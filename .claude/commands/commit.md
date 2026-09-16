@@ -1,0 +1,1 @@
+../../../ai-standard/commands/commit.md

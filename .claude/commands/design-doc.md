@@ -1,0 +1,1 @@
+../../../ai-standard/commands/design-doc.md

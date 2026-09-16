@@ -1,0 +1,1 @@
+../../../ai-standard/docs/add/template.md
