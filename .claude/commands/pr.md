@@ -1,0 +1,1 @@
+../../../ai-standard/commands/pr.md

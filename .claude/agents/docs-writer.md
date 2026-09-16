@@ -1,0 +1,1 @@
+../../../ai-standard/agents/docs-writer.md

@@ -1,0 +1,44 @@
+# Software Design Documents (SDD)
+
+An SDD describes the internal design of **one module or service**, one level deeper than an
+[ADD](../add) — the audience is the engineer(s) about to build or maintain that module, not
+someone trying to understand the whole system.
+
+## What goes in an SDD
+
+- Data model / schema for the module
+- Key classes/interfaces and their responsibilities
+- Sequence diagrams for its important flows
+- The API contract it exposes (and the contracts it consumes from others)
+- Error handling and edge cases at the design level
+
+## What doesn't
+
+- Cross-service architecture — that's an [`add/`](../add) doc
+- Step-by-step implementation/file-by-file plan for a single feature — that's a
+  [`tdd/`](../tdd) doc
+- The _why_ behind a specific technical choice made while designing this module — that's an
+  [`adr/`](../adr) entry, linked from here
+
+## Naming
+
+```
+service-or-module-name.md
+```
+
+One SDD per module/service, e.g. `booking-service.md`, `auth-service.md`. Like ADDs, these
+are living documents revised in place as the module's design evolves.
+
+## Workflow
+
+1. Copy [`template.md`](./template.md) to `service-or-module-name.md`.
+2. Write it before (or alongside) building the module — it's a design tool, not documentation
+   written after the fact.
+3. Get it reviewed before implementation starts.
+4. Update it when the module's design changes materially; trivial implementation details
+   don't need to be reflected here.
+
+## Index
+
+| Title | Status |
+| ----- | ------ |
