@@ -7,8 +7,12 @@
   `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md)
   (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md)
   (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md)
-  (synchronous, fail-closed license validation against payment-service). Device/network
-  fingerprinting rationale lives in the ADD's "Design rationale: device/network
+  (synchronous, fail-closed license validation against payment-service),
+  [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time
+  license/subscription re-validation on login and refresh),
+  [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user
+  subscription reservation on organization license lapse — `payment-service`'s decision).
+  Device/network fingerprinting rationale lives in the ADD's "Design rationale: device/network
   fingerprinting" section, not a standalone ADR.
 
 ## Responsibility
@@ -16,18 +20,27 @@
 `auth-service` owns `User` identity, credential verification, and the full JWT
 access-token/refresh-token lifecycle. It also now owns capturing — but not acting on —
 device/network fingerprint signals for future abuse-prevention work. It exposes generic
-`role` and `organizationId` claims to every other service and consuming app.
+`role` and `organizationId` claims to every other service and consuming app. As of ADR-0005,
+it also owns re-checking, on every login and token refresh, that the requesting user's
+organization still holds a valid license and — when one exists — that the user's own
+individual subscription is still valid, rejecting the call with a distinct `403` for each
+case when it isn't.
 
 It explicitly does **not** own:
 
 - What a given `role` or `organizationId` value *means* semantically to any consumer —
   those are fully opaque strings to `auth-service` (per ADR-0001).
-- License or billing data. That belongs to `payment-service`'s `Product`/`Charge` model
-  (per `CLAUDE.md`); `auth-service` only asks `payment-service` a yes/no question about
-  whether a given organization currently holds a valid license (per ADR-0004).
+- License, billing, or individual-subscription data. That belongs to `payment-service`'s
+  `Product`/`Charge` model (per `CLAUDE.md`); `auth-service` only asks `payment-service`
+  yes/no questions about whether a given organization currently holds a valid license (per
+  ADR-0004) and whether a given user's individual subscription, if any, is currently valid
+  (per ADR-0006). It never decides who gets a subscription in the first place.
 - Any actual blocking, rate-limiting, or abuse-scoring logic built on top of `Device`
   records. That is future work consuming what this service captures — this design covers
   capture only (see the ADD's "Design rationale: device/network fingerprinting").
+- The freeze/resume ("reservation") mechanics for a lapsed organization's individual
+  subscriptions, or the notifications sent when a license/subscription changes state. Both
+  are `payment-service`'s responsibility, per ADR-0006.
 
 ## Data model
 
@@ -101,6 +114,9 @@ Notes:
 - Password hashing: bcrypt, with the cost factor tuned for roughly 250ms per hash (an
   implementation parameter, not significant enough to warrant its own ADR — see the ADD's
   non-functional constraints).
+- No individual-subscription entity exists in this schema, deliberately: per ADR-0006, that
+  data is owned entirely by `payment-service`. `auth-service` only ever reads a subscription's
+  current status at login/refresh time (see API contract below); it never stores one.
 
 ## Key interfaces / classes
 
@@ -155,11 +171,18 @@ classDiagram
     class OrganizationValidationService {
       -paymentServiceClient: PaymentServiceClient
       +checkLicense(organizationId) LicenseStatus
+      +checkSubscription(userId) SubscriptionStatus
     }
     class PaymentServiceClient {
       +getLicenseStatus(organizationId) LicenseStatus
+      +getSubscriptionStatus(userId) SubscriptionStatus
     }
     class LicenseStatus {
+      +valid: boolean
+      +expiresAt: Date?
+    }
+    class SubscriptionStatus {
+      +exists: boolean
       +valid: boolean
       +expiresAt: Date?
     }
@@ -238,6 +261,7 @@ classDiagram
     OrganizationsController --> OrganizationValidationService
     OrganizationValidationService --> PaymentServiceClient
     PaymentServiceClient ..> LicenseStatus
+    PaymentServiceClient ..> SubscriptionStatus
     DevicesController --> DeviceService
     DeviceService --> Device
     UsersService --> User
@@ -266,7 +290,9 @@ service/gateway without a database dependency, while confining all stateful
 rotation/revocation bookkeeping to one place. `OrganizationsModule`
 (`OrganizationsController`/`OrganizationValidationService`/`PaymentServiceClient`) is the
 only module with an outbound network dependency on another service, implementing the
-license-check contract from ADR-0004. `DevicesModule` (`DevicesController`/
+license-check contract from ADR-0004 and, per ADR-0005, the subscription-check contract from
+ADR-0006 — both are now also called from `AuthService.login`/`AuthService.refresh`, not just
+from registration. `DevicesModule` (`DevicesController`/
 `DeviceService`/`Device` entity) is an independent entry point that fires
 before any user exists — it has no dependency on `AuthModule`, and `AuthModule` depends
 on it (not the other way around) only for the registration-time `deviceFingerprint`
@@ -308,12 +334,27 @@ requests to protected routes regardless of which module owns the route.
     resolve to a valid-license organization; `503` if `payment-service` is unreachable
     during the check.
 
-- **`POST /auth/login`** — body `{email, password}` → `200` token pair; `401` on any
-  credential failure, identical generic message whether the email doesn't exist or the
-  password is wrong.
+- **`POST /auth/login`** — body `{email, password}`.
+  - `401` on any credential failure, identical generic message whether the email doesn't
+    exist or the password is wrong (checked before the calls below, so a wrong password
+    never reveals anything about license/subscription state).
+  - On valid credentials, re-checks license and subscription status (per ADR-0005) before
+    issuing tokens: `403` with the same "contact your organization" message as
+    registration/validate if the user's `organizationId` doesn't resolve to a valid-license
+    organization; a distinct `403 {reason: "subscription_invalid", message: "Your
+    subscription has expired. Please renew to continue."}` if a `UserSubscription` exists
+    for this user (per ADR-0006) and its status isn't `active`; `503` if `payment-service`
+    is unreachable during either check.
+  - `200 {accessToken, refreshToken, expiresIn}` on success.
 
-- **`POST /auth/refresh`** — body `{refreshToken}` → `200` new token pair; `401` if not
-  found, expired, or already-rotated (reused).
+- **`POST /auth/refresh`** — body `{refreshToken}`.
+  - `401` if the refresh token itself is not found, expired, or already-rotated (reused) —
+    checked before the calls below.
+  - On a valid, not-yet-rotated refresh token, re-checks license and subscription status the
+    same way `login` does (per ADR-0005): same `403` (org license) / `403` (subscription) /
+    `503` (`payment-service` unreachable) outcomes as `login`, in place of rotating the
+    token.
+  - `200 {accessToken, refreshToken, expiresIn}` new token pair on success.
 
 - **`POST /auth/logout`** — body `{refreshToken}`, requires a valid `Authorization:
   Bearer` access token → `204` on success; revokes only that specific refresh token
@@ -440,6 +481,7 @@ sequenceDiagram
     participant AC as AuthController
     participant AS as AuthService
     participant US as UsersService
+    participant OVS as OrganizationValidationService
     participant TS as TokenService
     participant RTS as RefreshTokenService
 
@@ -458,11 +500,28 @@ sequenceDiagram
             alt password mismatch
                 AS-->>App: 401 (identical message to "not found")
             else password matches
-                AS->>TS: signAccessToken(payload)
-                TS-->>AS: accessToken
-                AS->>RTS: issue(userId)
-                RTS-->>AS: refresh token
-                AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                AS->>OVS: checkLicense(organizationId)
+                alt org license invalid or payment-service unreachable
+                    OVS-->>AS: not allowed / error
+                    AS-->>App: 403 contact-your-organization / 503
+                else org license valid
+                    AS->>OVS: checkSubscription(userId)
+                    alt subscription exists and invalid
+                        OVS-->>AS: invalid
+                        AS-->>App: 403 subscription_invalid
+                    else subscription valid or not applicable, or payment-service unreachable on this check
+                        OVS-->>AS: valid / not applicable / error
+                        alt payment-service unreachable on subscription check
+                            AS-->>App: 503
+                        else proceed
+                            AS->>TS: signAccessToken(payload)
+                            TS-->>AS: accessToken
+                            AS->>RTS: issue(userId)
+                            RTS-->>AS: refresh token
+                            AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                        end
+                    end
+                end
             end
         end
     end
@@ -474,11 +533,15 @@ sequenceDiagram
 sequenceDiagram
     participant App as Client app
     participant AC as AuthController
+    participant AS as AuthService
     participant RTS as RefreshTokenService
+    participant OVS as OrganizationValidationService
+    participant TS as TokenService
     participant DB as auth-service DB
 
     App->>AC: POST /auth/refresh {refreshToken}
-    AC->>RTS: rotate(rawToken)
+    AC->>AS: refresh(rawToken)
+    AS->>RTS: findValid(rawToken)
     RTS->>RTS: hash(rawToken)
     RTS->>DB: findByTokenHash(hash)
     alt not found
@@ -493,13 +556,36 @@ sequenceDiagram
             Note over RTS: logged as a security event
             RTS-->>App: 401
         else valid and not yet rotated
-            RTS->>DB: revoke old token, insert new token (same familyId)
-            DB-->>RTS: new RefreshToken row
-            RTS-->>AC: new raw refresh token
-            AC-->>App: 200 {accessToken, refreshToken, expiresIn}
+            RTS-->>AS: userId, organizationId
+            AS->>OVS: checkLicense(organizationId)
+            alt org license invalid or payment-service unreachable on this check
+                OVS-->>AS: not allowed / error
+                AS-->>App: 403 contact-your-organization / 503
+            else org license valid
+                AS->>OVS: checkSubscription(userId)
+                alt subscription exists and invalid, or payment-service unreachable on this check
+                    OVS-->>AS: invalid / error
+                    AS-->>App: 403 subscription_invalid / 503
+                else subscription valid or not applicable
+                    OVS-->>AS: valid / not applicable
+                    AS->>RTS: rotate(rawToken)
+                    RTS->>DB: revoke old token, insert new token (same familyId)
+                    DB-->>RTS: new RefreshToken row
+                    RTS-->>AS: new raw refresh token
+                    AS->>TS: signAccessToken(payload)
+                    TS-->>AS: accessToken
+                    AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                end
+            end
         end
     end
 ```
+
+Note: this flow reshapes the previous revision's `AuthController`-owned `rotate(rawToken)`
+call into `AuthService`-owned orchestration (`AuthService.refresh`), since rotation itself
+must now be gated by the license/subscription check above rather than happening
+unconditionally — matching the `AuthService.refresh` method already declared in the class
+diagram.
 
 **(f) Logout**
 
@@ -569,6 +655,21 @@ its own verification key and applies its own meaning to `role`/`organizationId`.
   confirming which organization ids exist.
 - `payment-service` unreachable or timing out during either `/auth/organizations/validate`
   or `/auth/register` → `503`, per ADR-0004's fail-closed decision.
+- Login or refresh attempted after the requesting user's organization's license has
+  lapsed → `403` with the same "contact your organization" message, even if the request's
+  credentials/refresh token are otherwise entirely valid (per ADR-0005). This is the
+  mechanism that logs a user out, bounded by the access-token TTL — see the ADD's Open
+  questions for the TTL value itself.
+- Login or refresh for a user whose individual `UserSubscription` (if one exists) is
+  suspended or expired, but whose organization's license is still valid → distinct
+  `403 {reason: "subscription_invalid"}` (per ADR-0006). A user with no `UserSubscription`
+  row at all is never blocked by this check.
+- `payment-service` unreachable or timing out during the login/refresh license or
+  subscription check → `503`, per ADR-0005's fail-closed decision (same as ADR-0004's).
+- An organization's license lapsing while a user is mid-session, holding a still-valid
+  access token → not surfaced immediately; the user keeps working until that access token
+  expires and a refresh is attempted, which then fails per the first bullet above. This is
+  documented as expected, intentional behavior (per ADR-0005), not a bug.
 - A license that expires in the window between a successful
   `/auth/organizations/validate` call and a later `/auth/register` call → register's own
   server-side re-check catches this and returns `403`; this is documented as expected,
@@ -592,11 +693,11 @@ its own verification key and applies its own meaning to `role`/`organizationId`.
   design is intended not to block adding these later.
 - The stale-claim window when a user's role or organizationId changes mid-session —
   current mitigation is a short access-token TTL; whether that's sufficient is
-  unresolved.
+  unresolved. The same access-token TTL now also bounds how long a user stays logged in
+  after their organization's license lapses (per ADR-0005) — the exact TTL value is not
+  decided by this document.
 - Rate-limiting `/auth/organizations/validate` specifically, given organization ids/keys
   may be short, human-typed codes rather than high-entropy tokens (an enumeration risk).
-- The exact shape of `payment-service`'s license-status API is only assumed here (per
-  ADR-0004), pending `payment-service`'s own design work.
 - Per-organization/per-license custom trial length is deferred — v1 uses one global
   config default.
 - How `installId` collisions or resets (e.g. app reinstall) should be handled —

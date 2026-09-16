@@ -2,7 +2,7 @@
 
 - **Status:** Draft <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
-- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service)
+- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies)
 - **Related ADDs/SDDs:** A corresponding SDD, `docs/sdd/auth-service.md`, will follow this ADD to cover `auth-service`'s internal module/class design, data model, and API contract in detail.
 
 ## Scope
@@ -12,7 +12,12 @@ how it verifies credentials, issues/rotates/revokes tokens, exposes the generic 
 `organizationId` claims other services and consuming apps rely on (per ADR-0001), and how it
 gates registration on an organization's license validity via a synchronous call to
 `payment-service` (per ADR-0004), including stamping the v1 trial period on first-time
-registrants for a given organization. Per ADR-0001, `organizationId` is required input on
+registrants for a given organization. It also covers re-validating that same license (and,
+when one exists, the requesting user's own individual subscription) on every login and token
+refresh, so that a user stays logged out — within one access-token lifetime — once their
+organization's license lapses (per ADR-0005), and how `auth-service` distinguishes the two
+different `403` reasons a login/refresh can fail for. Per ADR-0001, `organizationId` is
+required input on
 every self-service `POST /auth/register` call — there is no org-less self-registration mode;
 the only null-`organizationId` accounts are the platform's own `Admin` accounts, which are
 provisioned out-of-band and never created through this public endpoint (see Context).
@@ -33,10 +38,16 @@ Explicitly out of scope:
   social login, and multi-session/device management. None of these are designed here.
 - Any API-gateway design. No gateway exists in this repo today, and this document does not
   assume one will.
-- The license/organization data model itself. Per `CLAUDE.md`, licenses are a
-  `payment-service` `Product`/`Charge` concept; that model belongs in `payment-service`'s own
-  future ADD/SDD, not here. This document only covers the shape of `auth-service`'s
-  (currently assumed, per ADR-0004) call out to it.
+- The license/organization data model itself, and the individual-subscription
+  freeze/resume ("reservation") mechanics from ADR-0006. Per `CLAUDE.md`, licenses and
+  subscriptions are `payment-service` `Product`/`Charge` concepts; that model belongs in
+  `payment-service`'s own ADD/SDD, not here. This document only covers the shape of
+  `auth-service`'s (currently assumed, per ADR-0004/ADR-0005) calls out to it, and how a
+  `403` from either check is surfaced to the client.
+- Which roles or users ever get an individual subscription in the first place. That's a
+  consuming-app decision (e.g. `nawara-drive` choosing which of its own roles must pay
+  individually) — `auth-service` only ever observes whether `payment-service` reports a
+  subscription for a given user, never why one does or doesn't exist (per ADR-0006).
 - Any actual rate-limiting, blocking, or abuse-scoring logic built on top of captured
   `Device` records. As covered below, this document designs only how a device gets
   identified and recorded, not what happens once a pattern of abuse is detected.
@@ -77,6 +88,15 @@ during registration (ADR-0004). This is the first synchronous, service-to-servic
 any kind in `nawara-core` — until now, every service in this repo has been an independent,
 directly-called leaf with no outbound dependency on another service in the repo.
 
+Also new in this design: that same `payment-service` dependency is no longer limited to
+registration. `POST /auth/login` and `POST /auth/refresh` now make the same kind of call, to
+re-check that the requesting user's organization still holds a valid license — and, when one
+exists, that the user's own individual subscription is still valid — before issuing or
+rotating tokens (ADR-0005). This exists because access tokens, once issued, are verified
+locally with no call back to `auth-service` or `payment-service` (per ADR-0002); without a
+check at login/refresh time, a user whose organization's license lapses after they logged in
+would simply keep working until they happened to log out on their own.
+
 Per ADR-0001, `organizationId` is required input on every self-service registration — there
 is no supported flow for an end user to register without one. The only accounts with a null
 `organizationId` are the platform's own `Admin` accounts, and those are provisioned
@@ -106,8 +126,11 @@ At the architecture level, `auth-service` is composed of six logical components:
   `RefreshToken` table.
 - **`OrganizationsModule`** (organization-validation service) — implements
   `POST /auth/organizations/validate` and the server-side re-check inside registration,
-  calling out to `payment-service` per ADR-0004. This is the only component in `auth-service`
-  with an outbound network dependency on another service.
+  calling out to `payment-service` per ADR-0004. Per ADR-0005, `AuthService` now also calls
+  into this component from `login` and `refresh`, to re-check the requesting user's
+  organization's license (and, when one exists, their individual subscription) before
+  issuing or rotating tokens. This is the only component in `auth-service` with an outbound
+  network dependency on another service.
 - **RBAC guards (`RolesGuard`)** — a generic Nest guard reading the `role` claim off the
   verified access token to gate `auth-service`'s own endpoints where needed (e.g. anything
   restricted to the platform's own `Admin` role, such as license generation triggers that
@@ -163,7 +186,9 @@ graph LR
 `UsersModule` and token handling both write to `auth-service`'s own dedicated Postgres
 database (per ADR-0003), never shared with any other service. `OrgValidationService` is the
 sole component with a solid, synchronous edge leaving `auth-service` (to `payment-service`);
-the dashed edge to RabbitMQ represents the one v1 async event, described below.
+that edge now serves `login` and `refresh` as well as registration (ADR-0005), not just
+registration as in the previous revision of this document. The dashed edge to RabbitMQ
+represents the one v1 async event, described below.
 `DevicesController` is a second, independent entry point consuming apps call directly at
 first app launch (see "Design rationale: device/network fingerprinting" below) — its edge
 in the diagram above is deliberately drawn separate from the `AuthController` flows, since
@@ -246,15 +271,24 @@ Two synchronous flows matter architecturally:
 1. **Client ⇄ `auth-service`**: `POST /auth/register`, `POST /auth/login`,
    `POST /auth/refresh`, `POST /auth/logout`, and, for B2B registration,
    `POST /auth/organizations/validate`. All plain REST/JSON over HTTPS.
-2. **`auth-service` ⇄ `payment-service`**: a new synchronous call, `GET
-   /payment/licenses/:organizationId/status` (assumed shape, flagged provisional per
-   ADR-0004 — not yet finalized by `payment-service`'s own design). Invoked both from
-   `POST /auth/organizations/validate` and, independently, from inside `POST /auth/register`
-   itself, so registration never trusts that an earlier validate call is still accurate
-   (closing the time-of-check-to-time-of-use gap, per ADR-0004). On success, and only on a
+2. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
+   /payment/licenses/:organizationId/status`, its contract finalized by
+   `docs/add/payment-service.md`/`docs/sdd/payment-service.md` (per ADR-0004). Invoked from
+   `POST /auth/organizations/validate`, from inside `POST /auth/register` itself (so
+   registration never trusts that an earlier validate call is still accurate, closing the
+   time-of-check-to-time-of-use gap, per ADR-0004), and now also from `POST /auth/login` and
+   `POST /auth/refresh` (per ADR-0005). On a successful registration, and only on a
    first-time B2B registration for that organization, `auth-service` stamps the user's
    account with the v1 trial period (a global config default, e.g. 14 days) — the trial length
    itself is `auth-service`-owned account metadata, not something `payment-service` reports.
+3. **`auth-service` ⇄ `payment-service`**: a second synchronous call, `GET
+   /payment/subscriptions/:userId/status`, its contract likewise finalized by
+   `docs/sdd/payment-service.md` (per ADR-0006), invoked from `POST /auth/login` and
+   `POST /auth/refresh` alongside the license-status call above. A response indicating no
+   subscription exists for that user is treated as "not applicable" and never blocks
+   login/refresh on its own — only an existing-but-invalid (expired or suspended)
+   subscription does. `auth-service` never creates, modifies, or interprets *why* a
+   subscription exists; it only reads its current status.
 
 For side effects, this design recommends one async event for v1, consistent with
 `CLAUDE.md`'s "async events for side effects" principle:
@@ -278,7 +312,9 @@ records (per ADR-0003, its own dedicated Postgres database — no other service 
 directly). `organizationId` values are opaque to `auth-service` (per ADR-0001) — it stores and
 echoes them but never validates their meaning, except for the one carve-out in ADR-0004 where
 it checks license *status* against `payment-service`, not the organization id's validity
-itself. License/organization billing data itself is owned entirely by `payment-service`.
+itself. License/organization billing data, and now individual-subscription data (per
+ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever reads their
+*status*, on the same terms as the license check.
 
 ## Non-functional constraints
 
@@ -299,11 +335,19 @@ itself. License/organization billing data itself is owned entirely by `payment-s
   that might want to verify tokens locally — no `.env`/secrets infrastructure exists anywhere
   yet. Any service wanting to verify `auth-service`'s tokens today would need an
   out-of-band-shared key, which is not a solved problem.
-- **New availability coupling to `payment-service`, narrowly scoped.** Per ADR-0004, the
-  outbound call to `payment-service` needs an explicit request timeout (on the order of a few
-  seconds) and fails closed on error or timeout. This means `payment-service` being down
-  blocks new B2B registrations, but login, token refresh, and logout for already-registered
-  users are entirely unaffected, since none of those flows touch `payment-service`.
+- **Availability coupling to `payment-service` now extends to login and refresh.** Per
+  ADR-0004, the outbound call to `payment-service` needs an explicit request timeout (on the
+  order of a few seconds) and fails closed on error or timeout. Per ADR-0005, this coupling is
+  no longer limited to new B2B registrations — `payment-service` being down now also blocks
+  login and token refresh for already-registered users, since both flows re-check license
+  (and, when applicable, subscription) status on every call. Only `POST /auth/logout` remains
+  entirely unaffected, since it never touches `payment-service`. This is a materially wider
+  blast radius than the previous revision of this document described, and should be weighed
+  against `payment-service`'s own availability target.
+- **Access-token TTL directly bounds how long a forced logout can take.** Per ADR-0005, a
+  user whose organization's license lapses stays logged in until their current access token
+  expires and a refresh is attempted. No specific TTL value is decided by this document — see
+  Open questions.
 - **Rate limiting is an undesigned gap.** Login and registration endpoints have no
   rate-limiting design yet — a known gap to close before production exposure, not addressed
   in this document.
@@ -325,8 +369,6 @@ itself. License/organization billing data itself is owned entirely by `payment-s
   needs it, that requires a new ADR superseding ADR-0001, not a change to this document alone.
 - Whether an API gateway will ever front `auth-service` — no decision has been made either
   way, and this design deliberately does not assume one.
-- The exact API contract `payment-service` will expose for license status is currently only
-  assumed by `auth-service` (per ADR-0004) — pending `payment-service`'s own design work.
 - Enumeration risk on `POST /auth/organizations/validate` if organization ids/keys turn out to
   be short, human-typed codes rather than high-entropy tokens — a candidate for rate-limiting
   that specific endpoint, not yet designed.
@@ -341,3 +383,11 @@ itself. License/organization billing data itself is owned entirely by `payment-s
 - The internal mechanism for provisioning the platform's `Admin` accounts out-of-band (per
   ADR-0001) — e.g. a seed script vs. a separate internal/operator-only endpoint. Deliberately
   left unspecified in this pass.
+- The access-token TTL value itself — not decided by ADR-0005 or this document, but it
+  directly bounds how long a user stays logged in after their organization's license lapses.
+  A shorter TTL means faster enforcement but more frequent `payment-service` calls (per the
+  new availability coupling above); this tradeoff needs an explicit decision, likely at the
+  SDD level or its own ADR if the choice turns out to be hard to reverse.
+- What mechanism actually detects that an organization's license has lapsed or been renewed,
+  in order to trigger the suspend/resume flow from ADR-0006 — that detection lives entirely
+  inside `payment-service` and is out of scope for this document.
