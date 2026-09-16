@@ -43,3 +43,4 @@ are living documents revised in place as the module's design evolves.
 | Title | Status |
 | ----- | ------ |
 | [auth-service](./auth-service.md) | Draft |
+| [payment-service](./payment-service.md) | Draft |
