@@ -1,0 +1,1 @@
+../../../ai-standard/hooks/design-doc-conformance-trigger.sh
