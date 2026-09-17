@@ -2,7 +2,7 @@
 
 - **Status:** Reviewed <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
-- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit)
+- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit), [0017](../adr/0017-owner-recovery-and-second-owner.md) (owner recovery via multi-owner support and CLI force-reset)
 - **Related ADDs/SDDs:** See `docs/sdd/auth-service.md` for `auth-service`'s internal module/class design, data model, and API contract in detail.
 
 ## Scope
@@ -465,7 +465,7 @@ Consequences carried into this design:
 apps — there is no gateway or intermediary in v1, so `auth-service` must validate and
 authenticate every request itself rather than trusting an upstream layer to have done so.
 
-Five synchronous flows matter architecturally:
+Six synchronous flows matter architecturally:
 
 1. **Client ⇄ `auth-service`**: `POST /auth/register`, `POST /auth/login`,
    `POST /auth/refresh`, `POST /auth/logout`, and, for B2B registration,
@@ -548,7 +548,42 @@ Five synchronous flows matter architecturally:
      `DELETE .../time-off/:timeOffId`.
 
    See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
-4. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
+4. **Platform owner ⇄ `auth-service`, owner management** (new, per ADR-0017), Bearer,
+   `adminTier: owner` only for every endpoint in this group, all `:id` lookups scoped to the
+   caller's own `platformId` and returning `404` (never `403`) on any mismatch — the same
+   collapsed-404 pattern item 3 above already established for operator management:
+   - `POST /auth/admin/owners` — body `{email?, phone?, password}`, exactly one of
+     `email`/`phone` required (`400` otherwise), `password` always required (`400` if
+     missing — unlike operator creation, a new owner needs a real password from the moment
+     they exist, since there's no code-based login for owners); `409` on a duplicate
+     email/phone. `platformId` is taken from the caller's own JWT claim, never the request
+     body, mirroring `POST /auth/admin/operators`'s own defense-in-depth. Creates an owner
+     `User` row (`passwordHash` set, `secretKeyHash: null`) and publishes
+     `admin.owner_registered`. The new owner obtains their first secret key exactly the way a
+     bootstrapped owner does (per ADR-0016): password login, then
+     `POST /auth/admin/secret-key/rotate` — no new key-issuance path.
+   - `POST /auth/admin/owners/:id/deactivate` — sets `isActive: false` and revokes all of
+     that owner's refresh tokens via the same `RefreshTokenService.revokeAllForUser` ADR-0012
+     introduced for blocking an operator. **Rejected with `409 {reason: "last_owner", ...}`**
+     if it would leave the platform with zero active owners — a hard invariant enforced via an
+     atomic check (a transaction with a row lock, or a single conditional query), never a
+     read-then-write count-then-act pair, so two concurrent deactivations of a platform's last
+     two owners can't both succeed. This same pairing (add a new owner, then deactivate the
+     old one) is also how ownership *transfer* is achieved — no separate transfer endpoint is
+     designed.
+   - `POST /auth/admin/owners/:id/activate` — sets `isActive: true`.
+
+   Separately, and **not** an HTTP flow: a CLI-only `BOOTSTRAP_OWNER_FORCE_RESET=true` mode on
+   ADR-0016's existing `bootstrap-owner.ts` script (see the ADD's Context above for how that
+   script is already provisioned out-of-band) covers the one scenario this in-band pair cannot
+   retroactively fix — a platform already down to one owner who has already lost both
+   credentials, with no second owner to add via `POST /auth/admin/owners` above. Like
+   `bootstrap-owner.ts` itself, this mode requires direct server/deploy access and is
+   deliberately never HTTP-reachable, so it has no request/response entry here — see the SDD's
+   Open questions for where the script's behavior is documented.
+
+   See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
+5. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
    /payment/licenses/:organizationId/status`, its contract finalized by
    `docs/add/payment-service.md`/`docs/sdd/payment-service.md` (per ADR-0004). Invoked from
    `POST /auth/organizations/validate`, from inside `POST /auth/register` itself (so
@@ -558,7 +593,7 @@ Five synchronous flows matter architecturally:
    first-time B2B registration for that organization, `auth-service` stamps the user's
    account with the v1 trial period (a global config default, e.g. 14 days) — the trial length
    itself is `auth-service`-owned account metadata, not something `payment-service` reports.
-5. **`auth-service` ⇄ `payment-service`**: a second synchronous call, `GET
+6. **`auth-service` ⇄ `payment-service`**: a second synchronous call, `GET
    /payment/subscriptions/:userId/status`, its contract likewise finalized by
    `docs/sdd/payment-service.md` (per ADR-0006), invoked from `POST /auth/login` and
    `POST /auth/refresh` alongside the license-status call above. A response indicating no
@@ -620,6 +655,12 @@ of the previous revision:
   questions).
 - **`admin.operator_unblocked`** — `{ operatorId, platformId, ownerId, timestamp }` (per
   ADR-0012), published when an owner unblocks an operator.
+- **`admin.owner_registered`** — `{ ownerId, platformId, createdByOwnerId, channel:
+  "email"|"phone", timestamp }` (per ADR-0017), published when an existing owner creates a
+  second (or subsequent) owner via `POST /auth/admin/owners`, mirroring
+  `admin.operator_registered`'s shape field-for-field except `ownerId`/`createdByOwnerId` in
+  place of `operatorId`/`ownerId`. Unlike `admin.operator_registered`, it deliberately carries
+  no `destination` — see below.
 
 **Why these carry contact info inline, unlike `user.registered`:** `admin.operator_code_issued`,
 `admin.operator_confirmation_code_issued`, and `admin.secret_key_login_from_new_device` all
@@ -631,7 +672,12 @@ contact info at all. Per this repo's database-per-service principle, only `auth-
 notification, and each operator code being that operator's sole means of completing
 confirmation or login, respectively) — waiting on a separate synchronous lookup back into
 `auth-service` would add latency and a new dependency to something meant to be immediate. See
-ADR-0010, ADR-0011, and ADR-0015 for the full reasoning.
+ADR-0010, ADR-0011, and ADR-0015 for the full reasoning. `admin.owner_registered` is a
+deliberate exception to this pattern even though it otherwise mirrors
+`admin.operator_registered`'s shape: an owner-created-owner notification isn't the same kind
+of time-critical, sole-means-of-access delivery a login/confirmation code or new-device alert
+is, so carrying `destination` inline wasn't judged necessary to add now (per ADR-0017) — it can
+be revisited if a concrete notification need for it emerges.
 
 Two related events — `user.role_changed` and `user.organization_changed` — are explicitly
 **not** designed for v1: there is no user-management endpoint in v1 that could mutate a
@@ -763,10 +809,22 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   recommendation — `isWorkingDay` and every shift-boundary evaluation (`OperatorSchedule`
   `startTime`/`endTime`, per ADR-0012) evaluate "today"/"now" against the server's UTC clock.
   A per-platform timezone field remains an explicit future enhancement, not designed here.
-- The single-owner-per-platform assumption: nothing in ADR-0009/ADR-0010 designs an
+- ~~The single-owner-per-platform assumption: nothing in ADR-0009/ADR-0010 designs an
   ownership-transfer mechanism (e.g. if a platform's owner leaves and access needs to move to
   someone else). Today, that would require the still-unspecified out-of-band provisioning
-  mechanism above to intervene directly.
+  mechanism above to intervene directly.~~ **Resolved by
+  [ADR-0017](../adr/0017-owner-recovery-and-second-owner.md)**: a new in-band
+  `POST /auth/admin/owners` (mirroring `POST /auth/admin/operators` from ADR-0011, owner-only
+  via `AdminTierGuard`) lets an existing owner add a second owner to their own platform, and a
+  new `POST /auth/admin/owners/:id/deactivate`/`.../activate` pair gives ownership *transfer*
+  almost for free — add a new owner, then deactivate the old one, with a hard "last owner"
+  invariant preventing a platform from ever being fully de-owned. For the catastrophic case a
+  second owner can't retroactively fix — a sole owner who has already lost both credentials —
+  ADR-0017 also adds an opt-in `BOOTSTRAP_OWNER_FORCE_RESET` mode to ADR-0016's existing
+  `bootstrap-owner.ts` CLI, rather than a new self-service reset flow. A residual gap remains,
+  stated explicitly in ADR-0017's Consequences: a freshly bootstrapped platform's very first
+  owner has the same lockout exposure until they act, and this design surfaces "add a second
+  owner immediately" only as operational guidance, not something enforced or defaulted.
 - The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
   such infrastructure exists anywhere in this repo yet, so `admin.operator_code_issued`
   events for phone-registered operators are undeliverable until it lands. As of ADR-0015,
