@@ -5,7 +5,7 @@ This file gives Claude (via Claude Code) context on the Nawara Core project. Rea
 ## Shared AI-Agent Workflow Standard
 
 Branch naming, commit message format, PR conventions, and the ADR/ADD/SDD/TDD design-doc
-process are defined once for all Nawara Solution projects in
+process are defined once for all Nawara Solutions projects in
 [`../ai-standard/README.md`](../ai-standard/README.md). This repo's `/branch`, `/commit`,
 `/pr`, `/design-doc` commands and its `design-conformance`/`docs-writer` agents are symlinks
 into that shared source — editing one of them from here edits it for `nawara-drive` and
@@ -21,7 +21,7 @@ full conventions.
 
 ## What this project is
 
-**Nawara Core** is the shared microservices repo for **Nawara Solution**, an organization building multiple apps (starting with **Nawara Drive**, a driving-school platform). This repo holds services generic enough to be reused by *any* future Nawara Solution app — not just Nawara Drive.
+**Nawara Core** is the shared microservices repo for **Nawara Solutions**, an organization building multiple apps (starting with **Nawara Drive**, a driving-school platform). This repo holds services generic enough to be reused by *any* future Nawara Solutions app — not just Nawara Drive.
 
 ## Hard rule: keep services generic
 

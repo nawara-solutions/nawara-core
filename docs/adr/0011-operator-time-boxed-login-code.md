@@ -53,14 +53,7 @@ We chose **Option 3**. Concretely:
   timestamp}` — a minor addition letting `notification-service` send a welcome message.
 - New **`AdminOperatorCode`** entity: `{id, userId FK -> User (the operator), codeHash
   (SHA-256 of a 6-digit numeric code), expiresAt (issuedAt + 8h), attemptCount (default 0),
-  consumedAt, createdAt}`.
-
-  > **Note (added, not part of the original decision):** the flat 8h duration described here
-  > is amended by [ADR-0014](./0014-schedule-anchored-operator-duration.md) — it now applies
-  > only as a fallback for an operator with no configured `OperatorSchedule`; a scheduled
-  > operator's code duration is anchored to their own shift end instead.
-
-  Requesting a new code invalidates any previous unconsumed code for
+  consumedAt, createdAt}`. Requesting a new code invalidates any previous unconsumed code for
   that operator — only the most recently issued code is ever valid, the same "old one is
   fully superseded" rule ADR-0010 uses for secret-key rotation. A 6-digit code is low-entropy
   relative to an 8-hour validity window, so a companion control is necessary, not optional:

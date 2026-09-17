@@ -2,7 +2,7 @@
 
 - **Status:** Draft <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
-- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login)
+- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit)
 - **Related ADDs/SDDs:** See `docs/sdd/auth-service.md` for `auth-service`'s internal module/class design, data model, and API contract in detail.
 
 ## Scope
@@ -725,11 +725,18 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
 - `Device` data-retention policy, and whether collecting IP/device metadata ahead of user
   registration needs disclosure in a privacy policy. Flagged as an open follow-up above;
   unresolved by this document.
-- The internal mechanism for provisioning the platform's `Admin` accounts out-of-band (per
-  ADR-0001) — e.g. a seed script vs. a separate internal/operator-only endpoint. Deliberately
-  left unspecified in this pass. Per ADR-0009/ADR-0010, that mechanism now also needs to seed
-  a non-null `platformId` for every Admin it creates, and, for an owner specifically, an
-  initial secret key — neither of those needs is solved here either.
+- ~~The internal mechanism for provisioning the platform's `Admin` accounts out-of-band (per
+  ADR-0001) — e.g. a seed script vs. a separate internal/operator-only endpoint.~~ **Resolved
+  by [ADR-0016](../adr/0016-first-owner-bootstrap-command.md)**, for a platform's *first*
+  owner specifically: an idempotent, explicitly-invoked CLI command
+  (`bootstrap-owner.ts`), writing through the existing `UsersService`, that seeds only an
+  email+password credential — never a secret key — leaving the owner's first secret key to be
+  obtained in-band via the existing password-login + `POST /auth/admin/secret-key/rotate`
+  path (ADR-0010). Every operator, by contrast, is still provisioned in-band by an owner via
+  `POST /auth/admin/operators` (ADR-0011), which was never part of this open question.
+  ADR-0016 does **not** resolve ownership transfer, a second/standby owner, or recovery for a
+  sole owner who loses both credentials — see ADR-0016's own Consequences for those as
+  still-open follow-ons.
 - Operator-code length/entropy tuning: ADR-0011 chose a 6-digit numeric code with a 5-attempt
   lockout as a starting point; whether that balance of usability vs. brute-force resistance
   needs revisiting (longer code, shorter validity window, etc.) is unresolved.
@@ -773,3 +780,15 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   follow-up design.
 - The very short redemption/session window an operator could get if they request a login code
   moments before their shift ends (per ADR-0014) — accepted, not mitigated.
+- **No first-class `Organization` entity exists anywhere in this repo.** `organizationId` is,
+  and remains after ADR-0016, purely an opaque string claim stamped onto `User`, `License`,
+  `Charge`, and `UserSubscription` records (per ADR-0001) — there is no table, service, or API
+  that treats "an organization" as a real, queryable thing with its own attributes. A direct
+  consequence: there is currently no way for a platform's owner or operator to list, view, or
+  otherwise manage the set of organizations that belong to their own platform — `auth-service`
+  has no notion of "which organizations does this `platformId` own" at all, since
+  `organizationId` and `platformId` are two independent opaque claims with no recorded
+  relationship between them anywhere in this schema. This is a real gap, not a stylistic
+  omission, and needs its own future ADR — likely introducing an `Organization` entity
+  (plausibly carrying its own `platformId` field) plus admin-facing listing/management
+  endpoints — rather than being solved incidentally as part of some other decision.
