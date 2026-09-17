@@ -44,6 +44,10 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
 ## Tech conventions
 
 - TypeScript services: NestJS, following Nest's module/controller/service/DTO structure.
+- Every service exposes interactive API docs via OpenAPI, mounted at `GET /docs`. For NestJS
+  services, this is `@nestjs/swagger` (`DocumentBuilder` + `SwaggerModule.setup('docs', ...)` in
+  `main.ts`) — every controller method gets `@ApiOperation`/`@ApiResponse`, every DTO field gets
+  `@ApiProperty`. FastAPI's `ai-service` gets this for free at the same path with no extra setup.
 - Python service: FastAPI, typed with Pydantic models.
 - Shared code that's safe to publish to consuming apps (DTOs, types) goes in `libs/shared-types` — but remember, consuming *services in this repo* can import libs; external apps (Nawara Drive) still only talk over HTTP, never via these libs directly.
 - Each service has its own `docker-compose` entry and its own database/migrations.
