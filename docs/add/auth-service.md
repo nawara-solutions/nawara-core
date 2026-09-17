@@ -2,8 +2,8 @@
 
 - **Status:** Draft <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
-- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies)
-- **Related ADDs/SDDs:** A corresponding SDD, `docs/sdd/auth-service.md`, will follow this ADD to cover `auth-service`'s internal module/class design, data model, and API contract in detail.
+- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login)
+- **Related ADDs/SDDs:** See `docs/sdd/auth-service.md` for `auth-service`'s internal module/class design, data model, and API contract in detail.
 
 ## Scope
 
@@ -29,6 +29,29 @@ abuse-prevention/rate-limiting work an early signal to build on. Acting on that 
 (actual blocking, rate-limiting, or abuse scoring) is explicitly out of scope here; this
 document covers capture only.
 
+This document also now covers platform-scoped Admin accounts (per ADR-0009): the
+`platformId`/`adminTier` claims that distinguish a platform's top-level owner from a
+delegated operator, and the two new, owner/operator-specific ways an Admin can log in
+without a standing password — an owner's permanent secret key with new-device alerting
+(per ADR-0010), and an operator's time-boxed login code gated to the platform's configured
+working days (per ADR-0011). It also covers the minimal per-platform working-day calendar
+(`PlatformNonWorkingDay`) management endpoints those login flows depend on.
+
+This document now also covers the owner's "manage agent" surface for operators it created
+(per ADR-0012): viewing/listing operators, updating an operator's contact info, configuring a
+per-operator schedule and individual time-off distinct from the platform-wide calendar, and
+blocking/unblocking an operator's access (activating the previously-dormant `User.isActive`
+field). It also covers the hard session ceiling placed on an operator's session once granted,
+independent of ADR-0011's login-code redemption window (per ADR-0013).
+
+This document now also covers making both of those windows track the operator's own
+schedule rather than a flat duration — an operator's login-code redemption window and the
+resulting session ceiling are both now anchored to their scheduled shift end for the day,
+falling back to a flat 8 hours only for an operator with no configured `OperatorSchedule`
+(per ADR-0014) — and a two-phase contact-confirmation step an operator must complete before
+their first ordinary login code is ever sent, proving they actually own the email/phone an
+owner registered them with (per ADR-0015).
+
 Explicitly out of scope:
 
 - Any app-specific authorization semantics — what a given `role` (e.g. `Admin`,
@@ -51,6 +74,10 @@ Explicitly out of scope:
 - Any actual rate-limiting, blocking, or abuse-scoring logic built on top of captured
   `Device` records. As covered below, this document designs only how a device gets
   identified and recorded, not what happens once a pattern of abuse is detected.
+- A real audit-log/"follow operator actions" capability (per ADR-0012). The `ownerId` already
+  carried on `admin.operator_blocked`/`admin.operator_unblocked` is an incidental, minimal
+  "who did it" record, not a designed audit trail — a real audit log is deferred, undesigned
+  future work.
 
 ## Context
 
@@ -113,7 +140,7 @@ abuse-prevention signal; nothing in this design acts on it yet.
 
 ## Component overview
 
-At the architecture level, `auth-service` is composed of six logical components:
+At the architecture level, `auth-service` is composed of eight logical components:
 
 - **`AuthModule`** — the `AuthController` and `AuthService` handling registration, login,
   refresh, and logout. This is the module clients actually talk to.
@@ -147,6 +174,57 @@ At the architecture level, `auth-service` is composed of six logical components:
   when the dedicated call didn't succeed earlier. `DevicesModule` is independent of
   `AuthModule`'s login/refresh/logout flows — it is called before a user exists, and later
   linked to a `User` once one is created via registration.
+- **`AdminModule`** (`AdminAuthController`, `SecretKeyService`, `OperatorCodeService`,
+  `AdminDeviceService`, `PlatformCalendarService`, `AdminTierGuard`) — new, per ADR-0009/
+  ADR-0010/ADR-0011. Handles everything specific to platform-scoped Admin accounts that
+  doesn't fit the generic email+password flow `AuthModule` already owns: `SecretKeyService`
+  issues/rotates/verifies an owner's permanent secret key and owns the `AdminDevice`
+  new-device-alerting check (ADR-0010); `OperatorCodeService` issues/verifies an operator's
+  time-boxed login code (ADR-0011) and, per ADR-0015, now also issues and verifies a
+  separate, purpose-scoped confirmation code an operator must redeem before their first
+  ordinary login code is ever sent — both the login code's redemption window and its
+  resulting session ceiling are computed via the new
+  `OperatorAvailabilityService.getShiftEndOrFallback` (per ADR-0014), while the confirmation
+  code keeps a flat 8h duration unconditionally, since it's issued at registration time,
+  outside the `isOperatorAvailable` gate a shift end could be anchored to;
+  `PlatformCalendarService` owns the
+  `PlatformNonWorkingDay` rows and the `isWorkingDay` check `OperatorCodeService` depends on;
+  `AdminTierGuard` is a new, generic Nest guard reading the `adminTier` claim off the
+  verified access token (no DB round-trip), analogous to `RolesGuard` but for the
+  owner/operator distinction. `AdminAuthController` exposes all of this module's endpoints
+  (secret-key login/rotation, operator registration, operator login, calendar management).
+  `AdminModule` depends on `UsersModule` (it creates and reads `User` rows, per ADR-0009)
+  and on token handling (it issues the same access/refresh token pairs `AuthModule` does),
+  but is otherwise independent of `AuthModule` itself — an Admin never goes through
+  `POST /auth/login`'s email+password path for the new owner/operator flows (an owner still
+  can, via the existing endpoint, as the secret-key recovery path per ADR-0010).
+- **`AdminOperatorController`, `OperatorManagementService`, `OperatorScheduleService`,
+  `OperatorAvailabilityService`** (owner-managed operator administration, new per ADR-0012) —
+  a new controller, sibling to `AdminAuthController` inside `AdminModule`, exposing the
+  owner's "manage agent" surface: listing/viewing operators, updating contact info,
+  block/unblock, and per-operator schedule/time-off management. `OperatorManagementService`
+  owns operator profile reads/updates and the block/unblock actions (including activating the
+  previously-dormant `User.isActive` field and revoking that operator's refresh tokens on
+  block). `OperatorScheduleService` owns `OperatorSchedule`/`OperatorTimeOff` persistence.
+  `OperatorAvailabilityService` composes `PlatformCalendarService.isWorkingDay` with the new
+  per-operator schedule/time-off data to answer "can this operator log in right now?" — it is
+  a new, distinct component from `PlatformCalendarService` (which stays platform-scoped only),
+  and it's what `OperatorCodeService`'s `request-code` flow now calls instead of calling
+  `PlatformCalendarService` directly. As of ADR-0014, `OperatorAvailabilityService` also
+  exposes `getShiftEndOrFallback(operatorUserId, now)`, deriving a concrete shift-end
+  timestamp (or a `+8h` fallback for an unscheduled operator) from the same
+  `OperatorSchedule` data `isOperatorAvailable` already reads — `OperatorCodeService` calls
+  it independently at both `requestCode()` (for the login code's `expiresAt`) and
+  `verifyCode()` (for the session's `sessionExpiresAt`), never reusing one call's result for
+  the other. All of `AdminOperatorController`'s endpoints are gated
+  by the same `AdminTierGuard` `AdminAuthController` already uses — no new authorization
+  mechanism.
+- **Token handling** also now enforces a hard session ceiling for operator-issued tokens (new
+  per ADR-0013): `RefreshTokenService.rotate()` gains a ceiling check (run before its existing
+  reuse-detection check) against a new `RefreshToken.sessionExpiresAt` column, and
+  `TokenService.signAccessToken()` gains an optional explicit-expiry parameter so an
+  operator's final token before the ceiling has its own `exp` claim clamped to that ceiling.
+  Both changes are inert (`null`/omitted-parameter default) for every non-operator caller.
 
 ```mermaid
 graph LR
@@ -154,6 +232,8 @@ graph LR
     NDBackend[nawara-drive backend]
     NDDesktop[nawara-drive desktop]
     NDMobile[nawara-drive mobile]
+    Owner[Platform owner]
+    Operator[Platform operator]
   end
 
   NDBackend -- REST/HTTPS --> AuthController
@@ -164,6 +244,10 @@ graph LR
   NDDesktop -- "REST/HTTPS (first launch)" --> DevicesController
   NDMobile -- "REST/HTTPS (first launch)" --> DevicesController
 
+  Owner -- "REST/HTTPS (secret-key login, rotation)" --> AdminAuthController
+  Operator -- "REST/HTTPS (confirm, request-code, verify-code)" --> AdminAuthController
+  Owner -- "REST/HTTPS (manage operators)" --> AdminOperatorController
+
   subgraph auth-service
     AuthController --> AuthService
     AuthService --> UsersService
@@ -172,14 +256,40 @@ graph LR
     AuthController --> RolesGuard
     AuthService --> DeviceService
     DevicesController --> DeviceService
+    AdminAuthController --> SecretKeyService
+    AdminAuthController --> OperatorCodeService
+    AdminAuthController --> PlatformCalendarService
+    AdminAuthController --> AdminTierGuard
+    SecretKeyService --> AdminDeviceService
+    SecretKeyService --> UsersService
+    OperatorCodeService --> UsersService
+    OperatorCodeService --> OperatorAvailabilityService
+    AdminOperatorController --> OperatorManagementService
+    AdminOperatorController --> OperatorScheduleService
+    AdminOperatorController --> AdminTierGuard
+    OperatorManagementService --> UsersService
+    OperatorManagementService --> RefreshTokenService
+    OperatorScheduleService --> OperatorAvailabilityService
+    OperatorAvailabilityService --> PlatformCalendarService
   end
 
   UsersService --> AuthDB[(auth-service Postgres DB)]
   TokenService --> AuthDB
+  RefreshTokenService --> AuthDB
   DeviceService --> AuthDB
+  SecretKeyService --> AuthDB
+  AdminDeviceService --> AuthDB
+  OperatorCodeService --> AuthDB
+  PlatformCalendarService --> AuthDB
+  OperatorManagementService --> AuthDB
+  OperatorScheduleService --> AuthDB
+  OperatorAvailabilityService --> AuthDB
   OrgValidationService -- REST/HTTPS --> PaymentService[payment-service]
 
   AuthService -. user.registered event .-> Broker[[RabbitMQ]]
+  SecretKeyService -. "admin.secret_key_login_from_new_device / admin.secret_key_rotated" .-> Broker
+  OperatorCodeService -. "admin.operator_registered / admin.operator_code_issued /<br/>admin.operator_confirmation_code_issued / admin.operator_contact_confirmed" .-> Broker
+  OperatorManagementService -. "admin.operator_blocked / admin.operator_unblocked" .-> Broker
 ```
 
 `AuthController` is the only entry point clients call for credential-based flows;
@@ -187,14 +297,103 @@ graph LR
 database (per ADR-0003), never shared with any other service. `OrgValidationService` is the
 sole component with a solid, synchronous edge leaving `auth-service` (to `payment-service`);
 that edge now serves `login` and `refresh` as well as registration (ADR-0005), not just
-registration as in the previous revision of this document. The dashed edge to RabbitMQ
-represents the one v1 async event, described below.
+registration as in the previous revision of this document. The dashed edges to RabbitMQ
+represent the v1 async events, described below — no longer just `user.registered`, now that
+`AdminModule` also publishes admin-security and operator-lifecycle events.
 `DevicesController` is a second, independent entry point consuming apps call directly at
 first app launch (see "Design rationale: device/network fingerprinting" below) — its edge
 in the diagram above is deliberately drawn separate from the `AuthController` flows, since
 it fires before a user exists and does not depend on, or block, registration/login.
 `AuthService` calls into `DeviceService` only for the registration-time `deviceFingerprint`
-fallback described below.
+fallback described below. `AdminAuthController` is a third, independent entry point (per
+ADR-0009/ADR-0010/ADR-0011): a platform owner calls it directly for secret-key login/
+rotation, and a platform operator calls it directly for the two-step request-code/
+verify-code login — neither ever goes through `AuthController`'s email+password path for
+these new flows. `AdminOperatorController` (per ADR-0012) is a fourth, independent entry
+point, sibling to `AdminAuthController` inside the same `AdminModule` — only a platform owner
+ever calls it, to list/view/update/block/unblock their own operators and manage per-operator
+schedule/time-off data; an operator never reaches it, gated by the same `AdminTierGuard`.
+`OperatorCodeService.requestCode` now calls `OperatorAvailabilityService` instead of calling
+`PlatformCalendarService` directly (per ADR-0012) — `OperatorAvailabilityService` still
+incorporates the platform-wide check internally, so this is an extension, not a removal, of
+the existing business-day gate.
+
+At the class level, the same components resolve to:
+
+```mermaid
+classDiagram
+  class AuthController
+  class AuthService
+  class UsersService
+  class TokenService
+  class OrgValidationService
+  class RolesGuard
+  class DevicesController
+  class DeviceService
+  class AdminAuthController
+  class SecretKeyService
+  class OperatorCodeService
+  class AdminDeviceService
+  class PlatformCalendarService
+  class AdminTierGuard
+  class AdminOperatorController
+  class OperatorManagementService
+  class OperatorScheduleService
+  class OperatorAvailabilityService
+  class RefreshTokenService
+  class User
+  class RefreshToken
+  class Device
+  class AdminDevice
+  class AdminOperatorCode
+  class PlatformNonWorkingDay
+  class OperatorSchedule
+  class OperatorTimeOff
+  class PaymentService {
+    <<external>>
+  }
+
+  AuthController --> AuthService
+  AuthController --> RolesGuard
+  AuthService --> UsersService
+  AuthService --> TokenService
+  AuthService --> OrgValidationService
+  AuthService --> DeviceService
+  DevicesController --> DeviceService
+  AdminAuthController --> SecretKeyService
+  AdminAuthController --> OperatorCodeService
+  AdminAuthController --> PlatformCalendarService
+  AdminAuthController --> AdminTierGuard
+  SecretKeyService --> UsersService
+  SecretKeyService --> AdminDeviceService
+  SecretKeyService --> TokenService
+  OperatorCodeService --> UsersService
+  OperatorCodeService --> OperatorAvailabilityService
+  OperatorCodeService --> TokenService
+  UsersService --> User
+  TokenService --> RefreshToken
+  RefreshTokenService --> RefreshToken
+  DeviceService --> Device
+  AdminDeviceService --> AdminDevice
+  OperatorCodeService --> AdminOperatorCode
+  PlatformCalendarService --> PlatformNonWorkingDay
+  OrgValidationService ..> PaymentService : REST/HTTPS
+  AdminOperatorController --> OperatorManagementService
+  AdminOperatorController --> OperatorScheduleService
+  AdminOperatorController --> AdminTierGuard
+  OperatorManagementService --> UsersService
+  OperatorManagementService --> RefreshTokenService
+  OperatorScheduleService --> OperatorAvailabilityService
+  OperatorAvailabilityService --> PlatformCalendarService
+  OperatorScheduleService --> OperatorSchedule
+  OperatorScheduleService --> OperatorTimeOff
+  OperatorSchedule --> User : belongs to
+  OperatorTimeOff --> User : belongs to
+```
+
+This is an architecture-level view — components and the entities they own, no fields or method
+signatures. See `docs/sdd/auth-service.md`'s "Key interfaces / classes" section for the full
+class diagram with DTOs and field-level detail.
 
 ## Design rationale: device/network fingerprinting
 
@@ -266,12 +465,90 @@ Consequences carried into this design:
 apps — there is no gateway or intermediary in v1, so `auth-service` must validate and
 authenticate every request itself rather than trusting an upstream layer to have done so.
 
-Two synchronous flows matter architecturally:
+Five synchronous flows matter architecturally:
 
 1. **Client ⇄ `auth-service`**: `POST /auth/register`, `POST /auth/login`,
    `POST /auth/refresh`, `POST /auth/logout`, and, for B2B registration,
    `POST /auth/organizations/validate`. All plain REST/JSON over HTTPS.
-2. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
+   `POST /auth/refresh` now also enforces a hard session ceiling for
+   operator-issued refresh tokens (per ADR-0013): once `RefreshToken.sessionExpiresAt` is
+   reached, rotation fails with `401 {reason: "session_ceiling_reached"}` instead of issuing
+   a new pair — this is a no-op for every non-operator token, which never has
+   `sessionExpiresAt` set. As of ADR-0014, that ceiling is anchored to the operator's own
+   scheduled shift end for the day (falling back to `now + 8h` only for an operator with no
+   configured `OperatorSchedule`), not a flat 8 hours.
+2. **Platform owner/operator ⇄ `auth-service`** (new, per ADR-0009/ADR-0010/ADR-0011),
+   also plain REST/JSON over HTTPS, never through the flows above:
+   - `POST /auth/admin/login/secret-key` — body `{secretKey}`, no auth required (this is
+     the owner's login). `200 {accessToken, refreshToken, expiresIn}` on match, `401`
+     otherwise.
+   - `POST /auth/admin/secret-key/rotate` — Bearer, `adminTier: owner` only. No body.
+     `200 {secretKey, issuedAt}`, the raw key shown exactly once.
+   - `POST /auth/admin/operators` — Bearer, `adminTier: owner` only. Body
+     `{email?, phone?}` (exactly one required). Creates an operator `User` row scoped to
+     the caller's own `platformId`, with `contactVerifiedAt: null` (per ADR-0015). Also
+     generates and sends a `purpose: 'confirmation'` code — distinct from a login code (flat
+     `now + 8h` expiry,
+     unconditionally — this call happens outside the `isOperatorAvailable` gate a shift end
+     could anchor to), publishing a new `admin.operator_confirmation_code_issued` event
+     alongside the existing `admin.operator_registered` event.
+   - `POST /auth/admin/operators/confirm` — new (per ADR-0015), no auth required (the
+     operator has no session yet). Body `{email?, phone?, code}`. `401` for an unknown or
+     blocked identifier; `204` no-op, without validating `code` at all, if the operator's
+     `contactVerifiedAt` is already set (idempotent retry); otherwise validates `code`
+     against the operator's live `purpose: 'confirmation'` row with the same matching/lockout
+     logic `verify-code` uses, `401` on a wrong/expired/exhausted code, and on a match sets
+     `contactVerifiedAt = now`, publishes `admin.operator_contact_confirmed`, and internally
+     triggers the same `requestCode()` path a self-triggered call would hit — sending the
+     operator's real first `purpose: 'login'` code if they're currently available, or
+     nothing if not (still `204` either way; the operator gets their first code at their next
+     scheduled window instead).
+   - `POST /auth/admin/login/operator/request-code` — body `{email?, phone?}`, no auth
+     required. `204` on success (code delivered only via the published event/notification
+     channel); `403 {reason: "non_working_day"}` if the operator isn't currently available
+     per `OperatorAvailabilityService` (platform calendar, per-operator time off, or
+     per-operator schedule — per ADR-0012, all three collapse to this one reason code);
+     `401` if the identifier doesn't resolve to an active, contact-confirmed operator (unknown
+     identifier, blocked operator, and not-yet-confirmed operator are all indistinguishable,
+     per ADR-0012/ADR-0015). On success, the issued code's `expiresAt` is the operator's own
+     scheduled shift end for the day, via `OperatorAvailabilityService.getShiftEndOrFallback`
+     — falling back to `now + 8h` only if the operator has no configured `OperatorSchedule`
+     (per ADR-0014).
+   - `POST /auth/admin/login/operator/verify-code` — body `{email?, phone?, code}`, no
+     auth required. `200 {accessToken, refreshToken, expiresIn}` on a valid, unexpired,
+     unconsumed, not-yet-exhausted code, for a still-active, contact-confirmed operator;
+     `401` otherwise (including for a now-blocked operator's leftover code, without
+     incrementing `attemptCount`, per ADR-0012). On success, `sessionExpiresAt` is stamped
+     with a fresh, independent call to `getShiftEndOrFallback` (per ADR-0014) — not reused
+     from the value computed at request-code time — falling back to `now + 8h` only for an
+     unscheduled operator.
+   - `POST /auth/admin/platform/calendar` — Bearer, `adminTier: owner` only. Body
+     `{type, date?, dayOfWeek?, label?}`.
+   - `GET /auth/admin/platform/calendar` — Bearer, any admin, scoped to the caller's own
+     `platformId`.
+   - `DELETE /auth/admin/platform/calendar/:id` — Bearer, `adminTier: owner` only; `404`
+     if the row isn't the caller's own platform's.
+
+   See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
+3. **Platform owner ⇄ `auth-service`, operator management** (new, per ADR-0012), Bearer,
+   `adminTier: owner` only for every endpoint except the one noted, all `:id` lookups
+   scoped to the caller's own `platformId` and returning `404` (never `403`) on any
+   mismatch:
+   - `GET /auth/admin/operators` — list operators under the caller's own platform.
+   - `GET /auth/admin/operators/:id` — view one operator's profile.
+   - `PATCH /auth/admin/operators/:id/contact` — body `{email?, phone?}` (exactly one
+     required); `400`/`409` as at creation time.
+   - `POST /auth/admin/operators/:id/block` / `.../unblock` — set `User.isActive`;
+     blocking also deletes any unconsumed `AdminOperatorCode` row(s) regardless of `purpose`
+     (confirmation or login — per ADR-0015) and revokes all of that operator's refresh tokens.
+   - `PUT /auth/admin/operators/:id/schedule` — full-replace `{days: [...]}`.
+   - `GET /auth/admin/operators/:id/schedule` — owner-only (deliberately not readable by
+     the operator themselves, unlike the platform calendar's `GET`).
+   - `POST /auth/admin/operators/:id/time-off`, `GET .../time-off`,
+     `DELETE .../time-off/:timeOffId`.
+
+   See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
+4. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
    /payment/licenses/:organizationId/status`, its contract finalized by
    `docs/add/payment-service.md`/`docs/sdd/payment-service.md` (per ADR-0004). Invoked from
    `POST /auth/organizations/validate`, from inside `POST /auth/register` itself (so
@@ -281,7 +558,7 @@ Two synchronous flows matter architecturally:
    first-time B2B registration for that organization, `auth-service` stamps the user's
    account with the v1 trial period (a global config default, e.g. 14 days) — the trial length
    itself is `auth-service`-owned account metadata, not something `payment-service` reports.
-3. **`auth-service` ⇄ `payment-service`**: a second synchronous call, `GET
+5. **`auth-service` ⇄ `payment-service`**: a second synchronous call, `GET
    /payment/subscriptions/:userId/status`, its contract likewise finalized by
    `docs/sdd/payment-service.md` (per ADR-0006), invoked from `POST /auth/login` and
    `POST /auth/refresh` alongside the license-status call above. A response indicating no
@@ -290,13 +567,56 @@ Two synchronous flows matter architecturally:
    subscription does. `auth-service` never creates, modifies, or interprets *why* a
    subscription exists; it only reads its current status.
 
-For side effects, this design recommends one async event for v1, consistent with
-`CLAUDE.md`'s "async events for side effects" principle:
+For side effects, this design recommends a small set of async events, consistent with
+`CLAUDE.md`'s "async events for side effects" principle — no longer just the single v1 event
+of the previous revision:
 
 - **`user.registered`** — `{ userId, role, organizationId, timestamp }`, published after a
   successful registration so `notification-service` can react (e.g. send a welcome message)
   without `auth-service` taking on a direct dependency on `notification-service` or knowing
   anything about notification channels/templates.
+- **`admin.operator_registered`** — `{ operatorId, platformId, ownerId, channel:
+  "email"|"phone", timestamp }` (per ADR-0011), published when an owner creates an operator
+  account, so `notification-service` can send a welcome message the same way it does for
+  `user.registered`.
+- **`admin.operator_code_issued`** — `{ userId, platformId, channel: "email"|"sms",
+  destination, code, expiresAt, timestamp }` (per ADR-0011), published every time
+  `POST /auth/admin/login/operator/request-code` succeeds on a working day. As of ADR-0014,
+  `expiresAt` is the operator's own scheduled shift end (or `now + 8h` if unscheduled), not a
+  flat 8-hour value.
+- **`admin.operator_confirmation_code_issued`** — `{ userId, platformId, channel:
+  "email"|"sms", destination, code, expiresAt, timestamp }` (per ADR-0015), published when
+  `POST /auth/admin/operators` creates a new operator, carrying a `purpose: 'confirmation'`
+  code with a flat `now + 8h` expiry. Distinct from `admin.operator_code_issued`, which only
+  ever carries a `purpose: 'login'` code.
+- **`admin.operator_contact_confirmed`** — `{ operatorId, platformId, timestamp }` (per
+  ADR-0015), published when `POST /auth/admin/operators/confirm` successfully matches a
+  confirmation code. No `ownerId` — the confirming actor is the operator, not the owner,
+  unlike `admin.operator_blocked`/`admin.operator_unblocked` below.
+- **`admin.secret_key_login_from_new_device`** — `{ userId, platformId, channel: "email",
+  destination, ipAddress, userAgent, timestamp }` (per ADR-0010), published when an owner
+  logs in via secret key from a fingerprint `AdminDeviceService` hasn't seen before.
+- **`admin.secret_key_rotated`** — `{ userId, platformId, timestamp }` (per ADR-0010),
+  published on every secret-key rotation.
+- **`admin.operator_blocked`** — `{ operatorId, platformId, ownerId, timestamp }` (per
+  ADR-0012), published when an owner blocks an operator (`POST
+  /auth/admin/operators/:id/block`). `ownerId` gives an incidental, minimal "who did it"
+  record — not a substitute for a real audit log, which remains deferred (see Open
+  questions).
+- **`admin.operator_unblocked`** — `{ operatorId, platformId, ownerId, timestamp }` (per
+  ADR-0012), published when an owner unblocks an operator.
+
+**Why these carry contact info inline, unlike `user.registered`:** `admin.operator_code_issued`,
+`admin.operator_confirmation_code_issued`, and `admin.secret_key_login_from_new_device` all
+carry `destination`/`channel` (and, for both operator codes, the `code` itself) directly in
+the event payload — a deliberate departure from `user.registered`'s shape, which carries no
+contact info at all. Per this repo's database-per-service principle, only `auth-service` owns
+`User.email`/`User.phone`; `notification-service` has no independent way to resolve a bare
+`userId` to a contact address, and all three alerts are time-critical (a security
+notification, and each operator code being that operator's sole means of completing
+confirmation or login, respectively) — waiting on a separate synchronous lookup back into
+`auth-service` would add latency and a new dependency to something meant to be immediate. See
+ADR-0010, ADR-0011, and ADR-0015 for the full reasoning.
 
 Two related events — `user.role_changed` and `user.organization_changed` — are explicitly
 **not** designed for v1: there is no user-management endpoint in v1 that could mutate a
@@ -304,15 +624,19 @@ user's `role` or `organizationId` after creation, so there is nothing yet to tri
 They're noted here so a future user-management design doesn't have to rediscover the need.
 
 **Infrastructure gap:** no RabbitMQ broker, exchange/queue naming convention, or client
-library exists anywhere in this repo yet — `user.registered` is a design recommendation, not
+library exists anywhere in this repo yet — every event above is a design recommendation, not
 a component that can be built today without that follow-up infra work landing first.
 
 **Data ownership:** `auth-service` is the sole owner and writer of `User` and `RefreshToken`
 records (per ADR-0003, its own dedicated Postgres database — no other service queries it
-directly). `organizationId` values are opaque to `auth-service` (per ADR-0001) — it stores and
-echoes them but never validates their meaning, except for the one carve-out in ADR-0004 where
-it checks license *status* against `payment-service`, not the organization id's validity
-itself. License/organization billing data, and now individual-subscription data (per
+directly), and now also of `AdminDevice`, `AdminOperatorCode`, `PlatformNonWorkingDay`
+(per ADR-0009/ADR-0010/ADR-0011), and `OperatorSchedule`/`OperatorTimeOff` (per ADR-0012)
+records. `organizationId` values are opaque to
+`auth-service` (per ADR-0001) — it stores and echoes them but never validates their meaning,
+except for the one carve-out in ADR-0004 where it checks license *status* against
+`payment-service`, not the organization id's validity itself. `platformId` is likewise opaque
+(per ADR-0009) — `auth-service` never interprets what a "platform" means to any given
+consumer. License/organization billing data, and now individual-subscription data (per
 ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever reads their
 *status*, on the same terms as the license check.
 
@@ -350,7 +674,27 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   Open questions.
 - **Rate limiting is an undesigned gap.** Login and registration endpoints have no
   rate-limiting design yet — a known gap to close before production exposure, not addressed
-  in this document.
+  in this document. This now explicitly also includes
+  `POST /auth/admin/login/operator/request-code`,
+  `POST /auth/admin/login/operator/verify-code` (operator-code brute force, beyond
+  ADR-0011's own 5-attempt-per-code lockout), `POST /auth/admin/operators/confirm`
+  (confirmation-code brute force, reusing the same 5-attempt lockout, per ADR-0015), and
+  `POST /auth/admin/login/secret-key` (secret-key brute force) — all four are
+  unauthenticated, unthrottled endpoints in this design, the same undesigned gap as
+  login/registration, not a separately-solved one. The
+  new owner-only `AdminOperatorController` surface (per ADR-0012) inherits the same
+  undesigned gap, even though it's Bearer-authenticated rather than public — no
+  rate-limiting design exists anywhere in `auth-service` yet, for any endpoint.
+- **Schedule-anchored session ceiling for operator sessions.** Per ADR-0013 (as amended by
+  ADR-0014), an operator's session (from a successful `verify-code` onward) is capped at
+  their own scheduled shift end for the day, falling back to `now + 8h` only for an operator
+  with no configured `OperatorSchedule` — regardless of how often the refresh token is
+  rotated within that window. This ceiling is distinct from, and not to be confused with,
+  ADR-0011's login-*code* redemption window, which (per ADR-0014) is computed the same way
+  but independently, at a different call site and moment. This is enforced server-side
+  (`RefreshTokenService.rotate()`), not just client-side, and the final token before the
+  ceiling carries the ceiling itself as its own JWT `exp`, so a client can implement a
+  "session ending soon" warning purely from information it already has.
 
 ## Open questions
 
@@ -364,7 +708,8 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
 - When (if ever) a cross-cutting "shared JWT validation" ADD becomes worth writing, once a
   second real service actually needs to verify `auth-service`'s tokens locally.
 - RabbitMQ infrastructure does not exist anywhere in this repo yet (broker, exchange/queue
-  conventions) — needs its own follow-up before `user.registered` can actually ship.
+  conventions) — needs its own follow-up before `user.registered` or any of the newer
+  `admin.*` events can actually ship.
 - Multi-organization membership is explicitly out of scope per ADR-0001; if a future consumer
   needs it, that requires a new ADR superseding ADR-0001, not a change to this document alone.
 - Whether an API gateway will ever front `auth-service` — no decision has been made either
@@ -382,7 +727,24 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   unresolved by this document.
 - The internal mechanism for provisioning the platform's `Admin` accounts out-of-band (per
   ADR-0001) — e.g. a seed script vs. a separate internal/operator-only endpoint. Deliberately
-  left unspecified in this pass.
+  left unspecified in this pass. Per ADR-0009/ADR-0010, that mechanism now also needs to seed
+  a non-null `platformId` for every Admin it creates, and, for an owner specifically, an
+  initial secret key — neither of those needs is solved here either.
+- Operator-code length/entropy tuning: ADR-0011 chose a 6-digit numeric code with a 5-attempt
+  lockout as a starting point; whether that balance of usability vs. brute-force resistance
+  needs revisiting (longer code, shorter validity window, etc.) is unresolved.
+- Per-platform timezone for evaluating "today" in `isWorkingDay` (per ADR-0011) — this
+  document recommends UTC server-date as a default until, or unless, a timezone field is
+  added; not designed here.
+- The single-owner-per-platform assumption: nothing in ADR-0009/ADR-0010 designs an
+  ownership-transfer mechanism (e.g. if a platform's owner leaves and access needs to move to
+  someone else). Today, that would require the still-unspecified out-of-band provisioning
+  mechanism above to intervene directly.
+- The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
+  such infrastructure exists anywhere in this repo yet, so `admin.operator_code_issued`
+  events for phone-registered operators are undeliverable until it lands. As of ADR-0015,
+  this same gap now also covers `admin.operator_confirmation_code_issued` events for
+  phone-registered operators — one shared, undesigned dependency, not two separate ones.
 - The access-token TTL value itself — not decided by ADR-0005 or this document, but it
   directly bounds how long a user stays logged in after their organization's license lapses.
   A shorter TTL means faster enforcement but more frequent `payment-service` calls (per the
@@ -391,3 +753,23 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
 - What mechanism actually detects that an organization's license has lapsed or been renewed,
   in order to trigger the suspend/resume flow from ADR-0006 — that detection lives entirely
   inside `payment-service` and is out of scope for this document.
+- A real audit-log capability for owner actions taken against operators (per ADR-0012) —
+  deferred as bigger scope than that ADR's pass warranted. Today's only trace is the
+  incidental `ownerId` carried on `admin.operator_blocked`/`admin.operator_unblocked`, not a
+  designed audit trail.
+- Per-operator timezone for evaluating `OperatorSchedule`'s `startTime`/`endTime` (per
+  ADR-0012) — this extends, rather than resolves, ADR-0011's existing open question about
+  the timezone `isWorkingDay` uses for "today"; neither is designed here.
+- `OperatorSchedule`'s no-overnight-shift restriction (per ADR-0012) — a real v1 limitation
+  for any platform whose operators work shifts crossing midnight; not designed here.
+- Whether the operator session-ceiling/login-code fallback duration (per ADR-0013/ADR-0014,
+  currently 8 hours, used only when an operator has no configured `OperatorSchedule`) should
+  become configurable per platform, rather than a single hardcoded constant shared by every
+  platform.
+- A confirmation-code resend endpoint (per ADR-0015) is not designed — only the initial send
+  (bundled into `POST /auth/admin/operators`) and `POST /auth/admin/operators/confirm` exist.
+  An operator whose confirmation code expires or is exhausted before they complete
+  confirmation has no self-service way to get a new one in v1; this would need its own
+  follow-up design.
+- The very short redemption/session window an operator could get if they request a login code
+  moments before their shift ends (per ADR-0014) — accepted, not mitigated.
