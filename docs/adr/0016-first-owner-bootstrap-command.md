@@ -1,6 +1,6 @@
 # 0016. One-time bootstrap command for a platform's first owner account
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 
