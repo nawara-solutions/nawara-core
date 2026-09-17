@@ -192,10 +192,11 @@ to these two endpoints — no new cases invented:
   publish) — fully owned and tested by `devices-module.md`; this flow only calls
   `checkAndRecord` and never branches its own control flow on the result (login always
   proceeds either way).
-- `admin.secret_key_rotated` publish failing/unavailable — no RabbitMQ broker exists anywhere
-  in this repo yet (per the ADD's "Infrastructure gap" note); built against whatever
-  stub/no-op event-publishing mechanism `auth-core-flow.md`'s `user.registered` publish
-  already established.
+- `admin.secret_key_rotated` publish failing/unavailable — RabbitMQ infra now exists for local
+  dev (per ADR-0018: the shared `nawara.events` topic exchange, via `EventsPublisherService`),
+  but this TDD's own code isn't implemented yet, so no real publish call site exists here to
+  wire up until this TDD itself is built — publish through `EventsPublisherService.publish(...)`
+  the same way any future event-publishing code in this service does, not a stub.
 - Both secret-key endpoints inherit the same undesigned rate-limiting gap as the rest of
   `auth-service` (per the ADD's non-functional constraints) — secret-key brute force on
   `POST /auth/admin/login/secret-key` is a known, currently unaddressed gap, not solved by
