@@ -1,10 +1,10 @@
 # Nawara Core
 
-**Nawara Core** hosts the **shared, reusable microservices** for Nawara Solution — built once, consumed by any Nawara Solution app (starting with [Nawara Drive](../nawara-drive)) purely over their public APIs. No app ever imports this repo's code directly; they only ever call these services' endpoints.
+**Nawara Core** hosts the **shared, reusable microservices** for Nawara Solutions — built once, consumed by any Nawara Solutions app (starting with [Nawara Drive](../nawara-drive)) purely over their public APIs. No app ever imports this repo's code directly; they only ever call these services' endpoints.
 
 ## Why a separate repo
 
-App-specific logic (driving lessons, exam rules, course content — anything unique to Nawara Drive) lives in the `nawara-drive` repo. Anything generic enough to be useful for a _future, unrelated_ Nawara Solution app lives here instead. That separation keeps each repo's release cycle independent: shipping a Nawara Drive feature never requires touching Core, and improving Core (e.g. adding a new payment gateway) never requires a Nawara Drive deploy.
+App-specific logic (driving lessons, exam rules, course content — anything unique to Nawara Drive) lives in the `nawara-drive` repo. Anything generic enough to be useful for a _future, unrelated_ Nawara Solutions app lives here instead. That separation keeps each repo's release cycle independent: shipping a Nawara Drive feature never requires touching Core, and improving Core (e.g. adding a new payment gateway) never requires a Nawara Drive deploy.
 
 ## Services
 
@@ -49,13 +49,13 @@ nawara-core/
 
 ## Consuming these services from another app
 
-Other Nawara Solution apps (including Nawara Drive) never import this repo. They call the deployed API, e.g.:
+Other Nawara Solutions apps (including Nawara Drive) never import this repo. They call the deployed API, e.g.:
 
 ```
-POST https://api.nawara-solution.com/auth/login
-POST https://api.nawara-solution.com/payment/charge
-POST https://api.nawara-solution.com/notification/send
-POST https://api.nawara-solution.com/ai/chat
+POST https://api.nawara-solutions.com/auth/login
+POST https://api.nawara-solutions.com/payment/charge
+POST https://api.nawara-solutions.com/notification/send
+POST https://api.nawara-solutions.com/ai/chat
 ```
 
 ## Status
