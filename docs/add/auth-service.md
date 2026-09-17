@@ -2,7 +2,7 @@
 
 - **Status:** Reviewed <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
-- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit), [0017](../adr/0017-owner-recovery-and-second-owner.md) (owner recovery via multi-owner support and CLI force-reset)
+- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit), [0017](../adr/0017-owner-recovery-and-second-owner.md) (owner recovery via multi-owner support and CLI force-reset), [0018](../adr/0018-rabbitmq-as-async-message-broker.md) (RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq`), [0019](../adr/0019-twilio-as-sms-gateway-provider.md) (Twilio as the SMS gateway provider)
 - **Related ADDs/SDDs:** See `docs/sdd/auth-service.md` for `auth-service`'s internal module/class design, data model, and API contract in detail.
 
 ## Scope
@@ -684,9 +684,15 @@ Two related events — `user.role_changed` and `user.organization_changed` — a
 user's `role` or `organizationId` after creation, so there is nothing yet to trigger them.
 They're noted here so a future user-management design doesn't have to rediscover the need.
 
-**Infrastructure gap:** no RabbitMQ broker, exchange/queue naming convention, or client
-library exists anywhere in this repo yet — every event above is a design recommendation, not
-a component that can be built today without that follow-up infra work landing first.
+**Infrastructure gap, resolved by [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md):**
+the broker, exchange, routing-key convention, and client library are now decided — a single
+shared `nawara.events` topic exchange, routing key = event name verbatim (as already used
+above), plain JSON message bodies with no added envelope, and `@golevelup/nestjs-rabbitmq` as
+the NestJS client library. This is **local-dev-only for now, by deliberate choice** — ADR-0018
+explicitly defers production deployment of the broker to a later step, once `notification-service`
+has a real consumer to justify it. Every event above still has nowhere real to be delivered in
+production today; what's resolved is the wire format each will use once a broker and a consumer
+both exist, not the fact of deployment itself.
 
 **Data ownership:** `auth-service` is the sole owner and writer of `User` and `RefreshToken`
 records (per ADR-0003, its own dedicated Postgres database — no other service queries it
@@ -733,19 +739,24 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   user whose organization's license lapses stays logged in until their current access token
   expires and a refresh is attempted. The access-token TTL is **15 minutes** — see Open
   questions for the full rationale.
-- **Rate limiting is an undesigned gap.** Login and registration endpoints have no
-  rate-limiting design yet — a known gap to close before production exposure, not addressed
-  in this document. This now explicitly also includes
+- **Rate limiting: global baseline resolved, per-endpoint limits still an undesigned gap.**
+  A global, per-IP request-rate baseline (`@nestjs/throttler`, 100 requests/60s, applied to
+  every route via a global guard) is now implemented — see
+  [`docs/tdd/rate-limiting-baseline.md`](../tdd/rate-limiting-baseline.md). This closes the
+  "no rate limiting exists anywhere in `auth-service`" gap, but is deliberately a blunt,
+  permissive floor, not fine-grained protection for brute-force-sensitive endpoints. Stricter,
+  per-endpoint limits remain undesigned for: `POST /auth/login`, `POST /auth/register`,
   `POST /auth/admin/login/operator/request-code`,
   `POST /auth/admin/login/operator/verify-code` (operator-code brute force, beyond
   ADR-0011's own 5-attempt-per-code lockout), `POST /auth/admin/operators/confirm`
   (confirmation-code brute force, reusing the same 5-attempt lockout, per ADR-0015), and
   `POST /auth/admin/login/secret-key` (secret-key brute force) — all four are
-  unauthenticated, unthrottled endpoints in this design, the same undesigned gap as
-  login/registration, not a separately-solved one. The
+  unauthenticated, unthrottled-beyond-the-baseline endpoints in this design, the same
+  undesigned gap as login/registration, not a separately-solved one. The
   new owner-only `AdminOperatorController` surface (per ADR-0012) inherits the same
-  undesigned gap, even though it's Bearer-authenticated rather than public — no
-  rate-limiting design exists anywhere in `auth-service` yet, for any endpoint.
+  undesigned per-endpoint gap, even though it's Bearer-authenticated rather than public —
+  only the global baseline covers it so far, no endpoint-specific rate-limiting design exists
+  yet.
 - **Schedule-anchored session ceiling for operator sessions.** Per ADR-0013 (as amended by
   ADR-0014), an operator's session (from a successful `verify-code` onward) is capped at
   their own scheduled shift end for the day, falling back to `now + 8h` only for an operator
@@ -770,9 +781,15 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   learn that a consumer's organization was later deleted or deactivated.
 - When (if ever) a cross-cutting "shared JWT validation" ADD becomes worth writing, once a
   second real service actually needs to verify `auth-service`'s tokens locally.
-- RabbitMQ infrastructure does not exist anywhere in this repo yet (broker, exchange/queue
+- ~~RabbitMQ infrastructure does not exist anywhere in this repo yet (broker, exchange/queue
   conventions) — needs its own follow-up before `user.registered` or any of the newer
-  `admin.*` events can actually ship.
+  `admin.*` events can actually ship.~~ **Resolved by
+  [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md):** a single shared `nawara.events`
+  topic exchange, routing key = event name verbatim, plain JSON payloads with no added envelope,
+  and `@golevelup/nestjs-rabbitmq` as the client library. **Not fully closed as a deployment
+  matter** — per ADR-0018, this is a local-dev-only decision for now; production deployment of
+  the broker is explicitly deferred to a separate future step, once `notification-service` has a
+  real consumer to justify standing it up.
 - Multi-organization membership is explicitly out of scope per ADR-0001; if a future consumer
   needs it, that requires a new ADR superseding ADR-0001, not a change to this document alone.
 - Whether an API gateway will ever front `auth-service` — no decision has been made either
@@ -825,11 +842,18 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   stated explicitly in ADR-0017's Consequences: a freshly bootstrapped platform's very first
   owner has the same lockout exposure until they act, and this design surfaces "add a second
   owner immediately" only as operational guidance, not something enforced or defaulted.
-- The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
+- ~~The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
   such infrastructure exists anywhere in this repo yet, so `admin.operator_code_issued`
   events for phone-registered operators are undeliverable until it lands. As of ADR-0015,
   this same gap now also covers `admin.operator_confirmation_code_issued` events for
-  phone-registered operators — one shared, undesigned dependency, not two separate ones.
+  phone-registered operators — one shared, undesigned dependency, not two separate ones.~~
+  **Provider resolved by [ADR-0019](../adr/0019-twilio-as-sms-gateway-provider.md):** Twilio is
+  named as the SMS gateway, accessed through a generic `SmsGateway` interface, mirroring
+  `payment-service`'s own gateway-adapter pattern. **`notification-service`'s actual
+  integration remains entirely undesigned** — ADR-0019 is deliberately narrow (naming a
+  provider only) and does not touch the much larger, separate gap that `notification-service`
+  has no ADD or SDD of any kind. `auth-service`'s own design is unaffected either way: it never
+  calls Twilio, or any SMS gateway, directly.
 - ~~The access-token TTL value itself — not decided by ADR-0005 or this document, but it
   directly bounds how long a user stays logged in after their organization's license lapses.
   A shorter TTL means faster enforcement but more frequent `payment-service` calls (per the

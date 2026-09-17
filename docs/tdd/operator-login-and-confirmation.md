@@ -279,9 +279,12 @@ this TDD's endpoints — no new cases invented:
   **UTC server-date** — the formalized v1 decision per the ADD's/SDD's resolved Open questions,
   not merely a recommendation. No per-platform/per-operator timezone field exists.
 - Phone-registered operator's `admin.operator_code_issued`/`admin.operator_confirmation_code_
-  issued` events have no real delivery mechanism yet (no SMS gateway anywhere in this repo) —
-  and, per this TDD's Problem, no event is actually published at all yet regardless of channel,
-  since no RabbitMQ infra exists. Flagged, not solved here.
+  issued` events have no real delivery mechanism yet: the SMS gateway *provider* is now named
+  (Twilio, per ADR-0019), but `notification-service`'s actual integration remains completely
+  undesigned. Separately, RabbitMQ infra itself now exists for local dev (per ADR-0018), but
+  this TDD's own code isn't implemented yet, so neither event is actually published anywhere
+  until this TDD is built — at that point it publishes through `EventsPublisherService`, not a
+  stub. Flagged, not solved here.
 
 ## Data migration
 

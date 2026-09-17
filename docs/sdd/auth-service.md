@@ -26,7 +26,9 @@
   (one-time bootstrap command for a platform's first owner account, and the accompanying
   null-`organizationId` login/refresh short-circuit),
   [0017](../adr/0017-owner-recovery-and-second-owner.md) (owner recovery via multi-owner
-  support and CLI force-reset).
+  support and CLI force-reset), [0018](../adr/0018-rabbitmq-as-async-message-broker.md)
+  (RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq`),
+  [0019](../adr/0019-twilio-as-sms-gateway-provider.md) (Twilio as the SMS gateway provider).
   Device/network fingerprinting rationale lives in the ADD's "Design rationale: device/network
   fingerprinting" section, not a standalone ADR.
 
@@ -1925,10 +1927,13 @@ absence, not an oversight in this pass.
 - `DELETE /auth/admin/platform/calendar/:id` for a row belonging to a different platform →
   `404` (never `403`, to avoid confirming the row exists at all).
 - Phone-registered operator's `admin.operator_code_issued` event is currently undeliverable
-  in practice — no SMS gateway/provider exists anywhere in this repo yet (per ADR-0011);
-  flagged as a shared, undesigned dependency, not solved here. As of ADR-0015, this same gap
-  now also covers `admin.operator_confirmation_code_issued` events for phone-registered
-  operators.
+  in practice — the SMS **provider** is now named (Twilio, per
+  [ADR-0019](../adr/0019-twilio-as-sms-gateway-provider.md)), but `notification-service`'s
+  actual integration (consuming the event, calling the gateway, retry/failure handling) remains
+  entirely undesigned — `notification-service` has no ADD or SDD of any kind yet. As of
+  ADR-0015, this same gap also covers `admin.operator_confirmation_code_issued` events for
+  phone-registered operators. `auth-service` itself is unaffected either way — it never calls
+  an SMS gateway directly.
 - `isWorkingDay`'s notion of "today" is evaluated as **UTC server-date** — the v1 decision
   (per ADR-0011; see the ADD's Open questions), not merely a recommendation.
   `OperatorAvailabilityService`'s time-of-day comparison (per ADR-0012) uses the same UTC
@@ -1976,8 +1981,13 @@ absence, not an oversight in this pass.
   forced composition rules (no required uppercase/digit/symbol mix) — NIST 800-63B-style
   guidance, where length matters more than composition-rule theater. No breach-corpus/
   pwned-password check in v1; that's separate future scope.
-- Login rate-limiting — `@nestjs/throttler` is a likely candidate, deferred to a future
-  TDD.
+- ~~Login rate-limiting — `@nestjs/throttler` is a likely candidate, deferred to a future
+  TDD.~~ **Resolved by [`docs/tdd/rate-limiting-baseline.md`](../tdd/rate-limiting-baseline.md),
+  for the global baseline only:** `@nestjs/throttler`, applied globally (100 requests/60s per
+  IP) via a global `APP_GUARD`, not per-endpoint. Stricter, per-endpoint limits for
+  `/auth/login`, `/auth/register`, and the admin/operator endpoints named in the ADD's
+  non-functional constraints remain each endpoint's own future TDD's job, once that endpoint
+  is actually implemented.
 - ~~Whether a "logout everywhere" (family-wide refresh-token revoke) endpoint is needed.~~
   **Resolved:** out of v1 scope — grouped with the other already-deferred v1 cuts below (MFA,
   multi-session/device management) rather than built now.
@@ -2065,9 +2075,15 @@ absence, not an oversight in this pass.
   self-service flow. A freshly bootstrapped platform's very first owner still carries the same
   lockout exposure until a second owner is actually added — ADR-0017 surfaces that as
   operational guidance, not something this design enforces.
-- The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
+- ~~The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
   such infrastructure exists anywhere in this repo yet. As of ADR-0015, this same gap also
-  covers confirmation-code delivery.
+  covers confirmation-code delivery.~~ **Provider resolved by
+  [ADR-0019](../adr/0019-twilio-as-sms-gateway-provider.md)**: Twilio, behind a generic
+  `SmsGateway` interface mirroring `payment-service`'s own gateway-adapter pattern.
+  **`notification-service`'s actual integration remains entirely undesigned** — that service
+  has no ADD or SDD of any kind yet, and ADR-0019 deliberately does not attempt to design it;
+  it only names the provider. `auth-service` never touches Twilio, or any SMS gateway,
+  directly — this resolution doesn't change anything about `auth-service`'s own design.
 - A real audit-log capability for owner actions against operators (per ADR-0012) — deferred
   as bigger scope than that ADR's pass warranted. Today's only trace is the incidental
   `ownerId` on `admin.operator_blocked`/`admin.operator_unblocked`, not a designed audit

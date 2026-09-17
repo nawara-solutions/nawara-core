@@ -53,3 +53,4 @@ if requirements change significantly later, write a new TDD for that follow-up w
 | [admin-owner-secret-key](./admin-owner-secret-key.md) | Draft |
 | [operator-login-and-confirmation](./operator-login-and-confirmation.md) | Draft |
 | [operator-administration](./operator-administration.md) | Draft |
+| [rate-limiting-baseline](./rate-limiting-baseline.md) | Implemented |
