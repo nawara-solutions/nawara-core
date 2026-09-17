@@ -1,0 +1,102 @@
+name: auth-service Docker build
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/auth-service/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/auth-service-docker-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/auth-service/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/auth-service-docker-build.yml'
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-auth-service
+
+jobs:
+  build-develop:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/auth-service/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:develop
+
+  build-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/auth-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:production
+            ${{ env.IMAGE_NAME }}:latest
+
+  # Deploys :production to the same VPS nawara-drive uses, over SSH, routed through the
+  # existing Traefik proxy on the deploy_edge network. Reuses the same DEPLOY_SSH_* repo
+  # secrets nawara-drive's repo has (same VPS) — must be added to this repo separately, since
+  # GitHub secrets don't cross repos. Routed at core-api.hsalem-anwar.dev/auth — a single
+  # domain shared by every nawara-core service, path-routed per service via Traefik
+  # PathPrefix rules (notification-service, payment-service, ai-service can be added the
+  # same way later, each with their own PathPrefix).
+  deploy-production:
+    needs: build-production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE_NAME
+          script: |
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            docker pull "$IMAGE_NAME:production"
+            docker stop nawara-core-auth-service 2>/dev/null || true
+            docker rm nawara-core-auth-service 2>/dev/null || true
+            docker run -d --name nawara-core-auth-service --restart unless-stopped \
+              --network deploy_edge \
+              --label traefik.enable=true \
+              --label "traefik.http.routers.nawara-core-auth-service.rule=Host(\`core-api.hsalem-anwar.dev\`) && PathPrefix(\`/auth\`)" \
+              --label traefik.http.routers.nawara-core-auth-service.entrypoints=websecure \
+              --label traefik.http.routers.nawara-core-auth-service.tls.certresolver=le \
+              --label traefik.http.services.nawara-core-auth-service.loadbalancer.server.port=3000 \
+              "$IMAGE_NAME:production"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
