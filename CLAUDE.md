@@ -7,8 +7,8 @@ This file gives Claude (via Claude Code) context on the Nawara Core project. Rea
 Branch naming, commit message format, PR conventions, and the ADR/ADD/SDD/TDD design-doc
 process are defined once for all Nawara Solutions projects in
 [`../ai-standard/README.md`](../ai-standard/README.md). This repo's `/branch`, `/commit`,
-`/pr`, `/design-doc` commands and its `design-conformance`/`docs-writer` agents are symlinks
-into that shared source — editing one of them from here edits it for `nawara-drive` and
+`/pr`, `/design-doc` commands and its `design-conformance`/`docs-writer`/`tech-lead` agents are
+symlinks into that shared source — editing one of them from here edits it for `nawara-drive` and
 `nawara-daycare` too. See `CONTRIBUTING.md` (itself a symlink into `ai-standard/`) for the
 full conventions.
 
