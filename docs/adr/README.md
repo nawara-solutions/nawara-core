@@ -56,4 +56,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0013](./0013-operator-session-ceiling.md) | Hard 8-hour session ceiling for operator refresh-token rotation | Accepted |
 | [0014](./0014-schedule-anchored-operator-duration.md) | Schedule-anchored operator login-code and session duration | Accepted |
 | [0015](./0015-two-phase-operator-contact-confirmation.md) | Two-phase operator contact confirmation before first login | Accepted |
-| [0016](./0016-first-owner-bootstrap-command.md) | One-time bootstrap command for a platform's first owner account | Proposed |
+| [0016](./0016-first-owner-bootstrap-command.md) | One-time bootstrap command for a platform's first owner account | Accepted |
