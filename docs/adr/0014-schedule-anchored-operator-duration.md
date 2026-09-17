@@ -128,10 +128,13 @@ We chose **Option 3**. Concretely:
   `TokenService.signAccessToken()`'s `exp = min(now + normalTTL, sessionExpiresAt)` clamping
   mechanism are both unchanged — only what gets passed as `sessionExpiresAt` changes.
 - Per this repo's ADR-immutability convention (`docs/adr/README.md`), ADR-0011's and
-  ADR-0013's own text is **not** being rewritten to reflect this — short cross-reference notes
-  pointing to this ADR are added under the specific bullets they partially supersede instead.
-  `docs/add/auth-service.md` and `docs/sdd/auth-service.md`, being living documents, **are**
-  being fully updated in place to describe this as current behavior.
+  ADR-0013's own text is left **completely unmodified**, exactly as originally decided — no
+  cross-reference notes are added into either file's body. This ADR (0014) alone is the
+  record of what superseded what; a reader who wants to know an operator's *current*
+  login-code/session-ceiling duration should read this ADR, not expect ADR-0011 or ADR-0013 to
+  point forward to it themselves. `docs/add/auth-service.md` and `docs/sdd/auth-service.md`,
+  being living documents, **are** being fully updated in place to describe this as current
+  behavior.
 - Makes an operator's granted access proportional to their actual scheduled shift instead of
   an arbitrary flat window — a shift shorter than 8h no longer over-grants access, and a
   shift longer than 8h is no longer cut short mid-shift.

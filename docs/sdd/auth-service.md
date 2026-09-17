@@ -22,7 +22,9 @@
   refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md)
   (schedule-anchored operator login-code and session duration),
   [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact
-  confirmation before first login).
+  confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md)
+  (one-time bootstrap command for a platform's first owner account, and the accompanying
+  null-`organizationId` login/refresh short-circuit).
   Device/network fingerprinting rationale lives in the ADD's "Design rationale: device/network
   fingerprinting" section, not a standalone ADR.
 
@@ -207,7 +209,11 @@ Notes:
   schema.
 - `User.phone` is new (per ADR-0009), unique when present, nullable otherwise.
 - `User.secretKeyHash`/`User.secretKeyIssuedAt` (per ADR-0010) exist only for owners — one
-  active key per owner, no history table in v1. **Hashed with SHA-256, not bcrypt:** a
+  active key per owner, no history table in v1. **`secretKeyHash: null` is a legitimate,
+  expected owner state, not an error case** (per ADR-0016): a freshly bootstrapped owner (see
+  ADR-0016) has no secret key at all until their first `POST /auth/admin/secret-key/rotate`
+  call — see "API contract" below for the defense-in-depth `AND secretKeyHash IS NOT NULL`
+  predicate this adds to the secret-key login lookup. **Hashed with SHA-256, not bcrypt:** a
   secret key is a high-entropy, server-generated value, not a low-entropy, human-chosen
   password, so it doesn't need bcrypt's deliberate slowness to resist brute force — the same
   reasoning applies to ADR-0002's refresh tokens, which are likewise persisted only as a hash
@@ -788,13 +794,21 @@ and flows below; both changes are additive and inert for every non-operator call
   - `401` on any credential failure, identical generic message whether the email doesn't
     exist or the password is wrong (checked before the calls below, so a wrong password
     never reveals anything about license/subscription state).
-  - On valid credentials, re-checks license and subscription status (per ADR-0005) before
-    issuing tokens: `403` with the same "contact your organization" message as
-    registration/validate if the user's `organizationId` doesn't resolve to a valid-license
-    organization; a distinct `403 {reason: "subscription_invalid", message: "Your
-    subscription has expired. Please renew to continue."}` if a `UserSubscription` exists
-    for this user (per ADR-0006) and its status isn't `active`; `503` if `payment-service`
-    is unreachable during either check.
+  - If the authenticated user's `organizationId` is **`null`** (per ADR-0016) — true for
+    every platform-scoped Admin, owner or operator, including one created by ADR-0016's
+    bootstrap command — both the license check and the subscription check are treated as
+    "not applicable" and skipped entirely; the flow proceeds straight to issuing tokens. This
+    mirrors how ADR-0006 already treats "no `UserSubscription` row exists" as non-blocking:
+    a check that has no organization to check against is not a check that fails, it's a check
+    that doesn't apply. Without this, a bootstrapped owner (`organizationId: null` by
+    construction) could never successfully log in at all.
+  - Otherwise (non-null `organizationId`), re-checks license and subscription status (per
+    ADR-0005) before issuing tokens: `403` with the same "contact your organization" message
+    as registration/validate if the user's `organizationId` doesn't resolve to a
+    valid-license organization; a distinct `403 {reason: "subscription_invalid", message:
+    "Your subscription has expired. Please renew to continue."}` if a `UserSubscription`
+    exists for this user (per ADR-0006) and its status isn't `active`; `503` if
+    `payment-service` is unreachable during either check.
   - `200 {accessToken, refreshToken, expiresIn}` on success.
 
 - **`POST /auth/refresh`** — body `{refreshToken}`.
@@ -809,10 +823,14 @@ and flows below; both changes are additive and inert for every non-operator call
     reused/stolen token on any retry.
   - `401` if the refresh token itself is not found, expired, or already-rotated (reused) —
     checked before the license/subscription calls below, and after the ceiling check above.
-  - On a valid, not-yet-rotated refresh token, re-checks license and subscription status the
-    same way `login` does (per ADR-0005): same `403` (org license) / `403` (subscription) /
-    `503` (`payment-service` unreachable) outcomes as `login`, in place of rotating the
-    token.
+  - If the token's owning user has `organizationId: null` (per ADR-0016 — every
+    platform-scoped Admin, owner or operator) the license/subscription checks below are
+    skipped as "not applicable," identically to `login` above, and the flow proceeds straight
+    to rotation.
+  - Otherwise, on a valid, not-yet-rotated refresh token, re-checks license and subscription
+    status the same way `login` does (per ADR-0005): same `403` (org license) / `403`
+    (subscription) / `503` (`payment-service` unreachable) outcomes as `login`, in place of
+    rotating the token.
   - `200 {accessToken, refreshToken, expiresIn}` new token pair on success. For an
     operator-issued token, the new refresh token carries `sessionExpiresAt` copied forward
     unchanged from the old one (per ADR-0013), and the new access token's `exp` is
@@ -824,12 +842,22 @@ and flows below; both changes are additive and inert for every non-operator call
   Bearer` access token → `204` on success; revokes only that specific refresh token
   (family-wide "logout everywhere" is out of v1 — see Open questions).
 
-- **`GET /auth/me`** — requires `Authorization: Bearer` → `200 {id, email, role,
-  organizationId, isActive, trialEndsAt, createdAt}`.
+- **`GET /auth/me`** — requires `Authorization: Bearer` → `200 {id, email, phone, role,
+  organizationId, platformId, adminTier, isActive, contactVerifiedAt, trialEndsAt,
+  createdAt}`. `phone`, `platformId`, `adminTier`, and `contactVerifiedAt` were added to this
+  contract as a living-doc correction — these fields have existed on `User` since ADR-0009
+  (`phone`, `platformId`, `adminTier`) and ADR-0015 (`contactVerifiedAt`), but were never
+  reflected in this endpoint's response shape until now. All four are `null` for a non-admin
+  end user, exactly as they are on the `User` entity itself.
 
-- **`POST /auth/admin/login/secret-key`** (per ADR-0010) — no auth required. Body
-  `{secretKey}`. Looked up as `WHERE secretKeyHash = hash(input) AND adminTier = 'owner'`;
-  `platformId` is derived from the matched row, never supplied by the caller. On match, hashes
+- **`POST /auth/admin/login/secret-key`** (per ADR-0010, updated by ADR-0016) — no auth
+  required. Body `{secretKey}`. Looked up as `WHERE secretKeyHash = hash(input) AND adminTier
+  = 'owner' AND secretKeyHash IS NOT NULL` — the `secretKeyHash IS NOT NULL` predicate is new
+  per ADR-0016, defense-in-depth against a null/empty input somehow hashing to a value that
+  matches a null/empty stored column; it also documents explicitly that `secretKeyHash: null`
+  is a real, reachable owner state (a freshly bootstrapped owner who hasn't rotated yet, per
+  ADR-0016), not something this lookup can assume away. `platformId` is derived from the
+  matched row, never supplied by the caller. On match, hashes
   the normalized User-Agent and checks `AdminDevice` for that owner — an unrecognized
   fingerprint inserts a new `AdminDevice` row and publishes
   `admin.secret_key_login_from_new_device`, but never blocks the login. `200 {accessToken,
@@ -1124,25 +1152,34 @@ sequenceDiagram
             alt password mismatch
                 AS-->>App: 401 (identical message to "not found")
             else password matches
-                AS->>OVS: checkLicense(organizationId)
-                alt org license invalid or payment-service unreachable
-                    OVS-->>AS: not allowed / error
-                    AS-->>App: 403 contact-your-organization / 503
-                else org license valid
-                    AS->>OVS: checkSubscription(userId)
-                    alt subscription exists and invalid
-                        OVS-->>AS: invalid
-                        AS-->>App: 403 subscription_invalid
-                    else subscription valid or not applicable, or payment-service unreachable on this check
-                        OVS-->>AS: valid / not applicable / error
-                        alt payment-service unreachable on subscription check
-                            AS-->>App: 503
-                        else proceed
-                            AS->>TS: signAccessToken(payload)
-                            TS-->>AS: accessToken
-                            AS->>RTS: issue(userId)
-                            RTS-->>AS: refresh token
-                            AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                alt organizationId is null (per ADR-0016 — every platform-scoped Admin)
+                    Note over AS,OVS: license/subscription checks are "not applicable" and<br/>skipped entirely — mirrors ADR-0006's "no subscription row" non-blocking<br/>case. Without this, a bootstrapped owner could never log in.
+                    AS->>TS: signAccessToken(payload)
+                    TS-->>AS: accessToken
+                    AS->>RTS: issue(userId)
+                    RTS-->>AS: refresh token
+                    AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                else organizationId is non-null
+                    AS->>OVS: checkLicense(organizationId)
+                    alt org license invalid or payment-service unreachable
+                        OVS-->>AS: not allowed / error
+                        AS-->>App: 403 contact-your-organization / 503
+                    else org license valid
+                        AS->>OVS: checkSubscription(userId)
+                        alt subscription exists and invalid
+                            OVS-->>AS: invalid
+                            AS-->>App: 403 subscription_invalid
+                        else subscription valid or not applicable, or payment-service unreachable on this check
+                            OVS-->>AS: valid / not applicable / error
+                            alt payment-service unreachable on subscription check
+                                AS-->>App: 503
+                            else proceed
+                                AS->>TS: signAccessToken(payload)
+                                TS-->>AS: accessToken
+                                AS->>RTS: issue(userId)
+                                RTS-->>AS: refresh token
+                                AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                            end
                         end
                     end
                 end
@@ -1186,25 +1223,37 @@ sequenceDiagram
             RTS-->>App: 401
         else valid and not yet rotated
             RTS-->>AS: userId, organizationId
-            AS->>OVS: checkLicense(organizationId)
-            alt org license invalid or payment-service unreachable on this check
-                OVS-->>AS: not allowed / error
-                AS-->>App: 403 contact-your-organization / 503
-            else org license valid
-                AS->>OVS: checkSubscription(userId)
-                alt subscription exists and invalid, or payment-service unreachable on this check
-                    OVS-->>AS: invalid / error
-                    AS-->>App: 403 subscription_invalid / 503
-                else subscription valid or not applicable
-                    OVS-->>AS: valid / not applicable
-                    AS->>RTS: rotate(rawToken)
-                    RTS->>DB: revoke old token, insert new token (same familyId,<br/>sessionExpiresAt copied forward unchanged if set)
-                    DB-->>RTS: new RefreshToken row
-                    RTS-->>AS: new raw refresh token
-                    AS->>TS: signAccessToken(payload, sessionExpiresAt?)
-                    Note over TS: if sessionExpiresAt is set, exp = min(now + normal TTL, sessionExpiresAt)<br/>— otherwise unchanged, exp = now + normal TTL
-                    TS-->>AS: accessToken
-                    AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+            alt organizationId is null (per ADR-0016 — every platform-scoped Admin)
+                Note over AS,OVS: license/subscription checks are "not applicable" and<br/>skipped entirely, identically to the login flow — proceeds straight to rotation
+                AS->>RTS: rotate(rawToken)
+                RTS->>DB: revoke old token, insert new token (same familyId,<br/>sessionExpiresAt copied forward unchanged if set)
+                DB-->>RTS: new RefreshToken row
+                RTS-->>AS: new raw refresh token
+                AS->>TS: signAccessToken(payload, sessionExpiresAt?)
+                Note over TS: if sessionExpiresAt is set, exp = min(now + normal TTL, sessionExpiresAt)<br/>— otherwise unchanged, exp = now + normal TTL
+                TS-->>AS: accessToken
+                AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+            else organizationId is non-null
+                AS->>OVS: checkLicense(organizationId)
+                alt org license invalid or payment-service unreachable on this check
+                    OVS-->>AS: not allowed / error
+                    AS-->>App: 403 contact-your-organization / 503
+                else org license valid
+                    AS->>OVS: checkSubscription(userId)
+                    alt subscription exists and invalid, or payment-service unreachable on this check
+                        OVS-->>AS: invalid / error
+                        AS-->>App: 403 subscription_invalid / 503
+                    else subscription valid or not applicable
+                        OVS-->>AS: valid / not applicable
+                        AS->>RTS: rotate(rawToken)
+                        RTS->>DB: revoke old token, insert new token (same familyId,<br/>sessionExpiresAt copied forward unchanged if set)
+                        DB-->>RTS: new RefreshToken row
+                        RTS-->>AS: new raw refresh token
+                        AS->>TS: signAccessToken(payload, sessionExpiresAt?)
+                        Note over TS: if sessionExpiresAt is set, exp = min(now + normal TTL, sessionExpiresAt)<br/>— otherwise unchanged, exp = now + normal TTL
+                        TS-->>AS: accessToken
+                        AS-->>App: 200 {accessToken, refreshToken, expiresIn}
+                    end
                 end
             end
         end
@@ -1281,7 +1330,7 @@ sequenceDiagram
     Owner->>AAC: POST /auth/admin/login/secret-key {secretKey}
     AAC->>SKS: login(secretKey, ip, userAgent)
     SKS->>SKS: hash(secretKey)
-    SKS->>DB: findOne(WHERE secretKeyHash = hash AND adminTier = 'owner')
+    SKS->>DB: findOne(WHERE secretKeyHash = hash AND adminTier = 'owner' AND secretKeyHash IS NOT NULL)
     alt no match
         DB-->>SKS: null
         SKS-->>Owner: 401 generic message
@@ -1784,10 +1833,18 @@ sequenceDiagram
   (unresolved — see the ADD's "Design rationale: device/network fingerprinting").
 - What actually consumes `Device` records for blocking/rate-limiting is out of scope for
   this pass — capture only.
-- The internal mechanism for provisioning platform Admin accounts out-of-band is
-  deliberately left unspecified in this pass (per ADR-0001's revision). Per ADR-0009/
-  ADR-0010, that mechanism now also needs to seed a non-null `platformId` for every Admin,
-  and, for an owner specifically, an initial secret key — neither is solved here either.
+- ~~The internal mechanism for provisioning platform Admin accounts out-of-band is
+  deliberately left unspecified in this pass (per ADR-0001's revision).~~ **Resolved by
+  [ADR-0016](../adr/0016-first-owner-bootstrap-command.md)**, for a platform's *first* owner:
+  `apps/auth-service/src/cli/bootstrap-owner.ts`, an idempotent CLI command (not a migration —
+  ADR-0016 keeps `apps/auth-service/src/migrations/` schema-only) that seeds only an
+  email+password credential through the real `UsersService`, deliberately minting no secret
+  key — the owner's first secret key still comes from the existing
+  `POST /auth/admin/secret-key/rotate` path (ADR-0010), reached via the same command's seeded
+  password login. Operators remain provisioned in-band by an owner, via
+  `POST /auth/admin/operators` (ADR-0011) — that path was never part of this open question.
+  Ownership transfer, a second/standby owner, and sole-owner credential-loss recovery remain
+  unresolved — see ADR-0016's own Consequences.
 - **SHA-256, not bcrypt, for `secretKeyHash`/`codeHash`:** stated explicitly here, not just
   referenced. For `secretKeyHash`, the reasoning is entropy-based — the secret key is a
   high-entropy, server-generated value, not a low-entropy human-chosen password, so it doesn't
@@ -1837,3 +1894,13 @@ sequenceDiagram
   confirmation has no self-service way to get a new one in v1.
 - The very short redemption/session window an operator could get if they request a login code
   moments before their shift ends (per ADR-0014) — an accepted, not-mitigated edge case.
+- **No first-class `Organization` entity exists anywhere in this repo.** `organizationId` is
+  purely an opaque string claim stamped onto `User` (this document), and onto `License`,
+  `Charge`, and `UserSubscription` in `payment-service` — there is no `Organization` table or
+  service anywhere. Concretely, `auth-service` has no way to answer "list the organizations
+  under my platform," because `organizationId` and `platformId` are two independent, opaque
+  claims (per ADR-0001/ADR-0009) with no recorded relationship between them in this schema —
+  an owner or operator has no endpoint here to list, view, or manage the organizations
+  belonging to their own platform. Not designed here; needs its own future ADR (likely a new
+  `Organization` entity carrying its own `platformId`, plus admin-facing
+  listing/management endpoints), not an incidental extension of this document.

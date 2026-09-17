@@ -52,14 +52,7 @@ We chose **Option 3**. Concretely:
   issued by every path other than operator verify-code (registration, password login,
   secret-key login) — this is a purely additive column with zero behavior change to ADR-0002's
   existing unbounded rotation for regular users and owners. It is set exactly once, at
-  `OperatorCodeService.verifyCode()` success, to `now + 8h`.
-
-  > **Note (added, not part of the original decision):** the flat 8h duration described here
-  > is amended by [ADR-0014](./0014-schedule-anchored-operator-duration.md) — it now applies
-  > only as a fallback for an operator with no configured `OperatorSchedule`; a scheduled
-  > operator's session ceiling is anchored to their own shift end instead.
-
-  On every subsequent rotation
+  `OperatorCodeService.verifyCode()` success, to `now + 8h`. On every subsequent rotation
   within that token family, the value is copied forward **unchanged** — never recomputed from
   "now." This is what makes it a fixed ceiling anchored to the original login moment, rather
   than a sliding window an operator could extend indefinitely by refreshing repeatedly.
