@@ -531,7 +531,7 @@ Five synchronous flows matter architecturally:
 
    See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
 3. **Platform owner ⇄ `auth-service`, operator management** (new, per ADR-0012), Bearer,
-   `adminTier: owner` only for every endpoint except the one noted, all `:id` lookups
+   `adminTier: owner` only for every endpoint in this group, all `:id` lookups
    scoped to the caller's own `platformId` and returning `404` (never `403`) on any
    mismatch:
    - `GET /auth/admin/operators` — list operators under the caller's own platform.
