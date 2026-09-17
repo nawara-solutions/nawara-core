@@ -1,6 +1,6 @@
 # 0007. Out-of-band cash payment confirmation via Admin role
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

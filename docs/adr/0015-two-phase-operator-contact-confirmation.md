@@ -1,6 +1,6 @@
 # 0015. Two-phase operator contact confirmation before first login
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 

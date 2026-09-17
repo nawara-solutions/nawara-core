@@ -48,3 +48,4 @@ if requirements change significantly later, write a new TDD for that follow-up w
 
 | Title | Status |
 | ----- | ------ |
+| [auth-core-flow](./auth-core-flow.md) | Draft |

@@ -1,6 +1,6 @@
 # 0008. Automatic 24-hour grace license on organization license lapse
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

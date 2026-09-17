@@ -1,6 +1,6 @@
 # 0012. Owner-managed operator profile, schedule, and block/unblock
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 

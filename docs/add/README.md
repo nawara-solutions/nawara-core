@@ -44,5 +44,5 @@ ADRs, which are immutable). Use git history/PRs to see how a given ADD changed o
 
 | Title | Status |
 | ----- | ------ |
-| [auth-service](./auth-service.md) | Draft |
+| [auth-service](./auth-service.md) | Reviewed |
 | [payment-service](./payment-service.md) | Draft |

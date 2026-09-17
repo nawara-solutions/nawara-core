@@ -1,6 +1,6 @@
 # 0006. Per-user subscription reservation on organization license lapse
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

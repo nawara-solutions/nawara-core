@@ -1,6 +1,6 @@
 # 0014. Schedule-anchored operator login-code and session duration
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 

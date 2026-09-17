@@ -1,6 +1,6 @@
 # auth-service
 
-- **Status:** Draft <!-- Draft | Reviewed | Implemented -->
+- **Status:** Reviewed <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [docs/add/auth-service.md](../add/auth-service.md)
 - **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic
@@ -1710,8 +1710,8 @@ sequenceDiagram
 - Login or refresh attempted after the requesting user's organization's license has
   lapsed → `403` with the same "contact your organization" message, even if the request's
   credentials/refresh token are otherwise entirely valid (per ADR-0005). This is the
-  mechanism that logs a user out, bounded by the access-token TTL — see the ADD's Open
-  questions for the TTL value itself.
+  mechanism that logs a user out, bounded by the 15-minute access-token TTL — see the ADD's
+  Open questions for the full rationale.
 - Login or refresh for a user whose individual `UserSubscription` (if one exists) is
   suspended or expired, but whose organization's license is still valid → distinct
   `403 {reason: "subscription_invalid"}` (per ADR-0006). A user with no `UserSubscription`
@@ -1787,11 +1787,11 @@ sequenceDiagram
   flagged as a shared, undesigned dependency, not solved here. As of ADR-0015, this same gap
   now also covers `admin.operator_confirmation_code_issued` events for phone-registered
   operators.
-- `isWorkingDay`'s notion of "today" is evaluated in an unspecified timezone — recommended
-  as UTC server-date until, or unless, a per-platform timezone field is added; not solved
-  here (per ADR-0011). `OperatorAvailabilityService`'s time-of-day comparison (per ADR-0012)
-  inherits the same unresolved timezone question, extended to `startTime`/`endTime`, not just
-  "today."
+- `isWorkingDay`'s notion of "today" is evaluated as **UTC server-date** — the v1 decision
+  (per ADR-0011; see the ADD's Open questions), not merely a recommendation.
+  `OperatorAvailabilityService`'s time-of-day comparison (per ADR-0012) uses the same UTC
+  server clock for `startTime`/`endTime`. A per-platform/per-operator timezone field remains
+  an explicit future enhancement, not designed here.
 - Any `GET/PATCH/POST/DELETE /auth/admin/operators/:id...` call where `:id` doesn't resolve
   to an operator on the caller's own platform → `404` (never `403`), the same collapsed
   pattern as `DELETE /auth/admin/platform/calendar/:id` (per ADR-0011/ADR-0012).
@@ -1811,18 +1811,27 @@ sequenceDiagram
 
 ## Open questions
 
-- Password complexity policy (not yet defined).
+- ~~Password complexity policy (not yet defined).~~ **Resolved:** minimum 8 characters, no
+  forced composition rules (no required uppercase/digit/symbol mix) — NIST 800-63B-style
+  guidance, where length matters more than composition-rule theater. No breach-corpus/
+  pwned-password check in v1; that's separate future scope.
 - Login rate-limiting — `@nestjs/throttler` is a likely candidate, deferred to a future
   TDD.
-- Whether a "logout everywhere" (family-wide refresh-token revoke) endpoint is needed.
+- ~~Whether a "logout everywhere" (family-wide refresh-token revoke) endpoint is needed.~~
+  **Resolved:** out of v1 scope — grouped with the other already-deferred v1 cuts below (MFA,
+  multi-session/device management) rather than built now.
 - The five explicit v1-deferred auth features (password reset, email verification, MFA,
-  social login, multi-session/device management) — the current additive-only schema
+  social login, multi-session/device management), now joined by "logout everywhere"
+  (family-wide refresh-token revoke, resolved above) — the current additive-only schema
   design is intended not to block adding these later.
-- The stale-claim window when a user's role or organizationId changes mid-session —
+- ~~The stale-claim window when a user's role or organizationId changes mid-session —
   current mitigation is a short access-token TTL; whether that's sufficient is
   unresolved. The same access-token TTL now also bounds how long a user stays logged in
   after their organization's license lapses (per ADR-0005) — the exact TTL value is not
-  decided by this document.
+  decided by this document.~~ **Resolved:** 15 minutes (see the ADD's Open questions for the
+  full rationale) — short enough to bound both the role/organizationId stale-claim window and
+  the license/subscription-lapse window, refreshed transparently via the existing rotating
+  refresh-token mechanism.
 - Rate-limiting `/auth/organizations/validate` specifically, given organization ids/keys
   may be short, human-typed codes rather than high-entropy tokens (an enumeration risk).
 - Per-organization/per-license custom trial length is deferred — v1 uses one global
@@ -1868,8 +1877,11 @@ sequenceDiagram
   for confirmation codes, flat 8-hour) validity
   window and 5-attempt lockout is the right balance, or needs revisiting (per ADR-0011,
   ADR-0014, ADR-0015).
-- Per-platform timezone for `isWorkingDay`'s "today" — recommended as UTC server-date for
-  now (per ADR-0011); not designed here.
+- ~~Per-platform timezone for `isWorkingDay`'s "today" — recommended as UTC server-date for
+  now (per ADR-0011); not designed here.~~ **Resolved:** UTC server-date is the v1 decision,
+  not merely a recommendation — see the ADD's "Timezone default for `isWorkingDay`/
+  shift-boundary evaluation" open-question resolution. A per-platform timezone field remains
+  an explicit future enhancement.
 - The single-owner-per-platform assumption — no ownership-transfer mechanism is designed if
   a platform's owner needs to be replaced (per ADR-0009/ADR-0010).
 - The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
@@ -1879,9 +1891,12 @@ sequenceDiagram
   as bigger scope than that ADR's pass warranted. Today's only trace is the incidental
   `ownerId` on `admin.operator_blocked`/`admin.operator_unblocked`, not a designed audit
   trail.
-- Per-operator timezone for evaluating `OperatorSchedule.startTime`/`endTime` (per ADR-0012)
-  — this extends, rather than resolves, the existing `isWorkingDay`-timezone open question
-  above; neither is designed here.
+- ~~Per-operator timezone for evaluating `OperatorSchedule.startTime`/`endTime` (per
+  ADR-0012) — this extends, rather than resolves, the existing `isWorkingDay`-timezone open
+  question above; neither is designed here.~~ **Resolved** by the same UTC-server-date
+  decision above: `startTime`/`endTime` comparisons also evaluate "now" against the server's
+  UTC clock. A per-operator timezone field remains an explicit future enhancement, not
+  designed here.
 - `OperatorSchedule`'s no-overnight-shift restriction (per ADR-0012) — a real v1 limitation
   for a platform whose operators work shifts crossing midnight; not designed here.
 - Whether the operator session-ceiling/login-code fallback duration (per ADR-0013/ADR-0014,

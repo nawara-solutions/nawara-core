@@ -1,6 +1,6 @@
 # 0011. Time-boxed operator login code with business-day gating
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

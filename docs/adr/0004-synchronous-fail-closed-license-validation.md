@@ -1,6 +1,6 @@
 # 0004. Synchronous, fail-closed license validation against payment-service for B2B registration
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

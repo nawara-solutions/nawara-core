@@ -1,6 +1,6 @@
 # 0005. Bounded-time license and subscription re-validation on login and refresh
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

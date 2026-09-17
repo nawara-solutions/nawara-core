@@ -1,6 +1,6 @@
 # 0010. Owner permanent secret-key login with new-device alerting
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
