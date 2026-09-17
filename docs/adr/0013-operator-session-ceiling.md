@@ -1,6 +1,6 @@
 # 0013. Hard 8-hour session ceiling for operator refresh-token rotation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 

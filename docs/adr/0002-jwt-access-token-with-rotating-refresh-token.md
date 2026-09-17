@@ -1,6 +1,6 @@
 # 0002. JWT access token + DB-backed refresh token with rotation & reuse detection
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

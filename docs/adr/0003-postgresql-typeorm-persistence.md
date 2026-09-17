@@ -1,6 +1,6 @@
 # 0003. PostgreSQL + TypeORM as auth-service's persistence
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 

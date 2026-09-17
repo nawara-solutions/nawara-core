@@ -1,6 +1,6 @@
 # auth-service
 
-- **Status:** Draft <!-- Draft | Reviewed | Implemented -->
+- **Status:** Reviewed <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)
 - **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit)
 - **Related ADDs/SDDs:** See `docs/sdd/auth-service.md` for `auth-service`'s internal module/class design, data model, and API contract in detail.
@@ -567,6 +567,21 @@ Five synchronous flows matter architecturally:
    subscription does. `auth-service` never creates, modifies, or interprets *why* a
    subscription exists; it only reads its current status.
 
+**Build-sequencing note: `OrganizationValidationService`/`PaymentServiceClient` built against
+a stub in v1.** `auth-service`'s core-flow implementation (register/login/refresh) is built
+against a **stub** `PaymentServiceClient` — implementing the same interface
+(`getLicenseStatus(organizationId): LicenseStatus`, `getSubscriptionStatus(userId):
+SubscriptionStatus`) with canned responses matching the shape `docs/add/payment-service.md`/
+`docs/sdd/payment-service.md` already finalize: `GET /payment/licenses/:organizationId/status`
+→ `{valid, expiresAt}`, and `GET /payment/subscriptions/:userId/status` → `{exists, valid,
+expiresAt}` — both of which match `auth-service`'s own assumed `LicenseStatus`/
+`SubscriptionStatus` DTOs field-for-field. Concretely, this means `auth-service`'s
+implementation does not block on `payment-service`'s real HTTP endpoints existing — building
+those is separate, parallel work tracked elsewhere. This is purely a living-doc note recording
+a build-sequencing decision, not a new architectural decision needing its own ADR; it does not
+amend ADR-0004's "assumed, not finalized" framing, which remains accurate as a historical
+record of what was known when that ADR was written.
+
 For side effects, this design recommends a small set of async events, consistent with
 `CLAUDE.md`'s "async events for side effects" principle — no longer just the single v1 event
 of the previous revision:
@@ -670,8 +685,8 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   against `payment-service`'s own availability target.
 - **Access-token TTL directly bounds how long a forced logout can take.** Per ADR-0005, a
   user whose organization's license lapses stays logged in until their current access token
-  expires and a refresh is attempted. No specific TTL value is decided by this document — see
-  Open questions.
+  expires and a refresh is attempted. The access-token TTL is **15 minutes** — see Open
+  questions for the full rationale.
 - **Rate limiting is an undesigned gap.** Login and registration endpoints have no
   rate-limiting design yet — a known gap to close before production exposure, not addressed
   in this document. This now explicitly also includes
@@ -700,11 +715,13 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
 
 - The five v1-deferred features: password reset, email verification, MFA, social login, and
   multi-session/device management. None are designed here.
-- Who is responsible for the ongoing validity/meaning of an `organizationId` over time — e.g.
-  if a consuming app's notion of "that organization" is later deleted, does anything in
-  `auth-service` need to react, or is that entirely the consumer's problem? Per ADR-0001,
-  `auth-service` treats the value as fully opaque, but this specific lifecycle question wasn't
-  addressed by that ADR.
+- ~~Who is responsible for the ongoing validity/meaning of an `organizationId` over time —
+  e.g. if a consuming app's notion of "that organization" is later deleted, does anything in
+  `auth-service` need to react, or is that entirely the consumer's problem?~~ **Resolved:**
+  entirely the consuming app's own responsibility — `auth-service` takes no action.
+  Consistent with ADR-0001's opacity principle, `auth-service` treats the value as fully
+  opaque and non-authoritative for its own existence; it has no mechanism, and needs none, to
+  learn that a consumer's organization was later deleted or deactivated.
 - When (if ever) a cross-cutting "shared JWT validation" ADD becomes worth writing, once a
   second real service actually needs to verify `auth-service`'s tokens locally.
 - RabbitMQ infrastructure does not exist anywhere in this repo yet (broker, exchange/queue
@@ -740,9 +757,12 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
 - Operator-code length/entropy tuning: ADR-0011 chose a 6-digit numeric code with a 5-attempt
   lockout as a starting point; whether that balance of usability vs. brute-force resistance
   needs revisiting (longer code, shorter validity window, etc.) is unresolved.
-- Per-platform timezone for evaluating "today" in `isWorkingDay` (per ADR-0011) — this
+- ~~Per-platform timezone for evaluating "today" in `isWorkingDay` (per ADR-0011) — this
   document recommends UTC server-date as a default until, or unless, a timezone field is
-  added; not designed here.
+  added; not designed here.~~ **Resolved:** UTC server-date is the v1 decision, not merely a
+  recommendation — `isWorkingDay` and every shift-boundary evaluation (`OperatorSchedule`
+  `startTime`/`endTime`, per ADR-0012) evaluate "today"/"now" against the server's UTC clock.
+  A per-platform timezone field remains an explicit future enhancement, not designed here.
 - The single-owner-per-platform assumption: nothing in ADR-0009/ADR-0010 designs an
   ownership-transfer mechanism (e.g. if a platform's owner leaves and access needs to move to
   someone else). Today, that would require the still-unspecified out-of-band provisioning
@@ -752,11 +772,15 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   events for phone-registered operators are undeliverable until it lands. As of ADR-0015,
   this same gap now also covers `admin.operator_confirmation_code_issued` events for
   phone-registered operators — one shared, undesigned dependency, not two separate ones.
-- The access-token TTL value itself — not decided by ADR-0005 or this document, but it
+- ~~The access-token TTL value itself — not decided by ADR-0005 or this document, but it
   directly bounds how long a user stays logged in after their organization's license lapses.
   A shorter TTL means faster enforcement but more frequent `payment-service` calls (per the
   new availability coupling above); this tradeoff needs an explicit decision, likely at the
-  SDD level or its own ADR if the choice turns out to be hard to reverse.
+  SDD level or its own ADR if the choice turns out to be hard to reverse.~~ **Resolved:** 15
+  minutes. Short enough to bound the stale-claim window (a `role`/`organizationId` change, or
+  a license/subscription lapse, mid-session) consistently with ADR-0005's bounded-time-
+  revalidation framing already established for license/subscription checks, refreshed
+  transparently via the existing rotating refresh-token mechanism (ADR-0002).
 - What mechanism actually detects that an organization's license has lapsed or been renewed,
   in order to trigger the suspend/resume flow from ADR-0006 — that detection lives entirely
   inside `payment-service` and is out of scope for this document.
@@ -764,9 +788,12 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   deferred as bigger scope than that ADR's pass warranted. Today's only trace is the
   incidental `ownerId` carried on `admin.operator_blocked`/`admin.operator_unblocked`, not a
   designed audit trail.
-- Per-operator timezone for evaluating `OperatorSchedule`'s `startTime`/`endTime` (per
+- ~~Per-operator timezone for evaluating `OperatorSchedule`'s `startTime`/`endTime` (per
   ADR-0012) — this extends, rather than resolves, ADR-0011's existing open question about
-  the timezone `isWorkingDay` uses for "today"; neither is designed here.
+  the timezone `isWorkingDay` uses for "today"; neither is designed here.~~ **Resolved** by
+  the same UTC-server-date decision above: `startTime`/`endTime` comparisons also evaluate
+  "now" against the server's UTC clock. A per-operator timezone field remains an explicit
+  future enhancement, not designed here.
 - `OperatorSchedule`'s no-overnight-shift restriction (per ADR-0012) — a real v1 limitation
   for any platform whose operators work shifts crossing midnight; not designed here.
 - Whether the operator session-ceiling/login-code fallback duration (per ADR-0013/ADR-0014,
