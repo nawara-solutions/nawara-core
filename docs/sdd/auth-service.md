@@ -25,8 +25,8 @@
   confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md)
   (one-time bootstrap command for a platform's first owner account, and the accompanying
   null-`organizationId` login/refresh short-circuit),
-  [0017](../adr/0017-owner-recovery-and-second-owner.md) (owner recovery via multi-owner
-  support and CLI force-reset), [0018](../adr/0018-rabbitmq-as-async-message-broker.md)
+  [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) (single owner per platform,
+  permanently, with a CLI secret-key force-reset tool), [0018](../adr/0018-rabbitmq-as-async-message-broker.md)
   (RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq`),
   [0019](../adr/0019-twilio-as-sms-gateway-provider.md) (Twilio as the SMS gateway provider).
   Device/network fingerprinting rationale lives in the ADD's "Design rationale: device/network
@@ -223,25 +223,24 @@ Notes:
   reasoning applies to ADR-0002's refresh tokens, which are likewise persisted only as a hash
   rather than a bcrypt digest, though ADR-0002 itself doesn't name a specific algorithm or
   spell out this entropy-based rationale (ADR-0010 states it explicitly). Rotation overwrites
-  both fields atomically, instantly invalidating the old key. As of ADR-0017, a second, in-band
-  creation path (`POST /auth/admin/owners`) lands a new owner in this exact same
-  `secretKeyHash: null` state — not a new state this ADR introduces, only a second creation
-  path that also reaches it — and a CLI-only `BOOTSTRAP_OWNER_FORCE_RESET` mode on
-  `bootstrap-owner.ts` can overwrite an existing owner's `passwordHash` for credential-loss
-  recovery while deliberately leaving `secretKeyHash`/`secretKeyIssuedAt` untouched (see Open
-  questions below).
+  both fields atomically, instantly invalidating the old key. Per ADR-0017, a platform has, and
+  will only ever have, exactly one owner — there is no second, in-band owner-creation path that
+  could land a different owner in this state. Instead, ADR-0017 adds a standalone, ops-only CLI
+  tool, `reset-owner-secret-key.ts`, that overwrites an **existing** owner's
+  `secretKeyHash`/`secretKeyIssuedAt` atomically (the same two columns rotation already
+  overwrites, just invoked out-of-band) for the case where the owner suspects the key leaked but
+  still has password access; it deliberately never touches `passwordHash` (see Open questions
+  below).
 - `User.trialEndsAt` is stamped at registration time for every self-registered user
   (every self-registration now goes through the org/license-gated path — there is no
   separate "direct" mode), using a global config default trial length for v1.
 - `User.isActive` is no longer just schema-only groundwork: as of ADR-0012, the new
   `POST /auth/admin/operators/:id/block` / `.../unblock` endpoints are the first to actually
-  write it (`false`/`true` respectively). As of ADR-0017,
-  `POST /auth/admin/owners/:id/deactivate` / `.../activate` write the same column for owners —
-  deactivation is additionally gated by the "last owner" invariant (see API contract below),
-  which has no operator-side equivalent. It remains generically named and generically checked
-  at login/refresh (see Error handling & edge cases) — nothing about it is
-  operator-or-owner-specific at the schema level, only the endpoints that write it currently
-  are.
+  write it (`false`/`true` respectively). There is no owner-side equivalent — per ADR-0017,
+  a platform's single owner row is never deactivated/reactivated in-band; `isActive` is written
+  for operators only. It remains generically named and generically checked at login/refresh
+  (see Error handling & edge cases) — nothing about it is operator-specific at the schema
+  level, only the endpoint that writes it currently is.
 - `User.contactVerifiedAt` is new (per ADR-0015) — meaningful only for operators, always
   `null` for owners and non-admin users. Null until an operator successfully redeems a
   `purpose: 'confirmation'` code via `POST /auth/admin/operators/confirm`; never reset once
@@ -1027,49 +1026,6 @@ and flows below; both changes are additive and inert for every non-operator call
   `adminTier: owner` only. `204` on success; `404` if either `:id` isn't the caller's own
   operator or `:timeOffId` doesn't belong to that operator (same collapsed pattern).
 
-- **`POST /auth/admin/owners`** (new, per ADR-0017) — Bearer, `adminTier: owner` only
-  (`AdminTierGuard`). Body `{email?, phone?, password}` — exactly one of `email`/`phone`
-  required, `400` otherwise; `password` always required, `400` if missing (unlike operator
-  creation, a new owner cannot be created password-less — there is no operator-style code
-  login for owners, and this is the in-band route's only way to hand the new owner a usable
-  first credential); `409` on a duplicate `email`/`phone`. `platformId` is taken from the
-  **caller's own** JWT claim, never accepted in the body — the same defense-in-depth pattern
-  `POST /auth/admin/operators` already applies. Creates a `User` row with `role: 'admin'`,
-  `adminTier: 'owner'`, `platformId` (from the caller's claim), `passwordHash:
-  bcrypt(password)`, `secretKeyHash: null`, `secretKeyIssuedAt: null`, `organizationId: null`
-  (unchanged, per ADR-0001), `contactVerifiedAt: null` (meaningful only for operators, per
-  ADR-0015 — always null for an owner, exactly like ADR-0016's bootstrapped owner), `isActive:
-  true`. Publishes `admin.owner_registered`. The new owner obtains their own first secret key
-  exactly the way a bootstrapped owner does (per ADR-0016): log in via `POST /auth/login` with
-  the password just set, then call `POST /auth/admin/secret-key/rotate` — no new key-issuance
-  path is introduced. `201 {id, email?, phone?, platformId, adminTier}` on success.
-
-- **`POST /auth/admin/owners/:id/deactivate`** (new, per ADR-0017) — Bearer, `adminTier: owner`
-  only. Scoped as `WHERE id=:id AND adminTier='owner' AND platformId=<caller's own JWT claim>`
-  → `404`, never `403`, on any mismatch (unknown id, an id belonging to a different platform,
-  or an id that isn't an owner at all — e.g. an operator's id) — the identical collapsed-404
-  pattern ADR-0012 already established for `:id`-scoped operator-management lookups. On a
-  match, sets `isActive: false` and revokes all of that owner's refresh tokens via the existing
-  `RefreshTokenService.revokeAllForUser(id)` (the same session-termination machinery ADR-0012
-  introduced for blocking an operator) — capping the deactivated owner's remaining access to at
-  most their current access token's own short remaining TTL, the same accepted limitation
-  ADR-0012 already documents. **Rejected outright, before any write, if it would leave the
-  platform with zero `isActive: true` owners**: `409 {reason: "last_owner", message: "Cannot
-  deactivate the platform's last active owner. Add another owner first."}` — a hard invariant,
-  not a soft warning, enforced via a proper atomic check (a transaction with a row lock on the
-  platform's owner rows, or a single conditional query that only succeeds if the resulting
-  count would stay above zero), never a read-then-write count-then-act pair of separate
-  database round-trips, so two simultaneous deactivation requests against a platform's last two
-  owners cannot both succeed (per ADR-0017's explicit concurrency requirement). `204` on
-  success. This endpoint, paired with `POST /auth/admin/owners`, is also how ownership
-  *transfer* is achieved (add a new owner, then deactivate the old one) — no separate transfer
-  endpoint is designed.
-
-- **`POST /auth/admin/owners/:id/activate`** (new, per ADR-0017) — Bearer, `adminTier: owner`
-  only, same collapsed-404 scoping as deactivate above. Sets `isActive: true`. No refresh-token
-  action and no "last owner" check (activating an owner never reduces the platform's active-
-  owner count). `204` on success; `404` per the collapsed pattern above.
-
 - **JWT claims:** `sub`, `role`, `organizationId`, `platformId`, `adminTier`, `iat`, `exp` —
   `platformId`/`adminTier` are new (per ADR-0009), always optional/absent for non-admin
   users, exactly like `organizationId` behaves for unscoped accounts. Deliberately no email
@@ -1736,92 +1692,12 @@ sequenceDiagram
     end
 ```
 
-**(p) Owner creation (new, per ADR-0017)**
-
-```mermaid
-sequenceDiagram
-    participant Owner as Existing platform owner
-    participant Guard as AdminTierGuard
-    participant AOwC as AdminOwnerController
-    participant OwnMS as OwnerManagementService
-    participant US as UsersService
-    participant DB as auth-service DB
-    participant Broker as RabbitMQ
-
-    Owner->>Guard: POST /auth/admin/owners {email?, phone?, password}, Authorization: Bearer <accessToken>
-    alt adminTier != owner
-        Guard-->>Owner: 403
-    else adminTier == owner
-        Guard->>AOwC: forward request with JwtPayload {platformId, ...}
-        alt neither or both of email/phone given, or password missing
-            AOwC-->>Owner: 400
-        else exactly one of email/phone given, and password present
-            AOwC->>OwnMS: create(email?, phone?, password, platformId, createdByOwnerId)
-            OwnMS->>US: findByEmailOrPhone(email, phone)
-            alt already exists
-                US-->>OwnMS: User
-                OwnMS-->>Owner: 409
-            else available
-                US-->>OwnMS: null
-                OwnMS->>OwnMS: hash password (bcrypt)
-                OwnMS->>US: create(role: 'admin', adminTier: 'owner', platformId: caller's own claim,<br/>passwordHash, secretKeyHash: null, secretKeyIssuedAt: null,<br/>contactVerifiedAt: null, isActive: true)
-                Note over OwnMS: platformId always taken from the caller's JWT, never the request body
-                US->>DB: insert User row
-                DB-->>US: User (owner)
-                US-->>OwnMS: User
-                OwnMS-)Broker: publish admin.owner_registered {ownerId, platformId, createdByOwnerId, channel, timestamp}
-                OwnMS-->>Owner: 201 {id, email?, phone?, platformId, adminTier}
-                Note over Owner: obtains a secret key exactly the way a bootstrapped owner does —<br/>POST /auth/login with this password, then POST /auth/admin/secret-key/rotate (per ADR-0016)
-            end
-        end
-    end
-```
-
-**(q) Owner deactivation with the "last owner" invariant (new, per ADR-0017)**
-
-```mermaid
-sequenceDiagram
-    participant Owner as Platform owner
-    participant Guard as AdminTierGuard
-    participant AOwC as AdminOwnerController
-    participant OwnMS as OwnerManagementService
-    participant DB as auth-service DB
-    participant RTS as RefreshTokenService
-
-    Owner->>Guard: POST /auth/admin/owners/:id/deactivate, Authorization: Bearer <accessToken>
-    alt adminTier != owner
-        Guard-->>Owner: 403
-    else adminTier == owner
-        Guard->>AOwC: forward request with JwtPayload {platformId, ...}
-        AOwC->>OwnMS: deactivate(id, platformId)
-        OwnMS->>DB: findOne(WHERE id=:id AND adminTier='owner' AND platformId=:platformId)
-        alt not found (wrong id, wrong platform, or not an owner)
-            DB-->>OwnMS: null
-            OwnMS-->>Owner: 404
-            Note over OwnMS: 404, never 403 — same collapsed pattern ADR-0012<br/>established for :id-scoped operator-management lookups
-        else found
-            DB-->>OwnMS: User (owner)
-            OwnMS->>DB: atomic conditional UPDATE isActive=false WHERE id=:id<br/>AND (SELECT COUNT(*) FROM "user" WHERE platformId=:platformId<br/>AND adminTier='owner' AND isActive=true) > 1
-            Note over OwnMS,DB: a single atomic check, not a read-then-write — required per<br/>ADR-0017, so two concurrent deactivations of a platform's last two<br/>owners can never both succeed
-            alt update affected 0 rows (this was the platform's last active owner)
-                DB-->>OwnMS: 0 rows updated
-                OwnMS-->>Owner: 409 {reason: "last_owner", message: "Cannot deactivate the<br/>platform's last active owner. Add another owner first."}
-            else update affected 1 row
-                DB-->>OwnMS: 1 row updated
-                OwnMS->>RTS: revokeAllForUser(id)
-                RTS->>DB: UPDATE refresh_token SET revokedAt = now() WHERE userId=:id AND revokedAt IS NULL
-                Note over RTS: bounded by the deactivated owner's current access token's own<br/>remaining TTL — same accepted limitation as ADR-0012's operator-block case
-                Note over OwnMS: no admin.* event published here — ADR-0017 names no dedicated<br/>deactivation event, unlike admin.operator_blocked/unblocked
-                OwnMS-->>Owner: 204
-            end
-        end
-    end
-```
-
-Note: unlike operator block/unblock (flows (m)/(n)), ADR-0017's Decision section does not name a
-dedicated `admin.owner_deactivated`/`admin.owner_activated` event pair — only
-`admin.owner_registered` is specified. The note in flow (q) above records this as a documented
-absence, not an oversight in this pass.
+Per ADR-0017, a platform has, and will only ever have, exactly one owner — there is no in-band
+owner-creation, deactivation, or activation flow, so no sequence diagram exists for one here.
+The one new operational tool ADR-0017 does add, `reset-owner-secret-key.ts`, is a CLI command
+with no HTTP request/response shape to diagram, exactly like ADR-0016's `bootstrap-owner.ts`
+before it (which likewise has no sequence diagram in this document) — see Open questions below
+for its implementation-level spec.
 
 ## Error handling & edge cases
 
@@ -1955,25 +1831,16 @@ absence, not an oversight in this pass.
 - The new owner-only `AdminOperatorController` surface is unauthenticated-adjacent in the
   sense that it inherits the same undesigned rate-limiting gap as the rest of
   `auth-service` — see the ADD's non-functional constraints.
-- `POST /auth/admin/owners` with a duplicate `email`/`phone` → `409`; with neither or both of
-  `email`/`phone`, or a missing `password` → `400`; called by a non-owner admin → `403` (per
-  ADR-0017).
-- `POST /auth/admin/owners/:id/deactivate` that would leave the platform with zero
-  `isActive: true` owners → `409 {reason: "last_owner", message: "Cannot deactivate the
-  platform's last active owner. Add another owner first."}` (per ADR-0017), enforced via an
-  atomic check rather than a read-then-write, so two concurrent deactivation requests against a
-  platform's last two owners can never both succeed in leaving zero.
-- Any `POST /auth/admin/owners/:id/...` call where `:id` doesn't resolve to an owner on the
-  caller's own platform (unknown id, a different platform's owner, or an id that isn't an owner
-  at all) → `404`, never `403` — the same collapsed pattern already used for
-  `:id`-scoped operator-management lookups (per ADR-0012, reused unchanged by ADR-0017).
-- The CLI's `BOOTSTRAP_OWNER_FORCE_RESET` mode revokes all of the target owner's existing
-  refresh tokens unconditionally, on every invocation — not only when there's specific evidence
-  of compromise. This is a deliberately defensive posture (per ADR-0017): "the owner lost both
-  credentials" and "an attacker compromised the account and changed credentials to lock the
-  real owner out" are indistinguishable from the command's point of view, so both are treated
-  identically and all existing sessions are ended, the same posture ADR-0010 already takes for
-  a suspicious secret-key rotation.
+- There is no in-band owner-creation, deactivation, or activation surface (per ADR-0017) — a
+  platform's one owner row is created exactly once, out-of-band, via ADR-0016's
+  `bootstrap-owner.ts`, and never changed in-band thereafter. There is accordingly no
+  "last owner" invariant to enforce and no corresponding `409` response shape.
+- `reset-owner-secret-key.ts` (per ADR-0017) revokes all of the target owner's existing refresh
+  tokens unconditionally, on every invocation — not only when there's specific evidence of
+  compromise. This is a deliberately defensive posture: "the owner lost the key" and "an
+  attacker has the key and is actively using it" are indistinguishable from the tool's point of
+  view, so both are treated identically and all existing sessions are ended, the same posture
+  ADR-0010 already takes for a suspicious secret-key rotation.
 
 ## Open questions
 
@@ -2025,16 +1892,45 @@ absence, not an oversight in this pass.
   `POST /auth/admin/operators` (ADR-0011) — that path was never part of this open question.
   Ownership transfer, a second/standby owner, and sole-owner credential-loss recovery remain
   unresolved — see ADR-0016's own Consequences. **Addendum, per
-  [ADR-0017](../adr/0017-owner-recovery-and-second-owner.md):** this same script gains an
-  opt-in `BOOTSTRAP_OWNER_FORCE_RESET=true` mode, a CLI-only (never HTTP-reachable) path for
-  the one scenario in-band owner creation cannot retroactively fix — a platform already down to
-  one owner who has already lost both credentials. It identifies the target owner via
-  `BOOTSTRAP_OWNER_RESET_EMAIL` combined with the existing `BOOTSTRAP_OWNER_PLATFORM_ID` (no
-  match → exit non-zero, no writes), overwrites only `passwordHash` from
-  `BOOTSTRAP_OWNER_PASSWORD`, leaves `secretKeyHash`/`secretKeyIssuedAt` deliberately untouched,
-  and revokes all of that owner's existing refresh tokens unconditionally. See the
-  ADR-0017-resolution bullet below for the rest of the picture this mode complements
-  (multi-owner support and ownership transfer).
+  [ADR-0017](../adr/0017-single-owner-with-secret-key-force-reset.md):** ownership transfer and
+  a second/standby owner are not addenda but a closed door — ADR-0017 decides, permanently,
+  that a platform has exactly one owner, created only by this script, never joined or replaced
+  in-band. What ADR-0017 does add is a separate, purpose-built script,
+  `apps/auth-service/src/cli/reset-owner-secret-key.ts` (deliberately **not** a new mode on
+  `bootstrap-owner.ts` — see ADR-0017's Decision for why extending this script was rejected),
+  for an owner who still has password access but suspects their secret key has leaked (per
+  ADR-0010's new-device/rotation alerts) and wants to invalidate it out-of-band rather than
+  through the live `POST /auth/admin/secret-key/rotate` endpoint:
+  - **Identification:** the existing `BOOTSTRAP_OWNER_PLATFORM_ID` (reused, not a new variable)
+    plus a new `OWNER_SECRET_KEY_RESET_EMAIL`. Looked up as `WHERE role = 'admin' AND
+    adminTier = 'owner' AND platformId = <BOOTSTRAP_OWNER_PLATFORM_ID> AND email =
+    <OWNER_SECRET_KEY_RESET_EMAIL>` — unambiguous, since exactly one owner ever exists per
+    platform. No match → exit non-zero, no writes, before any database write is attempted —
+    the same fail-closed posture ADR-0016 established for its own required-env-var checks.
+  - **Action, atomic, on a match:** generate a new high-entropy raw secret key, hash it with
+    SHA-256 (per ADR-0010's entropy-based rationale, restated in ADR-0017), and overwrite
+    `secretKeyHash`/`secretKeyIssuedAt` on the matched row in one write — the same
+    database-level effect `POST /auth/admin/secret-key/rotate` already produces, invoked
+    out-of-band instead of over HTTP. `passwordHash` is never read or written by this script.
+  - Also calls the existing `RefreshTokenService.revokeAllForUser(ownerId)`, unconditionally,
+    on every invocation — not only when there's specific evidence of compromise. "The owner
+    lost the key" and "an attacker has the key and is actively using it" are indistinguishable
+    from this tool's point of view, so both are treated identically and every existing session
+    is ended, the same posture ADR-0010 already takes for a suspicious rotation.
+  - Prints the new raw key **exactly once**, in the command's own output — mirroring
+    `POST /auth/admin/secret-key/rotate`'s own "returned exactly once, never persisted in
+    plaintext" property field-for-field. Never logged or persisted anywhere else in plaintext.
+  - Resolves the same `SecretKeyService` (or equivalent DI-resolved service) that
+    `POST /auth/admin/secret-key/rotate` already uses from a
+    `NestFactory.createApplicationContext(AppModule)` context — no HTTP listener, no raw SQL —
+    for the identical reason ADR-0016 rejected a manual SQL runbook for `bootstrap-owner.ts`.
+  - No HTTP surface, never auto-invoked (no startup hook, no CI step), no `admin.*` event
+    published (no authenticated caller to attribute one to — the same accepted gap ADR-0016
+    already accepts for the ordinary bootstrap path). Requires direct server/deploy access,
+    exactly like `bootstrap-owner.ts`.
+  - **Not idempotent the way `bootstrap-owner.ts` is:** every successful invocation always
+    mints a fresh key and overwrites the previous one — there is no "already reset" no-op
+    branch. Running it twice in a row simply invalidates the first new key with a second one.
 - **SHA-256, not bcrypt, for `secretKeyHash`/`codeHash`:** stated explicitly here, not just
   referenced. For `secretKeyHash`, the reasoning is entropy-based — the secret key is a
   high-entropy, server-generated value, not a low-entropy human-chosen password, so it doesn't
@@ -2065,16 +1961,20 @@ absence, not an oversight in this pass.
   an explicit future enhancement.
 - ~~The single-owner-per-platform assumption — no ownership-transfer mechanism is designed if
   a platform's owner needs to be replaced (per ADR-0009/ADR-0010).~~ **Resolved by
-  [ADR-0017](../adr/0017-owner-recovery-and-second-owner.md)**: `POST /auth/admin/owners`
-  (owner-only, mirroring `POST /auth/admin/operators`) lets an existing owner add another owner
-  to their own platform; `POST /auth/admin/owners/:id/deactivate`/`.../activate` give
-  ownership transfer almost for free (add a new owner, then deactivate the old one), gated by a
-  hard "last owner" invariant so a platform can never be fully de-owned. Sole-owner
-  credential-loss recovery is handled separately, by a new opt-in
-  `BOOTSTRAP_OWNER_FORCE_RESET` mode on ADR-0016's existing `bootstrap-owner.ts` CLI, not a
-  self-service flow. A freshly bootstrapped platform's very first owner still carries the same
-  lockout exposure until a second owner is actually added — ADR-0017 surfaces that as
-  operational guidance, not something this design enforces.
+  [ADR-0017](../adr/0017-single-owner-with-secret-key-force-reset.md), by deciding not to
+  build one:** single-owner-per-platform is now a decided, permanent invariant, not an
+  ownership model with a gap. A platform has, and will only ever have, exactly one
+  `adminTier: 'owner'` row, created once via `bootstrap-owner.ts` (ADR-0016); there is no
+  in-band owner creation, deactivation, or transfer mechanism, and none is planned. The one
+  concrete gap ADR-0017 does close is narrower: `reset-owner-secret-key.ts` (see the
+  bootstrap-mechanism bullet above) gives an owner who still has password access, and suspects
+  their secret key has leaked, an out-of-band way to force-invalidate it without depending on
+  the live API. **Accepted, permanent gap:** if a platform's sole owner loses **both** their
+  password and their secret key, nothing in this design can recover that platform's admin
+  access — there is no second owner to fall back on, and `reset-owner-secret-key.ts` never
+  touches `passwordHash`. This is exactly the scenario ADR-0016's own Consequences already
+  named as an unresolved open question; ADR-0017 does not resolve it, it accepts it as the
+  permanent cost of keeping the owner tier strictly single-owner.
 - ~~The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
   such infrastructure exists anywhere in this repo yet. As of ADR-0015, this same gap also
   covers confirmation-code delivery.~~ **Provider resolved by
