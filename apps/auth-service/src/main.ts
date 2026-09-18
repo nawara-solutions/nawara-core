@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module.js';
+import { basicAuth } from './docs/basic-auth.js';
 import { APP_CONFIG, type AppConfig } from './config/app-config.js';
 
 async function bootstrap() {
@@ -23,7 +24,13 @@ async function bootstrap() {
     .setVersion('0.1.0')
     .addBearerAuth()
     .build();
-  SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, config));
+  // Served under the routed /auth prefix (the gateway forwards only /auth/*) and only behind basic
+  // auth: with no SWAGGER_PASSWORD configured the docs are not mounted at all.
+  if (cfg.docs.password) {
+    const guard = basicAuth(cfg.docs.username, cfg.docs.password);
+    app.use(['/auth/docs', '/auth/docs-json'], guard);
+    SwaggerModule.setup('auth/docs', app, SwaggerModule.createDocument(app, config));
+  }
 
   await app.listen(process.env.PORT ?? 3000);
 }

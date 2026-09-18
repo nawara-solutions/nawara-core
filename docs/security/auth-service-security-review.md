@@ -119,7 +119,7 @@ Classes: **public** · **public + challenge** (opaque single-use token) · **mem
 | Route | Class | Rate limit bucket(s) | Notes |
 |---|---|---|---|
 | `GET /` | public | baseline | liveness |
-| `GET /docs` | public | baseline | **disable/authenticate in production** (open item) |
+| `GET /auth/docs`, `/auth/docs-json` | HTTP basic auth | none (guard runs before Nest; long generated password) | not mounted unless `SWAGGER_PASSWORD` is set; constant-time compare |
 | `POST /auth/register` | public | `register_ip` | kind=member only; `admin` reserved; org must exist + be licensed (payment, fail closed) |
 | `POST /auth/login` | public | `login_ip`, `login_identifier` | owner ⇒ challenge, never tokens; generic `401` |
 | `POST /auth/refresh` | public (refresh token) | `refresh_ip` | rotation; reuse ⇒ family revoked |
@@ -172,7 +172,7 @@ Defaults are conservative starting points, not measured values: login 60/15 min 
 2. Bootstrap window: the bootstrap password is one-time; whoever enrolls first owns the account.
 3. Downstream JWT verification sees revocation only after the access TTL; HS256 forces secret distribution to verifiers.
 4. payment-service has no service-to-service authentication yet (F12); platform services may forget the entitlement check (fails open).
-5. Not implemented: owner password reset, notification delivery (events only; raw one-time codes travel over the broker — short queue TTL, no payload logging), pruning of `auth_throttle`/`owner_auth_challenge`, `/docs` protection, CI job for the DB/e2e suites, device registration, org/platform CRUD and the other endpoints listed under G.
+5. Not implemented: owner password reset, notification delivery (events only; raw one-time codes travel over the broker — short queue TTL, no payload logging), pruning of `auth_throttle`/`owner_auth_challenge`, CI job for the DB/e2e suites, device registration, org/platform CRUD and the other endpoints listed under G.
 6. Timing side channel: `request-code` does more work for an eligible operator than for an unknown one (the response is identical; latency is not).
 7. `session_replication_role = replica` and `TRUNCATE` bypass triggers/FKs — enforce by database privileges.
 8. Rate-limit numbers are unmeasured defaults.
