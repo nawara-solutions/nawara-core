@@ -56,12 +56,6 @@ actually be published today:
 >   questions).
 > - **`admin.operator_unblocked`** — `{ operatorId, platformId, ownerId, timestamp }` (per
 >   ADR-0012), published when an owner unblocks an operator.
-> - **`admin.owner_registered`** — `{ ownerId, platformId, createdByOwnerId, channel:
->   "email"|"phone", timestamp }` (per ADR-0017), published when an existing owner creates a
->   second (or subsequent) owner via `POST /auth/admin/owners`, mirroring
->   `admin.operator_registered`'s shape field-for-field except `ownerId`/`createdByOwnerId` in
->   place of `operatorId`/`ownerId`. Unlike `admin.operator_registered`, it deliberately carries
->   no `destination` — see below.
 
 Immediately under that list, the same document states the gap in its own words:
 
@@ -152,7 +146,7 @@ as the client library every NestJS service in this repo uses to talk to it. Conc
   `docs/add/auth-service.md`, `docs/sdd/auth-service.md`, and ADR-0006. No new naming scheme is
   invented here; this ADR only formalizes what the existing design docs already assume. For
   example: `user.registered`, `admin.operator_code_issued`, `admin.secret_key_rotated`,
-  `admin.owner_registered`, and (from ADR-0006) `license.expired` and
+  `admin.operator_blocked`, and (from ADR-0006) `license.expired` and
   `subscription.suspended` are all, verbatim, the routing keys those events publish under —
   there is no separate "event type" field distinct from the routing key.
 - **Message body = the payload shape each event already documents, as JSON, with no added
