@@ -19,6 +19,10 @@ COPY package.json package-lock.json ./
 COPY apps/auth-service/package.json apps/auth-service/package.json
 RUN npm ci --workspace=auth-service --omit=dev --include-workspace-root --ignore-scripts
 COPY --from=build /app/apps/auth-service/dist ./apps/auth-service/dist
+# Schema of record + the on-server provisioning script travel with the image so a deploy always
+# applies the migrations/script that match this exact code (see deploy/provision-and-deploy.sh).
+COPY apps/auth-service/db/migrations ./apps/auth-service/db/migrations
+COPY apps/auth-service/deploy ./apps/auth-service/deploy
 WORKDIR /app/apps/auth-service
 EXPOSE 3000
 CMD ["node", "dist/main.js"]

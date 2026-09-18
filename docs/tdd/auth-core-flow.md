@@ -20,6 +20,8 @@
   this flow must implement)
 - **Ticket/issue:** https://github.com/nawara-solutions/nawara-core/issues/11
 
+> **Superseded in part — read with the ADRs below.** [ADR-0026](../adr/0026-authentication-is-not-entitlement.md) removes the license/subscription checks from `login` and `refresh` (and `User.trialEndsAt`); only registration still asks `payment-service`. Members authenticate with email **or** phone + password; an owner's correct password yields an MFA challenge, not tokens ([ADR-0025](../adr/0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md)).
+
 ## Problem
 
 `auth-service` is currently a bare, unmodified Nest CLI scaffold — no code exists yet. This is

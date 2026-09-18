@@ -65,8 +65,10 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
 
   # Deploys :production to the same VPS nawara-drive uses, over SSH, routed through the
-  # existing Traefik proxy on the deploy_edge network. Reuses the same DEPLOY_SSH_* repo
-  # secrets nawara-drive's repo has (same VPS) — must be added to this repo separately, since
+  # existing Traefik proxy on the deploy_edge network. The container's PostgreSQL, env file
+  # (secrets generated on the server, never in GitHub) and migrations are handled by
+  # apps/auth-service/deploy/provision-and-deploy.sh, shipped inside the image.
+  # Reuses the same DEPLOY_SSH_* secrets nawara-drive's repo has (same VPS) — must be added to this repo separately, since
   # GitHub secrets don't cross repos. Routed at core-api.hsalem-anwar.dev/auth — a single
   # domain shared by every nawara-core service, path-routed per service via Traefik
   # PathPrefix rules (notification-service, payment-service, ai-service can be added the
@@ -82,21 +84,14 @@ jobs:
           username: ${{ secrets.DEPLOY_SSH_USER }}
           password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE_NAME
+          script_stop: true
+          envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE
           script: |
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-            docker pull "$IMAGE_NAME:production"
-            docker stop nawara-core-auth-service 2>/dev/null || true
-            docker rm nawara-core-auth-service 2>/dev/null || true
-            docker run -d --name nawara-core-auth-service --restart unless-stopped \
-              --network deploy_edge \
-              --label traefik.enable=true \
-              --label "traefik.http.routers.nawara-core-auth-service.rule=Host(\`core-api.hsalem-anwar.dev\`) && PathPrefix(\`/auth\`)" \
-              --label traefik.http.routers.nawara-core-auth-service.entrypoints=websecure \
-              --label traefik.http.routers.nawara-core-auth-service.tls.certresolver=le \
-              --label traefik.http.services.nawara-core-auth-service.loadbalancer.server.port=3000 \
-              "$IMAGE_NAME:production"
+            docker pull "$IMAGE"
+            docker run --rm --entrypoint cat "$IMAGE" deploy/provision-and-deploy.sh | IMAGE="$IMAGE" bash -s
+            docker logout ghcr.io
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE: ${{ env.IMAGE_NAME }}:production

@@ -4,6 +4,8 @@
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
+> **Amended by [ADR-0026](./0026-authentication-is-not-entitlement.md):** only the registration-time license check remains in `auth-service`; the login/refresh usage and the `trialEndsAt` preview are removed.
+
 ## Context
 
 This system supports two registration modes. Individual/direct registration is

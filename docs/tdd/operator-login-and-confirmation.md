@@ -21,6 +21,8 @@
   operator contact confirmation before first login)
 - **Ticket/issue:** https://github.com/nawara-solutions/nawara-core/issues/14
 
+> **Superseded in part — read with the ADRs below.** Codes are now stored as `HMAC-SHA-256(pepper, operatorId ‖ purpose ‖ code)` (64-hex), not a bare SHA-256, and issuing a code supersedes rather than deletes the previous one; the database also refuses to record a code as consumed after it expired or was locked out, and forces operator sessions to carry a ceiling no refresh token can exceed (migration `0002`, ADR-0024/0025).
+
 ## Problem
 
 `auth-service`'s core credential flow (register/login/refresh/logout/me, per

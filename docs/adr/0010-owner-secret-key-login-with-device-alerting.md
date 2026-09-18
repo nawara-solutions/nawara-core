@@ -1,8 +1,10 @@
 # 0010. Owner permanent secret-key login with new-device alerting
 
-- **Status:** Accepted
+- **Status:** Partially superseded by ADR-0025
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
+
+> **Login mechanism superseded by [ADR-0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md).** The secret key is no longer the owner's login credential (`POST /auth/admin/login/secret-key` is removed); it is a step-up and recovery credential. New-device alerting (now on every owner login), SHA-256 hashing and rotation (now behind step-up) are retained. Text below is left as the original record.
 
 ## Context
 

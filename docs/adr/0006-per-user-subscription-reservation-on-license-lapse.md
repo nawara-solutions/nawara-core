@@ -4,6 +4,8 @@
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
+> **Amended by [ADR-0026](./0026-authentication-is-not-entitlement.md):** `payment-service`'s reservation mechanics are unchanged, but `auth-service` no longer returns `403 subscription_invalid` at login/refresh; platform services enforce entitlement.
+
 ## Context
 
 A user can hold an individual subscription — their own paid access, independent of and in

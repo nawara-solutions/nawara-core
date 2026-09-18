@@ -1,8 +1,18 @@
 # 0016. One-time bootstrap command for a platform's first owner account
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0022
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
+
+> **Also amended by [ADR-0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md):** a bootstrapped owner's first sign-in is `enrollment_required` (password, then enroll a second factor); the first secret key is issued only after that, via step-up-protected rotation.
+
+> **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): The bootstrap command now creates the `User(kind='owner')` and its `Owner` row (scoped to a `Company`) in one transaction, and the null-`organizationId` login short-circuit is keyed on `kind <> 'member'` — see ADR-0024.
+
+> **Superseded by [ADR-0022](./0022-company-and-platform-entities-with-operator-assignment.md).**
+> The bootstrap CLI this ADR designed is reworked around a company-wide owner instead of a
+> per-platform one: `BOOTSTRAP_OWNER_PLATFORM_ID` is replaced by `BOOTSTRAP_COMPANY_NAME`, and
+> the owner-existence idempotency check moves from per-platform to global. This ADR's text is
+> left unedited below as accurate history of what was originally decided and why.
 
 ## Context
 

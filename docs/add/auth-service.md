@@ -1,8 +1,8 @@
 # auth-service
 
-- **Status:** Reviewed <!-- Draft | Reviewed | Implemented -->
+- **Status:** Draft <!-- Draft | Reviewed | Implemented --> (revised per ADR-0024 after review; needs re-review)
 - **Owners:** Anwar (project owner)
-- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit), [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) (single owner per platform, permanently, with a CLI secret-key force-reset tool), [0018](../adr/0018-rabbitmq-as-async-message-broker.md) (RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq`), [0019](../adr/0019-twilio-as-sms-gateway-provider.md) (Twilio as the SMS gateway provider)
+- **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic `organizationId` scoping claim), [0002](../adr/0002-jwt-access-token-with-rotating-refresh-token.md) (JWT access token + DB-backed rotating refresh token), [0003](../adr/0003-postgresql-typeorm-persistence.md) (PostgreSQL + TypeORM persistence), [0004](../adr/0004-synchronous-fail-closed-license-validation.md) (synchronous, fail-closed license validation against payment-service), [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (bounded-time license/subscription re-validation on login and refresh), [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (per-user subscription reservation on organization license lapse — `payment-service`'s decision, referenced here for the login/refresh contract it implies), [0009](../adr/0009-platform-scoped-admin-accounts.md) (platform-scoped Admin accounts — `platformId`, `adminTier` owner/operator tiers), [0010](../adr/0010-owner-secret-key-login-with-device-alerting.md) (owner permanent secret-key login with new-device alerting), [0011](../adr/0011-operator-time-boxed-login-code.md) (time-boxed operator login code with business-day gating), [0012](../adr/0012-owner-managed-operator-schedule-and-blocking.md) (owner-managed operator profile, schedule, and block/unblock), [0013](../adr/0013-operator-session-ceiling.md) (hard 8-hour session ceiling for operator refresh-token rotation), [0014](../adr/0014-schedule-anchored-operator-duration.md) (schedule-anchored operator login-code and session duration), [0015](../adr/0015-two-phase-operator-contact-confirmation.md) (two-phase operator contact confirmation before first login), [0016](../adr/0016-first-owner-bootstrap-command.md) (one-time bootstrap command for a platform's first owner account, and the accompanying null-`organizationId` login/refresh short-circuit), [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) (single owner per Company, permanently, with a CLI secret-key force-reset tool — rewritten by ADR-0022 from its original platform-scoped framing), [0018](../adr/0018-rabbitmq-as-async-message-broker.md) (RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq`), [0019](../adr/0019-twilio-as-sms-gateway-provider.md) (Twilio as the SMS gateway provider), [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) (`Organization` entity and platform-scoped organization management, with equal owner/operator rights), [0021](../adr/0021-payment-service-platform-scoped-authorization.md) (synchronous, fail-closed platform-scope check `payment-service` runs against `auth-service`'s organization-lookup and platform-access-check endpoints), [0022](../adr/0022-company-and-platform-entities-with-operator-assignment.md) (`Company`/`Platform` entities, many-to-many operator↔platform `PlatformAssignment`, dropping `User.platformId` and the JWT `platformId` claim entirely, and re-scoping the owner to be company-wide rather than platform-wide), [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) (the generic `GET /auth/platform-access/:platformId` live-check endpoint, and decoupling operator login/session gating from any platform's calendar), [0024](../adr/0024-database-enforced-tenancy-and-authorization-integrity.md) (database-enforced tenancy and authorization integrity: `User.kind` + `Owner`/`Operator` subtype tables, mandatory `Organization`/`User` FKs, DB-level `PlatformAssignment` uniqueness and append-only history, reserved `role: 'admin'`), [0025](../adr/0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) (owner login is password + a second factor; the secret key is a step-up and recovery credential), [0026](../adr/0026-authentication-is-not-entitlement.md) (authentication is not entitlement: login/refresh no longer consult `payment-service`; `User.trialEndsAt` removed)
 - **Related ADDs/SDDs:** See `docs/sdd/auth-service.md` for `auth-service`'s internal module/class design, data model, and API contract in detail.
 
 ## Scope
@@ -11,12 +11,9 @@ This document covers `auth-service`'s v1 architecture as a boundary within `nawa
 how it verifies credentials, issues/rotates/revokes tokens, exposes the generic `role` and
 `organizationId` claims other services and consuming apps rely on (per ADR-0001), and how it
 gates registration on an organization's license validity via a synchronous call to
-`payment-service` (per ADR-0004), including stamping the v1 trial period on first-time
-registrants for a given organization. It also covers re-validating that same license (and,
-when one exists, the requesting user's own individual subscription) on every login and token
-refresh, so that a user stays logged out — within one access-token lifetime — once their
-organization's license lapses (per ADR-0005), and how `auth-service` distinguishes the two
-different `403` reasons a login/refresh can fail for. Per ADR-0001, `organizationId` is
+`payment-service` (per ADR-0004). (Trials are `payment-service` subscription state, not `auth-service` metadata — ADR-0026.) As of ADR-0026, login and token refresh do **not** re-validate a license or subscription:
+authentication is not entitlement, so a lapsed license never blocks authentication and
+`payment-service` availability does not affect login/refresh (only registration still asks). Per ADR-0001, `organizationId` is
 required input on
 every self-service `POST /auth/register` call — there is no org-less self-registration mode;
 the only null-`organizationId` accounts are the platform's own `Admin` accounts, which are
@@ -29,13 +26,53 @@ abuse-prevention/rate-limiting work an early signal to build on. Acting on that 
 (actual blocking, rate-limiting, or abuse scoring) is explicitly out of scope here; this
 document covers capture only.
 
-This document also now covers platform-scoped Admin accounts (per ADR-0009): the
-`platformId`/`adminTier` claims that distinguish a platform's top-level owner from a
-delegated operator, and the two new, owner/operator-specific ways an Admin can log in
-without a standing password — an owner's permanent secret key with new-device alerting
-(per ADR-0010), and an operator's time-boxed login code gated to the platform's configured
-working days (per ADR-0011). It also covers the minimal per-platform working-day calendar
-(`PlatformNonWorkingDay`) management endpoints those login flows depend on.
+This document also now covers platform-scoped Admin accounts (per ADR-0009, as re-scoped by
+ADR-0022): the `adminTier` claim distinguishing a company-wide owner from a delegated,
+platform-scoped operator, and the two ways an Admin authenticates — an owner's password plus a second factor (TOTP or
+passkey) with new-device alerting (per ADR-0010 as amended by ADR-0025: the secret key is now a
+step-up and recovery credential, not a login credential), and an operator's time-boxed login code (per ADR-0011, with its original
+platform-calendar business-day gate dropped by ADR-0023 — see below). It also covers the
+minimal per-platform working-day calendar (`PlatformNonWorkingDay`) management endpoints,
+which survive as platform-level reference data even though `auth-service`'s own login flow no
+longer consults them.
+
+This document now also covers a real `Company`/`Platform` hierarchy and a many-to-many,
+append-only, auditable `PlatformAssignment` table (per ADR-0022): `platformId` is no longer an
+opaque, unvalidated string on `User` — that column is dropped entirely — but a real, queryable
+`Platform` entity, owned by a `Company` (today, practically a singleton). An owner's access is
+now unconditional and **company-wide** by construction (`adminTier: 'owner'` alone), spanning
+every platform their company owns; an operator's access to any specific platform is instead a
+revocable, auditable `PlatformAssignment` grant, managed via new owner-only endpoints
+(`POST`/`GET`/`GET :id`/`PATCH :id` under `/auth/admin/platforms`, and
+`POST`/`DELETE`/`GET` under `/auth/admin/operators/:id/platform-assignments`). The JWT drops the
+`platformId` claim entirely as a consequence — it can never again be trusted as a stale, cached
+signal of an operator's platform access, since an assignment can be revoked at any time,
+independently of a token's own lifetime.
+
+This document now also covers a single, generic, live platform-access-check endpoint,
+`GET /auth/platform-access/:platformId` (per ADR-0023): a reusable primitive any caller —
+`auth-service` itself, or any downstream, platform-specific service (e.g. `nawara-drive`) —
+uses to confirm, at request time, that a given admin (owner or operator) currently has access to
+a given platform, without ever querying `auth-service`'s database directly. This document also
+now covers decoupling operator login/session gating from any platform's calendar entirely (per
+ADR-0023): an operator's ability to log in and hold a session depends only on their own
+schedule/time-off (ADR-0012, unchanged), never on a platform's business-day calendar, since an
+operator can now hold several concurrent `PlatformAssignment`s with no single platform whose
+calendar could legitimately gate their login.
+
+This document now also covers (per ADR-0024) moving the invariants that protect all of the above
+out of application code and into the database, without changing the architecture: `Company →
+Platform → Organization → User` is now backed by mandatory foreign keys (an organization cannot
+exist without a platform, a member cannot exist without an organization); `adminTier` on `User` is
+replaced by a single immutable `User.kind` discriminator (`member | owner | operator`) with
+`Owner` and `Operator` subtype tables holding each tier's own fields — `Owner.companyId` is the
+previously-implicit Owner → Company relationship; and `PlatformAssignment` is race-proof (a
+partial unique index allows at most one active row per operator/platform) and append-only
+(enforced by trigger), with the granting owner, the assignee operator and the platform pinned to
+one company by composite foreign keys. `role: 'admin'` becomes a reserved value so it cannot be
+forged through self-registration. Full detail, the access matrix, the authorization flow, the
+constraint list and the migration plan are in the SDD's "Authorization architecture & database
+integrity" section.
 
 This document now also covers the owner's "manage agent" surface for operators it created
 (per ADR-0012): viewing/listing operators, updating an operator's contact info, configuring a
@@ -52,6 +89,24 @@ falling back to a flat 8 hours only for an operator with no configured `Operator
 their first ordinary login code is ever sent, proving they actually own the email/phone an
 owner registered them with (per ADR-0015).
 
+This document now also covers a first-class `Organization` entity and the platform-scoped
+organization-management surface built on top of it (per ADR-0020, rewritten by ADR-0022): a
+platform's owner and every operator with **current, active access** to that platform — with
+equal rights, deliberately not an owner-only surface — can create, list, view, and update the
+organizations belonging to it, each carrying real business attributes (name, tax code, address,
+phone, an opaque `type`). `Organization.platformId` is now a real foreign key to `Platform.id`
+(per ADR-0022), not the opaque, unvalidated string ADR-0020 originally specified it as.
+`organizationId`, as already used on `User` (per ADR-0001) and on `payment-service`'s
+`License`/`Charge`/`UserSubscription` records, still refers to this entity's `id`, and stays
+opaque wherever it crosses that service boundary — this document does not change anything about
+how those existing records or fields behave.
+
+**`Company` is not exposed as its own separate management capability.** It exists (per
+ADR-0022) purely as the implicit, practically-singleton parent every `Platform` belongs to —
+`POST /auth/admin/platforms` resolves `companyId` implicitly rather than accepting it as input,
+and there is no `POST /auth/admin/companies` or equivalent CRUD surface for it. `Company` is
+documented here as a data-model fact, not as a capability this service exposes to callers.
+
 Explicitly out of scope:
 
 - Any app-specific authorization semantics — what a given `role` (e.g. `Admin`,
@@ -61,12 +116,12 @@ Explicitly out of scope:
   social login, and multi-session/device management. None of these are designed here.
 - Any API-gateway design. No gateway exists in this repo today, and this document does not
   assume one will.
-- The license/organization data model itself, and the individual-subscription
-  freeze/resume ("reservation") mechanics from ADR-0006. Per `CLAUDE.md`, licenses and
-  subscriptions are `payment-service` `Product`/`Charge` concepts; that model belongs in
-  `payment-service`'s own ADD/SDD, not here. This document only covers the shape of
-  `auth-service`'s (currently assumed, per ADR-0004/ADR-0005) calls out to it, and how a
-  `403` from either check is surfaced to the client.
+- The license/billing data model itself, and the individual-subscription freeze/resume
+  ("reservation") mechanics from ADR-0006. Per `CLAUDE.md`, licenses and subscriptions are
+  `payment-service` `Product`/`Charge` concepts; that model belongs in `payment-service`'s own
+  ADD/SDD, not here. This document only covers the shape of `auth-service`'s (per ADR-0004, **at registration only** as narrowed by
+  ADR-0026) call out to it, and how a `403` from that check is surfaced to the client. (This is distinct from the `Organization` *identity* entity — name,
+  tax code, address, phone, `type` — which ADR-0020 does place in `auth-service`; see below.)
 - Which roles or users ever get an individual subscription in the first place. That's a
   consuming-app decision (e.g. `nawara-drive` choosing which of its own roles must pay
   individually) — `auth-service` only ever observes whether `payment-service` reports a
@@ -78,6 +133,18 @@ Explicitly out of scope:
   carried on `admin.operator_blocked`/`admin.operator_unblocked` is an incidental, minimal
   "who did it" record, not a designed audit trail — a real audit log is deferred, undesigned
   future work.
+- Organization bulk-import, organization deletion/deactivation, and any Nawara-Drive-specific
+  organization sub-concepts (e.g. licensing plans) (per ADR-0020). None of these are designed
+  here — the last category is also permanently out of scope for this repo per `CLAUDE.md`.
+- Actually onboarding a second `Company` (per ADR-0022). The `Company`/`Platform` hierarchy is
+  deliberate groundwork against that possibility, not a currently-exercised multi-tenancy
+  capability — there is no `Company`-selection or `Company`-switching UX/API of any kind, since
+  exactly one `Company` row is ever expected to exist in the foreseeable future.
+- Any domain-specific permission check on a platform-specific resource (e.g. "can this operator
+  update Students"). Per ADR-0023 and `CLAUDE.md`'s "keep services generic" hard rule,
+  `auth-service` only ever answers "does this admin have platform access" — never "can this
+  admin perform this specific action." That question belongs entirely to whichever
+  platform-specific service owns the resource in question.
 
 ## Context
 
@@ -116,13 +183,10 @@ any kind in `nawara-core` — until now, every service in this repo has been an 
 directly-called leaf with no outbound dependency on another service in the repo.
 
 Also new in this design: that same `payment-service` dependency is no longer limited to
-registration. `POST /auth/login` and `POST /auth/refresh` now make the same kind of call, to
-re-check that the requesting user's organization still holds a valid license — and, when one
-exists, that the user's own individual subscription is still valid — before issuing or
-rotating tokens (ADR-0005). This exists because access tokens, once issued, are verified
-locally with no call back to `auth-service` or `payment-service` (per ADR-0002); without a
-check at login/refresh time, a user whose organization's license lapses after they logged in
-would simply keep working until they happened to log out on their own.
+registration. **As of ADR-0026 `POST /auth/login` and `POST /auth/refresh` no longer make that call** (ADR-0005
+is superseded): entitlement is enforced by each platform service against `payment-service` at the
+point of use, using the `organizationId`/`userId` from the verified token, and `auth-service` never
+carries entitlement in a token. Authentication ≠ entitlement.
 
 Per ADR-0001, `organizationId` is required input on every self-service registration — there
 is no supported flow for an end user to register without one. The only accounts with a null
@@ -140,7 +204,7 @@ abuse-prevention signal; nothing in this design acts on it yet.
 
 ## Component overview
 
-At the architecture level, `auth-service` is composed of eight logical components:
+At the architecture level, `auth-service` is composed of the following logical components:
 
 - **`AuthModule`** — the `AuthController` and `AuthService` handling registration, login,
   refresh, and logout. This is the module clients actually talk to.
@@ -153,10 +217,8 @@ At the architecture level, `auth-service` is composed of eight logical component
   `RefreshToken` table.
 - **`OrganizationsModule`** (organization-validation service) — implements
   `POST /auth/organizations/validate` and the server-side re-check inside registration,
-  calling out to `payment-service` per ADR-0004. Per ADR-0005, `AuthService` now also calls
-  into this component from `login` and `refresh`, to re-check the requesting user's
-  organization's license (and, when one exists, their individual subscription) before
-  issuing or rotating tokens. This is the only component in `auth-service` with an outbound
+  calling out to `payment-service` per ADR-0004. As of ADR-0026, only registration calls into
+  this component; `login` and `refresh` do not. This is the only component in `auth-service` with an outbound
   network dependency on another service.
 - **RBAC guards (`RolesGuard`)** — a generic Nest guard reading the `role` claim off the
   verified access token to gate `auth-service`'s own endpoints where needed (e.g. anything
@@ -176,10 +238,14 @@ At the architecture level, `auth-service` is composed of eight logical component
   linked to a `User` once one is created via registration.
 - **`AdminModule`** (`AdminAuthController`, `SecretKeyService`, `OperatorCodeService`,
   `AdminDeviceService`, `PlatformCalendarService`, `AdminTierGuard`) — new, per ADR-0009/
-  ADR-0010/ADR-0011. Handles everything specific to platform-scoped Admin accounts that
-  doesn't fit the generic email+password flow `AuthModule` already owns: `SecretKeyService`
-  issues/rotates/verifies an owner's permanent secret key and owns the `AdminDevice`
-  new-device-alerting check (ADR-0010); `OperatorCodeService` issues/verifies an operator's
+  ADR-0010/ADR-0011, re-scoped by ADR-0022 (owner access is now company-wide, not derived from
+  a `platformId` JWT claim, which no longer exists). Handles everything specific to
+  platform-scoped Admin accounts that
+  doesn't fit the generic email+password flow `AuthModule` already owns: `OwnerAuthService`
+  verifies an owner's second factor (TOTP/passkey) after the password step and drives the `AdminDevice`
+  new-device-alerting check (ADR-0010/ADR-0025); `SecretKeyService` verifies and rotates the secret
+  key for **step-up and recovery only**, and `StepUpService`/`StepUpGuard` issue and transactionally
+  consume `OwnerStepUp` records for sensitive owner operations (ADR-0025); `OperatorCodeService` issues/verifies an operator's
   time-boxed login code (ADR-0011) and, per ADR-0015, now also issues and verifies a
   separate, purpose-scoped confirmation code an operator must redeem before their first
   ordinary login code is ever sent — both the login code's redemption window and its
@@ -192,7 +258,7 @@ At the architecture level, `auth-service` is composed of eight logical component
   `AdminTierGuard` is a new, generic Nest guard reading the `adminTier` claim off the
   verified access token (no DB round-trip), analogous to `RolesGuard` but for the
   owner/operator distinction. `AdminAuthController` exposes all of this module's endpoints
-  (secret-key login/rotation, operator registration, operator login, calendar management).
+  (owner second-factor login/step-up/rotation, operator registration, operator login, calendar management).
   `AdminModule` depends on `UsersModule` (it creates and reads `User` rows, per ADR-0009)
   and on token handling (it issues the same access/refresh token pairs `AuthModule` does),
   but is otherwise independent of `AuthModule` itself — an Admin never goes through
@@ -206,11 +272,15 @@ At the architecture level, `auth-service` is composed of eight logical component
   owns operator profile reads/updates and the block/unblock actions (including activating the
   previously-dormant `User.isActive` field and revoking that operator's refresh tokens on
   block). `OperatorScheduleService` owns `OperatorSchedule`/`OperatorTimeOff` persistence.
-  `OperatorAvailabilityService` composes `PlatformCalendarService.isWorkingDay` with the new
+  `OperatorAvailabilityService` originally composed `PlatformCalendarService.isWorkingDay` with
   per-operator schedule/time-off data to answer "can this operator log in right now?" — it is
-  a new, distinct component from `PlatformCalendarService` (which stays platform-scoped only),
-  and it's what `OperatorCodeService`'s `request-code` flow now calls instead of calling
-  `PlatformCalendarService` directly. As of ADR-0014, `OperatorAvailabilityService` also
+  a distinct component from `PlatformCalendarService` (which stays platform-scoped only), and
+  it's what `OperatorCodeService`'s `request-code` flow calls instead of calling
+  `PlatformCalendarService` directly. **As of ADR-0023, it no longer consults
+  `PlatformCalendarService`/`isWorkingDay` at all** — an operator can now hold several
+  concurrent `PlatformAssignment`s (per ADR-0022), so no single platform's calendar can
+  legitimately gate a given operator's login; availability is now derived purely from the
+  operator's own time-off/schedule data. As of ADR-0014, `OperatorAvailabilityService` also
   exposes `getShiftEndOrFallback(operatorUserId, now)`, deriving a concrete shift-end
   timestamp (or a `+8h` fallback for an unscheduled operator) from the same
   `OperatorSchedule` data `isOperatorAvailable` already reads — `OperatorCodeService` calls
@@ -225,6 +295,47 @@ At the architecture level, `auth-service` is composed of eight logical component
   `TokenService.signAccessToken()` gains an optional explicit-expiry parameter so an
   operator's final token before the ceiling has its own `exp` claim clamped to that ceiling.
   Both changes are inert (`null`/omitted-parameter default) for every non-operator caller.
+- **`AdminOrganizationController`, `OrganizationManagementService`** (new, per ADR-0020,
+  rewritten by ADR-0022) — a new controller, sibling to `AdminAuthController` and
+  `AdminOperatorController` inside `AdminModule`, exposing create/list/view/update endpoints for
+  the `Organization` entity (`platformId` — a real FK to `Platform.id`, per ADR-0022 — `name`,
+  `taxCode`, `address`, `phone`, `type`). **Scoping is no longer a single caller-claimed
+  `platformId`** (no such JWT claim exists, per ADR-0022): an owner has unconditional,
+  company-wide access to any platform; an operator's access to a specific platform is checked
+  live against `PlatformAssignmentService` (see below). `OrganizationManagementService` owns
+  `Organization` persistence. Unlike every other controller in `AdminModule`, this one is gated
+  by the existing, generic `RolesGuard` (`role: admin`) rather than `AdminTierGuard` — a
+  deliberate choice, since an owner and every operator with access to a platform get equal
+  rights to manage that platform's organizations (per ADR-0020), not an owner-only surface.
+- **`PlatformsController`, `PlatformManagementService`** (new, per ADR-0022) — a new controller,
+  sibling to the others inside `AdminModule`, exposing owner-only create/list/view/update
+  endpoints for the `Platform` entity, resolving `companyId` implicitly against the (currently
+  singleton) `Company` row rather than accepting it as input. Gated by `AdminTierGuard`, like
+  every other owner-only surface in `AdminModule`.
+- **`PlatformAssignmentService`** (new, per ADR-0022) — owns the append-only, many-to-many
+  `PlatformAssignment` table recording which operator has, or has had, active access to which
+  platform. Shared by three call sites: `AdminOperatorController`'s new platform-assignment
+  endpoints (grant/revoke/list, owner-only), `OrganizationManagementService` (authorizing an
+  operator's organization-management actions against their own active assignments, in-process),
+  and `PlatformAccessController` (below). Its central invariant — at most one active
+  assignment per `(operatorId, platformId)` — is held by a partial unique index, not by this
+  service's own check (per ADR-0024), so concurrent grants cannot both succeed; the service only
+  maps the resulting `23505` to `409`. The granting owner, the assignee operator and the target
+  platform must all belong to one company, again by database constraint.
+- **`Owner` / `Operator`** (new subtype entities, per ADR-0024) — owned by the same
+  `UsersModule` as `User`, not separate components: `User.kind` says which identity a row is, and
+  `Owner` (`companyId`, secret-key fields) / `Operator` (`companyId`, `contactVerifiedAt`) hold each
+  tier's own state. `OperatorSchedule`, `OperatorTimeOff` and `AdminOperatorCode` hang off
+  `Operator`; `AdminDevice` hangs off `Owner`.
+- **`PlatformAccessController`** (new, per ADR-0023) — a new, independent entry point exposing
+  the single generic endpoint `GET /auth/platform-access/:platformId`, deliberately routed
+  outside the `/auth/admin/...` namespace (mirroring `OrganizationsController`'s own
+  `GET /auth/organizations/:id`, per ADR-0021), since its caller is any already-authenticated
+  admin — from `auth-service` itself, or from any downstream, platform-specific service (e.g.
+  `nawara-drive`) — not an owner/operator browsing their own company's admin UI. Gated by the
+  plain `RolesGuard` (`role: admin`, either tier), delegating to `PlatformAssignmentService` to
+  decide the outcome (an owner's `adminTier` alone is sufficient; an operator's requires a live
+  `PlatformAssignment` check).
 
 ```mermaid
 graph LR
@@ -244,9 +355,16 @@ graph LR
   NDDesktop -- "REST/HTTPS (first launch)" --> DevicesController
   NDMobile -- "REST/HTTPS (first launch)" --> DevicesController
 
-  Owner -- "REST/HTTPS (secret-key login, rotation)" --> AdminAuthController
+  Owner -- "REST/HTTPS (owner factor login, step-up, rotation)" --> AdminAuthController
   Operator -- "REST/HTTPS (confirm, request-code, verify-code)" --> AdminAuthController
-  Owner -- "REST/HTTPS (manage operators)" --> AdminOperatorController
+  Owner -- "REST/HTTPS (manage operators, platform assignments)" --> AdminOperatorController
+  Owner -- "REST/HTTPS (manage organizations)" --> AdminOrganizationController
+  Operator -- "REST/HTTPS (manage organizations)" --> AdminOrganizationController
+  Owner -- "REST/HTTPS (manage platforms)" --> PlatformsController
+  Owner -- "REST/HTTPS (platform-access check)" --> PlatformAccessController
+  Operator -- "REST/HTTPS (platform-access check)" --> PlatformAccessController
+  Downstream[Downstream platform-specific service<br/>e.g. nawara-drive] -- "REST/HTTPS (forwarded admin JWT)" --> PlatformAccessController
+  Downstream -- "REST/HTTPS (forwarded admin JWT)" --> OrganizationsController
 
   subgraph auth-service
     AuthController --> AuthService
@@ -266,11 +384,19 @@ graph LR
     OperatorCodeService --> OperatorAvailabilityService
     AdminOperatorController --> OperatorManagementService
     AdminOperatorController --> OperatorScheduleService
+    AdminOperatorController --> PlatformAssignmentService
     AdminOperatorController --> AdminTierGuard
     OperatorManagementService --> UsersService
     OperatorManagementService --> RefreshTokenService
     OperatorScheduleService --> OperatorAvailabilityService
-    OperatorAvailabilityService --> PlatformCalendarService
+    AdminOrganizationController --> OrganizationManagementService
+    AdminOrganizationController --> RolesGuard
+    OrganizationManagementService --> PlatformAssignmentService
+    PlatformsController --> PlatformManagementService
+    PlatformsController --> AdminTierGuard
+    PlatformAccessController --> PlatformAssignmentService
+    PlatformAccessController --> RolesGuard
+    OrganizationsController --> OrganizationManagementService
   end
 
   UsersService --> AuthDB[(auth-service Postgres DB)]
@@ -284,20 +410,26 @@ graph LR
   OperatorManagementService --> AuthDB
   OperatorScheduleService --> AuthDB
   OperatorAvailabilityService --> AuthDB
+  OrganizationManagementService --> AuthDB
+  PlatformManagementService --> AuthDB
+  PlatformAssignmentService --> AuthDB
   OrgValidationService -- REST/HTTPS --> PaymentService[payment-service]
 
-  AuthService -. user.registered event .-> Broker[[RabbitMQ]]
+  AuthService -. "user.registered event" .-> Broker[[RabbitMQ]]
   SecretKeyService -. "admin.secret_key_login_from_new_device / admin.secret_key_rotated" .-> Broker
   OperatorCodeService -. "admin.operator_registered / admin.operator_code_issued /<br/>admin.operator_confirmation_code_issued / admin.operator_contact_confirmed" .-> Broker
   OperatorManagementService -. "admin.operator_blocked / admin.operator_unblocked" .-> Broker
 ```
 
+Note on `OperatorAvailabilityService` in this diagram: as of ADR-0023 it no longer depends on
+`PlatformCalendarService` at all (the edge shown in earlier revisions of this diagram is
+removed) — see the Component overview above for why.
+
 `AuthController` is the only entry point clients call for credential-based flows;
 `UsersModule` and token handling both write to `auth-service`'s own dedicated Postgres
 database (per ADR-0003), never shared with any other service. `OrgValidationService` is the
 sole component with a solid, synchronous edge leaving `auth-service` (to `payment-service`);
-that edge now serves `login` and `refresh` as well as registration (ADR-0005), not just
-registration as in the previous revision of this document. The dashed edges to RabbitMQ
+that edge serves **registration only** (ADR-0026 removed the `login`/`refresh` calls ADR-0005 had added). The dashed edges to RabbitMQ
 represent the v1 async events, described below — no longer just `user.registered`, now that
 `AdminModule` also publishes admin-security and operator-lifecycle events.
 `DevicesController` is a second, independent entry point consuming apps call directly at
@@ -306,17 +438,29 @@ in the diagram above is deliberately drawn separate from the `AuthController` fl
 it fires before a user exists and does not depend on, or block, registration/login.
 `AuthService` calls into `DeviceService` only for the registration-time `deviceFingerprint`
 fallback described below. `AdminAuthController` is a third, independent entry point (per
-ADR-0009/ADR-0010/ADR-0011): a platform owner calls it directly for secret-key login/
+ADR-0009/ADR-0010/ADR-0011): a company owner calls it directly to complete second-factor login, step-up and
 rotation, and a platform operator calls it directly for the two-step request-code/
 verify-code login — neither ever goes through `AuthController`'s email+password path for
 these new flows. `AdminOperatorController` (per ADR-0012) is a fourth, independent entry
 point, sibling to `AdminAuthController` inside the same `AdminModule` — only a platform owner
 ever calls it, to list/view/update/block/unblock their own operators and manage per-operator
 schedule/time-off data; an operator never reaches it, gated by the same `AdminTierGuard`.
-`OperatorCodeService.requestCode` now calls `OperatorAvailabilityService` instead of calling
-`PlatformCalendarService` directly (per ADR-0012) — `OperatorAvailabilityService` still
-incorporates the platform-wide check internally, so this is an extension, not a removal, of
-the existing business-day gate.
+`OperatorCodeService.requestCode` calls `OperatorAvailabilityService` instead of calling
+`PlatformCalendarService` directly (per ADR-0012). **As of ADR-0023, `OperatorAvailabilityService`
+no longer incorporates any platform-wide check at all** — the original business-day gate is
+dropped entirely, not merely extended, since an operator can now hold several concurrent
+`PlatformAssignment`s (per ADR-0022) and no single platform's calendar can legitimately gate
+their login anymore. `AdminOrganizationController` (per ADR-0020, rewritten by ADR-0022) is a
+fifth, independent entry point, also a sibling inside `AdminModule` — both a platform owner and
+any operator with current access to that platform call it, to create/list/view/update the
+organizations belonging to it. Unlike `AdminAuthController` and `AdminOperatorController`, it
+is gated by the plain `RolesGuard` (`role: admin`), not `AdminTierGuard` — the deliberate,
+equal-rights departure ADR-0020 decided on. `PlatformsController` (per ADR-0022) is a sixth,
+independent entry point, owner-only, for managing the `Platform` registry itself.
+`PlatformAccessController` (per ADR-0023) is a seventh, independent entry point exposing the
+single generic `GET /auth/platform-access/:platformId` primitive any admin-authenticated caller
+— including a downstream, platform-specific service outside this repo, forwarding an admin's
+own JWT — uses to confirm platform access at request time.
 
 At the class level, the same components resolve to:
 
@@ -349,6 +493,18 @@ classDiagram
   class PlatformNonWorkingDay
   class OperatorSchedule
   class OperatorTimeOff
+  class AdminOrganizationController
+  class OrganizationManagementService
+  class Organization
+  class Company
+  class Platform
+  class PlatformAssignment
+  class Owner
+  class Operator
+  class PlatformsController
+  class PlatformManagementService
+  class PlatformAssignmentService
+  class PlatformAccessController
   class PaymentService {
     <<external>>
   }
@@ -380,15 +536,35 @@ classDiagram
   OrgValidationService ..> PaymentService : REST/HTTPS
   AdminOperatorController --> OperatorManagementService
   AdminOperatorController --> OperatorScheduleService
+  AdminOperatorController --> PlatformAssignmentService
   AdminOperatorController --> AdminTierGuard
   OperatorManagementService --> UsersService
   OperatorManagementService --> RefreshTokenService
   OperatorScheduleService --> OperatorAvailabilityService
-  OperatorAvailabilityService --> PlatformCalendarService
   OperatorScheduleService --> OperatorSchedule
   OperatorScheduleService --> OperatorTimeOff
   OperatorSchedule --> User : belongs to
   OperatorTimeOff --> User : belongs to
+  AdminOrganizationController --> OrganizationManagementService
+  AdminOrganizationController --> RolesGuard
+  OrganizationManagementService --> Organization
+  OrganizationManagementService --> PlatformAssignmentService
+  PlatformsController --> PlatformManagementService
+  PlatformsController --> AdminTierGuard
+  PlatformManagementService --> Platform
+  PlatformManagementService --> Company
+  Platform --> Company : belongs to
+  Organization --> Platform : scoped by
+  PlatformAssignmentService --> PlatformAssignment
+  PlatformAssignment --> Operator : operator
+  PlatformAssignment --> Owner : assignedBy / revokedBy
+  Owner --|> User : kind=owner
+  Operator --|> User : kind=operator
+  Owner --> Company : administers
+  Operator --> Company : managed within
+  PlatformAssignment --> Platform : grants access to
+  PlatformAccessController --> PlatformAssignmentService
+  PlatformAccessController --> RolesGuard
 ```
 
 This is an architecture-level view — components and the entities they own, no fields or method
@@ -465,7 +641,7 @@ Consequences carried into this design:
 apps — there is no gateway or intermediary in v1, so `auth-service` must validate and
 authenticate every request itself rather than trusting an upstream layer to have done so.
 
-Five synchronous flows matter architecturally:
+The following synchronous flows matter architecturally:
 
 1. **Client ⇄ `auth-service`**: `POST /auth/register`, `POST /auth/login`,
    `POST /auth/refresh`, `POST /auth/logout`, and, for B2B registration,
@@ -485,9 +661,12 @@ Five synchronous flows matter architecturally:
    - `POST /auth/admin/secret-key/rotate` — Bearer, `adminTier: owner` only. No body.
      `200 {secretKey, issuedAt}`, the raw key shown exactly once.
    - `POST /auth/admin/operators` — Bearer, `adminTier: owner` only. Body
-     `{email?, phone?}` (exactly one required). Creates an operator `User` row scoped to
-     the caller's own `platformId`, with `contactVerifiedAt: null` (per ADR-0015). Also
-     generates and sends a `purpose: 'confirmation'` code — distinct from a login code (flat
+     `{email?, phone?}` (exactly one required). **`platformId` is dropped from this body
+     entirely, per ADR-0022** — creates an operator `User` row that is platform-**less** at
+     creation (zero `PlatformAssignment` rows), with `contactVerifiedAt: null` (per ADR-0015);
+     every platform grant happens afterward, explicitly, via the new
+     `POST /auth/admin/operators/:id/platform-assignments` below. Also generates and sends a
+     `purpose: 'confirmation'` code — distinct from a login code (flat
      `now + 8h` expiry,
      unconditionally — this call happens outside the `isOperatorAvailable` gate a shift end
      could anchor to), publishing a new `admin.operator_confirmation_code_issued` event
@@ -506,8 +685,9 @@ Five synchronous flows matter architecturally:
    - `POST /auth/admin/login/operator/request-code` — body `{email?, phone?}`, no auth
      required. `204` on success (code delivered only via the published event/notification
      channel); `403 {reason: "non_working_day"}` if the operator isn't currently available
-     per `OperatorAvailabilityService` (platform calendar, per-operator time off, or
-     per-operator schedule — per ADR-0012, all three collapse to this one reason code);
+     per `OperatorAvailabilityService` (per-operator time off, or per-operator schedule — **no
+     longer any platform calendar, per ADR-0023**; both remaining causes collapse to this one
+     reason code);
      `401` if the identifier doesn't resolve to an active, contact-confirmed operator (unknown
      identifier, blocked operator, and not-yet-confirmed operator are all indistinguishable,
      per ADR-0012/ADR-0015). On success, the issued code's `expiresAt` is the operator's own
@@ -523,24 +703,41 @@ Five synchronous flows matter architecturally:
      from the value computed at request-code time — falling back to `now + 8h` only for an
      unscheduled operator.
    - `POST /auth/admin/platform/calendar` — Bearer, `adminTier: owner` only. Body
-     `{type, date?, dayOfWeek?, label?}`.
-   - `GET /auth/admin/platform/calendar` — Bearer, any admin, scoped to the caller's own
-     `platformId`.
+     `{platformId, type, date?, dayOfWeek?, label?}` — `platformId` must now be supplied
+     explicitly (no JWT claim to imply it from, per ADR-0022).
+   - `GET /auth/admin/platform/calendar` — Bearer, any admin, taking `platformId` as a
+     required query parameter.
    - `DELETE /auth/admin/platform/calendar/:id` — Bearer, `adminTier: owner` only; `404`
-     if the row isn't the caller's own platform's.
+     if the row doesn't exist.
+   - `POST /auth/admin/operators/:id/platform-assignments` — new, per ADR-0022. Bearer,
+     `adminTier: owner` only. Body `{platformId}`. Grants that operator an active
+     `PlatformAssignment` to the given platform, with `assignedBy` set to the caller's own id.
+     `404` if `:id` or `platformId` don't resolve; `409` if an active assignment for that
+     exact pair already exists.
+   - `DELETE /auth/admin/operators/:id/platform-assignments/:platformId` — new, per ADR-0022.
+     Bearer, `adminTier: owner` only. Revokes the currently-active assignment for that pair.
+     `404` if none is currently active. Does **not** force a logout (per ADR-0023) — only
+     requests scoped to the revoked platform start failing, on their next platform-access
+     check.
+   - `GET /auth/admin/operators/:id/platform-assignments` — new, per ADR-0022. Bearer,
+     `adminTier: owner` only. Lists that operator's full assignment history, active and
+     revoked alike.
 
    See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
-3. **Platform owner ⇄ `auth-service`, operator management** (new, per ADR-0012), Bearer,
-   `adminTier: owner` only for every endpoint in this group, all `:id` lookups
-   scoped to the caller's own `platformId` and returning `404` (never `403`) on any
-   mismatch:
-   - `GET /auth/admin/operators` — list operators under the caller's own platform.
+3. **Platform owner ⇄ `auth-service`, operator management** (new, per ADR-0012, re-scoped by
+   ADR-0022), Bearer, `adminTier: owner` only for every endpoint in this group, all `:id`
+   lookups returning `404` (never `403`) on any mismatch:
+   - `GET /auth/admin/operators` — list every operator in the (today, singleton) company —
+     **no longer scoped by `platformId`** (per ADR-0022, an operator `User` row isn't tied to
+     any single platform at all; the owner's own access is company-wide).
    - `GET /auth/admin/operators/:id` — view one operator's profile.
    - `PATCH /auth/admin/operators/:id/contact` — body `{email?, phone?}` (exactly one
      required); `400`/`409` as at creation time.
    - `POST /auth/admin/operators/:id/block` / `.../unblock` — set `User.isActive`;
-     blocking also deletes any unconsumed `AdminOperatorCode` row(s) regardless of `purpose`
+     blocking also supersedes (marks `supersededAt`, per ADR-0024, rather than deleting) any live `AdminOperatorCode` row(s) regardless of `purpose`
      (confirmation or login — per ADR-0015) and revokes all of that operator's refresh tokens.
+     This is a full account-level suspension, contrasted deliberately with a single
+     `PlatformAssignment` revocation (per ADR-0023), which does **not** force a logout.
    - `PUT /auth/admin/operators/:id/schedule` — full-replace `{days: [...]}`.
    - `GET /auth/admin/operators/:id/schedule` — owner-only (deliberately not readable by
      the operator themselves, unlike the platform calendar's `GET`).
@@ -548,24 +745,54 @@ Five synchronous flows matter architecturally:
      `DELETE .../time-off/:timeOffId`.
 
    See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
-4. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
+4. **Platform owner/operator ⇄ `auth-service`, organization management** (new, per
+   ADR-0020, rewritten by ADR-0022), Bearer, **`role: admin`** (via the plain `RolesGuard`, not
+   `AdminTierGuard`) — an owner and every operator with current access to a platform get equal
+   access to every endpoint in this group:
+   - `POST /auth/admin/organizations` — body `{platformId, name, taxCode?, address?, phone?,
+     type?}`. **`platformId` must now be supplied explicitly** — no JWT claim exists to imply
+     it (per ADR-0022). Owner: any real `platformId` accepted. Operator: must have an active
+     `PlatformAssignment` for the given `platformId`, else `403` (a deliberate, narrow
+     departure from this repo's collapsed-404 convention for this one create-action input —
+     see ADR-0020's rewritten Decision).
+   - `GET /auth/admin/organizations` — owner: every platform under the company by default,
+     optionally narrowed by `?platformId=`; operator: only organizations under their own
+     currently-active assigned platforms.
+   - `GET /auth/admin/organizations/:id` — view one organization; `404` (never `403`) if
+     `:id` doesn't resolve to an organization, or resolves to one under a platform the caller
+     (if an operator) has no active assignment to.
+   - `PATCH /auth/admin/organizations/:id` — body `{name?, taxCode?, address?, phone?,
+     type?}`; same `404` scoping as the `GET` above.
+   - `GET /auth/organizations/:id` — the narrow, service-to-service lookup `payment-service`
+     depends on (per ADR-0021); returns `{id, platformId}` only, `404` if `:id` doesn't
+     resolve to any organization, performing no admin-access authorization of its own.
+
+   See `docs/sdd/auth-service.md`'s API contract for exact request/response shapes.
+5. **Platform owner ⇄ `auth-service`, platform management** (new, per ADR-0022), Bearer,
+   `adminTier: owner` only:
+   - `POST /auth/admin/platforms` — body `{name}`; `companyId` resolved implicitly.
+   - `GET /auth/admin/platforms` — list every platform under the caller's company.
+   - `GET /auth/admin/platforms/:id` / `PATCH /auth/admin/platforms/:id` — collapsed-`404`
+     `:id`-scoped lookup/update, same convention as elsewhere.
+6. **Any admin ⇄ `auth-service`, or downstream service ⇄ `auth-service`, platform-access
+   check** (new, per ADR-0023): `GET /auth/platform-access/:platformId` — Bearer, `role: admin`
+   (either tier). Owner: always `200`. Operator: `200` if an active `PlatformAssignment`
+   exists for `(caller, platformId)`, else `404` (never `403`) — a live database check on every
+   call, never derived from a JWT claim or cached. This is the generic primitive any
+   downstream, platform-specific service uses (paired with `GET /auth/organizations/:id`) to
+   enforce the platform boundary on its own resources.
+7. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
    /payment/licenses/:organizationId/status`, its contract finalized by
    `docs/add/payment-service.md`/`docs/sdd/payment-service.md` (per ADR-0004). Invoked from
    `POST /auth/organizations/validate`, from inside `POST /auth/register` itself (so
    registration never trusts that an earlier validate call is still accurate, closing the
-   time-of-check-to-time-of-use gap, per ADR-0004), and now also from `POST /auth/login` and
-   `POST /auth/refresh` (per ADR-0005). On a successful registration, and only on a
-   first-time B2B registration for that organization, `auth-service` stamps the user's
-   account with the v1 trial period (a global config default, e.g. 14 days) — the trial length
-   itself is `auth-service`-owned account metadata, not something `payment-service` reports.
-5. **`auth-service` ⇄ `payment-service`**: a second synchronous call, `GET
-   /payment/subscriptions/:userId/status`, its contract likewise finalized by
-   `docs/sdd/payment-service.md` (per ADR-0006), invoked from `POST /auth/login` and
-   `POST /auth/refresh` alongside the license-status call above. A response indicating no
-   subscription exists for that user is treated as "not applicable" and never blocks
-   login/refresh on its own — only an existing-but-invalid (expired or suspended)
-   subscription does. `auth-service` never creates, modifies, or interprets *why* a
-   subscription exists; it only reads its current status.
+   time-of-check-to-time-of-use gap, per ADR-0004), (registration only — ADR-0026 removed
+   the login/refresh calls). `auth-service` stores no trial state: `payment-service` starts any trial
+   subscription when it consumes `user.registered`.
+8. ~~`auth-service` ⇄ `payment-service` subscription-status call from login/refresh~~ —
+   **removed by ADR-0026.** `auth-service` no longer reads subscription status at all; platform
+   services query `payment-service` (`GET /payment/subscriptions/:userId/status`, per ADR-0006) for
+   entitlement themselves.
 
 **Build-sequencing note: `OrganizationValidationService`/`PaymentServiceClient` built against
 a stub in v1.** `auth-service`'s core-flow implementation (register/login/refresh) is built
@@ -590,36 +817,48 @@ of the previous revision:
   successful registration so `notification-service` can react (e.g. send a welcome message)
   without `auth-service` taking on a direct dependency on `notification-service` or knowing
   anything about notification channels/templates.
-- **`admin.operator_registered`** — `{ operatorId, platformId, ownerId, channel:
+- **`admin.operator_registered`** — `{ operatorId, ownerId, channel:
   "email"|"phone", timestamp }` (per ADR-0011), published when an owner creates an operator
   account, so `notification-service` can send a welcome message the same way it does for
-  `user.registered`.
-- **`admin.operator_code_issued`** — `{ userId, platformId, channel: "email"|"sms",
+  `user.registered`. **No `platformId`** (dropped per ADR-0022) — an operator is created
+  platform-less; there is no platform to name at this point in the flow.
+- **`admin.operator_code_issued`** — `{ userId, channel: "email"|"sms",
   destination, code, expiresAt, timestamp }` (per ADR-0011), published every time
-  `POST /auth/admin/login/operator/request-code` succeeds on a working day. As of ADR-0014,
-  `expiresAt` is the operator's own scheduled shift end (or `now + 8h` if unscheduled), not a
-  flat 8-hour value.
-- **`admin.operator_confirmation_code_issued`** — `{ userId, platformId, channel:
+  `POST /auth/admin/login/operator/request-code` succeeds. As of ADR-0014, `expiresAt` is the
+  operator's own scheduled shift end (or `now + 8h` if unscheduled), not a flat 8-hour value.
+  **No `platformId`** (dropped per ADR-0022) — an operator's platform access is no longer a
+  single scalar value at all; it can be zero, one, or many platforms via `PlatformAssignment`.
+- **`admin.operator_confirmation_code_issued`** — `{ userId, channel:
   "email"|"sms", destination, code, expiresAt, timestamp }` (per ADR-0015), published when
   `POST /auth/admin/operators` creates a new operator, carrying a `purpose: 'confirmation'`
   code with a flat `now + 8h` expiry. Distinct from `admin.operator_code_issued`, which only
-  ever carries a `purpose: 'login'` code.
-- **`admin.operator_contact_confirmed`** — `{ operatorId, platformId, timestamp }` (per
+  ever carries a `purpose: 'login'` code. **No `platformId`**, for the same reason as above.
+- **`admin.operator_contact_confirmed`** — `{ operatorId, timestamp }` (per
   ADR-0015), published when `POST /auth/admin/operators/confirm` successfully matches a
   confirmation code. No `ownerId` — the confirming actor is the operator, not the owner,
-  unlike `admin.operator_blocked`/`admin.operator_unblocked` below.
-- **`admin.secret_key_login_from_new_device`** — `{ userId, platformId, channel: "email",
+  unlike `admin.operator_blocked`/`admin.operator_unblocked` below. **No `platformId`**, for the
+  same reason as above.
+- **`admin.secret_key_login_from_new_device`** — `{ userId, channel: "email",
   destination, ipAddress, userAgent, timestamp }` (per ADR-0010), published when an owner
-  logs in via secret key from a fingerprint `AdminDeviceService` hasn't seen before.
-- **`admin.secret_key_rotated`** — `{ userId, platformId, timestamp }` (per ADR-0010),
-  published on every secret-key rotation.
-- **`admin.operator_blocked`** — `{ operatorId, platformId, ownerId, timestamp }` (per
+  logs in via secret key from a fingerprint `AdminDeviceService` hasn't seen before. **No
+  `platformId`** (dropped per ADR-0022) — an owner's access is company-wide and unconditional;
+  there is no single platform to name.
+- **`admin.secret_key_rotated`** — `{ userId, timestamp }` (per ADR-0010),
+  published on every secret-key rotation. **No `platformId`**, for the same reason as above.
+- **`admin.operator_blocked`** — `{ operatorId, ownerId, timestamp }` (per
   ADR-0012), published when an owner blocks an operator (`POST
   /auth/admin/operators/:id/block`). `ownerId` gives an incidental, minimal "who did it"
   record — not a substitute for a real audit log, which remains deferred (see Open
-  questions).
-- **`admin.operator_unblocked`** — `{ operatorId, platformId, ownerId, timestamp }` (per
-  ADR-0012), published when an owner unblocks an operator.
+  questions). **No `platformId`** (dropped per ADR-0022) — block/unblock is a full
+  account-level action, unaffected by which platforms (if any) the operator is assigned to.
+- **`admin.operator_unblocked`** — `{ operatorId, ownerId, timestamp }` (per
+  ADR-0012), published when an owner unblocks an operator. **No `platformId`**, for the same
+  reason as above.
+**No new event is published for granting or revoking a `PlatformAssignment`** — ADR-0022 doesn't
+name one, and neither does this document invent one speculatively; the SDD's flows (q)/(r)
+likewise publish nothing. Whether an `admin.platform_assignment_granted`/`_revoked` pair would be
+useful (e.g. for `notification-service` to alert an operator they've gained or lost access to a
+platform) is named as an open question below, not decided here.
 
 **Why these carry contact info inline, unlike `user.registered`:** `admin.operator_code_issued`,
 `admin.operator_confirmation_code_issued`, and `admin.secret_key_login_from_new_device` all
@@ -651,18 +890,50 @@ both exist, not the fact of deployment itself.
 **Data ownership:** `auth-service` is the sole owner and writer of `User` and `RefreshToken`
 records (per ADR-0003, its own dedicated Postgres database — no other service queries it
 directly), and now also of `AdminDevice`, `AdminOperatorCode`, `PlatformNonWorkingDay`
-(per ADR-0009/ADR-0010/ADR-0011), and `OperatorSchedule`/`OperatorTimeOff` (per ADR-0012)
-records. `organizationId` values are opaque to
-`auth-service` (per ADR-0001) — it stores and echoes them but never validates their meaning,
-except for the one carve-out in ADR-0004 where it checks license *status* against
-`payment-service`, not the organization id's validity itself. `platformId` is likewise opaque
-(per ADR-0009) — `auth-service` never interprets what a "platform" means to any given
-consumer. License/organization billing data, and now individual-subscription data (per
+(per ADR-0009/ADR-0010/ADR-0011), `OperatorSchedule`/`OperatorTimeOff` (per ADR-0012),
+`Organization` (per ADR-0020), and `Company`/`Platform`/`PlatformAssignment` (per ADR-0022)
+records. `organizationId` values are opaque to `auth-service` (per ADR-0001) — it stores and
+echoes them but never validates their meaning, except for the one carve-out in ADR-0004 where
+it checks license *status* against `payment-service`, not the organization id's validity
+itself. As of ADR-0020, `organizationId` now refers to a real `Organization` row `auth-service`
+itself owns, but this is unchanged in practice: `auth-service` still never validates that a
+given `User.organizationId` (or a `payment-service` record's `organizationId`) actually
+resolves to an existing `Organization` row — that remains undesigned, exactly as before.
+**`platformId` is no longer opaque, and is no longer a `User` column at all (per ADR-0022):**
+it now identifies a real, queryable `Platform` row that `auth-service` itself owns and can
+validate against — `Organization.platformId` is an enforceable foreign key, not an unvalidated
+string, because both tables live in the same database. `auth-service` still never interprets
+what a "platform" *means* to any given consumer (that stays opaque, exactly like
+`organizationId`); what changed is that its mere existence and identity are now real, checkable
+facts, not an assumed-valid string. License/billing data, and individual-subscription data (per
 ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever reads their
-*status*, on the same terms as the license check.
+*status*, on the same terms as the license check; `Organization`'s own business fields (name,
+tax code, address, phone, type) are a separate, `auth-service`-owned identity concern, per
+ADR-0020.
 
 ## Non-functional constraints
 
+- **Authentication ≠ entitlement (ADR-0026).** `auth-service` answers who a user is and which
+  tenant/platform boundary they may touch. Licenses, subscriptions, trials and billing are
+  `payment-service`'s; business roles and permissions are the platform services'. No entitlement
+  state is stored in, or gated by, `auth-service`.
+- **High-assurance owner operations use step-up (ADR-0025).** Granting/revoking platform access,
+  rotating the secret key, factor changes and platform/operator creation require a short-lived
+  (≤15 min), single-use, session-bound re-verification consumed inside the operation's own
+  transaction. The secret key is a step-up/recovery credential and is never stored in plaintext.
+
+
+- **Integrity is enforced by the database, not just the service (ADR-0024).** Fundamental
+  relationships and uniqueness — every `Organization` has a `Platform`, every member has an
+  `Organization`, one active `PlatformAssignment` per operator/platform, append-only assignment
+  history, subtype/kind consistency — are foreign keys, CHECKs, partial unique indexes or triggers,
+  so they hold under concurrency and for any writer. The service layer still pre-validates (for
+  friendly errors and authorization) but is never the only line of defence for these rules. The
+  reference DDL and its executable invariant tests live in `apps/auth-service/db/`.
+- **Authorization is resolved server-side from the resource.** Platform access is always derived
+  `resource → organization → platform → actor's owner/assignment`, never from a client-supplied
+  `platformId`/`organizationId`, and never from a cached claim; a revoked assignment denies on the
+  next request.
 - **Horizontal scalability of token verification.** Per ADR-0002, access-token verification
   must never require a database call, so `auth-service` itself — and any other service that
   chooses to verify tokens locally — can scale horizontally without a shared database becoming
@@ -680,19 +951,13 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   that might want to verify tokens locally — no `.env`/secrets infrastructure exists anywhere
   yet. Any service wanting to verify `auth-service`'s tokens today would need an
   out-of-band-shared key, which is not a solved problem.
-- **Availability coupling to `payment-service` now extends to login and refresh.** Per
-  ADR-0004, the outbound call to `payment-service` needs an explicit request timeout (on the
-  order of a few seconds) and fails closed on error or timeout. Per ADR-0005, this coupling is
-  no longer limited to new B2B registrations — `payment-service` being down now also blocks
-  login and token refresh for already-registered users, since both flows re-check license
-  (and, when applicable, subscription) status on every call. Only `POST /auth/logout` remains
-  entirely unaffected, since it never touches `payment-service`. This is a materially wider
-  blast radius than the previous revision of this document described, and should be weighed
-  against `payment-service`'s own availability target.
-- **Access-token TTL directly bounds how long a forced logout can take.** Per ADR-0005, a
-  user whose organization's license lapses stays logged in until their current access token
-  expires and a refresh is attempted. The access-token TTL is **15 minutes** — see Open
-  questions for the full rationale.
+- **`payment-service` availability no longer affects login or refresh (ADR-0026).** Only new
+  registrations still make a synchronous, fail-closed call to `payment-service` (ADR-0004, request
+  timeout on the order of a few seconds). ADR-0005's wider coupling was removed.
+- **Access-token TTL bounds staleness, not entitlement.** The 15-minute access-token TTL bounds how
+  long a `role`/`organizationId` change, a blocked account, or a revoked operator session stays
+  effective for stateless verifiers (see Open questions). It plays no role in license enforcement:
+  ADR-0026 moved that to the platform services.
 - **Rate limiting: global baseline resolved, per-endpoint limits still an undesigned gap.**
   A global, per-IP request-rate baseline (`@nestjs/throttler`, 100 requests/60s, applied to
   every route via a global guard) is now implemented — see
@@ -710,7 +975,19 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   new owner-only `AdminOperatorController` surface (per ADR-0012) inherits the same
   undesigned per-endpoint gap, even though it's Bearer-authenticated rather than public —
   only the global baseline covers it so far, no endpoint-specific rate-limiting design exists
-  yet.
+  yet. The `AdminOrganizationController` surface (per ADR-0020) and the new `PlatformsController`/
+  `PlatformAccessController` surfaces (per ADR-0022/ADR-0023) inherit the identical gap for the
+  same reason.
+- **`GET /auth/platform-access/:platformId` (per ADR-0023) is a new hard, synchronous runtime
+  dependency for every downstream, platform-specific service.** Any service outside this repo
+  (e.g. `nawara-drive`) that wants to enforce the platform boundary on its own resources now
+  needs `auth-service` reachable, on every affected admin action, for both this endpoint and
+  `GET /auth/organizations/:id` (ADR-0021) — the same category of tradeoff already accepted for
+  `payment-service`'s own mirror-image dependency (ADR-0004/ADR-0021), extended here to a caller
+  outside this repo. Performance/caching tradeoffs for a downstream service calling this on a
+  hot path are explicitly out of this repo's scope to design (see ADR-0023's own Consequences) —
+  `auth-service` itself rejects caching this result anywhere, including in the JWT, precisely
+  because a stale answer would silently undo the whole point of a revocable `PlatformAssignment`.
 - **Schedule-anchored session ceiling for operator sessions.** Per ADR-0013 (as amended by
   ADR-0014), an operator's session (from a successful `verify-code` onward) is capped at
   their own scheduled shift end for the day, falling back to `now + 8h` only for an operator
@@ -780,27 +1057,57 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   recommendation — `isWorkingDay` and every shift-boundary evaluation (`OperatorSchedule`
   `startTime`/`endTime`, per ADR-0012) evaluate "today"/"now" against the server's UTC clock.
   A per-platform timezone field remains an explicit future enhancement, not designed here.
-- **Single-owner-per-platform is a decided, permanent invariant, not an open question.** Per
-  [ADR-0017](../adr/0017-single-owner-with-secret-key-force-reset.md), a platform has, and will
-  only ever have, exactly one `adminTier: "owner"` row, created once via ADR-0016's
-  `bootstrap-owner.ts`. This was always the implicit assumption behind ADR-0009's "platform's
-  top-level administrator" framing and ADR-0010's secret-key design; ADR-0017 is what makes it
-  explicit and final. There is no in-band owner-creation endpoint, no deactivate/activate pair,
-  and no ownership-transfer mechanism — none is planned, and none should be assumed by any
-  future design in this document. What ADR-0017 adds instead is narrower: a standalone,
-  ops-only CLI tool, `reset-owner-secret-key.ts` (a new script, deliberately not a new mode on
-  `bootstrap-owner.ts` — see ADR-0017's Decision for the naming reasoning), letting an owner who
-  still has password access force-invalidate a secret key they suspect is compromised (per
-  ADR-0010's `admin.secret_key_login_from_new_device`/`admin.secret_key_rotated` alerts) without
-  depending on trusting the live API the way the existing
-  `POST /auth/admin/secret-key/rotate` self-service path does. **Accepted, permanent gap, stated
-  plainly per ADR-0017's Consequences:** if a platform's sole owner loses **both** their password
-  and their secret key, nothing in this design can recover that platform's admin access — there
-  is no second owner to fall back on, and `reset-owner-secret-key.ts` only ever touches the
-  secret key, never the password. This is the same catastrophic scenario ADR-0016 originally
-  named ("Open question, not resolved here: what recovery path (if any) exists for that
-  scenario") — ADR-0017 does not resolve it; by choosing strict single ownership, it accepts that
-  gap as permanent rather than closing it with a second-owner mechanism.
+- **Single-owner-per-Company is a decided, permanent invariant, not an open question** (re-scoped
+  from platform-wide to company-wide by ADR-0022). Per
+  [ADR-0017](../adr/0017-single-owner-with-secret-key-force-reset.md), as rewritten to reflect
+  ADR-0022's `Company`/`Platform` model, the company has, and will only ever have, exactly one
+  `adminTier: "owner"` row, created once via ADR-0016's `bootstrap-owner.ts` (itself reworked by
+  ADR-0022 to be globally- rather than platform-scoped). This was always the implicit assumption
+  behind ADR-0009's "platform's top-level administrator" framing and ADR-0010's secret-key
+  design; ADR-0017, now backed by ADR-0022's real `Company` entity, is what makes it explicit and
+  final. There is no in-band owner-creation endpoint, no deactivate/activate pair, and no
+  ownership-transfer mechanism — none is planned, and none should be assumed by any future design
+  in this document. What ADR-0017 adds instead is narrower: a standalone, ops-only CLI tool,
+  `reset-owner-secret-key.ts` (a new script, deliberately not a new mode on `bootstrap-owner.ts`
+  — see ADR-0017's Decision for the naming reasoning), letting an owner who still has password
+  access force-invalidate a secret key they suspect is compromised (per ADR-0010's
+  `admin.secret_key_login_from_new_device`/`admin.secret_key_rotated` alerts) without depending
+  on trusting the live API the way the existing `POST /auth/admin/secret-key/rotate` self-service
+  path does. **Rekeyed by ADR-0022's rewrite of ADR-0017:** the tool no longer takes a
+  `BOOTSTRAP_OWNER_PLATFORM_ID`-style scoping variable (that concept no longer exists); a single
+  `OWNER_SECRET_KEY_RESET_EMAIL` env var now serves purely as a safety confirmation against the
+  one globally-existing owner row, not a lookup key. **Accepted, permanent gap, now company-wide
+  in blast radius, stated plainly per ADR-0017's Consequences:** if the company's sole owner
+  loses **both** their password and their secret key, nothing in this design can recover admin
+  access to any platform the company owns — there is no second owner to fall back on, and
+  `reset-owner-secret-key.ts` only ever touches the secret key, never the password. This is the
+  same catastrophic scenario ADR-0016 originally named ("Open question, not resolved here: what
+  recovery path (if any) exists for that scenario") — ADR-0017 does not resolve it; by choosing
+  strict single ownership, it accepts that gap as permanent rather than closing it with a
+  second-owner mechanism.
+- **Multi-company support (named as an open question by ADR-0022, not this document's own).**
+  `Company` is modeled as a real table today even though exactly one row exists in practice —
+  deliberate groundwork, not a currently-exercised capability.
+- **Whether granting/revoking a `PlatformAssignment` should publish an `admin.*` event** (e.g.
+  `admin.platform_assignment_granted`/`_revoked`), so `notification-service` could alert an
+  operator of a platform-access change the way it does for `admin.operator_blocked`/
+  `admin.operator_unblocked`. Not designed here — ADR-0022 doesn't name one, and none is added
+  speculatively.
+- **Operator revocation session semantics — resolved, not open, per ADR-0023.** Revoking one
+  `PlatformAssignment` does not force a logout or touch any other active assignment the same
+  operator holds for a different platform; only requests scoped to the revoked platform start
+  failing, on their next `GET /auth/platform-access/:platformId` check. Deliberately different
+  from `POST /auth/admin/operators/:id/block` (ADR-0012), which **does** force a full session
+  revocation, since the two actions differ in kind (scoped access change vs. full account
+  suspension).
+- **Two genuine design judgment calls in ADR-0020's rewrite (per ADR-0022), flagged for
+  visibility:** (1) `POST /auth/admin/organizations` returns a distinguishing `403`, not the
+  usual collapsed `404`, when an operator supplies a real but inaccessible `platformId` — a
+  deliberate, narrow departure from this repo's collapsed-404 convention, reasoned through in
+  ADR-0020's Decision, worth revisiting if the resulting enumeration cost is judged too high.
+  (2) `GET /auth/admin/organizations` defaults an owner's listing to every platform under their
+  company, with an optional `?platformId=` filter, rather than requiring the filter always — a
+  judgment call, not an ADR-mandated requirement.
 - ~~The SMS-gateway/provider dependency for phone-registered operators (per ADR-0011) — no
   such infrastructure exists anywhere in this repo yet, so `admin.operator_code_issued`
   events for phone-registered operators are undeliverable until it lands. As of ADR-0015,
@@ -818,9 +1125,8 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   A shorter TTL means faster enforcement but more frequent `payment-service` calls (per the
   new availability coupling above); this tradeoff needs an explicit decision, likely at the
   SDD level or its own ADR if the choice turns out to be hard to reverse.~~ **Resolved:** 15
-  minutes. Short enough to bound the stale-claim window (a `role`/`organizationId` change, or
-  a license/subscription lapse, mid-session) consistently with ADR-0005's bounded-time-
-  revalidation framing already established for license/subscription checks, refreshed
+  minutes. Short enough to bound the stale-claim window (a `role`/`organizationId` change
+  mid-session; ADR-0026 removed the license-lapse role this TTL used to have), refreshed
   transparently via the existing rotating refresh-token mechanism (ADR-0002).
 - What mechanism actually detects that an organization's license has lapsed or been renewed,
   in order to trigger the suspend/resume flow from ADR-0006 — that detection lives entirely
@@ -848,7 +1154,7 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   follow-up design.
 - The very short redemption/session window an operator could get if they request a login code
   moments before their shift ends (per ADR-0014) — accepted, not mitigated.
-- **No first-class `Organization` entity exists anywhere in this repo.** `organizationId` is,
+- ~~No first-class `Organization` entity exists anywhere in this repo. `organizationId` is,
   and remains after ADR-0016, purely an opaque string claim stamped onto `User`, `License`,
   `Charge`, and `UserSubscription` records (per ADR-0001) — there is no table, service, or API
   that treats "an organization" as a real, queryable thing with its own attributes. A direct
@@ -859,4 +1165,26 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
   relationship between them anywhere in this schema. This is a real gap, not a stylistic
   omission, and needs its own future ADR — likely introducing an `Organization` entity
   (plausibly carrying its own `platformId` field) plus admin-facing listing/management
-  endpoints — rather than being solved incidentally as part of some other decision.
+  endpoints — rather than being solved incidentally as part of some other decision.~~
+  **Resolved by [ADR-0020](../adr/0020-organization-entity-and-platform-scoped-management.md),
+  and rewritten in place by ADR-0022:** a first-class `Organization` entity now lives in
+  `auth-service` — `{id, platformId (non-null, **a real foreign key to `Platform.id`**, per
+  ADR-0022 — amending ADR-0020's original opaque-string description), name (required), taxCode,
+  address, phone, type (opaque, per the same treatment ADR-0001 gives `organizationId`),
+  createdAt, updatedAt}` — and `organizationId`, everywhere it already appears (`User` here, and
+  `License`/`Charge`/`UserSubscription` in `payment-service`, per ADR-0004/ADR-0006/ADR-0007),
+  still refers to this entity's `id`. A new `AdminOrganizationController`/
+  `OrganizationManagementService` (`POST`/`GET`/`GET :id`/`PATCH :id` under
+  `/auth/admin/organizations`) lets a platform's owner and every operator with current access to
+  that platform — deliberately with **equal** rights, gated by the plain `RolesGuard`
+  (`role: admin`), not `AdminTierGuard` — list, view, create, and update the organizations
+  belonging to it, authorized against a live `PlatformAssignment` check for operators (per
+  ADR-0022/ADR-0023) rather than a JWT claim. **Not resolved by ADR-0020, and explicitly named as
+  such:** no existence-validation is added anywhere that already accepts an `organizationId` at
+  face value (`POST /auth/register`, or any `payment-service` write path), and organization
+  bulk-import, deletion/deactivation, and any Nawara-Drive-specific organization sub-concepts
+  remain undesigned. A related, separate gap in `payment-service`'s own license/cash-payment
+  authorization is resolved by **ADR-0021**, likewise rewritten in place by ADR-0022/ADR-0023 to
+  use `GET /auth/organizations/:id` plus `GET /auth/platform-access/:platformId` (a two-call
+  chain) instead of a JWT-claim comparison — see that ADR and its own `docs/add/payment-service.md`/
+  `docs/sdd/payment-service.md` sync (a separate, later pass, not this one) for the mechanics.

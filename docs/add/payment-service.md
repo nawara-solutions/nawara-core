@@ -9,9 +9,14 @@
   [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (`auth-service`'s
   login/refresh calls into the endpoints this document defines),
   [0007](../adr/0007-out-of-band-cash-payment-confirmation.md) (out-of-band cash payment
-  confirmation via Admin role) and
+  confirmation via Admin role),
   [0008](../adr/0008-automatic-grace-license-on-license-lapse.md) (automatic 24-hour grace
-  license on organization license lapse).
+  license on organization license lapse),
+  [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) (`auth-service`'s
+  `Organization` entity and its `platformId` field, which ADR-0021 depends on), and
+  [0021](../adr/0021-payment-service-platform-scoped-authorization.md) (synchronous, fail-closed
+  platform-scope check, against `auth-service`, for `payment-service`'s organization-scoped
+  admin actions).
 - **Related ADDs/SDDs:** [docs/add/auth-service.md](./auth-service.md) is this document's main
   consumer (its `OrganizationValidationService` calls the endpoints defined here). A
   corresponding SDD, `docs/sdd/payment-service.md`, follows this ADD.
@@ -61,15 +66,27 @@ Today's and near-term callers of `payment-service`:
 
 - **`auth-service`** — the first and, for now, only real consumer. Calls
   `GET /payment/licenses/:organizationId/status` from `POST /auth/organizations/validate`,
-  `POST /auth/register`, `POST /auth/login`, and `POST /auth/refresh` (per `ADR-0004`/
-  `ADR-0005`), and `GET /payment/subscriptions/:userId/status` from the latter two (per
-  `ADR-0006`). This is a synchronous, fail-closed dependency — `payment-service` being down
-  now blocks `auth-service` login and token refresh, not just registration (see
-  `docs/add/auth-service.md`'s non-functional constraints).
+  and `POST /auth/register` (per `ADR-0004`). **As of `ADR-0026`, `auth-service` no longer calls
+  `payment-service` from `POST /auth/login` or `POST /auth/refresh`, and no longer calls
+  `GET /payment/subscriptions/:userId/status` at all** — `payment-service` being down blocks
+  registration only, not authentication. Entitlement is checked by platform/consuming services,
+  which become the callers of both status endpoints. `payment-service` also now owns trials: it
+  starts a trial `UserSubscription` when it consumes `auth-service`'s `user.registered` event
+  (`User.trialEndsAt` was removed from `auth-service`).
 - **`notification-service`**, indirectly, via the async events `payment-service` publishes
   (below) — no direct API call.
 - **Consuming apps** (e.g. `nawara-drive`), eventually, for the purchase/checkout flow itself —
   explicitly out of scope here (see Scope).
+
+Per `ADR-0021`, `payment-service` is now also, for the first time, a **caller** of
+`auth-service` — the reverse of every dependency direction described above. Before completing
+`POST /payment/charges/:chargeId/cash/confirm`, `.../reject`, or filtering
+`GET /payment/charges?method=cash&status=pending`, `payment-service` synchronously calls
+`auth-service`'s new `GET /auth/organizations/:id` to confirm the target `Charge`'s
+`organizationId` belongs to the acting admin's own platform, forwarding the same admin bearer
+token it already verified locally. This mirrors `ADR-0004`'s existing `auth-service →
+payment-service` license check, in the opposite direction, and is now `payment-service`'s own
+first live synchronous dependency on another `nawara-core` service.
 
 ## Component overview
 
@@ -101,7 +118,11 @@ At the architecture level, this document adds four logical components to `paymen
   — all four are `payment-service`'s first authenticated endpoints, gated by a new
   `JwtAuthGuard` (verifies the caller's JWT; required on all four), and the latter three
   additionally gated by a new `RolesGuard` (checks `role: admin`; required only on
-  confirm/reject/list — see below).
+  confirm/reject/list — see below). Per `ADR-0021`, those same three admin-only endpoints are
+  now additionally gated by a new `PlatformScopeService` — checking that the target `Charge`'s
+  `organizationId` belongs to the acting admin's own platform, via a live call to `auth-service`
+  through a new `OrganizationLookupClient` — the mirror image, on `payment-service`'s side, of
+  `auth-service`'s existing `OrganizationValidationService`/`PaymentServiceClient` split.
 
 ```mermaid
 graph LR
@@ -121,10 +142,14 @@ graph LR
     SubscriptionsController --> SubscriptionsService
     ChargesController --> JwtAuthGuard
     ChargesController --> RolesGuard
+    ChargesController --> PlatformScopeService
     ChargesController --> ChargesService
     LicensesService --> LicenseLapseService
     LicenseLapseService --> SubscriptionsService
+    PlatformScopeService --> OrganizationLookupClient
   end
+
+  OrganizationLookupClient -- "REST/HTTPS (GET /auth/organizations/:id, forwarded admin JWT)" --> Auth
 
   LicensesService --> PaymentDB[(payment-service Postgres DB)]
   SubscriptionsService --> PaymentDB
@@ -147,7 +172,12 @@ confirm/reject/list endpoints, following the same generic `role: string` pattern
 own `RolesGuard` already uses (see `docs/add/auth-service.md`'s "RBAC guards" component). Any
 organization-scoped caller (JWT `organizationId` claim matching the org being billed, no extra
 role) can submit a cash request past `JwtAuthGuard` alone; confirming, rejecting, or listing
-pending cash requests additionally requires clearing `RolesGuard`.
+pending cash requests additionally requires clearing `RolesGuard`. Per `ADR-0021`, those same
+three admin actions additionally require clearing `PlatformScopeService` — a live check,
+through `OrganizationLookupClient`, that the target `Charge`'s organization belongs to the
+caller's own platform. `POST /payment/charges/cash` is unaffected: its `organizationId` comes
+from the caller's own JWT claim, not an admin-supplied target, so there is no cross-platform
+question to ask.
 
 At the class level, the same components resolve to:
 
@@ -161,6 +191,8 @@ classDiagram
   class ChargesService
   class JwtAuthGuard
   class RolesGuard
+  class PlatformScopeService
+  class OrganizationLookupClient
   class LicenseLapseService
   class License
   class UserSubscription
@@ -171,7 +203,9 @@ classDiagram
   SubscriptionsController --> SubscriptionsService
   ChargesController --> JwtAuthGuard
   ChargesController --> RolesGuard
+  ChargesController --> PlatformScopeService
   ChargesController --> ChargesService
+  PlatformScopeService --> OrganizationLookupClient
   ChargesService --> Charge
   LicensesService --> License
   LicenseLapseService --> LicensesService
@@ -259,14 +293,11 @@ elsewhere on this entity — never inferred or looked up from `auth-service`.
 
 ## Non-functional constraints
 
-- **`payment-service` is now a hard dependency for login, not just registration.** Per
-  `ADR-0005`, if `payment-service` is down or slow, `auth-service` cannot complete a login or
-  token refresh for anyone. This makes `payment-service`'s own availability and the two status
-  endpoints' response latency directly load-bearing for the whole system's ability to
-  authenticate — a materially higher bar than a service whose only caller was a registration
-  flow.
-- **Status endpoints must stay cheap and fast.** Both endpoints are called on every login and
-  refresh across the whole system (per `ADR-0005`); they should be simple indexed lookups
+- **`payment-service` is no longer a dependency of authentication (`ADR-0026`, superseding
+  `ADR-0005`).** It is a hard dependency only of registration and of whichever platform services
+  enforce entitlement, so its availability no longer decides whether anyone can log in.
+- **Status endpoints must stay cheap and fast.** Both endpoints are now called by platform services at the point of use (per `ADR-0026`; formerly on every login and
+  refresh, per `ADR-0005`), so they stay hot and should be simple indexed lookups
   (`organizationId` on `License`, `userId` on `UserSubscription`), not anything requiring a
   join across gateway/payment-provider data on the hot path.
 - **RabbitMQ infra gap** (as above) — the six lifecycle events are undeliverable until that
@@ -284,6 +315,16 @@ elsewhere on this entity — never inferred or looked up from `auth-service`.
   in this repo for distributing the JWT signing secret/key to a service that needs to verify
   tokens locally. That gap previously only threatened a hypothetical future consumer; it now
   concretely blocks this decision.
+- **`payment-service`'s three admin cash endpoints now have a hard runtime dependency on
+  `auth-service`, per `ADR-0021`.** Before completing a confirm, reject, or pending-cash listing,
+  `payment-service` synchronously calls `auth-service`'s `GET /auth/organizations/:id` to check
+  platform ownership; any failure or timeout fails the action closed (see that ADR's Decision
+  for exact response shapes). (`ADR-0026` removed `payment-service`'s former hard dependency from `auth-service`'s login/refresh,
+  so the dependency is now mostly one-directional.) The two services still call each other for
+  different flows. Filtering
+  `GET /payment/charges?method=cash&status=pending` by platform costs one such call per
+  **distinct** organization present in a given result page, not one per request, compounding
+  this endpoint's already-open "no pagination in v1" question (see Open questions).
 
 ## Open questions
 
@@ -308,3 +349,11 @@ elsewhere on this entity — never inferred or looked up from `auth-service`.
 - Building `payment-service`'s own JWT verification/`RolesGuard` capability, and how it obtains
   the JWT signing secret/key given the still-unsolved secret-distribution gap (see Non-functional
   constraints above and `docs/add/auth-service.md`'s own open item on the same gap).
+- Whether `platformId` should eventually be denormalized onto `Charge`/`License`/
+  `UserSubscription` rows at write time — `ADR-0021`'s Option 2, deferred rather than adopted —
+  if the live per-request lookup's availability coupling or the pending-cash listing's
+  per-organization batch-lookup cost ever prove unacceptable at scale.
+- Whether the same platform-scoping check `ADR-0021` adds to today's cash-payment endpoints
+  needs to be retrofitted onto the still-undesigned gateway purchase/checkout flow or the
+  `Charge → License`/`UserSubscription` issuance step, once either is actually designed —
+  `ADR-0021` does not decide this for flows that don't exist yet.

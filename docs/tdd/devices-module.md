@@ -10,6 +10,8 @@
   a standalone ADR.
 - **Ticket/issue:** https://github.com/nawara-solutions/nawara-core/issues/12
 
+> **Superseded in part — read with the ADRs below.** `AdminDevice` new-device alerting now runs on **every owner login** (after the second factor) and on recovery, not on a secret-key login ([ADR-0025](../adr/0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md)). The event is `admin.owner_login_from_new_device`. It remains an alert-only signal; a User-Agent fingerprint is never an authentication factor.
+
 ## Problem
 
 `auth-service` is currently a bare, unmodified Nest CLI scaffold — no code exists yet. This

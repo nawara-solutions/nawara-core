@@ -45,18 +45,26 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0002](./0002-jwt-access-token-with-rotating-refresh-token.md) | JWT access token + DB-backed refresh token with rotation & reuse detection | Accepted |
 | [0003](./0003-postgresql-typeorm-persistence.md) | PostgreSQL + TypeORM as auth-service's persistence | Accepted |
 | [0004](./0004-synchronous-fail-closed-license-validation.md) | Synchronous, fail-closed license validation against payment-service for B2B registration | Accepted |
-| [0005](./0005-bounded-time-license-subscription-revalidation.md) | Bounded-time license and subscription re-validation on login and refresh | Accepted |
+| [0005](./0005-bounded-time-license-subscription-revalidation.md) | Bounded-time license and subscription re-validation on login and refresh | Superseded by ADR-0026 |
 | [0006](./0006-per-user-subscription-reservation-on-license-lapse.md) | Per-user subscription reservation on organization license lapse | Accepted |
 | [0007](./0007-out-of-band-cash-payment-confirmation.md) | Out-of-band cash payment confirmation via Admin role | Accepted |
 | [0008](./0008-automatic-grace-license-on-license-lapse.md) | Automatic 24-hour grace license on organization license lapse | Accepted |
 | [0009](./0009-platform-scoped-admin-accounts.md) | Platform-scoped Admin accounts (platformId, owner/operator tiers) | Accepted |
-| [0010](./0010-owner-secret-key-login-with-device-alerting.md) | Owner permanent secret-key login with new-device alerting | Accepted |
+| [0010](./0010-owner-secret-key-login-with-device-alerting.md) | Owner permanent secret-key login with new-device alerting | Partially superseded by ADR-0025 |
 | [0011](./0011-operator-time-boxed-login-code.md) | Time-boxed operator login code with business-day gating | Accepted |
 | [0012](./0012-owner-managed-operator-schedule-and-blocking.md) | Owner-managed operator profile, schedule, and block/unblock | Accepted |
 | [0013](./0013-operator-session-ceiling.md) | Hard 8-hour session ceiling for operator refresh-token rotation | Accepted |
 | [0014](./0014-schedule-anchored-operator-duration.md) | Schedule-anchored operator login-code and session duration | Accepted |
 | [0015](./0015-two-phase-operator-contact-confirmation.md) | Two-phase operator contact confirmation before first login | Accepted |
 | [0016](./0016-first-owner-bootstrap-command.md) | One-time bootstrap command for a platform's first owner account | Accepted |
-| [0017](./0017-single-owner-with-secret-key-force-reset.md) | Single owner per platform, permanently, with a CLI secret-key force-reset tool | Proposed |
+| [0017](./0017-single-owner-with-secret-key-force-reset.md) | Single owner per Company, permanently, with a CLI secret-key force-reset tool | Proposed |
 | [0018](./0018-rabbitmq-as-async-message-broker.md) | RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq` | Proposed |
 | [0019](./0019-twilio-as-sms-gateway-provider.md) | Twilio as the SMS gateway provider | Proposed |
+| [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Proposed |
+| [0021](./0021-payment-service-platform-scoped-authorization.md) | Synchronous, fail-closed platform-scope check for payment-service's organization-scoped admin actions | Proposed |
+| [0022](./0022-company-and-platform-entities-with-operator-assignment.md) | Company and Platform entities, with many-to-many operator↔platform assignment | Proposed |
+| [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Proposed |
+| [0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) | Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness) | Proposed |
+| [0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) | Owner login with password + second factor; secret key as step-up and recovery credential | Proposed |
+| [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Proposed |
+| [0027](./0027-service-layer-security-model.md) | Service-layer security model: cool-down recovery, enrollment rules, live authorization, shared security state, key management | Proposed |
