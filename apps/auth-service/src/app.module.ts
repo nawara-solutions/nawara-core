@@ -15,6 +15,7 @@ import { TotpSecretCipher } from './crypto/totp-cipher.js';
 import { DbService } from './db/db.service.js';
 import { EventsModule } from './events/events.module.js';
 import { EventsPublisherService } from './events/events-publisher.service.js';
+import { HealthController } from './health/health.controller.js';
 import { OperatorAvailabilityService } from './operator/availability.service.js';
 import { OperatorAdminService } from './operator/operator-admin.service.js';
 import { OperatorCodeService } from './operator/operator-code.service.js';
@@ -48,7 +49,7 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.BASELINE_RATE_LIMIT_PER_MINUTE ?? 100) }]),
     ...(eventsEnabled ? [EventsModule] : []),
   ],
-  controllers: [AppController, AuthController, OwnerController, OperatorController, PlatformController],
+  controllers: [AppController, HealthController, AuthController, OwnerController, OperatorController, PlatformController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
