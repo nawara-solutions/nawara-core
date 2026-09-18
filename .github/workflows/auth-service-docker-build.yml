@@ -84,7 +84,6 @@ jobs:
           username: ${{ secrets.DEPLOY_SSH_USER }}
           password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          script_stop: true
           envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE
           script: |
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
