@@ -6,13 +6,20 @@
 - **Related ADRs:** [0004](../adr/0004-synchronous-fail-closed-license-validation.md)
   (`auth-service`'s assumed license-status contract, finalized here),
   [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (`auth-service`'s
-  login/refresh calls into the endpoints below),
+  login/refresh calls into the endpoints below — **superseded by
+  [0026](../adr/0026-authentication-is-not-entitlement.md)**: `auth-service` no longer calls them at
+  login/refresh; platform services do),
   [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (the primary
   decision this document implements),
   [0007](../adr/0007-out-of-band-cash-payment-confirmation.md) (out-of-band cash payment
   confirmation via Admin role),
   [0008](../adr/0008-automatic-grace-license-on-license-lapse.md) (automatic 24-hour grace
-  license on organization license lapse).
+  license on organization license lapse),
+  [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) (`auth-service`'s
+  `Organization` entity and its `platformId` field, which ADR-0021 depends on),
+  [0021](../adr/0021-payment-service-platform-scoped-authorization.md) (synchronous, fail-closed
+  platform-scope check, against `auth-service`, for `payment-service`'s organization-scoped
+  admin actions).
 
 ## Responsibility
 
@@ -25,7 +32,10 @@ rather than losing it — and publishes events so `notification-service` can inf
 users. Per `ADR-0008`, on a license's first lapse per renewal cycle it instead auto-issues a
 24-hour grace license, deferring suspension until that window also elapses. Per `ADR-0007`, it
 also owns the out-of-band cash-payment request/confirm/reject/list surface, gated by its own
-new `JwtAuthGuard`/`RolesGuard`.
+new `JwtAuthGuard`/`RolesGuard`. Per `ADR-0021`, the confirm/reject/list endpoints are further
+gated by a new `PlatformScopeService`, which synchronously confirms — against `auth-service` —
+that the target `Charge`'s organization belongs to the acting admin's own platform before the
+action proceeds.
 
 It explicitly does **not** own:
 
@@ -35,7 +45,11 @@ It explicitly does **not** own:
   `UserSubscription` row exists, never why.
 - Any `auth-service` data (`User`, `RefreshToken`, credentials). `organizationId` and `userId`
   values stored here are opaque foreign references, stamped from the JWT at purchase time —
-  never resolved via a cross-service database query.
+  never resolved via a cross-service database query. Per `ADR-0021`, `payment-service` does now
+  make a live **API** call to `auth-service` to resolve an `organizationId`'s `platformId` for
+  its own three admin cash endpoints — this is a network call to `auth-service`'s API, never a
+  direct query against `auth-service`'s database, and it never stores the resulting `platformId`
+  anywhere in `payment-service`'s own schema.
 - Notification delivery. `payment-service` publishes domain events; translating those into an
   actual push/SMS/email is entirely `notification-service`'s job.
 - The gateway purchase/checkout flow itself, and — now shared with `ADR-0007`'s cash-confirmation
@@ -165,18 +179,19 @@ classDiagram
     }
     class ChargesController {
       +requestCashPayment(dto, callerOrgId, callerUserId) Charge
-      +confirmCashPayment(chargeId) Charge
-      +rejectCashPayment(chargeId) Charge
-      +listPendingCash() Charge[]
+      +confirmCashPayment(chargeId, callerPlatformId, bearerToken) Charge
+      +rejectCashPayment(chargeId, callerPlatformId, bearerToken) Charge
+      +listPendingCash(callerPlatformId, bearerToken) Charge[]
     }
     class ChargesService {
       -chargeRepository: Repository~Charge~
       -productsService: ProductsService
       -eventPublisher: EventPublisher
+      -platformScopeService: PlatformScopeService
       +requestCashPayment(dto, callerOrgId, callerUserId) Charge
-      +confirmCashPayment(chargeId) Charge
-      +rejectCashPayment(chargeId) Charge
-      +listPendingCash() Charge[]
+      +confirmCashPayment(chargeId, callerPlatformId, bearerToken) Charge
+      +rejectCashPayment(chargeId, callerPlatformId, bearerToken) Charge
+      +listPendingCash(callerPlatformId, bearerToken) Charge[]
     }
     class CreateCashChargeRequestDto {
       +productId: string
@@ -187,6 +202,18 @@ classDiagram
     }
     class RolesGuard {
       +canActivate(context) boolean
+    }
+    class PlatformScopeService {
+      -organizationLookupClient: OrganizationLookupClient
+      +assertOwnedByCallerPlatform(organizationId, callerPlatformId, bearerToken) void
+      +filterToCallerPlatform(charges, callerPlatformId, bearerToken) Charge[]
+    }
+    class OrganizationLookupClient {
+      +getOrganization(organizationId, bearerToken) OrganizationLookupResult?
+    }
+    class OrganizationLookupResult {
+      +id: string
+      +platformId: string
     }
     class EventPublisher {
       +publish(eventName, payload) void
@@ -251,6 +278,9 @@ classDiagram
     ChargesController ..> CreateCashChargeRequestDto
     ChargesService --> Charge
     ChargesService --> EventPublisher
+    ChargesService --> PlatformScopeService
+    PlatformScopeService --> OrganizationLookupClient
+    OrganizationLookupClient ..> OrganizationLookupResult
 ```
 
 Module boundaries: `LicensesModule` (`LicensesController`/`LicensesService`/`License` entity)
@@ -279,6 +309,23 @@ persists the `Charge`, and publishes `charge.cash_requested` through the same `E
 every other component uses — it does not itself decide what happens after a charge is confirmed
 (the issuance hand-off is out of scope, see the ADD).
 
+Per `ADR-0021`, `ChargesService`'s `confirmCashPayment`, `rejectCashPayment`, and
+`listPendingCash` methods additionally depend on the new `PlatformScopeService` — the mirror
+image, on `payment-service`'s side, of `auth-service`'s existing
+`OrganizationValidationService`. `PlatformScopeService` owns no persistence of its own; it wraps
+`OrganizationLookupClient`, a thin HTTP client (the mirror image of `auth-service`'s own
+`PaymentServiceClient`) that calls `auth-service`'s `GET /auth/organizations/:id`, forwarding
+whichever admin bearer token `ChargesController` already received and verified locally.
+`assertOwnedByCallerPlatform` is used by the two single-target actions (confirm/reject) and
+throws on any mismatch or lookup failure (see API contract below for exact status codes);
+`filterToCallerPlatform` is used by `listPendingCash` and instead resolves every **distinct**
+`organizationId` present in the matched `Charge` rows (deduplicated, one lookup per unique
+organization, not per row) and excludes any row whose organization doesn't belong to the
+caller's platform, failing the whole request closed if any of those lookups itself errors.
+`ChargesService`'s other method, `requestCashPayment`, is unaffected — its `organizationId`
+comes from the caller's own JWT claim, not an admin-supplied target, so `PlatformScopeService`
+is never consulted there.
+
 Per `ADR-0008`, `LicenseLapseService.handleExpiry` now branches on the lapsing `License.type`
 before deciding what to do — see flows (f)/(g) below — rather than unconditionally expiring and
 suspending as in the previous revision of this document. `handleReactivation` (flow (b)) is
@@ -306,7 +353,11 @@ subscriptions, since (per `ADR-0008`'s reset rule) the future issuance mechanism
 Both endpoints are internal, service-to-service calls in v1 (no API gateway exists in this
 repo, per `auth-service`'s ADD) — they carry no separate authentication of their own beyond
 whatever network-level trust exists between `nawara-core` services today, which this document
-does not change or strengthen.
+does not change or strengthen. Per `ADR-0021`, neither endpoint gains a platform-scope check:
+both are called by `auth-service` on behalf of an anonymous prospective registrant or an
+ordinary end user's own login/refresh, never by an authenticated platform admin acting on an
+arbitrary target — there is no admin JWT in either call chain to extract a `platformId` claim
+from, so `ADR-0021`'s check has no principal to attach to here.
 
 The four endpoints below are new, per `ADR-0007`, and are `payment-service`'s first
 authenticated endpoints — all require a valid JWT (`JwtAuthGuard`); the three Admin-only ones
@@ -321,16 +372,33 @@ additionally require `role: admin` (`RolesGuard`).
   doesn't resolve to a `Product`. On success, `201` with the created `Charge`
   (`method: 'cash'`, `status: 'pending'`, `submittedByUserId` = caller's `userId`, `payerId` =
   caller's `userId` for `org_license` or `beneficiaryUserId` for `individual_subscription`,
-  `amount`/`currency` copied from `Product`). Publishes `charge.cash_requested`.
+  `amount`/`currency` copied from `Product`). Publishes `charge.cash_requested`. Per `ADR-0021`,
+  this endpoint gains no platform-scope check: `organizationId` here is the caller's own JWT
+  claim, not an admin-supplied target, so the caller can only ever act on the one organization
+  their own token already proves membership in.
 - **`POST /payment/charges/:chargeId/cash/confirm`** — auth: `role: admin`. `404` if `chargeId`
-  doesn't exist. `409` unless the charge is `method: 'cash'` and `status: 'pending'`. On success,
-  `200` with the updated `Charge` (`status: 'succeeded'`) and hands off to the (out-of-scope)
-  issuance step.
-- **`POST /payment/charges/:chargeId/cash/reject`** — auth: `role: admin`. Same `404`/`409`
-  preconditions as confirm. On success, `200` with the updated `Charge` (`status: 'failed'`).
+  doesn't exist. Per `ADR-0021`, then calls `PlatformScopeService.assertOwnedByCallerPlatform`
+  with the loaded `Charge.organizationId`, the caller's own JWT `platformId` claim, and the
+  caller's forwarded bearer token: `403 { statusCode: 403, message: "You do not have authority
+  over this organization." }` on a genuine platform mismatch (the target organization doesn't
+  belong to the caller's platform, or doesn't exist at all); `503 { statusCode: 503, message:
+  "Unable to verify organization; please try again." }` if the `auth-service` lookup itself
+  fails or times out (timeout on the order of a few seconds, mirroring `ADR-0004`). Both
+  precede, and neither performs, any mutation. `409` unless the charge is `method: 'cash'` and
+  `status: 'pending'` (checked after the platform-scope check succeeds). On success, `200` with
+  the updated `Charge` (`status: 'succeeded'`) and hands off to the (out-of-scope) issuance step.
+- **`POST /payment/charges/:chargeId/cash/reject`** — auth: `role: admin`. Same `404`, platform-
+  scope (`403`/`503`, per `ADR-0021`), and `409` preconditions as confirm, in the same order. On
+  success, `200` with the updated `Charge` (`status: 'failed'`).
 - **`GET /payment/charges?method=cash&status=pending`** — auth: `role: admin`. `200` with an
   array of matching `Charge` rows, newest first. No pagination in v1 (flagged as an open
-  question if pending-cash volume ever grows large enough to matter).
+  question if pending-cash volume ever grows large enough to matter). Per `ADR-0021`, before
+  returning, calls `PlatformScopeService.filterToCallerPlatform` on the matched rows: resolves
+  every **distinct** `organizationId` among them (one lookup per unique organization, not per
+  row) and excludes any row whose organization isn't confirmed to belong to the caller's own
+  platform. If any of those lookups itself fails or times out, the whole request fails closed
+  with the same `503` shape as confirm/reject above — a genuine cross-platform row, by contrast,
+  is not an error for this endpoint; it is simply, correctly, omitted from the response.
 
 ## Important flows
 
@@ -338,8 +406,8 @@ additionally require `role: admin` (`RolesGuard`).
 
 Per `ADR-0008`, this flow now only runs when the lapsing `License.type` is already `'grace'` —
 i.e. the organization's one-shot grace window has itself now also elapsed. A `type = 'standard'`
-license lapsing for the first time since its last real payment takes flow (f) instead. See flow
-(g) below for this exact diagram applied to that precondition.
+license lapsing for the first time since its last real payment takes flow (g) instead. See flow
+(h) below for this exact diagram applied to that precondition.
 
 ```mermaid
 sequenceDiagram
@@ -395,7 +463,11 @@ sequenceDiagram
     end
 ```
 
-**(c) auth-service checking license/subscription status (login or refresh)**
+**(c) A caller checking license/subscription status** — *originally `auth-service` at login/refresh; per
+[ADR-0026](../adr/0026-authentication-is-not-entitlement.md) `auth-service` now calls only the
+license endpoint, and only at registration. The subscription-status endpoint and the license endpoint
+are otherwise consumed by platform/consuming services at the point of use (authentication ≠
+entitlement). The diagram below is unchanged; read "Auth" as "the calling service".*
 
 ```mermaid
 sequenceDiagram
@@ -445,6 +517,9 @@ sequenceDiagram
 
 **(e) Admin confirms (or rejects) a pending cash charge**
 
+Per `ADR-0021`, this flow now includes a synchronous, fail-closed call to `auth-service` between
+loading the target `Charge` and applying its state transition.
+
 ```mermaid
 sequenceDiagram
     participant Admin as Admin user
@@ -452,28 +527,95 @@ sequenceDiagram
     participant RG as RolesGuard
     participant CC as ChargesController
     participant CS as ChargesService
+    participant PSS as PlatformScopeService
+    participant OLC as OrganizationLookupClient
+    participant AuthSvc as auth-service
     participant DB as payment-service DB
 
-    Admin->>CC: POST /payment/charges/:chargeId/cash/confirm
+    Admin->>CC: POST /payment/charges/:chargeId/cash/confirm (Authorization: Bearer <adminToken>)
     CC->>JAG: verify JWT
-    JAG-->>CC: {userId, role}
+    JAG-->>CC: {userId, role, platformId}
     CC->>RG: check role === 'admin'
     RG-->>CC: allowed
-    CC->>CS: confirmCashPayment(chargeId)
+    CC->>CS: confirmCashPayment(chargeId, platformId, adminToken)
     CS->>DB: SELECT Charge WHERE id = chargeId
-    DB-->>CS: Charge row
-    CS->>CS: 409 unless method='cash' AND status='pending'
-    CS->>DB: UPDATE Charge SET status='succeeded'
-    DB-->>CS: Charge row
-    CS->>CS: hand off to (out-of-scope) issuance step — must set License.type='standard'
-    CS-->>CC: Charge
-    CC-->>Admin: 200 Charge
+    DB-->>CS: Charge row (or none → 404)
+    CS->>PSS: assertOwnedByCallerPlatform(charge.organizationId, platformId, adminToken)
+    PSS->>OLC: getOrganization(charge.organizationId, adminToken)
+    OLC->>AuthSvc: GET /auth/organizations/:id, Authorization: Bearer <adminToken>
+    alt organization belongs to caller's platform
+        AuthSvc-->>OLC: 200 {id, platformId}
+        OLC-->>PSS: {id, platformId}
+        PSS-->>CS: ok
+        CS->>CS: 409 unless method='cash' AND status='pending'
+        CS->>DB: UPDATE Charge SET status='succeeded'
+        DB-->>CS: Charge row
+        CS->>CS: hand off to (out-of-scope) issuance step — must set License.type='standard'
+        CS-->>CC: Charge
+        CC-->>Admin: 200 Charge
+    else organization belongs to a different platform, or doesn't exist
+        AuthSvc-->>OLC: 404
+        OLC-->>PSS: null
+        PSS-->>CS: throw ForbiddenException
+        CS-->>CC: propagate
+        CC-->>Admin: 403 {statusCode: 403, message: "You do not have authority over this organization."}
+    else auth-service lookup fails or times out
+        AuthSvc--xOLC: timeout / 5xx
+        OLC-->>PSS: throw
+        PSS-->>CS: throw ServiceUnavailableException
+        CS-->>CC: propagate
+        CC-->>Admin: 503 {statusCode: 503, message: "Unable to verify organization; please try again."}
+    end
 ```
 
 `POST /payment/charges/:chargeId/cash/reject` follows the identical shape, differing only in
 setting `status='failed'` and skipping the issuance hand-off entirely.
 
-**(f) Lapse detected on a standard license → auto-grace issued, no suspension**
+**(f) Admin lists pending cash charges, filtered to their own platform**
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin user
+    participant JAG as JwtAuthGuard
+    participant RG as RolesGuard
+    participant CC as ChargesController
+    participant CS as ChargesService
+    participant PSS as PlatformScopeService
+    participant OLC as OrganizationLookupClient
+    participant AuthSvc as auth-service
+    participant DB as payment-service DB
+
+    Admin->>CC: GET /payment/charges?method=cash&status=pending (Authorization: Bearer <adminToken>)
+    CC->>JAG: verify JWT
+    JAG-->>CC: {userId, role, platformId}
+    CC->>RG: check role === 'admin'
+    RG-->>CC: allowed
+    CC->>CS: listPendingCash(platformId, adminToken)
+    CS->>DB: SELECT Charge WHERE method='cash' AND status='pending'
+    DB-->>CS: Charge rows (across potentially many organizations)
+    CS->>PSS: filterToCallerPlatform(charges, platformId, adminToken)
+    PSS->>PSS: dedupe distinct organizationId values across the rows
+    loop each distinct organizationId
+        PSS->>OLC: getOrganization(organizationId, adminToken)
+        OLC->>AuthSvc: GET /auth/organizations/:id, Authorization: Bearer <adminToken>
+        alt belongs to caller's platform
+            AuthSvc-->>OLC: 200 {id, platformId}
+        else different platform or not found
+            AuthSvc-->>OLC: 404
+        else lookup fails or times out
+            AuthSvc--xOLC: timeout / 5xx
+            OLC-->>PSS: throw
+            PSS-->>CS: throw ServiceUnavailableException (whole request fails closed)
+            CS-->>CC: propagate
+            CC-->>Admin: 503 {statusCode: 503, message: "Unable to verify organization; please try again."}
+        end
+    end
+    PSS-->>CS: rows whose organization matched, others silently omitted
+    CS-->>CC: Charge[]
+    CC-->>Admin: 200 Charge[]
+```
+
+**(g) Lapse detected on a standard license → auto-grace issued, no suspension**
 
 ```mermaid
 sequenceDiagram
@@ -497,10 +639,10 @@ sequenceDiagram
     Note over LLS: No UserSubscription suspension — org still reads as fully valid<br/>via GET /payment/licenses/:organizationId/status
 ```
 
-**(g) Grace license itself lapses → real lockout**
+**(h) Grace license itself lapses → real lockout**
 
 Identical to flow (a) above, with the precondition that the lapsing `License.type` is already
-`'grace'` (i.e. the 24-hour window granted by flow (f) has now also elapsed). `type` is left as
+`'grace'` (i.e. the 24-hour window granted by flow (g) has now also elapsed). `type` is left as
 `'grace'` after this runs — per `ADR-0008`, this is what makes the existing idempotent
 `WHERE status = 'active'` sweep-selection naturally skip the row on any repeat run, with no
 additional guard needed.
@@ -546,10 +688,24 @@ additional guard needed.
   upgrading the same row early rather than waiting for the grace window to run out first. Not
   itself a new code path in `LicenseLapseService` — the issuance mechanism (out of scope) is
   solely responsible for this write.
-- The 24-hour grace window (flow (f)) is anchored to *detection time*, not the license's original
+- The 24-hour grace window (flow (g)) is anchored to *detection time*, not the license's original
   `expiresAt` — if the eventual lapse-detection sweep cadence is coarser than roughly an hour,
   "exactly 24 hours" cannot be honored precisely, since the window starts whenever the sweep
   happens to notice the lapse, not the instant it occurred (see `ADR-0008`'s Consequences).
+- `POST /payment/charges/:chargeId/cash/confirm` or `.../reject` called against a `Charge` whose
+  organization belongs to a different platform than the caller's own, or whose organization
+  doesn't exist at all → `403` (per `ADR-0021`), checked after the `404`-if-`chargeId`-not-found
+  check and before the `409` state-precondition check — an admin never learns whether a
+  foreign-platform charge is currently confirmable via the `409` signal, since the platform
+  check short-circuits first.
+- `auth-service` is unreachable, errors, or times out while `PlatformScopeService` is resolving
+  an `organizationId`'s `platformId` (single-target confirm/reject, or any one of the batched
+  lookups behind the pending-cash listing) → `503` in all cases (per `ADR-0021`); for the
+  listing endpoint specifically, this fails the **entire** request, never a partial/silently
+  filtered list.
+- A cash `Charge`'s organization genuinely belongs to a different platform than the listing
+  caller's own → not an error for `GET /payment/charges?method=cash&status=pending`; the row is
+  simply omitted from the response (per `ADR-0021`).
 
 ## Open questions
 
@@ -578,4 +734,14 @@ additional guard needed.
   to record why a cash request was rejected (e.g. for the submitting organization's benefit) —
   not required by `ADR-0007`, flagged as a possible follow-up.
 - Whether `GET /payment/charges?method=cash&status=pending` needs pagination once pending-cash
-  volume grows — not designed here, v1 returns an unpaginated list.
+  volume grows — not designed here, v1 returns an unpaginated list. Per `ADR-0021`, this now
+  compounds with the per-distinct-organization `auth-service` lookup cost that same endpoint's
+  platform-scope filtering adds — the two open questions are related but neither is resolved by
+  the other.
+- Whether `platformId` should eventually be denormalized onto `Charge`/`License`/
+  `UserSubscription` rows at write time, closing both the mutual `payment-service`↔`auth-service`
+  availability coupling and the pending-cash listing's batch-lookup cost in one move — `ADR-0021`
+  Option 2, deferred rather than adopted for this pass.
+- Whether the `ADR-0021` platform-scope check needs to be retrofitted onto the still-undesigned
+  gateway purchase/checkout flow or the `Charge → License`/`UserSubscription` issuance step, once
+  either is actually designed — not decided here, since neither exists yet.

@@ -1,0 +1,200 @@
+import { randomBytes, randomUUID } from 'node:crypto';
+import { ValidationPipe, type LoggerService } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { decodeJwt } from 'jose';
+import { generateSync } from 'otplib';
+import pg from 'pg';
+import request from 'supertest';
+import { inject } from 'vitest';
+import { AppModule } from '../../src/app.module.js';
+import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../../src/common/ports.js';
+import { APP_CONFIG, loadConfig, type AppConfig } from '../../src/config/app-config.js';
+import { PasswordService } from '../../src/crypto/password.js';
+import { DbService } from '../../src/db/db.service.js';
+import { PAYMENT_CLIENT, type PaymentClient } from '../../src/payment/payment-client.js';
+import { UsersService } from '../../src/users/users.service.js';
+
+export class FakeClock implements Clock {
+  constructor(private t = new Date()) {}
+  now() { return new Date(this.t); }
+  advance(ms: number) { this.t = new Date(this.t.getTime() + ms); }
+  set(d: Date) { this.t = d; }
+}
+
+export class RecordingBus implements EventBus {
+  events: Array<{ key: string; payload: any }> = [];
+  publish(key: string, payload: object) { this.events.push({ key, payload }); }
+  last(key: string) { return [...this.events].reverse().find((e) => e.key === key)?.payload; }
+  all(key: string) { return this.events.filter((e) => e.key === key).map((e) => e.payload); }
+}
+
+export class FakePayment implements PaymentClient {
+  licensed = new Set<string>();
+  down = false;
+  calls: string[] = [];
+  async isOrganizationLicensed(id: string) {
+    this.calls.push(id);
+    if (this.down) throw new Error('payment down');
+    return this.licensed.has(id);
+  }
+}
+
+export class CapturingLogger implements LoggerService {
+  lines: string[] = [];
+  private push(...a: unknown[]) { this.lines.push(a.map(String).join(' ')); }
+  log = this.push; error = this.push; warn = this.push; debug = this.push; verbose = this.push; fatal = this.push;
+}
+
+const RATE_BUCKETS = ['LOGIN_IP', 'LOGIN_IDENTIFIER', 'REGISTER_IP', 'REFRESH_IP', 'OWNER_VERIFY_OWNER', 'OWNER_VERIFY_IP', 'STEP_UP_OWNER', 'STEP_UP_IP',
+  'FACTOR_ENROLL_OWNER', 'RECOVERY_IP', 'RECOVERY_IDENTIFIER', 'OPERATOR_REQUEST_IDENTIFIER', 'OPERATOR_REQUEST_IP', 'OPERATOR_VERIFY_IDENTIFIER',
+  'OPERATOR_VERIFY_IP', 'OPERATOR_VERIFY_GLOBAL', 'OPERATOR_CONFIRM_IP'];
+
+const rand = () => randomBytes(32).toString('base64');
+
+export type TestCtx = Awaited<ReturnType<typeof createTestApp>>;
+
+/** A fully wired app against its own database cloned from the migrated template. */
+export async function createTestApp(overrides: Record<string, string> = {}) {
+  const adminUrl = inject('pgAdminUrl');
+  const dbName = `t_${randomUUID().replace(/-/g, '')}`;
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  await admin.query(`CREATE DATABASE ${dbName} TEMPLATE ${inject('pgTemplate')}`);
+  await admin.end();
+  const databaseUrl = adminUrl.replace(/\/[^/]*$/, `/${dbName}`);
+
+  const env: Record<string, string> = {
+    NODE_ENV: 'test', DATABASE_URL: databaseUrl,
+    JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(),
+    TOTP_ENCRYPTION_KEYS: `k1:${rand()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1',
+    WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
+    BCRYPT_COST: '4', ACCESS_TOKEN_TTL_SEC: '3600', RECOVERY_COOLDOWN_SEC: '3600', WORK_TIMEZONE: 'UTC',
+    ...Object.fromEntries(RATE_BUCKETS.map((b) => [`RATE_${b}_LIMIT`, '100000'])),
+    ...overrides,
+  };
+  const cfg: AppConfig = loadConfig(env as NodeJS.ProcessEnv);
+  const clock = new FakeClock();
+  const bus = new RecordingBus();
+  const payment = new FakePayment();
+  const logger = new CapturingLogger();
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(APP_CONFIG).useValue(cfg)
+    .overrideProvider(CLOCK).useValue(clock)
+    .overrideProvider(EVENT_BUS).useValue(bus)
+    .overrideProvider(PAYMENT_CLIENT).useValue(payment)
+    .setLogger(logger)
+    .compile();
+  const app = moduleRef.createNestApplication();
+  app.useLogger(logger);
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
+  await app.init();
+
+  const db = new pg.Pool({ connectionString: databaseUrl, max: 3 });
+  const http = request(app.getHttpServer());
+  const users = app.get(UsersService);
+  const passwords = app.get(PasswordService);
+  const dbs = app.get(DbService);
+
+  const ctx = {
+    app, cfg, clock, bus, payment, logger, db, http, users, dbs, env,
+    async close() {
+      await db.end();
+      await app.close();
+      const a = new pg.Client({ connectionString: adminUrl });
+      await a.connect();
+      await a.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+      await a.end();
+    },
+
+    // ------------------------------------------------------------------ fixtures
+    async world() {
+      const id = () => randomUUID();
+      const w = { companyA: id(), companyB: id(), platformSchool: id(), platformDrive: id(), platformClinic: id(), orgSchool1: id(), orgSchool2: id(), orgDrive: id(), orgClinic: id() };
+      await db.query(`INSERT INTO company(id,name) VALUES ($1,'A'),($2,'B')`, [w.companyA, w.companyB]);
+      await db.query(`INSERT INTO platform(id,"companyId",name) VALUES ($1,$4,'School'),($2,$4,'Drive'),($3,$5,'Clinic')`, [w.platformSchool, w.platformDrive, w.platformClinic, w.companyA, w.companyB]);
+      await db.query(`INSERT INTO organization(id,"platformId",name) VALUES ($1,$5,'School 1'),($2,$5,'School 2'),($3,$6,'Drive 1'),($4,$7,'Clinic 1')`, [w.orgSchool1, w.orgSchool2, w.orgDrive, w.orgClinic, w.platformSchool, w.platformDrive, w.platformClinic]);
+      return w;
+    },
+    /** a fresh company (the database allows exactly ONE owner per company) */
+    async newCompany() {
+      const id = randomUUID();
+      await db.query(`INSERT INTO company(id,name) VALUES ($1,'C')`, [id]);
+      return id;
+    },
+    async owner(companyId: string, email: string, password = 'correct horse battery') {
+      const hash = await passwords.hash(password);
+      const u = await dbs.tx((q) => users.createOwner({ companyId, email, passwordHash: hash }, q));
+      return { id: u.id, email, password, companyId };
+    },
+    async member(organizationId: string, email: string, password = 'member password 1', role = 'student') {
+      const hash = await passwords.hash(password);
+      const u = await users.createMember({ email, passwordHash: hash, role, organizationId });
+      return { id: u.id, email, password };
+    },
+    async operator(companyId: string, email: string, confirmed = true) {
+      const u = await dbs.tx((q) => users.createOperator({ companyId, email }, q));
+      if (confirmed) await db.query(`UPDATE operator SET "contactVerifiedAt"=now() WHERE "userId"=$1`, [u.id]);
+      return { id: u.id, email };
+    },
+    async assign(operatorId: string, platformId: string, ownerId: string, companyId: string) {
+      await db.query(`INSERT INTO platform_assignment("operatorId","platformId","companyId","assignedBy") VALUES ($1,$2,$3,$4)`, [operatorId, platformId, companyId, ownerId]);
+    },
+
+    // ------------------------------------------------------------------ flows
+    /** A TOTP code for a time step the service has not seen (advances the fake clock one step). */
+    nextCode(secret: string) {
+      clock.advance(31_000);
+      return generateSync({ secret, strategy: 'totp', epoch: Math.floor(clock.now().getTime() / 1000) } as any);
+    },
+    /** bootstrap path: password -> enrollment_required -> enroll TOTP -> first session. */
+    async enrollFirstTotp(o: { email: string; password: string }) {
+      const login = await http.post('/auth/login').send({ email: o.email, password: o.password }).expect(200);
+      expect(login.body.status).toBe('enrollment_required');
+      const begin = await http.post('/auth/admin/enroll/totp').send({ enrollmentToken: login.body.enrollmentToken }).expect(200);
+      const confirm = await http.post('/auth/admin/enroll/totp/confirm')
+        .send({ enrollmentToken: login.body.enrollmentToken, factorId: begin.body.factorId, code: ctx.nextCode(begin.body.secret) }).expect(200);
+      return { totpSecret: begin.body.secret as string, factorId: begin.body.factorId as string, tokens: confirm.body as Tokens };
+    },
+    /** normal owner login: password -> mfa_required -> TOTP -> session. */
+    async ownerLogin(o: { email: string; password: string }, totpSecret: string) {
+      const login = await http.post('/auth/login').send({ email: o.email, password: o.password }).expect(200);
+      expect(login.body.status).toBe('mfa_required');
+      const v = await http.post('/auth/admin/login/owner/verify').send({ challengeToken: login.body.challengeToken, method: 'totp', code: ctx.nextCode(totpSecret) }).expect(200);
+      return v.body as Tokens;
+    },
+    /** A ready owner with a TOTP factor and a live session. */
+    async readyOwner(companyId: string, email: string) {
+      const o = await ctx.owner(companyId, email);
+      const e = await ctx.enrollFirstTotp(o);
+      return { ...o, totpSecret: e.totpSecret, tokens: e.tokens };
+    },
+    async stepUp(tokens: Tokens, purpose: string, totpSecret: string, extra: Record<string, unknown> = {}) {
+      const r = await http.post('/auth/admin/step-up').set(bearer(tokens)).send({ purpose, method: 'totp', code: ctx.nextCode(totpSecret), ...extra });
+      return r;
+    },
+    async stepUpToken(tokens: Tokens, purpose: string, totpSecret: string) {
+      const r = await ctx.stepUp(tokens, purpose, totpSecret);
+      expect(r.status).toBe(200);
+      return r.body.stepUpToken as string;
+    },
+    /** Operator: request a code, read it from the notification event, redeem it. */
+    async operatorCode(email: string) {
+      const before = bus.all('admin.operator_code_issued').length;
+      await http.post('/auth/admin/login/operator/request-code').send({ email }).expect(204);
+      const evs = bus.all('admin.operator_code_issued');
+      return evs.length > before ? (evs[evs.length - 1].code as string) : undefined;
+    },
+    async operatorLogin(email: string) {
+      const code = await ctx.operatorCode(email);
+      const r = await http.post('/auth/admin/login/operator/verify-code').send({ email, code });
+      expect(r.status).toBe(200);
+      return r.body as Tokens;
+    },
+  };
+  return ctx;
+}
+
+export interface Tokens { accessToken: string; refreshToken: string; expiresIn: number }
+export const bearer = (t: Tokens | string) => ({ Authorization: `Bearer ${typeof t === 'string' ? t : t.accessToken}` });
+export const claims = (t: Tokens) => decodeJwt(t.accessToken);

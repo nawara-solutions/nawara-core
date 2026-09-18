@@ -11,6 +11,8 @@
   consequences, the same treatment already given to the Swagger/OpenAPI integration.
 - **Ticket/issue:** https://github.com/nawara-solutions/nawara-core/issues/19
 
+> **Superseded in part — read with the ADRs below.** The endpoint that needed secret-key-guess throttling, `POST /auth/admin/login/secret-key`, is removed ([ADR-0025](../adr/0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md)). Apply the same limits to `POST /auth/admin/login/owner/verify`, `POST /auth/admin/step-up` and `POST /auth/admin/recovery` (strictest).
+
 ## Problem
 
 `docs/add/auth-service.md`'s non-functional-constraints section has flagged "rate limiting is

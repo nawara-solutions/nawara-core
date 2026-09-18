@@ -1,8 +1,10 @@
-# 0017. Single owner per platform, permanently, with a CLI secret-key force-reset tool
+# 0017. Single owner per Company, permanently, with a CLI secret-key force-reset tool
 
 - **Status:** Proposed
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): The single-owner rule is now the droppable unique index `owner_single_per_company_v1`, and `secretKeyHash`/`secretKeyIssuedAt` live on the `Owner` table rather than `User` — see ADR-0024.
 
 ## Context
 
@@ -38,6 +40,26 @@ draft was never accepted (this ADR's status has stayed `Proposed` throughout), a
 repo's ADR-immutability rule (`docs/adr/README.md`) a `Proposed` ADR is rewritten in place
 rather than superseded — this revision replaces that decision rather than building on it.
 
+**This revision also re-scopes the decision itself, from platform-wide to company-wide,
+following ADR-0022.** ADR-0009's "platform's top-level administrator" framing, and every draft
+of this ADR up to this one, assumed a platform was the right unit for "single owner" to be
+scoped to — there was no other candidate unit in the schema at the time. ADR-0022 introduced a
+real `Company`/`Platform` hierarchy (a `Company` owns one or more `Platform`s) and, as part of
+that decision, stated explicitly that an owner is scoped **company-wide**, not platform-wide —
+one owner has unconditional access across every platform their company owns, with no
+per-platform assignment needed — and named this ADR, by number, as the follow-up that needed
+to be rewritten in place to reflect that. Concretely, ADR-0022 also drops `User.platformId`
+entirely (an owner's access is no longer expressed as a scalar platform claim at all) and
+reworks ADR-0016's bootstrap CLI to match: `BOOTSTRAP_OWNER_PLATFORM_ID` no longer exists as an
+env var or a concept anywhere in this design, replaced by `BOOTSTRAP_COMPANY_NAME` plus a
+globally-scoped (not per-platform) owner-existence check. This ADR's own single-owner decision,
+and the CLI tool it introduces below, are rewritten to match that reality rather than
+continuing to describe a per-platform scope that no longer exists anywhere else in this
+design. **This ADR's "single owner" decision is, from this revision forward, formally backed by
+ADR-0022's `Company`/`Platform` model — a real, queryable entity a company-wide owner is scoped
+to — rather than being this ADR's own standalone, schema-less assumption the way it was in
+every earlier draft.**
+
 Separately, and still unresolved by anything above: ADR-0010 gives an owner two signals that
 their secret key may have leaked — `admin.secret_key_login_from_new_device` (an unrecognized
 device logged in with the key) and `admin.secret_key_rotated` (the key was rotated, possibly
@@ -53,17 +75,17 @@ out-of-band lever.
 
 Concretely, two separate problems sit inside this gap:
 
-1. **Whether a platform should ever have more than one owner at all.** ADR-0009's data model
-   doesn't prohibit a second `adminTier: "owner"` row for the same `platformId`, but nothing
-   in this design was ever built assuming one exists, and the question of whether to allow one
-   has not, until now, been explicitly decided either way.
+1. **Whether a company should ever have more than one owner at all.** Nothing in this design
+   was ever built assuming more than one exists, and the question of whether to allow one has
+   not, until now, been explicitly decided either way.
 2. **An out-of-band way to invalidate a possibly-compromised secret key**, for an owner who
    still has password access and has received one of ADR-0010's alerts, that doesn't depend on
    trusting the live API the way `POST /auth/admin/secret-key/rotate` does.
 
-This ADR resolves both, without amending or superseding ADR-0009, ADR-0010, or ADR-0016 — per
-this repo's ADR-immutability rule, their text stays exactly as accepted; this ADR documents the
-resolution as new decisions layered on top.
+This ADR resolves both, without amending or superseding ADR-0009, ADR-0010, ADR-0016, or
+ADR-0022 — per this repo's ADR-immutability rule, their text stays exactly as accepted/written;
+this ADR documents the resolution as new decisions layered on top, now re-scoped to match
+ADR-0022's company-wide owner model.
 
 ## Options considered
 
@@ -74,9 +96,9 @@ resolution as new decisions layered on top.
    happens (add a second owner immediately). Rejected on reflection: it permanently grows the
    owner tier's surface area — a new endpoint group, a new hard invariant that has to be
    enforced atomically under concurrency, a new `admin.owner_registered` event, and an ongoing
-   design question of whether/when a platform should actually have more than one — for a
+   design question of whether/when a company should actually have more than one owner — for a
    capability this project has decided it does not want. The owner tier is meant to model one
-   platform's one top-level administrator; "one or more, defaulting to one" is a materially
+   company's one top-level administrator; "one or more, defaulting to one" is a materially
    different, larger model than "exactly one," and this project chooses the latter, permanently.
 2. **Do nothing beyond what ADR-0010/ADR-0016 already provide** — leave
    `POST /auth/admin/secret-key/rotate` as the only way to invalidate a secret key, and leave
@@ -86,41 +108,48 @@ resolution as new decisions layered on top.
    the scenario where an operator wants an independent, out-of-band lever — the same reasoning
    ADR-0016 already used to justify a CLI tool over an HTTP-only path for bootstrap in the first
    place (see ADR-0016's Options considered, option 3).
-3. **Strict single owner per platform, permanent, plus a narrow, ops-only CLI tool that
+3. **Strict single owner per Company, permanent, plus a narrow, ops-only CLI tool that
    force-resets only the secret key (chosen).** Keeps the owner tier exactly as simple as
-   ADR-0009 always implicitly modeled it, and adds the one piece of tooling actually motivated
-   by a concrete, named scenario (a suspected key leak, with the owner still holding their
-   password) rather than building a general-purpose multi-owner capability to indirectly cover
-   it. Deliberately does **not** attempt to solve ownership transfer or the sole-owner-lockout
-   case — both are named and accepted as open/out of scope below, not silently dropped.
+   ADR-0009 always implicitly modeled it (re-scoped company-wide per ADR-0022), and adds the one
+   piece of tooling actually motivated by a concrete, named scenario (a suspected key leak, with
+   the owner still holding their password) rather than building a general-purpose multi-owner
+   capability to indirectly cover it. Deliberately does **not** attempt to solve ownership
+   transfer or the sole-owner-lockout case — both are named and accepted as open/out of scope
+   below, not silently dropped.
 
 ## Decision
 
 We chose **Option 3**. Concretely:
 
-### Single owner per platform — permanent, not an interim state
+### Single owner per Company — permanent, not an interim state
 
-A platform has, and will only ever have, exactly one `role: 'admin' AND adminTier: 'owner'`
-row, created once via ADR-0016's `bootstrap-owner.ts`. There is no in-band way to create,
-deactivate, or replace an owner, and none is planned. Concretely, this ADR removes, from the
-design (nothing under `apps/` ever implemented any of it, so there is no code to remove):
+Per ADR-0022, a company has, and will only ever have, exactly one `role: 'admin' AND
+adminTier: 'owner'` row, created once via ADR-0016's `bootstrap-owner.ts` (as reworked by
+ADR-0022). That owner's access is unconditional and company-wide — it spans every `Platform`
+the company owns, with no per-platform scoping or assignment involved, exactly as ADR-0022's
+Decision establishes. There is no in-band way to create, deactivate, or replace an owner, and
+none is planned. Concretely, this ADR removes, from the design (nothing under `apps/` ever
+implemented any of it, so there is no code to remove):
 
 - The in-band `POST /auth/admin/owners` endpoint.
 - The `POST /auth/admin/owners/:id/deactivate` and `.../activate` endpoints.
-- The "never leave a platform with zero active owners" invariant, and the atomic-check
+- The "never leave a company with zero active owners" invariant, and the atomic-check
   requirement that existed solely to enforce it.
 - The `admin.owner_registered` event.
 
 This is not a narrowing of scope pending a future revisit — it is this ADR's central,
-deliberate decision, stated plainly: **single-owner-per-platform is now a permanent
+deliberate decision, stated plainly: **single-owner-per-Company is now a permanent
 architectural invariant**, not an unresolved question or a temporary simplification. It was
 always the implicit assumption underlying ADR-0009's "platform's top-level administrator"
-framing and ADR-0010's secret-key design; this ADR is what makes that assumption explicit and
-final, closing the open question `docs/add/auth-service.md`/`docs/sdd/auth-service.md` have
-carried since ADR-0009 by resolving it as "no ownership-transfer or second-owner mechanism will
-be built," not by building one. ADR-0016's own text needs no change: it never assumed more than
-one owner, and this ADR does not add anything for it to account for — `bootstrap-owner.ts`
-remains exactly the single, idempotent, create-only tool ADR-0016 designed.
+framing and ADR-0010's secret-key design, at a time before this schema had any notion of a
+`Company` for such an assumption to be scoped to; ADR-0022 gave that assumption a real entity to
+attach to, and this ADR is what makes the resulting invariant explicit and final, closing the
+open question `docs/add/auth-service.md`/`docs/sdd/auth-service.md` have carried since
+ADR-0009 by resolving it as "no ownership-transfer or second-owner mechanism will be built," not
+by building one. ADR-0016's own text needs no change beyond what ADR-0022 already applies to it:
+it never assumed more than one owner, and this ADR does not add anything new for it to account
+for — `bootstrap-owner.ts` remains exactly the single, idempotent, create-only tool ADR-0016
+designed, now globally- rather than platform-scoped per ADR-0022's rework.
 
 ### CLI tool: force-resetting a possibly-compromised secret key
 
@@ -132,12 +161,13 @@ access, and wants to invalidate the secret key out-of-band rather than through t
 **Naming: a new script, not a new mode on `bootstrap-owner.ts`.** This is a real design choice,
 made deliberately rather than defaulted:
 
-- `bootstrap-owner.ts` (ADR-0016) exists to answer one question: "does this platform's one
-  owner row exist yet, and if not, create it." ADR-0016 states explicitly that this command is
-  "deliberately not a credential-reset mechanism" — that was true of the command as originally
-  designed, and this ADR keeps it true, rather than reopening it. The previous draft of this
-  ADR added a second, reset-flavored mode to that same script (`BOOTSTRAP_OWNER_FORCE_RESET`);
-  this revision does not carry that mode forward at all, in any form, on `bootstrap-owner.ts`.
+- `bootstrap-owner.ts` (ADR-0016, as reworked by ADR-0022) exists to answer one question: "does
+  the company's one owner row exist yet, and if not, create it." ADR-0016 states explicitly
+  that this command is "deliberately not a credential-reset mechanism" — that was true of the
+  command as originally designed, and this ADR keeps it true, rather than reopening it. The
+  previous draft of this ADR added a second, reset-flavored mode to that same script
+  (`BOOTSTRAP_OWNER_FORCE_RESET`); this revision does not carry that mode forward at all, in any
+  form, on `bootstrap-owner.ts`.
 - The operation this ADR actually needs — replacing an *existing* owner's secret key — is
   conceptually distinct from anything `bootstrap-owner.ts` does: it never creates a `User` row,
   never touches `passwordHash`, and is triggered by an entirely different scenario (the owner
@@ -164,14 +194,31 @@ listener — resolves the same secret-key-issuing service ADR-0010 already intro
 this service's DI-resolved class is named for secret-key issuance, e.g. `SecretKeyService` per
 the SDD's class diagram) from the resulting context, and exits.
 
-- **Identification, reusing an existing env var:** `BOOTSTRAP_OWNER_PLATFORM_ID` (the same
-  variable ADR-0016 already defined, not a new one) plus a new `OWNER_SECRET_KEY_RESET_EMAIL`
-  — the owner's email. Since exactly one owner ever exists per platform (per the decision
-  above), this pair unambiguously identifies the target row: `WHERE role = 'admin' AND
-  adminTier = 'owner' AND platformId = <BOOTSTRAP_OWNER_PLATFORM_ID> AND email =
-  <OWNER_SECRET_KEY_RESET_EMAIL>`. No matching row → exit non-zero, no writes — the same
-  fail-closed posture ADR-0016 established for its own required-env-var checks, checked before
-  any database write is attempted.
+- **Identification, rekeyed on the single global owner row.** Per ADR-0022, there is no longer
+  a per-platform, or even per-company, scoping claim to key this lookup on beyond the fact that
+  exactly one `role: 'admin' AND adminTier: 'owner'` row exists globally in the entire system —
+  `BOOTSTRAP_OWNER_PLATFORM_ID` no longer exists as an env var or a concept anywhere in this
+  design (ADR-0022 dropped it along with `User.platformId` itself), and there is no equivalent
+  `BOOTSTRAP_COMPANY_ID` needed either, since a company-wide owner is already the single
+  `adminTier: 'owner'` row in the system by construction — there is nothing further to scope by.
+  This tool is rekeyed on a single required env var: **`OWNER_SECRET_KEY_RESET_EMAIL`** — the
+  owner's email, used purely as a safety confirmation, not as a scoping key. Concretely:
+  1. Look up the one existing `WHERE role = 'admin' AND adminTier = 'owner'` row, globally, with
+     no other predicate. Per ADR-0022's own decision (restated here without re-deciding it),
+     there is at most one such row in the entire system.
+  2. If no such row exists at all → exit non-zero, no writes. There is nothing to reset — this
+     tool is a reset, not a bootstrap, and never creates a `User` row (that remains
+     `bootstrap-owner.ts`'s exclusive job).
+  3. **If the row exists, its `email` column must match `OWNER_SECRET_KEY_RESET_EMAIL` exactly,
+     or the tool fails closed** — exits non-zero, no writes, with a clear error stating the
+     email did not match the existing owner's own email. This is deliberately not a lookup key
+     (the tool would find the same one row regardless of what email is supplied, since there is
+     only ever one owner globally) but a mandatory confirmation step: requiring the operator
+     invoking this tool to already know, and correctly type, the actual owner's email before a
+     highest-privilege credential is overwritten is a deliberate, cheap safeguard against
+     invoking this tool against the wrong account by mistake (e.g. a copy-pasted email from a
+     different environment's runbook) — the same fail-closed posture ADR-0016 established for
+     its own required-env-var checks, checked before any database write is attempted.
 - **Action, atomic, in one write:** generate a new, high-entropy raw secret key, hash it with
   **SHA-256, not bcrypt** — the identical reasoning ADR-0010 already gives for `secretKeyHash`:
   a secret key is a high-entropy, server-generated value, not a low-entropy, human-chosen
@@ -187,7 +234,10 @@ the SDD's class diagram) from the resulting context, and exits.
   draft of this ADR gave for its own (now-removed) force-reset mode: "the owner lost the key"
   and "an attacker has the key and is actively using it" are indistinguishable from this tool's
   point of view — both look identical from outside the account — so both are treated the same
-  way, ending every existing session rather than trying to guess which case applies.
+  way, ending every existing session rather than trying to guess which case applies. Because an
+  owner's access is company-wide (per ADR-0022), this now ends the owner's sessions across every
+  platform their company owns, not a single platform's session in isolation — a direct
+  consequence of the re-scoping this revision applies, not a new decision.
 - **Prints the new raw key exactly once**, in the command's own output, mirroring ADR-0010's
   own property for `POST /auth/admin/secret-key/rotate` field-for-field: "returns the new raw
   key exactly once, never persisted in plaintext." The plaintext key is never logged anywhere
@@ -197,8 +247,9 @@ the SDD's class diagram) from the resulting context, and exits.
   `POST /auth/admin/secret-key/rotate` already uses, not a hand-written `UPDATE` statement. This
   reuses ADR-0016's own rejection of a manual SQL runbook (its Options considered, option 1)
   for the identical reason: hashing correctly by hand in a `psql` session is not something a
-  person should do for the platform's highest-privilege credential, it silently drifts from the
-  entity's real shape as columns change over time, and it is unreviewable and untestable.
+  person should do for the highest-privilege credential in the whole system, it silently drifts
+  from the entity's real shape as columns change over time, and it is unreviewable and
+  untestable.
 - **No HTTP surface, requires direct server/deploy access, never auto-invoked** — no startup
   hook, no docker-compose entrypoint, no CI step. This is the identical trust model ADR-0016
   already accepted for `bootstrap-owner.ts`, for the identical reason ADR-0016 gave for
@@ -223,16 +274,18 @@ the SDD's class diagram) from the resulting context, and exits.
 
 ## Consequences
 
-- The owner tier stays exactly as simple as ADR-0009 originally modeled it: one owner row per
-  platform, one creation path (`bootstrap-owner.ts`), no deactivate/activate surface, no "last
+- The owner tier stays exactly as simple as ADR-0009 originally modeled it, now formally backed
+  by ADR-0022's `Company` entity rather than an unscoped assumption: one owner row for the whole
+  company, one creation path (`bootstrap-owner.ts`), no deactivate/activate surface, no "last
   owner" invariant to maintain, no `admin.owner_registered` event. Every future admin-creating
-  path in this design still only has to reason about the two invariants ADR-0009 established
-  (non-null `platformId`/`adminTier`) for exactly two rows types: the one owner and however many
-  operators — never a variable-sized owner set.
+  path in this design still only has to reason about exactly two row types: the one
+  company-wide owner and however many platform-scoped operators — never a variable-sized owner
+  set.
 - **The catastrophic sole-owner-lockout risk is reintroduced, and knowingly accepted as
-  permanent, not an oversight.** If a platform's sole owner loses **both** their password and
-  their secret key, nothing in this design can recover that platform's admin access: there is
-  no second owner to fall back on (by this ADR's own decision), and `reset-owner-secret-key.ts`
+  permanent, not an oversight — and it is now company-wide, not platform-wide, in its blast
+  radius.** If the company's sole owner loses **both** their password and their secret key,
+  nothing in this design can recover admin access to any platform the company owns: there is no
+  second owner to fall back on (by this ADR's own decision), and `reset-owner-secret-key.ts`
   only ever touches the secret key — it cannot help an owner who has also lost their password,
   since a lost password isn't something this tool, or `bootstrap-owner.ts`, is designed to
   overwrite. This is the exact scenario ADR-0016's Consequences already named — "**Open
@@ -240,13 +293,14 @@ the SDD's class diagram) from the resulting context, and exits.
   remains exactly that: unresolved. The difference is that it is no longer an open question this
   design might still close with a future second-owner mechanism; by choosing strict
   single-ownership, this ADR closes off that particular mitigation permanently and accepts the
-  resulting exposure as the cost of keeping the owner tier simple. Whether some other recovery
-  path (e.g. a manually-verified, heavily-audited out-of-band identity-proof process outside
-  this schema entirely) should exist is new, undesigned scope, not decided here.
-- Ownership transfer (a platform's owner needing to be replaced by a different person or
+  resulting exposure — now spanning every platform the company owns, per ADR-0022's company-wide
+  owner model — as the cost of keeping the owner tier simple. Whether some other recovery path
+  (e.g. a manually-verified, heavily-audited out-of-band identity-proof process outside this
+  schema entirely) should exist is new, undesigned scope, not decided here.
+- Ownership transfer (the company's owner needing to be replaced by a different person or
   account) has no designed mechanism, and this ADR does not add one. The only way to change who
-  operates a given platform's owner credentials is to have the current owner rotate/share
-  their own login, or to re-run `bootstrap-owner.ts` against a platform id that has never had an
+  operates the company's owner credentials is to have the current owner rotate/share their own
+  login, or to re-run `bootstrap-owner.ts` against a fresh environment that has never had an
   owner — neither of which is a real transfer mechanism, and none is designed here.
 - `reset-owner-secret-key.ts` closes a narrower, real gap: an owner who still has their password
   and wants to act on an ADR-0010 compromise alert now has an out-of-band lever independent of
@@ -259,7 +313,15 @@ the SDD's class diagram) from the resulting context, and exits.
   this design (`admin.secret_key_rotated` chief among them, which this tool deliberately does
   not publish). Whoever operates the deployment is trusted to keep their own external record of
   when and why this tool was invoked.
+- **This ADR's single-owner decision is now formally backed by ADR-0022's `Company`/`Platform`
+  model, not a standalone assumption.** Every earlier draft of this ADR (and ADR-0009's own
+  original framing) treated "single owner" as scoped to an unvalidated `platformId` string with
+  no real entity behind it; from this revision forward, "single owner" means "exactly one
+  `adminTier: 'owner'` row scoped to the one real `Company` row this system manages," per
+  ADR-0022's Decision. This ADR does not re-decide anything ADR-0022 already settled (whether a
+  second company should ever exist, the shape of `Platform`/`PlatformAssignment`) — it only
+  re-states its own prior "single owner" decision in terms of that now-real entity.
 - `docs/add/auth-service.md` and `docs/sdd/auth-service.md`'s open-questions entries are updated
-  in place to state single-owner-per-platform as a decided, permanent invariant — not to
-  restate it as still-open — while keeping the dual-credential-loss risk stated as an explicit,
-  accepted gap, per this Consequences section.
+  in place to state single-owner-per-Company as a decided, permanent invariant — not to
+  restate it as still-open, and not to describe it as platform-scoped — while keeping the
+  dual-credential-loss risk stated as an explicit, accepted gap, per this Consequences section.

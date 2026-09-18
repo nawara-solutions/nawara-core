@@ -12,6 +12,8 @@
   the login lookup)
 - **Ticket/issue:** https://github.com/nawara-solutions/nawara-core/issues/13
 
+> **Superseded in part — read with the ADRs below.** [ADR-0025](../adr/0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) removes the secret key as a *login* credential (`POST /auth/admin/login/secret-key` no longer exists). Owners sign in with email/phone + password + a TOTP/passkey second factor; the secret key is a step-up and recovery credential, and rotation now needs a step-up. The rotation/hashing/new-device-alert parts of this plan still apply; the login part does not.
+
 ## Problem
 
 `auth-service` is currently a bare, unmodified Nest CLI scaffold — no code exists yet. This TDD

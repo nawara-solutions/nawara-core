@@ -1,8 +1,19 @@
 # 0011. Time-boxed operator login code with business-day gating
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0023
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
+
+> **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): Issuing a new login code no longer physically deletes the previous one (it is marked `supersededAt`), and `AdminOperatorCode` now references the `Operator` subtype table — see ADR-0024. Matching, lockout and expiry behavior are unchanged.
+
+> **Superseded by [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md).**
+> Only this ADR's business-day-gating portion — the `PlatformNonWorkingDay` consultation and the
+> `isWorkingDay(platformId, date)` check as a login/session gate — is replaced, now that an
+> operator can hold assignments to multiple platforms (ADR-0022) and no single platform's
+> calendar can correctly gate their login anymore. The time-boxed login-code mechanism itself
+> (the request-code/verify-code endpoints, code hashing, the 5-attempt lockout, and the
+> not-found-before-day-check ordering) is untouched. This ADR's text is left unedited below as
+> accurate history of what was originally decided and why.
 
 ## Context
 

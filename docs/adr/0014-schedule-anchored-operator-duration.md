@@ -1,8 +1,17 @@
 # 0014. Schedule-anchored operator login-code and session duration
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0023
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
+
+> **Superseded by [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md).**
+> Only the platform-calendar-combination portion is affected: the guarantee behind
+> `getShiftEndOrFallback`'s "today's `OperatorSchedule` row is guaranteed to exist" invariant no
+> longer depends on `isOperatorAvailable` having first validated a single platform's calendar
+> (that step is removed by ADR-0023, since an operator can now hold multiple platform
+> assignments). `getShiftEndOrFallback`'s own algorithm and signature are untouched — it never
+> queried `PlatformNonWorkingDay` or took a `platformId` parameter to begin with. This ADR's text
+> is left unedited below as accurate history of what was originally decided and why.
 
 ## Context
 

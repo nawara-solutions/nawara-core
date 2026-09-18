@@ -1,8 +1,16 @@
 # 0009. Platform-scoped Admin accounts (platformId, owner/operator tiers)
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0022
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
+
+> **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): `User.adminTier` is additionally replaced by the `User.kind` discriminator with `Owner`/`Operator` subtype tables, and `role: 'admin'` becomes a reserved value — see ADR-0024.
+
+> **Superseded by [ADR-0022](./0022-company-and-platform-entities-with-operator-assignment.md).**
+> `platformId`/`adminTier` as introduced here are replaced by a real `Company`/`Platform`
+> hierarchy and a many-to-many `PlatformAssignment` table for operators; `User.platformId` is
+> dropped entirely. This ADR's text is left unedited below as accurate history of what was
+> originally decided and why.
 
 ## Context
 

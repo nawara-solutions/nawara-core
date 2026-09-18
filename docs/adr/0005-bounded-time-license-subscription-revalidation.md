@@ -1,8 +1,10 @@
 # 0005. Bounded-time license and subscription re-validation on login and refresh
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0026
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
+
+> **Superseded by [ADR-0026](./0026-authentication-is-not-entitlement.md).** `auth-service` no longer checks licenses or subscriptions on login or refresh; entitlement is enforced by platform services against `payment-service`. Text below is left as the original record.
 
 ## Context
 
