@@ -21,6 +21,10 @@ export async function bootstrapOwner(
   assertPasswordPolicy(a.password);
   const hash = await passwords.hash(a.password);
   return db.tx(async (q) => {
+    // Check-then-insert is only safe when bootstraps are serialised: otherwise two concurrent runs each
+    // see "no owner" and each create a Company + Owner (the one-owner-per-company index cannot stop two
+    // DIFFERENT companies).
+    await q.query(`SELECT pg_advisory_xact_lock(hashtextextended('auth.bootstrap_owner', 0))`);
     const existing = await q.query(`SELECT "userId" FROM owner LIMIT 1`);
     if (existing.rowCount) return { created: false };
     const company = await q.query(`SELECT id FROM company ORDER BY "createdAt" LIMIT 1`);
@@ -46,4 +50,22 @@ export async function resealTotpSecrets(db: DbService, cipher: TotpSecretCipher,
   }
   const left = await db.query(`SELECT count(*)::int n FROM owner_auth_factor WHERE type='totp' AND "secretKeyId" <> $1`, [activeKeyId]);
   return { resealed, remaining: left.rows[0].n };
+}
+
+/**
+ * Retire-a-key preflight: counts TOTP factors whose sealing key id is NOT in the key ring, i.e. factors
+ * that can no longer be opened. It must be 0 before a startup with a reduced ring (and is what makes
+ * "remove the old key" safe). Read-only; prints ids and counts only, never key material or secrets.
+ */
+export async function checkTotpKeys(db: DbService, cipher: TotpSecretCipher): Promise<{ total: number; unreadable: number; byKeyId: Record<string, number> }> {
+  const { rows } = await db.query(`SELECT "secretKeyId" AS id, count(*)::int AS n FROM owner_auth_factor WHERE type='totp' AND "revokedAt" IS NULL GROUP BY 1`);
+  let total = 0;
+  let unreadable = 0;
+  const byKeyId: Record<string, number> = {};
+  for (const r of rows) {
+    total += r.n;
+    byKeyId[r.id] = r.n;
+    if (!cipher.hasKey(r.id)) unreadable += r.n;
+  }
+  return { total, unreadable, byKeyId };
 }

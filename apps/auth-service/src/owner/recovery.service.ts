@@ -68,6 +68,9 @@ export class RecoveryService {
     const token = randomToken();
     const availableAt = new Date(now.getTime() + this.cfg.recovery.cooldownSec * 1000);
     await this.db.tx(async (q) => {
+      // One start at a time per owner: without this, two concurrent starts both cancel "nothing" and
+      // then collide on owner_recovery_one_pending (a 500). The later start supersedes the earlier one.
+      await q.query(`SELECT pg_advisory_xact_lock(hashtextextended('owner_recovery:' || $1::text, 0))`, [owner.id]);
       await q.query(`UPDATE owner_recovery_request SET status='cancelled', "resolvedAt"=$2 WHERE "ownerId"=$1 AND status='pending'`, [owner.id, now]);
       await q.query(
         `INSERT INTO owner_recovery_request("ownerId","tokenHash","requestIp","createdAt","availableAt","expiresAt") VALUES ($1,$2,$3,$4,$5,$6)`,

@@ -34,6 +34,11 @@ export class TotpSecretCipher {
     if (!active || active.length !== 32) throw new Error('active TOTP key missing or not 32 bytes');
   }
 
+  /** Is this key id present in the ring? (Used by the retire-a-key preflight; never exposes key material.) */
+  hasKey(keyId: string): boolean {
+    return this.keys.has(keyId);
+  }
+
   private aad(ownerId: string, factorId: string): Buffer {
     return Buffer.from(`nawara.totp.v1|${ownerId}|${factorId}`);
   }

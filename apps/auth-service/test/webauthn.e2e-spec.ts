@@ -1,13 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { FactorService } from '../src/owner/factor.service.js';
 import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
 import { SoftAuthenticator } from './helpers/authenticator.js';
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const RP = 'auth.test';
 const ORIGIN = 'https://auth.test';
 
 describe('WebAuthn / passkeys: real protocol verification', () => {
   let t: TestCtx;
-  beforeAll(async () => { t = await createTestApp(); });
+  beforeAll(async () => { t = await createTestApp(); await t.app.listen(0); }); // listen once: parallel supertest bursts otherwise ECONNRESET
   afterAll(() => t.close());
 
   /** owner enrolled with a passkey (bootstrap path) */
@@ -89,6 +91,38 @@ describe('WebAuthn / passkeys: real protocol verification', () => {
       expect((await verify(c.challengeToken, a)).status).toBe(200);
       expect((await verify(c.challengeToken, a)).status).toBe(401);
     });
+  });
+
+  it('an EXPIRED login challenge cannot be satisfied, even with a perfectly valid assertion', async () => {
+    const o = await passkeyOwner();
+    const c = await challenge(o);
+    t.clock.advance(3600 * 1000); // past the challenge lifetime
+    const r = await verify(c.challengeToken, o.auth.assert(c.options));
+    expect(r.status).toBe(401);
+    expect(r.body).not.toHaveProperty('accessToken');
+  });
+
+  it('two assertions with the SAME counter verified in overlapping transactions: exactly one is accepted (forced interleaving)', async () => {
+    const o = await passkeyOwner();
+    const factors = t.app.get(FactorService);
+    const c1 = await challenge(o);
+    const c2 = await challenge(o);
+    // a cloned authenticator answering two different challenges with the same counter value
+    const a1 = o.auth.assert(c1.options, { counter: 9 });
+    const a2 = o.auth.assert(c2.options, { counter: 9 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    // T1 verifies and stays OPEN (its counter update is uncommitted) ...
+    const t1 = t.dbs.tx(async (q) => { const r = await factors.verifyWebauthn(q, o.id, a1, c1.options.challenge); await gate; return r; });
+    await sleep(300);
+    // ... while T2 verifies the twin assertion against the STALE stored counter.
+    const t2 = t.dbs.tx((q) => factors.verifyWebauthn(q, o.id, a2, c2.options.challenge));
+    await sleep(500);
+    release();
+    const [r1, r2] = await Promise.all([t1, t2]);
+    expect([r1, r2].filter((r) => r !== null)).toHaveLength(1);
+    const f = await t.db.query(`SELECT "revokedAt", "signCount" FROM owner_auth_factor WHERE "ownerId"=$1`, [o.id]);
+    expect(f.rows[0].revokedAt).not.toBeNull(); // the clone signal revoked the passkey
   });
 
   it('a non-advancing signature counter is treated as a possible clone: rejected, the passkey revoked and audited, and a password cannot re-enroll', async () => {
