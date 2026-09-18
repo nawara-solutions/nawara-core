@@ -79,6 +79,8 @@ export interface AppConfig {
   };
   rate: Record<RateBucket, RateRule>;
   payment: { baseUrl: string; serviceToken: string; timeoutMs: number };
+  /** Swagger UI at /auth/docs. Served only when a password is set (fail closed), behind basic auth. */
+  docs: { username: string; password: string | undefined };
 }
 
 const MAX_STEP_UP_SEC = 900; // mirrors the owner_step_up CHECK (15 minutes)
@@ -167,6 +169,11 @@ export function loadConfig(
     throw new ConfigError('PAYMENT_SERVICE_TOKEN (>= 32 chars) is required in production');
   }
 
+  const docsPassword = src.get('SWAGGER_PASSWORD');
+  if (docsPassword !== undefined && docsPassword.length < 16) {
+    throw new ConfigError('SWAGGER_PASSWORD must be at least 16 characters');
+  }
+
   return {
     env: nodeEnv,
     databaseUrl,
@@ -227,6 +234,7 @@ export function loadConfig(
       serviceToken: payToken,
       timeoutMs: int(env, 'PAYMENT_TIMEOUT_MS', 3000, 100, 30_000),
     },
+    docs: { username: env.SWAGGER_USERNAME || 'docs', password: docsPassword },
   };
 }
 

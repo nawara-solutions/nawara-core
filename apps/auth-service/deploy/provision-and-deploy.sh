@@ -99,6 +99,9 @@ ensure "$APP_ENV" PAYMENT_SERVICE_URL "${PAYMENT_SERVICE_URL:-http://nawara-core
 ensure "$APP_ENV" TRUST_PROXY true
 ensure "$APP_ENV" AUTH_EVENTS off
 ensure "$APP_ENV" WORK_TIMEZONE Africa/Tunis
+# Swagger UI at /auth/docs (basic auth). Read the password on the server:  grep ^SWAGGER_ "$APP_ENV"
+ensure "$APP_ENV" SWAGGER_USERNAME docs
+ensure "$APP_ENV" SWAGGER_PASSWORD "$(openssl rand -hex 24)"
 
 # ---------------------------------------------------------------- application container
 PREV=""

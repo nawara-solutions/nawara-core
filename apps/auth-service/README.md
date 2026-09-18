@@ -7,7 +7,9 @@ It does **not** own licenses/subscriptions/billing (payment-service) or business
 - Design: `docs/sdd/auth-service.md`, ADR-0024…0027. Security review and route matrix:
   `docs/security/auth-service-security-review.md`.
 - Schema of record: `db/migrations/*.sql` (applied in order; each has a documented rollback in `db/migrations/down/`).
-- API docs: `GET /docs` (OpenAPI). **Disable or protect it in production.**
+- API docs: `GET /auth/docs` (Swagger UI) and `/auth/docs-json`, behind HTTP basic auth. Mounted only when
+  `SWAGGER_PASSWORD` (>= 16 chars) is set; `SWAGGER_USERNAME` defaults to `docs`. Under `/auth` so it is
+  reachable through the path-routed gateway.
 
 ## Run
 
