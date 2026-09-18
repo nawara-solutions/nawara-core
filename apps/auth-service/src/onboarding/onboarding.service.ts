@@ -99,6 +99,7 @@ export class OnboardingService {
       audience: c.audience,
       requiresSubscription: c.requiresSubscription,
       requiresOrganizationApproval: c.requiresApproval,
+      requiresVerification: this.cfg.onboarding.requireContactVerification,
     };
   }
 

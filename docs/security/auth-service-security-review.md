@@ -131,7 +131,9 @@ Classes: **public** · **public + challenge** (opaque single-use token) · **mem
 | `POST /auth/contact/request-code`, `/verify` | member | `contact_request_user`, `contact_verify_user`, `contact_verify_ip` | gates access only when `REQUIRE_CONTACT_VERIFICATION=true` |
 | `GET/POST /auth/organizations/:id/join-codes`, `.../:codeId/revoke` | owner (step-up) \| operator \| org admin | `join_code_manage_actor` | plaintext returned once |
 | `GET /auth/organizations/:id/memberships`, `POST .../:mid/approve\|reject` | owner \| operator \| org admin | `membership_op_actor` | one transaction, conditional UPDATE; nobody decides their own |
-| `POST/DELETE /auth/organizations/:id/memberships/:mid/admin` | owner + step-up (factor only) | `membership_op_actor` | org admins cannot mint admins |
+| `POST/DELETE /auth/organizations/:id/memberships/:mid/admin` | owner + step-up (factor only) | `membership_op_actor` | org admins cannot use THIS route to mint admins (they can invite one via an invitation, see below) |
+| `POST /auth/onboarding/invitations/resolve`, `.../accept` | public | `invitation_resolve_ip`, `invitation_resolve_global`, `invitation_accept_ip` | one generic 404/403; accept is single-use and atomic; no license asked |
+| `POST/GET /auth/organizations/:id/admin-invitations`, `.../:invId/revoke` | owner (step-up, factor only) \| org admin; operators refused | `invitation_manage_actor` | plaintext returned once; server computes expiry |
 | `POST /auth/admin/login/owner/webauthn-options` | public + challenge | `owner_verify_ip`, `owner_verify_owner` | |
 | `POST /auth/admin/login/owner/verify` | public + challenge | same | TOTP/passkey; 5 attempts kill the challenge |
 | `POST /auth/admin/enroll/{totp,totp/confirm,webauthn/options,webauthn}` | enrollment token | `factor_enroll_owner` | only for never-enrolled or recovery-issued; single use |
@@ -200,3 +202,16 @@ Defaults are conservative starting points, not measured values: login 60/15 min 
 - **Open:** verification codes and approval notices have no delivery channel (event only), so
   `REQUIRE_CONTACT_VERIFICATION` must stay off in production; teacher approval does not re-check the
   organization license (contract undecided).
+
+## M. Addendum: admin invitations (2026-09-18, ADR-0029)
+
+- **New attack surface and controls.** Privilege provisioning by guessing (60-bit random code, per-IP and global
+  throttles, one generic answer), replay and races (single conditional UPDATE plus a database trigger; 8
+  simultaneous acceptances give exactly one account), wrong-person interception (optional HMAC contact binding, a
+  mismatch does not consume it), long-lived credential (server-computed expiry inside a configured 15 min to 7 day
+  range, DB 30-day backstop), credential confusion (own table and HMAC domain; a join code is not an invitation and
+  the reverse), reserved-role abuse (`admin` refused), session confusion (invitation lifetime is independent of the
+  session).
+- **Residual risks.** An organization admin can mint further admins on their session alone (no member step-up
+  exists); delivery of the code is out of band and unbuilt; recovery policy for an organization with no admin is
+  undefined; acceptance asks no license (deliberate, ADR-0029).

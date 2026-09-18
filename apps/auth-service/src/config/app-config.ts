@@ -55,7 +55,11 @@ export type RateBucket =
   | 'membership_op_actor'
   | 'contact_request_user'
   | 'contact_verify_user'
-  | 'contact_verify_ip';
+  | 'contact_verify_ip'
+  | 'invitation_resolve_ip'
+  | 'invitation_resolve_global'
+  | 'invitation_accept_ip'
+  | 'invitation_manage_actor';
 
 export interface AppConfig {
   env: 'development' | 'test' | 'production';
@@ -92,6 +96,8 @@ export interface AppConfig {
     /** When true, organization access also requires a verified e-mail/phone. Off until a delivery channel exists. */
     requireContactVerification: boolean;
     contactCodeTtlSec: number;
+    /** Admin-invitation lifetime bounds in MINUTES. The client only ever asks for a duration inside this range. */
+    invitation: { minMinutes: number; defaultMinutes: number; maxMinutes: number };
   };
   /** Swagger UI at /auth/docs. Served only when a password is set (fail closed), behind basic auth. */
   docs: { username: string; password: string | undefined };
@@ -184,6 +190,15 @@ export function loadConfig(
     throw new ConfigError('PAYMENT_SERVICE_TOKEN (>= 32 chars) is required in production');
   }
 
+  const invitation = {
+    minMinutes: int(env, 'INVITATION_MIN_MINUTES', 15, 1, 1440),
+    defaultMinutes: int(env, 'INVITATION_DEFAULT_MINUTES', 1440, 1, 43_200),
+    maxMinutes: int(env, 'INVITATION_MAX_MINUTES', 10_080, 1, 43_200), // hard ceiling 30 days = the database CHECK
+  };
+  if (!(invitation.minMinutes <= invitation.defaultMinutes && invitation.defaultMinutes <= invitation.maxMinutes)) {
+    throw new ConfigError('INVITATION_MIN_MINUTES <= INVITATION_DEFAULT_MINUTES <= INVITATION_MAX_MINUTES must hold');
+  }
+
   const docsPassword = src.get('SWAGGER_PASSWORD');
   if (docsPassword !== undefined && docsPassword.length < 16) {
     throw new ConfigError('SWAGGER_PASSWORD must be at least 16 characters');
@@ -252,6 +267,11 @@ export function loadConfig(
       contact_request_user: rule(env, 'CONTACT_REQUEST_USER', 5, 3600),
       contact_verify_user: rule(env, 'CONTACT_VERIFY_USER', 10, 900),
       contact_verify_ip: rule(env, 'CONTACT_VERIFY_IP', 40, 900),
+      // Admin invitations grant a privileged capability: resolution/acceptance are throttled harder than join codes.
+      invitation_resolve_ip: rule(env, 'INVITATION_RESOLVE_IP', 15, 900),
+      invitation_resolve_global: rule(env, 'INVITATION_RESOLVE_GLOBAL', 500, 60),
+      invitation_accept_ip: rule(env, 'INVITATION_ACCEPT_IP', 10, 900),
+      invitation_manage_actor: rule(env, 'INVITATION_MANAGE_ACTOR', 20, 3600),
     },
     payment: {
       baseUrl: env.PAYMENT_SERVICE_URL ?? '',
@@ -261,6 +281,7 @@ export function loadConfig(
     onboarding: {
       requireContactVerification: env.REQUIRE_CONTACT_VERIFICATION === 'true',
       contactCodeTtlSec: int(env, 'CONTACT_CODE_TTL_SEC', 900, 60, 3600),
+      invitation: invitation,
     },
     docs: { username: env.SWAGGER_USERNAME || 'docs', password: docsPassword },
   };

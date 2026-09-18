@@ -44,3 +44,30 @@ export function normalizeJoinCode(input: string): string | null {
 }
 
 export const hashJoinCode = (pepper: Buffer, normalized: string): string => hmacHex(pepper, 'join_code', normalized);
+
+// ---------------------------------------------------------------------------------------------
+// Admin invitations (ADR-0029): a DIFFERENT credential from a join code. Longer (12 characters, 60 bits),
+// single use, and hashed under its own HMAC domain label, so a join code can never match an invitation
+// row (or the other way round) even if the two values were somehow equal.
+// ---------------------------------------------------------------------------------------------
+const INVITATION_LEN = 12;
+
+export function generateInvitationCode(): GeneratedJoinCode {
+  let normalized = '';
+  for (let i = 0; i < INVITATION_LEN; i++) normalized += ALPHABET[randomInt(0, ALPHABET.length)];
+  return { display: `${normalized.slice(0, 4)}-${normalized.slice(4, 8)}-${normalized.slice(8)}`, normalized };
+}
+
+/** Canonical 12-character form of user input, or null. Case, spaces, hyphens and look-alikes are folded. */
+export function normalizeInvitationCode(input: string): string | null {
+  if (typeof input !== 'string' || input.length > 64) return null;
+  const cleaned = input.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  if (!/^[0-9A-Z]+$/.test(cleaned) || cleaned.length < INVITATION_LEN) return null;
+  const tail = cleaned.slice(-INVITATION_LEN);
+  return /^[0-9A-HJKMNP-TV-Z]{12}$/.test(tail) ? tail : null;
+}
+
+export const hashInvitationCode = (pepper: Buffer, normalized: string): string => hmacHex(pepper, 'admin_invitation', normalized);
+
+/** Optional binding of an invitation to the intended person: an HMAC, so no e-mail/phone is stored. */
+export const hashInviteeContact = (pepper: Buffer, normalizedContact: string): string => hmacHex(pepper, 'invitee_contact', normalizedContact);

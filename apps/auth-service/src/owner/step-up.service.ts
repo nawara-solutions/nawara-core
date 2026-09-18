@@ -33,6 +33,9 @@ export const STEP_UP_METHODS = {
   // Minting an organization administrator is a privilege grant: factor only, never the bare key.
   'organization.admin.grant': ['totp', 'webauthn'],
   'organization.admin.revoke': ['totp', 'webauthn'],
+  // Minting or revoking an administrator invitation is a privilege grant: factor only, never the bare key.
+  'admin_invitation.create': ['totp', 'webauthn'],
+  'admin_invitation.revoke': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
