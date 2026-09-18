@@ -114,8 +114,9 @@ Everything else is one collapsed 404. Approve/reject is one transaction (row loc
 `UPDATE ... WHERE status='pending'`), so simultaneous decisions leave exactly one winner and a 409 for the
 loser; nobody decides their own membership. Owners need a step-up for two groups of actions. Creating or revoking
 join codes accepts a TOTP, a passkey or the secret key. Granting or revoking the org-admin flag is a privilege
-grant and accepts a factor only (TOTP or passkey), never the bare secret key. An org admin cannot mint other
-admins. Operators and org admins have no step-up mechanism and act on their session alone. The flag can only sit on an active membership (database CHECK).
+grant and accepts a factor only (TOTP or passkey), never the bare secret key. An org admin cannot use the **flag grant/revoke route** to mint other
+admins (ADR-0029 later lets an org admin invite one through a separate, single-use invitation: see there).
+Operators and org admins have no step-up mechanism and act on their session alone. The flag can only sit on an active membership (database CHECK).
 
 ### Contact verification
 `member_contact_verification` mirrors operator codes (6-digit CSPRNG code, HMAC-stored, 5 attempts, one live
@@ -171,6 +172,6 @@ change) over a separate publish, so a crash cannot lose an approval notice. Not 
    on the code?
 5. **Membership revocation and suspension** (removing a teacher) and **multiple organizations per user**:
    deliberately out of scope; the state machine and the one-organization key are the two places to extend.
-6. **First organization administrator:** bootstrapped by an Owner approving the registration of the intended
-   person (through any code whose `requiresApproval` is true, e.g. a `manager` audience) and then granting the
-   flag; no self-service path exists.
+6. **First organization administrator:** resolved by [ADR-0029](./0029-organization-admin-invitations.md): an Owner
+   creates the first admin invitation (with a factor step-up). Before it, the only path was an Owner approving a
+   registration and then granting the flag.

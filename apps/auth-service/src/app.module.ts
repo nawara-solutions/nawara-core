@@ -19,6 +19,7 @@ import { HealthController } from './health/health.controller.js';
 import { OrganizationController } from './membership/organization.controller.js';
 import { MembershipService } from './membership/membership.service.js';
 import { ContactVerificationService } from './onboarding/contact-verification.service.js';
+import { InvitationService } from './onboarding/invitation.service.js';
 import { OnboardingController } from './onboarding/onboarding.controller.js';
 import { OnboardingService } from './onboarding/onboarding.service.js';
 import { OperatorAvailabilityService } from './operator/availability.service.js';
@@ -72,7 +73,7 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,
     OperatorAvailabilityService, OperatorCodeService, OperatorAdminService,
-    PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, MembershipService, AuthService, AuthGuard,
+    PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, AuthGuard,
   ],
 })
 export class AppModule {}

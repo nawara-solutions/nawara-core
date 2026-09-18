@@ -705,6 +705,81 @@ SELECT pg_temp.expect_ok('PK', 'a platform key', format($$UPDATE platform SET ke
 SELECT pg_temp.expect_error('PK', 'a platform key is unique', format($$UPDATE platform SET key='nawara-drive' WHERE id=%L$$, :pDrive), '23505');
 SELECT pg_temp.expect_error('PK', 'a platform key is a lowercase slug', format($$UPDATE platform SET key='Nawara Drive!' WHERE id=%L$$, :pDrive), '23514');
 
+
+-- ------------------------------------------------ 0005: organization admin invitations (INV) ----
+INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy","createdAt")
+VALUES (:orgA, :pSchool, repeat('1',64), 'org_admin', now() + interval '1 day', :'owner1', now()) RETURNING id AS inv1 \gset
+INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy","createdAt")
+VALUES (:orgA, :pSchool, repeat('2',64), 'org_admin', now() + interval '1 day', :'owner1', now()) RETURNING id AS inv2 \gset
+INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy","createdAt")
+VALUES (:orgA, :pSchool, repeat('3',64), 'org_admin', now() + interval '1 day', :'owner1', now()) RETURNING id AS inv3 \gset
+
+-- composite FK: an invitation can never cross platform or company
+SELECT pg_temp.expect_error('INV', 'Organization A + Platform B (wrong platform) is refused',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'org_admin',now()+interval '1 day',%L)$$, :orgA, :pDrive, :'owner1'), '23503');
+SELECT pg_temp.expect_error('INV', 'an organization of ANOTHER company + this company''s platform is refused',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'org_admin',now()+interval '1 day',%L)$$, :orgE, :pSchool, :'owner1'), '23503');
+SELECT pg_temp.expect_error('INV', 'the creator must be a real user',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'org_admin',now()+interval '1 day',gen_random_uuid())$$, :orgA, :pSchool), '23503');
+
+-- shape, label, lifetime
+SELECT pg_temp.expect_error('INV', 'only a 64-hex HMAC is storable (never a plaintext code)',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,'ABCD-EFGH-JKMN','org_admin',now()+interval '1 day',%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('INV', 'the reserved label "admin" is refused',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'admin',now()+interval '1 day',%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('INV', 'the invitation type is a controlled label shape',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'Bad Label!',now()+interval '1 day',%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('INV', 'a contact binding is an HMAC, never a plaintext e-mail',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","inviteeContactHash","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'org_admin','a@b.test',now()+interval '1 day',%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('INV', 'an expiry in the past is refused',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('a',64),'org_admin',now() - interval '1 hour',%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('INV', 'a lifetime beyond 30 days is refused (hard backstop; the service enforces the tighter range)',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy","createdAt") VALUES (%L,%L,repeat('a',64),'org_admin',now() + interval '31 days',%L, now())$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_ok('INV', 'a lifetime of exactly 30 days is the ceiling',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy","createdAt") VALUES (%L,%L,repeat('9',64),'org_admin', timestamptz '2030-01-31 00:00+00', %L, timestamptz '2030-01-01 00:00+00')$$, :orgA, :pSchool, :'owner1'));
+SELECT pg_temp.expect_error('INV', 'the code hash is unique',
+  format($$INSERT INTO organization_admin_invitation ("organizationId","platformId","codeHash","invitationType","expiresAt","createdBy") VALUES (%L,%L,repeat('1',64),'org_admin',now()+interval '1 day',%L)$$, :orgA, :pSchool, :'owner1'), '23505');
+
+-- single use and consistency
+SELECT pg_temp.expect_error('INV', 'consumedAt without consumedBy is refused',
+  format($$UPDATE organization_admin_invitation SET "consumedAt"=now() WHERE id=%L$$, :'inv2'), '23514');
+SELECT pg_temp.expect_error('INV', 'revokedAt without revokedBy is refused',
+  format($$UPDATE organization_admin_invitation SET "revokedAt"=now() WHERE id=%L$$, :'inv3'), '23514');
+SELECT pg_temp.expect_error('INV', 'an invitation can never be both consumed and revoked',
+  format($$UPDATE organization_admin_invitation SET "consumedAt"=now(), "consumedBy"=%L, "revokedAt"=now(), "revokedBy"=%L WHERE id=%L$$, :'user1', :'owner1', :'inv2'), '23514');
+SELECT pg_temp.expect_error('INV', 'an invitation can never be consumed after it expired',
+  format($$UPDATE organization_admin_invitation SET "consumedAt"="expiresAt" + interval '1 hour', "consumedBy"=%L WHERE id=%L$$, :'user1', :'inv2'), '23514');
+SELECT pg_temp.expect_ok('INV', 'a live invitation can be consumed once',
+  format($$UPDATE organization_admin_invitation SET "consumedAt"=now(), "consumedBy"=%L WHERE id=%L$$, :'user1', :'inv2'));
+SELECT pg_temp.expect_error('INV', 'a second consumption (another user) is refused: single use',
+  format($$UPDATE organization_admin_invitation SET "consumedBy"=%L WHERE id=%L$$, :'user2', :'inv2'), '23514');
+SELECT pg_temp.expect_error('INV', 'a consumed invitation cannot be un-consumed',
+  format($$UPDATE organization_admin_invitation SET "consumedAt"=NULL, "consumedBy"=NULL WHERE id=%L$$, :'inv2'), '23514');
+SELECT pg_temp.expect_ok('INV', 'an unused invitation can be revoked',
+  format($$UPDATE organization_admin_invitation SET "revokedAt"=now(), "revokedBy"=%L, "consumedAt"=NULL WHERE id=%L$$, :'owner1', :'inv3'));
+SELECT pg_temp.expect_error('INV', 'a revoked invitation can never be revived',
+  format($$UPDATE organization_admin_invitation SET "revokedAt"=NULL, "revokedBy"=NULL WHERE id=%L$$, :'inv3'), '23514');
+
+-- immutability, no delete
+SELECT pg_temp.expect_error('INV', 'the expiry is immutable', format($$UPDATE organization_admin_invitation SET "expiresAt"="expiresAt" + interval '1 hour' WHERE id=%L$$, :'inv1'), '23514');
+SELECT pg_temp.expect_error('INV', 'the invitation type is immutable', format($$UPDATE organization_admin_invitation SET "invitationType"='manager' WHERE id=%L$$, :'inv1'), '23514');
+SELECT pg_temp.expect_error('INV', 'the code hash is immutable', format($$UPDATE organization_admin_invitation SET "codeHash"=repeat('e',64) WHERE id=%L$$, :'inv1'), '23514');
+SELECT pg_temp.expect_error('INV', 'the target organization is immutable', format($$UPDATE organization_admin_invitation SET "organizationId"=%L WHERE id=%L$$, :orgB, :'inv1'), '23514');
+SELECT pg_temp.expect_error('INV', 'the contact binding cannot be added later', format($$UPDATE organization_admin_invitation SET "inviteeContactHash"=repeat('f',64) WHERE id=%L$$, :'inv1'), '23514');
+SELECT pg_temp.expect_error('INV', 'invitations are never deleted (revoke instead)', format($$DELETE FROM organization_admin_invitation WHERE id=%L$$, :'inv1'), '23514');
+
+-- membership provenance
+SELECT pg_temp.expect_error('INV', 'an invitation-admitted membership must be in the invitation''s own organization',
+  format($$INSERT INTO organization_membership ("userId","organizationId","status","invitationId","approvedAt") VALUES (%L,%L,'active',%L,now())$$, :'user4', :orgB, :'inv1'), '23503');
+SELECT pg_temp.expect_error('INV', 'a membership is admitted by a join code OR an invitation, never both',
+  format($$INSERT INTO organization_membership ("userId","organizationId","status","joinCodeId","invitationId","approvedAt") VALUES (%L,%L,'active',%L,%L,now())$$, :'mfree', :orgA, :'jca', :'inv1'), '23514');
+SELECT pg_temp.expect_ok('INV', 'a membership admitted by an invitation, carrying the management capability',
+  format($$INSERT INTO organization_membership ("userId","organizationId","status","invitationId","approvedAt","isOrganizationAdmin") VALUES (%L,%L,'active',%L,now(),true)$$, :'mfree', :orgA, :'inv1'));
+SELECT pg_temp.expect_error('INV', 'the membership provenance is immutable',
+  format($$UPDATE organization_membership SET "invitationId"=NULL WHERE "userId"=%L$$, :'mfree'), '23514');
+SELECT pg_temp.expect_error('INV', 'the existing membership guard still forbids illegal transitions',
+  format($$UPDATE organization_membership SET status='pending', "approvedAt"=NULL, "isOrganizationAdmin"=false WHERE "userId"=%L$$, :'mfree'), '23514');
+
 \o
 
 -- ---------------------------------------------------------------------------- verdict ----

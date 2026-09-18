@@ -36,6 +36,11 @@ membership grants organization access, evaluated from current rows on every requ
   step-up for codes and admin grants. See `docs/adr/0028-*`.
 - `JOIN_CODE_PEPPER` is required (generate it like the other secrets). `REQUIRE_CONTACT_VERIFICATION` defaults to
   `false` and must stay off until a channel delivers verification codes (events are published, nothing delivers them).
+- **Administrator invitations** (ADR-0029) provision privileged people: an Owner (factor step-up) or an existing
+  organization admin creates a single-use, revocable invitation (duration chosen by the admin within a server-enforced
+  range, default 24 h, 15 min to 7 days; `INVITATION_*_MINUTES`), delivered out of band; `POST
+  /auth/onboarding/invitations/accept` creates the account with the organization-management capability. The invitation
+  is not a join code, a license or a session. First administrator: an Owner creates the first invitation.
 - Payment stays the source of truth for subscriptions and licenses; `requiresSubscription` is only a hint for the app.
 
 ## Operations

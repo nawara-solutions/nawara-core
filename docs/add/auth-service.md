@@ -924,6 +924,17 @@ The client-to-auth-service contract for joining an organization changed; the ser
   generic 403. Auth stores no subscription or license state; `requiresSubscription` is only a hint to the app.
   Missing contracts (student checkout entry point, teacher-approval license re-check) are open questions in
   ADR-0028, not invented here.
+- **Admin invitations (ADR-0029).** `POST/GET /auth/organizations/:id/admin-invitations` and `.../:invId/revoke`
+  (owner with step-up, or organization admin); `POST /auth/onboarding/invitations/resolve|accept` (public, rate
+  limited). The administrator's business role is the platform's concern: Auth carries only an opaque label and the
+  generic organization-management capability. Create/revoke need an `x-step-up-token` header when the caller is an
+  Owner (purposes `admin_invitation.create|revoke`, factor only); operators are refused. Status codes: create 201 /
+  400 (duration outside the configured range, reserved or malformed type) / 404 (not authorized or not yours);
+  resolve 200 / 404 (any invalid reason, one answer) / 429; accept 201 / 403 (any refusal, one answer) / 409
+  (contact already registered; the invitation is not consumed); revoke 204 / 404 (unknown, already used or revoked).
+  `accept` publishes `user.registered` and `membership.admin_provisioned` (`{ userId, organizationId,
+  invitationType, timestamp }`); like the other new events these are **not delivered yet**, and no event carries
+  the code.
 - **New async events** (published on the existing bus; **nothing delivers them yet**, and a transactional outbox
   is the recommended delivery design once a broker exists): `membership.requested`
   `{ userId, organizationId, audience, timestamp }`, `membership.approved` and `membership.rejected`

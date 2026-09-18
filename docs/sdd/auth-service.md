@@ -3317,10 +3317,11 @@ spec.
   rate-limiting gap as the rest of `auth-service`'s Bearer-authenticated surfaces (per
   ADR-0012's precedent) — only the global baseline covers it so far.
 
-## Organization onboarding: join codes, membership, organization admins (ADR-0028)
+## Organization onboarding: join codes, membership, organization admins, admin invitations (ADR-0028, ADR-0029)
 
-Implemented by migration `0004`. The decisions and their alternatives are in
-[ADR-0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md); this section is the
+Implemented by migrations `0004` and `0005`. The decisions and their alternatives are in
+[ADR-0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md) and
+[ADR-0029](../adr/0029-organization-admin-invitations.md); this section is the
 implementation view.
 
 **Ownership.** Auth owns identity, authentication, membership and organization access state. payment-service
@@ -3329,7 +3330,8 @@ business roles (student, teacher, instructor, manager). `User.kind` stays `membe
 
 **Data.** `organization_join_code` (HMAC of the code, audience label, `requiresApproval`,
 `requiresSubscription`, expiry, `maxUses`/`usedCount`, revocation), `organization_membership`
-(`pending | active | rejected`, decision actors, `isOrganizationAdmin`), `member_contact_verification`,
+(`pending | active | rejected`, decision actors, `isOrganizationAdmin`, `invitationId` provenance),
+`organization_admin_invitation` (0005), `member_contact_verification`,
 `platform.key`, `"user"."contactVerifiedAt"`. Integrity is in the database: composite FK
 `(organizationId, platformId)` on the code, composite FK `(userId, organizationId)` on the membership,
 `UNIQUE (userId, organizationId)`, status CHECKs, and triggers for the status machine and immutability.
@@ -3349,7 +3351,24 @@ membership (and, when `REQUIRE_CONTACT_VERIFICATION=true`, a verified contact).
 **Registration transaction.** One conditional `UPDATE` spends a use of the code (never above `maxUses`), the
 user and membership are created, audit rows are written; any failure rolls the use back.
 
-**Rate limits and audit.** See ADR-0028. Join codes are never stored, logged or audited in plaintext.
+**Rate limits and audit.** See ADR-0028 and ADR-0029. Buckets added by 0004/0005: `join_code_resolve_ip|global`,
+`join_code_manage_actor`, `membership_op_actor`, `contact_request_user`, `contact_verify_user|ip`,
+`invitation_resolve_ip|global`, `invitation_accept_ip`, `invitation_manage_actor`. Step-up purposes added:
+`join_code.create|revoke`, `organization.admin.grant|revoke`, `admin_invitation.create|revoke` (the last four are
+factor-only). Audit events: `onboarding.join_code.*`, `onboarding.admin_invitation.created|resolved|resolve_failed|
+consumed|revoked`, `membership.*`, `organization.admin.*`, `member.contact.*`. Codes are never stored, logged or
+audited in plaintext.
+
+**Admin invitations (ADR-0029, migration `0005`).** A separate credential from a join code for privileged
+provisioning: `organization_admin_invitation` (12-character HMAC-stored code, opaque `invitationType` label,
+optional contact binding stored as an HMAC, server-computed `expiresAt` from an admin-chosen duration within a
+configured range (default 24 h, 15 min to 7 days), single use, revocable, never deleted). An Owner (fresh factor
+step-up) or an existing organization admin creates it; `POST /auth/onboarding/invitations/resolve` and `.../accept`
+are public and rate limited. Accepting creates a `kind=member`, an ACTIVE membership with the
+organization-management capability and `invitationId` provenance, and a normal session; the invitation is then
+dead and its lifetime is unrelated to the session. No license is asked at acceptance (an organization needs a member
+before it can pay, ADR-0007). The literal `admin` label stays reserved. First administrator: an Owner creates the
+first invitation.
 
 **Not built (documented, not guessed).** Delivery of verification codes and approval notices (event only),
 the outbox, teacher-approval license re-check, membership revocation/suspension, multiple organizations per

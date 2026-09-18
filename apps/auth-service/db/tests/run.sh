@@ -107,3 +107,22 @@ echo "PASS: M5 backfill gives every existing member an active membership; rollba
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO organization_join_code(\"organizationId\",\"platformId\",\"codeHash\",audience,\"requiresApproval\",\"requiresSubscription\",\"createdBy\") SELECT '00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001',repeat('a',64),'student',false,true,id FROM \"user\" LIMIT 1"
 if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0004_organization_join_codes_and_membership.down.sql" >/dev/null 2>&1; then fail "M5: rollback must refuse when join codes exist"; fi
 echo "PASS: M6 rollback refuses to destroy join codes"
+
+echo "== M7: migration 0005 applies on a database with data; rollback refuses to destroy invitations =="
+db="$(newdb mig5)"
+for f in "$mig"/0001_*.sql "$mig"/0002_*.sql "$mig"/0003_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f" || fail "M7: could not apply $f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" <<'SQL'
+INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara');
+INSERT INTO platform(id,"companyId",name) VALUES ('00000000-0000-0000-0000-00000000a001','00000000-0000-0000-0000-0000000000c1','School');
+INSERT INTO organization(id,"platformId",name) VALUES ('00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001','School A');
+INSERT INTO "user"(id,kind,email,"passwordHash",role,"organizationId") VALUES ('00000000-0000-0000-0000-0000000000a1','member','m1@x.io','pw','student','00000000-0000-0000-0000-00000000b00a');
+SQL
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0004_organization_join_codes_and_membership.sql" || fail "M7: 0004 did not apply on a database with data"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0005_organization_admin_invitations.sql" || fail "M7: 0005 did not apply on a database with data"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM organization_membership WHERE status='active' AND \"invitationId\" IS NULL")" = 1 ] || fail "M7: existing memberships must survive with no invitation"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0005_organization_admin_invitations.down.sql" || fail "M7: rollback must succeed while empty"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0005_organization_admin_invitations.sql" || fail "M7: re-apply after rollback"
+echo "PASS: M7 applies on data, and rollback then re-apply round-trips"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO organization_admin_invitation(\"organizationId\",\"platformId\",\"codeHash\",\"invitationType\",\"expiresAt\",\"createdBy\") VALUES ('00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001',repeat('a',64),'org_admin',now()+interval '1 day','00000000-0000-0000-0000-0000000000a1')"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0005_organization_admin_invitations.down.sql" >/dev/null 2>&1; then fail "M7: rollback must refuse when invitations exist"; fi
+echo "PASS: M8 rollback refuses to destroy invitations"

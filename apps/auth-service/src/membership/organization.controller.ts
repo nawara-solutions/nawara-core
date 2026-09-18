@@ -4,7 +4,8 @@ import type { Request } from 'express';
 import { Actors, type AuthedRequest } from '../auth/auth.guard.js';
 import { clientInfo } from '../common/client-info.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
-import { CreateJoinCodeDto, ListMembershipsQuery } from '../onboarding/dto.js';
+import { CreateAdminInvitationDto, CreateJoinCodeDto, ListMembershipsQuery } from '../onboarding/dto.js';
+import { InvitationService } from '../onboarding/invitation.service.js';
 import { OnboardingService } from '../onboarding/onboarding.service.js';
 import { MembershipService } from './membership.service.js';
 
@@ -18,6 +19,8 @@ const STEP_UP = 'x-step-up-token';
  *
  *   owner|operator|org admin : join codes (create/list/revoke), memberships (list/approve/reject)
  *   owner + step-up          : grant/revoke organization admin; join-code create/revoke when the caller is an owner
+ *   owner (step-up) | org admin : admin invitations (create/list/revoke, ADR-0029); OPERATORS are refused (same
+ *                                 collapsed 404). An Owner needs a factor-only step-up; an org admin acts on the session.
  */
 @ApiTags('organization-admin')
 @ApiBearerAuth()
@@ -27,6 +30,7 @@ export class OrganizationController {
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(OnboardingService) private readonly onboarding: OnboardingService,
     @Inject(MembershipService) private readonly memberships: MembershipService,
+    @Inject(InvitationService) private readonly invitations: InvitationService,
   ) {}
 
   private ip(req: Request) {
@@ -103,5 +107,33 @@ export class OrganizationController {
   @ApiOperation({ summary: 'Revoke organization-admin authority (owner + step-up only).' })
   async revokeAdmin(@Param('organizationId', ParseUUIDPipe) org: string, @Param('membershipId', ParseUUIDPipe) id: string, @Req() req: AuthedRequest, @Headers(STEP_UP) su?: string) {
     await this.memberships.setAdmin(this.actor(req), org, id, false, su, this.ip(req));
+  }
+
+  // ------------------------------------------------------------------------- admin invitations (ADR-0029)
+  @Post('admin-invitations')
+  @Actors('owner', 'operator', 'member')
+  @ApiHeader({ name: STEP_UP, required: false, description: 'Required when the caller is an Owner (purpose admin_invitation.create, factor only).' })
+  @ApiOperation({ summary: 'Create an administrator invitation. The plaintext code is returned ONCE; the server computes expiresAt from expiresInMinutes.' })
+  @ApiResponse({ status: 201 })
+  @ApiResponse({ status: 400, description: 'expiresInMinutes outside the configured range, reserved or malformed type.' })
+  @ApiResponse({ status: 404, description: 'No such organization, not yours, or not allowed (operators are not allowed) — indistinguishable.' })
+  createInvitation(@Param('organizationId', ParseUUIDPipe) org: string, @Body() dto: CreateAdminInvitationDto, @Req() req: AuthedRequest, @Headers(STEP_UP) su?: string) {
+    return this.invitations.create(this.actor(req), org, dto, su, this.ip(req));
+  }
+
+  @Get('admin-invitations')
+  @Actors('owner', 'operator', 'member')
+  @ApiOperation({ summary: 'List administrator invitations: metadata and a derived status (active, consumed, revoked, expired); never the code.' })
+  listInvitations(@Param('organizationId', ParseUUIDPipe) org: string, @Req() req: AuthedRequest) {
+    return this.invitations.list(this.actor(req), org);
+  }
+
+  @Post('admin-invitations/:invitationId/revoke')
+  @HttpCode(204)
+  @Actors('owner', 'operator', 'member')
+  @ApiHeader({ name: STEP_UP, required: false, description: 'Required when the caller is an Owner (purpose admin_invitation.revoke, factor only).' })
+  @ApiOperation({ summary: 'Revoke an unused invitation immediately (final). An already used or revoked invitation is a 404.' })
+  async revokeInvitation(@Param('organizationId', ParseUUIDPipe) org: string, @Param('invitationId', ParseUUIDPipe) id: string, @Req() req: AuthedRequest, @Headers(STEP_UP) su?: string) {
+    await this.invitations.revoke(this.actor(req), org, id, su, this.ip(req));
   }
 }

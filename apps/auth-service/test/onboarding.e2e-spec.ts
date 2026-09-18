@@ -50,7 +50,7 @@ describe('organization join codes, smart registration and membership approval', 
       expect(s).toEqual({
         platform: { id: w.platformSchool, key: 'nawara-drive', name: 'School' },
         organization: { id: w.orgSchool1, name: 'School 1' },
-        audience: 'student', requiresSubscription: true, requiresOrganizationApproval: false,
+        audience: 'student', requiresSubscription: true, requiresOrganizationApproval: false, requiresVerification: false,
       });
       expect((await resolve(teacher.code).expect(200)).body).toMatchObject({ audience: 'teacher', requiresSubscription: false, requiresOrganizationApproval: true });
       expect(JSON.stringify(s)).not.toMatch(/codeHash|usedCount|maxUses|createdBy|companyId/);
