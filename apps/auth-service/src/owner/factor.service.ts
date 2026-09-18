@@ -219,7 +219,12 @@ export class FactorService {
     } catch (e) {
       if (e instanceof CloneSuspected) {
         // Do not just fail: a non-advancing counter means the private key may be duplicated.
-        await this.revoke(this.db, ownerId, f.id);
+        // Revoke on the SAME connection the compare-and-set ran on. That UPDATE may hold a row lock (a
+        // waiting UPDATE re-locks the newest row version and keeps it until its transaction ends), so a
+        // revoke over a different connection would wait for us while we wait for it: an undetectable
+        // deadlock. On the caller's transaction the revoke commits with it (the login path returns null
+        // and commits); the step-up path passes the pool, where each statement commits on its own.
+        await this.revoke(q, ownerId, f.id);
         await this.audit.tryRecord({ type: 'owner.webauthn.clone_suspected', outcome: 'denied', actorId: ownerId, targetId: f.id });
       }
       return null;
