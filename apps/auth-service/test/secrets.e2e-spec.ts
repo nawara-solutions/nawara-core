@@ -15,7 +15,10 @@ describe('secrets are never logged, audited or stored in plaintext', () => {
     t.payment.licensed.add(w.orgSchool1);
 
     // member: password + refresh token
-    const member = await t.http.post('/auth/register').send({ email: 'sec-member@a.test', password: 'member-secret-pass-77', role: 'student', organizationId: w.orgSchool1 }).expect(201);
+    const jc = await t.joinCode(w.orgSchool1, { audience: 'student' });
+    secrets.joinCode = jc.code;
+    secrets.joinCodeNormalized = jc.normalized;
+    const member = await t.http.post('/auth/register').send({ email: 'sec-member@a.test', password: 'member-secret-pass-77', joinCode: jc.code }).expect(201);
     secrets.memberPassword = 'member-secret-pass-77';
     secrets.memberRefresh = member.body.refreshToken;
     secrets.memberAccess = member.body.accessToken;

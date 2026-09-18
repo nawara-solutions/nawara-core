@@ -4,16 +4,19 @@ import type { ClientInfo } from '../common/client-info.js';
 import { EVENT_BUS, CLOCK, type Clock, type EventBus } from '../common/ports.js';
 import { PasswordService, assertPasswordPolicy } from '../crypto/password.js';
 import { DbService } from '../db/db.service.js';
+import { MembershipService } from '../membership/membership.service.js';
+import { OnboardingService } from '../onboarding/onboarding.service.js';
 import { OwnerAuthService } from '../owner/owner-auth.service.js';
 import { PAYMENT_CLIENT, type PaymentClient } from '../payment/payment-client.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
+import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { UsersService, normalizeEmail, normalizePhone, PHONE_RE, toIdentifier } from '../users/users.service.js';
 import { SessionService } from './session.service.js';
 
 const INVALID_CREDENTIALS = 'Invalid credentials.';
-const NO_LICENSE = 'Your organization does not have a valid license. Please contact your organization.';
-const ROLE_RE = /^[a-z][a-z0-9_.-]{0,63}$/;
+/** One answer for a bad/expired/exhausted code AND an unlicensed organization, so neither is revealed. */
+const REGISTRATION_REFUSED = 'Registration is not available with this code. Please contact your organization.';
 
 @Injectable()
 export class AuthService {
@@ -29,42 +32,69 @@ export class AuthService {
     @Inject(PAYMENT_CLIENT) private readonly payment: PaymentClient,
     @Inject(EVENT_BUS) private readonly bus: EventBus,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Inject(APP_CONFIG) private readonly cfg: AppConfig,
+    @Inject(OnboardingService) private readonly onboarding: OnboardingService,
+    @Inject(MembershipService) private readonly memberships: MembershipService,
   ) {}
 
   /**
-   * Member self-registration. Always creates kind=member (no request can create an owner/operator);
-   * `admin` is a reserved role value. The organization must exist in this database AND payment-service
-   * must confirm a valid license (fail closed). Both failures return the same generic 403 so
-   * organization existence is not revealed. This is the ONLY entitlement question auth ever asks.
+   * Member registration through an ORGANIZATION JOIN CODE (ADR-0028). The client supplies the code and
+   * its own credentials, nothing else: organization, platform, audience and the approval/subscription
+   * flags are resolved server-side from the code and can be neither chosen nor changed by the caller
+   * (unknown body properties are rejected by the validation pipe).
+   *
+   * One transaction: spend one use of the code (atomic, so maxUses holds under concurrency), create the
+   * user (always kind=member; `role` is the opaque audience label), create the membership (`pending` when
+   * the code requires approval, else `active`). A pending member is authenticated but NOT admitted.
+   * payment-service is asked once whether the organization holds a valid license (fail closed); a bad
+   * code and an unlicensed organization give the same generic 403, so neither is revealed.
    */
-  async register(dto: { email?: string; phone?: string; password: string; role: string; organizationId: string }, client: ClientInfo) {
+  async register(dto: { email?: string; phone?: string; password: string; joinCode: string }, client: ClientInfo) {
     await this.throttle.hit('register_ip', client.ip);
+    await this.onboarding.guardGuessing(client);
     if (!dto.email && !dto.phone) throw new BadRequestException('Provide an email or a phone number.');
-    const role = dto.role.trim().toLowerCase();
-    if (role === 'admin' || !ROLE_RE.test(role)) throw new BadRequestException('Invalid role.');
     const email = dto.email ? normalizeEmail(dto.email) : undefined;
     const phone = dto.phone ? normalizePhone(dto.phone) : undefined;
     if (phone && !PHONE_RE.test(phone)) throw new BadRequestException('Invalid phone number.');
     assertPasswordPolicy(dto.password);
 
-    const { rowCount } = await this.db.query(`SELECT 1 FROM organization WHERE id=$1`, [dto.organizationId]);
-    if (!rowCount) throw new ForbiddenException(NO_LICENSE);
+    const found = await this.onboarding.lookup(dto.joinCode);
+    if ('rejected' in found) {
+      await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', ip: client.ip, metadata: { reason: found.rejected, stage: 'register' } });
+      throw new ForbiddenException(REGISTRATION_REFUSED);
+    }
     let licensed: boolean;
     try {
-      licensed = await this.payment.isOrganizationLicensed(dto.organizationId);
+      licensed = await this.payment.isOrganizationLicensed(found.row.organizationId);
     } catch {
       throw new ServiceUnavailableException(); // fail CLOSED whatever the client implementation throws
     }
-    if (!licensed) throw new ForbiddenException(NO_LICENSE);
+    if (!licensed) throw new ForbiddenException(REGISTRATION_REFUSED);
 
     const passwordHash = await this.passwords.hash(dto.password);
-    const session = await this.db.tx(async (q) => {
-      const user = await this.users.createMember({ email, phone, passwordHash, role, organizationId: dto.organizationId }, q);
-      this.bus.publish('user.registered', { userId: user.id, role, organizationId: dto.organizationId, timestamp: this.clock.now().toISOString() });
-      return { user, tokens: await this.sessions.issue(q, user) };
+    const result = await this.db.tx(async (q) => {
+      const code = await this.onboarding.redeem(q, dto.joinCode); // atomic; refuses a code that just ran out or was revoked
+      const user = await this.users.createMember({ email, phone, passwordHash, role: code.audience, organizationId: code.organizationId }, q);
+      const status = await this.memberships.createForRegistration(q, { userId: user.id, organizationId: code.organizationId, joinCodeId: code.id, requiresApproval: code.requiresApproval });
+      await this.audit.record({ type: 'onboarding.join_code.used', outcome: 'success', actorId: user.id, targetId: code.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
+      if (status === 'pending') {
+        await this.audit.record({ type: 'membership.requested', outcome: 'success', actorId: user.id, targetId: user.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
+      }
+      return { user, code, status, tokens: await this.sessions.issue(q, user) };
     });
-    const { sid: _sid, ...tokens } = session.tokens;
-    return tokens;
+    const now = this.clock.now().toISOString();
+    this.bus.publish('user.registered', { userId: result.user.id, role: result.code.audience, organizationId: result.code.organizationId, timestamp: now });
+    if (result.status === 'pending') this.bus.publish('membership.requested', { userId: result.user.id, organizationId: result.code.organizationId, audience: result.code.audience, timestamp: now });
+    const { sid: _sid, ...tokens } = result.tokens;
+    return {
+      ...tokens,
+      onboarding: {
+        audience: result.code.audience,
+        membershipStatus: result.status,
+        requiresSubscription: result.code.requiresSubscription,
+        contactVerificationRequired: this.cfg.onboarding.requireContactVerification,
+      },
+    };
   }
 
   /**
@@ -118,6 +148,11 @@ export class AuthService {
 
   async me(userId: string) {
     const u = await this.users.findById(userId);
-    return { id: u!.id, email: u!.email, phone: u!.phone, role: u!.role, organizationId: u!.organizationId, adminTier: u!.kind === 'member' ? null : u!.kind, isActive: u!.isActive };
+    return {
+      id: u!.id, email: u!.email, phone: u!.phone, role: u!.role, organizationId: u!.organizationId,
+      adminTier: u!.kind === 'member' ? null : u!.kind, isActive: u!.isActive,
+      // Members only: lets the app show "your request is waiting for approval". Never a token claim.
+      membership: u!.kind === 'member' ? await this.memberships.mine(userId) : null,
+    };
   }
 }

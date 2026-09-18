@@ -7,7 +7,7 @@ import { ConfigError, loadConfig } from './app-config.js';
 
 const b64 = () => randomBytes(32).toString('base64');
 const good = (): NodeJS.ProcessEnv => ({
-  NODE_ENV: 'test', DATABASE_URL: 'postgres://x', JWT_SECRET: b64(), OPERATOR_CODE_PEPPER: b64(), SECRET_KEY_PEPPER: b64(), THROTTLE_KEY_PEPPER: b64(),
+  NODE_ENV: 'test', DATABASE_URL: 'postgres://x', JWT_SECRET: b64(), OPERATOR_CODE_PEPPER: b64(), SECRET_KEY_PEPPER: b64(), THROTTLE_KEY_PEPPER: b64(), JOIN_CODE_PEPPER: b64(),
   TOTP_ENCRYPTION_KEYS: `k1:${b64()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1',
 });
 
@@ -17,7 +17,7 @@ describe('configuration and key management fail closed', () => {
     expect(c.secrets.totpKeys.get('k1')).toHaveLength(32);
     expect(c.stepUp.ttlSec).toBeLessThanOrEqual(900);
   });
-  it.each(['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'TOTP_ENCRYPTION_KEYS', 'TOTP_ENCRYPTION_ACTIVE_KEY_ID', 'DATABASE_URL'])('refuses to start without %s (no default)', (name) => {
+  it.each(['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'JOIN_CODE_PEPPER', 'TOTP_ENCRYPTION_KEYS', 'TOTP_ENCRYPTION_ACTIVE_KEY_ID', 'DATABASE_URL'])('refuses to start without %s (no default)', (name) => {
     const e = good(); delete e[name];
     expect(() => loadConfig(e)).toThrow(ConfigError);
   });
@@ -28,6 +28,14 @@ describe('configuration and key management fail closed', () => {
   it('requires every secret to be distinct (domain separation)', () => {
     const e = good(); e.SECRET_KEY_PEPPER = e.JWT_SECRET;
     expect(() => loadConfig(e)).toThrow(/distinct/);
+  });
+  it('the join-code pepper is purpose-separated: it must differ from every other secret, and verification defaults to off', () => {
+    for (const other of ['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER']) {
+      const e = good(); e.JOIN_CODE_PEPPER = e[other];
+      expect(() => loadConfig(e)).toThrow(/distinct/);
+    }
+    expect(loadConfig(good()).onboarding.requireContactVerification).toBe(false);
+    expect(loadConfig({ ...good(), REQUIRE_CONTACT_VERIFICATION: 'true' }).onboarding.requireContactVerification).toBe(true);
   });
   it('validates the TOTP key ring: 32-byte keys, and the active id must exist', () => {
     const e = good(); e.TOTP_ENCRYPTION_KEYS = `k1:${randomBytes(16).toString('base64')}`;

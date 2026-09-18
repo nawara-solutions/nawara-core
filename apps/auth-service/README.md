@@ -23,6 +23,21 @@ The process **refuses to start** if any secret is missing, weak or duplicated. S
 environment or from files (`NAME_FILE=/run/secrets/name`); see `.env.example` and the key-management
 section of the security review. Set `AUTH_EVENTS=off` to run without RabbitMQ.
 
+## Organization onboarding (join codes)
+
+An organization hands a user a **join code**; the app never sends an organization id, platform or role.
+`POST /auth/onboarding/resolve {joinCode}` returns the server-derived context (platform, organization, audience,
+`requiresSubscription`, `requiresOrganizationApproval`); `POST /auth/register {joinCode, email|phone, password}`
+creates a `kind=member` with an `active` (auto) or `pending` (needs approval) membership. Only an `active`
+membership grants organization access, evaluated from current rows on every request.
+
+- Organization administration (create/revoke codes, approve/reject, grant org admin) is authorized per request:
+  Owner (company), Operator (assigned platform) or a member holding an active org-admin membership. Owners need a
+  step-up for codes and admin grants. See `docs/adr/0028-*`.
+- `JOIN_CODE_PEPPER` is required (generate it like the other secrets). `REQUIRE_CONTACT_VERIFICATION` defaults to
+  `false` and must stay off until a channel delivers verification codes (events are published, nothing delivers them).
+- Payment stays the source of truth for subscriptions and licenses; `requiresSubscription` is only a hint for the app.
+
 ## Operations
 
 ```bash

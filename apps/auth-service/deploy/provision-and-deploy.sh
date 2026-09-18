@@ -87,6 +87,7 @@ ensure "$APP_ENV" JWT_SECRET "$(b64)"
 ensure "$APP_ENV" OPERATOR_CODE_PEPPER "$(b64)"
 ensure "$APP_ENV" SECRET_KEY_PEPPER "$(b64)"
 ensure "$APP_ENV" THROTTLE_KEY_PEPPER "$(b64)"
+ensure "$APP_ENV" JOIN_CODE_PEPPER "$(b64)"
 ensure "$APP_ENV" TOTP_ENCRYPTION_KEYS "k1:$(b64)"
 ensure "$APP_ENV" TOTP_ENCRYPTION_ACTIVE_KEY_ID k1
 ensure "$APP_ENV" PAYMENT_SERVICE_TOKEN "$(openssl rand -hex 32)"
@@ -99,6 +100,8 @@ ensure "$APP_ENV" PAYMENT_SERVICE_URL "${PAYMENT_SERVICE_URL:-http://nawara-core
 ensure "$APP_ENV" TRUST_PROXY true
 ensure "$APP_ENV" AUTH_EVENTS off
 ensure "$APP_ENV" WORK_TIMEZONE Africa/Tunis
+# No channel delivers verification codes yet, so it stays off in production until one exists.
+ensure "$APP_ENV" REQUIRE_CONTACT_VERIFICATION false
 # Swagger UI at /auth/docs (basic auth). Read the password on the server:  grep ^SWAGGER_ "$APP_ENV"
 ensure "$APP_ENV" SWAGGER_USERNAME docs
 ensure "$APP_ENV" SWAGGER_PASSWORD "$(openssl rand -hex 24)"

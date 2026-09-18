@@ -27,6 +27,12 @@ export const STEP_UP_METHODS = {
   'owner.factor.enroll': ['totp', 'webauthn'],
   'owner.factor.remove': ['totp', 'webauthn'],
   'owner.password.change': ['totp', 'webauthn'],
+  // Organization onboarding (ADR-0028). An Owner acts with step-up; operators/org admins have none.
+  'join_code.create': ['totp', 'webauthn', 'secret_key'],
+  'join_code.revoke': ['totp', 'webauthn', 'secret_key'],
+  // Minting an organization administrator is a privilege grant: factor only, never the bare key.
+  'organization.admin.grant': ['totp', 'webauthn'],
+  'organization.admin.revoke': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 

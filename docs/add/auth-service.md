@@ -13,9 +13,8 @@ how it verifies credentials, issues/rotates/revokes tokens, exposes the generic 
 gates registration on an organization's license validity via a synchronous call to
 `payment-service` (per ADR-0004). (Trials are `payment-service` subscription state, not `auth-service` metadata — ADR-0026.) As of ADR-0026, login and token refresh do **not** re-validate a license or subscription:
 authentication is not entitlement, so a lapsed license never blocks authentication and
-`payment-service` availability does not affect login/refresh (only registration still asks). Per ADR-0001, `organizationId` is
-required input on
-every self-service `POST /auth/register` call — there is no org-less self-registration mode;
+`payment-service` availability does not affect login/refresh (only registration still asks). Per ADR-0001, every member belongs to exactly one organization and there is no org-less self-registration mode. **Since ADR-0028 the client no longer supplies `organizationId`:
+`POST /auth/register` takes a join code and the organization is resolved server-side;**
 the only null-`organizationId` accounts are the platform's own `Admin` accounts, which are
 provisioned out-of-band and never created through this public endpoint (see Context).
 
@@ -813,7 +812,8 @@ For side effects, this design recommends a small set of async events, consistent
 `CLAUDE.md`'s "async events for side effects" principle — no longer just the single v1 event
 of the previous revision:
 
-- **`user.registered`** — `{ userId, role, organizationId, timestamp }`, published after a
+- **`user.registered`** — `{ userId, role, organizationId, timestamp }` (since ADR-0028 `role` is the opaque
+  join-code audience label), published after a
   successful registration so `notification-service` can react (e.g. send a welcome message)
   without `auth-service` taking on a direct dependency on `notification-service` or knowing
   anything about notification channels/templates.
@@ -910,6 +910,26 @@ ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever 
 *status*, on the same terms as the license check; `Organization`'s own business fields (name,
 tax code, address, phone, type) are a separate, `auth-service`-owned identity concern, per
 ADR-0020.
+
+### Organization onboarding contract (ADR-0028)
+
+The client-to-auth-service contract for joining an organization changed; the service-to-service boundaries did not.
+
+- **Client ⇄ `auth-service`.** `POST /auth/onboarding/resolve {joinCode}` (public, rate limited) returns the
+  server-derived platform, organization, audience and two hints; `POST /auth/register {joinCode, email|phone,
+  password}` replaces the previous body. `organizationId`, `platformId`, `role` and `audience` are never accepted
+  from the client. Membership and its approval are `POST/GET /auth/organizations/:id/...` (owner, assigned
+  operator or organization admin); `GET /auth/me` reports `membership.status`.
+- **`auth-service` ⇄ `payment-service`.** Unchanged: one registration-time license question, fail closed, one
+  generic 403. Auth stores no subscription or license state; `requiresSubscription` is only a hint to the app.
+  Missing contracts (student checkout entry point, teacher-approval license re-check) are open questions in
+  ADR-0028, not invented here.
+- **New async events** (published on the existing bus; **nothing delivers them yet**, and a transactional outbox
+  is the recommended delivery design once a broker exists): `membership.requested`
+  `{ userId, organizationId, audience, timestamp }`, `membership.approved` and `membership.rejected`
+  `{ userId, organizationId, channel, destination, timestamp }`, and
+  `member.contact_verification_requested` `{ userId, channel, destination, code, expiresAt }` (like the operator
+  working code, the verification code travels only in this delivery event).
 
 ## Non-functional constraints
 

@@ -5,8 +5,8 @@ export class RegisterDto {
   @ApiPropertyOptional() @IsOptional() @IsEmail() @MaxLength(254) email?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(20) phone?: string;
   @ApiProperty() @IsString() @MinLength(10) @MaxLength(72) password!: string;
-  @ApiProperty({ description: "Opaque to auth-service; the value 'admin' is reserved." }) @IsString() @Length(1, 64) role!: string;
-  @ApiProperty() @IsUUID() organizationId!: string;
+  @ApiProperty({ description: 'Organization join code. Organization, platform and audience are resolved from it server-side.' })
+  @IsString() @Length(10, 64) joinCode!: string;
 }
 
 export class LoginDto {
