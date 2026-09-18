@@ -575,6 +575,136 @@ SELECT pg_temp.expect_error('AUD', 'an oversized payload (a dumped assertion/tok
   $$INSERT INTO auth_audit_event(type,outcome,metadata) VALUES ('owner.login','failure', jsonb_build_object('x', (SELECT string_agg(md5(i::text),'') FROM generate_series(1,200) i)))$$, '23514');
 SELECT pg_temp.expect_error('AUD', 'event types are a controlled vocabulary shape',
   $$INSERT INTO auth_audit_event(type,outcome) VALUES ('Owner Login!','success')$$, '23514');
+
+-- ------------------------------------- 0004: join codes, membership, contact verification ----
+-- (prefixes: JC join code, MEM membership, CV contact verification, PK platform key)
+\set orgE '\'00000000-0000-0000-0000-00000000b00e\''
+SELECT pg_temp.new_member(:orgA, 'm_pending@x.io',  'teacher') AS mpending  \gset
+SELECT pg_temp.new_member(:orgA, 'm_active@x.io',   'student') AS mactive   \gset
+SELECT pg_temp.new_member(:orgA, 'm_rejected@x.io', 'teacher') AS mrejected \gset
+SELECT pg_temp.new_member(:orgA, 'm_free@x.io',     'student') AS mfree     \gset
+
+INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","expiresAt","maxUses","createdBy")
+VALUES (:orgA, :pSchool, repeat('a',64), 'teacher', true, false, now() + interval '30 days', 2, :'owner1') RETURNING id AS jca \gset
+INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy")
+VALUES (:orgB, :pSchool, repeat('b',64), 'student', false, true, :'owner1') RETURNING id AS jcb \gset
+-- a revoked code, revoked legitimately
+INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy","isActive","revokedAt","revokedBy")
+VALUES (:orgA, :pSchool, repeat('c',64), 'student', false, true, :'owner1', false, now(), :'owner1') RETURNING id AS jcrev \gset
+
+-- platform / composite-FK integrity: a code can never name a foreign platform or company
+SELECT pg_temp.expect_error('JC', 'Organization A + Platform B (same company, wrong platform) is refused',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,repeat('d',64),'student',false,true,%L)$$, :orgA, :pDrive, :'owner1'), '23503');
+SELECT pg_temp.expect_error('JC', 'an organization of ANOTHER company + this company''s platform is refused',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,repeat('d',64),'student',false,true,%L)$$, :orgE, :pSchool, :'owner1'), '23503');
+SELECT pg_temp.expect_error('JC', 'a code must name a real organization',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (gen_random_uuid(),%L,repeat('d',64),'student',false,true,%L)$$, :pSchool, :'owner1'), '23503');
+SELECT pg_temp.expect_error('JC', 'the creator must be a real user',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,repeat('d',64),'student',false,true,gen_random_uuid())$$, :orgA, :pSchool), '23503');
+
+-- shape and limits
+SELECT pg_temp.expect_error('JC', 'only a 64-hex HMAC is storable (never a plaintext code)',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,'ABCDE-FGHJK','student',false,true,%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('JC', 'the audience is a controlled label shape',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,repeat('d',64),'Bad Label!',false,true,%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('JC', 'the reserved audience "admin" is refused (a member can never hold that role, so the code could never be redeemed)',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,repeat('d',64),'admin',false,true,%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('JC', 'maxUses must be positive',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","maxUses","createdBy") VALUES (%L,%L,repeat('d',64),'student',false,true,0,%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('JC', 'usedCount can never exceed maxUses',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","maxUses","usedCount","createdBy") VALUES (%L,%L,repeat('d',64),'student',false,true,2,3,%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('JC', 'a code that is already at its limit cannot be spent again (atomic-increment backstop)',
+  format($$UPDATE organization_join_code SET "usedCount" = 3 WHERE id = %L$$, :'jca'), '23514');
+SELECT pg_temp.expect_ok('JC', 'a use can be spent up to maxUses',
+  format($$UPDATE organization_join_code SET "usedCount" = 2 WHERE id = %L$$, :'jca'));
+SELECT pg_temp.expect_error('JC', 'an expiry in the past (before creation) is refused',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","expiresAt","createdBy") VALUES (%L,%L,repeat('d',64),'student',false,true, now() - interval '1 day',%L)$$, :orgA, :pSchool, :'owner1'), '23514');
+SELECT pg_temp.expect_error('JC', 'the code hash is unique',
+  format($$INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","createdBy") VALUES (%L,%L,repeat('a',64),'student',false,true,%L)$$, :orgA, :pSchool, :'owner1'), '23505');
+SELECT pg_temp.expect_error('JC', 'revokedAt without revokedBy is refused',
+  format($$UPDATE organization_join_code SET "isActive"=false, "revokedAt"=now() WHERE id = %L$$, :'jcb'), '23514');
+SELECT pg_temp.expect_error('JC', 'a revoked code that is still "active" is refused',
+  format($$UPDATE organization_join_code SET "revokedAt"=now(), "revokedBy"=%L WHERE id = %L$$, :'owner1', :'jcb'), '23514');
+
+-- immutability and no revival
+SELECT pg_temp.expect_error('JC', 'the target organization is immutable',
+  format($$UPDATE organization_join_code SET "organizationId"=%L WHERE id=%L$$, :orgB, :'jca'), '23514');
+SELECT pg_temp.expect_error('JC', 'the audience is immutable',
+  format($$UPDATE organization_join_code SET audience='student' WHERE id=%L$$, :'jca'), '23514');
+SELECT pg_temp.expect_error('JC', 'the approval flag is immutable',
+  format($$UPDATE organization_join_code SET "requiresApproval"=false WHERE id=%L$$, :'jca'), '23514');
+SELECT pg_temp.expect_error('JC', 'the hash is immutable',
+  format($$UPDATE organization_join_code SET "codeHash"=repeat('e',64) WHERE id=%L$$, :'jca'), '23514');
+SELECT pg_temp.expect_error('JC', 'usedCount can only increase',
+  format($$UPDATE organization_join_code SET "usedCount"=0 WHERE id=%L$$, :'jca'), '23514');
+SELECT pg_temp.expect_error('JC', 'a revoked code can never be revived',
+  format($$UPDATE organization_join_code SET "isActive"=true, "revokedAt"=NULL, "revokedBy"=NULL WHERE id=%L$$, :'jcrev'), '23514');
+SELECT pg_temp.expect_error('JC', 'join codes are never deleted (revoke instead)',
+  format($$DELETE FROM organization_join_code WHERE id=%L$$, :'jca'), '23514');
+
+-- membership
+INSERT INTO organization_membership ("userId","organizationId",status,"joinCodeId") VALUES (:'mpending', :orgA, 'pending', :'jca') RETURNING id AS mempending \gset
+INSERT INTO organization_membership ("userId","organizationId",status,"approvedAt") VALUES (:'mactive', :orgA, 'active', now()) RETURNING id AS memactive \gset
+INSERT INTO organization_membership ("userId","organizationId",status,"rejectedAt","rejectedBy") VALUES (:'mrejected', :orgA, 'rejected', now(), :'owner1') RETURNING id AS memrejected \gset
+
+SELECT pg_temp.expect_error('MEM', 'a membership can only name the member''s OWN organization',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'pending')$$, :'mfree', :orgB), '23503');
+SELECT pg_temp.expect_error('MEM', 'an owner/operator (no organization) cannot have a membership',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'pending')$$, :'owner1', :orgA), '23503');
+SELECT pg_temp.expect_error('MEM', 'one membership per (user, organization)',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'pending')$$, :'mpending', :orgA), '23505');
+SELECT pg_temp.expect_error('MEM', 'the admitting join code must belong to the SAME organization',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status,"joinCodeId") VALUES (%L,%L,'pending',%L)$$, :'mfree', :orgA, :'jcb'), '23503');
+SELECT pg_temp.expect_error('MEM', 'active needs an approval time',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'active')$$, :'mfree', :orgA), '23514');
+SELECT pg_temp.expect_error('MEM', 'pending cannot carry a decision',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status,"approvedAt") VALUES (%L,%L,'pending',now())$$, :'mfree', :orgA), '23514');
+SELECT pg_temp.expect_error('MEM', 'rejected needs who and when',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'rejected')$$, :'mfree', :orgA), '23514');
+SELECT pg_temp.expect_error('MEM', 'a decision cannot be both approved and rejected',
+  format($$INSERT INTO organization_membership ("userId","organizationId",status,"approvedAt","rejectedAt","rejectedBy") VALUES (%L,%L,'active',now(),now(),%L)$$, :'mfree', :orgA, :'owner1'), '23514');
+SELECT pg_temp.expect_error('MEM', 'organization admin is only possible on an ACTIVE membership',
+  format($$UPDATE organization_membership SET "isOrganizationAdmin"=true WHERE id=%L$$, :'mempending'), '23514');
+SELECT pg_temp.expect_ok('MEM', 'an active member can be made organization admin',
+  format($$UPDATE organization_membership SET "isOrganizationAdmin"=true WHERE id=%L$$, :'memactive'));
+SELECT pg_temp.expect_ok('MEM', 'pending -> active with an approval time is the legal move',
+  format($$UPDATE organization_membership SET status='active', "approvedAt"=now(), "approvedBy"=%L WHERE id=%L$$, :'owner1', :'mempending'));
+SELECT pg_temp.expect_error('MEM', 'active -> pending is illegal',
+  format($$UPDATE organization_membership SET status='pending', "approvedAt"=NULL WHERE id=%L$$, :'mempending'), '23514');
+SELECT pg_temp.expect_error('MEM', 'active -> rejected is illegal (revocation is future scope, not a loophole)',
+  format($$UPDATE organization_membership SET status='rejected', "rejectedAt"=now(), "rejectedBy"=%L WHERE id=%L$$, :'owner1', :'mempending'), '23514');
+SELECT pg_temp.expect_error('MEM', 'rejected -> active is illegal',
+  format($$UPDATE organization_membership SET status='active', "approvedAt"=now() WHERE id=%L$$, :'memrejected'), '23514');
+SELECT pg_temp.expect_error('MEM', 'a resolved decision cannot be rewritten (approver swapped)',
+  format($$UPDATE organization_membership SET "approvedBy"=%L WHERE id=%L$$, :'ahmed', :'mempending'), '23514');
+SELECT pg_temp.expect_error('MEM', 'the member cannot be re-pointed at another user',
+  format($$UPDATE organization_membership SET "userId"=%L WHERE id=%L$$, :'mfree', :'memactive'), '23514');
+SELECT pg_temp.expect_error('MEM', 'memberships are never deleted (history is kept)',
+  format($$DELETE FROM organization_membership WHERE id=%L$$, :'memactive'), '23514');
+SELECT pg_temp.expect_error('MEM', 'a user with a membership cannot change organization underneath it',
+  format($$UPDATE "user" SET "organizationId"=%L WHERE id=%L$$, :orgB, :'mactive'), '23503');
+SELECT pg_temp.expect_error('MEM', 'a user with a membership cannot be deleted',
+  format($$DELETE FROM "user" WHERE id=%L$$, :'mactive'), '23503');
+
+-- contact verification
+SELECT pg_temp.expect_ok('CV', 'a member verification code',
+  format($$INSERT INTO member_contact_verification ("userId",channel,"codeHash","expiresAt") VALUES (%L,'email',repeat('a',64), now() + interval '10 minutes')$$, :'mfree'));
+SELECT pg_temp.expect_error('CV', 'at most ONE live code per member',
+  format($$INSERT INTO member_contact_verification ("userId",channel,"codeHash","expiresAt") VALUES (%L,'email',repeat('b',64), now() + interval '10 minutes')$$, :'mfree'), '23505');
+SELECT pg_temp.expect_error('CV', 'only an HMAC is storable',
+  format($$INSERT INTO member_contact_verification ("userId",channel,"codeHash","expiresAt") VALUES (%L,'email','123456', now() + interval '10 minutes')$$, :'mactive'), '23514');
+SELECT pg_temp.expect_error('CV', 'attempts are capped at 5 by the database',
+  format($$UPDATE member_contact_verification SET "attemptCount"=6 WHERE "userId"=%L$$, :'mfree'), '23514');
+SELECT pg_temp.expect_error('CV', 'only a member can hold a verification code (not an operator)',
+  format($$INSERT INTO member_contact_verification ("userId",channel,"codeHash","expiresAt") VALUES (%L,'phone',repeat('c',64), now() + interval '10 minutes')$$, :'ahmed'), '23503');
+SELECT pg_temp.expect_error('CV', 'the channel is e-mail or phone',
+  format($$INSERT INTO member_contact_verification ("userId",channel,"codeHash","expiresAt") VALUES (%L,'pigeon',repeat('c',64), now() + interval '10 minutes')$$, :'mactive'), '23514');
+
+-- platform key
+SELECT pg_temp.expect_ok('PK', 'a platform key', format($$UPDATE platform SET key='nawara-drive' WHERE id=%L$$, :pSchool));
+SELECT pg_temp.expect_error('PK', 'a platform key is unique', format($$UPDATE platform SET key='nawara-drive' WHERE id=%L$$, :pDrive), '23505');
+SELECT pg_temp.expect_error('PK', 'a platform key is a lowercase slug', format($$UPDATE platform SET key='Nawara Drive!' WHERE id=%L$$, :pDrive), '23514');
+
 \o
 
 -- ---------------------------------------------------------------------------- verdict ----

@@ -85,3 +85,25 @@ echo "PASS: M3 acknowledged migration succeeds and preserves existing rows"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0002_owner_operator_hardening_and_owner_step_up.down.sql"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0002_owner_operator_hardening_and_owner_step_up.sql"
 echo "PASS: M4 rollback then re-apply round-trips"
+
+echo "== M5: migration 0004 backfills an ACTIVE membership for every existing member =="
+db="$(newdb mig4)"
+for f in "$mig"/0001_*.sql "$mig"/0002_*.sql "$mig"/0003_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f" || fail "M5: could not apply $f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" <<'SQL'
+INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara');
+INSERT INTO platform(id,"companyId",name) VALUES ('00000000-0000-0000-0000-00000000a001','00000000-0000-0000-0000-0000000000c1','School');
+INSERT INTO organization(id,"platformId",name) VALUES ('00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001','School A');
+INSERT INTO "user"(id,kind,email,"passwordHash",role,"organizationId") VALUES
+  ('00000000-0000-0000-0000-0000000000a1','member','m1@x.io','pw','student','00000000-0000-0000-0000-00000000b00a'),
+  ('00000000-0000-0000-0000-0000000000a2','member','m2@x.io','pw','teacher','00000000-0000-0000-0000-00000000b00a');
+SQL
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0004_organization_join_codes_and_membership.sql" || fail "M5: 0004 did not apply on a database with data"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM organization_membership WHERE status='active' AND \"approvedBy\" IS NULL AND \"joinCodeId\" IS NULL AND \"isOrganizationAdmin\" = false")" = 2 ] || fail "M5: every existing member must get one active, non-admin membership"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM \"user\" WHERE kind='member'")" = 2 ] || fail "M5: existing users must survive"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0004_organization_join_codes_and_membership.down.sql" || fail "M5: rollback must succeed when only backfilled rows exist"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0004_organization_join_codes_and_membership.sql" || fail "M5: re-apply after rollback"
+echo "PASS: M5 backfill gives every existing member an active membership; rollback then re-apply round-trips"
+# rollback must REFUSE to destroy real onboarding data
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO organization_join_code(\"organizationId\",\"platformId\",\"codeHash\",audience,\"requiresApproval\",\"requiresSubscription\",\"createdBy\") SELECT '00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001',repeat('a',64),'student',false,true,id FROM \"user\" LIMIT 1"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0004_organization_join_codes_and_membership.down.sql" >/dev/null 2>&1; then fail "M5: rollback must refuse when join codes exist"; fi
+echo "PASS: M6 rollback refuses to destroy join codes"

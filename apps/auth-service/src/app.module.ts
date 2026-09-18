@@ -16,6 +16,11 @@ import { DbService } from './db/db.service.js';
 import { EventsModule } from './events/events.module.js';
 import { EventsPublisherService } from './events/events-publisher.service.js';
 import { HealthController } from './health/health.controller.js';
+import { OrganizationController } from './membership/organization.controller.js';
+import { MembershipService } from './membership/membership.service.js';
+import { ContactVerificationService } from './onboarding/contact-verification.service.js';
+import { OnboardingController } from './onboarding/onboarding.controller.js';
+import { OnboardingService } from './onboarding/onboarding.service.js';
 import { OperatorAvailabilityService } from './operator/availability.service.js';
 import { OperatorAdminService } from './operator/operator-admin.service.js';
 import { OperatorCodeService } from './operator/operator-code.service.js';
@@ -49,7 +54,7 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.BASELINE_RATE_LIMIT_PER_MINUTE ?? 100) }]),
     ...(eventsEnabled ? [EventsModule] : []),
   ],
-  controllers: [AppController, HealthController, AuthController, OwnerController, OperatorController, PlatformController],
+  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -67,7 +72,7 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,
     OperatorAvailabilityService, OperatorCodeService, OperatorAdminService,
-    PlatformAccessService, AssignmentService, AuthService, AuthGuard,
+    PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, MembershipService, AuthService, AuthGuard,
   ],
 })
 export class AppModule {}

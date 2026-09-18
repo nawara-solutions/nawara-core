@@ -9,6 +9,7 @@ import { inject } from 'vitest';
 import { AppModule } from '../../src/app.module.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../../src/common/ports.js';
 import { APP_CONFIG, loadConfig, type AppConfig } from '../../src/config/app-config.js';
+import { generateJoinCode, hashJoinCode } from '../../src/crypto/join-code.js';
 import { PasswordService } from '../../src/crypto/password.js';
 import { DbService } from '../../src/db/db.service.js';
 import { PAYMENT_CLIENT, type PaymentClient } from '../../src/payment/payment-client.js';
@@ -47,7 +48,8 @@ export class CapturingLogger implements LoggerService {
 
 const RATE_BUCKETS = ['LOGIN_IP', 'LOGIN_IDENTIFIER', 'REGISTER_IP', 'REFRESH_IP', 'OWNER_VERIFY_OWNER', 'OWNER_VERIFY_IP', 'STEP_UP_OWNER', 'STEP_UP_IP',
   'FACTOR_ENROLL_OWNER', 'RECOVERY_IP', 'RECOVERY_IDENTIFIER', 'OPERATOR_REQUEST_IDENTIFIER', 'OPERATOR_REQUEST_IP', 'OPERATOR_VERIFY_IDENTIFIER',
-  'OPERATOR_VERIFY_IP', 'OPERATOR_VERIFY_GLOBAL', 'OPERATOR_CONFIRM_IP'];
+  'OPERATOR_VERIFY_IP', 'OPERATOR_VERIFY_GLOBAL', 'OPERATOR_CONFIRM_IP',
+  'JOIN_CODE_RESOLVE_IP', 'JOIN_CODE_RESOLVE_GLOBAL', 'JOIN_CODE_MANAGE_ACTOR', 'MEMBERSHIP_OP_ACTOR', 'CONTACT_REQUEST_USER', 'CONTACT_VERIFY_USER', 'CONTACT_VERIFY_IP'];
 
 const rand = () => randomBytes(32).toString('base64');
 
@@ -65,7 +67,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
 
   const env: Record<string, string> = {
     NODE_ENV: 'test', DATABASE_URL: databaseUrl,
-    JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(),
+    JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(), JOIN_CODE_PEPPER: rand(),
     TOTP_ENCRYPTION_KEYS: `k1:${rand()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1',
     WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
     BCRYPT_COST: '4', ACCESS_TOKEN_TTL_SEC: '3600', RECOVERY_COOLDOWN_SEC: '3600', WORK_TIMEZONE: 'UTC',
@@ -127,10 +129,29 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
       const u = await dbs.tx((q) => users.createOwner({ companyId, email, passwordHash: hash }, q));
       return { id: u.id, email, password, companyId };
     },
-    async member(organizationId: string, email: string, password = 'member password 1', role = 'student') {
+    /** A member with an ACTIVE membership (what registration through an auto-approved code produces). */
+    async member(organizationId: string, email: string, password = 'member password 1', role = 'student', status: 'pending' | 'active' | 'rejected' = 'active') {
       const hash = await passwords.hash(password);
       const u = await users.createMember({ email, passwordHash: hash, role, organizationId });
+      if (status === 'active') {
+        await db.query(`INSERT INTO organization_membership("userId","organizationId",status,"approvedAt") VALUES ($1,$2,'active',now())`, [u.id, organizationId]);
+      } else if (status === 'pending') {
+        await db.query(`INSERT INTO organization_membership("userId","organizationId",status) VALUES ($1,$2,'pending')`, [u.id, organizationId]);
+      }
       return { id: u.id, email, password };
+    },
+    /** A join code inserted directly (fast fixture). Returns the plaintext once, like the API does. */
+    async joinCode(organizationId: string, o: { audience?: string; requiresApproval?: boolean; requiresSubscription?: boolean; maxUses?: number | null; createdBy?: string; expiresInDays?: number } = {}) {
+      const org = await db.query(`SELECT o."platformId", p."companyId" FROM organization o JOIN platform p ON p.id = o."platformId" WHERE o.id = $1`, [organizationId]);
+      const creator = o.createdBy ?? (await ctx.operator(org.rows[0].companyId, `jc${randomUUID().slice(0, 8)}@x.test`)).id;
+      const gen = generateJoinCode('DRIVE');
+      const ins = await db.query(
+        `INSERT INTO organization_join_code("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","expiresAt","maxUses","createdBy")
+         VALUES ($1,$2,$3,$4,$5,$6, now() + ($7 || ' days')::interval, $8, $9) RETURNING id`,
+        [organizationId, org.rows[0].platformId, hashJoinCode(cfg.secrets.joinCodePepper, gen.normalized), o.audience ?? 'student',
+          o.requiresApproval ?? false, o.requiresSubscription ?? true, String(o.expiresInDays ?? 30), o.maxUses ?? null, creator],
+      );
+      return { id: ins.rows[0].id as string, code: gen.display, normalized: gen.normalized };
     },
     async operator(companyId: string, email: string, confirmed = true) {
       const u = await dbs.tx((q) => users.createOperator({ companyId, email }, q));

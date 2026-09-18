@@ -1,7 +1,7 @@
 # auth-service
 
 - **Status:** Partially implemented <!-- Draft | Reviewed | Implemented --> — the authentication, session, MFA, step-up, recovery, operator-code and platform-authorization surface is implemented and tested (`apps/auth-service`); the rest is still design. Needs re-review after ADR-0024/0025/0026/0027.
-- **Canonical references:** the migrations (`apps/auth-service/db/migrations/0001…0003`) are the schema of record; ADR-0026 is the data-model/entitlement reference and [ADR-0027](../adr/0027-service-layer-security-model.md) the service-layer model; the implementation report is [`docs/security/auth-service-security-review.md`](../security/auth-service-security-review.md). Older PDFs of this model (`auth-service-data-model.pdf`, `…-adr-0024.pdf`) are **superseded**.
+- **Canonical references:** the migrations (`apps/auth-service/db/migrations/0001…0004`) are the schema of record; ADR-0026 is the data-model/entitlement reference and [ADR-0027](../adr/0027-service-layer-security-model.md) the service-layer model; the implementation report is [`docs/security/auth-service-security-review.md`](../security/auth-service-security-review.md). Older PDFs of this model (`auth-service-data-model.pdf`, `…-adr-0024.pdf`) are **superseded**.
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [docs/add/auth-service.md](../add/auth-service.md)
 - **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic
@@ -396,8 +396,9 @@ Notes:
   ADR-0020).** `CHECK ((kind = 'member') = (organizationId IS NOT NULL))` makes both halves
   database-enforced: a member cannot be created without an organization or with a nonexistent
   one, and a management identity cannot be given one. The nullable-`organizationId` convention
-  ADR-0016 relied on is thus now an explicit, checked consequence of `kind`. It is still required
-  as input on the public `POST /auth/register` endpoint, still never validated *against
+  ADR-0016 relied on is thus now an explicit, checked consequence of `kind`. It was required
+  as input on the public `POST /auth/register` endpoint; **since ADR-0028 the client sends only a join code and the
+  organization is resolved server-side**, still never validated *against
   `payment-service`* beyond the license check (no cross-service FK is possible or attempted), and
   `User` still gains no access to `Organization`'s business fields.
 - **`User.platformId` (ADR-0009) is dropped entirely, per ADR-0022, and must never be
@@ -420,7 +421,8 @@ Notes:
   (`contactVerifiedAt`, `companyId`) only on `Operator` — a member row physically cannot carry
   either, and neither can be mistaken for the other's credentials.
 - **`role = 'admin'` is reserved** for owners and operators (`CHECK ((kind='member') = (role <>
-  'admin'))`). `POST /auth/register` rejects it with `400`, and the JWT `role: 'admin'` claim other
+  'admin'))`). `POST /auth/register` no longer accepts a `role` at all (ADR-0028: it is the opaque join-code audience, and `admin`
+  is refused as an audience at code creation), and the JWT `role: 'admin'` claim other
   services already read keeps its meaning. Every other `role` string stays opaque (ADR-0001); a
   platform's own "administrator"-style member role must use a different value.
 - `User.email` and `User.passwordHash` are **nullable** (per ADR-0009) only where the database allows it:
@@ -1134,7 +1136,7 @@ anything else is the collapsed `404`.
 | `23505` on `owner_single_per_company_v1` | second owner (v1 policy) | bootstrap/CLI refuses, non-zero exit |
 | `23505` on `admin_operator_code_one_live` | code issuance did not supersede first | `500` (service bug — supersede then insert, in one transaction) |
 | `23503` on `user_organizationId_fkey` | unknown organization | register: the same generic `403` used for "no valid license" (never reveals existence) + integrity alert |
-| `23514` on `user_admin_role_reserved` | `role: 'admin'` on a member | `400` |
+| `23514` on `user_admin_role_reserved` | `role: 'admin'` on a member (registration cannot supply a role since ADR-0028; a join code with audience `admin` is refused when created) | `400` at code creation |
 | any other `23xxx` | invariant the service failed to pre-empt | `500` + alert |
 
 ### Migration
@@ -1882,7 +1884,10 @@ operator with access to a platform get equal rights to manage that platform's or
     confirming which organization ids exist.
   - `payment-service` unreachable or times out → `503` (fail closed, per ADR-0004).
 
-- **`POST /auth/register`** — body `{email?, phone?, password, role, organizationId,
+- **`POST /auth/register`** — **superseded by ADR-0028: the body is now `{joinCode, email?, phone?, password}`; `role`,
+  `organizationId`, `platformId` and `audience` are rejected, and the organization/audience/approval behaviour
+  come from the join code (see "Organization onboarding" below). The text that follows describes the previous
+  contract and is kept for history.** Previously: body `{email?, phone?, password, role, organizationId,
   deviceFingerprint?}` — at least one of `email`/`phone` (ADR-0025: members authenticate with email or phone + password). Always creates a `kind = 'member'` user; no request can create an
   owner or operator through this endpoint. **`role: 'admin'` is reserved (ADR-0024) → `400`**; any
   other `role` string is stored opaquely as before. Unknown `platformId`/`adminTier`/`kind`
@@ -2392,6 +2397,7 @@ sequenceDiagram
     participant RTS as RefreshTokenService
     participant Broker as RabbitMQ
 
+    Note over App,AC: SUPERSEDED (ADR-0028): the body is now {joinCode, email|phone, password}; organization and audience are resolved from the code
     App->>AC: POST /auth/register {email, password, role, organizationId, deviceFingerprint?}
     alt organizationId missing
         AC-->>App: 400 (no further processing)
@@ -3310,6 +3316,44 @@ spec.
 - The new `AdminOrganizationController` surface inherits the same undesigned per-endpoint
   rate-limiting gap as the rest of `auth-service`'s Bearer-authenticated surfaces (per
   ADR-0012's precedent) — only the global baseline covers it so far.
+
+## Organization onboarding: join codes, membership, organization admins (ADR-0028)
+
+Implemented by migration `0004`. The decisions and their alternatives are in
+[ADR-0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md); this section is the
+implementation view.
+
+**Ownership.** Auth owns identity, authentication, membership and organization access state. payment-service
+owns subscriptions, licenses, payments, entitlements. The platform application (e.g. Nawara Drive) owns
+business roles (student, teacher, instructor, manager). `User.kind` stays `member | owner | operator`.
+
+**Data.** `organization_join_code` (HMAC of the code, audience label, `requiresApproval`,
+`requiresSubscription`, expiry, `maxUses`/`usedCount`, revocation), `organization_membership`
+(`pending | active | rejected`, decision actors, `isOrganizationAdmin`), `member_contact_verification`,
+`platform.key`, `"user"."contactVerifiedAt"`. Integrity is in the database: composite FK
+`(organizationId, platformId)` on the code, composite FK `(userId, organizationId)` on the membership,
+`UNIQUE (userId, organizationId)`, status CHECKs, and triggers for the status machine and immutability.
+
+**Student flow.** `POST /auth/onboarding/resolve` (optional) -> `POST /auth/register {joinCode, ...}` ->
+membership `active` (code says no approval) -> app shows the payment-required hint -> payment-service decides
+entitlement. Auth stores no subscription state.
+
+**Teacher flow.** resolve -> register -> membership `pending` (authenticated, not admitted; `GET /auth/me`
+reports `membership.status`) -> `POST .../memberships/:id/approve` by an owner, an assigned operator or an
+organization admin -> `active`, effective on the next request with the same token. `reject` is final.
+
+**Authorization.** `PlatformAccessService.organizationAuthority(actor, organizationId)` returns `owner`,
+`operator`, `org_admin` or null (collapsed 404), from current rows. `memberBelongsTo` requires an `active`
+membership (and, when `REQUIRE_CONTACT_VERIFICATION=true`, a verified contact).
+
+**Registration transaction.** One conditional `UPDATE` spends a use of the code (never above `maxUses`), the
+user and membership are created, audit rows are written; any failure rolls the use back.
+
+**Rate limits and audit.** See ADR-0028. Join codes are never stored, logged or audited in plaintext.
+
+**Not built (documented, not guessed).** Delivery of verification codes and approval notices (event only),
+the outbox, teacher-approval license re-check, membership revocation/suspension, multiple organizations per
+user, student checkout entry point. See the ADR's unresolved questions.
 
 ## Open questions
 

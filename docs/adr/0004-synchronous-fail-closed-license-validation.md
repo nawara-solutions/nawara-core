@@ -6,6 +6,8 @@
 
 > **Amended by [ADR-0026](./0026-authentication-is-not-entitlement.md):** only the registration-time license check remains in `auth-service`; the login/refresh usage and the `trialEndsAt` preview are removed.
 
+> **Also amended by [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md):** registration no longer takes `organizationId` or `role` from the client; the organization is resolved server-side from a join code. The registration-time license check described here is unchanged.
+
 ## Context
 
 This system supports two registration modes. Individual/direct registration is

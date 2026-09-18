@@ -24,9 +24,9 @@ export class AuthController {
 
   /** public */
   @Post('register')
-  @ApiOperation({ summary: 'Register a member (public). Always kind=member; role "admin" is reserved.' })
-  @ApiResponse({ status: 201, description: 'Tokens.' })
-  @ApiResponse({ status: 403, description: 'Organization unknown or not licensed (same response for both).' })
+  @ApiOperation({ summary: 'Register a member with an organization join code (public). Always kind=member; organization, platform and audience come from the code.' })
+  @ApiResponse({ status: 201, description: 'Tokens plus the onboarding context (audience, membership status, hints).' })
+  @ApiResponse({ status: 403, description: 'Bad/expired/exhausted code or unlicensed organization (same response for all).' })
   register(@Body() dto: RegisterDto, @Req() req: Request) {
     return this.auth.register(dto, this.client(req));
   }

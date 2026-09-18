@@ -48,7 +48,14 @@ export type RateBucket =
   | 'operator_verify_identifier'
   | 'operator_verify_ip'
   | 'operator_verify_global'
-  | 'operator_confirm_ip';
+  | 'operator_confirm_ip'
+  | 'join_code_resolve_ip'
+  | 'join_code_resolve_global'
+  | 'join_code_manage_actor'
+  | 'membership_op_actor'
+  | 'contact_request_user'
+  | 'contact_verify_user'
+  | 'contact_verify_ip';
 
 export interface AppConfig {
   env: 'development' | 'test' | 'production';
@@ -66,6 +73,8 @@ export interface AppConfig {
     operatorCodePepper: Buffer;
     secretKeyPepper: Buffer;
     throttlePepper: Buffer;
+    /** HMAC key for organization join codes (purpose-separated from every other secret). */
+    joinCodePepper: Buffer;
   };
   totp: { issuer: string; epochToleranceSec: number };
   webauthn: { rpId: string; rpName: string; origins: string[] };
@@ -79,6 +88,11 @@ export interface AppConfig {
   };
   rate: Record<RateBucket, RateRule>;
   payment: { baseUrl: string; serviceToken: string; timeoutMs: number };
+  onboarding: {
+    /** When true, organization access also requires a verified e-mail/phone. Off until a delivery channel exists. */
+    requireContactVerification: boolean;
+    contactCodeTtlSec: number;
+  };
   /** Swagger UI at /auth/docs. Served only when a password is set (fail closed), behind basic auth. */
   docs: { username: string; password: string | undefined };
 }
@@ -144,12 +158,13 @@ export function loadConfig(
   const operatorCodePepper = secretBytes(src, 'OPERATOR_CODE_PEPPER');
   const secretKeyPepper = secretBytes(src, 'SECRET_KEY_PEPPER');
   const throttlePepper = secretBytes(src, 'THROTTLE_KEY_PEPPER');
+  const joinCodePepper = secretBytes(src, 'JOIN_CODE_PEPPER');
 
   // Domain separation: one compromised/leaked secret must not unlock another purpose.
   const distinct = new Set(
-    [jwtSecret, operatorCodePepper, secretKeyPepper, throttlePepper, ...totpKeys.values()].map((b) => b.toString('hex')),
+    [jwtSecret, operatorCodePepper, secretKeyPepper, throttlePepper, joinCodePepper, ...totpKeys.values()].map((b) => b.toString('hex')),
   );
-  if (distinct.size !== 4 + totpKeys.size) {
+  if (distinct.size !== 5 + totpKeys.size) {
     throw new ConfigError('every secret (JWT, peppers, TOTP keys) must be distinct');
   }
 
@@ -188,7 +203,7 @@ export function loadConfig(
     },
     refreshTtlSec: int(env, 'REFRESH_TOKEN_TTL_SEC', 14 * 86_400, 60, 90 * 86_400),
     bcryptCost: int(env, 'BCRYPT_COST', 12, 4, 15),
-    secrets: { totpKeys, totpActiveKeyId, operatorCodePepper, secretKeyPepper, throttlePepper },
+    secrets: { totpKeys, totpActiveKeyId, operatorCodePepper, secretKeyPepper, throttlePepper, joinCodePepper },
     totp: { issuer: env.TOTP_ISSUER ?? 'Nawara', epochToleranceSec: int(env, 'TOTP_EPOCH_TOLERANCE_SEC', 30, 0, 60) },
     webauthn: {
       rpId: rpId || 'localhost',
@@ -228,11 +243,24 @@ export function loadConfig(
       // Coarse global brake on distributed guessing across many operators.
       operator_verify_global: rule(env, 'OPERATOR_VERIFY_GLOBAL', 600, 60),
       operator_confirm_ip: rule(env, 'OPERATOR_CONFIRM_IP', 30, 900),
+      // Join codes are onboarding credentials: resolution is throttled per IP and by a global brake so a
+      // botnet cannot enumerate the code space, and every failure looks identical to the caller.
+      join_code_resolve_ip: rule(env, 'JOIN_CODE_RESOLVE_IP', 20, 900),
+      join_code_resolve_global: rule(env, 'JOIN_CODE_RESOLVE_GLOBAL', 1000, 60),
+      join_code_manage_actor: rule(env, 'JOIN_CODE_MANAGE_ACTOR', 30, 3600),
+      membership_op_actor: rule(env, 'MEMBERSHIP_OP_ACTOR', 120, 900),
+      contact_request_user: rule(env, 'CONTACT_REQUEST_USER', 5, 3600),
+      contact_verify_user: rule(env, 'CONTACT_VERIFY_USER', 10, 900),
+      contact_verify_ip: rule(env, 'CONTACT_VERIFY_IP', 40, 900),
     },
     payment: {
       baseUrl: env.PAYMENT_SERVICE_URL ?? '',
       serviceToken: payToken,
       timeoutMs: int(env, 'PAYMENT_TIMEOUT_MS', 3000, 100, 30_000),
+    },
+    onboarding: {
+      requireContactVerification: env.REQUIRE_CONTACT_VERIFICATION === 'true',
+      contactCodeTtlSec: int(env, 'CONTACT_CODE_TTL_SEC', 900, 60, 3600),
     },
     docs: { username: env.SWAGGER_USERNAME || 'docs', password: docsPassword },
   };
