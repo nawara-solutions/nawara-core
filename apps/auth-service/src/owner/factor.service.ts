@@ -122,7 +122,16 @@ export class FactorService {
       [ownerId],
     );
     for (const f of rows) {
-      const chk = this.checkCode(this.cipher.open(f.secretCiphertext, f.secretKeyId, ownerId, f.id), code);
+      let secret: string;
+      try {
+        secret = this.cipher.open(f.secretCiphertext, f.secretKeyId, ownerId, f.id);
+      } catch {
+        // Retired key or damaged ciphertext: this factor is unusable, which must be an audited, safe
+        // refusal (the caller answers 401) and never a 500. Nothing about the key or blob is logged.
+        await this.audit.tryRecord({ type: 'owner.totp.key_unavailable', outcome: 'failure', actorId: ownerId, targetId: f.id });
+        continue;
+      }
+      const chk = this.checkCode(secret, code);
       if (!chk.valid) continue;
       // Atomic replay guard: the step must be strictly newer than the last one accepted.
       const { rowCount } = await q.query(
@@ -197,7 +206,15 @@ export class FactorService {
         expectedChallenge,
         { credentialId: f.credentialId, publicKey: f.publicKey, signCount: Number(f.signCount), transports: f.transports },
       );
-      await q.query(`UPDATE owner_auth_factor SET "signCount"=$2, "lastUsedAt"=$3 WHERE id=$1`, [f.id, newCounter, this.clock.now()]);
+      // Compare-and-set: the counter must still be the value this assertion was verified against. If a
+      // concurrent assertion advanced it first (two holders of one key answering at once), this one is
+      // a clone signal exactly like a non-advancing counter. Authenticators that never count (0 and 0)
+      // stay allowed.
+      const upd = await q.query(
+        `UPDATE owner_auth_factor SET "signCount"=$2, "lastUsedAt"=$3 WHERE id=$1 AND ("signCount" < $2 OR ($2 = 0 AND "signCount" = 0))`,
+        [f.id, newCounter, this.clock.now()],
+      );
+      if (upd.rowCount !== 1) throw new CloneSuspected('signature counter advanced concurrently');
       return { factorId: f.id };
     } catch (e) {
       if (e instanceof CloneSuspected) {
@@ -219,11 +236,21 @@ export class FactorService {
     return (rowCount ?? 0) === 1;
   }
 
-  /** Removal that can never leave an owner with zero confirmed factors. */
+  /**
+   * Removal that can never leave an owner with zero confirmed factors.
+   *
+   * Every live factor row of the owner is locked (in id order, so two removals cannot deadlock) BEFORE
+   * counting. Locking only the target row is not enough: two transactions removing two DIFFERENT
+   * factors would each still count "2 confirmed" and together remove both (write skew).
+   */
   async removeSafely(q: Queryable, ownerId: string, factorId: string): Promise<void> {
-    const { rows } = await q.query(`SELECT ("confirmedAt" IS NOT NULL) AS confirmed FROM owner_auth_factor WHERE id=$1 AND "ownerId"=$2 AND "revokedAt" IS NULL FOR UPDATE`, [factorId, ownerId]);
-    if (!rows[0]) throw new NotFoundException();
-    if (rows[0].confirmed && (await this.countConfirmed(ownerId, q)) <= 1) {
+    const { rows } = await q.query<{ id: string; confirmed: boolean }>(
+      `SELECT id, ("confirmedAt" IS NOT NULL) AS confirmed FROM owner_auth_factor WHERE "ownerId"=$1 AND "revokedAt" IS NULL ORDER BY id FOR UPDATE`,
+      [ownerId],
+    );
+    const target = rows.find((r) => r.id === factorId);
+    if (!target) throw new NotFoundException();
+    if (target.confirmed && rows.filter((r) => r.confirmed).length <= 1) {
       throw new ConflictException('You cannot remove your only authentication factor.');
     }
     await this.revoke(q, ownerId, factorId);

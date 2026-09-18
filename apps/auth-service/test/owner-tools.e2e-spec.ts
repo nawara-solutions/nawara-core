@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bootstrapOwner, resealTotpSecrets } from '../src/cli/owner-tools.js';
+import { bootstrapOwner, checkTotpKeys, resealTotpSecrets } from '../src/cli/owner-tools.js';
 import { PasswordService } from '../src/crypto/password.js';
 import { TotpSecretCipher } from '../src/crypto/totp-cipher.js';
 import { DbService } from '../src/db/db.service.js';
@@ -44,5 +44,43 @@ describe('operational tools', () => {
     expect(onlyNew.open(row.rows[0].secretCiphertext, 'k2', o.id, row.rows[0].id)).toBe(o.totpSecret);
     // idempotent
     expect((await resealTotpSecrets(t.app.get(DbService), ring, 'k2')).resealed).toBe(0);
+  });
+
+  it('retire-a-key preflight: reports factors a reduced key ring could no longer open, and is clean when the ring covers them', async () => {
+    const r = await createTestApp(); // its own database: the shared one already holds resealed rows
+    try {
+      const o = await r.readyOwner(await r.newCompany(), 'pre@a.test');
+      const covered = new TotpSecretCipher(new Map([['k1', r.cfg.secrets.totpKeys.get('k1')!]]), 'k1');
+      const cleanRing = await checkTotpKeys(r.app.get(DbService), covered);
+      expect(cleanRing.unreadable).toBe(0);
+      expect(cleanRing.byKeyId.k1).toBeGreaterThan(0);
+      // a ring that dropped k1 (the retirement mistake) is detected BEFORE anyone is locked out
+      const dropped = new TotpSecretCipher(new Map([['k2', randomBytes(32)]]), 'k2');
+      const report = await checkTotpKeys(r.app.get(DbService), dropped);
+      expect(report.unreadable).toBe(report.total);
+      expect(report.unreadable).toBeGreaterThan(0);
+      expect(JSON.stringify(report)).not.toContain(o.totpSecret); // ids and counts only
+    } finally {
+      await r.close();
+    }
+  });
+
+  it('newly enrolled factors are sealed under the ACTIVE key, and old factors keep opening under theirs', async () => {
+    const k = () => randomBytes(32).toString('base64');
+    const k1 = k(), k2 = k();
+    const r = await createTestApp({ TOTP_ENCRYPTION_KEYS: `k1:${k1},k2:${k2}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k2' });
+    try {
+      const o = await r.readyOwner(await r.newCompany(), 'active@a.test');
+      const row = await r.db.query(`SELECT "secretKeyId" FROM owner_auth_factor WHERE "ownerId"=$1`, [o.id]);
+      expect(row.rows[0].secretKeyId).toBe('k2');
+      // seal one factor under the OLD key (as if enrolled before the rotation): login must still work
+      const cipher = new TotpSecretCipher(new Map([['k1', Buffer.from(k1, 'base64')], ['k2', Buffer.from(k2, 'base64')]]), 'k1');
+      const f = await r.db.query(`SELECT id FROM owner_auth_factor WHERE "ownerId"=$1`, [o.id]);
+      const sealed = cipher.seal(o.totpSecret, o.id, f.rows[0].id);
+      await r.db.query(`UPDATE owner_auth_factor SET "secretCiphertext"=$2, "secretKeyId"='k1' WHERE id=$1`, [f.rows[0].id, sealed.ciphertext]);
+      await r.ownerLogin(o, o.totpSecret);
+    } finally {
+      await r.close();
+    }
   });
 });
