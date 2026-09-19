@@ -98,7 +98,7 @@ describeWithEnv('platform currency configuration (foundation), against a real Po
   describe('historical invoices are never changed by Platform configuration', () => {
     async function issueTnd() {
       const seller = crypto.randomUUID();
-      const product = (await admin.query(`INSERT INTO product ("sellerType", "sellerId", code, name) VALUES ('organization', $1, 'plan', 'Plan') RETURNING id`, [seller])).rows[0].id;
+      const product = (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('test-producer', 'organization', $1, 'plan', 'Plan') RETURNING id`, [seller])).rows[0].id;
       const price = (await admin.query(`INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval") VALUES ($1, 'p', 'TND', 2500, 'one_time') RETURNING id`, [product])).rows[0].id;
       const input = normaliseCreateInvoiceInput({
         invoiceRequestId: crypto.randomUUID(), seller: { type: 'organization', id: seller }, payer: { type: 'user', id: 'user-1' }, sourceType: 'contract', sourceId: 's-1',

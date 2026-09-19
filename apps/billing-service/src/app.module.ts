@@ -6,6 +6,7 @@ import {
 } from '@nawara/service-kit';
 import { AuthClientModule } from './auth/auth-client.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { CatalogModule } from './catalog/catalog.module.js';
 import type { BillingConfig } from './config/billing-config.js';
 import { BillingConfigModule } from './config/billing-config.module.js';
 import { CurrenciesModule } from './currencies/currencies.module.js';
@@ -25,8 +26,10 @@ export interface AppModuleOverrides {
 
 /**
  * The whole module graph. `main.ts` and the test suites build it through the SAME function, so a test can never
- * pass against a differently wired application than the one that ships. Stage 2 adds the invoice persistence layer
- * (`InvoicesModule`); there is still no controller (the HTTP API is Stage 3, SDD section 34).
+ * pass against a differently wired application than the one that ships. Stage 3 adds the HTTP API (`CatalogModule`,
+ * `InvoicesModule`'s controllers): products, prices, invoice create/get/list/issue/discard, and Billing-side payment
+ * request create/get. The Payment integration itself (dispatcher, client, reconciler, event consumer) is Stage 4 and
+ * is not built.
  */
 @Module({})
 export class AppModule {
@@ -50,6 +53,7 @@ export class AppModule {
         RateLimitModule,
         AuthModule,
         InvoicesModule,
+        CatalogModule,
         CurrenciesModule,
       ],
     };

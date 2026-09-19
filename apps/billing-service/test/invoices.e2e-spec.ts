@@ -49,7 +49,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
   async function seedPrice(o: { unit?: number; currency?: string; seller?: string; retired?: boolean; future?: boolean; archived?: boolean } = {}): Promise<string> {
     seq += 1;
     const product = await admin.query(
-      `INSERT INTO product ("sellerType", "sellerId", code, name, status) VALUES ('organization', $1, $2, $3, 'active') RETURNING id`,
+      `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status) VALUES ('test-producer', 'organization', $1, $2, $3, 'active') RETURNING id`,
       [o.seller ?? ORG, `prod-${seq}-${Math.random().toString(36).slice(2, 8)}`, `Product ${seq}`],
     );
     const price = await admin.query(

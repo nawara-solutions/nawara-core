@@ -22,6 +22,8 @@ export interface BillingConfig extends BaseConfig {
   supportedCurrencies: string[];
   /** OpenAPI is mounted at /billing/docs behind basic auth, and only when a password is configured. */
   docs: { username: string; password?: string };
+  /** Baseline abuse limits (SDD section 29): requests per minute per AUTHENTICATED caller. Technical values, no business meaning. */
+  rateLimits: { invoiceCreatePerMinute: number; paymentRequestCreatePerMinute: number };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -65,6 +67,10 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       // A password that protects financial API documentation must not be trivial.
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
+    },
+    rateLimits: {
+      invoiceCreatePerMinute: reader.int('BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),
+      paymentRequestCreatePerMinute: reader.int('BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE', { default: 30, min: 1, max: 100_000 }),
     },
   };
 }

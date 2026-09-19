@@ -6,10 +6,13 @@ import { billingError, notFound, operationNotPermitted } from '../domain/errors.
 import { fromDbAmount } from '../domain/money.js';
 import { relationTo } from '../domain/relations.js';
 import { SnapshotError, buildPresentationSnapshot } from '../domain/snapshots.js';
+import { ACTIVE_PAYMENT_REQUEST_STATUSES } from '../domain/state-machines.js';
 import { computeTotals } from '../domain/totals.js';
 import type { NormalisedCreateInvoiceInput } from '../domain/invoice-input.js';
 import { invoiceCreatedEvent } from './billing-events.js';
-import { INVOICE_COLUMNS, type InvoiceLineRow, type InvoiceRecord, type InvoiceRow, type PriceForInvoice } from './invoice.types.js';
+import {
+  INVOICE_COLUMNS, type InvoiceLineRow, type InvoiceListFilters, type InvoiceListRow, type InvoiceRecord, type InvoiceRow, type PriceForInvoice,
+} from './invoice.types.js';
 import { recordTransition } from './transitions.js';
 
 export interface WriteResult {
@@ -122,6 +125,48 @@ export class InvoiceRepository {
     const invoice = await this.load(this.db, invoiceId);
     if (!invoice || relationTo(invoice, caller) === null) throw notFound();
     return invoice;
+  }
+
+  /**
+   * Lists invoices for a caller (SDD 18.1 endpoint 9). The SCOPE is derived from the caller, never from a filter: a
+   * service token sees only invoices it produced; a user bearer sees only invoices whose payer is that user. A filter
+   * (organizationId via payer/sourceType, payerId, etc.) that does not match the caller's own scope narrows to an empty
+   * page, never to another caller's data, because every filter is ANDed onto the scope clause, never a replacement for
+   * it. No `lines` here (a list of up to 100 invoices with up to 100 lines each would be unbounded); `GET .../{id}` has
+   * them. `limit + 1` rows are fetched so `toPage` can tell whether another page follows without a second query.
+   */
+  async listForCaller(caller: Caller, filters: InvoiceListFilters, limit: number, cursor: { createdAt: Date; id: string } | null): Promise<InvoiceListRow[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const p = (v: unknown): string => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+
+    if (caller.kind === 'service') where.push(`i.producer = ${p(caller.service)}`);
+    else where.push(`i."payerType" = 'user' AND i."payerId" = ${p(caller.userId)}`);
+
+    if (filters.status !== undefined) where.push(`i.status = ${p(filters.status)}`);
+    if (filters.sourceType !== undefined) where.push(`i."sourceType" = ${p(filters.sourceType)}`);
+    if (filters.sourceId !== undefined) where.push(`i."sourceId" = ${p(filters.sourceId)}`);
+    if (filters.payerType !== undefined) where.push(`i."payerType" = ${p(filters.payerType)}`);
+    if (filters.payerId !== undefined) where.push(`i."payerId" = ${p(filters.payerId)}`);
+    if (filters.dueBefore !== undefined) where.push(`i."dueAt" IS NOT NULL AND i."dueAt" < ${p(filters.dueBefore)}`);
+    if (cursor) where.push(`(i."createdAt", i.id) < (${p(cursor.createdAt)}, ${p(cursor.id)})`); // keyset pagination, newest first
+
+    const { rows } = await this.db.query<InvoiceListRow>(
+      `SELECT i.*, (i.status = 'open' AND i."dueAt" IS NOT NULL AND i."dueAt" <= now()) AS "isOverdue",
+              pr.id AS "activePaymentRequestId", pr.status AS "activePaymentRequestStatus", pr."paymentId" AS "activePaymentRequestPaymentId"
+         FROM invoice i
+         LEFT JOIN LATERAL (
+           SELECT id, status, "paymentId" FROM payment_request WHERE "invoiceId" = i.id AND status = ANY(${p([...ACTIVE_PAYMENT_REQUEST_STATUSES])}::text[]) LIMIT 1
+         ) pr ON true
+        WHERE ${where.join(' AND ')}
+        ORDER BY i."createdAt" DESC, i.id DESC
+        LIMIT ${p(limit + 1)}`,
+      params,
+    );
+    return rows;
   }
 
   async load(q: Queryable, invoiceId: string): Promise<InvoiceRecord | null> {

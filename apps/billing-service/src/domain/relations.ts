@@ -14,3 +14,12 @@ export function relationTo(invoice: { producer: string; payerType: string; payer
   if (caller.kind === 'user' && invoice.payerType === 'user' && invoice.payerId === caller.userId) return 'payer';
   return null;
 }
+
+/**
+ * A caller's relation to a product or price (SDD section 11: "reached by the producer that created it"). Only `producer`
+ * exists: a product/price has no payer concept, and no membership-based relation (B-029, B-031: which services may act
+ * for which sellers is not decided; this checks only "the same producer that created the row", never a seller scope).
+ */
+export function catalogRelationTo(row: { producer: string }, caller: Caller): 'producer' | null {
+  return caller.kind === 'service' && caller.service === row.producer ? 'producer' : null;
+}

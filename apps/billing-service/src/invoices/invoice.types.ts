@@ -84,6 +84,21 @@ export interface PaymentRequestRow {
   updatedAt: Date;
 }
 
+export interface InvoiceListFilters {
+  status?: string;
+  sourceType?: string;
+  sourceId?: string;
+  payerType?: string;
+  payerId?: string;
+  dueBefore?: Date;
+}
+
+export interface InvoiceListRow extends InvoiceRow {
+  activePaymentRequestId: string | null;
+  activePaymentRequestStatus: string | null;
+  activePaymentRequestPaymentId: string | null;
+}
+
 export interface PriceForInvoice {
   priceId: string;
   productId: string;

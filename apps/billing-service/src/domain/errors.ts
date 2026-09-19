@@ -3,10 +3,14 @@ import { HttpException } from '@nestjs/common';
 /** The stable, machine-readable error codes of SDD section 18.2, carried in the kit's additive `code` field. */
 export type BillingErrorCode =
   | 'invalid_invoice_request'
+  | 'invalid_product_request'
+  | 'invalid_price_request'
   | 'unauthorized'
   | 'operation_not_permitted'
   | 'not_found'
   | 'invoice_request_conflict'
+  | 'product_conflict'
+  | 'price_conflict'
   | 'invalid_state_transition'
   | 'invoice_not_payable'
   | 'payment_request_not_supported'
