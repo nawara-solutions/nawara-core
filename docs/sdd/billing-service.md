@@ -1,6 +1,6 @@
 # billing-service
 
-- **Status:** Draft, **for review**. Nothing here is implemented: there is no `apps/billing-service` (the local PostgreSQL only provisions the `billing` database and its two roles).
+- **Status:** Draft, **for review**. Only **Stage 1** (the service foundation, no domain) is implemented in `apps/billing-service` (see `docs/tdd/billing-service-foundation.md`); everything else here is designed, not built.
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md), [financial-architecture.md](../architecture/financial-architecture.md) (root architecture documents)
 - **Related SDD:** [payment-service.md](./payment-service.md) (Billing's only outbound API dependency and its main event source; **not redesigned here**)
@@ -898,7 +898,7 @@ Each feature is planned in its own TDD (`docs/tdd/`) before code, as for Payment
 
 ### 34.2 Reality check
 
-Today: the kit provides configuration, request and correlation ids, the error filter with a `code` field, health and readiness, the service-token guard, the Auth client, database access, the migration runner, outbox, inbox and the RabbitMQ bus, a fixed-window rate limiter, and generic immutability triggers. Payment on `main` (Phase 1: create, get, start and sync an attempt, webhooks, resolver, expiry sweeper, events, test provider only) is the integration target. **Everything in this SDD is designed, not built.**
+Today: the kit provides configuration, request and correlation ids, the error filter with a `code` field, health and readiness, the service-token guard, the Auth client, database access, the migration runner, outbox, inbox and the RabbitMQ bus, a fixed-window rate limiter, and generic immutability triggers. Payment on `main` (Phase 1: create, get, start and sync an attempt, webhooks, resolver, expiry sweeper, events, test provider only) is the integration target. **Stage 1 (the foundation, no domain) is built; everything else in this SDD is designed, not built.**
 
 ### 34.3 Implementation readiness gate
 
