@@ -24,6 +24,18 @@ export interface BillingConfig extends BaseConfig {
   docs: { username: string; password?: string };
   /** Baseline abuse limits (SDD section 29): requests per minute per AUTHENTICATED caller. Technical values, no business meaning. */
   rateLimits: { invoiceCreatePerMinute: number; paymentRequestCreatePerMinute: number };
+  /** Stage 4: the one outbound dependency Billing has. Billing's OWN service token for the pair billing -> payment (ADR-0033, SDD section 20) — never a user's JWT, never forwarded from anywhere else. */
+  paymentServiceUrl: string;
+  paymentServiceToken: string;
+  paymentTimeoutMs: number;
+  /**
+   * Dispatcher polling (SDD section 21.5): technical tuning, no business meaning. `staleSendingMs` is also the
+   * dispatcher's own retry threshold — a `sending` row older than this is re-claimed and re-sent (safe: the natural
+   * key makes a repeated create idempotent), so a stuck dispatch never needs the reconciler at all.
+   */
+  dispatch: { intervalMs: number; batchSize: number; staleSendingMs: number };
+  /** Reconciler polling and staleness threshold for `requested` rows with no terminal event yet (SDD section 21.5): technical tuning, no business meaning. */
+  reconcile: { intervalMs: number; staleRequestedMs: number };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -71,6 +83,18 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     rateLimits: {
       invoiceCreatePerMinute: reader.int('BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),
       paymentRequestCreatePerMinute: reader.int('BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE', { default: 30, min: 1, max: 100_000 }),
+    },
+    paymentServiceUrl: reader.url('PAYMENT_SERVICE_URL', ['http:', 'https:']),
+    paymentServiceToken: reader.secret('PAYMENT_SERVICE_TOKEN', 32),
+    paymentTimeoutMs: reader.int('PAYMENT_TIMEOUT_MS', { default: 5000, min: 100, max: 60_000 }),
+    dispatch: {
+      intervalMs: reader.int('BILLING_DISPATCH_INTERVAL_MS', { default: 2000, min: 100, max: 300_000 }),
+      batchSize: reader.int('BILLING_DISPATCH_BATCH_SIZE', { default: 50, min: 1, max: 1000 }),
+      staleSendingMs: reader.int('BILLING_DISPATCH_STALE_SENDING_MS', { default: 60_000, min: 1000, max: 3_600_000 }),
+    },
+    reconcile: {
+      intervalMs: reader.int('BILLING_RECONCILE_INTERVAL_MS', { default: 30_000, min: 1000, max: 3_600_000 }),
+      staleRequestedMs: reader.int('BILLING_RECONCILE_STALE_REQUESTED_MS', { default: 300_000, min: 1000, max: 86_400_000 }),
     },
   };
 }

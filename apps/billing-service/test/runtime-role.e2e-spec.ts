@@ -152,7 +152,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     expect((await platforms.disable('platform-rt', 'TND')).revision).toBe(1);
     // an event receipt, so the append-only guard below has a row to refuse to change (a row-level guard cannot fire on an empty table)
     const ignored = await requests.applyPaymentEvent(crypto.randomUUID(), {
-      name: 'payment.failed', source: 'payment-service', paymentId: crypto.randomUUID(), paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: open.id,
+      name: 'payment.failed', source: 'payment-service', paymentId: crypto.randomUUID(), producer: 'billing-service', paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: open.id,
       payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: org }, organizationId: org, amount: 5000, currency: 'TND', revision: 1,
     }, { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'e1' } });
     expect(ignored).toMatchObject({ outcome: 'ignored', detail: 'unknown_payment_request' });

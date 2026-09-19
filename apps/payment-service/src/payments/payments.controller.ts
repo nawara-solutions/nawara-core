@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CallerService, DbService, RateLimitService, ServiceTokenGuard } from '@nawara/service-kit';
@@ -7,10 +7,12 @@ import type { PaymentConfig } from '../config/payment-config.js';
 import { AuthorizationService } from '../authorization/authorization.service.js';
 import type { CallerRequest } from '../auth/service-or-user.guard.js';
 import { ServiceOrUserGuard } from '../auth/service-or-user.guard.js';
-import { notFound } from '../errors.js';
+import { notFound, paymentError } from '../errors.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { representPayment } from './payment.representation.js';
 import { PaymentService } from './payment.service.js';
+
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 
 @ApiTags('payments')
 @Controller('payment/payments')
@@ -55,5 +57,31 @@ export class PaymentsController {
     if (!payment || !req.caller) throw notFound();
     this.authorization.assertCanRead(payment, req.caller);
     return representPayment(this.db, payment);
+  }
+
+  @Post(':id/cancel')
+  @HttpCode(200)
+  @UseGuards(ServiceTokenGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      'Cancel a payment (producer only; must equal the payment\'s own producer). Requires Idempotency-Key. Only created/pending ' +
+      'payments with no open attempt can be cancelled — terminal states (succeeded/failed/expired/cancelled) are refused.',
+  })
+  @ApiResponse({ status: 200, description: 'Cancelled, or an identical replay of the original cancellation.' })
+  @ApiResponse({ status: 400, description: 'idempotency_key_required' })
+  @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 404, description: 'collapsed: missing, or not this caller\'s payment' })
+  @ApiResponse({ status: 409, description: 'invalid_state_transition / payment_has_open_attempt' })
+  @ApiResponse({ status: 422, description: 'idempotency_key_reused' })
+  async cancel(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string, @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    if (!idempotencyKey || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+      throw paymentError(400, 'idempotency_key_required', 'A valid Idempotency-Key header is required.');
+    }
+    const payment = await this.payments.findById(id);
+    if (!payment) throw notFound();
+    this.authorization.assertCanCancel(payment, { kind: 'service', service: producer });
+    const { payment: cancelled } = await this.payments.cancel(id, producer, idempotencyKey);
+    return representPayment(this.db, cancelled);
   }
 }

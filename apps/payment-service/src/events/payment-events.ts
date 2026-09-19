@@ -70,6 +70,9 @@ export function paymentEvent(name: PaymentEventName, payment: PaymentRow, ctx: E
       actor: ctx.actor,
       cause: ctx.cause,
       ...extra,
+      // Placed AFTER `...extra` so nothing an event-specific caller passes can ever override Payment's own authoritative
+      // producer (Billing SDD R-6): additional isolation evidence, never a replacement for full snapshot validation.
+      producer: payment.producer,
     },
   };
 }

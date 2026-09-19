@@ -10,17 +10,19 @@ const noopAuthClient: AuthClient = { getIdentity: async () => null, hasPlatformA
 
 /**
  * OpenAPI validation (repo rule: every controller method and DTO field carries @ApiOperation/@ApiResponse/@ApiProperty):
- * the document must BUILD without throwing (SwaggerModule reflects every controller's decorators), and every Stage 3
- * operation must be present with a summary and at least one documented response. No real database is touched: document
- * generation is pure reflection over the compiled module graph.
+ * the document must BUILD without throwing (SwaggerModule reflects every controller's decorators), and every
+ * implemented operation must be present with a summary and at least one documented response. No real database is
+ * touched: document generation is pure reflection over the compiled module graph.
  */
-describe('OpenAPI document (Stage 3)', () => {
-  it('builds without throwing, and documents every Stage 3 operation', async () => {
+describe('OpenAPI document (Stage 3 + Stage 4)', () => {
+  it('builds without throwing, and documents every implemented operation', async () => {
     const config = loadBillingConfig({
       NODE_ENV: 'test',
       DATABASE_URL: 'postgres://billing_app:pw@localhost:5433/billing',
       AUTH_SERVICE_URL: 'http://auth.invalid',
       BILLING_SUPPORTED_CURRENCIES: 'TND',
+      PAYMENT_SERVICE_URL: 'http://payment.invalid',
+      PAYMENT_SERVICE_TOKEN: 'test-only-payment-service-token-not-a-real-secret-000',
     });
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule.register(config, { authClient: noopAuthClient, bus: new InMemoryEventBus() })],
@@ -44,6 +46,7 @@ describe('OpenAPI document (Stage 3)', () => {
         ['/billing/invoices/{id}/discard', 'post'],
         ['/billing/invoices/{invoiceId}/payment-requests', 'post'],
         ['/billing/payment-requests/{id}', 'get'],
+        ['/billing/payment-requests/{id}/cancel', 'post'],
       ];
       for (const [path, method] of expectedOperations) {
         const operation = document.paths[path]?.[method];
@@ -52,8 +55,8 @@ describe('OpenAPI document (Stage 3)', () => {
         expect(Object.keys(operation!.responses ?? {}).length, `${method.toUpperCase()} ${path} has at least one @ApiResponse`).toBeGreaterThan(0);
       }
 
-      // Endpoints not yet built (void, credit notes, entitlement, payment-request cancel — all blocked or Stage 4/8) must not appear.
-      for (const notBuilt of ['/billing/invoices/{id}/void', '/billing/credit-notes', '/billing/licenses/{organizationId}/status', '/billing/payment-requests/{id}/cancel']) {
+      // Endpoints not yet built (void, credit notes, entitlement — all blocked or Stage 8) must not appear.
+      for (const notBuilt of ['/billing/invoices/{id}/void', '/billing/credit-notes', '/billing/licenses/{organizationId}/status']) {
         expect(document.paths[notBuilt], `${notBuilt} is not documented (not built)`).toBeUndefined();
       }
     } finally {

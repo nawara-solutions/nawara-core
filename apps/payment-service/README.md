@@ -27,9 +27,9 @@ no production traffic can reach any of this (the test provider refuses to start 
   application code.
 - Payment lifecycle: `created → pending → succeeded/failed → created (retry) → expired`, natural-key
   idempotency on `(producer, paymentRequestId)`, header-based idempotency for attempts.
-- Endpoints 1, 2, 3, 4, 5 of SDD section 9: create/get a payment, start/sync an attempt, provider
-  webhooks. (Endpoint 9, cancel, is `[T]` — implemented at the service layer, no HTTP route; see
-  "Deferred" below.)
+- Endpoints 1, 2, 3, 4, 5, 9 of SDD section 9: create/get a payment, start/sync an attempt, provider
+  webhooks, cancel (Stage 4: producer-only, `Idempotency-Key` required, refuses a terminal state or
+  an open attempt with `payment_has_open_attempt`).
 - The deterministic test provider (`success`, `failure`, `retry`, `timeout_before_accept`,
   `timeout_after_accept`, plus signature verification), the provider port, and three background jobs
   (`AttemptResolver`, `WebhookRetrier`, `ExpirySweeper`) with the same start/stop shape as the kit's
@@ -39,10 +39,12 @@ no production traffic can reach any of this (the test provider refuses to start 
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
   resolver and the webhook path all share.
 - Transactional outbox events: `payment.created`, `payment.succeeded`, `payment.failed`,
-  `payment.expired` (`payment.cancelled` exists at the service layer; cancel has no route yet). Payloads follow
-  SDD section 11 (common payload, `revision`, `actor`, `cause`, correlation id).
+  `payment.expired`, `payment.cancelled`. Payloads follow SDD section 11 (common payload, `revision`,
+  `actor`, `cause`, correlation id) plus `producer` (Stage 4: additional producer-isolation evidence
+  for Billing's consumer, sourced only from the payment row, never overridable via event metadata —
+  never a replacement for full snapshot validation).
 - Baseline rate limits on payment creation (per producer) and attempts (per payer), `PAYMENT_RATE_LIMIT_*`.
-- 51 unit + 96 integration/e2e tests (against a real PostgreSQL, including the service running as the restricted
+- 52 unit + 107 integration/e2e tests (against a real PostgreSQL, including the service running as the restricted
   `payment_app`-style role) plus 47 database-level invariant assertions and 2 concurrency races in `db/tests/`.
   See `docs/tdd/payment-phase1-acceptance-fixes.md` for what the acceptance review found and fixed.
 
@@ -60,8 +62,7 @@ no production traffic can reach any of this (the test provider refuses to start 
 ### Deferred (`[X]`, SDD section 18)
 
 Real gateway adapters, organization payment accounts, settlement, payouts, fees, custody/wallet,
-merchant-of-record behaviour, full periodic reconciliation, admin/support tooling, the cancel HTTP
-route (implemented at the service layer only — flag if you want it exposed).
+merchant-of-record behaviour, full periodic reconciliation, admin/support tooling.
 
 ### Known limitations
 

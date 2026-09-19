@@ -35,6 +35,7 @@ describe('paymentEvent (SDD section 11)', () => {
     expect(ev.name).toBe('payment.succeeded');
     expect(ev.payload).toMatchObject({
       paymentId: row.id,
+      producer: 'billing-service',
       paymentRequestId: row.paymentRequestId,
       sourceType: 'invoice',
       sourceId: 'inv-1',
@@ -60,6 +61,15 @@ describe('paymentEvent (SDD section 11)', () => {
     for (const forbidden of ['description', 'reference', 'providerData', 'rawBody', 'secret', 'token', 'signature', 'statement line']) {
       expect(json).not.toContain(forbidden);
     }
+  });
+
+  it('every payment lifecycle event carries producer, sourced only from PaymentRow.producer, never from ctx or extra', () => {
+    for (const name of ['payment.created', 'payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired'] as const) {
+      const e = paymentEvent(name, row, requestContext({ type: 'user', id: 'u' }), { producer: 'someone-else' }); // extra cannot override it
+      expect(e.payload.producer).toBe('billing-service');
+    }
+    const otherRow: PaymentRow = { ...row, producer: 'other-producer' };
+    expect(paymentEvent('payment.succeeded', otherRow, requestContext({ type: 'user', id: 'u' })).payload.producer).toBe('other-producer');
   });
 
   it('derives its id from (payment, event name) only, so a retried transition cannot enqueue a second event', () => {

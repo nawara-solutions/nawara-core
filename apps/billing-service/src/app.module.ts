@@ -11,6 +11,7 @@ import type { BillingConfig } from './config/billing-config.js';
 import { BillingConfigModule } from './config/billing-config.module.js';
 import { CurrenciesModule } from './currencies/currencies.module.js';
 import { InvoicesModule } from './invoices/invoices.module.js';
+import { PaymentIntegrationModule } from './payment-integration/payment-integration.module.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
 export const billingMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -26,10 +27,9 @@ export interface AppModuleOverrides {
 
 /**
  * The whole module graph. `main.ts` and the test suites build it through the SAME function, so a test can never
- * pass against a differently wired application than the one that ships. Stage 3 adds the HTTP API (`CatalogModule`,
- * `InvoicesModule`'s controllers): products, prices, invoice create/get/list/issue/discard, and Billing-side payment
- * request create/get. The Payment integration itself (dispatcher, client, reconciler, event consumer) is Stage 4 and
- * is not built.
+ * pass against a differently wired application than the one that ships. Stage 3 added the HTTP API (`CatalogModule`,
+ * `InvoicesModule`'s controllers). Stage 4 adds `PaymentIntegrationModule`: the dispatcher, the Payment client port,
+ * the event consumer and the reconciler — the actual cross-service loop to payment-service.
  */
 @Module({})
 export class AppModule {
@@ -55,6 +55,7 @@ export class AppModule {
         InvoicesModule,
         CatalogModule,
         CurrenciesModule,
+        PaymentIntegrationModule,
       ],
     };
   }

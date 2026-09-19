@@ -5,11 +5,13 @@ Answers: **what is owed, why, how much, in which currency, by whom, to whom, and
 [`docs/architecture/financial-architecture.md`](../../docs/architecture/financial-architecture.md). It is **not** the payment or
 accounting system: it never moves money and keeps no ledger.
 
-## Status: Stage 2 (domain schema, financial invariants, state-transition foundation)
+## Status: Stage 4 (Payment integration: dispatch, cancel, event consumption, reconciliation)
 
-The **database and the pure domain rules** of the Billing aggregate (SDD section 34.1, Stage 2), on top of the Stage 1 foundation.
-There is **still no Billing HTTP endpoint**: the invoice API is Stage 3. **Not production-ready** and not deployed.
-Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs/tdd/billing-service-domain-schema.md).
+The full cross-service loop with payment-service (SDD section 21), on top of Stage 3's HTTP API and the Stage 2 domain/schema
+foundation. Billing can now actually ask Payment to collect an invoice, learn the outcome, and recover from a distributed
+failure — end to end, not just record the request. **Not production-ready** and not deployed.
+Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs/tdd/billing-service-domain-schema.md) and
+[`docs/tdd/billing-service-http-api.md`](../../docs/tdd/billing-service-http-api.md).
 
 ### Implemented
 
@@ -26,19 +28,38 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   **not** assumed (scope and format are B-004).
 - **Currency in three layers**: the global `currency` reference, Platform-enabled currencies (`platform_currency`, with a permission question nothing calls yet) and the immutable historical invoice currency. No Platform currency HTTP API; how an invoice gets its Platform is undecided (B-036).
 - **Payment-request mapping** as a pure function of two immutable rows, and **payment-event handling**: a pure decision function plus
-  a durable receipt (duplicates, out-of-order, unknown, early events; a `paymentId` is never bound from an event).
+  a durable receipt (duplicates, out-of-order, unknown, early events; a `paymentId` is never bound from an event). Billing keeps its
+  own `payment_event_receipt` for this rather than the kit's generic `InboxService` — Payment-event deduplication carries Billing
+  business semantics (a decision, a detail code, the request/invoice it settles) that does not belong in shared infrastructure.
 - **Persistence layer** (`src/invoices`): `InvoiceRepository` (create draft with natural-key idempotency, issue, discard, read) and
-  `PaymentRequestRepository` (state-idempotent create, apply a Payment event). Every state change is one transaction: row lock,
-  change, history row and, on issue, the `invoice.created` outbox event.
-- Tests: unit (domain rules, input normalisation, no-float source scan), integration (repositories, races, atomicity, ownership,
-  runtime role), and a database suite (`npm run test:db`: 185 assertions and 5 concurrency races).
+  `PaymentRequestRepository` (state-idempotent create, apply a Payment event, plus the Stage 4 dispatch/reconciliation/cancel
+  support below). Every state change is one transaction: row lock, change, history row and, on issue, the `invoice.created` outbox
+  event.
+- **HTTP API** (`src/invoices/*.controller.ts`, mounted at `GET /docs`): products, prices, invoices (create, list, get, issue,
+  discard) and payment requests (create, get, cancel). `@nestjs/swagger` decorators on every operation and DTO field.
+- **Payment integration** (`src/payment-integration`, SDD section 21):
+  - `PaymentClient` port + `HttpPaymentClient` adapter — Billing's domain depends on the interface, never on HTTP directly.
+  - `PaymentDispatcher` — a background job (same start/stop shape as the kit's `OutboxRelay`) that claims `created`/stale-`sending`
+    payment requests and calls Payment's `POST /payment/payments`, never touching Payment's own state or database directly.
+  - `PaymentEventConsumer` — subscribes to Payment's terminal events (`payment.succeeded/failed/cancelled/expired`) and feeds them
+    through the SAME decision procedure the reconciler uses; trusts nothing about the wire payload's shape.
+  - `PaymentReconciler` — settles a `requested` payment request that has gone stale with no terminal event, by asking Payment
+    directly (`GET /payment/payments/{id}`) and applying the answer through that same decision procedure.
+  - Cancel (`POST /billing/payment-requests/{id}/cancel`, producer-only): a request never sent is cancelled locally; a request
+    already sent stamps `cancelRequestedAt` and asks Payment to cancel — the request's own terminal state still arrives only
+    through the normal event/reconciliation path, never set directly by this endpoint.
+- Every Payment lifecycle event carries `producer` (sourced only from the authoritative `PaymentRow` on the Payment side, never
+  from client input), checked here as extra isolation evidence alongside the full snapshot Billing already validates.
+- Tests: unit (domain rules, input normalisation, no-float source scan), integration (repositories, HTTP API, the dispatcher,
+  reconciler, event consumer and cancel endpoint under duplicate/out-of-order/timeout/conflict/deferred scenarios, races, atomicity,
+  ownership, runtime role), and a database suite (`npm run test:db`: 188 assertions and 5 concurrency races).
 
 ### Explicitly NOT implemented (later stages; see the SDD)
 
-Invoice HTTP API, rendering, templates, PDF, File Service, delivery, QR, signatures, recurring billing, dunning, trials,
-proration, discounts, tax engine, credit notes, refunds, external customers, branches, multiple legal entities, exchange rates,
-wallets, accounting ledger, Payment client and provider logic, the payment-event consumer and reconciler, entitlements.
-No table exists for any of them (a test asserts the exact table set).
+Invoice rendering, templates, PDF, File Service, delivery, QR, signatures, recurring billing, dunning, trials, proration,
+discounts, tax engine, credit notes, refunds, real payment providers, cash, payouts, wallets, accounting ledger, settlement
+infrastructure, merchant of record, external customers, branches, multiple legal entities, exchange rates, currency conversion,
+membership-based payment authorization, entitlements. No table exists for any of them (a test asserts the exact table set).
 
 ## Configuration
 
@@ -52,6 +73,10 @@ Secrets may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME`. 
 | `BILLING_SUPPORTED_CURRENCIES` | yes | ISO 4217 codes accepted on an invoice or price; **no default** (B-005). Each must also exist in the immutable `currency` table |
 | `SERVICE_TOKENS` | no | accepted callers, `<caller>:<sha256 digest>`; empty means every service call is refused |
 | `RABBITMQ_URL` | **in production** | event bus; without it the in-memory bus is used (development and tests only) |
+| `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_TOKEN` | yes | payment-service's base URL and Billing's own service token (bearer sent to Payment; a user's bearer is never forwarded) |
+| `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |
+| `BILLING_DISPATCH_INTERVAL_MS`, `BILLING_DISPATCH_BATCH_SIZE`, `BILLING_DISPATCH_STALE_SENDING_MS` | no | `PaymentDispatcher`'s poll interval, batch size and stale-`sending` retry threshold (defaults: 2000ms, 50, 60s) |
+| `BILLING_RECONCILE_INTERVAL_MS`, `BILLING_RECONCILE_STALE_REQUESTED_MS` | no | `PaymentReconciler`'s poll interval and stale-`requested` threshold (defaults: 30s, 5min) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | docs credentials; the password must be 16+ characters; without it the docs are not mounted |
 | `NODE_ENV`, `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY` | no | the kit's base configuration (`NODE_ENV` defaults to `production`) |
 
@@ -76,6 +101,8 @@ npm run test:e2e -w billing-service        # integration, real PostgreSQL (needs
 npm run build -w billing-service
 ```
 
-The integration suite builds the **same** module graph as `main.ts` (`AppModule.register`). Stage 1 has no domain endpoint, so the
-guards, error filter, validation and identifiers are exercised through **test-only probe routes** (`test/support/probe.ts`) that
-are never part of the shipped application. It also runs the whole service as a non-owner, DML-only database role.
+The integration suite builds the **same** module graph as `main.ts` (`AppModule.register`). The foundation-level guards, error
+filter, validation and identifiers are additionally exercised through **test-only probe routes** (`test/support/probe.ts`) that
+are never part of the shipped application. It also runs the whole service as a non-owner, DML-only database role. Stage 4's own
+suite (`test/payment-integration.e2e-spec.ts`) covers the dispatcher, the reconciler and the event consumer against a scripted
+`PaymentClient` test double (no network) and the cancel endpoint over real HTTP.
