@@ -45,4 +45,12 @@ describe('loadPaymentConfig', () => {
     const cfg = loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}` });
     expect(cfg.serviceTokens).toEqual([{ caller: 'billing-service', digest }]);
   });
+
+  it('reads the baseline rate limits, with defaults, and refuses a nonsensical value', () => {
+    const base = { ...BASE_ENV };
+    expect(loadPaymentConfig(base).rateLimits).toEqual({ createPerMinute: 300, attemptPerMinute: 30 });
+    expect(loadPaymentConfig({ ...base, PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE: '5', PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '2' }).rateLimits).toEqual({ createPerMinute: 5, attemptPerMinute: 2 });
+    expect(() => loadPaymentConfig({ ...base, PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE: '0' })).toThrow();
+    expect(() => loadPaymentConfig({ ...base, PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: 'lots' })).toThrow();
+  });
 });

@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CallerService, DbService, ServiceTokenGuard } from '@nawara/service-kit';
+import { CallerService, DbService, RateLimitService, ServiceTokenGuard } from '@nawara/service-kit';
+import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
+import type { PaymentConfig } from '../config/payment-config.js';
 import { AuthorizationService } from '../authorization/authorization.service.js';
 import type { CallerRequest } from '../auth/service-or-user.guard.js';
 import { ServiceOrUserGuard } from '../auth/service-or-user.guard.js';
@@ -17,6 +19,8 @@ export class PaymentsController {
     private readonly payments: PaymentService,
     private readonly authorization: AuthorizationService,
     private readonly db: DbService,
+    private readonly rateLimit: RateLimitService,
+    @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
   ) {}
 
   @Post()
@@ -29,7 +33,10 @@ export class PaymentsController {
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 409, description: 'payment_request_conflict: same paymentRequestId, different snapshot' })
   @ApiResponse({ status: 422, description: 'unsupported_currency' })
+  @ApiResponse({ status: 429, description: 'rate_limited' })
   async create(@CallerService() producer: string, @Body() dto: CreatePaymentDto, @Res({ passthrough: true }) res: Response) {
+    // Keyed by the AUTHENTICATED producer (the guard already ran), so an unauthenticated caller cannot write limiter rows.
+    await this.rateLimit.assert('payment-create', producer, { limit: this.config.rateLimits.createPerMinute, windowSec: 60 });
     const { payment, replayed } = await this.payments.create(producer, dto);
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');

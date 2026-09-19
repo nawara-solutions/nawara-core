@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
 import { DbService, isUniqueViolation } from '@nawara/service-kit';
 import { AttemptService } from '../attempts/attempt.service.js';
+import { webhookContext } from '../events/payment-events.js';
 import type { AttemptRow } from '../attempts/attempt.types.js';
 import type { FetchStatusResult, PaymentProvider } from '../providers/provider.port.js';
 import type { WebhookEventRow } from './webhook-event.types.js';
@@ -27,7 +29,11 @@ export class WebhookService {
 
   async receive(provider: PaymentProvider, rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<WebhookResult> {
     const verified = await provider.verifyWebhook(rawBody, headers);
-    if (!verified.signatureValid) return { status: 401 };
+    if (!verified.signatureValid) {
+      // Counted and logged so forged calls are visible to operators (SDD section 7); never the body or the signature.
+      this.logger.warn(`webhook signature rejected for provider ${provider.id}`);
+      return { status: 401 };
+    }
 
     // Transaction A: deduplicated insert. A conflicting row that already reached a terminal outcome is a pure no-op;
     // one left mid-flight (a crash between A and B) is reprocessed, never swallowed.
@@ -84,14 +90,14 @@ export class WebhookService {
       return { status: 200 };
     }
 
-    const attempt = await this.findAttemptByReference(parsed.reference);
+    const attempt = await this.findAttemptByReference(provider.id, parsed.reference);
     if (!attempt) {
       await this.markState(eventId, 'unmatched', null);
       return { status: 200 }; // the resolver/retrier revisits this — the record may not be visible yet
     }
 
     try {
-      await this.attempts.applyStatus(attempt.id, status, provider);
+      await this.attempts.applyStatus(attempt.id, status, provider, webhookContext(provider.id, eventId));
       await this.markState(eventId, 'processed', null, attempt.id);
       return { status: 200 };
     } catch (e) {
@@ -118,9 +124,11 @@ export class WebhookService {
     return null;
   }
 
-  private async findAttemptByReference(reference: string): Promise<AttemptRow | null> {
+  /** Scoped to the provider whose signature was verified: a valid signature from one provider must never be able to settle
+   * an attempt that belongs to another (FI-09 identifies a provider transaction by `(provider, providerTransactionId)`). */
+  private async findAttemptByReference(providerId: string, reference: string): Promise<AttemptRow | null> {
     // merchantReference is a generated column always equal to id (SDD section 4.2), so matching on id covers both.
-    const { rows } = await this.db.query<AttemptRow>(`SELECT * FROM payment_attempt WHERE "providerTransactionId" = $1 OR id::text = $1`, [reference]);
+    const { rows } = await this.db.query<AttemptRow>(`SELECT * FROM payment_attempt WHERE provider = $1 AND ("providerTransactionId" = $2 OR id::text = $2)`, [providerId, reference]);
     return rows[0] ?? null;
   }
 
@@ -133,7 +141,5 @@ export class WebhookService {
 }
 
 function hashOf(buf: Buffer): string {
-  let h = 0;
-  for (const b of buf) h = (h * 31 + b) >>> 0;
-  return h.toString(16);
+  return createHash('sha256').update(buf).digest('hex');
 }

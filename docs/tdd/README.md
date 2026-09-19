@@ -58,3 +58,4 @@ if requirements change significantly later, write a new TDD for that follow-up w
 | [payment-creation-and-read](./payment-creation-and-read.md) | Implemented |
 | [payment-attempts-and-provider](./payment-attempts-and-provider.md) | Implemented |
 | [payment-webhooks-and-events](./payment-webhooks-and-events.md) | Implemented |
+| [payment-phase1-acceptance-fixes](./payment-phase1-acceptance-fixes.md) | Implemented |

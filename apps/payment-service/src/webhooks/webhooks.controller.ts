@@ -1,4 +1,4 @@
-import { Controller, HttpCode, NotFoundException, Param, Post, Req, Res } from '@nestjs/common';
+import { BadRequestException, Controller, HttpCode, NotFoundException, Param, Post, Req, Res } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request, Response } from 'express';
@@ -23,7 +23,10 @@ export class WebhooksController {
   async handle(@Param('provider') providerId: string, @Req() req: RawBodyRequest<Request>, @Res() res: Response): Promise<void> {
     const provider = this.providers.tryGet(providerId);
     if (!provider) throw new NotFoundException();
-    const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
+    // Signatures are computed over the EXACT bytes the provider sent. Never re-serialise the parsed body as a fallback: that
+    // would verify (or reject) bytes nobody signed and hide a raw-body misconfiguration behind a misleading 401.
+    const rawBody = req.rawBody;
+    if (!rawBody) throw new BadRequestException();
     const result = await this.webhooks.receive(provider, rawBody, req.headers);
     res.status(result.status).json(result.status === 401 ? { message: 'Unauthorized' } : { received: true });
   }

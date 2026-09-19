@@ -1,9 +1,10 @@
-import { Inject, Injectable, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
 import { DbService } from '@nawara/service-kit';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import type { WebhookEventRow } from './webhook-event.types.js';
 import { WebhookService } from './webhook.service.js';
 
+const BATCH_SIZE = 100;
 const STUCK_THRESHOLD_MS = 10_000; // a delivery left in a non-terminal state this long is worth reprocessing
 
 /**
@@ -15,6 +16,7 @@ const STUCK_THRESHOLD_MS = 10_000; // a delivery left in a non-terminal state th
 export class WebhookRetriever {
   private timer?: NodeJS.Timeout;
   private running = false;
+  private readonly logger = new Logger(WebhookRetriever.name);
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -40,15 +42,23 @@ export class WebhookRetriever {
       const { rows } = await this.db.query<WebhookEventRow>(
         `SELECT * FROM webhook_event
          WHERE state IN ('received', 'processing', 'failed', 'unmatched')
-           AND "receivedAt" < now() - make_interval(secs => $1)`,
-        [STUCK_THRESHOLD_MS / 1000],
+           AND NOT (state = 'failed' AND outcome = 'malformed_body') -- non-retryable (SDD section 7): it will never parse differently
+           AND "receivedAt" < now() - make_interval(secs => $1)
+         ORDER BY "receivedAt"
+         LIMIT $2`,
+        [STUCK_THRESHOLD_MS / 1000, BATCH_SIZE],
       );
       let retried = 0;
       for (const event of rows) {
         const provider = this.providers.tryGet(event.provider);
         if (!provider) continue; // a provider that was since disabled; nothing to retry against
-        await this.webhooks.reprocess(event, provider);
-        retried++;
+        try {
+          await this.webhooks.reprocess(event, provider);
+          retried++;
+        } catch (e) {
+          // One bad event must not stop the rest of the pass (it is retried on the next one).
+          this.logger.warn(`webhook event ${event.id} could not be reprocessed: ${e instanceof Error ? e.name : 'error'}`);
+        }
       }
       return { retried };
     } finally {
