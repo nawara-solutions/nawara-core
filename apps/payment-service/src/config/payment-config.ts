@@ -15,6 +15,8 @@ export interface PaymentConfig extends BaseConfig {
   /** Refused when true and `isProduction` is also true (SDD section 13.2). */
   testProviderEnabled: boolean;
   returnUrlAllowlist: string[];
+  /** Baseline abuse limits (SDD section 16): requests per minute per authenticated caller. Technical values, no business meaning. */
+  rateLimits: { createPerMinute: number; attemptPerMinute: number };
   docs: { username: string; password?: string };
 }
 
@@ -42,6 +44,10 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     idempotencyTtlHours: reader.int('IDEMPOTENCY_TTL_HOURS', { default: 24, min: 1, max: 24 * 30 }),
     testProviderEnabled,
     returnUrlAllowlist: (reader.optional('PAYMENT_RETURN_URL_ALLOWLIST', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    rateLimits: {
+      createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),
+      attemptPerMinute: reader.int('PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE', { default: 30, min: 1, max: 100_000 }),
+    },
     docs: { username: reader.optional('SWAGGER_USERNAME', 'docs') as string, password: reader.optional('SWAGGER_PASSWORD') },
   };
 }

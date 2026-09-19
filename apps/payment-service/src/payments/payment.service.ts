@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, OutboxService, isUniqueViolation } from '@nawara/service-kit';
-import { deterministicEventId } from '../events/deterministic-id.js';
+import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
 import { paymentError } from '../errors.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
@@ -12,6 +12,8 @@ export interface CreatePaymentResult {
   payment: PaymentRow;
   replayed: boolean;
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const SNAPSHOT_FIELDS = [
   'sourceType', 'sourceId', 'payerType', 'payerId', 'sellerType', 'sellerId', 'organizationId', 'amount', 'currency',
@@ -34,14 +36,22 @@ export class PaymentService {
     if (dto.payer.type === dto.seller.type && dto.payer.id === dto.seller.id) {
       throw paymentError(400, 'invalid_payment_request', 'payer and seller must differ.');
     }
-    let organizationId: string | null = dto.organizationId ?? null;
+    // An organization is identified by a uuid (the `organizationId` column is a uuid): a seller of that type whose id is
+    // not one is a bad request, not a database error. Compared and stored in canonical (lower-case) form.
+    let seller = dto.seller;
+    let organizationId: string | null = dto.organizationId ? dto.organizationId.toLowerCase() : null;
     if (dto.seller.type === 'organization') {
-      if (organizationId && organizationId !== dto.seller.id) {
+      if (!UUID.test(dto.seller.id)) throw paymentError(400, 'invalid_payment_request', 'seller.id must be a uuid when seller.type is organization.');
+      seller = { type: dto.seller.type, id: dto.seller.id.toLowerCase() };
+      if (organizationId && organizationId !== seller.id) {
         throw paymentError(400, 'invalid_payment_request', 'organizationId must equal seller.id when seller.type is organization.');
       }
-      organizationId = dto.seller.id;
+      organizationId = seller.id;
     }
+    // The shape check in the DTO admits values such as 2026-13-45T00:00:00Z that are not instants.
     const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
+    if (expiresAt && Number.isNaN(expiresAt.getTime())) throw paymentError(400, 'invalid_payment_request', 'expiresAt is not a valid timestamp.');
+    const ctx = requestContext({ type: 'service', id: producer });
 
     return this.db.tx(async (q) => {
       // A savepoint, not a bare try/catch: once a statement in a transaction errors, PostgreSQL aborts the whole
@@ -55,23 +65,19 @@ export class PaymentService {
            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
            RETURNING *`,
           [
-            producer, dto.paymentRequestId, dto.sourceType, dto.sourceId, dto.payer.type, dto.payer.id, dto.seller.type,
-            dto.seller.id, organizationId, dto.amount, dto.currency, dto.description ?? null, dto.reference ?? null, expiresAt,
+            producer, dto.paymentRequestId, dto.sourceType, dto.sourceId, dto.payer.type, dto.payer.id, seller.type,
+            seller.id, organizationId, dto.amount, dto.currency, dto.description ?? null, dto.reference ?? null, expiresAt,
           ],
         );
         const payment = rows[0];
-        await this.outbox.enqueue(q, {
-          id: deterministicEventId(payment.id, 'payment.created'),
-          name: 'payment.created',
-          payload: eventPayload(payment),
-        });
+        await this.outbox.enqueue(q, paymentEvent('payment.created', payment, ctx));
         return { payment, replayed: false };
       } catch (e) {
         if (!isUniqueViolation(e, 'payment_request_id_unique')) throw e;
         await q.query('ROLLBACK TO SAVEPOINT create_payment');
         const { rows } = await q.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
         const existing = rows[0];
-        if (isIdenticalSnapshot(existing, producer, dto, organizationId, expiresAt)) return { payment: existing, replayed: true };
+        if (isIdenticalSnapshot(existing, producer, dto, seller, organizationId, expiresAt)) return { payment: existing, replayed: true };
         throw paymentError(409, 'payment_request_conflict', 'A payment already exists for this paymentRequestId with a different snapshot.');
       }
     });
@@ -84,7 +90,7 @@ export class PaymentService {
 
   /** Producer-only cancellation (SDD section 5.1, 9.1 endpoint 9). No HTTP route in this phase; kept for internal use
    * (expiry/cancellation share the same "no open collection" guard) and so the state machine is exercised end to end. */
-  async cancel(id: string): Promise<PaymentRow> {
+  async cancel(id: string, ctx: EventContext = requestContext({ type: 'system', id: null })): Promise<PaymentRow> {
     return this.db.tx(async (q) => {
       const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [id]);
       const payment = rows[0];
@@ -101,11 +107,7 @@ export class PaymentService {
         `UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = $1 RETURNING *`,
         [id],
       );
-      await this.outbox.enqueue(q, {
-        id: deterministicEventId(id, 'payment.cancelled'),
-        name: 'payment.cancelled',
-        payload: eventPayload(updated[0]),
-      });
+      await this.outbox.enqueue(q, paymentEvent('payment.cancelled', updated[0], ctx));
       return updated[0];
     });
   }
@@ -115,6 +117,7 @@ function isIdenticalSnapshot(
   existing: PaymentRow,
   producer: string,
   dto: CreatePaymentDto,
+  seller: { type: string; id: string },
   organizationId: string | null,
   expiresAt: Date | null,
 ): boolean {
@@ -124,8 +127,8 @@ function isIdenticalSnapshot(
     sourceId: dto.sourceId,
     payerType: dto.payer.type,
     payerId: dto.payer.id,
-    sellerType: dto.seller.type,
-    sellerId: dto.seller.id,
+    sellerType: seller.type,
+    sellerId: seller.id,
     organizationId,
     amount: String(dto.amount),
     currency: dto.currency,
@@ -136,20 +139,4 @@ function isIdenticalSnapshot(
   const existingExpiry = existing.expiresAt ? new Date(existing.expiresAt).getTime() : null;
   const candidateExpiry = expiresAt ? expiresAt.getTime() : null;
   return existingExpiry === candidateExpiry;
-}
-
-function eventPayload(payment: PaymentRow): Record<string, unknown> {
-  return {
-    paymentId: payment.id,
-    paymentRequestId: payment.paymentRequestId,
-    sourceType: payment.sourceType,
-    sourceId: payment.sourceId,
-    organizationId: payment.organizationId,
-    payer: { type: payment.payerType, id: payment.payerId },
-    seller: { type: payment.sellerType, id: payment.sellerId },
-    amount: Number(payment.amount),
-    currency: payment.currency,
-    status: payment.status,
-    revision: payment.revision,
-  };
 }

@@ -39,11 +39,12 @@ no production traffic can reach any of this (the test provider refuses to start 
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
   resolver and the webhook path all share.
 - Transactional outbox events: `payment.created`, `payment.succeeded`, `payment.failed`,
-  `payment.expired` (no `payment.cancelled` — cancel has no route yet).
-- 92 tests (unit + integration/e2e against a real PostgreSQL) plus 30 database-level invariant
-  assertions and 2 concurrency races in `db/tests/`, including the four required concurrency
-  scenarios: double-start, concurrent duplicate-success delivery, an expiry-vs-success race, and a
-  webhook-vs-resolver race.
+  `payment.expired` (`payment.cancelled` exists at the service layer; cancel has no route yet). Payloads follow
+  SDD section 11 (common payload, `revision`, `actor`, `cause`, correlation id).
+- Baseline rate limits on payment creation (per producer) and attempts (per payer), `PAYMENT_RATE_LIMIT_*`.
+- 51 unit + 96 integration/e2e tests (against a real PostgreSQL, including the service running as the restricted
+  `payment_app`-style role) plus 47 database-level invariant assertions and 2 concurrency races in `db/tests/`.
+  See `docs/tdd/payment-phase1-acceptance-fixes.md` for what the acceptance review found and fixed.
 
 ### Blocked by business decision (not implemented — see `docs/sdd/payment-service.md` section 19)
 
@@ -64,8 +65,15 @@ route (implemented at the service layer only — flag if you want it exposed).
 
 ### Known limitations
 
-- No rate limiting is actually wired onto payment routes yet (the kit's new `RateLimitModule` is
-  imported but no endpoint calls it — a follow-up, not a Phase 1 requirement).
+- The webhook route (`POST /payment/webhooks/{provider}`) has **no rate limit**: the kit limiter is
+  database-backed, and an unauthenticated caller must not be able to write rows (SDD 4.6). Limit it at the
+  gateway, or decide on an in-memory limiter.
+- `submitted -> expired` (SDD 5.2, the attempt TTL) and the stuck-payment/alert machinery are not built:
+  a payment whose attempt stays `submitted` at the provider is never expired and nothing alerts.
+- Attempts resolved from `unknown` never record a `providerTransactionId` (the port's `fetchStatus` does not return
+  one), so FI-09 cannot protect them. Add it to the port with the first real adapter.
+- `returnUrl` is validated as a URL but ignored; the `PAYMENT_RETURN_URL_ALLOWLIST` check is not enforced yet.
+- `unmatched` webhooks are retried with no upper bound and raise no alert (SDD 7 wants a bounded period).
 - Webhook "out of order" handling relies on `applyStatus`'s own idempotent no-ops rather than a
   distinct `ignored_stale` outcome; functionally safe, less precisely observable than the SDD's fully
   detailed table.

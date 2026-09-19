@@ -1,5 +1,9 @@
-import { Body, Controller, Headers, HttpCode, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { RateLimitService } from '@nawara/service-kit';
+import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
+import type { PaymentConfig } from '../config/payment-config.js';
+import { requestContext } from '../events/payment-events.js';
 import { ServiceOrUserGuard, type CallerRequest } from '../auth/service-or-user.guard.js';
 import { AuthorizationService } from '../authorization/authorization.service.js';
 import { paymentError } from '../errors.js';
@@ -16,6 +20,8 @@ export class AttemptsController {
     private readonly attempts: AttemptService,
     private readonly payments: PaymentService,
     private readonly authorization: AuthorizationService,
+    private readonly rateLimit: RateLimitService,
+    @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
   ) {}
 
   @Post()
@@ -29,6 +35,7 @@ export class AttemptsController {
   @ApiResponse({ status: 404 })
   @ApiResponse({ status: 409, description: 'payment_not_payable / payment_expired / payment_has_open_attempt' })
   @ApiResponse({ status: 422, description: 'invalid_provider' })
+  @ApiResponse({ status: 429, description: 'rate_limited' })
   async start(
     @Param('paymentId', new ParseUUIDPipe()) paymentId: string,
     @Body() dto: StartAttemptDto,
@@ -42,6 +49,8 @@ export class AttemptsController {
     if (!payment || !req.caller) throw paymentError(404, 'not_found', 'Not found.');
     this.authorization.assertCanStartAttempt(payment, req.caller);
     const callerId = req.caller.kind === 'user' ? req.caller.identity.id : req.caller.service;
+    // After authentication and authorization, so only a real payer consumes (and can exhaust) their own budget.
+    await this.rateLimit.assert('payment-attempt', callerId, { limit: this.config.rateLimits.attemptPerMinute, windowSec: 60 });
     const { attempt } = await this.attempts.start(paymentId, callerId, idempotencyKey, dto);
     return representAttempt(attempt);
   }
@@ -60,7 +69,8 @@ export class AttemptsController {
     this.authorization.assertCanSync(payment, req.caller);
     const attempt = await this.attempts.findById(attemptId);
     if (!attempt || attempt.paymentId !== paymentId) throw paymentError(404, 'not_found', 'Not found.');
-    const synced = await this.attempts.sync(attemptId);
+    const actor = req.caller.kind === 'user' ? ({ type: 'user', id: req.caller.identity.id } as const) : ({ type: 'service', id: req.caller.service } as const);
+    const synced = await this.attempts.sync(attemptId, requestContext(actor));
     return representAttempt(synced);
   }
 }

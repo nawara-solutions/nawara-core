@@ -59,7 +59,9 @@ export async function representPayment(q: Queryable, payment: PaymentRow): Promi
     statusReason: payment.statusReason,
     settledMethod: payment.settledMethod,
     refundedAmount: 0, // no refunds exist yet in this phase
-    refundableAmount: payment.status === 'succeeded' ? Number(payment.amount) : 0,
+    // Refunds are blocked by O-6 and no provider declares the refund capability, so nothing is refundable yet. Reporting
+    // the full amount here would tell a consumer that money can be returned, which is a refund policy nobody has approved.
+    refundableAmount: 0,
     attempts: rows.map((r) => ({
       id: r.id,
       attemptNumber: r.attemptNumber,

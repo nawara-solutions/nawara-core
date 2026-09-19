@@ -1,6 +1,6 @@
 # payment-service
 
-- **Status:** Draft, **for review**. Nothing here is implemented; `apps/payment-service` is still a NestJS starter (one `GET /` route).
+- **Status:** Draft, **for review**. Phase 1 (the gateway-settlement path with the test provider, the webhook pipeline and the financial-invariant schema) is implemented in `apps/payment-service`; cash, refunds and everything `[B]`/`[X]` below are not. See `docs/tdd/payment-*.md` and `apps/payment-service/README.md` for what exists.
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md), [financial-architecture.md](../architecture/financial-architecture.md)
   (root architecture documents). The old `docs/add/payment-service.md` is superseded in its financial parts.
