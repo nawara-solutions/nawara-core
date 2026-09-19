@@ -4,6 +4,8 @@
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** the grace-license rule is kept, but licenses now live in billing-service ([ADR-0038](./0038-entitlement-in-billing-service.md)).
+
 ## Context
 
 `docs/add/payment-service.md` carries this open question: "Whether `License` should support a

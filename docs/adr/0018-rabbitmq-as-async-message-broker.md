@@ -3,6 +3,8 @@
 - **Status:** Proposed
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
+
+> **Forward note (2026-09-19):** [ADR-0037](./0037-reliable-events-outbox-inbox.md) builds on this decision: the project owner accepted RabbitMQ for the financial services and added message headers, a transactional outbox and an inbox. This ADR's production-deployment deferral still holds.
 - **GitHub issue:** https://github.com/nawara-solutions/nawara-core/issues/17
 
 ## Context

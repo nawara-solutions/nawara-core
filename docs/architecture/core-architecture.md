@@ -1,0 +1,241 @@
+# Nawara Core architecture
+
+- **Status:** Proposed. Decisions D1–D4 and E1–E4 were accepted by the project owner on 2026-09-19; the ADRs that record them are
+  still *Proposed* until merged. auth-service is described as it is on `main` after the multi-organization change ([ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md), merged).
+- **Date:** 2026-09-19
+- **Financial services:** see [financial-architecture.md](./financial-architecture.md) (billing, payment, accounting; assessment of the old payment design; unresolved decisions).
+- **Decisions recorded in:** [ADR-0031](../adr/0031-organization-ownership-and-tenancy-anchor.md),
+  [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md),
+  [ADR-0033](../adr/0033-service-to-service-authentication-and-user-identity.md),
+  [ADR-0034](../adr/0034-shared-service-kit-and-api-conventions.md); financial: [ADR-0035](../adr/0035-financial-service-boundaries.md),
+  [ADR-0036](../adr/0036-money-parties-and-source-references.md), [ADR-0037](../adr/0037-reliable-events-outbox-inbox.md) (accepts the RabbitMQ choice of [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md)),
+  [ADR-0038](../adr/0038-entitlement-in-billing-service.md)
+
+Nawara Core is a set of **generic, product-independent** services. Products live outside this repository and consume
+Core over the network. Nothing here may contain a concept that belongs to one product's business domain. If a rule
+only makes sense for one product, it belongs in that product.
+
+## 1. The model everything shares
+
+```
+Company
+  └── Platform                  a product/app (Core never interprets what a platform is)
+        └── Organization        a customer of a platform
+              └── Membership ── User      one user, many memberships (Auth owns both)
+```
+
+- A **User** is one universal identity (Auth). It may belong to many organizations on many platforms.
+- Product services keep `userId`, `organizationId` and `platformId` as **opaque references**. They never create a
+  second authentication identity. (A product's own domain entity that stores `userId` is correct; a product-specific
+  user type inside Auth is not.)
+- Generic user kinds stay `member | owner | operator`. They are not product roles.
+
+## 2. Service inventory
+
+| Service | Answers | Owns | Does **not** own | Own database | State today |
+|---|---|---|---|---|---|
+| **auth-service** | Who is this and how are they authenticated? | user, credentials, sessions, tokens, MFA, recovery, passkeys, **membership and its status/authority**, tenancy anchor (company, platform, organization ids), local security audit | organization profile/config/lifecycle, subscriptions, notification delivery | yes | **implemented and deployed** (data model frozen; multi-organization membership per [ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md)) |
+| **organization-service** | What is this organization and how is it configured? | organization record, profile, settings, policies, lifecycle (`provisioning → active ⇄ suspended → deactivated`) | users, credentials, sessions, **membership** | yes | to build (later, after the finance stages) |
+| **notification-service** | How is this delivered? | email/SMS/push/in-app delivery, templates, preferences, attempts, retries, providers | why something was triggered | yes (later) | 60-line starter |
+| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring definitions, **entitlements** (organization license, user subscription) | how money moved; the ledger; product concepts | yes | to build (finance stages) |
+| **payment-service** | How was it paid, by which method, and what is the payment state? | payment, attempt, method, provider transaction, cash workflow, refund, webhooks, idempotency, reconciliation | what is owed; the ledger; entitlements | yes | 60-line starter; **redesigned** (financial-architecture.md) |
+| **accounting-service** | What accounting effect did this have? | chart of accounts, journal, entries and lines, ledger, fiscal periods, tax, reports | payments and invoices as a source of truth | yes | to build (finance stages) |
+| **ai-service** | How do services use AI? | provider abstraction, model config, usage, quotas, cost, safety | product AI workflows | yes (later) | 8-line FastAPI, `/health` only |
+| **file-service** | Where is this file and who may read it? | file metadata, ownership, access control, lifecycle, storage port, limits, checksums | the binary in PostgreSQL | yes | to build (later, skeleton) |
+| **audit-service** | What happened, who did it, when? | immutable central event history, query, retention | Auth's **local** security audit (stays in Auth) | yes | to build (later, skeleton) |
+| **location-service** | Where is this place? | geocoding, reverse geocoding, distance, generic zones, provider port | product routing and assignment | none yet | to build (later, skeleton) |
+| **search-service** | How do I find things quickly? | derived index, query, reindex | source of truth (the owner stays authoritative) | none yet (derived) | to build (later, skeleton) |
+| **analytics-service** | What is happening across Nawara? | async event ingestion, aggregates, reporting | any synchronous dependency | none yet | to build (later, skeleton) |
+
+**Services deliberately not created:** `user-service`, `role-service`, `permission-service`, `membership-service`, `invoice-service`,
+`cash-service`, `tax-service`, `ledger-service`, `wallet-service`, `subscription-service`, `organization-payment-service`, and
+any service for a product's own domain entities. User and membership stay in Auth; business roles are a product
+concern until there is a concrete cross-product need.
+
+## 3. Ownership map (one owner per entity)
+
+| Entity | Owner | Others hold |
+|---|---|---|
+| User, credentials, session, refresh token, MFA factor, device | auth | `userId` |
+| Membership (user ↔ organization), status, org-admin capability, `audience` label | auth | `membershipId` only if needed; **never a copy of the status** |
+| Company, Platform | auth (unchanged; see O9) | `companyId`, `platformId` |
+| Tenancy anchor for an organization (id, platform, name) | auth | — |
+| **Organization** record, profile, settings, lifecycle | **organization-service** | `organizationId` |
+| Product, price, invoice, invoice line, credit note, **organization license, user subscription** | billing | `requiresSubscription` may exist as onboarding metadata but is **never** the authority |
+| Payment, attempt, cash payment, refund, provider transaction, webhook event | payment | `paymentId` |
+| Chart of accounts, journal entry, ledger, tax, fiscal period | accounting | — |
+| Notification, template, delivery attempt | notification | — |
+| File metadata and access rules | file | `fileId` |
+| Central audit event | audit | — |
+| Search index | search (derived) | — |
+| Analytics event and aggregate | analytics | — |
+
+## 4. Dependencies
+
+```
+                       ┌────────── products (outside Core) ──────────┐
+                       │ HTTP                                        │ HTTP
+                       ▼                                             ▼
+   ┌─────────► auth-service ◄──────── organization-service ──────► (events) ──┐
+   │  live      ▲   │  ▲   authorize + provision anchor                        │
+   │  checks    │   │  │                                                       ▼
+ file-service ──┘   │  └── payment-service (org → platform, membership)   notification-service
+                    │ license status at registration/join (exists today)  audit-service
+                    ▼                                                     search-service
+              payment-service                                             analytics-service
+```
+
+**Synchronous calls (all authenticated, all documented):**
+
+| Caller → callee | Purpose | Failure behaviour |
+|---|---|---|
+| any service → auth | who is this user, what memberships, what platform access | fail closed (503) |
+| organization → auth | provision the tenancy anchor (idempotent by id) | organization stays `provisioning`, retried |
+| payment → auth | organization → platform, and membership check for who may act for an organization (mechanism per ADR-0033; **supersedes ADR-0021's forwarded-JWT choice**) | fail closed |
+| auth → payment | license status at registration and joining (**exists today**; entitlement moves to billing, so this call is to be repointed or removed: open decision) | fail closed (503) |
+| file → auth | authorize a download/upload for an organization | fail closed |
+| billing, payment → auth | who is the caller, and is their membership active for this organization; seller authority for cash confirmation and invoicing | fail closed |
+| platform services → billing | entitlement status (license/subscription valid?) at the point of use | each consumer documents fail-open or fail-closed |
+| billing → payment | create a payment request carrying an **immutable snapshot** (invoice id, amount, currency, payer, seller); payment **never calls billing back** and reports only through events | fail closed for the caller; billing retries |
+| product services → billing | "this customer owes X for `sourceType/sourceId`" (service token) | fail closed |
+
+**Events only (never a synchronous dependency):** notification, audit, search, analytics consume events. A producer
+never waits for, or fails because of, a consumer.
+
+**Flagged cycle:** `auth ⇄ payment` are two narrow synchronous reads in opposite directions. It is tolerated because
+each call is a read with a timeout and a fail-closed default, and ADR-0026 already aims to remove `auth → payment`
+at registration. It is recorded as an open risk (O8), not silently accepted as a pattern. **New services must not add
+cycles.**
+
+## 5. Data ownership
+
+One **database per service** on a shared PostgreSQL server, one login role per service, no cross-database grants
+([ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md)). A service never queries another service's
+database and no table is shared or mutated by two services. Cross-service needs go through a service API or an event.
+`organizationId`/`userId`/`platformId` in another service's tables are plain identifiers with no foreign key.
+
+## 6. Identity, organization context and authorization
+
+**Identity flow.** The user authenticates only with Auth and receives a short-lived access token. A service that needs to
+know who the caller is does **not** verify the token itself (Auth signs with a shared HS256 secret that must not be
+distributed). It presents the caller's bearer to Auth and asks (`GET /auth/me`). Auth verifies the signature, the
+session and the account **live**, so revocation, blocking and disabled accounts take effect on the next request.
+
+**Organization context flow.** The organization comes from the **resource in the request** (URL or body of a call the
+service itself validates), never from a token claim or a client-asserted header. Tokens carry no organization.
+
+**Authorization flow for an organization-scoped request:**
+1. The service authenticates the caller (above).
+2. It asks Auth what the caller may do *for that organization* : a member's `memberships[]` entry (status must be
+   `active`; `isOrganizationAdmin` marks the generic organization-management capability), or, for owner/operator,
+   `GET /auth/platform-access/:platformId`.
+3. It enforces tenant isolation itself: a resource of another organization/platform/company answers with the same
+   **404** as a nonexistent one.
+4. Business permissions (what an administrator may do *inside a product*) are decided by the **product**, not Core. Generic *seller authority* over an organization's own invoices and cash confirmations (organization-management capability, owner, assigned operator) is a **proposed policy** of the financial services, listed as an open decision in [financial-architecture.md](./financial-architecture.md).
+
+Never trusted without server-side verification: `userId`, `organizationId`, `platformId`, `role`, `permissions`.
+
+## 7. Service-to-service authentication
+
+Decision D3 ([ADR-0033](../adr/0033-service-to-service-authentication-and-user-identity.md)):
+
+- One **service token per caller→callee pair** (**new: only the caller side exists today**, see ADR-0033): 32+ random bytes, generated per deployment, never in source control.
+  The caller holds the raw token (`<CALLEE>_SERVICE_TOKEN`); the callee stores only its **SHA-256 digest** per caller
+  (`SERVICE_TOKENS=<caller>:<digest>[,<caller>:<digest>]`, at most two per caller so a token can be rotated without
+  downtime) and compares in constant time. A token is valid for one callee only (audience-bound by construction).
+- The token identifies the **calling service**; it never carries a user. On-behalf-of calls forward the user's bearer
+  **only to Auth**, never to another service.
+- Anything on the internal network is untrusted until it presents a valid token. Every route is deny-by-default:
+  either a user guard or a service guard, never neither.
+- The **caller side** matches what auth-service already does toward payment (`PAYMENT_SERVICE_TOKEN`, a raw bearer). The
+  **callee side** (digest storage, per-caller tokens, constant-time guard) is new and exists nowhere yet.
+- Upgrade path (not now): signed short-lived service JWTs with published keys, which needs asymmetric signing in Auth.
+
+## 8. Events
+
+- **Broker:** RabbitMQ, one topic exchange `nawara.events`, routing key = event name, as
+  [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md) and Auth's publisher already assume (O1: still Proposed).
+- **Envelope:** the payload stays the flat, documented shape each service already uses. For **new** publishers, metadata
+  (`eventId`, `occurredAt`, `correlationId`, producing service) travels in **message headers**, so payloads stay
+  compatible. Auth's current publisher sends the payload only, with no headers, so Auth's events have no `eventId`
+  until it adds one (a small Auth change, not made here); consumers must treat missing metadata as "cannot dedupe".
+- **Delivery today:** RabbitMQ runs only in the local `docker-compose.yml`, not in production, and events are fire-and-forget, so **no event is reliably delivered yet**.
+  A transactional outbox is the recommended fix and is out of scope here (O10).
+- **Rules:** a producer never blocks on the broker; a payload never contains a secret or a token; the only exception is
+  a one-time code whose delivery *is* the event's purpose (Auth's operator working code and member contact-verification
+  code today, an exception Auth's `ports.ts` does not yet reflect); consumers are idempotent by `eventId` where present.
+
+| Producer | Events (existing or planned) | Consumers |
+|---|---|---|
+| auth | `user.registered`, `membership.requested/approved/rejected/revoked`, `member.contact_verification_requested`, operator/owner alerts | notification (delivery), audit, analytics |
+| organization | `organization.created`, `.updated`, `.suspended`, `.activated`, `.deactivated` | audit, search, analytics |
+| billing | `invoice.created/due/overdue/paid/voided` (`overdue` is emitted by a billing sweep of `dueAt`), `license.expired/reactivated/grace_issued`, `subscription.suspended/resumed/expired` | notification, accounting, audit, analytics |
+| payment | `payment.pending/succeeded/failed/refunded`, `refund.created/succeeded/failed`, `cash_payment.requested/confirmed/rejected` (renames the old design's `charge.cash_requested`) | billing (invoice paid, entitlement), accounting (journal entry), notification, audit, analytics |
+| accounting | `journal_entry.posted` (optional) | audit, analytics |
+| file | `file.uploaded`, `file.deleted` | audit, search, analytics |
+| every service | security/administrative events worth keeping | audit |
+
+Auth keeps its **own** local security audit and never depends synchronously on audit-service.
+
+## 9. Common foundation (shared conventions)
+
+Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-kit-and-api-conventions.md)); auth-service is not migrated onto it.
+
+| Area | Convention |
+|---|---|
+| Config | environment only; validated at startup; missing/weak value stops the process with a clear error that never echoes a secret; `.env.example` per service; production-required values documented |
+| Logging | one JSON line per event; request id and correlation id on every line; redaction of anything credential-shaped |
+| Ids | `X-Request-Id` (generated if absent) and `X-Correlation-Id` (propagated across services and into event headers) |
+| Health | `GET /health` = process alive; `GET /ready` = every dependency check passes, else 503. Root paths, not routed publicly |
+| Errors | Nest default `{ statusCode, message, error }` plus `requestId`; validation failures 400; never a stack trace or a database message |
+| API | public prefix is the singular domain noun (`/organization`, `/file`, ...), no version segment in v1; additive changes only; a breaking change becomes `/v2/<prefix>`; OpenAPI at `GET /docs` |
+| Lists | `?limit=&cursor=` → `{ items, nextCursor }`; allow-listed `sort` and filters |
+| Idempotency | `Idempotency-Key` on resource-creating `POST`s |
+| Security | `helmet`, request-size limit, baseline rate limit, DTO whitelist with unknown fields rejected, deny-by-default routes |
+| Persistence | plain SQL migrations with a `schema_migrations` table (as in Auth), database constraints for invariants |
+| Testing | unit, integration against real PostgreSQL, API tests, security tests; concurrency, duplicate requests, idempotency and retries are tested, not assumed |
+| Docker | one Dockerfile per service (repository-root context, npm workspaces), non-root, health check; each service runs alone with only its own database |
+
+## 10. Existing services: compatibility (inspect, not rewrite)
+
+| Service | Finding | Concrete change needed |
+|---|---|---|
+| auth-service | Data model frozen. `GET /auth/platform-access/:platformId` exists today; `GET /auth/me` returns `memberships[]`. It already calls payment with a service token. | **One additive route** to provision the tenancy anchor by id, guarded by a service token (a small Auth PR, after the service-kit and finance foundations). No schema change. |
+| notification-service | Unmodified starter; no providers, no consumers. | Nothing until built; it will consume events and expose a token-guarded send API. |
+| payment-service | Unmodified starter. Its ADD/SDD assume a single-organization JWT, forwarding the admin JWT (ADR-0021), `Charge` as the transaction and entitlements inside payment; none holds after ADR-0030, ADR-0033, ADR-0035 and ADR-0038. | Rebuilt on [financial-architecture.md](./financial-architecture.md); the old ADD/SDD are marked superseded in their financial parts. No code to migrate. |
+| ai-service | 8-line FastAPI app, `/health` only. | Later: `/ready`, request ids, config validation and the service-token guard in Python. Not rewritten now. |
+
+## 11. Decisions and open decisions
+
+| # | Decision | Status |
+|---|---|---|
+| D1 | organization-service owns the organization record; Auth keeps only a minimal tenancy anchor, created idempotently by id | **confirmed** (ADR-0031) |
+| D2 | One database per service on a shared PostgreSQL server | **confirmed** (ADR-0032) |
+| D3 | Per-pair service tokens; end users identified by asking Auth live | **confirmed** (ADR-0033) |
+| D4 | Phased delivery with a small shared `service-kit` | **confirmed** (ADR-0034) |
+| E1 | Entitlement (organization license, user subscription) is owned by billing-service | **confirmed** (ADR-0038) |
+| E2 | RabbitMQ with a transactional outbox (producers) and inbox (consumers) for the financial services | **confirmed** (ADR-0037) |
+| E3 | Order: docs, service-kit, finance foundations, billing, payment, entitlement, accounting; organization-service and the other skeletons later; settlement waits for business/legal input | **confirmed** |
+| E4 | One matrix CI workflow (typecheck, lint, tests, Docker build without push) for new services and auth-service; no deploy workflow or server provisioning yet | **confirmed** |
+
+| # | Open decision (nothing pulled in until decided) | Foundation ships |
+|---|---|---|
+| ~~O1~~ | ~~Accept RabbitMQ~~ **accepted for the financial services with outbox/inbox** (ADR-0037); deployment of RabbitMQ still needs its own approval | event publisher port |
+| O2 | Object storage provider for files (S3-compatible service, self-hosted, or a cloud provider) | storage port + in-memory adapter |
+| O3 | Search engine (PostgreSQL full text, or a dedicated engine) | search port + in-memory adapter |
+| O4 | Analytics store | ingestion port only |
+| O5 | Geocoding provider | provider port |
+| O6 | AI providers | not started |
+| O7 | Notification providers (SMS: Twilio is proposed in ADR-0019) | not started |
+| O8 | Auth ⇄ payment cycle (and its repointing to billing) | documented risk |
+| O9 | Who owns **platform** and **company** lifecycle (Auth keeps them today via its bootstrap tool) | unchanged |
+| O10 | Reliable event delivery (outbox) and asymmetric token signing | out of scope |
+
+## 12. Risks
+
+- **Two systems, one fact.** An organization exists in organization-service and as an anchor in Auth. Creation is
+  ordered (`provisioning` first, anchor second, `active` last) so a crash leaves a retryable row, never an orphan.
+- **Every service asks Auth live.** Auth becomes a hot dependency for every request; a slow Auth slows everything.
+  Mitigation later (caching with a short TTL) needs an explicit revocation decision.
+- **No CI runs any suite,** for any service. This is the largest gap before production use.
+- **Events are not delivered yet** (no broker, no outbox).
