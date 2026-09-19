@@ -59,6 +59,7 @@ MIGRATION_DATABASE_URL=postgres://<svc>_migrator:...@host:5432/<svc> \
 
 * Nothing migrates at service start. `DbModule` can make `/ready` **fail while migrations are pending**, so an instance whose schema is behind does not take traffic.
 * Order is deterministic: directories in the order given, files by name; the kit's own files are named `kit_NNNN_*.sql`.
+* The kit also ships a generic, reusable `forbid_column_change()` trigger function (immutable-column enforcement): `CREATE TRIGGER x_immutable BEFORE UPDATE ON x FOR EACH ROW EXECUTE FUNCTION forbid_column_change('col1', 'col2')` in your own migration, once the kit's migrations have run.
 * Each file runs in **one transaction with its bookkeeping row** (files must not contain `BEGIN`/`COMMIT`); a failure rolls back and is not recorded.
 * An applied file whose contents later change is refused (checksum). Two runners at once are serialized (advisory lock).
 * Use the **migrator** role for this step and the least-privilege **runtime** role for the service (`DATABASE_URL`). See `infra/postgres`.
