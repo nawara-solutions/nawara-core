@@ -49,7 +49,7 @@ Business      → product services (outside Core)
 
 | Service | Question | Owns | Does **not** own |
 |---|---|---|---|
-| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring definitions, **entitlements** (organization license, user subscription) | how money moved; accounting; product concepts |
+| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring definitions, **entitlements** (organization license, user subscription), and (future) invoice presentation: templates, template versions and document metadata ([billing SDD](../sdd/billing-service.md) section 36) | how money moved; accounting; product concepts |
 | **payment-service** | How was it paid, by which method, and what is the payment state? | payment, payment attempt, payment method, provider transaction, cash payment workflow, refund, webhooks, idempotency, reconciliation; later organization payment account and settlement | what is owed; the ledger; entitlements |
 | **accounting-service** | What accounting effect did it have? | chart of accounts, journal, journal entry and lines, ledger, fiscal period, tax, tax rate, tax transaction, reconciliation, reports | payments, invoices as source of truth |
 
