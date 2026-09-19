@@ -1,6 +1,6 @@
 # Production readiness: CI/CD, database roles, backups and migrations
 
-- **Status:** Proposed; facts checked on 2026-09-19 against the repository and a local scratch PostgreSQL.
+- **Status:** Proposed; facts checked on 2026-09-19 against the repository and a local scratch PostgreSQL. Updated after the CI / deployment-safety change: see [service-foundations.md](./service-foundations.md).
 - **Scope:** what exists, what the Core requires (CI/CD, least-privilege database access, tested backups, safe migrations), and what
   is done versus not. Nothing here changes production. Related: [core-architecture.md](./core-architecture.md),
   [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md), the auth security review (`docs/security/`).
@@ -26,10 +26,15 @@
 **Decision (project owner, 2026-09-19):** fix all three in the same PR as the new CI workflow. No deploy is run or triggered by that
 work; merging to `main` is what exercises it, so the first deploy after it must be watched.
 
-**Planned CI (`core-ci.yml`, matrix per service, PostgreSQL service container):** format check, lint, typecheck, unit tests, integration
+**Implemented in that PR (not yet exercised on GitHub or in production):** the remote script starts with `set -euo pipefail` and logs out
+of the registry on exit; one concurrency queue (`production-deploy-core-api`, `cancel-in-progress: false`) covers the `:production`
+image publication, the automatic deployment and the manual one; the stale trigger is removed; the manual deploy is now restricted to
+`main`. Static checks in `scripts/` fail the build if any of this regresses.
+
+**Implemented CI (`core-ci.yml`, matrix per workspace, PostgreSQL and RabbitMQ service containers):** format check, lint, typecheck, unit tests, integration
 tests, migration apply-from-scratch and rollback checks where a down migration exists, build, and simple architecture checks (no
-service importing another service's code; no product terms in Core service code). **CI coverage is not claimed until it actually runs
-these checks on a pull request.**
+service importing another service's code; no product terms in Core service code). Formatting is not checked and ai-service (Python) has no job. **CI coverage is not claimed until the workflow has run
+on a pull request:** every command in it passed locally, but it has not executed on GitHub yet.
 
 ## 2. Database access: least privilege
 
@@ -40,7 +45,9 @@ is built from that same user. The official image makes that initial user a **sup
 **Target (per [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md)):** per service, two roles: a **migration role**
 (owns the schema, runs DDL, used only by the migration step) and a **runtime role** (DML on that service's tables, no superuser, no
 `CREATE`, no access to any other database); credentials generated on the server and never in Git.
-**Status: NEEDS IMPLEMENTATION.** It changes the running production database of auth-service, so it needs its own approval and a
+**Local development:** implemented in `infra/postgres` (a migrator and a runtime role per financial service, no superuser, no access
+to other databases) and proven by `infra/postgres/verify.sh`, which CI runs.
+**Production: NEEDS IMPLEMENTATION.** It changes the running production database of auth-service, so it needs its own approval and a
 rehearsal; it has **not** been changed or tested against production.
 
 ## 3. Backups and restore
@@ -77,9 +84,9 @@ change, state existing data, backward compatibility, migration and deploy order,
 
 | Item | State |
 |---|---|
-| CI that runs formatting, lint, typecheck, tests, migrations | **NEEDS IMPLEMENTATION** (planned, approved) |
-| Deploy: fail-fast on the piped script, concurrency group, stale trigger removed | **NEEDS IMPLEMENTATION** (approved, in the CI PR) |
-| Least-privilege database roles | **NEEDS IMPLEMENTATION** (needs approval; changes production) |
+| CI that runs lint, typecheck, tests, build (not formatting) | implemented; **NEEDS VERIFICATION** on GitHub |
+| Deploy: fail-fast on the piped script, concurrency queue, stale trigger removed | implemented and statically checked; **NEEDS VERIFICATION** at the first deploy after merge |
+| Least-privilege database roles | local: implemented and verified; production: **NEEDS IMPLEMENTATION** (needs approval; changes production) |
 | Backup job and off-host copy | **NEEDS IMPLEMENTATION** |
 | Restore procedure | proven on a local scratch database only; **BLOCKER** until drilled on the real volume |
 | Retention and RPO/RTO | **NEEDS DECISION** |

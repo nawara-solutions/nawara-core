@@ -2,25 +2,27 @@ name: auth-service manual deploy
 
 # Builds the selected ref and deploys it to the VPS (PostgreSQL + auth-service behind Traefik at
 # core-api.hsalem-anwar.dev/auth) via apps/auth-service/deploy/provision-and-deploy.sh.
-# Run from any branch:  gh workflow run auth-service-deploy.yml --ref <branch>
+# Runs from `main` only (the job is guarded):  gh workflow run auth-service-deploy.yml --ref main
 # Secrets: the org-level DEPLOY_SSH_* (same as the main-push deploy). Application secrets are NOT
 # stored in GitHub — the script generates them on the server on first run (see the script header).
 
+# MANUAL redeploy of auth-service (workflow_dispatch only): builds the current commit of `main` and deploys it. It shares the
+# production concurrency queue with the automatic deployment in auth-service-docker-build.yml, so the two can never race.
 on:
   workflow_dispatch:
-  # TEMPORARY: a workflow only becomes dispatchable once it is on main, so this lets the first
-  # deploy run from the unmerged branch. REMOVE this trigger before merging.
-  push:
-    branches: [feat/auth-service-security-hardening]
-    paths:
-      - 'apps/auth-service/**'
-      - '.github/workflows/auth-service-deploy.yml'
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-auth-service
 
 jobs:
   deploy:
+    if: github.ref == 'refs/heads/main'
+    # Production deployments and the :production image tag share ONE queue across every workflow. A running deployment is
+    # NEVER cancelled (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group:
+    # if a third request arrives, the older waiting one is superseded by it (its commit is included in the newer main).
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,10 +50,11 @@ jobs:
           script_stop: true
           envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE
           script: |
+            set -euo pipefail
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             docker pull "$IMAGE"
             docker run --rm --entrypoint cat "$IMAGE" deploy/provision-and-deploy.sh | IMAGE="$IMAGE" bash -s
-            docker logout ghcr.io
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}

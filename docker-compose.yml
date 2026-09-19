@@ -1,9 +1,49 @@
+# Local development infrastructure ONLY. Nothing here is production configuration and none of these credentials is a real secret.
+#
+#   cp .env.example .env
+#   docker compose --profile db up -d --wait postgres     # PostgreSQL 16: one database per Core service (ADR-0032)
+#   docker compose up -d rabbitmq                          # RabbitMQ, for asynchronous domain events (ADR-0037)
+#
+# Every service runs alone with only the pieces it needs; nothing here couples services to each other. Ports are bound to
+# loopback so they are not reachable from the network.
 services:
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:3.13-management-alpine
     ports:
-      - '5672:5672'
-      - '15672:15672'
+      - '127.0.0.1:5672:5672'
+      - '127.0.0.1:15672:15672'
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    profiles: [db]
+    image: postgres:16-alpine
+    ports:
+      - '127.0.0.1:5433:5432' # 5433 so it does not clash with a PostgreSQL already on the host
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?copy .env.example to .env}
+      # Per-service roles (see infra/postgres/init). Values are read by the init script, only on first start of an empty volume.
+      BILLING_MIGRATOR_PASSWORD: ${BILLING_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      BILLING_APP_PASSWORD: ${BILLING_APP_PASSWORD:?copy .env.example to .env}
+      PAYMENT_MIGRATOR_PASSWORD: ${PAYMENT_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      PAYMENT_APP_PASSWORD: ${PAYMENT_APP_PASSWORD:?copy .env.example to .env}
+      ACCOUNTING_MIGRATOR_PASSWORD: ${ACCOUNTING_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      ACCOUNTING_APP_PASSWORD: ${ACCOUNTING_APP_PASSWORD:?copy .env.example to .env}
+    volumes:
+      - nawara_pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  nawara_pgdata:

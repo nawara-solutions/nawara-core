@@ -1,0 +1,123 @@
+name: Core CI
+
+# Validates every Node workspace: lint, typecheck, unit tests, integration tests, build; plus the repository's static
+# safety and architecture checks. It builds and tests only: it never deploys, publishes an image or touches production.
+# Covered:      auth-service, notification-service, payment-service, service-kit (Node), repository checks.
+# NOT covered:  ai-service (Python) has no CI job yet.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes an older CI run. (Production DEPLOYMENT is different and is never cancelled.)
+concurrency:
+  group: core-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  repo-checks:
+    name: repository checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: workflow safety and architecture checks
+        run: npm run check:repo
+      - name: checks' own tests
+        run: npm run test:repo
+
+  node:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: service-kit
+            workspace: '@nawara/service-kit'
+            integration: test:integration
+          - name: auth-service
+            workspace: auth-service
+            integration: test:e2e
+            database-tests: true
+          - name: payment-service
+            workspace: payment-service
+            integration: test:e2e
+          - name: notification-service
+            workspace: notification-service
+            integration: test:e2e
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      # Integration suites FAIL (never skip) in CI when a service they need is missing.
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: pw
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # Services that depend on the kit consume its built output, so it is built first.
+      - name: build the service-kit
+        run: npm run build -w @nawara/service-kit
+      - name: lint
+        run: npm run lint -w ${{ matrix.workspace }}
+      - name: typecheck
+        run: npm run typecheck -w ${{ matrix.workspace }}
+      - name: unit tests
+        run: npm test -w ${{ matrix.workspace }}
+      - name: integration tests
+        run: npm run ${{ matrix.integration }} -w ${{ matrix.workspace }}
+      - name: database invariant tests
+        if: matrix.database-tests
+        run: npm run test:db -w ${{ matrix.workspace }}
+      - name: build
+        run: npm run build -w ${{ matrix.workspace }}
+
+  infra:
+    name: local infrastructure (least-privilege roles)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build -w @nawara/service-kit
+      - name: start PostgreSQL with the per-service databases and roles
+        run: |
+          cp .env.example .env
+          docker compose --profile db up -d --wait postgres
+      - name: verify least privilege, including the kit migrations under the runtime role
+        run: bash infra/postgres/verify.sh --with-kit-migrations
