@@ -5,7 +5,7 @@ const PAYMENT_ID = '33333333-3333-4333-8333-333333333333';
 const invoice: InvoiceFacts = { id: 'inv-1', status: 'open', payerType: 'user', payerId: 'user-1', sellerType: 'organization', sellerId: 'org-1', organizationId: 'org-1', currency: 'TND', total: 4500n };
 const request: RequestFacts = { id: 'req-1', status: 'requested', paymentId: PAYMENT_ID, amount: 4500n, currency: 'TND' };
 const event: PaymentEventFacts = {
-  name: 'payment.succeeded', source: 'payment-service', paymentId: PAYMENT_ID, paymentRequestId: 'req-1', sourceType: 'invoice', sourceId: 'inv-1',
+  name: 'payment.succeeded', source: 'payment-service', paymentId: PAYMENT_ID, producer: 'billing-service', paymentRequestId: 'req-1', sourceType: 'invoice', sourceId: 'inv-1',
   payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: 'org-1' }, organizationId: 'org-1', amount: 4500, currency: 'TND', revision: 2,
 };
 
@@ -26,10 +26,12 @@ describe('payment event decision (SDD 21.4): a pure function', () => {
   it('a request with no paymentId defers, whatever the event claims: the id is never bound from an event', () => {
     expect(decidePaymentEvent(event, { ...request, status: 'sending', paymentId: null }, invoice)).toEqual({ outcome: 'deferred', detail: 'payment_id_not_recorded' });
     expect(decidePaymentEvent({ ...event, source: 'evil' }, { ...request, paymentId: null }, invoice)).toEqual({ outcome: 'deferred', detail: 'payment_id_not_recorded' });
+    expect(decidePaymentEvent({ ...event, producer: 'evil' }, { ...request, paymentId: null }, invoice)).toEqual({ outcome: 'deferred', detail: 'payment_id_not_recorded' });
   });
 
   it.each<[string, Partial<PaymentEventFacts>, string]>([
     ['another source', { source: 'other-service' }, 'wrong_source'],
+    ['another producer (Stage 4: checked before paymentId, as cheap additional evidence)', { producer: 'other-producer' }, 'producer_mismatch'],
     ['another paymentId', { paymentId: '44444444-4444-4444-8444-444444444444' }, 'payment_id_mismatch'],
     ['a string amount', { amount: '4500' }, 'invalid_amount'],
     ['a fractional amount', { amount: 4500.5 }, 'invalid_amount'],

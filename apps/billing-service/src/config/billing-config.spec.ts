@@ -7,6 +7,8 @@ const BASE = {
   DATABASE_URL: 'postgres://billing_app:pw@localhost:5433/billing',
   AUTH_SERVICE_URL: 'http://localhost:3001',
   BILLING_SUPPORTED_CURRENCIES: 'TND',
+  PAYMENT_SERVICE_URL: 'http://localhost:3002',
+  PAYMENT_SERVICE_TOKEN: 'a'.repeat(32),
 };
 
 const PROD = { ...BASE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://guest:guest@localhost:5672' };
@@ -45,11 +47,27 @@ describe('loadBillingConfig', () => {
     for (const bad of ['TN', 'TNDD', 'T1D', ',', 'tnd;usd']) expect(refusal({ ...BASE, BILLING_SUPPORTED_CURRENCIES: bad })).toContain('BILLING_SUPPORTED_CURRENCIES');
   });
 
-  it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3; the payment URL/token still arrive with Stage 4)', () => {
+  it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
-      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel',
-      'nodeEnv', 'port', 'rabbitmqUrl', 'rateLimits', 'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
+      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'dispatch', 'docs', 'isProduction', 'logLevel',
+      'nodeEnv', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqUrl', 'rateLimits', 'reconcile',
+      'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
     ]);
+  });
+
+  it('has safe default Payment client/dispatch/reconcile settings, tunable per deployment (technical values, no business meaning)', () => {
+    const cfg = loadBillingConfig(BASE);
+    expect(cfg.paymentServiceUrl).toBe('http://localhost:3002');
+    expect(cfg.paymentServiceToken).toBe('a'.repeat(32));
+    expect(cfg.paymentTimeoutMs).toBe(5000);
+    expect(cfg.dispatch).toEqual({ intervalMs: 2000, batchSize: 50, staleSendingMs: 60_000 });
+    expect(cfg.reconcile).toEqual({ intervalMs: 30_000, staleRequestedMs: 300_000 });
+  });
+
+  it('refuses a PAYMENT_SERVICE_TOKEN shorter than 32 characters, never echoing it', () => {
+    const message = refusal({ ...BASE, PAYMENT_SERVICE_TOKEN: 'too-short' });
+    expect(message).toContain('PAYMENT_SERVICE_TOKEN');
+    expect(message).not.toContain('too-short');
   });
 
   it('has safe default rate limits, tunable per deployment (technical values, no business meaning)', () => {
@@ -60,7 +78,7 @@ describe('loadBillingConfig', () => {
     });
   });
 
-  it.each(['DATABASE_URL', 'AUTH_SERVICE_URL'])('refuses a missing %s', (name) => {
+  it.each(['DATABASE_URL', 'AUTH_SERVICE_URL', 'PAYMENT_SERVICE_URL', 'PAYMENT_SERVICE_TOKEN'])('refuses a missing %s', (name) => {
     const env: NodeJS.ProcessEnv = { ...BASE };
     delete env[name];
     expect(refusal(env)).toContain(name);
@@ -70,6 +88,8 @@ describe('loadBillingConfig', () => {
     ['a non-URL DATABASE_URL', { DATABASE_URL: 'not a url' }, 'DATABASE_URL'],
     ['a DATABASE_URL that is not postgres', { DATABASE_URL: 'mysql://u:p@h/db' }, 'DATABASE_URL'],
     ['an AUTH_SERVICE_URL that is not http(s)', { AUTH_SERVICE_URL: 'ftp://auth' }, 'AUTH_SERVICE_URL'],
+    ['a PAYMENT_SERVICE_URL that is not http(s)', { PAYMENT_SERVICE_URL: 'ftp://payment' }, 'PAYMENT_SERVICE_URL'],
+    ['a PAYMENT_TIMEOUT_MS below the minimum', { PAYMENT_TIMEOUT_MS: '10' }, 'PAYMENT_TIMEOUT_MS'],
     ['a PORT out of range', { PORT: '70000' }, 'PORT'],
     ['an unknown NODE_ENV', { NODE_ENV: 'staging' }, 'NODE_ENV'],
     ['an unknown LOG_LEVEL', { LOG_LEVEL: 'verbose' }, 'LOG_LEVEL'],

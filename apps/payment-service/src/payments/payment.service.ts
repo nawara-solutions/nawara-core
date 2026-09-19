@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { DbService, OutboxService, isUniqueViolation } from '@nawara/service-kit';
 import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
 import { paymentError } from '../errors.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-machine.js';
@@ -9,6 +10,11 @@ import type { PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
 
 export interface CreatePaymentResult {
+  payment: PaymentRow;
+  replayed: boolean;
+}
+
+export interface CancelPaymentResult {
   payment: PaymentRow;
   replayed: boolean;
 }
@@ -26,6 +32,7 @@ export class PaymentService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(OutboxService) private readonly outbox: OutboxService,
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
+    @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
   ) {}
 
   /** Creates a payment, or replays an identical one (SDD sections 3.1–3.3, 6). */
@@ -88,10 +95,31 @@ export class PaymentService {
     return rows[0] ?? null;
   }
 
-  /** Producer-only cancellation (SDD section 5.1, 9.1 endpoint 9). No HTTP route in this phase; kept for internal use
-   * (expiry/cancellation share the same "no open collection" guard) and so the state machine is exercised end to end. */
-  async cancel(id: string, ctx: EventContext = requestContext({ type: 'system', id: null })): Promise<PaymentRow> {
+  /**
+   * Producer-only cancellation (SDD section 5.1, 9.1 endpoint 9), exposed over HTTP (Stage 4): `POST
+   * /payment/payments/{id}/cancel`, `Idempotency-Key` required (SDD section 6). Cancelling a payment with an open
+   * collection path is refused — money may already be in flight and must be resolved first, never silently abandoned.
+   */
+  async cancel(id: string, callerId: string, idempotencyKey: string, ctx: EventContext = requestContext({ type: 'service', id: callerId })): Promise<CancelPaymentResult> {
+    const requestHash = IdempotencyService.requestHash('cancel_payment', `/payment/payments/${id}/cancel`, {});
     return this.db.tx(async (q) => {
+      const reserved = await this.idempotency.reserve(q, {
+        caller: `service:${callerId}`,
+        operation: 'cancel_payment',
+        key: idempotencyKey,
+        requestHash,
+        responseStatus: 200,
+        resourceType: 'payment',
+        resourceId: id,
+        ttlHours: this.config.idempotencyTtlHours,
+      });
+      if (reserved.replay) {
+        const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [reserved.resourceId]);
+        const payment = rows[0];
+        if (!payment) throw paymentError(404, 'not_found', 'Not found.');
+        return { payment, replayed: true };
+      }
+
       const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [id]);
       const payment = rows[0];
       if (!payment) throw paymentError(404, 'not_found', 'Not found.');
@@ -108,7 +136,7 @@ export class PaymentService {
         [id],
       );
       await this.outbox.enqueue(q, paymentEvent('payment.cancelled', updated[0], ctx));
-      return updated[0];
+      return { payment: updated[0], replayed: false };
     });
   }
 }

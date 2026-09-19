@@ -8,17 +8,24 @@ import type { InvoiceStatus, PaymentRequestStatus } from './state-machines.js';
  * `succeeded -> failed -> succeeded` and `failed -> succeeded` cannot be produced by Payment; if one ever arrived it is a recorded
  * `conflict`, never a transition.
  *
- * Above all: an event NEVER binds a `paymentId` to a request. Payment events carry no `producer`, so another producer could reuse
- * Billing's `paymentRequestId`; only Billing's own authenticated call (or the reconciler, reading with Billing's service token) may
- * record it. An event that arrives before that is `deferred`, and the reconciler completes the request.
+ * Above all: an event NEVER binds a `paymentId` to a request. Only Billing's own authenticated call (or the reconciler, reading
+ * with Billing's service token) may record one. An event that arrives before that is `deferred`, and the reconciler completes the
+ * request. Payment events now carry `producer` (Stage 4): checked below as ADDITIONAL, cheap-to-reject isolation evidence, never a
+ * replacement for the full snapshot comparison that already independently closes the same gap (another producer reusing Billing's
+ * `paymentRequestId` fails on `paymentId`/snapshot equality regardless of what `producer` says).
  */
 export type PaymentEventName = 'payment.succeeded' | 'payment.failed' | 'payment.cancelled' | 'payment.expired';
+
+/** This service's own name, as Payment's `producer` field must read for any event Billing may legitimately apply. */
+export const EXPECTED_PRODUCER = 'billing-service';
 
 export interface PaymentEventFacts {
   name: PaymentEventName;
   /** The `source` header of the message. */
   source: string;
   paymentId: string;
+  /** Payment's own record of who created the payment (Stage 4). Additional evidence only — see the module doc comment. */
+  producer: string;
   paymentRequestId: string;
   sourceType: string;
   sourceId: string;
@@ -54,7 +61,7 @@ export interface InvoiceFacts {
 export type Decision =
   | { outcome: 'ignored'; detail: 'unknown_payment_request' | 'already_applied' }
   | { outcome: 'deferred'; detail: 'payment_id_not_recorded' }
-  | { outcome: 'conflict'; detail: 'wrong_source' | 'payment_id_mismatch' | 'snapshot_mismatch' | 'amount_mismatch' | 'invalid_amount' | 'request_already_terminal' | 'invoice_not_open' | 'invoice_missing' }
+  | { outcome: 'conflict'; detail: 'wrong_source' | 'producer_mismatch' | 'payment_id_mismatch' | 'snapshot_mismatch' | 'amount_mismatch' | 'invalid_amount' | 'request_already_terminal' | 'invoice_not_open' | 'invoice_missing' }
   | { outcome: 'applied'; requestTo: 'paid' | 'failed' | 'expired' | 'cancelled'; invoiceTo: 'paid' | null };
 
 const TARGET: Record<PaymentEventName, 'paid' | 'failed' | 'expired' | 'cancelled'> = {
@@ -73,6 +80,7 @@ export function decidePaymentEvent(event: PaymentEventFacts, request: RequestFac
   if (request.paymentId === null) return { outcome: 'deferred', detail: 'payment_id_not_recorded' };
 
   if (event.source !== 'payment-service') return { outcome: 'conflict', detail: 'wrong_source' };
+  if (event.producer !== EXPECTED_PRODUCER) return { outcome: 'conflict', detail: 'producer_mismatch' };
   if (event.paymentId !== request.paymentId) return { outcome: 'conflict', detail: 'payment_id_mismatch' };
 
   if (typeof event.amount !== 'number' || !Number.isSafeInteger(event.amount) || event.amount < 1) return { outcome: 'conflict', detail: 'invalid_amount' };

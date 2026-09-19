@@ -307,8 +307,8 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
   });
 
   // ------------------------------------------------------------------------------------------------------- payment requests
-  describe('payment requests: Billing-side creation only, the Payment integration is Stage 4', () => {
-    it('creates a payment request equal to the full invoice total; paymentId is ALWAYS null and status ALWAYS "created" (no dispatcher exists)', async () => {
+  describe('payment requests: Billing-side creation (the Payment integration itself — dispatch, cancel, events — is covered in payment-integration.e2e-spec.ts)', () => {
+    it('creates a payment request equal to the full invoice total; paymentId is ALWAYS null and status ALWAYS "created" (the dispatcher never runs in this suite — its own interval is set to an hour, and nothing here calls dispatchOnce())', async () => {
       const { priceId, sellerId } = await seedPrice({ unitAmount: 2000 });
       const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, quantity: 1, payerId: 'user-1' })).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);

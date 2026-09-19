@@ -61,3 +61,4 @@ if requirements change significantly later, write a new TDD for that follow-up w
 | [payment-phase1-acceptance-fixes](./payment-phase1-acceptance-fixes.md) | Implemented |
 | [billing-service-foundation](./billing-service-foundation.md) | Implemented |
 | [billing-service-domain-schema](./billing-service-domain-schema.md) | Implemented |
+| [billing-service-http-api](./billing-service-http-api.md) | Implemented |

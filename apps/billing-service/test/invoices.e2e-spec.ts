@@ -99,7 +99,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
   }
 
   const eventFor = (invoice: { id: string; total: string; currency: string }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded', over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
-    name, source: 'payment-service', paymentId, paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
+    name, source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
     payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG,
     amount: Number(invoice.total), currency: invoice.currency, revision: 1, ...over,
   });
@@ -444,6 +444,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
       ['a different payer', (p: PaymentEventFacts) => ({ ...p, payer: { type: 'user', id: 'user-x' } }), 'snapshot_mismatch'],
       ['a different source', (p: PaymentEventFacts) => ({ ...p, sourceId: crypto.randomUUID() }), 'snapshot_mismatch'],
       ['a message from another source', (p: PaymentEventFacts) => ({ ...p, source: 'evil-service' }), 'wrong_source'],
+      ['a different producer (Stage 4)', (p: PaymentEventFacts) => ({ ...p, producer: 'other-producer' }), 'producer_mismatch'],
     ])('an event with %s is a recorded conflict and changes no state', async (_n, mutate, detail) => {
       const { open, request, paymentId } = await requested();
       const r = await requests.applyPaymentEvent(crypto.randomUUID(), mutate(eventFor(open, request, paymentId)), paymentCtx);
