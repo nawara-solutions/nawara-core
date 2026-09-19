@@ -7,18 +7,70 @@ state machines, idempotency, authorization, events) and
 for how it fits alongside billing-service and accounting-service. It is **not** the billing or
 accounting system: it never decides what is owed and keeps no ledger.
 
-## Status
+## Status: Phase 1 (technical foundation)
 
-Phase 1 (technical foundation) is being built in stages; see the SDD's "Implementation readiness
-gate" (section 22) for what is and is not allowed to be implemented yet. As of this stage:
+Gateway-settlement lifecycle only. No cash, no refunds — see the SDD's "Implementation readiness
+gate" (section 22) and the `[B]`-gated decisions below. **Not production-ready**: no real gateway,
+no production traffic can reach any of this (the test provider refuses to start when
+`NODE_ENV=production`), and several `[B]` decisions remain open.
 
-- ✅ Service foundation on `@nawara/service-kit`: configuration, database connection/migration
-  wiring, `/health` and `/ready`, service-token authentication, a combined service-token-or-user
-  guard, the event bus (in-memory locally, RabbitMQ by configuration), a generic rate limiter,
-  OpenAPI at `/payment/docs` (behind basic auth, unmounted unless a password is configured), and
-  raw-body capture for the webhook route that a later stage will add.
-- ⏳ No domain table, endpoint or business rule exists yet — this stage deliberately mirrors the
-  SDD's own "Stage 1: convert the starter into a kit-based service with no domain" (section 21).
+### Implemented in Phase 1
+
+- Service foundation on `@nawara/service-kit`: configuration, database connection/migration wiring,
+  `/health`/`/ready`, service-token authentication, a combined service-token-or-user guard, the event
+  bus (in-memory locally, RabbitMQ by configuration), a generic rate limiter, OpenAPI at
+  `/payment/docs` (basic auth, unmounted unless a password is configured), and raw-body capture for
+  the webhook route (Nest's `rawBody: true`, no kit change needed).
+- Schema: `currency`, `payment`, `payment_attempt`, `idempotency_key`, `webhook_event` — financial
+  invariants FI-01, FI-02, FI-03, FI-04, FI-09, FI-11 and the late-success edge of FI-12 enforced at
+  the database level (CHECK constraints, immutability and state-transition triggers), not just in
+  application code.
+- Payment lifecycle: `created → pending → succeeded/failed → created (retry) → expired`, natural-key
+  idempotency on `(producer, paymentRequestId)`, header-based idempotency for attempts.
+- Endpoints 1, 2, 3, 4, 5 of SDD section 9: create/get a payment, start/sync an attempt, provider
+  webhooks. (Endpoint 9, cancel, is `[T]` — implemented at the service layer, no HTTP route; see
+  "Deferred" below.)
+- The deterministic test provider (`success`, `failure`, `retry`, `timeout_before_accept`,
+  `timeout_after_accept`, plus signature verification), the provider port, and three background jobs
+  (`AttemptResolver`, `WebhookRetrier`, `ExpirySweeper`) with the same start/stop shape as the kit's
+  `OutboxRelay`.
+- Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
+  rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
+  silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
+  resolver and the webhook path all share.
+- Transactional outbox events: `payment.created`, `payment.succeeded`, `payment.failed`,
+  `payment.expired` (no `payment.cancelled` — cancel has no route yet).
+- 92 tests (unit + integration/e2e against a real PostgreSQL) plus 30 database-level invariant
+  assertions and 2 concurrency races in `db/tests/`, including the four required concurrency
+  scenarios: double-start, concurrent duplicate-success delivery, an expiry-vs-success race, and a
+  webhook-vs-resolver race.
+
+### Blocked by business decision (not implemented — see `docs/sdd/payment-service.md` section 19)
+
+- Cash submissions and their confirm/reject flow — **O-4** (who may submit), **O-5** (who may
+  confirm/reject).
+- Refunds — **O-6** (who may refund; whether partial refunds are approved). FI-07/FI-08/FI-10/FI-14
+  (the refund invariants) have no enforcement yet because there is no refund table.
+- Producer service-token scopes and non-test-fixture producers — **O-13**, **O-14**.
+- Organization/platform/company hierarchy validation with no user context — **O-15**.
+- Any currency beyond the configured list, and a default/maximum payment lifetime — **O-10**, **O-16**.
+- Who may pay on behalf of an organization, and read access beyond producer/payer — **O-18**, **O-20**.
+
+### Deferred (`[X]`, SDD section 18)
+
+Real gateway adapters, organization payment accounts, settlement, payouts, fees, custody/wallet,
+merchant-of-record behaviour, full periodic reconciliation, admin/support tooling, the cancel HTTP
+route (implemented at the service layer only — flag if you want it exposed).
+
+### Known limitations
+
+- No rate limiting is actually wired onto payment routes yet (the kit's new `RateLimitModule` is
+  imported but no endpoint calls it — a follow-up, not a Phase 1 requirement).
+- Webhook "out of order" handling relies on `applyStatus`'s own idempotent no-ops rather than a
+  distinct `ignored_stale` outcome; functionally safe, less precisely observable than the SDD's fully
+  detailed table.
+- Observability (structured counters/alerts for stuck attempts, conflicts, outbox lag) is not built —
+  the background jobs log via Nest's `Logger` only.
 
 ## Running locally
 
@@ -35,12 +87,13 @@ MIGRATION_DATABASE_URL=postgres://payment_migrator:...@localhost:5433/payment np
 ```
 
 Nothing migrates automatically at service start; `/ready` fails while a migration is pending (see
-`@nawara/service-kit`'s README for the full migration model). There are no payment-service-specific
-migrations yet — only the kit's own (outbox/inbox, rate limiting) apply today.
+`@nawara/service-kit`'s README for the full migration model).
 
 ## Tests
 
 ```bash
-npm run test -w payment-service        # unit
-npm run test:e2e -w payment-service     # integration, against a real PostgreSQL (needs TEST_DATABASE_ADMIN_URL)
+npm run test -w payment-service         # unit
+npm run test:e2e -w payment-service      # integration, against a real PostgreSQL (needs TEST_DATABASE_ADMIN_URL)
+npm run test:db -w payment-service       # database-level invariants and concurrency races (needs PGHOST/PGPORT/PGUSER/PGPASSWORD)
+npm run test:all -w payment-service      # all three
 ```
