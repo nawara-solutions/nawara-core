@@ -4,6 +4,8 @@
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 
+> **Refinements recorded by the [payment SDD](../sdd/payment-service.md) (2026-09-19), not yet decisions of their own:** (1) creations that have a durable business key (a payment from a payment request, a refund with a client reference) use that **natural key** for idempotency instead of the `Idempotency-Key` header, which stays for other mutating operations; (2) the error body gains an optional stable `code` field (an additive change to the kit's filter, plus a `502` status text); (3) a service's OpenAPI page is served under its routed prefix (`/payment/docs`, as `/auth/docs`), because the gateway routes only `/<prefix>`. If you disagree with any of them, revise the SDD.
+
 > Auth-service is **not** migrated onto the kit; it keeps its own implementations. The kit copies proven patterns from
 > it (fail-closed configuration, health, event publisher, plain-SQL migrations) without importing Auth code.
 

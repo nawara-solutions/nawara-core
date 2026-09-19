@@ -1,19 +1,20 @@
 # Service foundations: what is implemented, designed and deferred
 
-- **Status:** describes the repository as of 2026-09-19, after the service-kit / CI / deployment-safety change.
+- **Status:** describes the repository as of 2026-09-19, after the service-kit / CI / deployment-safety change (PR #39, merged) and its verification on GitHub.
 - **Related:** [core-architecture.md](./core-architecture.md), [financial-architecture.md](./financial-architecture.md),
   [production-readiness.md](./production-readiness.md), [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md),
   [ADR-0033](../adr/0033-service-to-service-authentication-and-user-identity.md),
   [ADR-0034](../adr/0034-shared-service-kit-and-api-conventions.md), [ADR-0037](../adr/0037-reliable-events-outbox-inbox.md).
 
 Three words are used strictly: **Implemented** (code exists and was run), **Designed** (documented, no code), **Deferred**
-(consciously left for later). Nothing in this document is "verified in production": production was not touched.
+(consciously left for later). After the merge of PR #39 the first production deployment ran through the normal merge process;
+what was observed is recorded in section 7. Nothing else in production was touched.
 
 ## 1. Payment Service reality
 
 `apps/payment-service` is still an unmodified NestJS starter (one `GET /` route). The Payment, Billing and Accounting domains are
-**Designed** ([financial-architecture.md](./financial-architecture.md)) and **not implemented**. The new Payment SDD has not been
-written and must precede any payment code. This change touches payment-service in exactly one way: its starter e2e test no longer
+**Designed** ([financial-architecture.md](./financial-architecture.md)) and **not implemented**. The new Payment SDD is written
+([`docs/sdd/payment-service.md`](../sdd/payment-service.md), Draft, for review) and must be approved before any payment code. This change touches payment-service in exactly one way: its starter e2e test no longer
 imports the unresolvable `supertest/types` subpath (the same fix in notification-service), and a `typecheck` script was added.
 
 ## 2. Implemented
@@ -43,7 +44,7 @@ production database roles, backups and RabbitMQ; migrating auth-service onto the
 
 | Gap | Fix | How it is checked |
 |---|---|---|
-| The SSH step piped `docker run ... \| bash -s` without `pipefail`, so a failed pull could pass silently | the remote script now starts with `set -euo pipefail`; an `EXIT` trap logs out of the registry even when the script fails | `scripts` fail the build if any `appleboy/ssh-action` script does not start with it |
+| The SSH step piped `docker run ... \| bash -s` without `pipefail`, so a failed pull could pass silently | the remote script now starts with `set -euo pipefail`; an `EXIT` trap logs out of the registry even when the script fails | `scripts` fail the build if any `appleboy/ssh-action` script does not start with it, or uses the ignored `script_stop` input |
 | No concurrency control | one queue, `production-deploy-core-api`, shared by the `:production` image publication, the automatic deployment and the manual one; `cancel-in-progress: false` | checked for every deploying job; a group other than the shared one, or `cancel-in-progress` other than `false`, fails the build |
 | A `TEMPORARY` push trigger on an old branch in `auth-service-deploy.yml` | removed; the manual workflow is `workflow_dispatch` only | a deploying workflow triggered by any branch but `main` fails the build |
 | Found while reviewing: the manual deploy could run from any branch | its job is now guarded to `refs/heads/main` | a deploying job without a `refs/heads/main` guard fails the build |
@@ -77,11 +78,16 @@ never cancelled; if a third request arrives, the older *waiting* one is supersed
 | repository checks and their tests | pass; 11 tests. Run against the workflows *before* the fixes they reported all three known gaps and one more |
 | `infra/postgres/verify.sh --with-kit-migrations` | all checks pass for the three services; deliberately over-granting a runtime role made it fail |
 | `npm ci --dry-run` | lockfile in sync |
+| **GitHub: Core CI** on the pull request and on `main` | **all six jobs passed** (repository checks, service-kit, auth, payment, notification, local infrastructure) |
+| **GitHub: production deployment job** after the merge of PR #39 | **passed** (about 1m10s): the remote script ran under `set -euo pipefail`; migrations `0001`–`0007` already applied; the new container healthy; the previous container kept stopped |
+| `GET /auth/health` after the deployment | HTTP 200 (a single read-only request) |
 
-**Not verified:** any GitHub Actions run (the workflows were parsed and statically checked, and every command in them was run
-locally, but no workflow has executed on GitHub); the changed deploy script on the real server (it assumes the remote login shell is
-bash: `pipefail` is a bash feature, so on another shell the deploy would fail loudly, not silently); anything in production;
-ai-service; behaviour under load.
+**Correction:** `script_stop: true`, present in both deploy workflows since before PR #39, is **not** an input of
+`appleboy/ssh-action@v1`; GitHub reported it as an unexpected input and ignored it. It never provided protection and has been removed.
+Failure handling comes from `set -euo pipefail`.
+
+**Not verified:** the concurrency queue under two simultaneous deployments (only one ran); the manual deploy workflow (never run);
+ai-service (no CI job); behaviour under load; anything in production beyond the deployment above and one health request.
 
 ## 8. Decisions that still need human approval
 
@@ -96,7 +102,6 @@ ai-service; behaviour under load.
 
 ## 9. Risks found
 
-* No workflow has run on GitHub yet: the first CI run may expose an environment difference (runner tools, service startup timing).
-* The first production deploy after merge exercises the new script and queue for the first time: **watch it**.
+* Concurrent deployments have not been exercised; if two ever overlap, confirm in the run log that the second waited.
 * Outbox rows and inbox rows grow without bound until a pruning policy exists.
 * The kit consumes Auth's `/auth/me` contract; a change to that response shape must update the client and its test.

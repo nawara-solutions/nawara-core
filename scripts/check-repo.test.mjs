@@ -14,7 +14,6 @@ jobs:
     steps:
       - uses: appleboy/ssh-action@v1
         with:
-          script_stop: true
           script: |
 ${script.split('\n').map((l) => '            ' + l).join('\n')}
 `;
@@ -26,6 +25,11 @@ test('a correct production deployment passes', () => {
 test('the remote script must start with set -euo pipefail', () => {
   assert.match(checkWorkflowSafety('d.yml', deploy({ script: 'docker pull "$IMAGE"' })).join(), /must start with "set -euo pipefail"/);
   assert.match(checkWorkflowSafety('d.yml', deploy({ script: 'set -e\ndocker pull x' })).join(), /must start with "set -euo pipefail"/);
+});
+
+test('the ignored script_stop input is refused (it gives no protection)', () => {
+  const wf = deploy().replace('          script: |', '          script_stop: true\n          script: |');
+  assert.match(checkWorkflowSafety('d.yml', wf).join(), /script_stop.*not an input/);
 });
 
 test('a deployment without a concurrency group is refused', () => {
