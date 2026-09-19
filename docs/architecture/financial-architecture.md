@@ -213,7 +213,7 @@ existing synchronous dependency; whether it stays is an open decision.)
 | ADR-0026 | ownership statement amended by ADR-0038 |
 | `docs/add/payment-service.md`, `docs/sdd/payment-service.md` | financial parts superseded by this document |
 | `docs/adr/README.md`, `docs/architecture/README.md` | index rows for ADR-0031 to 0038; the architecture folder is indexed by its own README (`docs/README.md` is a shared symlink and is not edited here) |
-| SDDs | one each for billing, payment and accounting **before** their Stage 2, 3 and 5 code. Written so far: [payment](../sdd/payment-service.md) and [billing](../sdd/billing-service.md) (draft, for review; its section 5 lists the reconciliations it proposes to this document: invoice state names, the `invoice.issued` event, the product/price split). Accounting: not written |
+| SDDs | one each for billing, payment and accounting **before** their Stage 2, 3 and 5 code. Written so far: [payment](../sdd/payment-service.md) and [billing](../sdd/billing-service.md) (draft, for review; its section 5 records how it reconciles with this document: the invoice states and event names are kept as written here, and the product/price split is the one proposed change). Accounting: not written |
 
 ## 12. Intentionally deferred
 

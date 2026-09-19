@@ -69,7 +69,7 @@ Billing must never become, and this document does not design: the payment servic
         │  then pays at payment-service (POST /payment/payments/{id}/attempts, user bearer)
                                                                        ▼
    payment-service ── payment.succeeded / failed / cancelled / expired ──► billing (inbox) ──► invoice paid / request closed
-   billing ── invoice.issued / paid / voided / overdue ── outbox ──► RabbitMQ (nawara.events) ──► accounting, notification, audit
+   billing ── invoice.created / paid / voided / overdue ── outbox ──► RabbitMQ (nawara.events) ──► accounting, notification, audit
    platform services ── GET /billing/licenses/... (service token) ──► entitlement status                       (Stage 8)
 ```
 
@@ -108,7 +108,7 @@ Billing must never become, and this document does not design: the payment servic
 
 ### 4.2 Important flows [T]
 
-**Create and issue.** (1) The producer sends the request with its service token. (2) The guard identifies it; validation rejects unknown fields. (3) One transaction: resolve every price server-side, compute totals, insert the invoice and lines (`draft`); a replay returns the existing one. (4) The producer issues: one transaction locks the invoice, then the seller's counter, assigns the number, moves `draft → open` and enqueues `invoice.issued`.
+**Create and issue.** (1) The producer sends the request with its service token. (2) The guard identifies it; validation rejects unknown fields. (3) One transaction: resolve every price server-side, compute totals, insert the invoice and lines (`draft`); a replay returns the existing one. (4) The producer issues: one transaction locks the invoice, then the seller's counter, assigns the number, moves `draft → open` and enqueues `invoice.created`.
 
 **Pay.** (1) The `user` payer asks for a payment request (Auth is asked live; relation is `payer`). (2) One transaction inserts the request (`created`) under the invoice lock and answers. (3) The dispatcher claims it, calls Payment with the mapped body, and records `requested` with `paymentId`. (4) The payer starts an attempt **at Payment** with their own bearer and pays. (5) Payment emits `payment.succeeded`; the consumer runs the procedure of 21.4 and, in one transaction, marks the request and the invoice `paid` and enqueues `invoice.paid`. (6) If the event is lost or dead-lettered, the reconciler reaches the same result from Payment's status.
 
@@ -122,15 +122,15 @@ What was inspected on `main` (merge of PR #43) and what it means for Billing. **
 
 | # | Finding | Consequence for Billing |
 |---|---|---|
-| R-1 | `financial-architecture.md` section 5 gives `invoice.status: draft → open → paid \| void \| uncollectible`, with `overdue` **derived** from `dueAt`. The brief this SDD was commissioned from (not stored in the repository) lists `issued, partially_paid, paid, overdue, voided, cancelled`. | This SDD adopts the architecture's names as **[T]**: `draft`, `open` (= "issued"), `paid`, `void` (= "voided"). `overdue` stays derived. `partially_paid` needs partial payments (**B-010**; Payment v1 is one payment per request), `uncollectible` needs a write-off decision (**B-014**), and a separate `cancelled` is unnecessary (discarding a draft is `draft → void`, section 17.1). The names are a reconciliation for the owner to accept. |
+| R-1 | **Canonical invoice vocabulary.** The only existing statement of invoice states is `financial-architecture.md` section 5: `draft → open → paid \| void \| uncollectible`, with `overdue` **derived** from `dueAt`. `core-architecture.md` (events) uses the past-participle forms `invoice.paid` and `invoice.voided`, which name the same `paid` and `void` states and do not conflict with it. The words `issued`, `voided` (as a state), `cancelled` (for an invoice) and `partially_paid` appear in **no** existing document; they came from the brief this SDD was commissioned from (not stored in the repository). | The **canonical states are the architecture's**: `draft`, `open`, `paid`, `void`; `overdue` stays derived. "Issued" is the *operation* that moves `draft → open` (endpoint 10), not a state. `partially_paid` needs partial payments (**B-010**; Payment v1 is one payment per request) and `uncollectible` needs a write-off decision (**B-014**): both stay reserved and unimplemented. A separate `cancelled` adds nothing (discarding a draft is `draft → void`, 17.1). **No behaviour was invented and no owner approval is needed for the vocabulary.** |
 | R-2 | The architecture's `product.type` (`one_time`, `recurring`, `organization_license`, `user_subscription`) mixes *billing interval* with *entitlement kind*. | Split: the **interval belongs to the price**, the **entitlement kind to the product** (`none` \| `organization_license` \| `user_subscription`, Stage 8). |
-| R-3 | The event catalog in `core-architecture.md` names `invoice.created/due/overdue/paid/voided`. The flow it draws sends `invoice.created` to notification as "you owe 30 TND", i.e. at the moment the invoice becomes owed, not when a draft is made. | This SDD names that event **`invoice.issued`** (emitted only on `draft → open`; a draft is never announced). `invoice.due` is not defined (**B-013**). The catalog row in `core-architecture.md` needs a matching edit when this SDD is approved. |
+| R-3 | **Invoice event names.** `core-architecture.md` lists `invoice.created/due/overdue/paid/voided` and draws `invoice.created` going to notification as "you owe 30 TND". That flow only makes sense when the invoice becomes owed. The documents do not say whether a draft is announced. | This SDD **keeps the documented name `invoice.created`** and defines its *timing* as the transition `draft → open` (a draft is never announced), which is the only reading under which the documented flow is correct. The name is therefore slightly misleading (it fires at "open", not at row creation). Renaming it (an earlier draft of this SDD used `invoice.issued`) would change a documented contract and is **not adopted**; it is an optional owner decision (section 35, item 1). `invoice.due` has no defined semantics in any document and is **B-013**. No edit to `core-architecture.md` is needed. |
 | R-4 | ADR-0034 says resource-creating `POST`s take `Idempotency-Key`. | As the payment SDD already does (its section 6), Billing uses a **permanent natural key** where one exists and **state-based** idempotency elsewhere (section 25). **No `Idempotency-Key` header and no `idempotency_key` table exist in Billing.** |
-| R-5 | **Auth still depends on a payment route that does not exist.** `apps/auth-service/src/payment/payment-client.ts` calls `GET {PAYMENT_SERVICE_URL}/payment/licenses/{organizationId}/status` with `PAYMENT_SERVICE_TOKEN`, expects `{ "valid": boolean }`, treats **404 as "not licensed"** and anything else non-2xx as `503`. It is used at registration and when joining an organization only (`AuthService`, ADR-0004 as narrowed by ADR-0026). Payment Phase 1 on `main` has no such route. | If Auth were pointed at payment-service today, every organization would read as "not licensed" (fail closed, silently wrong). See section 16.4 for ownership, migration and the compatibility contract. Payment SDD O-12 already gates this before payment-service reaches production. |
-| R-6 | Payment events on `main` (`payment.created/succeeded/failed/cancelled/expired`) carry `paymentRequestId`, `sourceType`, `sourceId`, parties, `amount`, `currency`, `status`, `revision`, `actor`, `cause` and correlation id, but **not `producer`**. Payment's natural key is `(producer, paymentRequestId)`. | Another producer with a valid token could create a payment reusing Billing's `paymentRequestId`; its event would then look like Billing's. Billing therefore **verifies more than the id** (section 21.4): `paymentId` (assigned by Payment, unforgeable) once known, plus full snapshot equality. **Recommended additive Payment change (not made here):** carry `producer` in the payment event payload. |
+| R-5 | **Auth still depends on a payment route that does not exist.** `apps/auth-service/src/payment/payment-client.ts` calls `GET {PAYMENT_SERVICE_URL}/payment/licenses/{organizationId}/status` with `PAYMENT_SERVICE_TOKEN`, expects `{ "valid": boolean }`, treats **404 as "not licensed"** and anything else non-2xx as `503`. It is used at registration and when joining an organization only (`AuthService`, ADR-0004 as narrowed by ADR-0026). Payment Phase 1 on `main` has no such route. Auth's own tests use a **stub** payment client (`test/members-payment.e2e-spec.ts`, 10 passing), so the real client's 404 mapping is **not covered by any test**. The join-code migration also carries a stale comment ("Entitlement is owned by payment-service"), superseded by ADR-0038. | If Auth were pointed at payment-service today, every organization would read as "not licensed" (fail closed, silently wrong). See section 16.4 for ownership, migration and the compatibility contract. Payment SDD O-12 already gates this before payment-service reaches production. |
+| R-6 | Payment events on `main` (`payment.created/succeeded/failed/cancelled/expired`) carry `paymentRequestId`, `sourceType`, `sourceId`, parties, `amount`, `currency`, `status`, `revision`, `actor`, `cause` and correlation id, but **not `producer`**. Payment's natural key is `(producer, paymentRequestId)`. | Another producer with a valid token could create a payment reusing Billing's `paymentRequestId`; its event would then look like Billing's. Billing therefore **verifies more than the id** (section 21.4): the `paymentId` recorded from Billing's own call (assigned by Payment, unforgeable) plus full snapshot equality, and it **never binds a `paymentId` from an event**. **Recommended additive Payment change (not made here):** carry `producer` in the payment event payload. |
 | R-7 | Payment on `main` has **no cancel route** (endpoint 9 exists only at the service layer), **cannot start an attempt for an organization payer** (O-18), and has **no cash path** (O-4, O-5). Production use of payment creation by a non-test producer needs O-13, O-14, O-15. | Billing can create and issue invoices for any payer, but **can only complete a gateway collection for a `user` payer**, and cannot cancel a payment request that already reached Payment until Payment ships cancel. Combined with a null `expiresAt` (B-009) and BI-13, a request that Payment can never complete would be **unclosable**, which is why v1 refuses requests for non-`user` payers (13.1) and why **enabling payment requests outside the test fixture requires Payment's cancel route** (34.3). The headline flow "Nawara invoices an organization for a license" is **not completable** until B-001, B-026 (= Payment O-18) and the cash decisions are made. |
 | R-8 | ADR-0006 (per-user subscription reservation) and ADR-0008 (automatic 24-hour grace license) are **Accepted**, and ADR-0038 says their rules are "kept". `financial-architecture.md` section 10, item 7 nevertheless lists "grace-period rules on the new model" as **unresolved**. | The two documents disagree. This SDD treats the ADRs as evidence of intent, **not** as approval for the invoice-driven model, and marks re-expression **[B]** (B-020, B-021). The owner should say which one governs. |
-| R-9 | Kit gaps for Billing: no pagination helper (ADR-0034 lists one; `libs/service-kit` has none); the combined service-token-or-user guard, the deterministic event id and the test-app harness (the kit only ships the throwaway-database helper) live **inside payment-service**; a failed consumer goes straight to the dead-letter queue (no retry delay); no metrics facility. | Stage 0 prerequisites (section 34.1). Extracting the guard and the deterministic id into the kit is **recommended** (both are technical, not domain); it is a kit change with its own review, not done here. |
+| R-9 | Kit gaps for Billing: no pagination helper (ADR-0034 lists one; `libs/service-kit` has none); the combined service-token-or-user guard, the deterministic event id and the test-app harness (the kit only ships the throwaway-database helper) live **inside payment-service**; a failed consumer goes straight to the dead-letter queue (no retry delay); no metrics facility. | None of the three is *required*: each can be implemented **locally in Billing** (section 34.1, Stage 0). Extracting the guard and the deterministic id into the kit is an optional, separate kit change with its own review; not done here. |
 | R-10 | `apps/payment-service` obeys `scripts/lib/checks.mjs`: product terms (student, teacher, driver, lesson, classroom, instructor, vehicle) are forbidden in `apps/billing-service/src/`, and no service may import another's source. | Applies to Billing code from Stage 1; `check:repo` enforces it. |
 
 ## 6. Domain model and entity ownership
@@ -154,7 +154,7 @@ Invoice line ─(entitlement snapshot)─► OrganizationLicense | UserSubscript
 | `invoice_line` | one immutable line of an invoice | [T] |
 | `invoice_number_sequence` | the counter that assigns a number at issue | [T] mechanism; scope and format **[B, B-004]** |
 | `payment_request` | one attempt by Billing to have Payment collect an invoice | [T] |
-| `payment_event_receipt` | how each consumed Payment event was applied (applied, ignored, conflict, unmatched) | [T] |
+| `payment_event_receipt` | how each consumed Payment event was applied (applied, ignored, conflict, deferred) | [T] |
 | `billing_transition` | append-only history of every state change with actor and cause | [T] |
 | `credit_note` | a document reducing what is owed on an invoice | shape [T], behaviour **[B, B-016]** |
 | `organization_license`, `user_subscription` | billing-derived entitlement | structure [D, ADR-0038], rules **[B]** |
@@ -186,17 +186,17 @@ These are safety properties that must hold under retries, concurrent requests, d
 | BI-05 | Invoice totals are derivable from lines: `subtotal = Σ lineTotal`, `taxTotal = Σ taxAmount`, `total = subtotal + taxTotal`, `lineTotal = quantity × unitAmount`; at least one line, at most 100; no approved adjustments exist (B-033) | CHECK `lineTotal = quantity * unitAmount`, CHECK `total = subtotal + taxTotal`; a **deferred constraint trigger** (at commit) compares the header with `Σ` of its lines, summed as `numeric` so the check itself cannot overflow | totals computed **server-side** from lines and never accepted from the client | DB: header edited to disagree is refused at commit; a missing line, an extra line, a zero-line invoice refused; API: forged totals ignored/rejected |
 | BI-06 | A historical invoice never changes because a product or price changed: prices are immutable, and each line **copies** the price's amount, currency, quantity basis, description, product code and entitlement snapshot | `price` commercial columns immutable (trigger); `invoice_line` fully immutable (trigger); line values are stored, never joined at read time | representations read the line row only | DB + API: change/retire a price, archive a product, then read the old invoice: identical |
 | BI-07 | An invoice total cannot become inconsistent with its lines after creation | `invoice_line` rows cannot be inserted into a non-`draft` invoice, nor updated or deleted ever; amount columns of `invoice` immutable (`forbid_column_change`) | no update path exists | DB: UPDATE/DELETE of a line, UPDATE of totals, INSERT of a line into an `open` invoice all refused |
-| BI-08 | Amount due never becomes negative: `amountDue = total − Σ paid payment requests − Σ issued credit notes` is **derived, never stored** | trigger on `payment_request` and `credit_note` locks the invoice and refuses a sum above `total` | consumer refuses (records `conflict`) rather than over-applying | DB + integration: an over-application is refused and recorded, never applied |
+| BI-08 | Amount due never becomes negative: `amountDue = total − Σ paid payment requests` (minus `Σ issued credit notes` **only if B-016 unlocks them**) is **derived, never stored** | trigger on `payment_request` and `credit_note` locks the invoice and refuses a sum above `total` | consumer refuses (records `conflict`) rather than over-applying | DB + integration: an over-application is refused and recorded, never applied |
 | BI-09 | Payment allocation cannot exceed what the approved model permits. **v1 TEMPORARY RESTRICTION (no partial payments approved, B-010, B-011):** a payment request's `amount` equals the invoice `total`, and at most **one** payment request can be `paid` | CHECK-by-trigger `amount = invoice.total` at INSERT (relaxed by a migration only when B-010 is decided); partial unique index: one `paid` request per invoice | request creation refuses otherwise | DB: partial amount refused; a second `paid` request refused; integration: duplicate success is a recorded conflict |
 | BI-10 | An issued invoice's number is unique in its numbering scope and assigned once. The counter is transactional, so an issue that rolls back consumes no number; whether a gapless series is *required* is **B-004** | `UNIQUE (sellerType, sellerId, number)` (**TEMPORARY RESTRICTION**, scope is B-004); number set once (trigger); counter row locked and incremented in the issue transaction (a rollback returns the number) | the number is assigned only by the issue transition | DB: duplicate number, renumbering refused; concurrency: N parallel issues for one seller give N distinct consecutive numbers |
 | BI-11 | An invoice currency exists in the `currency` table and in the configured supported list | FK `invoice.currency → currency.code`, `price.currency → currency.code` | config check at creation (`422 unsupported_currency`) | DB: unknown code refused; API: unconfigured code `422` |
 | BI-12 | A state transition and its outbox event commit atomically | same transaction; deterministic event id (`ON CONFLICT DO NOTHING`); `revision` maintained by a trigger | every transition goes through one transition function that enqueues in the same `Queryable` | integration: force the outbox insert to fail, state and history roll back; retry commits both once |
 | BI-13 | **At most one active payment request per invoice** (`created`, `sending`, `requested`) | partial unique index on `payment_request (invoiceId)` for those statuses | request creation is state-idempotent (section 25) | DB race: 8 concurrent creates give one row; API: the loser gets the winner |
-| BI-14 | An invoice becomes `paid` only through a payment request that is `paid` for the full `total` (v1 **TEMPORARY RESTRICTION**, B-010), and a `paid` invoice always names it | CHECK `status <> 'paid' OR paidAt IS NOT NULL`; trigger: `open → paid` requires a `paid` request with `amount = total` in the same transaction; `paid` is terminal | only the payment-event consumer and the reconciler set it | DB: bare `UPDATE … status = 'paid'` refused; integration: no route or job sets `paid` (source scan, like the one in Payment's `review-matrix.e2e-spec.ts`) |
+| BI-14 | An invoice becomes `paid` only through a payment request that is `paid` for the full `total` (v1 **TEMPORARY RESTRICTION**, B-010), and the single `paid` request for a `paid` invoice is always discoverable | CHECK `status <> 'paid' OR paidAt IS NOT NULL`; trigger: `open → paid` requires a `paid` request with `amount = total` in the same transaction; `paid` is terminal | only the payment-event consumer and the reconciler set it | DB: bare `UPDATE … status = 'paid'` refused; integration: no route or job sets `paid` (source scan, like the one in Payment's `review-matrix.e2e-spec.ts`) |
 | BI-15 | A payment request's amount, currency and mapped fields never change after insert | `forbid_column_change` on `payment_request` (`invoiceId`, `amount`, `currency`, `expiresAt`, `mappingVersion`, `createdAt`) | none | DB: UPDATE refused |
-| BI-16 | A `paid` or `void` invoice never reopens; a `paid` invoice is never rewritten by a refund | transition trigger (section 17.1 table is the only allowed set) | consumer ignores `refund.*` in v1 (B-017) | DB: every forbidden pair refused (matrix test); integration: `refund.succeeded` changes nothing |
+| BI-16 | A `paid` or `void` invoice never reopens; a `paid` invoice is never rewritten by a refund | transition trigger whose allowed set is the section 17.1 table **without `open → void`** until B-015 is decided (**TEMPORARY RESTRICTION**; a migration adds it then) | consumer ignores `refund.*` in v1 (B-017) | DB: every forbidden pair refused (matrix test); integration: `refund.succeeded` changes nothing |
 | BI-17 | Credit notes for one invoice never exceed its `total` (shape only; gated by B-016) | trigger locking the invoice, summing `numeric` | — | DB (when unlocked): concurrent credit notes cannot exceed the cap |
-| BI-18 | **A Billing invoice can never yield a payment request Payment would refuse.** Payment's contract is copied onto the columns Billing sends: `payerType`/`sellerType` in (`user`, `organization`, `company`); `payerId`/`sellerId` **1 to 128 characters**; payer differs from seller; if `sellerType = 'organization'` then `sellerId` is a uuid and `organizationId = sellerId` (never NULL); `currency` matches `^[A-Z]{3}$`; `description` at most **140** characters; `number` at most **64** characters (Payment's `reference`); `sourceType`/`sourceId` (the producer's own) keep Payment's formats so they can be echoed; every amount `<= 2^53 − 1` | CHECK constraints copied from Payment's `payment` table and DTOs (including `char_length` bounds, the organization CHECK that also refuses a NULL `organizationId`, and a `number` length bound) | DTO validation with the same limits | DB: each violating row refused, one constraint per assertion; **contract test:** every valid invoice's mapped body (13.2) passes Payment's `CreatePaymentDto` validation |
+| BI-18 | **A Billing invoice can never yield a payment request Payment would refuse.** Payment's contract is copied onto the columns Billing sends: `payerType`/`sellerType` in (`user`, `organization`, `company`); `payerId`/`sellerId` **1 to 128 characters**; payer differs from seller; if `sellerType = 'organization'` then `sellerId` is a uuid and `organizationId = sellerId` (never NULL); `currency` matches `^[A-Z]{3}$`; `description` at most **140** characters; `number` at most **64** characters (Payment's `reference`); `sourceType`/`sourceId` (the producer's own) keep Payment's formats so they can be echoed; every amount `<= 2^53 − 1`. The request body is built from **stored canonical values** (a `uuid` column prints lower-case, which is what Payment stores and echoes for organization ids), so the echoed snapshot always compares equal | CHECK constraints copied from Payment's `payment` table and DTOs (including `char_length` bounds, the organization CHECK that also refuses a NULL `organizationId`, and a `number` length bound) | DTO validation with the same limits | DB: each violating row refused, one constraint per assertion; **contract test:** every valid invoice's mapped body (13.2) passes Payment's `CreatePaymentDto` validation |
 | BI-19 | `revision` and `updatedAt` advance on every state change; every state change has a history row with actor and cause | trigger (`revision`, `updatedAt`); deferred constraint trigger requiring a `billing_transition` row per status change | the transition function writes it | DB: revision counts changes; a status change without a history row refused at commit |
 
 ## 9. Invoice model [T]
@@ -216,7 +216,7 @@ An invoice is the **authoritative obligation** and its snapshot is **immutable f
 | `dueAt` | absolute timestamp or null, **supplied at creation** | Billing computes no payment terms (**[B, B-008]**); null means "no due date" (never overdue) as a **PROPOSED — NOT APPROVED** fallback |
 | `number` | assigned at issue | provisional counter, **[B, B-004]**, **[B, B-007]** |
 | `status`, `revision` | section 17.1 | |
-| `createdAt`, `issuedAt`, `paidAt`, `voidedAt`, `overdueAt`, `updatedAt` | database clock (`paidAt` = the time Payment reports as `succeededAt`; every decision uses Billing's database time) | `overdueAt` only marks that `invoice.overdue` was emitted |
+| `createdAt`, `issuedAt`, `paidAt`, `voidedAt`, `overdueAt`, `updatedAt` | database clock (`paidAt` = the time Payment reports: the event's `succeededAt`, or Payment's `closedAt` when settled by the reconciler; every decision uses Billing's database time) | `overdueAt` only marks that `invoice.overdue` was emitted |
 | `voidReasonCode` | bounded code (at most 64 characters) | free text stays out of events (personal data, **B-032**) |
 
 **Tax [B, B-006].** No tax rule is invented and no rate is hardcoded. Every invoice carries `taxTreatment`, whose only value in v1 is `not_determined`, and a CHECK requires `taxTotal = 0` while it is. This states honestly that *no tax determination was made*; it does **not** assert that no tax is due. Issuing invoices to real customers is blocked until B-006 and B-007 are decided (section 34.3). The `taxAmount` line field and `taxTotal` exist so the decision can be added without a redesign; who computes them (Billing from configuration, Accounting, or the producer) is the open question.
@@ -346,7 +346,7 @@ Product:  "What does an entitled organization / user actually get to DO?"   → 
 Auth:     "Who is this, are they active, what memberships do they have?"    → identity only
 ```
 
-Billing stores **whether something bought is still valid**. It stores no product role, no permission, no capability list, and never `DriveRole`-like concepts. Authentication **never** depends on entitlement (ADR-0026, ADR-0038): a lapsed license leaves the user a valid identity; the consuming service asks Billing at the point of use and denies the protected capability.
+Billing stores **whether something bought is still valid**. It stores no product role, no permission, no capability list, and never product-role concepts (for example a role or permission named after a product). Authentication **never** depends on entitlement (ADR-0026, ADR-0038): a lapsed license leaves the user a valid identity; the consuming service asks Billing at the point of use and denies the protected capability.
 
 ### 16.2 Structure [D, ADR-0038], rules [B]
 
@@ -377,6 +377,7 @@ Platform services call, with a **service token** (Stage 8):
 | Desired ownership | Auth = identity, security, membership. **Billing = billing-derived entitlement.** Whether Auth keeps a synchronous check at all is **[B, B-035]** (financial-architecture section 10, item 8). |
 | Migration strategy | (1) Stage 8 ships the status route above in Billing, registering `auth-service` as a caller (digest in `SERVICE_TOKENS`). (2) A **separate, additive Auth PR** adds `BILLING_SERVICE_URL` / `BILLING_SERVICE_TOKEN` and a client for the Billing path, selected by configuration; the old client stays until cutover. (3) Cutover is a configuration change; (4) the Payment reference is removed in a later Auth PR. No behaviour of Auth's own API changes at any step. |
 | Compatibility requirement | Billing's answer keeps Auth's parsed shape (`valid: boolean`); fail-closed behaviour is unchanged; unknown organization is `200 valid:false`. A **contract test** (Billing route against Auth's client parsing) is required at Stage 8. |
+| Documentation debt | Auth's SDD and the `requiresSubscription` migration comment still name payment-service as the entitlement owner (ADR-0026 wording); they are updated with the Auth PR, not here. |
 | Dependency | Billing Stage 8, which is itself gated by B-020, B-025 for real activation logic. Until then nothing changes and nothing is moved silently. |
 | Risk to check before any production deploy | The production value of `PAYMENT_SERVICE_URL` in Auth was **not inspected** (no production access). If it points at payment-service, org registration is already reading as "not licensed". |
 
@@ -391,10 +392,10 @@ States: `draft` (created, immutable snapshot, no number, not announced), `open` 
 | From | To | Caused by | Precondition | Event | Reversal | Payment / accounting consequence |
 |---|---|---|---|---|---|---|
 | (none) | `draft` | producer service: create | valid, natural key new or identical | none | n/a | none |
-| `draft` | `open` | producer service: **issue** (state-idempotent) | at least one line; totals consistent; currency supported; number assigned under the counter lock | `invoice.issued` | no (only `open → void`, B-015) | Accounting sees the obligation; no payment yet |
+| `draft` | `open` | producer service: **issue** (state-idempotent) | at least one line; totals consistent; currency supported; number assigned under the counter lock | `invoice.created` | no (only `open → void`, B-015) | Accounting may recognise the obligation (its decision); no payment yet |
 | `draft` | `void` | producer service: **discard** | none | none (a draft was never announced) | no | none; no number consumed |
-| `open` | `paid` | **system**: payment-event consumer or reconciler | a payment request `paid` for `total` (v1); amount and currency equal the snapshot | `invoice.paid` | **never** (refunds are Payment's; credit is B-016) | `payment.succeeded` is the cash fact; `invoice.paid` must **not** create a second journal entry |
-| `open` | `void` | producer service: **void** — **[B, B-015]** | **no active payment request** (else `409 invoice_has_active_payment_request`); not `paid` | `invoice.voided` | no | Accounting reverses the receivable; whether an issued invoice may be voided at all, or must be credited, is **B-015** |
+| `open` | `paid` | **system**: payment-event consumer or reconciler | a payment request `paid` for `total` (v1); amount and currency equal the snapshot | `invoice.paid` | **never** (refunds are Payment's; credit is B-016) | `payment.succeeded` is the cash fact; `invoice.paid` is informational (section 22) |
+| `open` | `void` | producer service: **void** — **[B, B-015]** | **no active payment request** (else `409 invoice_has_active_payment_request`); not `paid` | `invoice.voided` | no | The accounting effect is Accounting's decision; whether an issued invoice may be voided at all, or must be credited, is **B-015** |
 | `open` | `uncollectible` | — | — | — | — | **not implemented** (B-014) |
 
 **Forbidden, among others:** any move out of `paid` or `void`; `draft → paid`; `open → draft`; `paid → open`; success accepted from a client claim; voiding while a payment can still succeed. Repeated `issue` on an `open` invoice is **not** an error: it replays (`200`, `Idempotent-Replayed: true`); on `paid`/`void` it is `409 invalid_state_transition`.
@@ -414,8 +415,8 @@ States: `created` (row committed, not yet sent), `sending` (claimed by the dispa
 | (none) | `created` | payer or producer: create | invoice `open`, no active request, `amountDue > 0` |
 | `created` | `sending` | dispatcher claim (`FOR UPDATE SKIP LOCKED`) | none; increments `sendAttempts`, stamps `sendingSince` |
 | `sending` | `sending` | dispatcher retry after a timeout, 5xx, 429, `401`/`403` (a configuration fault, alerted) or crash | `sendingSince` older than the send timeout; **same request, same id** |
-| `sending` | `requested` | Payment answered `201` or `200 Idempotent-Replayed` | stores `paymentId`; verifies the echoed snapshot |
-| `sending` | `rejected` | Payment answered `400`, `403`, `409 payment_request_conflict` or `422 unsupported_currency` | a definitive refusal that a retry cannot change; raises an alert (it is a Billing or configuration defect) |
+| `sending` | `requested` | Payment answered `201` or `200 Idempotent-Replayed` (the reconciler may also record it from `GET`) | stores `paymentId`; verifies the echoed snapshot. **The only ways a `paymentId` is ever stored** |
+| `sending` | `rejected` | Payment answered `400`, `409 payment_request_conflict` or `422 unsupported_currency` | a definitive refusal that a retry cannot change; raises an alert (it is a Billing or configuration defect) |
 | `requested` | `paid` | `payment.succeeded` consumed (or reconciler) | all checks of 21.4 pass; invoice `open`; amount = request amount |
 | `requested` | `failed` / `expired` / `cancelled` | `payment.failed` / `payment.expired` / `payment.cancelled` consumed (or reconciler) | invoice unchanged; a **new** request may follow |
 | `created` | `cancelled` | producer: cancel a request **never sent** | `sendAttempts = 0` and not `sending` (else use the flag below) |
@@ -480,17 +481,17 @@ Public prefix `/billing` [D, ADR-0034]; no version segment in v1; errors and lis
 
 **9. List invoices.** `?limit=&cursor=&status=&sourceType=&sourceId=&payerType=&payerId=&dueBefore=`, `sort` fixed to `createdAt` descending, returning `{ items, nextCursor }` (ADR-0034). **The scope is derived from the caller, never from a filter:** a service token lists only invoices it produced; a user bearer lists only invoices whose payer is that user. A client-supplied `organizationId` or `payerId` that does not match the caller yields an **empty list**, never data. `limit` is capped at 100. Organization-member listing is **[B, B-027]**.
 
-**10. Issue.** No body. Locks the invoice, then the seller's number counter; assigns the number; `draft → open`; enqueues `invoice.issued`. `200` with the invoice. `200 Idempotent-Replayed` if already `open`. `409 invalid_state_transition` if `paid`/`void`.
+**10. Issue.** No body. Locks the invoice, then the seller's number counter; assigns the number; `draft → open`; enqueues `invoice.created`. `200` with the invoice. `200 Idempotent-Replayed` if already `open`. `409 invalid_state_transition` if `paid`/`void`.
 
 **11. Discard.** No body. `draft → void`, no number consumed, no event.
 
 **12. Void.** Body `{ voidReasonCode }`. **Blocked (B-015).** Specified for completeness: refused while a payment request is active (`409 invoice_has_active_payment_request`).
 
-**13. Create payment request.** No body in v1 (amount is the invoice's; `expiresAt` is null, B-009). `201` with the request; `200` with the **current active** request if one exists (state idempotency). The response carries `paymentId` once Payment has acknowledged, so the payer can start an attempt at Payment with their own bearer. `202` is never used: the request is durable before the call, and a `requested` state may follow asynchronously (`status: created \| sending`). Errors: `404`, `403`, `409 invoice_not_payable` (not `open`), `409 payment_request_not_supported` (payer is not a `user`, B-026). A Payment outage is **never** an error here: the row is durable and the dispatcher retries.
+**13. Create payment request.** No body in v1 (amount is the invoice's; `expiresAt` is null, B-009). `201` with the request; `200` with the **current active** request if one exists (state idempotency). The response carries `paymentId` once Payment has acknowledged, so the payer can start an attempt at Payment with their own bearer. `202` is never used: the request is durable before the call, and a `requested` state may follow asynchronously (`status: created \| sending`). Errors: `404`, `403`, `409 invoice_not_payable` (not `open`), `409 payment_request_not_supported` (payer is not a `user`, B-026). A Payment outage is **never** an error here: the row is durable and the dispatcher retries. A client that retries after its first request already *finished* (failed, expired, cancelled) creates a **new** request; that is at worst an extra collection attempt on an invoice that is still `open`, never a double payment, because an invoice can be `paid` only once (BI-09, BI-13).
 
 **14. Get payment request.** `200` with `{ id, invoiceId, status, amount, currency, paymentId }`; `404` when the caller has no relation to the invoice.
 
-**15. Cancel payment request.** `202` if a cancel was requested of Payment; `409 payment_request_in_flight` when Payment refuses because an attempt is open.
+**15. Cancel payment request.** `200` when a request that was **never sent** is cancelled locally; `202` when a cancel was requested of Payment (the terminal state then arrives as `payment.cancelled`); `409 payment_request_in_flight` when Payment refuses because an attempt is open or cash is awaiting review (21.2). Needs Payment's cancel route for any request that reached Payment (R-7).
 
 **16. Create credit note.** **Blocked (B-016).** No behaviour is defined.
 
@@ -610,28 +611,31 @@ Queue `billing.payment-events`, bindings `payment.succeeded`, `payment.failed`, 
 ### 21.4 Consumption procedure (one transaction, kit `InboxService.handle`)
 
 ```
-insert inbox(eventId)  ── duplicate ──► stop (200-equivalent: nothing happens twice)
+insert inbox(eventId)  ── duplicate ──► stop (nothing happens twice)
 find payment_request by paymentRequestId
-   ─ none, sourceType <> 'invoice'          ──► receipt: ignored        (someone else's payment)
-   ─ none, sourceType = 'invoice'           ──► receipt: unmatched + alert (cannot happen: the row is committed before Payment is called)
+   ─ none  ──► receipt: ignored            (someone else's payment: Payment events carry no `producer` (R-6), and another
+                                            producer may legitimately use the same sourceType, so an unknown id is never an alert)
 lock the INVOICE first, then the payment_request        (section 26 lock order)
-verify: header source = payment-service; sourceType = 'invoice'; sourceId = invoice.id; payer, seller, organizationId,
-        currency and amount = the stored snapshot; and, when payment_request.paymentId is set, paymentId = it
+   ─ payment_request.paymentId is NULL (dispatch not yet recorded) ──► receipt: deferred, NO state change.
+        A paymentId is NEVER bound from an event: only Billing's own authenticated call to Payment (21.2) or the reconciler
+        (which reads it with Billing's service token) may set it. The reconciler settles the request afterwards (21.5).
+verify: header source = payment-service; paymentId = payment_request.paymentId; sourceType = 'invoice'; sourceId = invoice.id;
+        payer, seller, organizationId, currency and amount = the stored snapshot
    ─ any mismatch ──► receipt: conflict + alert, NO state change
 apply by event:
-   succeeded: request must be requested|sending, invoice open  → request paid, invoice paid (BI-14), invoice.paid event
+   succeeded: request must be requested (or sending with paymentId set), invoice open → request paid, invoice paid (BI-14), invoice.paid event
               invoice void / request already terminal in another way → receipt: conflict + alert, no change (money moved: reconciliation, out of scope [X])
    failed | expired | cancelled: request → that terminal state; invoice unchanged
    an event for a request already in that terminal state → receipt: ignored (idempotent)
-write receipt(outcome) + billing_transition rows + outbox events, commit.
+write receipt(outcome, paymentRevision) + billing_transition rows + outbox events, commit.
 ```
 
-A `paymentId` learned from the first event is bound to the request when it was not yet stored (a crash between the `201` and its commit), guarded by **full snapshot equality** (R-6).
+`revision` is **recorded** in the receipt but not used to order events: Payment emits **at most one terminal event per payment** (`payment.succeeded`, `.failed`, `.cancelled` or `.expired`; its state machine makes them mutually exclusive, and a late success after a terminal state is a Payment-side conflict that emits no `payment.succeeded`), so `succeeded → failed → succeeded` and `failed → succeeded` cannot be produced by Payment. If one ever arrived it would be handled by the state checks above (a recorded `conflict`), never by inventing a payment state. The `deferred` outcome is safe because the inbox row is committed with it and the **reconciler, not a redelivery,** completes the request.
 
 ### 21.5 Recovery: dispatcher, reconciler and DLQ
 
 * **Dispatcher** (background, in-process, database-clock driven): claims `created` and stale `sending` requests in batches (`ORDER BY createdAt LIMIT n FOR UPDATE SKIP LOCKED`), calls Payment **outside any transaction**, then records the result in a short transaction. **Per-item failure isolation**: one request that cannot be sent never blocks the ones behind it (the resolver-blocking defect in `docs/tdd/payment-phase1-acceptance-fixes.md`, problem 3).
-* **Reconciler:** a `requested` request older than a threshold with no terminal event is settled by `GET /payment/payments/{id}` (Payment allows the producer to read its own payments) and applies the **same** consumption procedure with `cause = reconciliation`. This is **mandatory**, not optional: the kit sends a failed consumer to the dead-letter queue **without retry** (R-9), so a transient database error while consuming would otherwise strand the invoice.
+* **Reconciler:** a `sending` request with a `deferred` receipt, and a `requested` request older than a threshold with no terminal event, are settled by `GET /payment/payments/{id}` (Payment lets a producer read only its **own** payments, so a foreign payment can never be read this way; `paidAt` is then Payment's `closedAt`, since the representation has no `succeededAt`) and applies the **same** consumption procedure with `cause = reconciliation`. This is **mandatory**, not optional: the kit sends a failed consumer to the dead-letter queue **without retry** (R-9), so a transient database error while consuming would otherwise strand the invoice.
 * **DLQ handling:** a dead-lettered Payment event is an operational alert; replaying it is safe (the inbox dedupes).
 * Payment's event ordering is not guaranteed; the procedure validates **state**, not order. Payment emits **one terminal event per payment**, so the only ordering that matters is between Payment's terminal event and Billing's own transitions (cancel, void), covered by the lock and the state checks.
 
@@ -641,7 +645,7 @@ Billing emits business events; **Accounting decides the entries** (its SDD does 
 
 | Event | Semantic (what Accounting may rely on) |
 |---|---|
-| `invoice.issued` | an obligation now exists (receivable), with lines, totals and tax snapshot |
+| `invoice.created` | an obligation now exists (receivable), with lines, totals and tax snapshot |
 | `payment.succeeded` (Payment's event) | **money was received**. This, not `invoice.paid`, is the cash fact |
 | `invoice.paid` | the invoice is settled. **Informational for Accounting: it must not create a second journal entry for the same money** |
 | `invoice.voided` | an issued obligation was annulled (only if B-015 allows it) |
@@ -657,7 +661,7 @@ Events go through the transactional outbox and are published at least once to `n
 
 | Event | Emitted on | Extra payload | Consumers |
 |---|---|---|---|
-| `invoice.issued` | `draft → open` | `lines[ { lineId, lineNumber, productCode, priceId, quantity, unitAmount, lineTotal, taxAmount, entitlementKind } ]` (at most 100; **no description text**) | accounting, notification, audit, analytics |
+| `invoice.created` (emitted at `draft → open`, R-3) | `draft → open` | `lines[ { lineId, lineNumber, productCode, priceId, quantity, unitAmount, lineTotal, taxAmount, entitlementKind } ]` (at most 100; **no description text**; about 300 bytes per line, so at most about 30 KB, inside the kit's 64 KB payload cap) | accounting, notification, audit, analytics |
 | `invoice.paid` | `open → paid` | `paymentId`, `paymentRequestId`, `paidAt` | notification, audit, analytics, accounting (informational) |
 | `invoice.voided` | `open → void` (**B-015**) | `voidReasonCode` | accounting, notification, audit |
 | `invoice.overdue` | sweep, once | `overdueAt` | notification, audit (**B-013** for what happens next) |
@@ -695,12 +699,21 @@ An "identical replay" of creation means **every field** of the request matches t
 
 ## 26. Concurrency
 
-**Lock order is fixed** (a deadlock is a design defect): **`recurring_definition` → `invoice` → `payment_request` → `invoice_number_sequence` → entitlement rows (`organization_license`, `user_subscription`) → `credit_note`**. Nothing locks an earlier entry after a later one. Invoice lines are immutable and need no lock. Conditional updates (`WHERE status = …`) apply every change; **the database, not application code alone,** is the referee (partial unique indexes, CHECKs, triggers).
+**Lock order is fixed** (a deadlock is a design defect): **`recurring_definition` → `invoice` → `payment_request` → `credit_note` → sequence rows (`invoice_number_sequence` and any credit-note counter) → `organization_license` → `user_subscription`**. Nothing locks an earlier entry after a later one. Invoice lines are immutable and need no lock. Conditional updates (`WHERE status = …`) apply every change; **the database, not application code alone,** is the referee (partial unique indexes, CHECKs, triggers).
+
+Why this order (each edge is a real path, none is inherited from Payment):
+
+* `recurring_definition → invoice`: the runner locks the definition, then **inserts** new invoices (new rows have no contenders). Nothing locks a definition after an invoice.
+* `invoice → payment_request`: every path that touches both (create request, cancel, the consumer, the reconciler) locks the invoice first. The consumer reads the request **unlocked** only to learn its invoice id (immutable), then locks in order.
+* `payment_request → credit_note`, then `→ license → subscription`: a payment success locks invoice, request, then any entitlement rows it extends; a credit note (B-016), if it ever affects entitlement, locks invoice, credit note, then the same entitlement rows. A license lapse locks the license before its subscriptions (ADR-0006).
+* `invoice → sequence`: only `issue` takes a counter, after the invoice.
+* **Rule for cross-table triggers:** a trigger that locks the invoice (BI-08, BI-09, BI-14, BI-17) may fire only on `INSERT` and on the transition to `paid`, and those writers already hold the invoice lock. The **dispatcher's** transitions (`created → sending → requested | rejected`, retries) **never fire such a trigger and never lock the invoice**, so a dispatcher holding a request row can never wait on an invoice held by the consumer. The dispatcher's claim (`FOR UPDATE SKIP LOCKED`) is its own short transaction and locks only the request row.
+* There is no path from any later entry back to an earlier one, so no cycle exists. A **deterministic `NOWAIT` test** (as in Payment's `review-adversarial.e2e-spec.ts`, the lock-order case) must prove the `invoice → payment_request` edge, and a mixed-race storm must show no `40P01`.
 
 | Scenario | Mechanism | Deterministic result |
 |---|---|---|
 | Two invoice creations, same `(producer, invoiceRequestId)` | unique index; loser catches `23505` in a savepoint and returns the winner | one row |
-| Two `issue` requests | invoice row lock; second sees `open` | one number, one `invoice.issued`; the second is a replay |
+| Two `issue` requests | invoice row lock; second sees `open` | one number, one `invoice.created`; the second is a replay |
 | Many issues for one seller | the seller's counter row locked in the issue transaction (after the invoice) | distinct, consecutive numbers (BI-10) |
 | Payment event vs void | invoice locked first; void requires no active request, so a `requested` request blocks the void | either the void is refused, or (a `cancelled` request) the event is a no-op |
 | Payment event vs manual cancel of the request | same lock; the terminal state that arrives first wins; the other is a recorded no-op or conflict | one terminal state |
@@ -720,7 +733,7 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 | Database unavailable | `/ready` fails; requests fail; nothing is half-applied (single transactions) |
 | Payment unavailable or slow | the payment request is **already committed**; the dispatcher retries the identical request with backoff; the API answers immediately; nothing waits on Payment inside a transaction |
 | Timeout during the call to Payment | the request stays `sending`; the next attempt is a byte-identical replay (safe) |
-| Crash after Payment accepted, before Billing stored `paymentId` | `sending` is retried; Payment answers `200 Idempotent-Replayed`; or an event arrives first and binds `paymentId` (21.4) |
+| Crash after Payment accepted, before Billing stored `paymentId` | `sending` is retried; Payment answers `200 Idempotent-Replayed` and Billing records `paymentId`; an event that arrives first is `deferred` (21.4) and the reconciler completes it |
 | Duplicate payment event | inbox; no second effect |
 | Delayed or out-of-order event | state and snapshot are validated, not order; a terminal event for a request already terminal is ignored |
 | Payment event lost or dead-lettered | the reconciler settles the request from `GET /payment/payments/{id}` |
@@ -728,7 +741,7 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 | Billing crash mid-consumption | one transaction: the inbox row and the effect commit together or not at all |
 | Recurring job crash (**[X]**) | natural key per period makes the re-run safe |
 | Invoice creation / issue retry | natural key / state idempotency |
-| Stuck records | alerts (section 30): `sending` older than a threshold, `requested` older than a threshold, dead-lettered events, `conflict` and `unmatched` receipts, unpublished outbox age |
+| Stuck records | alerts (section 30): `sending` older than a threshold, `requested` older than a threshold, dead-lettered events, `conflict` receipts and `deferred` receipts not settled, unpublished outbox age |
 | Auth unavailable | user operations fail closed with `503`; service-token operations and event consumption continue |
 | Payment amount or snapshot differs from the request | not applied; recorded `conflict`, alert |
 
@@ -754,7 +767,7 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 | Forged invoice / payment-request id | relation check; a request id is never accepted from a client |
 | Mass assignment | whitelist DTOs (`forbidNonWhitelisted`), no generic update route |
 | Replay / duplicate requests | natural keys and state idempotency (section 25); the same key with different content is a conflict |
-| Event replay / forged event | inbox by `eventId`; source header and full snapshot check (R-6); a mismatch is a recorded conflict, never applied |
+| Event replay / forged event | inbox by `eventId`; source header, `paymentId` and full snapshot check (R-6); **a `paymentId` is never bound from an event**; a mismatch is a recorded conflict, never applied |
 | Service token theft | digest-only storage, constant-time compare, two tokens per caller for rotation, one token per pair, never logged |
 | Sensitive logging | no service token, bearer, payment payload, description, or raw event body is ever logged; ids and codes only (kit redaction) |
 | Secret handling | `NAME_FILE`/environment, never a table or event |
@@ -766,7 +779,7 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 
 ## 30. Observability
 
-The kit provides structured logs with request and correlation ids and redaction, `/health` and `/ready`; it provides **no metrics facility** (Payment lists the same gap in its README, "Known limitations"). Required signals (implementation is Stage 9, and the metrics mechanism itself is a prerequisite decision): counters of invoices by status; payment requests by status; **payment events by receipt outcome** (`applied`, `ignored`, `conflict`, `unmatched`); dispatcher sends, retries and `rejected`; reconciler settlements; outbox lag and unpublished age; DLQ depth; overdue sweep lag; rate-limit rejections. **Alerts:** any `conflict`, `unmatched` or `rejected`; a request `sending` or `requested` longer than a threshold; a dead-lettered event; outbox age. Until a metrics mechanism exists these are structured log lines with stable names, not silent.
+The kit provides structured logs with request and correlation ids and redaction, `/health` and `/ready`; it provides **no metrics facility** (Payment lists the same gap in its README, "Known limitations"). Required signals (implementation is Stage 9, and the metrics mechanism itself is a prerequisite decision): counters of invoices by status; payment requests by status; **payment events by receipt outcome** (`applied`, `ignored`, `conflict`, `deferred`); dispatcher sends, retries and `rejected`; reconciler settlements; outbox lag and unpublished age; DLQ depth; overdue sweep lag; rate-limit rejections. **Alerts:** any `conflict` or `rejected`, and a `deferred` receipt not settled within a threshold; a request `sending` or `requested` longer than a threshold; a dead-lettered event; outbox age. Until a metrics mechanism exists these are structured log lines with stable names, not silent.
 
 ## 31. Testing strategy
 
@@ -792,12 +805,12 @@ Nothing below is decided or invented. Every entry is `[B]` (B-033 and B-034 stay
 
 | ID | Question | Why it matters | Affected (entities · APIs · events · services) | Implementation blocked? |
 |---|---|---|---|---|
-| B-001 | Who is the **legal issuer** of Nawara's invoices; is Nawara represented by a `company` row (the platform-owning company) or another party type? | issuer identity, legal/tax fields, numbering scope, Accounting | `invoice.seller` · 7, 10 · `invoice.issued` · billing, accounting, auth (Company) | Issuing **to real customers** and any Nawara-as-seller flow. Test producer fixtures proceed |
+| B-001 | Who is the **legal issuer** of Nawara's invoices; is Nawara represented by a `company` row (the platform-owning company) or another party type? | issuer identity, legal/tax fields, numbering scope, Accounting | `invoice.seller` · 7, 10 · `invoice.created` · billing, accounting, auth (Company) | Issuing **to real customers** and any Nawara-as-seller flow. Test producer fixtures proceed |
 | B-002 | May **organizations issue invoices through Nawara**, and whose legal and tax identity appears? (fin-arch 10.3) | validity of seller = organization in production | seller, `organizationId` · 7, 10 · events · accounting | issuing **to real customers** with an organization seller; the seller relation for organization members (19.3) |
 | B-003 | **Organization vs user billing:** which parties may be payers of what; how a `company` acts | who owes, who may pay | `payer` · 7, 13 · events | organization/company payer flows (also Payment O-18); user payer proceeds |
 | B-004 | **Invoice numbering:** scope (seller, legal entity, platform), format, series, reset, gapless requirement | legal validity, uniqueness | `invoice.number`, `invoice_number_sequence` · 10 | the **format**; the counter mechanism and the provisional uniqueness proceed but are not for real customers |
 | B-005 | **Supported currencies** beyond the first; the seed of the currency table (Payment O-10) | validation, exponent, Payment support | `currency`, `price`, `invoice` · 4, 7 | adding a currency; config default is **not** chosen here |
-| B-006 | **Tax:** who is responsible; who computes (Billing from configuration, Accounting, the producer); inclusive vs exclusive; rounding; exemptions | totals, `taxAmount`, legal validity | `invoice_line.taxAmount`, `taxTotal`, `taxTreatment` · 7 · `invoice.issued` · accounting | any nonzero tax; issuing to real customers |
+| B-006 | **Tax:** who is responsible; who computes (Billing from configuration, Accounting, the producer); inclusive vs exclusive; rounding; exemptions | totals, `taxAmount`, legal validity | `invoice_line.taxAmount`, `taxTotal`, `taxTreatment` · 7 · `invoice.created` · accounting | any nonzero tax; issuing to real customers |
 | B-007 | **Legal invoice requirements:** mandatory content, language, retention | legality of issuing | `invoice` fields, presentation · events | issuing to real customers |
 | B-008 | **Payment terms and due dates:** default terms, whether Billing computes `dueAt`, whether null is allowed | overdue, dunning | `invoice.dueAt` · 7 · `invoice.overdue` | terms computation; explicit `dueAt` proceeds |
 | B-009 | **Payment-request lifetime**, and whether a request is created automatically at issue (Payment O-16) | stuck open payments, UX | `payment_request.expiresAt` · 13 | any default lifetime; auto-creation is **[X]** |
@@ -828,6 +841,36 @@ Nothing below is decided or invented. Every entry is `[B]` (B-033 and B-034 stay
 | B-034 | **Fractional and usage-based quantities and pricing** | integer quantities, `flat` only | price, line | **[X]** |
 | B-035 | **Does Auth keep a synchronous entitlement check** at registration/join (fin-arch 10.8; Payment O-12) | Auth ⇄ Billing coupling | 17 · Auth client | the Auth PR (16.4); Billing's route proceeds |
 
+### 32.1 Which stage each decision blocks
+
+A stage is blocked **only in the named part**; everything else in it proceeds.
+
+| Decision | Blocks (stage: part) |
+|---|---|
+| B-001, B-002, B-007 | 3: issuing to real customers (`issue` with a real seller); 8: nothing |
+| B-003 | 4 and 6: payment requests and reads for organization or company payers |
+| B-004 | 3: the number **format** and real-customer issuing (counter and uniqueness proceed) |
+| B-005 | 2 and 3: adding any currency (the currency table seed is config) |
+| B-006 | 3: any nonzero tax and real-customer issuing |
+| B-008 | 3: computing `dueAt` from terms (explicit `dueAt` proceeds); 5: overdue actions |
+| B-009 | 4: any request `expiresAt` default and automatic request creation |
+| B-010, B-011 | 4: partial amounts, credit balance, `partially_paid` |
+| B-012 | 4: retry limits and automatic re-requests |
+| B-013 | 5: everything beyond emitting `invoice.overdue`; `invoice.due` |
+| B-014 | 3: the `uncollectible` state |
+| B-015 | 7: void (endpoint 12); draft discard proceeds |
+| B-016, B-017 | 7: credit notes; consuming `refund.*` |
+| B-018 to B-024 | 7: recurring billing, trials, grace, reservation, cancellation, proration, pause (not planned) |
+| B-020, B-021, B-025 | 8: entitlement activation, extension, grace, reservation (structure and read API proceed) |
+| B-026 | 4 and 6: organization-payer collection |
+| B-027 | 6: organization-facing reads and lists |
+| B-028 | 3, 6: user-bearer writes except endpoint 13 |
+| B-029, B-031 | 3 and 4 in production: any non-test producer, catalog writes |
+| B-030 | 3: ad hoc lines |
+| B-032 | 9: retention, pruning, free-text fields |
+| B-033, B-034 | 3: any adjustment, discount, fractional or usage pricing (`[X]`) |
+| B-035 | 8: the Auth client PR |
+
 ## 33. Deferred [X]
 
 Recurring billing runner, subscriptions and dunning (until B-018, B-013); trials; proration; usage-based, tiered and volume pricing; discounts, coupons, promotions and adjustments; fractional quantities; ad hoc (producer-priced) lines; automatic payment-request creation at issue; invoice rendering, PDF, numbering templates, localization and delivery; a tax engine; bundles; multi-currency conversion; write-off (`uncollectible`); administrative or support tooling; product and price edits and their events; consumer retry policy beyond the dead-letter queue; caching of Auth answers; outbox, inbox and history pruning; periodic reconciliation beyond the stuck-request poll; reporting; any Accounting, Organization Service, settlement, payout, wallet, custody, fee, merchant-of-record, cash or gateway behaviour; any product-specific logic.
@@ -840,10 +883,10 @@ Only justified stages are listed. Each stage ends with its tests green **includi
 
 | Stage | Content | Depends on |
 |---|---|---|
-| **0 Prerequisites (outside Billing)** | (a) decide whether to extract the combined service-token-or-user guard and the deterministic event id into the kit, or copy them (R-9); (b) a cursor-pagination helper (kit or service-local); (c) a `billing` CI matrix entry (`.github/workflows/core-ci.yml`); (d) **Payment**: record the wish for `producer` in event payloads (R-6) and the cancel route (R-7); nothing in Payment is changed by this SDD | the owner |
-| **1 Foundation** | convert to a kit-based service **with no domain**: `loadBaseConfig`, `HealthModule`, `DbModule` on the `billing` database with the runtime role, `ServiceAuthModule`, `AuthClientModule`, `EventsModule` (in-memory bus for tests, RabbitMQ by configuration), `RateLimitModule`, OpenAPI with the basic-auth guard, Dockerfile, `.env.example`, README, migrations wired to the kit's, tests for configuration, health vs readiness, the service-token guard, the runtime role. **No table, endpoint or domain type from this SDD is created.** | Stage 0 |
+| **0 Prerequisites and dependencies** | **Not blockers for Stage 1.** (a) the combined service-token-or-user guard and the deterministic event id: **implemented locally in Billing** by default [T]; extracting them into the kit is an optional separate change (R-9); (b) cursor pagination (`{ items, nextCursor }`, ADR-0034): **service-local** by default [T], because the kit has none; (c) the `billing` CI matrix entry is a **Stage 1 deliverable**, not a prerequisite; (d) **Payment follow-ups** (separate Payment work, not done here): a `producer` field in payment events (R-6, hardens Stage 4 but is not required for it, because of the `deferred` rule in 21.4) and Payment's **cancel route** (required before payment requests are enabled outside the test fixture, 34.3) | none |
+| **1 Foundation** | convert to a kit-based service **with no domain** (this stage also adds the CI entry, the local guard, the local event-id helper and the local pagination helper): `loadBaseConfig`, `HealthModule`, `DbModule` on the `billing` database with the runtime role, `ServiceAuthModule`, `AuthClientModule`, `EventsModule` (in-memory bus for tests, RabbitMQ by configuration), `RateLimitModule`, OpenAPI with the basic-auth guard, Dockerfile, `.env.example`, README, migrations wired to the kit's, tests for configuration, health vs readiness, the service-token guard, the runtime role. **No table, endpoint or domain type from this SDD is created.** | none |
 | **2 Schema and invariants** | migrations `0001` to `0008` with every trigger and CHECK of section 8; the SQL invariant suite (one constraint per assertion); the TypeScript-vs-trigger agreement test; concurrency races in SQL (issue numbers, one active request) | Stage 1 |
-| **3 Catalog and invoices** | products, prices, create/get/list/issue/discard invoices, natural-key idempotency, totals computed server-side, events (`invoice.issued`) through the outbox, with the **test producer fixture**; authorization for producer only | Stage 2 |
+| **3 Catalog and invoices** | products, prices, create/get/list/issue/discard invoices, natural-key idempotency, totals computed server-side, events (`invoice.created`) through the outbox, with the **test producer fixture**; authorization for producer only | Stage 2 |
 | **4 Payment integration** | `payment_request`, the dispatcher, the Payment client (a port with a test double and an integration run against Payment `main` with its test provider), the event consumer with inbox and receipts, the reconciler, `invoice.paid` | Stage 3; Payment on `main`; production needs Payment O-13, O-14, O-15 |
 | **5 Events and sweep** | completes the event catalog: `invoice.overdue` sweep, DLQ handling and alerts, correlation ids for system events; outbox-atomicity failure-injection tests | Stage 4 |
 | **6 Authorization and isolation** | user-bearer read and list (payer only), the collapsed `404`, the isolation and IDOR test set, payment-request creation by the payer; **organization relations remain blocked** | Stage 4; B-026, B-027, B-028 for the rest |
@@ -861,7 +904,7 @@ Today: the kit provides configuration, request and correlation ids, the error fi
 
 Per feature, not for the document as a whole: a feature enters implementation only when, for **that** feature:
 
-1. every `[D]` and `[T]` prerequisite it needs is satisfied (including Stage 0);
+1. every `[D]` and `[T]` prerequisite it needs is satisfied (Stage 0 items are local by default and do not block);
 2. no unresolved `[B]` decision is required by the code being written; if one is, only the independent portion proceeds and the rest stays blocked or isolated;
 3. no `[X]` functionality is implemented as a side effect;
 4. every invariant of section 8 that applies has its database mechanism **and** its test row of section 31;
@@ -870,31 +913,31 @@ Per feature, not for the document as a whole: a feature enters implementation on
 7. its Payment integration (success, timeout, conflict, duplicate, out-of-order) is covered where it touches Payment;
 8. its outbox behaviour is covered by a **failure-injection** test where it emits an event.
 
-**Blocked under this gate until the named decision is recorded as `[D]`:** issuing invoices to real customers (B-001, B-002, B-004, B-006, B-007); any organization-payer collection (B-003, B-026); production use by any non-test producer (B-029); user-bearer writes **other than a payer creating their own payment request** (B-028); void (B-015); credit notes (B-016); recurring billing (B-018); entitlement activation, grace and reservation (B-020, B-021, B-025); payment lifetime, retries and dunning (B-009, B-012, B-013). **Independent and not blocked:** Stage 1; the schema and state machines with the provisional numbering counter; catalog and invoice creation, issue and discard with the test producer; the Payment integration for **user payers** through Payment's test provider; the read-only entitlement status shape.
+**Blocked under this gate until the named decision is recorded as `[D]` or the named dependency exists:** **payment requests outside the test fixture until Payment ships its cancel route** (a request Payment cannot complete or cancel would be unclosable, R-7; 13.1); issuing invoices to real customers (B-001, B-002, B-004, B-006, B-007); any organization-payer collection (B-003, B-026); production use by any non-test producer (B-029); user-bearer writes **other than a payer creating their own payment request** (B-028); void (B-015); credit notes (B-016); recurring billing (B-018); entitlement activation, grace and reservation (B-020, B-021, B-025); payment lifetime, retries and dunning (B-009, B-012, B-013). **Independent and not blocked:** Stage 1; the schema and state machines with the provisional numbering counter; catalog and invoice creation, issue and discard with the test producer; the Payment integration for **user payers** through Payment's test provider; the read-only entitlement status shape.
 
 ### 34.4 Acceptance criteria
 
-Billing implementation may begin (Stage 1) when all of the following are true. This document is what makes the first eight true; the last four are conditions on the owner and the repository:
+**Stage 1 (foundation, no domain) may begin when criteria 1 to 9 hold**, which this document makes true. Criteria 10 to 12 gate *later* stages and are recorded so they are not forgotten:
 
-| # | Criterion | State after this SDD |
+| # | Criterion | State |
 |---|---|---|
 | 1 | All `[D]`/`[T]` requirements are technically specified | met (sections 6 to 31) |
-| 2 | No `[B]` decision has been silently resolved | met: 35 open decisions, each with a marker; fallbacks are labelled PROPOSED — NOT APPROVED |
+| 2 | No `[B]` decision has been silently resolved | met: 35 open decisions, each with a marker; database restrictions tied to a `[B]` decision are labelled **TEMPORARY RESTRICTION** (0.1); fallbacks are labelled PROPOSED — NOT APPROVED |
 | 3 | No `[X]` feature is included | met (section 33) |
 | 4 | Every financial invariant has an enforcement strategy | met (section 8: DB, app, test) |
 | 5 | Every state transition is defined | met (section 17) |
-| 6 | The Payment integration contract is explicit | met (sections 13, 21) |
+| 6 | The Payment integration contract is explicit and matches Payment on `main` | met (sections 13, 21; reviewed against the code) |
 | 7 | The Accounting boundary is explicit | met (section 22) |
-| 8 | The authorization boundary, idempotency, concurrency, failure and recovery, and tests are explicit | met (sections 19, 25, 26, 27, 31) |
-| 9 | Cross-service database access is prohibited | met (sections 4, 28; also `check:repo` for source imports) |
-| 10 | The reconciliations R-1 to R-10 are accepted or corrected by the owner | **open** |
-| 11 | The Stage 0 prerequisites are decided | **open** |
-| 12 | The `billing` service is added to CI | **open** (Stage 0c) |
+| 8 | Authorization, idempotency, concurrency, failure and recovery, and tests are explicit | met (sections 19, 25, 26, 27, 31) |
+| 9 | Cross-service database access is prohibited | met (sections 4, 28; `check:repo` also blocks source imports) |
+| 10 | Payment's cancel route exists before payment requests are enabled outside the test fixture | open (Payment work); gates Stage 4 in production |
+| 11 | ADR-0006/0008 vs `financial-architecture.md` 10.7 is ruled on (R-8) | open (owner); gates Stage 8 only |
+| 12 | The `[B]` decisions of a feature are recorded as `[D]` (section 32.1) | open per feature; gates that feature only |
 
 ## 35. Open questions for the owner (not `[B]` business decisions)
 
-1. Accept the R-1 state names (`draft`, `open`, `paid`, `void`) and the R-3 event rename (`invoice.issued`), and edit `core-architecture.md` to match.
-2. Say whether ADR-0006/0008 (Accepted) or `financial-architecture.md` section 10.7 (open) governs grace and reservation (R-8).
-3. Decide Stage 0: extract the combined guard and the deterministic id into the kit, or copy them.
-4. Ask for the additive Payment changes recommended by R-6 and R-7 (`producer` in events, the cancel route) as separate Payment work.
+1. **Optional:** rename `invoice.created` (emitted at `draft → open`) to something clearer such as `invoice.issued`. This SDD keeps the documented name (R-3); a rename changes `core-architecture.md` and every consumer.
+2. Say whether ADR-0006/0008 (Accepted) or `financial-architecture.md` section 10.7 (open) governs grace and reservation (R-8). Gates Stage 8 only.
+3. Optional: extract the combined guard and the deterministic id into the kit (R-9). Billing copies them locally otherwise.
+4. Ask for the additive Payment changes as separate Payment work: the cancel route (needed before production payment requests) and a `producer` field in events (R-6, R-7).
 5. Confirm the production value of Auth's `PAYMENT_SERVICE_URL` (R-5, 16.4).
