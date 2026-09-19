@@ -15,6 +15,11 @@ export interface BillingConfig extends BaseConfig {
   authTimeoutMs: number;
   /** Set means RabbitMQ; unset means the in-memory bus, which is refused in production (below). */
   rabbitmqUrl?: string;
+  /**
+   * ISO 4217 codes this deployment accepts on an invoice or price (BI-11). NO code default: which currencies are supported is B-005, so
+   * an operator must say. A code must also exist in the immutable `currency` table (BI-21), which is seeded by migration.
+   */
+  supportedCurrencies: string[];
   /** OpenAPI is mounted at /billing/docs behind basic auth, and only when a password is configured. */
   docs: { username: string; password?: string };
 }
@@ -39,9 +44,19 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     throw new ConfigError('RABBITMQ_URL is required in production (the in-memory event bus is for development and tests only)');
   }
 
+  const supportedCurrencies = reader
+    .required('BILLING_SUPPORTED_CURRENCIES')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  if (supportedCurrencies.length === 0 || supportedCurrencies.some((c) => !/^[A-Z]{3}$/.test(c))) {
+    throw new ConfigError('BILLING_SUPPORTED_CURRENCIES must list ISO 4217 codes such as TND, comma-separated');
+  }
+
   return {
     ...base,
     databaseUrl,
+    supportedCurrencies: [...new Set(supportedCurrencies)],
     serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),

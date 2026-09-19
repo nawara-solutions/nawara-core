@@ -5,33 +5,39 @@ Answers: **what is owed, why, how much, in which currency, by whom, to whom, and
 [`docs/architecture/financial-architecture.md`](../../docs/architecture/financial-architecture.md). It is **not** the payment or
 accounting system: it never moves money and keeps no ledger.
 
-## Status: Stage 1 (service foundation only)
+## Status: Stage 2 (domain schema, financial invariants, state-transition foundation)
 
-This is the **technical foundation with no domain** (SDD section 34.1, Stage 1). Nothing here is a Billing feature yet.
-**Not production-ready** and not deployed.
+The **database and the pure domain rules** of the Billing aggregate (SDD section 34.1, Stage 2), on top of the Stage 1 foundation.
+There is **still no Billing HTTP endpoint**: the invoice API is Stage 3. **Not production-ready** and not deployed.
+Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs/tdd/billing-service-domain-schema.md).
 
 ### Implemented
 
-- A kit-based NestJS service: validated configuration (fails closed and never echoes a value), structured JSON logging with
-  redaction, request and correlation ids, the uniform error body with an optional machine-readable `code`, secure headers,
-  bounded and whitelisted request bodies, CORS off unless exact origins are listed, graceful shutdown.
-- `GET /health` (process alive) and `GET /ready` (database reachable, no migration pending, and the broker when one is configured).
-- Service authentication: the kit's per-caller service-token guard, plus the combined **service-token-or-user** guard
-  (`ServiceOrUserGuard`). Both **authenticate** only: they say who is calling. **No authorization rule exists** (no Billing role,
-  permission or relation): that arrives with each operation and its `[B]` decisions (SDD section 19).
-- Database wiring on the `billing` database with the least-privilege runtime role, the explicit migration step
-  (`npm run migrate`, as `billing_migrator`), and the kit's infrastructure migrations (outbox, inbox, rate limit, generic triggers).
-- Event infrastructure from the kit (transactional outbox and its relay, inbox, RabbitMQ or in-memory bus). **No event is defined
-  or published, and no event is consumed.**
-- OpenAPI at `/billing/docs`, mounted only when `SWAGGER_PASSWORD` is set, behind basic auth.
-- Local technical helpers a later stage will use: the deterministic event id and cursor pagination (`src/common`).
-- A Dockerfile that runs as the unprivileged `node` user, and an entry in the Core CI matrix.
+- **Schema** (`db/migrations/0001..0008`): `currency` (immutable reference, BI-21), `product` and `price` (immutable), `invoice`,
+  `invoice_line`, `invoice_number_sequence`, `payment_request`, `payment_event_receipt`, `billing_transition`. Integer minor units
+  (`bigint`, capped at 2^53-1) only; no float or money type anywhere.
+- **Financial invariants BI-01 .. BI-21 enforced by the database** (CHECKs, composite foreign keys, unique and partial unique
+  indexes, an immutable-by-default allow-list trigger, deferred constraint triggers for totals and history, append-only and
+  no-delete guards), so no code path, including a bug or the runtime role, can break them.
+- **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
+  clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
+- **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).
+- **Numbering foundation**: a concurrency-safe counter per seller at issue; a rolled-back issue returns its number; gaplessness is
+  **not** assumed (scope and format are B-004).
+- **Payment-request mapping** as a pure function of two immutable rows, and **payment-event handling**: a pure decision function plus
+  a durable receipt (duplicates, out-of-order, unknown, early events; a `paymentId` is never bound from an event).
+- **Persistence layer** (`src/invoices`): `InvoiceRepository` (create draft with natural-key idempotency, issue, discard, read) and
+  `PaymentRequestRepository` (state-idempotent create, apply a Payment event). Every state change is one transaction: row lock,
+  change, history row and, on issue, the `invoice.created` outbox event.
+- Tests: unit (domain rules, input normalisation, no-float source scan), integration (repositories, races, atomicity, ownership,
+  runtime role), and a database suite (`npm run test:db`: 153 assertions and 5 concurrency races).
 
 ### Explicitly NOT implemented (later stages; see the SDD)
 
-No Billing table, endpoint, event, consumer, reconciler, scheduler or metric. Nothing about products, prices, invoices, payment
-requests, credit notes, entitlements, subscriptions, tax or numbering. No Payment client and no Payment configuration (Stage 4).
-The migrations folder `db/migrations/` is empty on purpose: Stage 2 adds the schema.
+Invoice HTTP API, rendering, templates, PDF, File Service, delivery, QR, signatures, recurring billing, dunning, trials,
+proration, discounts, tax engine, credit notes, refunds, external customers, branches, multiple legal entities, exchange rates,
+wallets, accounting ledger, Payment client and provider logic, the payment-event consumer and reconciler, entitlements.
+No table exists for any of them (a test asserts the exact table set).
 
 ## Configuration
 
@@ -42,6 +48,7 @@ Secrets may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME`. 
 |---|---|---|
 | `DATABASE_URL` | yes | runtime connection, the `billing_app` role. In production a superuser or `*_migrator` login is refused |
 | `AUTH_SERVICE_URL`, `AUTH_TIMEOUT_MS` | URL yes | live identity for user bearers (sent to Auth only) |
+| `BILLING_SUPPORTED_CURRENCIES` | yes | ISO 4217 codes accepted on an invoice or price; **no default** (B-005). Each must also exist in the immutable `currency` table |
 | `SERVICE_TOKENS` | no | accepted callers, `<caller>:<sha256 digest>`; empty means every service call is refused |
 | `RABBITMQ_URL` | **in production** | event bus; without it the in-memory bus is used (development and tests only) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | docs credentials; the password must be 16+ characters; without it the docs are not mounted |
