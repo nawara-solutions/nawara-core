@@ -63,6 +63,7 @@ jobs:
           - name: billing-service
             workspace: billing-service
             integration: test:e2e
+            database-tests: true
     services:
       postgres:
         image: postgres:16-alpine

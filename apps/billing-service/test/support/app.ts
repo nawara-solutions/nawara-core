@@ -38,6 +38,7 @@ export async function createTestApp(opts: {
     NODE_ENV: 'test',
     DATABASE_URL: opts.databaseUrl,
     AUTH_SERVICE_URL: 'http://auth.invalid',
+    BILLING_SUPPORTED_CURRENCIES: 'TND',
     ...(opts.tokens?.length ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(',') } : {}),
     ...opts.env,
   });

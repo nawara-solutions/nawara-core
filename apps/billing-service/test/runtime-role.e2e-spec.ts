@@ -4,6 +4,9 @@ import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { InboxService, OutboxService, RateLimitService, DbService, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
 import { billingMigrationsDir } from '../src/app.module.js';
+import { normaliseCreateInvoiceInput } from '../src/domain/invoice-input.js';
+import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
+import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -117,6 +120,75 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
       }
       // the guards that protect the invariants still bind it: a published event's content is immutable
       await expect(app.query(`UPDATE outbox SET name = 'evil.changed'`)).rejects.toMatchObject({ code: '23514' });
+    } finally {
+      await app.end();
+    }
+  });
+
+  it('the whole Stage 2 flow works as the runtime role: create, issue with a number and an event, payment request, history', async () => {
+    const db = t.app.get(DbService);
+    const invoices = t.app.get(InvoiceRepository);
+    const requests = t.app.get(PaymentRequestRepository);
+    const org = crypto.randomUUID();
+    const product = (await db.query(`INSERT INTO product ("sellerType", "sellerId", code, name) VALUES ('organization', $1, 'plan-a', 'Plan A') RETURNING id`, [org])).rows[0].id;
+    const priceId = (await db.query(`INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval") VALUES ($1, 'p1', 'TND', 2500, 'one_time') RETURNING id`, [product])).rows[0].id;
+    const ctx = { actor: { type: 'service' as const, id: 'test-producer' }, cause: { type: 'request' as const, id: 'r1' } };
+    const input = normaliseCreateInvoiceInput({
+      invoiceRequestId: crypto.randomUUID(), seller: { type: 'organization', id: org }, payer: { type: 'user', id: 'user-1' }, sourceType: 'contract', sourceId: 'c-1',
+      issuerSnapshot: { schemaVersion: 1 }, billToSnapshot: { schemaVersion: 1 }, lines: [{ priceId, quantity: 2 }],
+    });
+    const draft = (await invoices.createDraft('test-producer', input, ['TND'], ctx)).invoice;
+    const open = (await invoices.issue(draft.id, { kind: 'service', service: 'test-producer' }, { template: 'system:1', locale: 'fr' }, ctx)).invoice;
+    expect(open).toMatchObject({ status: 'open', number: '1', total: '5000' });
+    const req = (await requests.createForInvoice(open.id, { kind: 'user', userId: 'user-1' }, ctx)).request;
+    expect(req).toMatchObject({ status: 'created', amount: '5000' });
+    expect((await db.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'invoice.created' AND payload->>'invoiceId' = $1`, [open.id])).rows[0].n).toBe(1);
+    expect((await db.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityId" = ANY($1::uuid[])`, [[open.id, req.id]])).rows[0].n).toBe(3);
+    // an event receipt, so the append-only guard below has a row to refuse to change (a row-level guard cannot fire on an empty table)
+    const ignored = await requests.applyPaymentEvent(crypto.randomUUID(), {
+      name: 'payment.failed', source: 'payment-service', paymentId: crypto.randomUUID(), paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: open.id,
+      payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: org }, organizationId: org, amount: 5000, currency: 'TND', revision: 1,
+    }, { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'e1' } });
+    expect(ignored).toMatchObject({ outcome: 'ignored', detail: 'unknown_payment_request' });
+  });
+
+  it('the runtime role cannot bypass a Stage 2 guard: no trigger switch-off, no replica mode, no truncate, no delete, no rewrite of history, a counter or a currency', async () => {
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await app.connect();
+    try {
+      for (const statement of [
+        'ALTER TABLE invoice DISABLE TRIGGER USER',
+        'ALTER TABLE invoice DISABLE TRIGGER invoice_10_immutable',
+        'DROP TRIGGER invoice_20_lifecycle ON invoice',
+        'DROP TABLE billing_transition',
+        'TRUNCATE invoice CASCADE',
+        'TRUNCATE billing_transition',
+        'ALTER TABLE currency DROP CONSTRAINT currency_pkey CASCADE',
+        'SET session_replication_role = replica',
+        'CREATE OR REPLACE FUNCTION billing_allocate_invoice_number(text, text) RETURNS text LANGUAGE sql AS $$ SELECT \'1\' $$',
+      ]) {
+        await expect(app.query(statement), statement).rejects.toMatchObject({ code: '42501' });
+      }
+      // ...and the guards that protect the invariants still bind it (DML the role IS allowed to attempt)
+      for (const statement of [
+        'UPDATE invoice SET total = total + 1',
+        'UPDATE invoice SET currency = \'EUR\'',
+        'DELETE FROM invoice',
+        'DELETE FROM invoice_line',
+        'DELETE FROM payment_request',
+        'UPDATE billing_transition SET "toStatus" = \'paid\'',
+        'DELETE FROM billing_transition',
+        'UPDATE payment_event_receipt SET outcome = \'applied\'',
+        'DELETE FROM payment_event_receipt',
+        'UPDATE invoice_number_sequence SET "nextValue" = 2',
+        'DELETE FROM invoice_number_sequence',
+        'UPDATE currency SET exponent = 2',
+        'DELETE FROM currency',
+        'UPDATE price SET "unitAmount" = 1',
+        'UPDATE invoice_line SET quantity = quantity + 1',
+      ]) {
+        await expect(app.query(statement), statement).rejects.toMatchObject({ code: '23514' });
+      }
     } finally {
       await app.end();
     }

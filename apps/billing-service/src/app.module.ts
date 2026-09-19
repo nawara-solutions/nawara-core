@@ -8,6 +8,7 @@ import { AuthClientModule } from './auth/auth-client.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import type { BillingConfig } from './config/billing-config.js';
 import { BillingConfigModule } from './config/billing-config.module.js';
+import { InvoicesModule } from './invoices/invoices.module.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
 export const billingMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -22,9 +23,9 @@ export interface AppModuleOverrides {
 }
 
 /**
- * The whole Stage 1 module graph. `main.ts` and the test suites build it through the SAME function, so a test can never
- * pass against a differently wired application than the one that ships. Stage 1 holds infrastructure only: no domain
- * module, controller, table or event exists yet (SDD section 34.1).
+ * The whole module graph. `main.ts` and the test suites build it through the SAME function, so a test can never
+ * pass against a differently wired application than the one that ships. Stage 2 adds the invoice persistence layer
+ * (`InvoicesModule`); there is still no controller (the HTTP API is Stage 3, SDD section 34).
  */
 @Module({})
 export class AppModule {
@@ -47,6 +48,7 @@ export class AppModule {
         }),
         RateLimitModule,
         AuthModule,
+        InvoicesModule,
       ],
     };
   }

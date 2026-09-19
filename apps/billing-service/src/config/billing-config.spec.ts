@@ -6,6 +6,7 @@ const BASE = {
   NODE_ENV: 'test',
   DATABASE_URL: 'postgres://billing_app:pw@localhost:5433/billing',
   AUTH_SERVICE_URL: 'http://localhost:3001',
+  BILLING_SUPPORTED_CURRENCIES: 'TND',
 };
 
 const PROD = { ...BASE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://guest:guest@localhost:5672' };
@@ -30,12 +31,24 @@ describe('loadBillingConfig', () => {
     expect(cfg.serviceTokens).toEqual([]);
     expect(cfg.docs).toEqual({ username: 'docs', password: undefined });
     expect(cfg.corsOrigins).toEqual([]); // CORS is off unless exact origins are listed
+    expect(cfg.supportedCurrencies).toEqual(['TND']);
+  });
+
+  it('has NO code default for the supported currencies (B-005): a deployment must say', () => {
+    const env: NodeJS.ProcessEnv = { ...BASE };
+    delete env.BILLING_SUPPORTED_CURRENCIES;
+    expect(refusal(env)).toContain('BILLING_SUPPORTED_CURRENCIES');
+  });
+
+  it('normalises the supported currency list (trimmed, upper-cased, de-duplicated) and refuses anything that is not an ISO code', () => {
+    expect(loadBillingConfig({ ...BASE, BILLING_SUPPORTED_CURRENCIES: ' tnd, TND ,usd' }).supportedCurrencies).toEqual(['TND', 'USD']);
+    for (const bad of ['TN', 'TNDD', 'T1D', ',', 'tnd;usd']) expect(refusal({ ...BASE, BILLING_SUPPORTED_CURRENCIES: bad })).toContain('BILLING_SUPPORTED_CURRENCIES');
   });
 
   it('carries no domain configuration in Stage 1 (currencies, payment URL, limits arrive with their features)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel',
-      'nodeEnv', 'port', 'rabbitmqUrl', 'serviceName', 'serviceTokens', 'trustProxy',
+      'nodeEnv', 'port', 'rabbitmqUrl', 'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
     ]);
   });
 
