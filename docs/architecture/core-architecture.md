@@ -182,7 +182,7 @@ Auth keeps its **own** local security audit and never depends synchronously on a
 
 ## 9. Common foundation (shared conventions)
 
-Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-kit-and-api-conventions.md)); auth-service is not migrated onto it.
+Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-kit-and-api-conventions.md)), **implemented as a foundation** (see [service-foundations.md](./service-foundations.md) for what exists and what is deferred, e.g. rate limiting and OpenAPI setup are not in it yet); auth-service is not migrated onto it.
 
 | Area | Convention |
 |---|---|

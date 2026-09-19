@@ -51,6 +51,7 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
   `main.ts`) — every controller method gets `@ApiOperation`/`@ApiResponse`, every DTO field gets
   `@ApiProperty`. FastAPI's `ai-service` gets this for free at the same path with no extra setup.
 - Python service: FastAPI, typed with Pydantic models.
+- `libs/service-kit` holds **technical infrastructure only** shared by Core services (configuration, logging, request ids, errors, health, service authentication, database and migrations, outbox/inbox). It must never contain business logic; `npm run check:repo` enforces part of this.
 - Shared code that's safe to publish to consuming apps (DTOs, types) goes in `libs/shared-types` — but remember, consuming *services in this repo* can import libs; external apps (Nawara Drive) still only talk over HTTP, never via these libs directly.
 - Each service has its own `docker-compose` entry and its own database/migrations.
 

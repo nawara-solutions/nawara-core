@@ -33,19 +33,37 @@ Each service:
 ```
 nawara-core/
 ├── apps/
-│   ├── auth-service/
-│   ├── notification-service/
-│   ├── payment-service/
-│   └── ai-service/
+│   ├── auth-service/           # implemented and deployed
+│   ├── notification-service/   # NestJS starter only
+│   ├── payment-service/        # NestJS starter only (target architecture is designed, not built)
+│   └── ai-service/             # FastAPI starter (/health only)
 ├── libs/
-│   ├── shared-types/        # DTOs/interfaces published for consuming apps
-│   ├── shared-auth-guard/   # JWT validation middleware reused across services
-│   └── shared-config/
-├── infra/
-│   └── docker-compose.yml
+│   └── service-kit/            # technical foundations for new services (no business logic); see its README
+├── infra/postgres/             # local PostgreSQL: one database + migrator/runtime roles per service, and a verify script
+├── scripts/                    # static repository checks (workflow safety, architecture boundaries)
+├── docs/                       # ADRs, architecture documents, ADD/SDD/TDD, security review
+├── docker-compose.yml          # LOCAL development infrastructure only (PostgreSQL, RabbitMQ)
+├── .github/workflows/          # Core CI, and the auth-service build/deploy workflows
 ├── CLAUDE.md
 └── README.md
 ```
+
+## Local development and checks
+
+```bash
+npm ci
+cp .env.example .env                                          # local development credentials only
+docker compose --profile db up -d --wait postgres             # PostgreSQL 16 on 127.0.0.1:5433
+docker compose up -d rabbitmq                                 # RabbitMQ on 127.0.0.1:5672
+bash infra/postgres/verify.sh                                 # proves the least-privilege roles
+
+npm run build -w @nawara/service-kit                          # services consume the kit's built output
+npm run lint|typecheck|test|build -w <workspace>              # what Core CI runs per workspace
+npm run check:repo && npm run test:repo                       # static workflow-safety and architecture checks
+```
+
+See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md) for what is implemented versus
+designed versus deferred.
 
 ## Consuming these services from another app
 

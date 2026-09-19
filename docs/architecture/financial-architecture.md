@@ -213,7 +213,7 @@ existing synchronous dependency; whether it stays is an open decision.)
 | ADR-0021 | superseded in part by ADR-0033 |
 | ADR-0026 | ownership statement amended by ADR-0038 |
 | `docs/add/payment-service.md`, `docs/sdd/payment-service.md` | financial parts superseded by this document |
-| `docs/adr/README.md`, `docs/README.md` | index rows for ADR-0031 to 0038; register `docs/architecture/` |
+| `docs/adr/README.md`, `docs/architecture/README.md` | index rows for ADR-0031 to 0038; the architecture folder is indexed by its own README (`docs/README.md` is a shared symlink and is not edited here) |
 | SDDs | one each for billing, payment and accounting **before** their Stage 2, 3 and 5 code |
 
 ## 12. Intentionally deferred

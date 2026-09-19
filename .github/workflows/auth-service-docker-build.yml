@@ -43,6 +43,12 @@ jobs:
 
   build-production:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Production deployments and the :production image tag share ONE queue across every workflow. A running deployment is
+    # NEVER cancelled (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group:
+    # if a third request arrives, the older waiting one is superseded by it (its commit is included in the newer main).
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -76,6 +82,12 @@ jobs:
   deploy-production:
     needs: build-production
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Production deployments and the :production image tag share ONE queue across every workflow. A running deployment is
+    # NEVER cancelled (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group:
+    # if a third request arrives, the older waiting one is superseded by it (its commit is included in the newer main).
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: appleboy/ssh-action@v1
@@ -87,10 +99,11 @@ jobs:
           script_stop: true
           envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE
           script: |
+            set -euo pipefail
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
             docker pull "$IMAGE"
             docker run --rm --entrypoint cat "$IMAGE" deploy/provision-and-deploy.sh | IMAGE="$IMAGE" bash -s
-            docker logout ghcr.io
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
