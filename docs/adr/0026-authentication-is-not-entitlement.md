@@ -4,6 +4,8 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** the principle (authentication is not entitlement) is unchanged, but the statement that payment-service owns licenses, subscriptions and reservations is amended by [ADR-0038](./0038-entitlement-in-billing-service.md): billing-service owns them.
+
 > **Supersedes [ADR-0005](./0005-bounded-time-license-subscription-revalidation.md) in full** and the
 > login/refresh usage of [ADR-0004](./0004-synchronous-fail-closed-license-validation.md) and
 > [ADR-0006](./0006-per-user-subscription-reservation-on-license-lapse.md)'s `subscription_invalid`

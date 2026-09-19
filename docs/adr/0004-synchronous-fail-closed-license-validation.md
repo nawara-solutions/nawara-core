@@ -4,6 +4,8 @@
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** the license-status contract (`GET /payment/licenses/:organizationId/status`) and the ownership of license data move to billing-service ([ADR-0038](./0038-entitlement-in-billing-service.md)); auth-service's client is repointed in a separate small change.
+
 > **Amended by [ADR-0026](./0026-authentication-is-not-entitlement.md):** only the registration-time license check remains in `auth-service`; the login/refresh usage and the `trialEndsAt` preview are removed.
 
 > **Also amended by [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md):** registration no longer takes `organizationId` or `role` from the client; the organization is resolved server-side from a join code. The registration-time license check described here is unchanged.

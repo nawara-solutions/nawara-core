@@ -4,6 +4,8 @@
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** the reservation rule is kept, but subscriptions and licenses now live in billing-service ([ADR-0038](./0038-entitlement-in-billing-service.md)), within the financial boundaries of [ADR-0035](./0035-financial-service-boundaries.md).
+
 > **Amended by [ADR-0026](./0026-authentication-is-not-entitlement.md):** `payment-service`'s reservation mechanics are unchanged, but `auth-service` no longer returns `403 subscription_invalid` at login/refresh; platform services enforce entitlement.
 
 ## Context

@@ -71,3 +71,11 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0028](./0028-organization-join-codes-membership-and-organization-admin.md) | Organization join codes, membership and organization-admin authority | Proposed |
 | [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Proposed |
 | [0030](./0030-multi-organization-membership-and-revoked-state.md) | Multi-organization membership: one identity, many memberships, and the REVOKED state | Proposed |
+| [0031](./0031-organization-ownership-and-tenancy-anchor.md) | Organization ownership: organization-service owns the organization, Auth keeps a tenancy anchor | Proposed |
+| [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
+| [0033](./0033-service-to-service-authentication-and-user-identity.md) | Service-to-service authentication, and how services identify the end user | Proposed |
+| [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Proposed |
+| [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed |
+| [0036](./0036-money-parties-and-source-references.md) | Money, explicit parties and generic source references | Proposed |
+| [0037](./0037-reliable-events-outbox-inbox.md) | Reliable events: RabbitMQ with a transactional outbox and an inbox | Proposed |
+| [0038](./0038-entitlement-in-billing-service.md) | Entitlement (licenses and subscriptions) lives in billing-service | Proposed |

@@ -4,6 +4,8 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) supersedes, for Core services, the choice to forward the admin's JWT: services use their own service token and ask Auth live. The financial services that would have used this are redesigned ([ADR-0035](./0035-financial-service-boundaries.md)).
+
 ## Context
 
 Every platform-scoped Admin (`role: 'admin'`) has owner and operator tiers sharing equal rights

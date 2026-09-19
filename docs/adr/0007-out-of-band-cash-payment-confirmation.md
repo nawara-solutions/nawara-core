@@ -4,6 +4,8 @@
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** the cash flow is kept, but the actor model changes from a platform-scoped "Admin" to the invoice **seller's** authority, and cash becomes a payment method in payment-service ([ADR-0035](./0035-financial-service-boundaries.md), [ADR-0036](./0036-money-parties-and-source-references.md)); the authority rules are a proposed policy (open decision 7 in [financial-architecture.md](../architecture/financial-architecture.md)).
+
 ## Context
 
 `payment-service`'s `Charge` model (per `CLAUDE.md`) is gateway-agnostic in principle, but
