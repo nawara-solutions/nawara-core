@@ -56,3 +56,4 @@ if requirements change significantly later, write a new TDD for that follow-up w
 | [rate-limiting-baseline](./rate-limiting-baseline.md) | Implemented |
 | [payment-service-foundation](./payment-service-foundation.md) | Implemented |
 | [payment-creation-and-read](./payment-creation-and-read.md) | Implemented |
+| [payment-attempts-and-provider](./payment-attempts-and-provider.md) | Implemented |

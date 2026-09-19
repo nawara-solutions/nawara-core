@@ -33,4 +33,16 @@ export class AuthorizationService {
     if (!relation) throw notFound();
     if (relation !== 'producer') throw operationNotPermitted();
   }
+
+  /** Start an attempt: the payer only, in this phase — organization-payer authority is [B, O-18], not decided. */
+  assertCanStartAttempt(payment: Pick<PaymentRow, 'producer' | 'payerType' | 'payerId'>, caller: Caller): void {
+    const relation = this.relationTo(payment, caller);
+    if (!relation) throw notFound();
+    if (relation !== 'payer') throw operationNotPermitted();
+  }
+
+  /** Sync an attempt: anyone with a read relation (producer or payer), per SDD section 8.4. */
+  assertCanSync(payment: Pick<PaymentRow, 'producer' | 'payerType' | 'payerId'>, caller: Caller): void {
+    if (!this.relationTo(payment, caller)) throw notFound();
+  }
 }

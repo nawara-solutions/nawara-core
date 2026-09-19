@@ -3,11 +3,12 @@ import { Module } from '@nestjs/common';
 import {
   DbModule, EventsModule, HealthModule, InMemoryEventBus, RabbitMqEventBus, RateLimitModule, ServiceAuthModule, kitMigrationsDir,
 } from '@nawara/service-kit';
+import { AttemptsModule } from './attempts/attempts.module.js';
 import { AuthClientModule } from './auth/auth-client.module.js';
-import { ServiceOrUserGuard } from './auth/service-or-user.guard.js';
 import { loadPaymentConfig } from './config/payment-config.js';
 import { PaymentConfigModule } from './config/payment-config.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
+import { ProvidersModule } from './providers/providers.module.js';
 
 const config = loadPaymentConfig();
 
@@ -27,9 +28,9 @@ const config = loadPaymentConfig();
       bus: config.rabbitmqUrl ? new RabbitMqEventBus({ url: config.rabbitmqUrl }) : new InMemoryEventBus(),
     }),
     RateLimitModule,
+    ProvidersModule,
     PaymentsModule,
+    AttemptsModule,
   ],
-  providers: [ServiceOrUserGuard],
-  exports: [ServiceOrUserGuard],
 })
 export class AppModule {}

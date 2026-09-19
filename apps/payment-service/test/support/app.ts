@@ -6,10 +6,12 @@ import {
   DbModule, EventsModule, HealthModule, InMemoryEventBus, JsonLogger, RateLimitModule, ReadinessRegistry, ServiceAuthModule,
   configureApp, kitMigrationsDir, type AuthClient, type ServiceTokenEntry,
 } from '@nawara/service-kit';
+import { AttemptsModule } from '../../src/attempts/attempts.module.js';
 import { AUTH_CLIENT } from '../../src/auth/auth-client.token.js';
 import { loadPaymentConfig, type PaymentConfig } from '../../src/config/payment-config.js';
 import { PaymentConfigModule } from '../../src/config/payment-config.module.js';
 import { PaymentsModule } from '../../src/payments/payments.module.js';
+import { ProvidersModule } from '../../src/providers/providers.module.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -67,7 +69,9 @@ export async function createTestApp(opts: {
       PaymentConfigModule.forRoot(config),
       EventsModule.forRoot({ source: 'payment-service', bus: new InMemoryEventBus() }),
       RateLimitModule,
+      ProvidersModule,
       PaymentsModule,
+      AttemptsModule,
     ],
     controllers: [RawBodyProbeController],
   }).compile();
