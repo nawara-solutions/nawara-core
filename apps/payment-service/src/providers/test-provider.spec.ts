@@ -14,6 +14,13 @@ describe('TestPaymentProvider', () => {
     await expect(p.fetchStatus('att-1')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND' });
   });
 
+  it('success_amount_mismatch: accepts, but fetchStatus later reports an amount that differs from the payment snapshot (FI-13 fixture)', async () => {
+    const p = new TestPaymentProvider();
+    const result = await p.initiate(payment(), { merchantReference: 'att-mismatch', options: { scenario: 'success_amount_mismatch' } });
+    expect(result).toMatchObject({ kind: 'accepted' });
+    await expect(p.fetchStatus('att-mismatch')).resolves.toEqual({ kind: 'succeeded', amount: 1001, currency: 'TND' });
+  });
+
   it('failure: rejects with the given (or default) failure class/code, and fetchStatus reports failed', async () => {
     const p = new TestPaymentProvider();
     const result = await p.initiate(payment(), { merchantReference: 'att-2', options: { scenario: 'failure', failureClass: 'retryable', failureCode: 'insufficient_funds' } });

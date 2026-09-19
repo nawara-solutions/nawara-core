@@ -13,8 +13,11 @@ const ALLOWED: Record<AttemptStatus, readonly AttemptStatus[]> = {
   unknown: ['submitted', 'succeeded', 'failed'],
 };
 
-/** Mirrors the database trigger (`payment_attempt_status_transition_guard`) — defence in depth, section 5.2. */
-export function canTransitionAttempt(from: AttemptStatus, to: AttemptStatus): boolean {
+/** Mirrors the database trigger (`payment_attempt_status_transition_guard`) — defence in depth, section 5.2.
+ * `failureInferred` narrows the one context-dependent edge: `failed -> succeeded` is the late-success path
+ * (section 5.1) and is only legitimate when the prior failure was a GUESS (inferred), never a provider-confirmed one. */
+export function canTransitionAttempt(from: AttemptStatus, to: AttemptStatus, opts: { failureInferred?: boolean } = {}): boolean {
+  if (from === 'failed' && to === 'succeeded') return opts.failureInferred === true;
   return ALLOWED[from].includes(to);
 }
 

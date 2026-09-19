@@ -61,7 +61,11 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM (VALUES
       ('created', 'pending'), ('pending', 'created'), ('pending', 'succeeded'), ('pending', 'failed'),
-      ('created', 'cancelled'), ('pending', 'cancelled'), ('created', 'expired'), ('pending', 'expired')
+      ('created', 'cancelled'), ('pending', 'cancelled'), ('created', 'expired'), ('pending', 'expired'),
+      -- Late success (section 5.1): an attempt that was failed by INFERENCE can still succeed later; if the failed
+      -- attempt already returned the payment to `created` (below the attempt limit) before the late success arrives,
+      -- the payment moves directly from `created` to `succeeded`.
+      ('created', 'succeeded')
     ) AS allowed(from_status, to_status)
     WHERE allowed.from_status = OLD.status AND allowed.to_status = NEW.status
   ) THEN

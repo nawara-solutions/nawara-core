@@ -26,6 +26,12 @@ describe('payment attempt state machine (SDD section 5.2)', () => {
     expect(canTransitionAttempt('unknown', 'initiated')).toBe(false);
   });
 
+  it('late success: failed -> succeeded is allowed ONLY when the failure was inferred (a guess), never a confirmed one', () => {
+    expect(canTransitionAttempt('failed', 'succeeded', { failureInferred: true })).toBe(true);
+    expect(canTransitionAttempt('failed', 'succeeded', { failureInferred: false })).toBe(false);
+    expect(canTransitionAttempt('failed', 'succeeded')).toBe(false); // defaults closed
+  });
+
   it('classifies initiated, submitted and unknown as open; nothing else', () => {
     expect(OPEN_ATTEMPT_STATUSES).toEqual(['initiated', 'submitted', 'unknown']);
     for (const s of ATTEMPT_STATUSES) expect(isOpenAttemptStatus(s)).toBe(OPEN_ATTEMPT_STATUSES.includes(s));

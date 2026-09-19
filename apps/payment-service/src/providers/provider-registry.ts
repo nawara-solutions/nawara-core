@@ -22,4 +22,9 @@ export class ProviderRegistry {
     if (!provider) throw paymentError(422, 'invalid_provider', `Provider ${id} is not enabled.`);
     return provider;
   }
+
+  /** For the webhook route, which reports an unknown provider as 404, not 422 (SDD section 9.1, endpoint 5). */
+  tryGet(id: string): PaymentProvider | undefined {
+    return this.providers.get(id);
+  }
 }

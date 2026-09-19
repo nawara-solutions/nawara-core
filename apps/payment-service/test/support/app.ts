@@ -12,6 +12,7 @@ import { loadPaymentConfig, type PaymentConfig } from '../../src/config/payment-
 import { PaymentConfigModule } from '../../src/config/payment-config.module.js';
 import { PaymentsModule } from '../../src/payments/payments.module.js';
 import { ProvidersModule } from '../../src/providers/providers.module.js';
+import { WebhooksModule } from '../../src/webhooks/webhooks.module.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -72,6 +73,7 @@ export async function createTestApp(opts: {
       ProvidersModule,
       PaymentsModule,
       AttemptsModule,
+      WebhooksModule,
     ],
     controllers: [RawBodyProbeController],
   }).compile();

@@ -4,6 +4,7 @@ import { PAYMENT_STATUSES, TERMINAL_PAYMENT_STATUSES, canTransitionPayment, isTe
 const ALLOWED_PAIRS: [PaymentStatus, PaymentStatus][] = [
   ['created', 'pending'], ['pending', 'created'], ['pending', 'succeeded'], ['pending', 'failed'],
   ['created', 'cancelled'], ['pending', 'cancelled'], ['created', 'expired'], ['pending', 'expired'],
+  ['created', 'succeeded'], // late success: an inferred failure already returned the payment to created
 ];
 
 describe('payment state machine (SDD section 5.1)', () => {
@@ -21,8 +22,11 @@ describe('payment state machine (SDD section 5.1)', () => {
     }
   });
 
-  it('forbids created -> succeeded directly (success is only reached from pending)', () => {
-    expect(canTransitionPayment('created', 'succeeded')).toBe(false);
+  it('allows created -> succeeded ONLY for the late-success path, not as a general shortcut around pending', () => {
+    // The application layer only ever takes this edge for a late-verified success after an inferred failure
+    // (AttemptService.applyStatus); the state machine itself cannot distinguish "legitimate late success" from
+    // "some other path," which is exactly why this one edge is deliberately narrow and documented here.
+    expect(canTransitionPayment('created', 'succeeded')).toBe(true);
   });
 
   it('classifies succeeded, failed, cancelled and expired as terminal, and no others', () => {

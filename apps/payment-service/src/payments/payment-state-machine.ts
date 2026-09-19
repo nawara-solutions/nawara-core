@@ -5,7 +5,9 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 export const TERMINAL_PAYMENT_STATUSES: readonly PaymentStatus[] = ['succeeded', 'failed', 'cancelled', 'expired'];
 
 const ALLOWED: Record<PaymentStatus, readonly PaymentStatus[]> = {
-  created: ['pending', 'cancelled', 'expired'],
+  // 'created' -> 'succeeded' is the late-success path (section 5.1): an inferred failure already returned the
+  // payment to 'created', and the provider then confirms success for that same attempt.
+  created: ['pending', 'cancelled', 'expired', 'succeeded'],
   pending: ['created', 'succeeded', 'failed', 'cancelled', 'expired'],
   succeeded: [],
   failed: [],

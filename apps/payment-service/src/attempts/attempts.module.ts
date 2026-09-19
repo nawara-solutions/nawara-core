@@ -10,6 +10,6 @@ import { AttemptsController } from './attempts.controller.js';
   imports: [AuthModule, PaymentsModule],
   controllers: [AttemptsController],
   providers: [AttemptService, IdempotencyService, AttemptResolver, AttemptResolverService],
-  exports: [AttemptResolver],
+  exports: [AttemptResolver, AttemptService],
 })
 export class AttemptsModule {}

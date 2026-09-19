@@ -42,7 +42,10 @@ BEGIN
       ('unknown', 'submitted'), ('unknown', 'succeeded'), ('unknown', 'failed')
     ) AS allowed(from_status, to_status)
     WHERE allowed.from_status = OLD.status AND allowed.to_status = NEW.status
-  ) THEN
+  )
+  -- Late success (section 5.1): an attempt failed by INFERENCE (a guess) can still succeed later; one that the
+  -- provider itself confirmed as failed cannot (that is a real conflict, refused by the application layer already).
+  AND NOT (OLD.status = 'failed' AND NEW.status = 'succeeded' AND OLD."failureInferred") THEN
     RAISE EXCEPTION 'payment_attempt % cannot move from % to %', OLD.id, OLD.status, NEW.status USING ERRCODE = '23514';
   END IF;
   RETURN NEW;

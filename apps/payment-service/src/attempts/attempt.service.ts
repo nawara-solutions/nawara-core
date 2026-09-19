@@ -95,11 +95,12 @@ export class AttemptService {
         const { rows } = await q.query<AttemptRow>(`UPDATE payment_attempt SET status = 'unknown' WHERE id = $1 RETURNING *`, [t1.attempt.id]);
         return rows[0];
       }
+      // Fixed lock order (SDD section 12): the payment row first, then the attempt row.
+      await this.settlePaymentAfterFailure(q, t1.payment.id, t1.attempt.attemptNumber, initiateResult.failureCode, provider);
       const { rows } = await q.query<AttemptRow>(
         `UPDATE payment_attempt SET status = 'failed', "failureCode" = $2, "failureClass" = $3, "completedAt" = now() WHERE id = $1 RETURNING *`,
         [t1.attempt.id, initiateResult.failureCode, initiateResult.failureClass],
       );
-      await this.settlePaymentAfterFailure(q, t1.payment.id, t1.attempt.attemptNumber, initiateResult.failureCode, provider);
       return rows[0];
     });
 
@@ -116,14 +117,17 @@ export class AttemptService {
     return this.applyStatus(attemptId, status, provider);
   }
 
-  /** Shared by `sync` and (later) the resolver/webhook path: applies a verified provider result if it's a valid transition. */
+  /** Shared by `sync`, the resolver and the webhook path: applies a verified provider result if it's a valid
+   * transition. Fixed lock order to prevent deadlocks (SDD section 12): find the attempt WITHOUT locking (just to
+   * learn its paymentId), lock the payment row first, then re-read and lock the attempt row. */
   async applyStatus(attemptId: string, status: FetchStatusResult, provider: PaymentProvider): Promise<AttemptRow> {
     return this.db.tx(async (q) => {
+      const { rows: unlocked } = await q.query<AttemptRow>('SELECT "paymentId" FROM payment_attempt WHERE id = $1', [attemptId]);
+      if (!unlocked[0]) throw paymentError(404, 'not_found', 'Not found.');
+      const { rows: payRows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [unlocked[0].paymentId]);
+      const payment = payRows[0];
       const { rows: attRows } = await q.query<AttemptRow>('SELECT * FROM payment_attempt WHERE id = $1 FOR UPDATE', [attemptId]);
       const current = attRows[0];
-      if (!current) throw paymentError(404, 'not_found', 'Not found.');
-      const { rows: payRows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [current.paymentId]);
-      const payment = payRows[0];
 
       if (status.kind === 'pending') return current; // still waiting; nothing changes
 
@@ -178,7 +182,7 @@ export class AttemptService {
   /** After an attempt fails: the payment fails if the attempt limit is reached or the provider says the payment
    * itself is unrecoverable; otherwise it returns to `created` so the payer can retry (SDD section 5.1). */
   private async settlePaymentAfterFailure(q: Queryable, paymentId: string, attemptNumber: number, failureCode: string | null, provider: PaymentProvider): Promise<void> {
-    const { rows } = await q.query<PaymentRow>('SELECT status FROM payment WHERE id = $1', [paymentId]);
+    const { rows } = await q.query<PaymentRow>('SELECT status FROM payment WHERE id = $1 FOR UPDATE', [paymentId]);
     if (rows[0]?.status !== 'pending') return; // already moved on by another path
     const paymentFatal = failureCode !== null && provider.capabilities.paymentFatalCodes.includes(failureCode);
     const limitReached = attemptNumber >= this.config.maxAttempts;

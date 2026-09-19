@@ -13,9 +13,18 @@ export type FetchStatusResult =
   | { kind: 'pending' }
   | { kind: 'notFound' };
 
+export interface ParsedWebhookBody {
+  providerEventId: string;
+  type: string;
+  reference: string;
+  amount?: number;
+  currency?: string;
+  data: unknown;
+}
+
 /** A verified provider notification, or how verification failed (SDD section 7's two distinct failure modes). */
 export type VerifyWebhookResult =
-  | { signatureValid: true; parsed: { providerEventId: string; type: string; reference: string; amount?: number; currency?: string; data: unknown } }
+  | { signatureValid: true; parsed: ParsedWebhookBody }
   /** Signature checks out, but the body could not be decoded into a recognizable event: SDD's "malformed body with a valid signature" case (persist, non-retryable failed), never a 401. */
   | { signatureValid: true; parsed: null }
   /** Signature does not check out: reject (401), persist nothing (an unauthenticated caller cannot write to the database). */
@@ -51,4 +60,7 @@ export interface PaymentProvider {
   /** `ref` is a providerTransactionId or a merchantReference — either identifies the same attempt to the provider. */
   fetchStatus(ref: string): Promise<FetchStatusResult>;
   verifyWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<VerifyWebhookResult>;
+  /** Re-derives the parsed shape from an already-verified, already-stored raw body — no signature check (the retrier
+   * re-processes a stored event; it never re-authenticates one, since the body cannot have changed since receipt). */
+  parseStoredBody(rawBody: Buffer): ParsedWebhookBody | null;
 }

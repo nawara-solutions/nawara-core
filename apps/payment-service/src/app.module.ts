@@ -9,6 +9,7 @@ import { loadPaymentConfig } from './config/payment-config.js';
 import { PaymentConfigModule } from './config/payment-config.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { ProvidersModule } from './providers/providers.module.js';
+import { WebhooksModule } from './webhooks/webhooks.module.js';
 
 const config = loadPaymentConfig();
 
@@ -31,6 +32,7 @@ const config = loadPaymentConfig();
     ProvidersModule,
     PaymentsModule,
     AttemptsModule,
+    WebhooksModule,
   ],
 })
 export class AppModule {}

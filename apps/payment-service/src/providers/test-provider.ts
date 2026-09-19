@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { PaymentRow } from '../payments/payment.types.js';
-import type { FetchStatusResult, InitiateResult, PaymentProvider, ProviderCapabilities, ProviderOptions, VerifyWebhookResult } from './provider.port.js';
+import type { FetchStatusResult, InitiateResult, ParsedWebhookBody, PaymentProvider, ProviderCapabilities, ProviderOptions, VerifyWebhookResult } from './provider.port.js';
 
 interface Record_ {
   status: 'accepted' | 'rejected' | 'unknown';
@@ -45,6 +45,12 @@ export class TestPaymentProvider implements PaymentProvider {
         const providerTransactionId = `ptx_${attempt.merchantReference}`;
         this.records.set(attempt.merchantReference, { status: 'accepted', providerTransactionId, amount, currency });
         return { kind: 'accepted', providerTransactionId, nextAction: { type: 'redirect', url: `https://test-provider.invalid/pay/${providerTransactionId}` } };
+      }
+      case 'success_amount_mismatch': {
+        // Deterministically exercises FI-13: the provider reports a DIFFERENT amount than the payment snapshot.
+        const providerTransactionId = `ptx_${attempt.merchantReference}`;
+        this.records.set(attempt.merchantReference, { status: 'accepted', providerTransactionId, amount: amount + 1, currency });
+        return { kind: 'accepted', providerTransactionId };
       }
       case 'failure': {
         const failureClass = (attempt.options?.failureClass as 'retryable' | 'terminal') ?? 'terminal';
@@ -119,24 +125,23 @@ export class TestPaymentProvider implements PaymentProvider {
     const signature = Array.isArray(header) ? header[0] : header;
     const expected = createHmac('sha256', WEBHOOK_SECRET).update(rawBody).digest('hex');
     if (!signature || !safeEqualHex(signature, expected)) return { signatureValid: false };
+    return { signatureValid: true, parsed: this.parseStoredBody(rawBody) };
+  }
+
+  parseStoredBody(rawBody: Buffer): ParsedWebhookBody | null {
     try {
       const body = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>;
-      if (typeof body.eventId !== 'string' || typeof body.type !== 'string' || typeof body.reference !== 'string') {
-        return { signatureValid: true, parsed: null };
-      }
+      if (typeof body.eventId !== 'string' || typeof body.type !== 'string' || typeof body.reference !== 'string') return null;
       return {
-        signatureValid: true,
-        parsed: {
-          providerEventId: body.eventId,
-          type: body.type,
-          reference: body.reference,
-          amount: typeof body.amount === 'number' ? body.amount : undefined,
-          currency: typeof body.currency === 'string' ? body.currency : undefined,
-          data: body.data,
-        },
+        providerEventId: body.eventId,
+        type: body.type,
+        reference: body.reference,
+        amount: typeof body.amount === 'number' ? body.amount : undefined,
+        currency: typeof body.currency === 'string' ? body.currency : undefined,
+        data: body.data,
       };
     } catch {
-      return { signatureValid: true, parsed: null };
+      return null;
     }
   }
 }

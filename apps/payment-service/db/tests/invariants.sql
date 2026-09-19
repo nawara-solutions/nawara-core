@@ -104,9 +104,14 @@ SELECT pg_temp.expect_ok('FI-02', 'status (a mutable field) can still change',
   format($$UPDATE payment SET status = 'pending' WHERE id = %L$$, :'pay1'));
 
 -- ============================================================ FI-11 / state machine (5.1) ----
-SELECT pg_temp.expect_error('FI-11', 'created -> succeeded is not a valid transition (success only from pending)',
+-- created -> succeeded IS allowed (the late-success path: an inferred failure already returned the payment to
+-- created before the provider's genuine success arrives) — proven directly by the ok case below, not an error case.
+SELECT pg_temp.expect_ok('SM', 'created -> succeeded is valid (late success after an inferred failure)',
   format($$UPDATE payment SET status = 'succeeded' WHERE id = %L$$,
-    pg_temp.new_payment('00000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000a1')), '23514');
+    pg_temp.new_payment('00000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000a1')));
+SELECT pg_temp.expect_error('FI-11', 'created -> failed is still not a valid transition (only succeeded has a late path from created)',
+  format($$UPDATE payment SET status = 'failed' WHERE id = %L$$,
+    pg_temp.new_payment('00000000-0000-0000-0000-0000000000b9', '00000000-0000-0000-0000-0000000000a1')), '23514');
 SELECT pg_temp.new_payment('00000000-0000-0000-0000-0000000000b3', '00000000-0000-0000-0000-0000000000a1') AS pay3 \gset
 SELECT pg_temp.expect_ok('SM', 'created -> pending is valid', format($$UPDATE payment SET status = 'pending' WHERE id = %L$$, :'pay3'));
 SELECT pg_temp.expect_ok('SM', 'pending -> succeeded is valid', format($$UPDATE payment SET status = 'succeeded' WHERE id = %L$$, :'pay3'));
