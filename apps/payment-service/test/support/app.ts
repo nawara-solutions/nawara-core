@@ -1,4 +1,4 @@
-import { Controller, Post, Req, type RawBodyRequest } from '@nestjs/common';
+import { Controller, Global, Module, Post, Req, type RawBodyRequest } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import type { Request } from 'express';
@@ -7,9 +7,9 @@ import {
   configureApp, kitMigrationsDir, type AuthClient, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { AUTH_CLIENT } from '../../src/auth/auth-client.token.js';
-import { ServiceOrUserGuard } from '../../src/auth/service-or-user.guard.js';
 import { loadPaymentConfig, type PaymentConfig } from '../../src/config/payment-config.js';
-import { PAYMENT_CONFIG } from '../../src/config/payment-config.token.js';
+import { PaymentConfigModule } from '../../src/config/payment-config.module.js';
+import { PaymentsModule } from '../../src/payments/payments.module.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -29,6 +29,15 @@ class RawBodyProbeController {
   @Post('raw-body')
   echo(@Req() req: RawBodyRequest<Request>) {
     return { rawBodyBase64: req.rawBody ? req.rawBody.toString('base64') : null, parsedBody: req.body };
+  }
+}
+
+/** Global, like `AuthClientModule` in production, so feature modules (PaymentsModule) can inject AUTH_CLIENT. */
+@Global()
+@Module({})
+class TestAuthClientModule {
+  static forRoot(authClient: AuthClient) {
+    return { module: TestAuthClientModule, providers: [{ provide: AUTH_CLIENT, useValue: authClient }], exports: [AUTH_CLIENT] };
   }
 }
 
@@ -54,15 +63,13 @@ export async function createTestApp(opts: {
       HealthModule.forRoot({ checkTimeoutMs: 1500 }),
       DbModule.forRoot({ url: opts.databaseUrl, migrations: { dirs: opts.migrationsDirs ?? [kitMigrationsDir] } }),
       ServiceAuthModule.forRoot(opts.tokens ?? []),
+      TestAuthClientModule.forRoot(opts.authClient ?? noopAuthClient),
+      PaymentConfigModule.forRoot(config),
       EventsModule.forRoot({ source: 'payment-service', bus: new InMemoryEventBus() }),
       RateLimitModule,
+      PaymentsModule,
     ],
     controllers: [RawBodyProbeController],
-    providers: [
-      { provide: PAYMENT_CONFIG, useValue: config },
-      { provide: AUTH_CLIENT, useValue: opts.authClient ?? noopAuthClient },
-      ServiceOrUserGuard,
-    ],
   }).compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false, rawBody: true, logger: false });

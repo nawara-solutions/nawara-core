@@ -64,7 +64,7 @@ N/A — greenfield tables, no existing data.
 
 - Unit: `libs/service-kit/test/http.spec.ts` (error `code` passthrough, 502 text), `test/rate-limit.int-spec.ts`; `apps/payment-service/src/config/payment-config.spec.ts`, `src/auth/service-or-user.guard.spec.ts`, `src/docs/basic-auth.spec.ts`.
 - Integration: `libs/service-kit/test/generic-triggers.int-spec.ts`; `apps/payment-service/test/health.e2e-spec.ts` (health/ready/raw-body, against a real throwaway Postgres via `createTestDatabase`).
-- Database: `apps/payment-service/db/tests/invariants.sql` (29 assertions covering FI-01, FI-02, FI-04, FI-09, FI-11 and the section 3.1 contract shape) plus two concurrency races in `run.sh`.
+- Database: `apps/payment-service/db/tests/invariants.sql` (31 assertions covering FI-01, FI-02, FI-04, FI-09, FI-11 and the section 3.1 contract shape) plus two concurrency races in `run.sh`.
 - Manual: `docker build` + container smoke run against local Postgres/RabbitMQ (`/health` 200, `/ready` 503→200 after migration, `/payment/docs` 401→200 with basic auth).
 
 ## Rollout
