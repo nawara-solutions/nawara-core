@@ -30,6 +30,32 @@ Every design point carries one marker:
 | **[B]** | **Business or legal decision required**: not decided, not invented. The document states what depends on it. |
 | **[X]** | **Deferred**: consciously not part of this phase. |
 
+### 0.1 Business-decision guardrail
+
+The markers above are an implementation contract, not just a reading aid, for whoever builds this service, human or agent:
+
+* **[D] Decided.** Implementation may proceed.
+* **[T] Technically defined here.** Implementation may proceed, subject to any `[B]` gate it explicitly references.
+* **[B] Business or legal decision required — not approved for implementation.** A `[B]` item may state a proposed behaviour, a
+  default, an example, a possible option or a recommendation; none of these is approval. An implementation agent must **not**:
+  select a `[B]` option itself, or infer approval from existing code, tests, fixtures, API examples, comments, implementation
+  convenience, the absence of a decision, or an apparently obvious default. If a requested feature depends on an unresolved `[B]`
+  decision, that part of the work is **blocked**; only the independent part may proceed.
+* **[X] Deferred.** Do not implement unless a later, explicit decision activates it.
+
+### 0.2 Implementation gate
+
+```
+[B] = do not decide                          [D] = approved, implement
+[T] = technically defined, implement          [X] = deferred, do not implement
+```
+
+No implementation agent may turn an unresolved `[B]` decision into an authorization rule, financial rule, API behaviour, database
+constraint, workflow, event contract or user-facing behaviour. When work reaches a `[B]` boundary, the agent must: (1) identify the
+unresolved decision (by its `O-` number, section 19); (2) identify exactly which part of the requested work depends on it; (3)
+implement only the independent part; (4) leave the business-dependent part blocked or explicitly isolated; (5) report which decision
+is required. The agent must not choose the business outcome.
+
 Reality check: payment-service today is a starter. The service-kit (`libs/service-kit`) provides configuration, request/correlation ids,
 logging, the error filter, `/health` and `/ready`, the service-token guard, the Auth client, database access, the migration runner,
 and the outbox/inbox with a RabbitMQ bus. **Everything in this SDD beyond those foundations is designed, not built.**
@@ -90,7 +116,7 @@ payment-service [T].
 | `organizationId` | uuid or null | **authoritative** | The organization context: the isolation boundary for access control, carried in events. If `seller.type` is `organization` it must equal `seller.id` [T] |
 | `amount` | integer minor units, 1 to 9007199254740991 | **authoritative** | JSON number; validated as a safe integer; stored as `bigint` [D, ADR-0036] |
 | `currency` | ISO 4217, upper case | **authoritative** | Must exist in the `currency` reference table of payment's database (section 4.8) and in the configured supported list [T]; the exponent comes from that table, never from code [D] |
-| `expiresAt` | absolute timestamp with offset, or null | authoritative | Drives expiry. A null value, and any default or maximum lifetime, is a policy question **[B, O-16]**; until decided a payment without `expiresAt` simply has no expiry and is watched by the stuck-payment alert (section 12) |
+| `expiresAt` | absolute timestamp with offset, or null | authoritative | Drives expiry. A null value, and any default or maximum lifetime, is a policy question **[B, O-16]**; until decided, a payment without `expiresAt` has no expiry as a **PROPOSED — NOT APPROVED fallback**, and is watched by the stuck-payment alert (section 12) |
 | `description` | string, at most 140 characters | **descriptive** | Statement and display text only. Never used in a decision [T] |
 | `reference` | string, at most 64 characters | descriptive | For example an invoice number. Never used in a decision [T] |
 
@@ -158,7 +184,7 @@ this database. Money is `bigint` minor units plus `currency char(3)`; CHECK cons
 | Immutable | `paymentId`, `amount`, `currency`, `note`, `submittedBy`, `submittedAt`; a decision, once made, is never rewritten |
 | Mutable | `status` and the decision fields, once each (`submitted` to `confirmed` or `rejected`) |
 | Uniqueness | at most one `submitted` or `confirmed` cash submission per payment (partial unique index). A `rejected` one does not block a new submission [T, revisit with O-5] |
-| Constraints | exactly one of the confirm fields or the reject fields is set, and only in the matching status (CHECK); **proposed generic control, not decided [T, revisit with O-5]:** the confirmer differs from the payer when the payer is a `user` (trigger, because the payer lives on `payment`); "confirmer differs from submitter" and any **bound on repeated submissions after rejections** (cash resubmission is otherwise unbounded, because the attempt limit does not apply to cash) are **[B, O-5]** |
+| Constraints | exactly one of the confirm fields or the reject fields is set, and only in the matching status (CHECK); **PROPOSED — NOT APPROVED generic control [T, revisit with O-5]:** the confirmer differs from the payer when the payer is a `user` (trigger, because the payer lives on `payment`); "confirmer differs from submitter" and any **bound on repeated submissions after rejections** (cash resubmission is otherwise unbounded, because the attempt limit does not apply to cash) are **[B, O-5]** |
 | Idempotency | submit by `Idempotency-Key`; confirm and reject are idempotent by state (section 6) |
 | Isolation | inherits the payment's |
 
@@ -213,6 +239,37 @@ Provided by the service-kit migration `kit_0001_outbox_inbox.sql` [D]. **Outbox:
 in the same transaction (section 11). **Inbox:** the table exists; **payment-service has no event consumer in this phase** (billing
 reaches it by API), so nothing writes to it yet [T]. Both belong to payment's own database; no other service reads them.
 
+### 4.10 Financial invariants [T]
+
+These are domain-level safety properties that must hold regardless of retries, concurrent requests, duplicate requests, provider
+callbacks, provider timeouts, worker crashes, process restarts, webhook retries, or malicious client input. They restate, in one
+place, invariants already implied by sections 3 to 4 and 5 to 12 below; they do not add new behaviour, states or entities.
+Enforcement may come from database constraints, unique indexes, database triggers, transactions and row locking, application or
+domain validation, provider verification, or tests — whichever mechanism the referenced section already assigns to it. Not every
+invariant needs a database trigger.
+
+| # | Invariant | Enforced by |
+|---|---|---|
+| FI-01 | A payment `amount` is strictly greater than zero | CHECK constraint (section 4) |
+| FI-02 | After creation, the payment snapshot is immutable: at minimum `amount`, `currency`, `payer`, `seller`, `organizationId`, `sourceType`, `sourceId`, `paymentRequestId` never change | database trigger (section 3.2, 4.1) |
+| FI-03 | A payment has at most one **successful gateway `PaymentAttempt`**. Cash settlement is not represented as a successful gateway `PaymentAttempt`; it is a separate settlement path represented by the authorized/confirmed `CashPayment` state (see FI-05) | a new attempt can only start from `created`, and `succeeded` is terminal for the payment (section 5.1, 5.2) |
+| FI-04 | If `succeededAttemptId` is set, it references an attempt belonging to the **same** payment, and that attempt is itself `succeeded` | the transition that sets it, set once (section 4.1, 12.2) |
+| FI-05 | A payment settles through **exactly one** of: a gateway attempt, or an authorized cash confirmation — never both | "one open collection at a time": starting an attempt and submitting cash both require status `created` (section 5.1) |
+| FI-06 | A `succeeded` payment retains no other unresolved collection path capable of producing a second settlement | the existing handling of `initiated`/`submitted`/`unknown` attempts, cash awaiting review, late success and conflict/reconciliation; no new state is introduced for this (section 5.1, 5.2, 5.3) |
+| FI-07 | Total refunds in `requested`, `processing` or `succeeded` never exceed the original payment amount, even under concurrent refund requests | the refund cap trigger that locks the payment row (section 4.4); scope stays full-refund-only until O-6 **[B]** approves partial refunds |
+| FI-08 | A refund belongs only to a **succeeded** payment; pending, failed, cancelled or expired payments cannot be refunded | the `succeeded`-only constraint on refund creation (section 4.4, 5.4) |
+| FI-09 | A provider transaction id (`provider`, `providerTransactionId`) belongs to at most one payment attempt | unique index (section 4.2) |
+| FI-10 | A provider refund transaction id (`provider`, `providerRefundId`) belongs to at most one refund attempt | unique index (section 4.5) |
+| FI-11 | Terminal payment states (`succeeded`, `failed`, `cancelled`, `expired`) never transition back into the lifecycle; a refund never moves the original payment out of `succeeded` | the state machine (section 5.1); refund history lives in `refund` rows only (section 5.4) |
+| FI-12 | A payment becomes `succeeded` only through a verified provider webhook, a verified server-side provider status query, or an authorized cash confirmation — never a client assertion alone | section 5.1, 7, 8 |
+| FI-13 | A provider success is applied only when its amount and currency match the immutable payment snapshot; a mismatch is never applied silently | treated as a `conflict`, routed to reconciliation, and raises an alert; no new payment state is introduced for this (section 5.1 "late success", 12, 13.1) |
+| FI-14 | A refund's currency equals its payment's currency | field definition (section 4.4) |
+| FI-15 | Financial amounts are `bigint` minor currency units against an ISO 4217 currency code; floating-point monetary arithmetic is forbidden anywhere in the service | section 4, 4.8 |
+| FI-16 | For a state transition that this SDD declares event-producing, the state change and its transactional outbox event commit atomically, in the same transaction | section 4.9, 11, 12. This does **not** mean every internal transition publishes an event: `pending` and the other transitions section 11 marks as internal-only are deliberately not published |
+
+FI-06 and FI-13 are safety nets for cases the state machine already prevents in normal operation; they do not create new payment or
+attempt states.
+
 ## 5. State machines
 
 Terminal states are never left. Every transition is applied by a **conditional update** (`WHERE status = <expected>`) inside a transaction
@@ -245,7 +302,7 @@ test provider); success accepted from a client claim; cancelling or expiring whi
 * A verified `succeeded` for an attempt that the **resolver failed by inference** (`failureInferred = true`) is accepted: the attempt moves to `succeeded` and, if the payment is not terminal, the payment moves to `succeeded` (`succeededAttemptId` is set). An inferred failure is a guess, and a later fact from the provider wins.
 * A verified `succeeded` for an attempt the **provider itself confirmed as failed**, or for a payment that is already terminal in another way, is a **conflict**: the webhook is recorded (`conflict`), nothing changes silently, an alert is raised, and the case goes to manual reconciliation (money has moved and must be returned or matched by an operator, outside this phase [X]). The rules above prevent this in normal operation; it is the safety net.
 
-**What ends a payment as `failed` is partly a business question [B, O-19]:** the table above ends a payment only on the attempt limit or an adapter-declared unrecoverable payment; a *declined* attempt on its own returns the payment to `created`, so the payer can try again until the limit or expiry. The limit's value, and whether a decline should end the payment, are for O-19. Whether a **rejected cash submission ends the payment** or returns it to `created` (the default above) is [B, O-5].
+**What ends a payment as `failed` is partly a business question [B, O-19]:** the table above ends a payment only on the attempt limit or an adapter-declared unrecoverable payment; a *declined* attempt on its own returns the payment to `created`, so the payer can try again until the limit or expiry. The limit's value, and whether a decline should end the payment, are for O-19. Whether a **rejected cash submission ends the payment** or returns it to `created` (PROPOSED — NOT APPROVED default shown above) is [B, O-5].
 
 ### 5.2 PaymentAttempt
 
@@ -273,7 +330,7 @@ States: `submitted`, `confirmed`, `rejected` (the last two terminal).
 |---|---|---|---|---|
 | (none) | `submitted` | an authorized submitter [B, O-4] | `created` to `pending` | `cash_payment.submitted` |
 | `submitted` | `confirmed` | an explicitly authorized person [B, O-5], who is not the payer | `pending` to `succeeded`, `settledMethod = cash` | `cash_payment.confirmed` (then `payment.succeeded`) |
-| `submitted` | `rejected` | the same authority | `pending` to `created` (default; [B, O-5]) | `cash_payment.rejected` |
+| `submitted` | `rejected` | the same authority | `pending` to `created` (PROPOSED — NOT APPROVED default; [B, O-5]) | `cash_payment.rejected` |
 
 A second confirmation or rejection is refused (`409 cash_already_confirmed` or `cash_already_rejected`), never applied twice. Withdrawal of
 a submission by its submitter is [X].
@@ -320,6 +377,14 @@ half-recorded key: a concurrent duplicate blocks on the unique index until the f
 one rolls back, the second one runs. Keys expire after a configured retention (a recommended minimum of 24 hours, configuration with no
 business meaning); an expired key is treated as new, which is safe because **every money-moving creation is also protected by a permanent
 natural key** above. A replay returns the **original status code with the resource's current representation**.
+
+**Replay semantics, made explicit [T]:** when a request is replayed with the same key (the natural key of section 3.3/4.4, or the
+same `Idempotency-Key` **and** the same `requestHash`), the original operation is **not executed again**: no second financial side
+effect occurs, no second provider operation is initiated, and the original result is reused as-is; the response reuses the
+**original status code** together with the **current representation** of the original resource, per the table above. The same key
+presented with a **different** request hash or a different snapshot is always rejected as an idempotency conflict — never
+partially applied and never silently resolved either way — with the codes already listed above (`422 idempotency_key_reused`,
+`409 payment_request_conflict`, `409 refund_conflict`).
 
 Provider calls are not inside these transactions (section 12); a retried request after a crash returns the attempt as it now is
 (`initiated` or `unknown`), and the resolver settles it.
@@ -407,7 +472,7 @@ A `company` payer or seller has **no user relation** in this phase: it is reacha
 | Read a payment or its refunds | the `producer` (only its own payments) and the `payer` [T]. **Whether members of the payer or seller organization may read** (which exposes payer, amount and reference to them, including members of the organization named in `organizationId`) is a privacy and role decision | **[B, O-20]** (until decided, organization members have no read access) |
 | Start or sync an attempt | the `payer`; sync is also allowed to anyone with a read relation. For an organization payer, who may act for it is not decided | [T] for a user payer; **[B, O-18]** for an organization payer |
 | Submit cash | not decided | **[B, O-4]** |
-| Confirm or reject cash | not decided. **Controls proposed regardless of the model (proposed, not decided):** the confirmer is not the payer; the decision is recorded with the actor; it cannot be applied twice. Which relation and authority qualify (including for a `company` seller) is part of the decision | **[B, O-5]**; controls [T] |
+| Confirm or reject cash | not decided. **Controls proposed regardless of the model (PROPOSED — NOT APPROVED):** the confirmer is not the payer; the decision is recorded with the actor; it cannot be applied twice. Which relation and authority qualify (including for a `company` seller) is part of the decision | **[B, O-5]**; controls [T] |
 | Cancel | the `producer` only in this phase | [T] |
 | Request a refund | not decided | **[B, O-6]**; the refund cap is [D] |
 | Process a webhook | a valid provider signature | [D] |
@@ -415,6 +480,16 @@ A `company` payer or seller has **no user relation** in this phase: it is reacha
 
 How cash and refund authority will be *modeled* is itself part of the decision: for example an explicit designation kept by payment-service,
 a producer-supplied grant, or an approved use of an Auth capability. **None is chosen here** (O-5, O-6).
+
+### 8.5 What payment never trusts [D]
+
+Consolidating the rule stated in sections 8.1 and 16: a client-supplied `userId`, `organizationId`, `platformId`, role, permission,
+amount, currency or beneficiary is never trusted as authority or as fact. Authority always comes from a **relation** the caller has
+to the resource (section 8.3) plus the **operation rule** for that relation (section 8.4), never from a claim in the request body, a
+header, or a forwarded token. Where the operation rule itself is `[B]` (cash and refund authorization, organization-payer
+authorization, read access beyond producer and payer — O-4, O-5, O-6, O-18, O-20), the authority model is unresolved: under the
+guardrail of section 0.1, an implementation must not invent or assume one, and the corresponding endpoint stays unimplemented, or
+fails closed, until the decision is made.
 
 ## 9. API contract
 
@@ -466,7 +541,7 @@ Errors: `404`, `403`, `409 cash_already_confirmed`, `409 cash_already_rejected`,
 `pending` to `succeeded`. Events: `cash_payment.confirmed`, `payment.succeeded`.
 
 **8. Reject cash.** Body: `{ reason? }`. Same errors as 7. Transitions: cash `submitted` to `rejected`; payment `pending` to `created`
-(default, **[B, O-5]**). Event: `cash_payment.rejected`.
+(PROPOSED — NOT APPROVED default, **[B, O-5]**). Event: `cash_payment.rejected`.
 
 **9. Cancel payment.** No body. `200` with the payment. Errors: `404`, `403`, `409 payment_has_open_attempt`, `409 cash_submission_exists`, `409 invalid_state_transition`.
 Transition: `created` or `pending` to `cancelled`. Event: `payment.cancelled`.
@@ -603,7 +678,7 @@ attempts stuck in `initiated`, `unknown` or long-`submitted` beyond their thresh
 
 **Pay by gateway.** (1) The payer asks to start an attempt with an `Idempotency-Key`. (2) The guard asks Auth for the identity; `AuthorizationService` establishes the relation. (3) T1: lock the payment, require `created` and not expired, insert the attempt `initiated`, move the payment to `pending`, commit. (4) Call the provider with `merchantReference`. (5) T2: record `submitted` with the provider transaction id and return `nextAction`; or `failed`; or `unknown`. (6) The payer completes at the provider. (7) The provider sends a signed webhook: verify, persist, then transaction B locks the payment, checks amount and currency against the snapshot, sets the attempt and the payment to `succeeded`, records `succeededAttemptId`, and enqueues `payment.succeeded`. (8) If the webhook is late or lost, `sync` or the resolver reaches the same result from the provider's status.
 
-**Cash.** (1) An authorized submitter posts a cash submission (`created` to `pending`; `cash_payment.submitted`). (2) An authorized person confirms: one transaction sets the cash row `confirmed`, the payment `succeeded` with `settledMethod = cash`, and enqueues `cash_payment.confirmed` and `payment.succeeded`. (3) Or rejects: the cash row becomes `rejected` and the payment returns to `created` (default, O-5). A repeated decision returns `409` and changes nothing.
+**Cash.** (1) An authorized submitter posts a cash submission (`created` to `pending`; `cash_payment.submitted`). (2) An authorized person confirms: one transaction sets the cash row `confirmed`, the payment `succeeded` with `settledMethod = cash`, and enqueues `cash_payment.confirmed` and `payment.succeeded`. (3) Or rejects: the cash row becomes `rejected` and the payment returns to `created` (PROPOSED — NOT APPROVED default, O-5). A repeated decision returns `409` and changes nothing.
 
 **Refund.** (1) An authorized requester posts `clientReference` and an amount. (2) One transaction: lock the payment, require `succeeded`, check the capability and the cap (full refund only until O-6), insert the refund `requested`, enqueue `refund.requested`. (3) The refund attempt runs like a payment attempt against `succeededAttemptId`. (4) A verified result sets `succeeded` (`refund.succeeded`) or `failed` (`refund.failed`, reservation released). The refund resolver retries `requested` refunds and settles `unknown` refund attempts.
 
@@ -779,3 +854,28 @@ empty service migrations folder wired to the kit migrations, and tests for confi
 migration/readiness behaviour. **No table, endpoint or domain type from this document is created in that task.**
 
 The remaining order (schema and triggers, creation, test provider and attempts, webhooks, events, isolation, then cash after O-4 and O-5 and refunds after O-6) is planned per feature in TDDs (`docs/tdd/`), not here. Real gateways and settlement stay deferred.
+
+## 22. Implementation readiness gate
+
+This gate applies per feature, not to the document as a whole: a feature enters domain implementation only when, for **that**
+feature:
+
+1. every `[D]` and `[T]` prerequisite it needs is satisfied (including the service-kit prerequisites of section 21);
+2. no unresolved `[B]` decision is required by the code being written (section 0.1, 0.2); if one is, only the independent portion
+   proceeds and the business-dependent portion stays blocked or explicitly isolated;
+3. no `[X]` deferred functionality is implemented as a side effect of implementing something else;
+4. the financial invariants of section 4.10 that apply to the feature have corresponding enforcement (constraint, trigger,
+   transaction/lock, or application check) and a corresponding test in section 17;
+5. the authorization boundary for the operations being implemented is defined (section 8.4) — not `[B]` for those operations;
+6. idempotency behaviour for the operations being implemented is covered by tests (section 6, 17);
+7. provider success, timeout and conflict handling relevant to the feature is covered by tests (section 12, 13, 17), where the
+   feature touches a provider path;
+8. transactional outbox behaviour for the events the feature emits is covered by tests (section 4.9, 11, 17), where the feature
+   emits an event.
+
+This SDD is **not** fully approved for implementation as a whole: section 19 lists decisions still open. Cash (endpoints 6 to 8),
+refunds (endpoint 10), organization-payer flows, and production use of endpoint 1 by non-trusted producers each depend on at least
+one unresolved `[B]` decision (O-4, O-5, O-6, O-13, O-14, O-15, O-18, O-20) and remain blocked under this gate until that decision is
+recorded as `[D]`. The independent portions — the Stage 1 conversion, the schema and state machines, the test-provider gateway path
+with the test producer fixture, and the webhook pipeline — are not blocked by those decisions and may proceed under section 21's
+plan.
