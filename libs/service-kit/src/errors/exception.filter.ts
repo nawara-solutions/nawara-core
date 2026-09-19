@@ -7,13 +7,20 @@ export interface ErrorBody {
   statusCode: number;
   message: string | string[];
   error: string;
+  code?: string;
   requestId?: string;
 }
 
 const STATUS_TEXT: Record<number, string> = {
   400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 409: 'Conflict', 413: 'Payload Too Large',
-  422: 'Unprocessable Entity', 429: 'Too Many Requests', 500: 'Internal Server Error', 503: 'Service Unavailable',
+  422: 'Unprocessable Entity', 429: 'Too Many Requests', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable',
 };
+
+function codeOf(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const code = (raw as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
 
 function isClientHttpError(e: unknown): e is { status?: number; statusCode?: number } {
   if (typeof e !== 'object' || e === null) return false;
@@ -23,6 +30,8 @@ function isClientHttpError(e: unknown): e is { status?: number; statusCode?: num
 
 /**
  * One error shape for every Core service: Nest's `{ statusCode, message, error }` plus `requestId`.
+ * A stable, machine-readable `code` is additive and optional: throw `new HttpException({ message, code }, status)`
+ * and it passes through untouched; omit it and the body is unchanged from before.
  * Anything that is not an HttpException (database errors, bugs, provider failures) becomes an opaque 500: the real error
  * goes to the server log only. No stack, SQL text, constraint name or credential can reach a response.
  */
@@ -39,7 +48,8 @@ export class KitExceptionFilter implements ExceptionFilter {
       const status = exception.getStatus();
       const raw = exception.getResponse();
       const message = typeof raw === 'string' ? raw : ((raw as { message?: string | string[] }).message ?? exception.message);
-      body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', requestId };
+      const code = codeOf(raw);
+      body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', ...(code ? { code } : {}), requestId };
       if (status >= 500) this.logger.error('request failed', { status, error: exception.constructor.name });
     } else if (isClientHttpError(exception)) {
       // Errors raised by Express middleware (for example body-parser: payload too large, malformed JSON) carry an HTTP status.

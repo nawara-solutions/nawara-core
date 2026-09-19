@@ -31,4 +31,7 @@ export { EVENT_BUS, EVENT_NAME, type EventBus, type EventEnvelope, type EventHea
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
 export { RabbitMqEventBus, type RabbitMqOptions } from './events/rabbitmq-event-bus.js';
 
+export { RateLimitModule } from './rate-limit/rate-limit.module.js';
+export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';
+
 export { configureApp } from './bootstrap.js';

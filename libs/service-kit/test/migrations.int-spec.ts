@@ -36,11 +36,12 @@ describeWithEnv('migration runner (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
   it('applies the kit migrations, and a second run is a no-op', async () => {
     const first = await runMigrations(db.url, [kitMigrationsDir]);
-    expect(first.applied).toEqual(['kit_0001_outbox_inbox.sql']);
+    expect(first.applied).toEqual(['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql']);
     expect(await tableExists(db.url, 'outbox')).toBe(true);
     expect(await tableExists(db.url, 'inbox')).toBe(true);
+    expect(await tableExists(db.url, 'kit_rate_limit')).toBe(true);
     const second = await runMigrations(db.url, [kitMigrationsDir]);
-    expect(second).toEqual({ applied: [], alreadyApplied: ['kit_0001_outbox_inbox.sql'] });
+    expect(second).toEqual({ applied: [], alreadyApplied: ['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql'] });
   });
 
   it('orders files deterministically: directories in the order given, files by name', () => {

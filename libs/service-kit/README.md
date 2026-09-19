@@ -17,6 +17,7 @@ patterns from it without importing its code.
 | Service authentication | `ServiceTokenGuard` (per-caller tokens, SHA-256 digests, constant-time comparison, one generic 401), `HttpAuthClient` (asks Auth about the *end user*, live, fail closed) |
 | Database | `DbModule`/`DbService` (pool, `tx()`, readiness, graceful shutdown), explicit migration runner and `nawara-migrate` CLI |
 | Events | `OutboxService`, `OutboxRelay`, `InboxService`, `EventBus` port with `InMemoryEventBus` and `RabbitMqEventBus` |
+| Rate limiting | `RateLimitModule`/`RateLimitService`: Postgres-backed fixed-window limiter, generic bucket/identifier/rule — no business meaning, keys are hashed before storage |
 | HTTP baseline | `configureApp`: helmet, bounded JSON body, DTO whitelist (unknown fields rejected), error filter, shutdown hooks, CORS off unless exact origins are listed |
 | Testing | `@nawara/service-kit/testing`: `createTestDatabase` |
 
@@ -81,9 +82,24 @@ bus.subscribe({ queue: 'svc.thing', bindings: ['thing.*'], handler: (e) => inbox
 * A failing consumer dead-letters the message (`<queue>.dead`); nothing is dropped silently or retried in a hot loop.
 * An event published while **no queue is bound** is dropped by the broker (normal topic-exchange behaviour): consumers must declare their queue before events matter.
 
+## Rate limiting
+
+```ts
+// app.module.ts
+imports: [DbModule.forRoot({ ... }), RateLimitModule]
+
+// somewhere with RateLimitService injected
+await this.rateLimit.assert('signup', req.ip, { limit: 5, windowSec: 60 }); // throws 429 { code: 'rate_limited' } once over
+```
+
+* Bucket, identifier and rule are all supplied by the caller — the kit assigns no business meaning to any of them.
+* The counter increments on every `hit`/`assert` call, success or not, so a caller cannot probe for free.
+* Identifiers are hashed (sha256) before being stored; nothing raw (IP, email, token) sits in `kit_rate_limit`.
+* `reset()` clears one identifier's counter, for example after a legitimate success that should not count against it.
+
 ## Not in the kit (yet)
 
-Rate limiting, OpenAPI setup, a retry/delay policy for consumers beyond the dead-letter queue, outbox pruning, and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
+OpenAPI setup, a retry/delay policy for consumers beyond the dead-letter queue, outbox pruning, and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
 
 ## Tests
 

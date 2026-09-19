@@ -20,6 +20,12 @@ export class ProbeController {
   @Get('conflict') conflict() {
     throw new HttpException('already exists', 409);
   }
+  @Get('conflict-with-code') conflictWithCode() {
+    throw new HttpException({ message: 'already exists', code: 'already_exists' }, 409);
+  }
+  @Get('bad-gateway') badGateway() {
+    throw new HttpException('upstream provider failed', 502);
+  }
   @Get('boom') boom() {
     // Looks like a database error: SQL text, a constraint name and a credential-bearing connection string.
     throw new Error('duplicate key value violates unique constraint "payment_idem_uk" for postgres://svc:hunter2@db:5432/payment');
