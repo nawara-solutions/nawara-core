@@ -292,11 +292,14 @@ States: `created` (accepted, no open attempt or cash submission), `pending` (exa
 | `pending` | `cancelled` | producer service: cancel | **no attempt in `initiated`, `submitted` or `unknown`** (else `409 payment_has_open_attempt`) **and no cash submission in `submitted`** (else `409 cash_submission_exists`: the cash has physically changed hands and must be decided first) | no | `payment.cancelled` |
 | `created` | `expired` | expiry sweep | `now() >= expiresAt` | no | `payment.expired` |
 | `pending` | `expired` | expiry sweep | `now() >= expiresAt` **and no attempt in `initiated`, `submitted` or `unknown` and no cash submission in `submitted`** (money in flight, or cash awaiting review, must be resolved first; how long a cash review may stay open is **[B, O-5]**) | no | `payment.expired` |
+| `created` | `succeeded` | late success only: **verified** provider success for an attempt this SDD's resolver already failed **by inference** (`failureInferred = true`), after that inferred failure had already returned the payment to `created` | amount and currency equal the snapshot; the prior failure was inferred, never provider-confirmed (see "Late success" below) | no | `payment.succeeded` |
 
 **One open collection at a time [T]:** starting an attempt **and** submitting cash both require status `created`, so a payment can never have a gateway attempt and a cash submission open together (the second is refused with `409 payment_has_open_attempt` or `409 cash_submission_exists`). Both are also refused once `now() >= expiresAt`, even before the expiry sweep has run (`409 payment_expired`).
 
-Forbidden, among others: any move out of a terminal state; `created` to `succeeded` (success is only reached from `pending`, even for the
-test provider); success accepted from a client claim; cancelling or expiring while an attempt may still succeed.
+Forbidden, among others: any move out of a terminal state; success accepted from a client claim; cancelling or expiring while an
+attempt may still succeed. `created` to `succeeded` is forbidden as a **general** transition (success is reached from `pending`,
+even for the test provider) — the **only** exception is the narrow late-success case immediately below, where an attempt already
+failed by inference had already returned the payment to `created`.
 **Late success [T]:**
 
 * A verified `succeeded` for an attempt that the **resolver failed by inference** (`failureInferred = true`) is accepted: the attempt moves to `succeeded` and, if the payment is not terminal, the payment moves to `succeeded` (`succeededAttemptId` is set). An inferred failure is a guess, and a later fact from the provider wins.

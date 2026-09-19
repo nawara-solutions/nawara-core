@@ -49,6 +49,18 @@ describe('uniform error model', () => {
     expect(r.body).toEqual({ statusCode: 409, message: 'already exists', error: 'Conflict', requestId: r.headers['x-request-id'] });
   });
 
+  it('passes an additive machine-readable code through untouched, and omits it when the thrower did not supply one', async () => {
+    const withCode = await request(t.app.getHttpServer()).get('/probe/conflict-with-code').expect(409);
+    expect(withCode.body).toEqual({ statusCode: 409, message: 'already exists', error: 'Conflict', code: 'already_exists', requestId: withCode.headers['x-request-id'] });
+    const withoutCode = await request(t.app.getHttpServer()).get('/probe/conflict').expect(409);
+    expect(withoutCode.body.code).toBeUndefined();
+  });
+
+  it('has a 502 status text entry for provider-facing errors', async () => {
+    const r = await request(t.app.getHttpServer()).get('/probe/bad-gateway').expect(502);
+    expect(r.body).toEqual({ statusCode: 502, message: 'upstream provider failed', error: 'Bad Gateway', requestId: r.headers['x-request-id'] });
+  });
+
   it('turns an unexpected error into an opaque 500: no message, SQL, constraint name, stack or credential', async () => {
     t.logs.length = 0;
     const r = await request(t.app.getHttpServer()).get('/probe/boom').expect(500);

@@ -1,114 +1,99 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# payment-service
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Answers: **how was an obligation paid, by which method, and what is the payment state?** See
+[`docs/sdd/payment-service.md`](../../docs/sdd/payment-service.md) for the full design (data model,
+state machines, idempotency, authorization, events) and
+[`docs/architecture/financial-architecture.md`](../../docs/architecture/financial-architecture.md)
+for how it fits alongside billing-service and accounting-service. It is **not** the billing or
+accounting system: it never decides what is owed and keeps no ledger.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Status: Phase 1 (technical foundation)
 
-## Description
+Gateway-settlement lifecycle only. No cash, no refunds — see the SDD's "Implementation readiness
+gate" (section 22) and the `[B]`-gated decisions below. **Not production-ready**: no real gateway,
+no production traffic can reach any of this (the test provider refuses to start when
+`NODE_ENV=production`), and several `[B]` decisions remain open.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+### Implemented in Phase 1
 
-## Project setup
+- Service foundation on `@nawara/service-kit`: configuration, database connection/migration wiring,
+  `/health`/`/ready`, service-token authentication, a combined service-token-or-user guard, the event
+  bus (in-memory locally, RabbitMQ by configuration), a generic rate limiter, OpenAPI at
+  `/payment/docs` (basic auth, unmounted unless a password is configured), and raw-body capture for
+  the webhook route (Nest's `rawBody: true`, no kit change needed).
+- Schema: `currency`, `payment`, `payment_attempt`, `idempotency_key`, `webhook_event` — financial
+  invariants FI-01, FI-02, FI-03, FI-04, FI-09, FI-11 and the late-success edge of FI-12 enforced at
+  the database level (CHECK constraints, immutability and state-transition triggers), not just in
+  application code.
+- Payment lifecycle: `created → pending → succeeded/failed → created (retry) → expired`, natural-key
+  idempotency on `(producer, paymentRequestId)`, header-based idempotency for attempts.
+- Endpoints 1, 2, 3, 4, 5 of SDD section 9: create/get a payment, start/sync an attempt, provider
+  webhooks. (Endpoint 9, cancel, is `[T]` — implemented at the service layer, no HTTP route; see
+  "Deferred" below.)
+- The deterministic test provider (`success`, `failure`, `retry`, `timeout_before_accept`,
+  `timeout_after_accept`, plus signature verification), the provider port, and three background jobs
+  (`AttemptResolver`, `WebhookRetrier`, `ExpirySweeper`) with the same start/stop shape as the kit's
+  `OutboxRelay`.
+- Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
+  rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
+  silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
+  resolver and the webhook path all share.
+- Transactional outbox events: `payment.created`, `payment.succeeded`, `payment.failed`,
+  `payment.expired` (no `payment.cancelled` — cancel has no route yet).
+- 92 tests (unit + integration/e2e against a real PostgreSQL) plus 30 database-level invariant
+  assertions and 2 concurrency races in `db/tests/`, including the four required concurrency
+  scenarios: double-start, concurrent duplicate-success delivery, an expiry-vs-success race, and a
+  webhook-vs-resolver race.
+
+### Blocked by business decision (not implemented — see `docs/sdd/payment-service.md` section 19)
+
+- Cash submissions and their confirm/reject flow — **O-4** (who may submit), **O-5** (who may
+  confirm/reject).
+- Refunds — **O-6** (who may refund; whether partial refunds are approved). FI-07/FI-08/FI-10/FI-14
+  (the refund invariants) have no enforcement yet because there is no refund table.
+- Producer service-token scopes and non-test-fixture producers — **O-13**, **O-14**.
+- Organization/platform/company hierarchy validation with no user context — **O-15**.
+- Any currency beyond the configured list, and a default/maximum payment lifetime — **O-10**, **O-16**.
+- Who may pay on behalf of an organization, and read access beyond producer/payer — **O-18**, **O-20**.
+
+### Deferred (`[X]`, SDD section 18)
+
+Real gateway adapters, organization payment accounts, settlement, payouts, fees, custody/wallet,
+merchant-of-record behaviour, full periodic reconciliation, admin/support tooling, the cancel HTTP
+route (implemented at the service layer only — flag if you want it exposed).
+
+### Known limitations
+
+- No rate limiting is actually wired onto payment routes yet (the kit's new `RateLimitModule` is
+  imported but no endpoint calls it — a follow-up, not a Phase 1 requirement).
+- Webhook "out of order" handling relies on `applyStatus`'s own idempotent no-ops rather than a
+  distinct `ignored_stale` outcome; functionally safe, less precisely observable than the SDD's fully
+  detailed table.
+- Observability (structured counters/alerts for stuck attempts, conflicts, outbox lag) is not built —
+  the background jobs log via Nest's `Logger` only.
+
+## Running locally
 
 ```bash
-$ npm install
+cp .env.example .env                  # edit AUTH_SERVICE_URL etc. for your setup
+docker compose --profile db up -d --wait postgres   # from the repo root
+npm run start:dev -w payment-service
 ```
 
-## Compile and run the project
+## Migrations
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+MIGRATION_DATABASE_URL=postgres://payment_migrator:...@localhost:5433/payment npm run migrate -w payment-service
 ```
 
-## Run tests
+Nothing migrates automatically at service start; `/ready` fails while a migration is pending (see
+`@nawara/service-kit`'s README for the full migration model).
+
+## Tests
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run test -w payment-service         # unit
+npm run test:e2e -w payment-service      # integration, against a real PostgreSQL (needs TEST_DATABASE_ADMIN_URL)
+npm run test:db -w payment-service       # database-level invariants and concurrency races (needs PGHOST/PGPORT/PGUSER/PGPASSWORD)
+npm run test:all -w payment-service      # all three
 ```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).

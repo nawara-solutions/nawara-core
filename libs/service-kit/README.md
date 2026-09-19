@@ -17,6 +17,7 @@ patterns from it without importing its code.
 | Service authentication | `ServiceTokenGuard` (per-caller tokens, SHA-256 digests, constant-time comparison, one generic 401), `HttpAuthClient` (asks Auth about the *end user*, live, fail closed) |
 | Database | `DbModule`/`DbService` (pool, `tx()`, readiness, graceful shutdown), explicit migration runner and `nawara-migrate` CLI |
 | Events | `OutboxService`, `OutboxRelay`, `InboxService`, `EventBus` port with `InMemoryEventBus` and `RabbitMqEventBus` |
+| Rate limiting | `RateLimitModule`/`RateLimitService`: Postgres-backed fixed-window limiter, generic bucket/identifier/rule — no business meaning, keys are hashed before storage |
 | HTTP baseline | `configureApp`: helmet, bounded JSON body, DTO whitelist (unknown fields rejected), error filter, shutdown hooks, CORS off unless exact origins are listed |
 | Testing | `@nawara/service-kit/testing`: `createTestDatabase` |
 
@@ -58,6 +59,7 @@ MIGRATION_DATABASE_URL=postgres://<svc>_migrator:...@host:5432/<svc> \
 
 * Nothing migrates at service start. `DbModule` can make `/ready` **fail while migrations are pending**, so an instance whose schema is behind does not take traffic.
 * Order is deterministic: directories in the order given, files by name; the kit's own files are named `kit_NNNN_*.sql`.
+* The kit also ships a generic, reusable `forbid_column_change()` trigger function (immutable-column enforcement): `CREATE TRIGGER x_immutable BEFORE UPDATE ON x FOR EACH ROW EXECUTE FUNCTION forbid_column_change('col1', 'col2')` in your own migration, once the kit's migrations have run.
 * Each file runs in **one transaction with its bookkeeping row** (files must not contain `BEGIN`/`COMMIT`); a failure rolls back and is not recorded.
 * An applied file whose contents later change is refused (checksum). Two runners at once are serialized (advisory lock).
 * Use the **migrator** role for this step and the least-privilege **runtime** role for the service (`DATABASE_URL`). See `infra/postgres`.
@@ -81,9 +83,24 @@ bus.subscribe({ queue: 'svc.thing', bindings: ['thing.*'], handler: (e) => inbox
 * A failing consumer dead-letters the message (`<queue>.dead`); nothing is dropped silently or retried in a hot loop.
 * An event published while **no queue is bound** is dropped by the broker (normal topic-exchange behaviour): consumers must declare their queue before events matter.
 
+## Rate limiting
+
+```ts
+// app.module.ts
+imports: [DbModule.forRoot({ ... }), RateLimitModule]
+
+// somewhere with RateLimitService injected
+await this.rateLimit.assert('signup', req.ip, { limit: 5, windowSec: 60 }); // throws 429 { code: 'rate_limited' } once over
+```
+
+* Bucket, identifier and rule are all supplied by the caller — the kit assigns no business meaning to any of them.
+* The counter increments on every `hit`/`assert` call, success or not, so a caller cannot probe for free.
+* Identifiers are hashed (sha256) before being stored; nothing raw (IP, email, token) sits in `kit_rate_limit`.
+* `reset()` clears one identifier's counter, for example after a legitimate success that should not count against it.
+
 ## Not in the kit (yet)
 
-Rate limiting, OpenAPI setup, a retry/delay policy for consumers beyond the dead-letter queue, outbox pruning, and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
+OpenAPI setup, a retry/delay policy for consumers beyond the dead-letter queue, outbox pruning, and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
 
 ## Tests
 

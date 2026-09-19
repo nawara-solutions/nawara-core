@@ -54,3 +54,7 @@ if requirements change significantly later, write a new TDD for that follow-up w
 | [operator-login-and-confirmation](./operator-login-and-confirmation.md) | Draft |
 | [operator-administration](./operator-administration.md) | Draft |
 | [rate-limiting-baseline](./rate-limiting-baseline.md) | Implemented |
+| [payment-service-foundation](./payment-service-foundation.md) | Implemented |
+| [payment-creation-and-read](./payment-creation-and-read.md) | Implemented |
+| [payment-attempts-and-provider](./payment-attempts-and-provider.md) | Implemented |
+| [payment-webhooks-and-events](./payment-webhooks-and-events.md) | Implemented |
