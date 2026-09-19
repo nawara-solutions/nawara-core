@@ -45,11 +45,19 @@ describe('loadBillingConfig', () => {
     for (const bad of ['TN', 'TNDD', 'T1D', ',', 'tnd;usd']) expect(refusal({ ...BASE, BILLING_SUPPORTED_CURRENCIES: bad })).toContain('BILLING_SUPPORTED_CURRENCIES');
   });
 
-  it('carries no domain configuration in Stage 1 (currencies, payment URL, limits arrive with their features)', () => {
+  it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3; the payment URL/token still arrive with Stage 4)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel',
-      'nodeEnv', 'port', 'rabbitmqUrl', 'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
+      'nodeEnv', 'port', 'rabbitmqUrl', 'rateLimits', 'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
     ]);
+  });
+
+  it('has safe default rate limits, tunable per deployment (technical values, no business meaning)', () => {
+    expect(loadBillingConfig(BASE).rateLimits).toEqual({ invoiceCreatePerMinute: 300, paymentRequestCreatePerMinute: 30 });
+    expect(loadBillingConfig({ ...BASE, BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE: '5', BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE: '7' }).rateLimits).toEqual({
+      invoiceCreatePerMinute: 5,
+      paymentRequestCreatePerMinute: 7,
+    });
   });
 
   it.each(['DATABASE_URL', 'AUTH_SERVICE_URL'])('refuses a missing %s', (name) => {

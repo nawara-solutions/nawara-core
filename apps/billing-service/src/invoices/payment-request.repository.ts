@@ -56,6 +56,15 @@ export class PaymentRequestRepository {
     });
   }
 
+  /** The invoice's current active request, if any (BI-13: at most one), for the invoice representation's `activePaymentRequest`. */
+  async findActiveForInvoice(invoiceId: string): Promise<Pick<PaymentRequestRow, 'id' | 'status' | 'paymentId'> | null> {
+    const { rows } = await this.db.query<Pick<PaymentRequestRow, 'id' | 'status' | 'paymentId'>>(
+      `SELECT id, status, "paymentId" FROM payment_request WHERE "invoiceId" = $1 AND status = ANY($2::text[])`,
+      [invoiceId, [...ACTIVE_PAYMENT_REQUEST_STATUSES]],
+    );
+    return rows[0] ?? null;
+  }
+
   async findForCaller(requestId: string, caller: Caller): Promise<PaymentRequestRow> {
     const { rows } = await this.db.query<PaymentRequestRow & { producer: string; payerType: string; payerId: string }>(
       `SELECT pr.*, i.producer, i."payerType", i."payerId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1`,

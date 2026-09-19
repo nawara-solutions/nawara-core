@@ -364,8 +364,12 @@ SELECT pg_temp.expect_error('BI-21', 'a currency row cannot be deleted', $$DELET
 SELECT pg_temp.assert_eq('BI-21', 'TND still has three decimals (historical amounts are not re-scaled)', (SELECT exponent::text FROM currency WHERE code = 'TND'), '3');
 
 -- =================================================================================================================== catalog, receipts and structural rules
-SELECT pg_temp.expect_error('CATALOG', 'a duplicate product code for one seller is refused', format($$INSERT INTO product ("sellerType", "sellerId", code, name)
-  SELECT "sellerType", "sellerId", code, 'dup' FROM product WHERE id = %L$$, :'d1_product'), '23505', 'product_code_unique');
+SELECT pg_temp.expect_error('CATALOG', 'a duplicate product code for one seller is refused', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name)
+  SELECT producer, "sellerType", "sellerId", code, 'dup' FROM product WHERE id = %L$$, :'d1_product'), '23505', 'product_code_unique');
+-- Stage 3 addition: the producer isolation column (SDD section 11, migration 0010), mirroring invoice.producer (BI-07 above).
+SELECT pg_temp.expect_error('CATALOG', 'a product with no producer is refused', $$INSERT INTO product ("sellerType", "sellerId", code, name) VALUES ('organization', '00000000-0000-4000-8000-0000000000a1', 'no-producer', 'X')$$, '23502');
+SELECT pg_temp.expect_error('CATALOG', 'a producer of the wrong shape is refused', $$INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('Not Valid!', 'organization', '00000000-0000-4000-8000-0000000000a1', 'bad-producer', 'X')$$, '23514', 'product_producer_shape');
+SELECT pg_temp.expect_error('CATALOG', 'a product producer cannot be changed', format($$UPDATE product SET producer = 'someone-else' WHERE id = %L$$, :'d1_product'), '23514');
 SELECT pg_temp.expect_error('CATALOG', 'a duplicate price reference for one product is refused', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval")
   SELECT "productId", "clientReference", currency, "unitAmount", "interval" FROM price WHERE id = %L$$, :'d1_line_price'), '23505', 'price_reference_unique');
 SELECT pg_temp.expect_error('CATALOG', 'a recurring price needs its interval unit and count', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval")

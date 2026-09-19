@@ -131,7 +131,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     const invoices = t.app.get(InvoiceRepository);
     const requests = t.app.get(PaymentRequestRepository);
     const org = crypto.randomUUID();
-    const product = (await db.query(`INSERT INTO product ("sellerType", "sellerId", code, name) VALUES ('organization', $1, 'plan-a', 'Plan A') RETURNING id`, [org])).rows[0].id;
+    const product = (await db.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('test-producer', 'organization', $1, 'plan-a', 'Plan A') RETURNING id`, [org])).rows[0].id;
     const priceId = (await db.query(`INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval") VALUES ($1, 'p1', 'TND', 2500, 'one_time') RETURNING id`, [product])).rows[0].id;
     const ctx = { actor: { type: 'service' as const, id: 'test-producer' }, cause: { type: 'request' as const, id: 'r1' } };
     const input = normaliseCreateInvoiceInput({

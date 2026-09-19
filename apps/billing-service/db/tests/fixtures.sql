@@ -11,7 +11,7 @@ $$;
 CREATE FUNCTION t_mk_price(unit bigint DEFAULT 1000) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE pid uuid; prid uuid;
 BEGIN
-  INSERT INTO product ("sellerType", "sellerId", code, name) VALUES ('organization', '00000000-0000-4000-8000-0000000000a1', 'p'||substr(md5(random()::text), 1, 10), 'A product') RETURNING id INTO pid;
+  INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('billing-test', 'organization', '00000000-0000-4000-8000-0000000000a1', 'p'||substr(md5(random()::text), 1, 10), 'A product') RETURNING id INTO pid;
   INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval") VALUES (pid, substr(md5(random()::text), 1, 12), 'TND', unit, 'one_time') RETURNING id INTO prid;
   RETURN prid;
 END $$;

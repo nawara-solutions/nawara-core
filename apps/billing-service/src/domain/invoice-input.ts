@@ -136,3 +136,77 @@ export function normaliseCreateInvoiceInput(raw: unknown): NormalisedCreateInvoi
 
   return { invoiceRequestId, seller, payer, organizationId, sourceType: raw.sourceType, sourceId: raw.sourceId, description, dueAt, issuerSnapshot, billToSnapshot, lines };
 }
+
+const LOCALE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$/;
+/** No producer-configured allow-list exists yet (SDD section 36: deferred to a later stage); this is a plain technical default, not a business choice. */
+export const DEFAULT_INVOICE_LOCALE = 'en';
+
+export interface NormalisedIssueInvoiceInput {
+  locale: string;
+}
+
+/**
+ * Validates the OPTIONAL body of endpoint 10 (`POST .../issue`). The SDD's own text says the endpoint takes "no body"
+ * (section 18.1) while the presentation snapshot needs a locale (section 9, BI-20); its TDD note (billing-service-domain-schema,
+ * "Notes for the SDD owner" #2) leaves the resolution to Stage 3: "the repository takes them as a parameter; Stage 3 must
+ * decide where they come from (service default or an optional body)". This is that Stage 3 decision, and it is [T], not
+ * [B]: no business policy is chosen — a producer that cares may name its own locale; one that does not gets the default.
+ * The TEMPLATE is never client-supplied: the presentation designer is deferred (section 36), so only the frozen built-in
+ * default (`SYSTEM_TEMPLATE_V1`) is ever used in this phase.
+ */
+export function normaliseIssueInvoiceInput(raw: unknown): NormalisedIssueInvoiceInput {
+  if (raw === undefined || raw === null) return { locale: DEFAULT_INVOICE_LOCALE };
+  if (!isObject(raw)) throw bad('the request must be an object');
+  for (const k of Object.keys(raw)) if (k !== 'locale') throw bad(`unknown field: ${k}`);
+  if (raw.locale === undefined) return { locale: DEFAULT_INVOICE_LOCALE };
+  if (typeof raw.locale !== 'string' || !LOCALE.test(raw.locale)) throw bad('locale must be a language tag such as fr or ar-TN');
+  return { locale: raw.locale };
+}
+
+export interface NormalisedInvoiceListFilters {
+  status?: string;
+  sourceType?: string;
+  sourceId?: string;
+  payerType?: string;
+  payerId?: string;
+  dueBefore?: Date;
+}
+
+const INVOICE_STATUS = new Set(['draft', 'open', 'paid', 'void']);
+
+/**
+ * Validates the OPTIONAL query filters of endpoint 9 (`?status=&sourceType=&sourceId=&payerType=&payerId=&dueBefore=`).
+ * These narrow the caller's own scope; they never widen it (the repository ANDs them onto the scope clause, section 18.1).
+ * An invalid value is a 400: a filter is never silently ignored, which could otherwise make a caller believe a filter
+ * excluded rows that a typo actually let through.
+ */
+export function normaliseInvoiceListFilters(raw: Record<string, unknown>): NormalisedInvoiceListFilters {
+  const out: NormalisedInvoiceListFilters = {};
+  if (raw.status !== undefined) {
+    if (typeof raw.status !== 'string' || !INVOICE_STATUS.has(raw.status)) throw bad('status must be draft, open, paid or void');
+    out.status = raw.status;
+  }
+  if (raw.sourceType !== undefined) {
+    if (typeof raw.sourceType !== 'string' || !SOURCE_TYPE.test(raw.sourceType)) throw bad('sourceType must match ^[a-z][a-z0-9_]{1,62}$');
+    out.sourceType = raw.sourceType;
+  }
+  if (raw.sourceId !== undefined) {
+    if (typeof raw.sourceId !== 'string' || raw.sourceId.length < 1 || raw.sourceId.length > 128) throw bad('sourceId must be 1 to 128 characters');
+    out.sourceId = raw.sourceId;
+  }
+  if (raw.payerType !== undefined) {
+    if (typeof raw.payerType !== 'string' || !PARTY_TYPES.includes(raw.payerType)) throw bad('payerType must be user, organization or company');
+    out.payerType = raw.payerType;
+  }
+  if (raw.payerId !== undefined) {
+    if (typeof raw.payerId !== 'string' || raw.payerId.length < 1 || raw.payerId.length > 128) throw bad('payerId must be 1 to 128 characters');
+    out.payerId = raw.payerId;
+  }
+  if (raw.dueBefore !== undefined) {
+    if (typeof raw.dueBefore !== 'string' || !OFFSET_TIMESTAMP.test(raw.dueBefore)) throw bad('dueBefore must be an absolute timestamp with an offset');
+    const d = new Date(raw.dueBefore);
+    if (Number.isNaN(d.getTime())) throw bad('dueBefore must be an absolute timestamp with an offset');
+    out.dueBefore = d;
+  }
+  return out;
+}

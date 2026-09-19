@@ -53,14 +53,21 @@ describeWithEnv('health and readiness (real PostgreSQL)', ['TEST_DATABASE_ADMIN_
     }
   });
 
-  it('exposes no domain route in Stage 1: the only routes are the infrastructure endpoints', async () => {
+  it('exposes the Stage 3 domain routes (authenticated), and no route for what is still deferred (entitlement is Stage 8)', async () => {
     const t: TestApp = await createTestApp({ databaseUrl: db.url });
     try {
-      for (const path of ['/billing/invoices', '/billing/products', '/billing/prices', '/billing/payment-requests', '/billing/licenses/x/status', '/billing']) {
+      // Real routes now exist: unauthenticated is 401 (the guard runs before any handler), never 404.
+      await request(t.app.getHttpServer()).get('/billing/invoices').expect(401); // list (endpoint 9)
+      for (const path of ['/billing/invoices', '/billing/products', '/billing/prices']) {
+        await request(t.app.getHttpServer()).post(path).send({}).expect(401);
+      }
+      // There is deliberately no list route for products or prices (SDD 18.1: only create/get/archive, create/get/retire).
+      for (const path of ['/billing/products', '/billing/prices']) {
         await request(t.app.getHttpServer()).get(path).expect(404);
       }
-      for (const path of ['/billing/invoices', '/billing/products', '/billing/prices']) {
-        await request(t.app.getHttpServer()).post(path).send({}).expect(404);
+      // Entitlement (endpoints 17, 18) is Stage 8: still no route, so still a 404 regardless of authentication.
+      for (const path of ['/billing/licenses/x/status', '/billing']) {
+        await request(t.app.getHttpServer()).get(path).expect(404);
       }
     } finally {
       await t.app.close();
