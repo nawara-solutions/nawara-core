@@ -27,7 +27,7 @@ describe('organization join codes, smart registration and membership approval', 
     t.http.post('/auth/register').send({ email: `u${uniq()}@a.test`, password: 'member password 1', joinCode, ...over });
   const resolve = (joinCode: string) => t.http.post('/auth/onboarding/resolve').send({ joinCode });
   const membershipOf = async (userId: string) =>
-    (await t.db.query(`SELECT id, status, "approvedBy", "rejectedBy", "isOrganizationAdmin" FROM organization_membership WHERE "userId"=$1`, [userId])).rows[0];
+    (await t.db.query(`SELECT id, status, audience, "approvedBy", "rejectedBy", "revokedBy", "isOrganizationAdmin" FROM organization_membership WHERE "userId"=$1`, [userId])).rows[0];
   const reach = (tokens: unknown, org: string) => t.http.get(`/auth/organizations/${org}/membership`).set(bearer(tokens as any));
   const approve = (tokens: unknown, org: string, id: string) => t.http.post(`/auth/organizations/${org}/memberships/${id}/approve`).set(bearer(tokens as any));
   const reject = (tokens: unknown, org: string, id: string) => t.http.post(`/auth/organizations/${org}/memberships/${id}/reject`).set(bearer(tokens as any));
@@ -121,8 +121,8 @@ describe('organization join codes, smart registration and membership approval', 
       const email = `student${uniq()}@a.test`;
       const r = await register(c.code, { email }).expect(201);
       expect(r.body.onboarding).toMatchObject({ audience: 'student', membershipStatus: 'active', requiresSubscription: true });
-      const u = (await t.db.query(`SELECT id, kind, role, "organizationId", "isActive" FROM "user" WHERE email=$1`, [email])).rows[0];
-      expect(u).toMatchObject({ kind: 'member', role: 'student', organizationId: w.orgSchool1, isActive: true });
+      const u = (await t.db.query(`SELECT u.id, u.kind, u.role, u."isActive", m."organizationId", m.audience FROM "user" u JOIN organization_membership m ON m."userId" = u.id WHERE u.email=$1`, [email])).rows[0];
+      expect(u).toMatchObject({ kind: 'member', role: 'member', organizationId: w.orgSchool1, audience: 'student', isActive: true });
       const m = await membershipOf(u.id);
       expect(m).toMatchObject({ status: 'active', approvedBy: null, rejectedBy: null });
       const pending = await t.db.query(`SELECT count(*)::int n FROM organization_membership WHERE "userId"=$1 AND status<>'active'`, [u.id]);
@@ -137,7 +137,7 @@ describe('organization join codes, smart registration and membership approval', 
       const email = `s${uniq()}@a.test`;
       await register(c.code, { email, audience: 'teacher' }).expect(400);
       await register(c.code, { email }).expect(201);
-      expect((await t.db.query(`SELECT role FROM "user" WHERE email=$1`, [email])).rows[0].role).toBe('student');
+      expect((await t.db.query(`SELECT m.audience FROM organization_membership m JOIN "user" u ON u.id = m."userId" WHERE u.email=$1`, [email])).rows[0].audience).toBe('student');
     });
 
     it('an organization-A code cannot be pointed at organization B or platform B', async () => {
@@ -146,7 +146,7 @@ describe('organization join codes, smart registration and membership approval', 
       await register(c.code, { email, organizationId: w.orgSchool2 }).expect(400);
       await register(c.code, { email, platformId: w.platformDrive }).expect(400);
       await register(c.code, { email }).expect(201);
-      expect((await t.db.query(`SELECT "organizationId" FROM "user" WHERE email=$1`, [email])).rows[0].organizationId).toBe(w.orgSchool1);
+      expect((await t.db.query(`SELECT m."organizationId" FROM organization_membership m JOIN "user" u ON u.id = m."userId" WHERE u.email=$1`, [email])).rows[0].organizationId).toBe(w.orgSchool1);
     });
   });
 
@@ -157,10 +157,12 @@ describe('organization join codes, smart registration and membership approval', 
       const m = await membershipOf(t1.id);
       expect(m.status).toBe('pending');
       const u = (await t.db.query(`SELECT kind, "isActive", role FROM "user" WHERE id=$1`, [t1.id])).rows[0];
-      expect(u).toEqual({ kind: 'member', isActive: true, role: 'teacher' }); // account valid; membership pending: different things
+      expect(u).toEqual({ kind: 'member', isActive: true, role: 'member' }); // account valid; membership pending: different things
+      expect((await membershipOf(t1.id)).audience).toBe('teacher'); // the label is on the relationship, not the identity
       await t.http.get('/auth/me').set(bearer(t1.tokens)).expect(200); // can authenticate
       const me = (await t.http.get('/auth/me').set(bearer(t1.tokens))).body;
-      expect(me.membership).toMatchObject({ organizationId: w.orgSchool1, status: 'pending' }); // the app can show "waiting for approval"
+      expect(me.memberships).toHaveLength(1);
+      expect(me.memberships[0]).toMatchObject({ organization: { id: w.orgSchool1 }, status: 'pending', audience: 'teacher' }); // the app can show "waiting for approval"
       await reach(t1.tokens, w.orgSchool1).expect(404); // no organization access
       // and no organization-admin surface either
       await t.http.get(`/auth/organizations/${w.orgSchool1}/memberships`).set(bearer(t1.tokens)).expect(404);
@@ -463,7 +465,9 @@ describe('member contact verification (behind REQUIRE_CONTACT_VERIFICATION)', ()
     const m = await newMember(false);
     expect(m.body.onboarding.contactVerificationRequired).toBe(true);
     await reach(m.tokens).expect(404);
-    expect((await t.http.get('/auth/me').set(bearer(m.tokens))).body.membership).toMatchObject({ status: 'active', contactVerified: false, contactVerificationRequired: true });
+    const me = (await t.http.get('/auth/me').set(bearer(m.tokens))).body;
+    expect(me.memberships[0]).toMatchObject({ status: 'active' });
+    expect(me).toMatchObject({ contactVerified: false, contactVerificationRequired: true });
     await t.http.post('/auth/contact/request-code').set(bearer(m.tokens)).expect(204);
     const ev = t.bus.last('member.contact_verification_requested');
     expect(ev).toMatchObject({ userId: m.id, channel: 'email', destination: m.email });

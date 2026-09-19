@@ -9,8 +9,8 @@ export interface UserRow {
   email: string | null;
   phone: string | null;
   passwordHash: string | null;
+  /** 'admin' for owners/operators (reserved word), the neutral 'member' for members. Never a business role. */
   role: string;
-  organizationId: string | null;
   isActive: boolean;
 }
 
@@ -33,7 +33,7 @@ export function toIdentifier(i: Identifier): { email: string } | { phone: string
   return { phone };
 }
 
-const COLS = `u.id, u.kind, u.email, u.phone, u."passwordHash", u.role, u."organizationId", u."isActive"`;
+const COLS = `u.id, u.kind, u.email, u.phone, u."passwordHash", u.role, u."isActive"`;
 
 @Injectable()
 export class UsersService {
@@ -53,15 +53,20 @@ export class UsersService {
     return rows[0] ?? null;
   }
 
+  /**
+   * A member identity. It carries NO organization and NO business role: the relationship to each organization is an
+   * OrganizationMembership row (with its own opaque `audience`), created by the caller in the SAME transaction. The
+   * database refuses (deferred) a member that ends a transaction without at least one membership.
+   */
   async createMember(
-    a: { email?: string; phone?: string; passwordHash: string; role: string; organizationId: string },
+    a: { email?: string; phone?: string; passwordHash: string },
     q: Queryable = this.db,
   ): Promise<UserRow> {
     try {
       const { rows } = await q.query<UserRow>(
-        `INSERT INTO "user"(kind, email, phone, "passwordHash", role, "organizationId")
-         VALUES ('member',$1,$2,$3,$4,$5) RETURNING id, kind, email, phone, "passwordHash", role, "organizationId", "isActive"`,
-        [a.email ?? null, a.phone ?? null, a.passwordHash, a.role, a.organizationId],
+        `INSERT INTO "user"(kind, email, phone, "passwordHash", role)
+         VALUES ('member',$1,$2,$3,'member') RETURNING id, kind, email, phone, "passwordHash", role, "isActive"`,
+        [a.email ?? null, a.phone ?? null, a.passwordHash],
       );
       return rows[0];
     } catch (e) {
@@ -74,7 +79,7 @@ export class UsersService {
   async createOwner(a: { companyId: string; email?: string; phone?: string; passwordHash: string }, q: Queryable): Promise<UserRow> {
     const { rows } = await q.query<UserRow>(
       `INSERT INTO "user"(kind, email, phone, "passwordHash", role) VALUES ('owner',$1,$2,$3,'admin')
-       RETURNING id, kind, email, phone, "passwordHash", role, "organizationId", "isActive"`,
+       RETURNING id, kind, email, phone, "passwordHash", role, "isActive"`,
       [a.email ?? null, a.phone ?? null, a.passwordHash],
     );
     await q.query(`INSERT INTO owner("userId","companyId") VALUES ($1,$2)`, [rows[0].id, a.companyId]);
@@ -85,7 +90,7 @@ export class UsersService {
     try {
       const { rows } = await q.query<UserRow>(
         `INSERT INTO "user"(kind, email, phone, role) VALUES ('operator',$1,$2,'admin')
-         RETURNING id, kind, email, phone, "passwordHash", role, "organizationId", "isActive"`,
+         RETURNING id, kind, email, phone, "passwordHash", role, "isActive"`,
         [a.email ?? null, a.phone ?? null],
       );
       await q.query(`INSERT INTO operator("userId","companyId") VALUES ($1,$2)`, [rows[0].id, a.companyId]);

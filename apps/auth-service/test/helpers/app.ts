@@ -49,7 +49,7 @@ export class CapturingLogger implements LoggerService {
 const RATE_BUCKETS = ['LOGIN_IP', 'LOGIN_IDENTIFIER', 'REGISTER_IP', 'REFRESH_IP', 'OWNER_VERIFY_OWNER', 'OWNER_VERIFY_IP', 'STEP_UP_OWNER', 'STEP_UP_IP',
   'FACTOR_ENROLL_OWNER', 'RECOVERY_IP', 'RECOVERY_IDENTIFIER', 'OPERATOR_REQUEST_IDENTIFIER', 'OPERATOR_REQUEST_IP', 'OPERATOR_VERIFY_IDENTIFIER',
   'OPERATOR_VERIFY_IP', 'OPERATOR_VERIFY_GLOBAL', 'OPERATOR_CONFIRM_IP',
-  'JOIN_CODE_RESOLVE_IP', 'JOIN_CODE_RESOLVE_GLOBAL', 'JOIN_CODE_MANAGE_ACTOR', 'MEMBERSHIP_OP_ACTOR', 'CONTACT_REQUEST_USER', 'CONTACT_VERIFY_USER', 'CONTACT_VERIFY_IP',
+  'JOIN_CODE_RESOLVE_IP', 'JOIN_CODE_RESOLVE_GLOBAL', 'JOIN_CODE_MANAGE_ACTOR', 'MEMBERSHIP_OP_ACTOR', 'MEMBERSHIP_JOIN_USER', 'CONTACT_REQUEST_USER', 'CONTACT_VERIFY_USER', 'CONTACT_VERIFY_IP',
   'INVITATION_RESOLVE_IP', 'INVITATION_RESOLVE_GLOBAL', 'INVITATION_ACCEPT_IP', 'INVITATION_MANAGE_ACTOR'];
 
 const rand = () => randomBytes(32).toString('base64');
@@ -130,16 +130,30 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
       const u = await dbs.tx((q) => users.createOwner({ companyId, email, passwordHash: hash }, q));
       return { id: u.id, email, password, companyId };
     },
-    /** A member with an ACTIVE membership (what registration through an auto-approved code produces). */
-    async member(organizationId: string, email: string, password = 'member password 1', role = 'student', status: 'pending' | 'active' | 'rejected' = 'active') {
+    /**
+     * A member identity with ONE membership (default active), created in one transaction as production does: a member
+     * must always have at least one membership. `audience` is only the opaque onboarding label on the membership.
+     */
+    async member(organizationId: string, email: string, password = 'member password 1', audience = 'student', status: 'pending' | 'active' | 'rejected' = 'active') {
       const hash = await passwords.hash(password);
-      const u = await users.createMember({ email, passwordHash: hash, role, organizationId });
-      if (status === 'active') {
-        await db.query(`INSERT INTO organization_membership("userId","organizationId",status,"approvedAt") VALUES ($1,$2,'active',now())`, [u.id, organizationId]);
-      } else if (status === 'pending') {
-        await db.query(`INSERT INTO organization_membership("userId","organizationId",status) VALUES ($1,$2,'pending')`, [u.id, organizationId]);
-      }
+      const u = await dbs.tx(async (q) => {
+        const user = await users.createMember({ email, passwordHash: hash }, q);
+        await ctx.addMembership(user.id, organizationId, audience, status, q);
+        return user;
+      });
       return { id: u.id, email, password };
+    },
+    /** Another organization relationship for an EXISTING user (one identity, many organizations). */
+    async addMembership(userId: string, organizationId: string, audience = 'student', status: 'pending' | 'active' | 'rejected' | 'revoked' = 'active', q: { query: (sql: string, p?: unknown[]) => Promise<unknown> } = db) {
+      if (status === 'active') {
+        await q.query(`INSERT INTO organization_membership("userId","organizationId",status,audience,"approvedAt") VALUES ($1,$2,'active',$3,now())`, [userId, organizationId, audience]);
+      } else if (status === 'pending') {
+        await q.query(`INSERT INTO organization_membership("userId","organizationId",status,audience) VALUES ($1,$2,'pending',$3)`, [userId, organizationId, audience]);
+      } else if (status === 'rejected') {
+        await q.query(`INSERT INTO organization_membership("userId","organizationId",status,audience,"rejectedAt","rejectedBy") VALUES ($1,$2,'rejected',$3,now(),$1)`, [userId, organizationId, audience]);
+      } else {
+        await q.query(`INSERT INTO organization_membership("userId","organizationId",status,audience,"approvedAt","revokedAt","revokedBy") VALUES ($1,$2,'revoked',$3,now(),now(),$1)`, [userId, organizationId, audience]);
+      }
     },
     /** A join code inserted directly (fast fixture). Returns the plaintext once, like the API does. */
     async joinCode(organizationId: string, o: { audience?: string; requiresApproval?: boolean; requiresSubscription?: boolean; maxUses?: number | null; createdBy?: string; expiresInDays?: number } = {}) {

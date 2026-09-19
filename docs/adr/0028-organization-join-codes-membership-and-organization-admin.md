@@ -4,6 +4,9 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** the state machine gains `revoked` and the audience label moves from `user.role` to `organization_membership.audience`; existing users can join with `POST /auth/onboarding/join`. See [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md).
+
+
 > **Extends** [ADR-0020](./0020-organization-entity-and-platform-scoped-management.md),
 > [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md),
 > [ADR-0026](./0026-authentication-is-not-entitlement.md) and

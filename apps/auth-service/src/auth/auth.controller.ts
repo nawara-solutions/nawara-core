@@ -7,6 +7,7 @@ import { NotFoundException } from '@nestjs/common';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { Actors, type AuthedRequest } from './auth.guard.js';
 import { AuthService } from './auth.service.js';
+import { ResolveJoinCodeDto } from '../onboarding/dto.js';
 import { LoginDto, RefreshDto, RegisterDto } from './dto.js';
 
 @ApiTags('auth')
@@ -29,6 +30,18 @@ export class AuthController {
   @ApiResponse({ status: 403, description: 'Bad/expired/exhausted code or unlicensed organization (same response for all).' })
   register(@Body() dto: RegisterDto, @Req() req: Request) {
     return this.auth.register(dto, this.client(req));
+  }
+
+  /** authenticated member */
+  @Post('onboarding/join')
+  @Actors('member')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Join ANOTHER organization with a join code, using the existing account (one identity, many organizations).' })
+  @ApiResponse({ status: 201, description: 'The onboarding context (membership pending or active). Creates no account; other memberships and the session are untouched.' })
+  @ApiResponse({ status: 403, description: 'Bad/expired/exhausted code or unlicensed organization (same response for all).' })
+  @ApiResponse({ status: 409, description: 'You already have a membership in that organization.' })
+  join(@Body() dto: ResolveJoinCodeDto, @Req() req: AuthedRequest) {
+    return this.auth.join(req.actor.userId, dto, this.client(req));
   }
 
   /** public */

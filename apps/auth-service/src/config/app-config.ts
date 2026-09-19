@@ -53,6 +53,7 @@ export type RateBucket =
   | 'join_code_resolve_global'
   | 'join_code_manage_actor'
   | 'membership_op_actor'
+  | 'membership_join_user'
   | 'contact_request_user'
   | 'contact_verify_user'
   | 'contact_verify_ip'
@@ -199,6 +200,16 @@ export function loadConfig(
     throw new ConfigError('INVITATION_MIN_MINUTES <= INVITATION_DEFAULT_MINUTES <= INVITATION_MAX_MINUTES must hold');
   }
 
+  const corsOrigins = (env.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const o of corsOrigins) {
+    let parsed: URL | undefined;
+    try { parsed = new URL(o); } catch { /* reported below */ }
+    // an exact origin only: no wildcard, no path/query/trailing slash, http(s) scheme (a typo must fail closed, not open)
+    if (o.includes('*') || !parsed || !['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== o) {
+      throw new ConfigError(`CORS_ORIGINS entries must be exact origins such as https://app.example.com (wildcards, paths and other schemes are refused); got "${o}"`);
+    }
+  }
+
   const docsPassword = src.get('SWAGGER_PASSWORD');
   if (docsPassword !== undefined && docsPassword.length < 16) {
     throw new ConfigError('SWAGGER_PASSWORD must be at least 16 characters');
@@ -208,7 +219,7 @@ export function loadConfig(
     env: nodeEnv,
     databaseUrl,
     trustProxy: env.TRUST_PROXY === 'true',
-    corsOrigins: (env.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    corsOrigins,
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),
     jwt: {
       secret: new Uint8Array(jwtSecret),
@@ -264,6 +275,7 @@ export function loadConfig(
       join_code_resolve_global: rule(env, 'JOIN_CODE_RESOLVE_GLOBAL', 1000, 60),
       join_code_manage_actor: rule(env, 'JOIN_CODE_MANAGE_ACTOR', 30, 3600),
       membership_op_actor: rule(env, 'MEMBERSHIP_OP_ACTOR', 120, 900),
+      membership_join_user: rule(env, 'MEMBERSHIP_JOIN_USER', 10, 3600),
       contact_request_user: rule(env, 'CONTACT_REQUEST_USER', 5, 3600),
       contact_verify_user: rule(env, 'CONTACT_VERIFY_USER', 10, 900),
       contact_verify_ip: rule(env, 'CONTACT_VERIFY_IP', 40, 900),

@@ -41,7 +41,7 @@ interface InvitationRow {
  *
  * Consuming one creates a `kind=member` with an ACTIVE membership carrying the generic
  * organization-management capability plus an opaque, platform-defined label. What that label MEANS
- * (a Nawara Drive "admin", another platform's "manager") is the platform's business, not Auth's.
+ * (a platform's "admin", another platform's "manager") is the platform's business, not Auth's.
  */
 @Injectable()
 export class InvitationService {
@@ -148,7 +148,7 @@ export class InvitationService {
     const passwordHash = await this.passwords.hash(dto.password);
 
     const result = await this.db.tx(async (q) => {
-      const user = await this.users.createMember({ email, phone, passwordHash, role: inv.invitationType, organizationId: inv.organizationId }, q);
+      const user = await this.users.createMember({ email, phone, passwordHash }, q);
       const now = this.clock.now();
       const { rows } = await q.query(
         `UPDATE organization_admin_invitation SET "consumedAt" = $2, "consumedBy" = $3
@@ -159,9 +159,9 @@ export class InvitationService {
       );
       if (!rows[0]) throw new ForbiddenException(ACCEPT_REFUSED); // lost the race, revoked, or expired meanwhile: rolls the user back
       await q.query(
-        `INSERT INTO organization_membership("userId","organizationId",status,"invitationId","requestedAt","approvedAt","approvedBy","isOrganizationAdmin","createdAt","updatedAt")
-         VALUES ($1,$2,'active',$3,$4,$4,$5,true,$4,$4)`,
-        [user.id, inv.organizationId, inv.id, now, inv.createdBy],
+        `INSERT INTO organization_membership("userId","organizationId",status,"invitationId",audience,"requestedAt","approvedAt","approvedBy","isOrganizationAdmin","createdAt","updatedAt")
+         VALUES ($1,$2,'active',$3,$6,$4,$4,$5,true,$4,$4)`,
+        [user.id, inv.organizationId, inv.id, now, inv.createdBy, inv.invitationType],
       );
       await this.audit.record({
         type: 'onboarding.admin_invitation.consumed', outcome: 'success', actorId: user.id, targetId: inv.id, ip: client.ip,

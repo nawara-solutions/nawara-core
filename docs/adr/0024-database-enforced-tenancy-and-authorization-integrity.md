@@ -4,6 +4,9 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** `user.organizationId`, `user_org_iff_member`, the `(userId, organizationId)` composite key and view `user_platform` are replaced by the membership model and view `member_platform` in [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md). Everything else here stands.
+
+
 > **Amends** (does not replace) [ADR-0009](./0009-platform-scoped-admin-accounts.md),
 > [ADR-0011](./0011-operator-time-boxed-login-code.md),
 > [ADR-0016](./0016-first-owner-bootstrap-command.md),

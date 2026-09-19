@@ -91,6 +91,16 @@ export class OrganizationController {
     return this.memberships.decide(this.actor(req), org, id, 'reject', this.ip(req));
   }
 
+  @Post('memberships/:membershipId/revoke')
+  @HttpCode(200)
+  @Actors('owner', 'operator', 'member')
+  @ApiOperation({ summary: 'Revoke an ACTIVE membership (active -> revoked, final). Clears the organization-management capability in the same statement; only this organization is affected.' })
+  @ApiResponse({ status: 409, description: 'Not an active membership.' })
+  @ApiResponse({ status: 404, description: 'Unknown, not yours, your own membership, or (for an organization admin) another administrator.' })
+  revoke(@Param('organizationId', ParseUUIDPipe) org: string, @Param('membershipId', ParseUUIDPipe) id: string, @Req() req: AuthedRequest) {
+    return this.memberships.revoke(this.actor(req), org, id, this.ip(req));
+  }
+
   @Post('memberships/:membershipId/admin')
   @HttpCode(204)
   @Actors('owner')

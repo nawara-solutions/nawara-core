@@ -66,4 +66,11 @@ describe('configuration and key management fail closed', () => {
     expect(loadConfig({ ...good(), RATE_OPERATOR_VERIFY_IDENTIFIER_LIMIT: '7' }).rate.operator_verify_identifier.limit).toBe(7);
     expect(() => loadConfig({ ...good(), RATE_LOGIN_IP_LIMIT: '0' })).toThrow(ConfigError);
   });
+  it('CORS_ORIGINS fails closed: exact http(s) origins only, never a wildcard, path or bare host; empty means CORS off', () => {
+    expect(loadConfig(good()).corsOrigins).toEqual([]);
+    expect(loadConfig({ ...good(), CORS_ORIGINS: 'https://a.test, http://localhost:3000' }).corsOrigins).toEqual(['https://a.test', 'http://localhost:3000']);
+    for (const bad of ['*', 'https://*.a.test', 'a.test', 'https://a.test/', 'https://a.test/path', 'ftp://a.test', 'null', 'https://a.test,*']) {
+      expect(() => loadConfig({ ...good(), CORS_ORIGINS: bad }), bad).toThrow(ConfigError);
+    }
+  });
 });

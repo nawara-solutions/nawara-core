@@ -19,8 +19,9 @@ describe('members, and the payment boundary (authentication is not entitlement)'
   it('registers a member (kind=member, in exactly one organization) from a join code and starts a session', async () => {
     const r = await reg({ email: 'reg@a.test' });
     expect(r.status).toBe(201);
-    const row = await t.db.query(`SELECT kind, "organizationId", role FROM "user" WHERE email='reg@a.test'`);
-    expect(row.rows[0]).toEqual({ kind: 'member', organizationId: w.orgSchool1, role: 'student' }); // all resolved server-side
+    const row = await t.db.query(`SELECT u.kind, u.role, m."organizationId", m.audience FROM "user" u JOIN organization_membership m ON m."userId" = u.id WHERE u.email='reg@a.test'`);
+    // all resolved server-side; the identity has NO organization and NO business role: the label lives on the membership
+    expect(row.rows[0]).toEqual({ kind: 'member', role: 'member', organizationId: w.orgSchool1, audience: 'student' });
     expect(t.bus.last('user.registered')).toMatchObject({ role: 'student', organizationId: w.orgSchool1 });
     expect(r.body.onboarding).toMatchObject({ audience: 'student', membershipStatus: 'active', requiresSubscription: true });
     await t.http.get('/auth/me').set(bearer(r.body)).expect(200);
@@ -118,8 +119,10 @@ describe('members, and the payment boundary (authentication is not entitlement)'
       const c = await t.joinCode(w.orgSchool1, { audience });
       await reg({ joinCode: c.code }).expect(201);
     }
+    const labels = await t.db.query(`SELECT DISTINCT audience FROM organization_membership`);
+    expect(labels.rows.map((r) => r.audience)).toEqual(expect.arrayContaining(['teacher', 'manager', 'school_admin']));
     const roles = await t.db.query(`SELECT DISTINCT role FROM "user" WHERE kind='member'`);
-    expect(roles.rows.map((r) => r.role)).toEqual(expect.arrayContaining(['teacher', 'manager', 'school_admin']));
+    expect(roles.rows.map((r) => r.role)).toEqual(['member']); // no business label on any identity
     // and having such a label grants nothing in auth's management surface
     const c = await t.joinCode(w.orgSchool1, { audience: 'school_admin' });
     const m = await reg({ joinCode: c.code });

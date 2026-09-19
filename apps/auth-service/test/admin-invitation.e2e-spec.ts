@@ -158,14 +158,15 @@ describe('organization admin invitations (privileged provisioning)', () => {
       expect(t.payment.calls.length).toBe(callsBefore); // no license question: an organization needs a member before it can pay
       expect(r.body.onboarding).toMatchObject({ invitationType: 'org_admin', membershipStatus: 'active', isOrganizationAdmin: true });
       const uid = (await userIdOf(email))!;
-      expect((await t.db.query(`SELECT kind, role, "organizationId", "isActive" FROM "user" WHERE id=$1`, [uid])).rows[0]).toEqual({ kind: 'member', role: 'org_admin', organizationId: w.orgSchool1, isActive: true });
+      expect((await t.db.query(`SELECT u.kind, u.role, u."isActive", m."organizationId", m.audience FROM "user" u JOIN organization_membership m ON m."userId" = u.id WHERE u.id=$1`, [uid])).rows[0])
+        .toEqual({ kind: 'member', role: 'member', isActive: true, organizationId: w.orgSchool1, audience: 'org_admin' }); // the label is on the membership
       const m = await membershipOf(uid);
       expect(m).toMatchObject({ status: 'active', isOrganizationAdmin: true, invitationId: inv.body.id, joinCodeId: null, approvedBy: ownerA.id });
       const row = await invitationRow(inv.body.id);
       expect(row.consumedBy).toBe(uid);
       expect(row.consumedAt).not.toBeNull();
       const me = (await t.http.get('/auth/me').set(bearer(r.body)).expect(200)).body;
-      expect(me.membership).toMatchObject({ organizationId: w.orgSchool1, status: 'active', isOrganizationAdmin: true });
+      expect(me.memberships[0]).toMatchObject({ organization: { id: w.orgSchool1 }, status: 'active', isOrganizationAdmin: true, audience: 'org_admin' });
       expect(t.bus.last('membership.admin_provisioned')).toMatchObject({ userId: uid, organizationId: w.orgSchool1, invitationType: 'org_admin' });
     });
 
@@ -184,7 +185,7 @@ describe('organization admin invitations (privileged provisioning)', () => {
       }
       const email = `ok${uniq()}@a.test`;
       await accept(inv.body.code, { email }).expect(201);
-      expect((await t.db.query(`SELECT "organizationId" FROM "user" WHERE email=$1`, [email])).rows[0].organizationId).toBe(w.orgSchool1);
+      expect((await t.db.query(`SELECT m."organizationId" FROM organization_membership m JOIN "user" u ON u.id = m."userId" WHERE u.email=$1`, [email])).rows[0].organizationId).toBe(w.orgSchool1);
     });
 
     it('a failed acceptance (duplicate account) does not burn the invitation', async () => {

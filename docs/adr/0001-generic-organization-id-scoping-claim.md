@@ -1,8 +1,11 @@
 # 0001. Generic `organizationId` as the multi-tenancy scoping claim
 
-- **Status:** Accepted
+- **Status:** Accepted (partially superseded by [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md))
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
+
+> **Forward note (2026-09-19):** the one-organization-per-member rule and the `organizationId` token claim are superseded in part by [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md): a user has N memberships and the token carries no organization.
+
 
 ## Context
 
