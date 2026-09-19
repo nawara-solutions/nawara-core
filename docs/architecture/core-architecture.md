@@ -173,7 +173,7 @@ Decision D3 ([ADR-0033](../adr/0033-service-to-service-authentication-and-user-i
 | auth | `user.registered`, `membership.requested/approved/rejected/revoked`, `member.contact_verification_requested`, operator/owner alerts | notification (delivery), audit, analytics |
 | organization | `organization.created`, `.updated`, `.suspended`, `.activated`, `.deactivated` | audit, search, analytics |
 | billing | `invoice.created/due/overdue/paid/voided` (`overdue` is emitted by a billing sweep of `dueAt`), `license.expired/reactivated/grace_issued`, `subscription.suspended/resumed/expired` | notification, accounting, audit, analytics |
-| payment | `payment.pending/succeeded/failed/refunded`, `refund.created/succeeded/failed`, `cash_payment.requested/confirmed/rejected` (renames the old design's `charge.cash_requested`) | billing (invoice paid, entitlement), accounting (journal entry), notification, audit, analytics |
+| payment | `payment.created/succeeded/failed/cancelled/expired`, `cash_payment.submitted/confirmed/rejected`, `refund.requested/succeeded/failed` (the authoritative catalog is in the [payment SDD](../sdd/payment-service.md); it supersedes the earlier `payment.pending`, `payment.refunded`, `refund.created` and `cash_payment.requested`) | billing (invoice paid, entitlement), accounting (journal entry), notification, audit, analytics |
 | accounting | `journal_entry.posted` (optional) | audit, analytics |
 | file | `file.uploaded`, `file.deleted` | audit, search, analytics |
 | every service | security/administrative events worth keeping | audit |

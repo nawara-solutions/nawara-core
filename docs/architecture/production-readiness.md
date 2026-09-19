@@ -11,9 +11,9 @@
 
 | Item | State |
 |---|---|
-| Formatting, lint, typecheck, unit, integration or migration checks in CI | **none**: no workflow runs them |
+| Formatting, lint, typecheck, unit, integration or migration checks in CI | at the time of the first assessment **none**; since PR #39 `core-ci.yml` runs lint, typecheck, unit, integration and build (not formatting) |
 | Docker build | `auth-service-docker-build.yml`: on pull requests it builds **and pushes** a `:develop` image; on push to `main` it builds, pushes `:production` and `:latest`, then deploys |
-| Deploy | SSH to the VPS, runs `deploy/provision-and-deploy.sh`, which is `set -euo pipefail`; the SSH step has `script_stop: true` |
+| Deploy | SSH to the VPS (`appleboy/ssh-action@v1`), runs `deploy/provision-and-deploy.sh`. Failure handling comes from `set -euo pipefail` in the remote script and in the provisioning script. (An earlier `script_stop: true` was **not** protection: it is not an input of `appleboy/ssh-action@v1`, GitHub reported it as unexpected, and it has been removed.) |
 | Other services | none has a workflow |
 
 **Gaps in the existing deploy (three, confirmed by reading the workflow):**
@@ -26,15 +26,20 @@
 **Decision (project owner, 2026-09-19):** fix all three in the same PR as the new CI workflow. No deploy is run or triggered by that
 work; merging to `main` is what exercises it, so the first deploy after it must be watched.
 
-**Implemented in that PR (not yet exercised on GitHub or in production):** the remote script starts with `set -euo pipefail` and logs out
+**Implemented in PR #39, and verified on GitHub on 2026-09-19 (see below):** the remote script starts with `set -euo pipefail` and logs out
 of the registry on exit; one concurrency queue (`production-deploy-core-api`, `cancel-in-progress: false`) covers the `:production`
 image publication, the automatic deployment and the manual one; the stale trigger is removed; the manual deploy is now restricted to
-`main`. Static checks in `scripts/` fail the build if any of this regresses.
+`main`. Static checks in `scripts/` fail the build if any of this regresses, including a use of the ignored `script_stop` input.
 
-**Implemented CI (`core-ci.yml`, matrix per workspace, PostgreSQL and RabbitMQ service containers):** format check, lint, typecheck, unit tests, integration
+**Verified on GitHub after the merge of PR #39:** Core CI passed (all six jobs) on the pull request and on `main`; the production
+deployment job passed (about 1m10s), the remote script ran under `set -euo pipefail` on the server, migrations `0001`–`0007` were
+reported already applied, the new container became healthy, and `GET /auth/health` returned HTTP 200 afterwards.
+**Still not verified:** the concurrency queue under two simultaneous deployments (only one has run, so queuing and never-cancelling are
+checked statically only) and the manual deploy workflow (never run).
+
+**Implemented CI (`core-ci.yml`, matrix per workspace, PostgreSQL and RabbitMQ service containers):** lint, typecheck, unit tests, integration
 tests, migration apply-from-scratch and rollback checks where a down migration exists, build, and simple architecture checks (no
-service importing another service's code; no product terms in Core service code). Formatting is not checked and ai-service (Python) has no job. **CI coverage is not claimed until the workflow has run
-on a pull request:** every command in it passed locally, but it has not executed on GitHub yet.
+service importing another service's code; no product terms in Core service code). Formatting is not checked and ai-service (Python) has no job. The workflow has run on GitHub: all six jobs passed on the pull request and on `main`.
 
 ## 2. Database access: least privilege
 
@@ -84,8 +89,8 @@ change, state existing data, backward compatibility, migration and deploy order,
 
 | Item | State |
 |---|---|
-| CI that runs lint, typecheck, tests, build (not formatting) | implemented; **NEEDS VERIFICATION** on GitHub |
-| Deploy: fail-fast on the piped script, concurrency queue, stale trigger removed | implemented and statically checked; **NEEDS VERIFICATION** at the first deploy after merge |
+| CI that runs lint, typecheck, tests, build (not formatting) | implemented and **verified on GitHub** (6 of 6 jobs passed) |
+| Deploy: fail-fast on the piped script, concurrency queue, stale trigger removed | implemented; the deploy passed under the new script; the concurrency queue itself is checked statically only |
 | Least-privilege database roles | local: implemented and verified; production: **NEEDS IMPLEMENTATION** (needs approval; changes production) |
 | Backup job and off-host copy | **NEEDS IMPLEMENTATION** |
 | Restore procedure | proven on a local scratch database only; **BLOCKER** until drilled on the real volume |

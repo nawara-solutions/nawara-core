@@ -43,7 +43,12 @@ export class FakePayment implements PaymentClient {
 export class CapturingLogger implements LoggerService {
   lines: string[] = [];
   private push(...a: unknown[]) { this.lines.push(a.map(String).join(' ')); }
-  log = this.push; error = this.push; warn = this.push; debug = this.push; verbose = this.push; fatal = this.push;
+  log = (...a: unknown[]) => this.push(...a);
+  error = (...a: unknown[]) => this.push(...a);
+  warn = (...a: unknown[]) => this.push(...a);
+  debug = (...a: unknown[]) => this.push(...a);
+  verbose = (...a: unknown[]) => this.push(...a);
+  fatal = (...a: unknown[]) => this.push(...a);
 }
 
 const RATE_BUCKETS = ['LOGIN_IP', 'LOGIN_IDENTIFIER', 'REGISTER_IP', 'REFRESH_IP', 'OWNER_VERIFY_OWNER', 'OWNER_VERIFY_IP', 'STEP_UP_OWNER', 'STEP_UP_IP',

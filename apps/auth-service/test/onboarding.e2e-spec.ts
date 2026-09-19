@@ -426,7 +426,7 @@ describe('organization join codes, smart registration and membership approval', 
       const mid = (await membershipOf(uid)).id;
       await approve(ownerA.tokens, w.orgSchool1, mid).expect(200);
       const ev = await t.db.query(`SELECT type, outcome, "actorId", "targetId", metadata FROM auth_audit_event WHERE type IN ('onboarding.join_code.used','membership.requested','membership.approved') AND ("actorId"=$1 OR "targetId"=$1)`, [uid]);
-      expect(ev.rows.map((r) => r.type).sort()).toEqual(['membership.approved', 'membership.requested', 'onboarding.join_code.used'].sort());
+      expect(ev.rows.map((r) => r.type).sort((a, b) => a.localeCompare(b))).toEqual(['membership.approved', 'membership.requested', 'onboarding.join_code.used'].sort((a, b) => a.localeCompare(b)));
       const approved = ev.rows.find((r) => r.type === 'membership.approved');
       expect(approved).toMatchObject({ actorId: ownerA.id, targetId: uid, outcome: 'success' });
       expect(approved.metadata).toMatchObject({ organizationId: w.orgSchool1, authority: 'owner' });

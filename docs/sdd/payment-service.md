@@ -1,750 +1,781 @@
 # payment-service
 
-> **Superseded in its financial parts (2026-09-19).** The financial model below (`Product`, `Charge`, `License`, `UserSubscription` inside one payment-service, a JWT `organizationId` claim, the forwarded admin JWT, fire-and-forget events) is replaced by [`docs/architecture/financial-architecture.md`](../architecture/financial-architecture.md) and ADR-0035 to ADR-0038: billing-service (what is owed, entitlements), payment-service (how money moved), accounting-service (accounting effect). Read this document only for the history and for the rules of ADR-0006, ADR-0007 and ADR-0008 that survive.
-
-
-- **Status:** Draft <!-- Draft | Reviewed | Implemented -->
+- **Status:** Draft, **for review**. Nothing here is implemented; `apps/payment-service` is still a NestJS starter (one `GET /` route).
 - **Owners:** Anwar (project owner)
-- **Related ADD:** [docs/add/payment-service.md](../add/payment-service.md)
-- **Related ADRs:** [0004](../adr/0004-synchronous-fail-closed-license-validation.md)
-  (`auth-service`'s assumed license-status contract, finalized here),
-  [0005](../adr/0005-bounded-time-license-subscription-revalidation.md) (`auth-service`'s
-  login/refresh calls into the endpoints below — **superseded by
-  [0026](../adr/0026-authentication-is-not-entitlement.md)**: `auth-service` no longer calls them at
-  login/refresh; platform services do),
-  [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) (the primary
-  decision this document implements),
-  [0007](../adr/0007-out-of-band-cash-payment-confirmation.md) (out-of-band cash payment
-  confirmation via Admin role),
-  [0008](../adr/0008-automatic-grace-license-on-license-lapse.md) (automatic 24-hour grace
-  license on organization license lapse),
-  [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) (`auth-service`'s
-  `Organization` entity and its `platformId` field, which ADR-0021 depends on),
-  [0021](../adr/0021-payment-service-platform-scoped-authorization.md) (synchronous, fail-closed
-  platform-scope check, against `auth-service`, for `payment-service`'s organization-scoped
-  admin actions).
+- **Related ADD:** [core-architecture.md](../architecture/core-architecture.md), [financial-architecture.md](../architecture/financial-architecture.md)
+  (root architecture documents). The old `docs/add/payment-service.md` is superseded in its financial parts.
+- **Related ADRs:** [0018](../adr/0018-rabbitmq-as-async-message-broker.md) (broker),
+  [0026](../adr/0026-authentication-is-not-entitlement.md) (authentication is not entitlement),
+  [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) (memberships; no organization in tokens),
+  [0032](../adr/0032-database-per-service-on-a-shared-server.md) (database per service),
+  [0033](../adr/0033-service-to-service-authentication-and-user-identity.md) (service tokens, identity asked of Auth),
+  [0034](../adr/0034-shared-service-kit-and-api-conventions.md) (service-kit and API conventions),
+  [0035](../adr/0035-financial-service-boundaries.md) (billing, payment, accounting),
+  [0036](../adr/0036-money-parties-and-source-references.md) (money, parties, source references),
+  [0037](../adr/0037-reliable-events-outbox-inbox.md) (outbox and inbox),
+  [0038](../adr/0038-entitlement-in-billing-service.md) (entitlement lives in billing).
+  ADR-0007 is **amended** for this service (its cash actor model changes) and ADR-0021 is superseded in part by ADR-0033 (the forwarded admin JWT).
 
-## Responsibility
+This document **replaces** the earlier payment SDD (superseded on 2026-09-19). The old text, including the sections earlier ADRs cite (for example the license-status contract of ADR-0004), is preserved in git history: `git show 126a52b:docs/sdd/payment-service.md`. It is the design contract
+for the implementation phase. It defines what can be defined and marks what cannot be decided from the repository.
 
-`payment-service` owns `Product`, `Charge`, `License`, and `UserSubscription` data, and answers
-two yes/no questions other services depend on: does an organization currently hold a valid
-license, and does a given user currently hold a valid individual subscription. It detects when
-an organization's license lapses or is renewed, and on each transition suspends or resumes
-every affected `UserSubscription` under that organization — freezing unused subscription time
-rather than losing it — and publishes events so `notification-service` can inform the affected
-users. Per `ADR-0008`, on a license's first lapse per renewal cycle it instead auto-issues a
-24-hour grace license, deferring suspension until that window also elapses. Per `ADR-0007`, it
-also owns the out-of-band cash-payment request/confirm/reject/list surface, gated by its own
-new `JwtAuthGuard`/`RolesGuard`. Per `ADR-0021`, the confirm/reject/list endpoints are further
-gated by a new `PlatformScopeService`, which synchronously confirms — against `auth-service` —
-that the target `Charge`'s organization belongs to the acting admin's own platform before the
-action proceeds.
+## 0. How to read this document
 
-It explicitly does **not** own:
+Every design point carries one marker:
 
-- What a `role` means, beyond the generic `admin`/non-`admin` distinction its own `RolesGuard`
-  checks, or which roles/users ever get a `UserSubscription` in the first place. That's entirely
-  a consuming-app decision (per `ADR-0006`); `payment-service` only ever observes whether a
-  `UserSubscription` row exists, never why.
-- Any `auth-service` data (`User`, `RefreshToken`, credentials). `organizationId` and `userId`
-  values stored here are opaque foreign references, stamped from the JWT at purchase time —
-  never resolved via a cross-service database query. Per `ADR-0021`, `payment-service` does now
-  make a live **API** call to `auth-service` to resolve an `organizationId`'s `platformId` for
-  its own three admin cash endpoints — this is a network call to `auth-service`'s API, never a
-  direct query against `auth-service`'s database, and it never stores the resulting `platformId`
-  anywhere in `payment-service`'s own schema.
-- Notification delivery. `payment-service` publishes domain events; translating those into an
-  actual push/SMS/email is entirely `notification-service`'s job.
-- The gateway purchase/checkout flow itself, and — now shared with `ADR-0007`'s cash-confirmation
-  flow — the `Charge → License`/`UserSubscription` issuance step a successful `Charge` hands off
-  to (out of scope per the ADD — see that document's Open questions).
+| Marker | Meaning |
+|---|---|
+| **[D]** | **Decided**: fixed by a decision of the project owner (decisions D1 to D4 and E1 to E4, accepted on 2026-09-19) or by the ADR that records it. ADRs 0031 to 0038 are still marked *Proposed* until merged into an accepted state, so "decided" here rests on the owner's acceptance. Do not change without a new decision. |
+| **[T]** | **Technically defined here**: a design detail derived from decided principles. It carries no business meaning and can be revised in this SDD. |
+| **[B]** | **Business or legal decision required**: not decided, not invented. The document states what depends on it. |
+| **[X]** | **Deferred**: consciously not part of this phase. |
 
-## Data model
+Reality check: payment-service today is a starter. The service-kit (`libs/service-kit`) provides configuration, request/correlation ids,
+logging, the error filter, `/health` and `/ready`, the service-token guard, the Auth client, database access, the migration runner,
+and the outbox/inbox with a RabbitMQ bus. **Everything in this SDD beyond those foundations is designed, not built.**
 
-```mermaid
-erDiagram
-    PRODUCT ||--o{ CHARGE : "purchased via"
-    CHARGE ||--o| LICENSE : "creates (org_license)"
-    CHARGE ||--o| USER_SUBSCRIPTION : "creates (individual_subscription)"
+## 1. Responsibility
 
-    PRODUCT {
-        uuid id PK
-        string type "org_license | individual_subscription | one_time"
-        string name
-        int priceAmount
-        string priceCurrency
-        timestamp createdAt
-    }
+**payment-service answers: how was an obligation paid, by which method, and what is the payment state?** [D, ADR-0035]
 
-    CHARGE {
-        uuid id PK
-        uuid productId FK
-        uuid payerId "userId the resulting License/UserSubscription is for"
-        uuid submittedByUserId "nullable; org-side caller who submitted a cash request"
-        string organizationId "nullable, denormalized"
-        string method "gateway | cash"
-        string gatewayProvider "nullable; flouci|konnect|paymee|stripe, required iff method=gateway"
-        string gatewayReference "nullable; required iff method=gateway"
-        int amount
-        string currency
-        string status "pending | succeeded | failed | refunded"
-        timestamp createdAt
-    }
+It owns: `Payment`, `PaymentAttempt`, `CashPayment`, `Refund`, `RefundAttempt`, `WebhookEvent`, `IdempotencyKey`, and its own
+`outbox` and `inbox`; the provider abstraction and the test provider; payment-domain authorization; reconciliation of payment state
+with providers.
 
-    LICENSE {
-        uuid id PK
-        string organizationId UK
-        uuid ownerId "userId who purchased it"
-        uuid chargeId FK
-        string type "standard | grace"
-        string status "active | expired"
-        timestamp expiresAt
-        timestamp createdAt
-        timestamp updatedAt
-    }
+It explicitly does **not** own, and must never become: an invoice or billing service (what is owed), the accounting ledger, a tax
+engine, a wallet or custody model, a subscription or entitlement service, or a copy of identity, membership or organization records.
 
-    USER_SUBSCRIPTION {
-        uuid id PK
-        uuid userId
-        string organizationId "denormalized from JWT at purchase time"
-        uuid chargeId FK
-        string status "active | suspended | expired"
-        timestamp expiresAt "nullable while suspended"
-        int frozenRemainingSeconds "nullable, set only while suspended"
-        timestamp createdAt
-        timestamp updatedAt
-    }
+| Concern | Owner |
+|---|---|
+| What is owed, why, how much, when due; entitlements | billing-service |
+| How money moved; payment and refund state | **payment-service** |
+| Accounting effect, ledger, tax | accounting-service |
+| Identity, sessions, membership | auth-service |
+| Delivery of notifications | notification-service |
+| Business meaning of `sourceType`/`sourceId` | the producing product service |
+
+## 2. Context
+
+```
+ Product service ──"a customer owes X for sourceType/sourceId"──> billing-service
+                                                                     │  POST /payment/payments   (service token, payment-request snapshot)
+                                                                     ▼
+ end user (payer) ── user bearer ──> payment-service ── verify identity and membership ──> auth-service (live)
+                                          │  │
+                                          │  └── provider port ──> gateway adapter (test provider first)   ◄── provider webhook (signed)
+                                          ▼
+                                    outbox ──> RabbitMQ (nawara.events) ──> billing (invoice paid), accounting (journal), notification, audit
 ```
 
-Notes:
+* payment-service **never calls billing**; billing learns outcomes from events, and may cancel a payment through the API [D, ADR-0035].
+* payment-service **never verifies a user token itself** and never forwards one; the user's bearer goes to Auth only [D, ADR-0033].
+* Nothing in payment-service reads another service's database or holds a foreign key into one [D].
 
-- `Product`/`Charge` are the generic catalog/transaction concepts from `CLAUDE.md`; their full
-  design (pricing rules, gateway-specific fields, refund handling) is out of scope here — only
-  the fields this feature depends on are shown. A successful `Charge` against an
-  `org_license`-type `Product` creates a `License` row; against an `individual_subscription`-type
-  `Product`, a `UserSubscription` row. The purchase flow that performs this creation is out of
-  scope (see the ADD).
-- `License.organizationId` is unique — one active license per organization at a time. `ownerId`
-  is the `userId` of the purchasing admin, used to address the `license.expired`/
-  `license.reactivated` notification (per `ADR-0006`).
-- `License.type` (per `ADR-0008`) defaults to `'standard'`. Because `organizationId` is already
-  unique, `LicenseLapseService` enforces "at most one auto-granted grace period per renewal
-  cycle" purely by inspecting this column on the existing row — no extra table or counter is
-  needed. A grace license reuses the same row and the same `chargeId` as the license it
-  succeeded; nothing about issuing grace creates a new `Charge` or a new `License` row. The
-  **only** place `type` ever reverts to `'standard'` is the future issuance mechanism writing a
-  real payment's result (`status = 'active'`, fresh `expiresAt`, fresh `chargeId`) — a real
-  payment arriving mid-grace simply upgrades the same row early.
-- `Charge.payerId` and `Charge.submittedByUserId` (per `ADR-0007`) answer different questions and
-  can diverge: `payerId` is who the resulting `License`/`UserSubscription` is *for*;
-  `submittedByUserId` is who actually called `POST /payment/charges/cash` on the organization's
-  behalf. For an `individual_subscription` cash request these are typically two different
-  people (the org submits on behalf of a beneficiary user); for an `org_license` cash request
-  they're typically the same person, but the field is populated explicitly either way, never
-  inferred. `submittedByUserId` is null for every `method = 'gateway'` charge.
-- `UserSubscription.organizationId` is denormalized from the JWT at purchase time specifically
-  so `LicenseLapseService` can find every subscription under a lapsing organization using only
-  `payment-service`'s own data — never a cross-service query (per `ADR-0006`).
-- `UserSubscription.expiresAt` and `frozenRemainingSeconds` are mutually exclusive in practice:
-  `active` rows have `expiresAt` set and `frozenRemainingSeconds` null; `suspended` rows have
-  the reverse. A `suspended` row's clock has stopped — only a resume operation restarts it.
-- No `auth-service` data (`User`, `RefreshToken`) is referenced by foreign key anywhere in this
-  schema — `userId`/`organizationId` columns are opaque strings, per the ADD's data-ownership
-  section.
+## 3. The payment request contract
 
-## Key interfaces / classes
+A **payment request** is the message by which an authorized producer (billing, in the architecture) asks payment-service to collect
+one obligation. **Billing owns the request's own lifecycle** (open, paid, cancelled: billing's SDD); **payment-service owns the
+resulting `Payment`.** Accepting the request *creates* the payment, and the payment's status is the request's status as seen by
+payment-service [T].
 
-```mermaid
-classDiagram
-    class LicensesController {
-      +getStatus(organizationId) LicenseStatusResponse
-    }
-    class LicensesService {
-      -licenseRepository: Repository~License~
-      +getStatus(organizationId) LicenseStatusResponse
-    }
-    class SubscriptionsController {
-      +getStatus(userId) SubscriptionStatusResponse
-    }
-    class SubscriptionsService {
-      -subscriptionRepository: Repository~UserSubscription~
-      -eventPublisher: EventPublisher
-      +getStatus(userId) SubscriptionStatusResponse
-      +suspendAllForOrganization(organizationId) void
-      +resumeAllForOrganization(organizationId) void
-    }
-    class LicenseLapseService {
-      -licenseRepository: Repository~License~
-      -subscriptionsService: SubscriptionsService
-      -eventPublisher: EventPublisher
-      +handleExpiry(organizationId) void
-      +handleReactivation(organizationId) void
-    }
-    class ChargesController {
-      +requestCashPayment(dto, callerOrgId, callerUserId) Charge
-      +confirmCashPayment(chargeId, callerPlatformId, bearerToken) Charge
-      +rejectCashPayment(chargeId, callerPlatformId, bearerToken) Charge
-      +listPendingCash(callerPlatformId, bearerToken) Charge[]
-    }
-    class ChargesService {
-      -chargeRepository: Repository~Charge~
-      -productsService: ProductsService
-      -eventPublisher: EventPublisher
-      -platformScopeService: PlatformScopeService
-      +requestCashPayment(dto, callerOrgId, callerUserId) Charge
-      +confirmCashPayment(chargeId, callerPlatformId, bearerToken) Charge
-      +rejectCashPayment(chargeId, callerPlatformId, bearerToken) Charge
-      +listPendingCash(callerPlatformId, bearerToken) Charge[]
-    }
-    class CreateCashChargeRequestDto {
-      +productId: string
-      +beneficiaryUserId: string?
-    }
-    class JwtAuthGuard {
-      +canActivate(context) boolean
-    }
-    class RolesGuard {
-      +canActivate(context) boolean
-    }
-    class PlatformScopeService {
-      -organizationLookupClient: OrganizationLookupClient
-      +assertOwnedByCallerPlatform(organizationId, callerPlatformId, bearerToken) void
-      +filterToCallerPlatform(charges, callerPlatformId, bearerToken) Charge[]
-    }
-    class OrganizationLookupClient {
-      +getOrganization(organizationId, bearerToken) OrganizationLookupResult?
-    }
-    class OrganizationLookupResult {
-      +id: string
-      +platformId: string
-    }
-    class EventPublisher {
-      +publish(eventName, payload) void
-    }
-    class LicenseStatusResponse {
-      +valid: boolean
-      +expiresAt: Date?
-    }
-    class SubscriptionStatusResponse {
-      +exists: boolean
-      +valid: boolean
-      +expiresAt: Date?
-    }
-    class License {
-      +id: string
-      +organizationId: string
-      +ownerId: string
-      +chargeId: string
-      +type: string
-      +status: string
-      +expiresAt: Date
-      +createdAt: Date
-      +updatedAt: Date
-    }
-    class UserSubscription {
-      +id: string
-      +userId: string
-      +organizationId: string
-      +status: string
-      +expiresAt: Date?
-      +frozenRemainingSeconds: number?
-      +createdAt: Date
-      +updatedAt: Date
-    }
-    class Charge {
-      +id: string
-      +productId: string
-      +payerId: string
-      +submittedByUserId: string?
-      +organizationId: string?
-      +method: string
-      +gatewayProvider: string?
-      +gatewayReference: string?
-      +amount: number
-      +currency: string
-      +status: string
-      +createdAt: Date
-    }
-    LicensesController --> LicensesService
-    LicensesService --> License
-    LicensesService ..> LicenseStatusResponse
-    SubscriptionsController --> SubscriptionsService
-    SubscriptionsService --> UserSubscription
-    SubscriptionsService ..> SubscriptionStatusResponse
-    SubscriptionsService --> EventPublisher
-    LicenseLapseService --> LicensesService
-    LicenseLapseService --> SubscriptionsService
-    LicenseLapseService --> EventPublisher
-    ChargesController --> JwtAuthGuard
-    ChargesController --> RolesGuard
-    ChargesController --> ChargesService
-    ChargesController ..> CreateCashChargeRequestDto
-    ChargesService --> Charge
-    ChargesService --> EventPublisher
-    ChargesService --> PlatformScopeService
-    PlatformScopeService --> OrganizationLookupClient
-    OrganizationLookupClient ..> OrganizationLookupResult
+### 3.1 Contract (request body of `POST /payment/payments`)
+
+| Field | Type and rule | Class | Notes |
+|---|---|---|---|
+| `paymentRequestId` | uuid, producer-generated | **authoritative** | Identity of the request and the natural idempotency key (with the calling service) [T] |
+| `sourceType` | string `^[a-z][a-z0-9_]{1,62}$` | authoritative (opaque) | The producer's vocabulary, for example `invoice`. Payment never interprets it [D, ADR-0036] |
+| `sourceId` | string, 1 to 128 characters | authoritative (opaque) | Id in the producer's system; no foreign key, no lookup [D] |
+| `payer` | `{ type, id }`, type in `user`, `organization`, `company` | **authoritative** | Who pays [D, ADR-0036] |
+| `seller` | `{ type, id }`, same types; must differ from `payer` | **authoritative** | Who is paid (merchant / issuer) [D] |
+| `organizationId` | uuid or null | **authoritative** | The organization context: the isolation boundary for access control, carried in events. If `seller.type` is `organization` it must equal `seller.id` [T] |
+| `amount` | integer minor units, 1 to 9007199254740991 | **authoritative** | JSON number; validated as a safe integer; stored as `bigint` [D, ADR-0036] |
+| `currency` | ISO 4217, upper case | **authoritative** | Must exist in the `currency` reference table of payment's database (section 4.8) and in the configured supported list [T]; the exponent comes from that table, never from code [D] |
+| `expiresAt` | absolute timestamp with offset, or null | authoritative | Drives expiry. A null value, and any default or maximum lifetime, is a policy question **[B, O-16]**; until decided a payment without `expiresAt` simply has no expiry and is watched by the stuck-payment alert (section 12) |
+| `description` | string, at most 140 characters | **descriptive** | Statement and display text only. Never used in a decision [T] |
+| `reference` | string, at most 64 characters | descriptive | For example an invoice number. Never used in a decision [T] |
+
+Not in the contract in this phase: line items, tax, fees, price rules, return URLs, allowed payment methods, customer contact data,
+and any product-specific field [X]. Method availability per seller is decided by payment configuration and providers, not by the request.
+
+### 3.2 Snapshot semantics [D]
+
+At acceptance the fields above are **copied into the `payment` row and are immutable** (database trigger). Later changes at the
+producer (an invoice voided, a price changed) do **not** alter an accepted payment; the producer must call `cancel` if it wants
+collection to stop. Payment never re-fetches, refreshes or validates the snapshot against the producer, so it cannot be affected by
+mutable billing data and never needs a synchronous call to billing during the payment lifecycle.
+
+### 3.3 Request status and idempotency [T]
+
+* Status = the payment's status (section 5.1). There is no second request table.
+* **Natural idempotency key:** `(calling service, paymentRequestId)` is unique and permanent. The same request repeated with an identical
+  snapshot returns the existing payment (`200`, header `Idempotent-Replayed: true`); the same id with a different snapshot is refused
+  (`409 payment_request_conflict`). No `Idempotency-Key` header is needed for creation.
+* The payment's own `createdAt` is Payment's clock (database time). The contract has no producer timestamp; a body with unknown fields is rejected (`400`).
+* **What an identical replay means:** the retry must carry the **same values for every field of section 3.1** (authoritative and descriptive). Any difference, including `expiresAt` or `description`, is a different snapshot and is refused with `409 payment_request_conflict`. A producer that must send a changed request uses a **new** `paymentRequestId`. For the same reason, after a payment ends as `failed`, `cancelled` or `expired`, billing needs a **new** `paymentRequestId` to try again: the natural key is permanent.
+* Version 1 restricts the schema to **one payment per payment request**. This is a **temporary technical restriction, not a policy**: whether partial payments are wanted is [B, O-7] (the architecture documents say they are "allowed by design, policy open"). If they are approved, the uniqueness is relaxed by a migration together with an invariant that the sum of succeeded payments never exceeds the request amount.
+
+## 4. Domain model
+
+All tables live in payment-service's **own database** and role (`payment_migrator` owns the schema, `payment_app` runs the service; ADR-0032).
+Times are `timestamptz` from the database clock. Ids are uuids generated by payment-service. Cross-service references (`payer`, `seller`,
+`organizationId`, `sourceType`, `sourceId`, user ids) are **opaque values with no foreign key** [D]. Foreign keys exist only inside
+this database. Money is `bigint` minor units plus `currency char(3)`; CHECK constraints enforce `amount > 0` and upper-case currency [D].
+
+### 4.1 Payment
+
+| Aspect | Definition |
+|---|---|
+| Purpose | One obligation to collect, created from one payment request; the aggregate that carries state, attempts, at most one cash submission, and refunds |
+| Ownership | payment-service |
+| Important fields | `id`, `producer` (calling service name), `paymentRequestId`, `sourceType`, `sourceId`, `payerType`/`payerId`, `sellerType`/`sellerId`, `organizationId`, `amount`, `currency`, `description`, `reference`, `expiresAt`, `status`, `statusReason`, `settledMethod` (`gateway` or `cash`, set on success), `succeededAttemptId` (the payment attempt that succeeded, for gateway payments; it is what a refund is executed against), `revision`, `createdAt`, `updatedAt`, `closedAt` |
+| Immutable | everything in the snapshot (`producer`, `paymentRequestId`, `source*`, `payer*`, `seller*`, `organizationId`, `amount`, `currency`, `description`, `reference`, `expiresAt`) and `createdAt`; enforced by trigger [D] |
+| Mutable | `status`, `statusReason`, `settledMethod`, `succeededAttemptId` (set once), `revision` (incremented on every state change, carried in events), `updatedAt`, `closedAt` |
+| Relationships | 1 to N `payment_attempt`; 0 or 1 active/confirmed `cash_payment`; 1 to N `refund` |
+| Lifecycle | section 5.1 |
+| Uniqueness | `UNIQUE (producer, paymentRequestId)` |
+| Idempotency | natural key above; creation is a no-op replay when identical |
+| Isolation | `organizationId`, `payer*` and `seller*` are the columns access is evaluated against (section 8); indexes on each |
+| Derived (never stored) | `refundedAmount` and `refundableAmount` are computed from `refund` rows, not kept as a counter [T] |
+
+### 4.2 PaymentAttempt
+
+| Aspect | Definition |
+|---|---|
+| Purpose | One try to collect through one provider. Keeps provider history separate from the business payment |
+| Fields | `id`, `paymentId`, `attemptNumber`, `provider`, `merchantReference` (= `id`, sent to the provider as its idempotency/merchant reference), `providerTransactionId` (null until the provider returns it), `status`, `failureCode`, `failureClass` (`retryable`, `terminal`, `ambiguous`), `failureInferred` (true when the failure was **inferred** by the resolver from a provider "no record" answer, false when the provider itself confirmed it), `providerData` (opaque, adapter-owned, **never a secret**), `initiatedAt`, `submittedAt`, `completedAt` |
+| Immutable | `paymentId`, `attemptNumber`, `provider`, `merchantReference`, `initiatedAt` |
+| Mutable | `status`, `providerTransactionId` (set once), `failure*`, `providerData`, timestamps |
+| Uniqueness | `UNIQUE (paymentId, attemptNumber)`; `UNIQUE (provider, providerTransactionId)` where not null; **at most one open attempt per payment** (partial unique index on `paymentId` where `status` in `initiated`, `submitted`, `unknown`) |
+| Idempotency | creation by `Idempotency-Key` (section 6); the provider call carries `merchantReference` so a repeated call cannot create a second provider transaction |
+| Isolation | inherits the payment's; reached only through it |
+
+### 4.3 CashPayment (a cash submission and its decision)
+
+| Aspect | Definition |
+|---|---|
+| Purpose | The workflow for money handed over outside any provider: submitted, then confirmed or rejected by an explicitly authorized person |
+| Fields | `id`, `paymentId`, `status`, `amount`, `currency` (equal to the payment's), `note` (at most 280 characters, descriptive), `submittedBy` (user id), `submittedAt`, `confirmedBy`, `confirmedAt`, `rejectedBy`, `rejectedAt`, `rejectionReason` (bounded text) |
+| Immutable | `paymentId`, `amount`, `currency`, `note`, `submittedBy`, `submittedAt`; a decision, once made, is never rewritten |
+| Mutable | `status` and the decision fields, once each (`submitted` to `confirmed` or `rejected`) |
+| Uniqueness | at most one `submitted` or `confirmed` cash submission per payment (partial unique index). A `rejected` one does not block a new submission [T, revisit with O-5] |
+| Constraints | exactly one of the confirm fields or the reject fields is set, and only in the matching status (CHECK); **proposed generic control, not decided [T, revisit with O-5]:** the confirmer differs from the payer when the payer is a `user` (trigger, because the payer lives on `payment`); "confirmer differs from submitter" and any **bound on repeated submissions after rejections** (cash resubmission is otherwise unbounded, because the attempt limit does not apply to cash) are **[B, O-5]** |
+| Idempotency | submit by `Idempotency-Key`; confirm and reject are idempotent by state (section 6) |
+| Isolation | inherits the payment's |
+
+### 4.4 Refund
+
+| Aspect | Definition |
+|---|---|
+| Purpose | A first-class return of money for one succeeded payment; never a flag on the payment [D] |
+| Fields | `id`, `paymentId`, `clientReference`, `amount`, `currency` (equal to the payment's), `reasonCode` (opaque, bounded), `note`, `status`, `failureCode`, `requestedByType`/`requestedById`, `requestedAt`, `completedAt` |
+| Immutable | `paymentId`, `clientReference`, `amount`, `currency`, `reasonCode`, `requestedBy*`, `requestedAt` |
+| Mutable | `status`, `failureCode`, `completedAt` |
+| Uniqueness | `UNIQUE (paymentId, clientReference)` (natural idempotency key) |
+| Constraints | the payment must be `succeeded`; **the sum of refunds in `requested`, `processing` or `succeeded` never exceeds the payment amount**, enforced by a trigger that locks the payment row (so concurrent requests cannot over-refund) and is released when a refund fails [T; a consequence of refunds being first-class, ADR-0035]; the provider must declare the refund capability, otherwise the request is refused (`payment_not_refundable`) |
+| Scope | partial amounts are supported by the model. **Until O-6 is decided the service accepts only a full refund** (the amount must equal the payment amount, and only one refund may succeed). Refunds of **cash** payments have no provider path and are refused (`payment_not_refundable`) until decided **[B, O-6]** |
+| Isolation | inherits the payment's |
+
+### 4.5 RefundAttempt
+
+Same shape and rules as `PaymentAttempt`, for a refund: `id`, `refundId`, `paymentAttemptId` (the succeeded payment attempt being refunded, copied from `payment.succeededAttemptId`; it identifies the provider transaction to refund), `attemptNumber`, `provider`, `merchantReference`,
+`providerRefundId` (`UNIQUE (provider, providerRefundId)` where not null), `status`, `failureCode`, `failureClass`, `providerData`,
+timestamps; at most one open refund attempt per refund. Provider refund history is never merged into the `refund` row. A capture that is not tied to `succeededAttemptId` (for example a duplicate or orphan capture on a second attempt) cannot be refunded automatically: it is a reconciliation case handled by an operator, outside this phase [X], and raises an alert.
+
+### 4.6 WebhookEvent
+
+| Aspect | Definition |
+|---|---|
+| Purpose | Durable, deduplicated record of a **verified** provider notification and of how it was processed |
+| Fields | `id`, `provider`, `providerEventId`, `eventType` (as sent), `rawBody` (exact bytes), `receivedAt`, `state` (`received`, `processing`, `processed`, `ignored`, `unmatched`, `conflict`, `failed`), `outcome` (bounded text), `attempts`, `lastError` (class only), `matchedAttemptId` / `matchedRefundAttemptId` (local ids), `processedAt` |
+| Immutable | `provider`, `providerEventId`, `eventType`, `rawBody`, `receivedAt` |
+| Uniqueness | `UNIQUE (provider, providerEventId)` (the deduplication key) |
+| Not stored | requests that **fail signature verification**: they are rejected and counted, never persisted (an unauthenticated caller cannot write to the database) [T] |
+| Retention | privacy and legal retention of raw bodies **[B, O-17]** |
+
+### 4.7 IdempotencyKey
+
+| Aspect | Definition |
+|---|---|
+| Purpose | Short-lived protection against a client retrying a non-natural-key operation |
+| Fields | `caller` (service name, or `user:<id>`), `operation`, `key`, `requestHash` (SHA-256 of the canonical request), `status` (`completed`), `responseStatus`, `resourceType`, `resourceId`, `createdAt`, `expiresAt` |
+| Uniqueness | `UNIQUE (caller, operation, key)` |
+| Rules | section 6 |
+
+### 4.8 Currency (reference table)
+
+`currency(code char(3) primary key, exponent smallint not null)`: the ISO 4217 minor-unit exponent for each supported currency, seeded by migration and
+referenced by `payment.currency` (a foreign key **inside** this database) [T, ADR-0036]. It is reference data, not a domain entity, and the only place an
+exponent lives; nothing in code assumes one. Which currencies are seeded is a configuration decision: anything beyond the first is [B, O-10].
+
+### 4.9 Outbox and Inbox
+
+Provided by the service-kit migration `kit_0001_outbox_inbox.sql` [D]. **Outbox:** every state change that publishes an event writes it
+in the same transaction (section 11). **Inbox:** the table exists; **payment-service has no event consumer in this phase** (billing
+reaches it by API), so nothing writes to it yet [T]. Both belong to payment's own database; no other service reads them.
+
+## 5. State machines
+
+Terminal states are never left. Every transition is applied by a **conditional update** (`WHERE status = <expected>`) inside a transaction
+that holds a row lock, and a **database trigger rejects any move not in these tables** (defence in depth: application checks are not
+the only guard) [T]. "Event" names refer to section 11.
+
+### 5.1 Payment
+
+States: `created` (accepted, no open attempt or cash submission), `pending` (exactly one open attempt or a submitted cash payment),
+`succeeded`, `failed`, `cancelled`, `expired` (the last four are terminal).
+
+| From | To | Caused by | Condition | Retryable | Event |
+|---|---|---|---|---|---|
+| (none) | `created` | producer service: create | valid request, new or identical | n/a | `payment.created` |
+| `created` | `pending` | payer starts an attempt; or a cash submission is recorded | no open attempt | n/a | none (internal) |
+| `pending` | `created` | the open attempt ended `failed` or `expired` and no rule below ends the payment; or the cash submission was rejected (**[B, O-5]**) | not expired | yes, by a new attempt | none |
+| `pending` | `succeeded` | **verified** provider success (webhook or server-side sync), or an authorized cash confirmation | amount and currency equal the snapshot | no | `payment.succeeded` |
+| `pending` | `failed` | the attempt limit is reached, or the adapter reports the payment itself unrecoverable (`paymentFatal`) | none | no | `payment.failed` |
+| `created` | `cancelled` | producer service: cancel | none | no | `payment.cancelled` |
+| `pending` | `cancelled` | producer service: cancel | **no attempt in `initiated`, `submitted` or `unknown`** (else `409 payment_has_open_attempt`) **and no cash submission in `submitted`** (else `409 cash_submission_exists`: the cash has physically changed hands and must be decided first) | no | `payment.cancelled` |
+| `created` | `expired` | expiry sweep | `now() >= expiresAt` | no | `payment.expired` |
+| `pending` | `expired` | expiry sweep | `now() >= expiresAt` **and no attempt in `initiated`, `submitted` or `unknown` and no cash submission in `submitted`** (money in flight, or cash awaiting review, must be resolved first; how long a cash review may stay open is **[B, O-5]**) | no | `payment.expired` |
+
+**One open collection at a time [T]:** starting an attempt **and** submitting cash both require status `created`, so a payment can never have a gateway attempt and a cash submission open together (the second is refused with `409 payment_has_open_attempt` or `409 cash_submission_exists`). Both are also refused once `now() >= expiresAt`, even before the expiry sweep has run (`409 payment_expired`).
+
+Forbidden, among others: any move out of a terminal state; `created` to `succeeded` (success is only reached from `pending`, even for the
+test provider); success accepted from a client claim; cancelling or expiring while an attempt may still succeed.
+**Late success [T]:**
+
+* A verified `succeeded` for an attempt that the **resolver failed by inference** (`failureInferred = true`) is accepted: the attempt moves to `succeeded` and, if the payment is not terminal, the payment moves to `succeeded` (`succeededAttemptId` is set). An inferred failure is a guess, and a later fact from the provider wins.
+* A verified `succeeded` for an attempt the **provider itself confirmed as failed**, or for a payment that is already terminal in another way, is a **conflict**: the webhook is recorded (`conflict`), nothing changes silently, an alert is raised, and the case goes to manual reconciliation (money has moved and must be returned or matched by an operator, outside this phase [X]). The rules above prevent this in normal operation; it is the safety net.
+
+**What ends a payment as `failed` is partly a business question [B, O-19]:** the table above ends a payment only on the attempt limit or an adapter-declared unrecoverable payment; a *declined* attempt on its own returns the payment to `created`, so the payer can try again until the limit or expiry. The limit's value, and whether a decline should end the payment, are for O-19. Whether a **rejected cash submission ends the payment** or returns it to `created` (the default above) is [B, O-5].
+
+### 5.2 PaymentAttempt
+
+States: `initiated` (row committed before the provider is called), `submitted` (provider accepted; awaiting the customer or the provider),
+`succeeded`, `failed`, `expired` (terminal), `unknown` (the provider call's outcome is ambiguous, for example a timeout after sending).
+
+| From | To | Caused by | Notes |
+|---|---|---|---|
+| (none) | `initiated` | payer starts an attempt (transaction 1) | payment moves `created` to `pending` in the same transaction |
+| `initiated` | `submitted` | provider accepted; `providerTransactionId` recorded | adapter returned a definite acceptance |
+| `initiated` | `failed` | provider definitively rejected before accepting | failure class `retryable` or `terminal` |
+| `initiated` | `unknown` | ambiguous outcome (timeout, connection lost); or found stuck in `initiated` by the resolver | **never retried blindly**, to avoid a double charge. The resolver waits **longer than the provider timeout plus the provider's visibility lag** (adapter-declared) before acting |
+| `submitted` | `succeeded` / `failed` | verified webhook or verified server-side status | monotonic for provider-confirmed states |
+| `submitted` | `expired` | the resolver, when the attempt is older than the attempt TTL (configuration) and the adapter says the provider-side session has ended, or `fetchStatus` says so | if the provider still reports it pending and the adapter cannot say the session ended, the attempt **stays `submitted` and an alert is raised**: an attempt is never closed by guess |
+| `unknown` | `submitted` / `succeeded` / `failed` | provider lookup by `merchantReference`, or a webhook | `failed` from a "no record" answer is allowed **only if the adapter declares `notFound` authoritative** (after its visibility lag); the attempt is then marked `failureInferred = true`. Otherwise it stays `unknown` and an alert is raised |
+
+The resolver settles attempts in `initiated`, `unknown` **and long-`submitted`**; a payment therefore cannot stay `pending` forever without an alert. No new attempt may start while another is `initiated`, `submitted` or `unknown` (partial unique index). Attempt states are exposed on the
+payment; **no separate attempt events are published in this phase** [T].
+
+### 5.3 CashPayment
+
+States: `submitted`, `confirmed`, `rejected` (the last two terminal).
+
+| From | To | Caused by | Effect on the payment | Event |
+|---|---|---|---|---|
+| (none) | `submitted` | an authorized submitter [B, O-4] | `created` to `pending` | `cash_payment.submitted` |
+| `submitted` | `confirmed` | an explicitly authorized person [B, O-5], who is not the payer | `pending` to `succeeded`, `settledMethod = cash` | `cash_payment.confirmed` (then `payment.succeeded`) |
+| `submitted` | `rejected` | the same authority | `pending` to `created` (default; [B, O-5]) | `cash_payment.rejected` |
+
+A second confirmation or rejection is refused (`409 cash_already_confirmed` or `cash_already_rejected`), never applied twice. Withdrawal of
+a submission by its submitter is [X].
+
+### 5.4 Refund
+
+States: `requested` (accepted; the amount is **reserved** against the payment), `processing` (an attempt is open), `succeeded`, `failed`
+(terminal).
+
+| From | To | Caused by | Event |
+|---|---|---|---|
+| (none) | `requested` | an authorized requester [B, O-6]; the payment is `succeeded`; the cap holds | `refund.requested` |
+| `requested` | `processing` | a refund attempt is started (system, right after acceptance) | none |
+| `processing` | `requested` | the attempt ended retryably | none |
+| `processing` / `requested` | `succeeded` | verified provider refund success | `refund.succeeded` |
+| `processing` / `requested` | `failed` | non-retryable failure, or the attempt limit; the reservation is released | `refund.failed` |
+
+A refund retry and resolver job restarts refunds returned to `requested` and settles refund attempts in `unknown` (same rules as section 5.2). A provider without the refund capability, or a cash payment, is refused **at request time** (`payment_not_refundable`) so a reservation never sits in `requested` with no way forward. Cancelling a requested refund is [X]. The payment's own status does not change when it is refunded; refund history is the refund rows.
+
+### 5.5 RefundAttempt
+
+Same states and transitions as section 5.2, applied to a refund, with the same "never retry an `unknown` blindly" rule.
+
+## 6. Idempotency
+
+Two mechanisms, chosen by whether the operation has a natural key [T]. **This deliberately refines ADR-0034 and `financial-architecture.md` (which say resource-creating `POST`s take an `Idempotency-Key`):** creating a payment and creating a refund use a **permanent natural key** instead, which is stronger than a header that expires; ADR-0034 carries a note recording this.
+
+| Operation | Mechanism | Same request repeated | Same key, different content | Concurrent duplicate |
+|---|---|---|---|---|
+| Create payment | natural key `(producer, paymentRequestId)` | `200` existing payment, `Idempotent-Replayed: true` | `409 payment_request_conflict` | one row (unique index); the loser returns the winner |
+| Start attempt | `Idempotency-Key` header (required) plus "one open attempt" index | replay: the original status code and the attempt's current state | `422 idempotency_key_reused` | serialized by the unique key; a different key while one attempt is open gets `409 payment_has_open_attempt` |
+| Submit cash | `Idempotency-Key` (required) plus "one submitted or confirmed" index | replay | `422 idempotency_key_reused` | same; a different key gets `409 cash_submission_exists` |
+| Confirm or reject cash | `Idempotency-Key` (required) **and** state | replay of the recorded decision | `422 idempotency_key_reused` | one decision wins; the loser gets `409 cash_already_confirmed` or `cash_already_rejected` |
+| Cancel | `Idempotency-Key` (required) and state | replay | `422` | state decides |
+| Create refund | natural key `(paymentId, clientReference)` | `200` existing refund | `409 refund_conflict` | one row |
+| Sync attempt with provider | naturally idempotent (a status query) | fresh state, no key needed | n/a | safe |
+| Provider webhook | `UNIQUE (provider, providerEventId)`, then state validation | `200`, no second effect | n/a | one processed |
+| Provider transaction / refund id | `UNIQUE (provider, providerTransactionId)` and `(provider, providerRefundId)` | a second attempt claiming the same provider id fails | n/a | one wins |
+
+Rules for the `Idempotency-Key` header: 8 to 128 characters of `[A-Za-z0-9._:-]`; the scope is `(caller, operation, key)` where the caller is the
+service name or the user id; `requestHash` is the SHA-256 of the canonical request (operation, path parameters, body); a missing key on a
+required operation is `400 idempotency_key_required`. The key row and the business change commit in **one transaction**, so there is no
+half-recorded key: a concurrent duplicate blocks on the unique index until the first transaction commits and then replays; if the first
+one rolls back, the second one runs. Keys expire after a configured retention (a recommended minimum of 24 hours, configuration with no
+business meaning); an expired key is treated as new, which is safe because **every money-moving creation is also protected by a permanent
+natural key** above. A replay returns the **original status code with the resource's current representation**.
+
+Provider calls are not inside these transactions (section 12); a retried request after a crash returns the attempt as it now is
+(`initiated` or `unknown`), and the resolver settles it.
+
+## 7. Webhooks
+
+Endpoint: `POST /payment/webhooks/{provider}` (unauthenticated by user or service; authenticated **only** by the provider's signature) [T].
+The route needs the **exact raw body** for signature verification: the service-kit must expose raw-body capture for this route (a
+prerequisite, section 20). Provider-specific signature schemes are defined per adapter when a provider contract exists [X].
+
+```
+receive ─▶ verify signature (adapter, using the provider secret from the secret store)
+        ─▶ invalid: 401, nothing persisted, counted and logged (no body in the log)
+        ─▶ valid:   transaction A: INSERT webhook_event(state = received) ON CONFLICT (provider, providerEventId) DO NOTHING
+                    conflict ─▶ existing row: if its state is processed, ignored or conflict ─▶ 200, no further effect;
+                                otherwise (received, processing, failed, unmatched) ─▶ re-run transaction B, so a crash between A and B loses nothing
+                    inserted ─▶ transaction B: lock the matching attempt and payment, validate the transition,
+                                 apply it, write the outbox event, set state = processed   ─▶ 200
 ```
 
-Module boundaries: `LicensesModule` (`LicensesController`/`LicensesService`/`License` entity)
-owns the read-only status check `auth-service` calls, and is otherwise not responsible for
-detecting lapses. `SubscriptionsModule`
-(`SubscriptionsController`/`SubscriptionsService`/`UserSubscription` entity) owns both the
-status check and the actual suspend/resume mutation, but never decides *when* to call them —
-that's `LicenseLapseService`'s job. Both `LicenseLapseService` (for the org-level
-`license.expired`/`license.reactivated` events) and `SubscriptionsService` (for the per-user
-`subscription.suspended`/`subscription.resumed` events, published as part of the same
-suspend/resume mutation — see flows (a)/(b) below) publish directly through `EventPublisher`.
-`LicenseLapseService` is the only component that ties a license-state transition to a batch of
-subscription mutations in the first place; it depends on both other services but neither of
-them depends on it, keeping the read path (`auth-service`'s hot-path calls) free of any
-lapse-detection logic. `EventPublisher` is a thin
-wrapper around whatever RabbitMQ client eventually lands (per the ADD's infrastructure gap) —
-its interface is stable even though its implementation can't be built yet.
+| Case | Behaviour [T] |
+|---|---|
+| Duplicate event | if already `processed`, `ignored` or `conflict`: `200`, a no-op (unique key). If the earlier delivery died before finishing (state `received`, `processing`, `failed`), the duplicate **re-runs processing** instead of being swallowed. Replays of an old signed event are the same case |
+| Out of order | the transition is validated against the **current** state: an event that is older in the lifecycle than the current state is `processed` with outcome `ignored_stale`; states are monotonic |
+| Success after a different terminal state | `conflict`: recorded, alert, no state change (section 5.1) |
+| Unknown event type | stored, `ignored`, `200` |
+| Matches no attempt yet | `unmatched`: retried for a bounded period (the webhook can arrive before our record is visible; matching is by `merchantReference` or `providerTransactionId`); afterwards it stays `unmatched` and raises an alert for reconciliation |
+| Malformed body with a **valid** signature | stored, state `failed`, non-retryable; answer `200` so the provider stops retrying |
+| Processing fails transiently | state `failed` (retryable); answer `500`, so the provider retries; the next delivery finds the row and reprocesses it |
+| Provider retries | idempotent by construction; no provider-specific assumption is made [D] |
 
-`ChargesModule` (`ChargesController`/`ChargesService`/`Charge` entity, per `ADR-0007`) owns the
-cash-payment request/confirm/reject/list surface. `ChargesController` is `payment-service`'s
-first controller gated by any guard: `requestCashPayment` only needs `JwtAuthGuard` (to read the
-caller's `organizationId`/`userId` claims, no role check), while `confirmCashPayment`,
-`rejectCashPayment`, and `listPendingCash` additionally require `RolesGuard` configured for
-`role: admin`. `ChargesService` validates the `productId`/`beneficiaryUserId` combination,
-persists the `Charge`, and publishes `charge.cash_requested` through the same `EventPublisher`
-every other component uses — it does not itself decide what happens after a charge is confirmed
-(the issuance hand-off is out of scope, see the ADD).
+Replay protection beyond deduplication (signed timestamps, tolerance windows, source address allow-lists) is provider-specific and belongs to
+each adapter [X]. A payment is **never** marked successful from a webhook that failed verification, from a client request, or from a
+redirect back to the application: the only success paths are a verified webhook, a verified server-side provider status query, and an
+authorized cash confirmation [D].
 
-Per `ADR-0021`, `ChargesService`'s `confirmCashPayment`, `rejectCashPayment`, and
-`listPendingCash` methods additionally depend on the new `PlatformScopeService` — the mirror
-image, on `payment-service`'s side, of `auth-service`'s existing
-`OrganizationValidationService`. `PlatformScopeService` owns no persistence of its own; it wraps
-`OrganizationLookupClient`, a thin HTTP client (the mirror image of `auth-service`'s own
-`PaymentServiceClient`) that calls `auth-service`'s `GET /auth/organizations/:id`, forwarding
-whichever admin bearer token `ChargesController` already received and verified locally.
-`assertOwnedByCallerPlatform` is used by the two single-target actions (confirm/reject) and
-throws on any mismatch or lookup failure (see API contract below for exact status codes);
-`filterToCallerPlatform` is used by `listPendingCash` and instead resolves every **distinct**
-`organizationId` present in the matched `Charge` rows (deduplicated, one lookup per unique
-organization, not per row) and excludes any row whose organization doesn't belong to the
-caller's platform, failing the whole request closed if any of those lookups itself errors.
-`ChargesService`'s other method, `requestCashPayment`, is unaffected — its `organizationId`
-comes from the caller's own JWT claim, not an admin-supplied target, so `PlatformScopeService`
-is never consulted there.
+## 8. Authorization and organization isolation
 
-Per `ADR-0008`, `LicenseLapseService.handleExpiry` now branches on the lapsing `License.type`
-before deciding what to do — see flows (f)/(g) below — rather than unconditionally expiring and
-suspending as in the previous revision of this document. `handleReactivation` (flow (b)) is
-unchanged: it still assumes a real payment has landed and unconditionally resumes suspended
-subscriptions, since (per `ADR-0008`'s reset rule) the future issuance mechanism is what writes
-`type = 'standard'` back onto the `License` row before `handleReactivation` would ever run.
+### 8.1 Who asks whom [D]
 
-## API contract
+* **Auth** answers: who is this person, and what are their memberships and their status. Payment asks it live through the kit's
+  `HttpAuthClient` (`GET /auth/me`) with the user's own bearer and does not cache the answer in this phase. Auth is unavailable: `503`, fail closed. An identity with `isActive = false` is refused (`401`). Owners and operators have no memberships, so they have **no relation** to a payment in this phase (platform-scoped staff access needs a platform id that payment does not store: O-15).
+* **Endpoints that accept either a service token or a user bearer** (2, 4, 11) resolve the caller in this order: try the service-token digests first; if the bearer matches one, the caller is that service and **the bearer is never sent to Auth**; otherwise treat it as a user bearer and ask Auth. The kit's `ServiceTokenGuard` throws on a non-matching bearer, so a small combined guard (service token else user identity) is part of the implementation.
+* **Payment** decides whether the caller may perform *this payment operation*. Payment does **not** delegate that decision to Auth and does
+  **not** treat a generic Auth capability (for example the organization-administrator flag) as authority for cash or refunds.
+* **Service to service** uses a per-pair service token (`ServiceTokenGuard`); the caller is identified by service name. An end user's JWT is never
+  used as, or forwarded as, a service credential; a user's bearer is sent to Auth only.
+* Payment adds no organization to Auth's `User` and keeps no membership table of its own.
 
-- **`GET /payment/licenses/:organizationId/status`** → `200 { valid: boolean, expiresAt: Date |
-  null }`. No license found for this `organizationId`, or its license has expired → the same
-  `{valid: false, expiresAt: null}` shape for both, deliberately not distinguished (mirrors the
-  enumeration-avoidance reasoning `auth-service` already applies at its own boundary). This is
-  the contract `auth-service` has assumed since `ADR-0004`, now finalized.
+### 8.2 The isolation procedure for every organization-scoped request [D]
 
-- **`GET /payment/subscriptions/:userId/status`** → `200 { exists: boolean, valid: boolean,
-  expiresAt: Date | null }`.
-  - No `UserSubscription` row ever created for this user → `{exists: false, valid: false,
-    expiresAt: null}`.
-  - `active` and not past `expiresAt` → `{exists: true, valid: true, expiresAt}`.
-  - `suspended`, or `active` but past `expiresAt` (naturally expired) → `{exists: true, valid:
-    false, expiresAt}` (`expiresAt` is `null` for a `suspended` row, since it's cleared while
-    frozen — see Data model).
-
-Both endpoints are internal, service-to-service calls in v1 (no API gateway exists in this
-repo, per `auth-service`'s ADD) — they carry no separate authentication of their own beyond
-whatever network-level trust exists between `nawara-core` services today, which this document
-does not change or strengthen. Per `ADR-0021`, neither endpoint gains a platform-scope check:
-both are called by `auth-service` on behalf of an anonymous prospective registrant or an
-ordinary end user's own login/refresh, never by an authenticated platform admin acting on an
-arbitrary target — there is no admin JWT in either call chain to extract a `platformId` claim
-from, so `ADR-0021`'s check has no principal to attach to here.
-
-The four endpoints below are new, per `ADR-0007`, and are `payment-service`'s first
-authenticated endpoints — all require a valid JWT (`JwtAuthGuard`); the three Admin-only ones
-additionally require `role: admin` (`RolesGuard`).
-
-- **`POST /payment/charges/cash`** — auth: any valid JWT whose `organizationId` claim matches
-  the `organizationId` being billed (no role restriction, per `ADR-0006`'s "role eligibility is
-  a consuming-app decision" precedent). Body: `{ productId: string, beneficiaryUserId?: string }`
-  (`CreateCashChargeRequestDto`). `400` if `beneficiaryUserId` is missing and
-  `Product.type === 'individual_subscription'`, if `beneficiaryUserId` is supplied and
-  `Product.type === 'org_license'`, or if `Product.type === 'one_time'`. `404` if `productId`
-  doesn't resolve to a `Product`. On success, `201` with the created `Charge`
-  (`method: 'cash'`, `status: 'pending'`, `submittedByUserId` = caller's `userId`, `payerId` =
-  caller's `userId` for `org_license` or `beneficiaryUserId` for `individual_subscription`,
-  `amount`/`currency` copied from `Product`). Publishes `charge.cash_requested`. Per `ADR-0021`,
-  this endpoint gains no platform-scope check: `organizationId` here is the caller's own JWT
-  claim, not an admin-supplied target, so the caller can only ever act on the one organization
-  their own token already proves membership in.
-- **`POST /payment/charges/:chargeId/cash/confirm`** — auth: `role: admin`. `404` if `chargeId`
-  doesn't exist. Per `ADR-0021`, then calls `PlatformScopeService.assertOwnedByCallerPlatform`
-  with the loaded `Charge.organizationId`, the caller's own JWT `platformId` claim, and the
-  caller's forwarded bearer token: `403 { statusCode: 403, message: "You do not have authority
-  over this organization." }` on a genuine platform mismatch (the target organization doesn't
-  belong to the caller's platform, or doesn't exist at all); `503 { statusCode: 503, message:
-  "Unable to verify organization; please try again." }` if the `auth-service` lookup itself
-  fails or times out (timeout on the order of a few seconds, mirroring `ADR-0004`). Both
-  precede, and neither performs, any mutation. `409` unless the charge is `method: 'cash'` and
-  `status: 'pending'` (checked after the platform-scope check succeeds). On success, `200` with
-  the updated `Charge` (`status: 'succeeded'`) and hands off to the (out-of-scope) issuance step.
-- **`POST /payment/charges/:chargeId/cash/reject`** — auth: `role: admin`. Same `404`, platform-
-  scope (`403`/`503`, per `ADR-0021`), and `409` preconditions as confirm, in the same order. On
-  success, `200` with the updated `Charge` (`status: 'failed'`).
-- **`GET /payment/charges?method=cash&status=pending`** — auth: `role: admin`. `200` with an
-  array of matching `Charge` rows, newest first. No pagination in v1 (flagged as an open
-  question if pending-cash volume ever grows large enough to matter). Per `ADR-0021`, before
-  returning, calls `PlatformScopeService.filterToCallerPlatform` on the matched rows: resolves
-  every **distinct** `organizationId` among them (one lookup per unique organization, not per
-  row) and excludes any row whose organization isn't confirmed to belong to the caller's own
-  platform. If any of those lookups itself fails or times out, the whole request fails closed
-  with the same `503` shape as confirm/reject above — a genuine cross-platform row, by contrast,
-  is not an error for this endpoint; it is simply, correctly, omitted from the response.
-
-## Important flows
-
-**(a) License lapse detected → suspend affected subscriptions and notify**
-
-Per `ADR-0008`, this flow now only runs when the lapsing `License.type` is already `'grace'` —
-i.e. the organization's one-shot grace window has itself now also elapsed. A `type = 'standard'`
-license lapsing for the first time since its last real payment takes flow (g) instead. See flow
-(h) below for this exact diagram applied to that precondition.
-
-```mermaid
-sequenceDiagram
-    participant LLS as LicenseLapseService
-    participant LS as LicensesService
-    participant SS as SubscriptionsService
-    participant DB as payment-service DB
-    participant EP as EventPublisher
-    participant Broker as RabbitMQ
-
-    LLS->>LS: mark License expired (organizationId)
-    LS->>DB: UPDATE License SET status = 'expired'
-    DB-->>LS: License row
-    LS-->>LLS: License (ownerId, organizationId)
-    LLS->>EP: publish license.expired {organizationId, ownerId, timestamp}
-    EP-)Broker: license.expired
-    LLS->>SS: suspendAllForOrganization(organizationId)
-    SS->>DB: SELECT UserSubscription WHERE organizationId = ? AND status = 'active'
-    DB-->>SS: active UserSubscription rows
-    loop each active subscription
-        SS->>SS: frozenRemainingSeconds = expiresAt - now
-        SS->>DB: UPDATE status='suspended', expiresAt=null, frozenRemainingSeconds=...
-        SS->>EP: publish subscription.suspended {userId, organizationId, frozenRemainingSeconds, timestamp}
-        EP-)Broker: subscription.suspended
-    end
+```
+caller (service token, or user bearer)
+  ─▶ authenticate           (401 on failure)
+  ─▶ for a user: ask Auth for identity and memberships (503 if Auth cannot answer)
+  ─▶ load the payment by id
+  ─▶ establish the caller's RELATION to the payment (section 8.3); none ─▶ 404 (collapsed, no existence leak)
+  ─▶ check the OPERATION rule for that relation (section 8.4); not allowed ─▶ 403
+  ─▶ check the state machine ─▶ 409 if the transition is not allowed
+  ─▶ perform, in one transaction, with the outbox event
 ```
 
-**(b) License reactivated → resume affected subscriptions and notify**
+A caller with **no** relation to a resource gets the same `404` as for a resource that does not exist. A caller who legitimately sees a
+payment but lacks the right for the operation gets `403 operation_not_permitted`. Membership must be **`active`** (a pending, rejected or
+revoked membership never counts). The organization always comes from the resource, never from a token or a client-supplied header.
 
-```mermaid
-sequenceDiagram
-    participant LLS as LicenseLapseService
-    participant LS as LicensesService
-    participant SS as SubscriptionsService
-    participant DB as payment-service DB
-    participant EP as EventPublisher
-    participant Broker as RabbitMQ
+### 8.3 Relations [T]
 
-    LLS->>LS: mark License active (organizationId)
-    LS->>DB: UPDATE License SET status = 'active'
-    DB-->>LS: License row
-    LS-->>LLS: License (ownerId, organizationId)
-    LLS->>EP: publish license.reactivated {organizationId, ownerId, timestamp}
-    EP-)Broker: license.reactivated
-    LLS->>SS: resumeAllForOrganization(organizationId)
-    SS->>DB: SELECT UserSubscription WHERE organizationId = ? AND status = 'suspended'
-    DB-->>SS: suspended UserSubscription rows
-    loop each suspended subscription
-        SS->>SS: expiresAt = now + frozenRemainingSeconds
-        SS->>DB: UPDATE status='active', expiresAt=..., frozenRemainingSeconds=null
-        SS->>EP: publish subscription.resumed {userId, organizationId, restoredExpiresAt, timestamp}
-        EP-)Broker: subscription.resumed
-    end
+| Relation | Holds when |
+|---|---|
+| `producer` | the caller is the service that created the payment (`producer` equals the service token's name) |
+| `payer` | the payer is a `user` and equals the caller's Auth identity |
+| `payer-organization member` | the payer is an `organization` and the caller has an **active** membership in it |
+| `seller-organization member` | the seller (or `organizationId`) is an organization and the caller has an **active** membership in it |
+| `provider` | webhook only: a valid signature |
+
+A `company` payer or seller has **no user relation** in this phase: it is reachable only through its `producer` service. Who acts for a company (for example platform staff acting for the seller in a Nawara-collected cash payment) needs a platform or company validation source that does not exist yet (O-15) and an authority model (O-5, O-6, O-18); until then those flows cannot be authorized through a user and are not implemented.
+
+### 8.4 Operation rules
+
+| Operation | Rule | Marker |
+|---|---|---|
+| Create payment | a **producer service** with a valid token. Which services may create obligations for which organizations (token scopes) is not decided | **[B, O-13, O-14]** |
+| Validate the organization/platform/company context of a created payment | Payment stores `organizationId` as asserted by the authorized producer. The source that validates organization to platform to company when there is no user context is not decided | **[B, O-15]** |
+| Read a payment or its refunds | the `producer` (only its own payments) and the `payer` [T]. **Whether members of the payer or seller organization may read** (which exposes payer, amount and reference to them, including members of the organization named in `organizationId`) is a privacy and role decision | **[B, O-20]** (until decided, organization members have no read access) |
+| Start or sync an attempt | the `payer`; sync is also allowed to anyone with a read relation. For an organization payer, who may act for it is not decided | [T] for a user payer; **[B, O-18]** for an organization payer |
+| Submit cash | not decided | **[B, O-4]** |
+| Confirm or reject cash | not decided. **Controls proposed regardless of the model (proposed, not decided):** the confirmer is not the payer; the decision is recorded with the actor; it cannot be applied twice. Which relation and authority qualify (including for a `company` seller) is part of the decision | **[B, O-5]**; controls [T] |
+| Cancel | the `producer` only in this phase | [T] |
+| Request a refund | not decided | **[B, O-6]**; the refund cap is [D] |
+| Process a webhook | a valid provider signature | [D] |
+| Administrative or support operations | **none** in this phase: no operation edits a status directly, and no list-everything endpoint exists | [X] |
+
+How cash and refund authority will be *modeled* is itself part of the decision: for example an explicit designation kept by payment-service,
+a producer-supplied grant, or an approved use of an Auth capability. **None is chosen here** (O-5, O-6).
+
+## 9. API contract
+
+Public prefix `/payment` [D, ADR-0034]; no version segment in v1; errors and lists follow the service-kit conventions; OpenAPI is served under
+`/payment/docs` behind basic authentication (as auth-service does) and every controller method and DTO field carries `@ApiOperation`,
+`@ApiResponse` and `@ApiProperty` (repository rule). `GET /health` and `GET /ready` are the kit's root paths and are not routed publicly.
+There is deliberately **no generic create/update/delete of a payment, attempt, cash payment or refund**, and **no list or search endpoint** in this phase [X]: every mutation is a named domain operation and every read is by id. `/payment/docs` (rather than a root `/docs`) follows auth-service's `/auth/docs`, because the gateway routes only `/<prefix>`.
+
+| # | Method and path | Authentication | Idempotency |
+|---|---|---|---|
+| 1 | `POST /payment/payments` | service token | natural key `paymentRequestId` |
+| 2 | `GET /payment/payments/{paymentId}` | service token or user bearer | n/a |
+| 3 | `POST /payment/payments/{paymentId}/attempts` | user bearer | `Idempotency-Key` required |
+| 4 | `POST /payment/payments/{paymentId}/attempts/{attemptId}/sync` | user bearer or service token | safe by nature |
+| 5 | `POST /payment/webhooks/{provider}` | provider signature | `(provider, providerEventId)` |
+| 6 | `POST /payment/payments/{paymentId}/cash-submissions` | user bearer | `Idempotency-Key` required |
+| 7 | `POST /payment/cash-submissions/{id}/confirm` | user bearer | `Idempotency-Key` required, plus state |
+| 8 | `POST /payment/cash-submissions/{id}/reject` | user bearer | `Idempotency-Key` required, plus state |
+| 9 | `POST /payment/payments/{paymentId}/cancel` | service token | `Idempotency-Key` required |
+| 10 | `POST /payment/payments/{paymentId}/refunds` | user bearer | natural key `clientReference` |
+| 11 | `GET /payment/refunds/{refundId}` | user bearer or service token | n/a |
+
+### 9.1 Endpoints
+
+**1. Create payment.** Body: the contract of section 3.1. `201` with the payment; `200` on an identical replay. Authorization: section 8.4 (**[B]** scopes).
+Errors: `400 invalid_payment_request`, `401`, `403 operation_not_permitted`, `409 payment_request_conflict`, `422 unsupported_currency`.
+Transition: none to `created`. Event: `payment.created`. Organization context: `organizationId` from the body, asserted by the producer (**[B, O-15]**).
+
+**2. Get payment.** `200` with the representation below; `404` when the caller has no relation. No transition.
+
+**3. Start attempt.** Body: `{ provider, providerOptions?, returnUrl? }` where `provider` must be an enabled provider (initially only the test provider [X]);
+`providerOptions` is opaque and validated by the adapter; `returnUrl` must match a configured allow-list. `201` with the attempt
+(`id`, `status`, `nextAction`: an adapter-defined instruction such as `{ "type": "redirect", "url": "..." }`, never a secret).
+Errors: `404`, `403`, `409 payment_not_payable` (terminal state), `409 payment_expired`, `409 payment_has_open_attempt`, `409 cash_submission_exists` (a cash submission is open), `422 invalid_provider`,
+`502 provider_error`, `503 provider_unavailable`. Transitions: payment `created` to `pending`; attempt none to `initiated` to `submitted`
+(or `failed` or `unknown`). The attempt row commits **before** the provider is called (section 12).
+
+**4. Sync attempt.** Asks payment-service to query the provider for the attempt's status and to apply the result if it is a valid transition.
+The client's claim is never used: only what the adapter verifies with the provider. `200` with the attempt. Errors: `404`, `403`, `502`, `503`.
+Transitions: as section 5.2.
+
+**5. Webhook.** Section 7. `200` (processed, duplicate, ignored, stored), `401` (signature invalid), `404` (unknown provider), `413` (too large), `500` (transient).
+
+**6. Submit cash.** Body: `{ note? }`. `201` with the cash submission. Authorization **[B, O-4]**. Errors: `404`, `403`, `409 payment_not_payable`,
+`409 payment_has_open_attempt`, `409 cash_submission_exists`. Transitions: cash none to `submitted`; payment `created` to `pending`. Event: `cash_payment.submitted`.
+
+**7. Confirm cash.** No body. `200` with the cash submission. Authorization **[B, O-5]** plus the technical conditions of section 8.4.
+Errors: `404`, `403`, `409 cash_already_confirmed`, `409 cash_already_rejected`, `409 invalid_state_transition`. Transitions: cash `submitted` to `confirmed`; payment
+`pending` to `succeeded`. Events: `cash_payment.confirmed`, `payment.succeeded`.
+
+**8. Reject cash.** Body: `{ reason? }`. Same errors as 7. Transitions: cash `submitted` to `rejected`; payment `pending` to `created`
+(default, **[B, O-5]**). Event: `cash_payment.rejected`.
+
+**9. Cancel payment.** No body. `200` with the payment. Errors: `404`, `403`, `409 payment_has_open_attempt`, `409 cash_submission_exists`, `409 invalid_state_transition`.
+Transition: `created` or `pending` to `cancelled`. Event: `payment.cancelled`.
+
+**10. Create refund.** Body: `{ clientReference, amount, reasonCode?, note? }`. Until O-6 is decided `amount` must equal the payment amount (full refund only; otherwise `422 refund_amount_not_allowed`). `201`, or `200` on an identical replay. Authorization **[B, O-6]**.
+Errors: `404`, `403`, `409 refund_conflict`, `409 payment_not_refundable` (not succeeded, or cash [B]), `422 refund_exceeds_refundable`, `422 unsupported_currency`.
+Transitions: refund none to `requested`, then `processing` when an attempt starts. Event: `refund.requested`.
+
+**11. Get refund.** `200` or `404`.
+
+### 9.2 Representations (excerpt)
+
+```
+Payment { id, paymentRequestId, sourceType, sourceId, payer{type,id}, seller{type,id}, organizationId, amount, currency,
+          description, reference, expiresAt, status, statusReason, settledMethod, refundedAmount, refundableAmount,
+          attempts[ { id, attemptNumber, provider, status, failureCode, nextAction, createdAt } ],   // newest first, bounded, no providerData
+          cash { id, status, submittedAt, confirmedAt, rejectedAt } | null, createdAt, updatedAt, closedAt }
+Refund  { id, paymentId, clientReference, amount, currency, reasonCode, status, failureCode, requestedAt, completedAt }
 ```
 
-**(c) A caller checking license/subscription status** — *originally `auth-service` at login/refresh; per
-[ADR-0026](../adr/0026-authentication-is-not-entitlement.md) `auth-service` now calls only the
-license endpoint, and only at registration. The subscription-status endpoint and the license endpoint
-are otherwise consumed by platform/consuming services at the point of use (authentication ≠
-entitlement). The diagram below is unchanged; read "Auth" as "the calling service".*
+## 10. Error model
 
-```mermaid
-sequenceDiagram
-    participant Auth as auth-service
-    participant LC as LicensesController
-    participant SC as SubscriptionsController
-    participant DB as payment-service DB
+Reuses the kit's body `{ statusCode, message, error, requestId }`. Domain errors need a **stable machine-readable `code`**; the kit's filter
+does not yet pass one through, so a small additive change to it is an implementation prerequisite (section 21; the kit's status-text table also has no `502`, which `provider_error` needs): `{ statusCode, message, error, code?, requestId }`.
+Messages are generic; no stack, SQL, constraint name, provider payload or credential ever reaches a response [D].
 
-    Auth->>LC: GET /payment/licenses/:organizationId/status
-    LC->>DB: SELECT License WHERE organizationId = ?
-    DB-->>LC: License row or none
-    LC-->>Auth: {valid, expiresAt}
-    alt org license valid
-        Auth->>SC: GET /payment/subscriptions/:userId/status
-        SC->>DB: SELECT UserSubscription WHERE userId = ?
-        DB-->>SC: UserSubscription row or none
-        SC-->>Auth: {exists, valid, expiresAt}
-    end
+| Code | HTTP | When |
+|---|---|---|
+| `invalid_payment_request` | 400 | body fails validation, unknown fields, bad party or amount |
+| `idempotency_key_required` | 400 | a required `Idempotency-Key` is missing or malformed |
+| `unauthorized` | 401 | missing or invalid service token or user bearer (or an inactive identity) |
+| `operation_not_permitted` | 403 | the caller sees the payment but may not do this |
+| `not_found` | 404 | no such resource, **or the caller has no relation to it** (collapsed) |
+| `payment_request_conflict` | 409 | same `paymentRequestId`, different snapshot |
+| `payment_not_payable` / `payment_expired` | 409 | the payment is terminal or expired |
+| `payment_has_open_attempt` | 409 | an attempt is `initiated`, `submitted` or `unknown` |
+| `invalid_state_transition` | 409 | the state machine forbids the move |
+| `cash_submission_exists` / `cash_already_confirmed` / `cash_already_rejected` | 409 | duplicate or repeated cash operations |
+| `refund_conflict` / `payment_not_refundable` | 409 | same `clientReference` with different content; payment not refundable |
+| `idempotency_key_reused` | 422 | the same key with different content |
+| `refund_exceeds_refundable` | 422 | the sum of refunds would exceed the amount paid |
+| `refund_amount_not_allowed` | 422 | a partial refund while partial refunds are not approved (O-6) |
+| `unsupported_currency` / `invalid_provider` | 422 | not in the configured lists |
+| `provider_error` | 502 | the provider answered with an unusable result |
+| `provider_unavailable` / `auth_unavailable` | 503 | provider or Auth cannot be reached; fail closed |
+| `webhook_signature_invalid` | 401 | webhook route only: verification failed (generic body, distinct so operators can count forged calls) |
+
+## 11. Event catalog
+
+Events go through the **transactional outbox** (kit), in the same transaction as the state change, and are published at least once to the
+`nawara.events` topic exchange; routing key = event name [D, ADR-0037]. Message **headers** carry `eventId`, `occurredAt`, `correlationId`,
+`source` (`payment-service`) and `version` (kit `EventHeaders`). The event id is derived **deterministically** from the aggregate and the
+transition (a name-based, version-5 style uuid computed in the service: Node has no built-in one), so a retried transition cannot enqueue a second event [T]. Payloads carry opaque ids and plain facts,
+**never a secret, a token, provider credentials or card/bank data**. Ordering is not guaranteed; consumers use `revision` and their inbox. `correlationId` is optional in the kit's headers: it is set from the request when there is one, and **system-initiated events** (webhook processing, sweeps, resolvers) set it to the id of the webhook event or to a fresh id generated per job run, so every event has one.
+
+Common payload for every payment event: `paymentId`, `paymentRequestId`, `sourceType`, `sourceId`, `organizationId`, `payer{type,id}`,
+`seller{type,id}`, `amount`, `currency`, `status`, `revision`, `actor{type,id}` (`user`, `service`, `provider` or `system`) and
+`cause{type,id}` (the request, webhook event, sweep or cash decision that caused it; the correlation id is in the header, and `cause` is the
+causation reference). Amounts are JSON integers in minor units. Version `1` for all events below; a breaking payload change publishes a higher version under the same name.
+
+| Event | Emitted on | Extra payload | Consumers | Justification |
+|---|---|---|---|---|
+| `payment.created` | `created` accepted | none | audit, analytics | correlation of a request with its payment; billing may confirm receipt |
+| `payment.succeeded` | to `succeeded` | `settledMethod`, `succeededAt` | **billing** (invoice paid, entitlement), **accounting** (journal entry), notification (receipt), audit, analytics | the central financial fact |
+| `payment.failed` | to `failed` | `failureCode` | billing, notification, audit | billing must know collection ended |
+| `payment.cancelled` | to `cancelled` | none | billing, audit | closes the request from payment's side |
+| `payment.expired` | to `expired` | `expiresAt` | billing, notification, audit | same |
+| `cash_payment.submitted` | cash `submitted` | `cashPaymentId`, `submittedBy` | notification (reviewers), audit | a human decision is now pending |
+| `cash_payment.confirmed` | cash `confirmed` | `cashPaymentId`, `confirmedBy` | audit, notification | who decided is a required audit fact |
+| `cash_payment.rejected` | cash `rejected` | `cashPaymentId`, `rejectedBy`, `rejectionReasonCode` (a bounded code; the free-text reason stays in the database only, because it may contain personal data: O-17) | audit, notification | same |
+| `refund.requested` | refund `requested` | `refundId`, `refundAmount`, `reasonCode` | audit, notification | money is about to move back |
+| `refund.succeeded` | refund `succeeded` | `refundId`, `refundAmount` | **accounting** (reversal), billing (credit), notification, audit | the accounting-relevant refund fact |
+| `refund.failed` | refund `failed` | `refundId`, `failureCode` | notification, audit | the requester must know |
+
+Deliberately **not** emitted in this phase: `payment.pending` (an internal state; no consumer needs it; notifications about an amount owed come
+from billing), `payment.processing`, per-attempt events, and `payment.refunded` (the refund events carry that fact; the earlier draft catalog
+in the architecture documents is superseded by this list). Payment publishes; **who consumes is each consumer's design**: billing and accounting
+SDDs do not exist yet.
+
+## 12. Transaction boundaries, key components, flows and failure modes
+
+**Rules [T]:** provider calls happen **outside** database transactions; every state change is one short transaction that (1) locks the
+payment row `FOR UPDATE`, (2) re-checks the state, (3) applies a conditional update, (4) writes the outbox event; database time is the only
+clock; no transaction spans a network call. **Lock order is fixed to prevent deadlocks: the payment row first, then its attempt, cash or refund rows** (the webhook processor follows the same order; it finds the attempt without locking, then locks the payment, then re-reads and locks the attempt). The T2 conditional update accepts the expected states `initiated` **or** `unknown`, so a resolver that got there first does not make the provider's real answer fail.
+
+| Operation | Transactions |
+|---|---|
+| Create payment | one: insert payment, insert outbox `payment.created` |
+| Start attempt | **T1:** idempotency row, attempt `initiated`, payment `created` to `pending` (commit). Then call the provider with `merchantReference`. **T2:** record `submitted` (with `providerTransactionId`), or `failed`, or `unknown` |
+| Webhook | **A:** insert the event (dedupe). **B:** lock, transition, outbox, mark processed |
+| Cash confirm | one: lock payment and cash row, transitions, outbox (`cash_payment.confirmed`, `payment.succeeded`) |
+| Refund request | one: lock payment, cap check, insert refund, outbox `refund.requested`; the refund attempt then runs like an attempt |
+| Expiry sweep | per payment: lock, re-check no open attempt (`initiated`, `submitted`, `unknown`), no cash submission in `submitted`, and `now() >= expiresAt`; transition; outbox |
+
+**Background work (in-process, database-clock driven) [T]:** the outbox relay (kit); an **expiry sweeper**; an **attempt resolver** that finds
+attempts stuck in `initiated`, `unknown` or long-`submitted` beyond their thresholds and settles them by asking the provider (by `merchantReference`), under the rules of section 5.2; a **stuck-payment alert** for any payment `pending` longer than a threshold; a retry pass for
+`unmatched` and `failed` webhook events **and a stuck-state sweep for events left in `received` or `processing` beyond a threshold** (a crash between transactions A and B); a refund retry and resolver job (section 5.4). Full periodic reconciliation of payment state against provider reports is [X].
+
+| Failure | Handling |
+|---|---|
+| Timeout or connection loss during the provider call | attempt `unknown`; never retried blindly; resolved by lookup or webhook |
+| Crash after the provider accepted but before T2 | the row stays `initiated`; the resolver finds it by `merchantReference` |
+| Webhook before our T2 commit | `unmatched`, retried for a bounded time, matched by `merchantReference` |
+| Duplicate, replayed or out-of-order webhook | section 7; no double effect |
+| Broker unavailable | outbox keeps the event; business transactions are unaffected |
+| Auth unavailable | user operations fail closed with `503`; service-token operations and webhooks continue |
+| Database unavailable | `/ready` fails; requests fail; nothing is half-applied (single transactions) |
+| Two concurrent operations on one payment | the row lock serializes them; the second re-checks the state and fails with `409` if no longer valid |
+| Provider says success for an amount or currency that differs from the snapshot | not applied; `conflict`, alert |
+
+### 12.1 Key interfaces and classes [T]
+
+| Component | Responsibility |
+|---|---|
+| Controllers (`Payments`, `Attempts`, `Cash`, `Refunds`, `Webhooks`) | HTTP only: DTO validation (unknown fields rejected), authentication guard, call one service method, map to the error model. No business rules |
+| `PaymentStateMachine` | the pure transition tables of section 5 (from, to, cause, condition); used by the services **and** by the trigger tests, so code and database cannot drift |
+| `PaymentService` | create (natural idempotency), read, cancel, expiry transition; owns the payment row transitions |
+| `AttemptService` | start an attempt (T1, provider call, T2), sync with the provider, record verified results; owns attempt rows |
+| `CashService` | submit, confirm, reject; owns cash rows |
+| `RefundService` | request (cap and capability checks), refund attempts, refund transitions |
+| `WebhookService` | verify (adapter), persist, deduplicate, process (transaction B); owns `webhook_event` |
+| `IdempotencyService` | `Idempotency-Key` handling (section 6); natural keys live in the services' unique constraints |
+| `AuthorizationService` | the **only** place that establishes a caller's relation to a payment and applies the operation rules of section 8; uses the kit's `AuthClient` and the combined service-token-or-user guard; returns the collapsed `404` |
+| `ProviderRegistry`, `PaymentProvider` adapters | the provider port of section 13; the test provider first |
+| `PaymentEvents` | builds the event payloads of section 11 with deterministic ids and writes them through the kit's `OutboxService` |
+| Background jobs | `ExpirySweeper`, `AttemptResolver`, `WebhookRetrier`, `RefundResolver`, `StuckPaymentMonitor`; the kit's outbox relay publishes |
+| Repositories | parameterized SQL only; a `withPaymentLock(paymentId, fn)` helper applies the fixed lock order |
+
+**Consumed contracts** (summary): the **producer contract** of section 3.1; **Auth** `GET /auth/me` returning `{ id, adminTier, isActive, memberships[ { id, organization{id}, platform{id}, status, isOrganizationAdmin } ] }`, empty for owners and operators (read through the kit's `HttpAuthClient`); each **provider's** API and webhook scheme (defined per adapter, deferred); the **broker** (`nawara.events`).
+
+### 12.2 Important flows [T]
+
+**Create payment.** (1) The producer sends the contract with its service token. (2) The guard identifies the caller. (3) Validate the body, currency and party rules. (4) One transaction: insert the payment (`created`) or find the identical one, and enqueue `payment.created`. (5) Return `201`, or `200` on an identical replay, or `409` on a conflicting one.
+
+**Pay by gateway.** (1) The payer asks to start an attempt with an `Idempotency-Key`. (2) The guard asks Auth for the identity; `AuthorizationService` establishes the relation. (3) T1: lock the payment, require `created` and not expired, insert the attempt `initiated`, move the payment to `pending`, commit. (4) Call the provider with `merchantReference`. (5) T2: record `submitted` with the provider transaction id and return `nextAction`; or `failed`; or `unknown`. (6) The payer completes at the provider. (7) The provider sends a signed webhook: verify, persist, then transaction B locks the payment, checks amount and currency against the snapshot, sets the attempt and the payment to `succeeded`, records `succeededAttemptId`, and enqueues `payment.succeeded`. (8) If the webhook is late or lost, `sync` or the resolver reaches the same result from the provider's status.
+
+**Cash.** (1) An authorized submitter posts a cash submission (`created` to `pending`; `cash_payment.submitted`). (2) An authorized person confirms: one transaction sets the cash row `confirmed`, the payment `succeeded` with `settledMethod = cash`, and enqueues `cash_payment.confirmed` and `payment.succeeded`. (3) Or rejects: the cash row becomes `rejected` and the payment returns to `created` (default, O-5). A repeated decision returns `409` and changes nothing.
+
+**Refund.** (1) An authorized requester posts `clientReference` and an amount. (2) One transaction: lock the payment, require `succeeded`, check the capability and the cap (full refund only until O-6), insert the refund `requested`, enqueue `refund.requested`. (3) The refund attempt runs like a payment attempt against `succeededAttemptId`. (4) A verified result sets `succeeded` (`refund.succeeded`) or `failed` (`refund.failed`, reservation released). The refund resolver retries `requested` refunds and settles `unknown` refund attempts.
+
+**Expiry.** The sweeper finds payments with `expiresAt` reached, locks each, re-checks that no attempt is open and no cash is awaiting review, and moves it to `expired` with `payment.expired`. A payment blocked by an open attempt is settled by the resolver first.
+
+**Recovery.** After a crash or timeout the resolver settles `initiated`, `unknown` and long-`submitted` attempts, and the webhook retrier reprocesses `received`, `processing`, `failed` and `unmatched` events; nothing depends on the original request being retried.
+
+## 13. Provider port and test provider
+
+### 13.1 The port [T]
+
+Payment depends on an interface, never on a vendor. Provider-specific fields live in `providerData` (opaque, adapter-owned, no secrets) and in
+adapter code.
+
+```
+PaymentProvider {
+  id: string
+  capabilities: { refunds, partialRefunds, notFoundIsAuthoritative, visibilityLagMs, timeoutMs, sessionExpiry, paymentFatalCodes }
+  initiate(payment, attempt)        -> accepted{providerTransactionId, nextAction} | rejected{class, code} | ambiguous
+  fetchStatus(ref)                  -> succeeded{amount, currency} | failed{class, code} | pending | notFound   // ref = providerTransactionId or merchantReference
+  verifyWebhook(rawBody, headers)   -> verified{providerEventId, type, reference, amount?, currency?, data} | rejected
+  refund(payment, refundAttempt)    -> accepted{providerRefundId} | rejected{class, code} | ambiguous
+  fetchRefundStatus(ref)            -> succeeded | failed | pending | notFound
+}
 ```
 
-**(d) Organization submits a cash payment request**
+Adapter contract: **the amount and currency the provider reports are checked against the snapshot before any success is applied** (a mismatch is a `conflict`, section 12); the adapter declares whether a `notFound` answer is authoritative, how long the provider's records lag, its timeout, whether it can tell that a session has ended, and which codes mean the payment itself is unrecoverable; methods are safe to retry given the same `merchantReference`; failures are classified `retryable`, `terminal` or
+`ambiguous`; secrets come from the secret store (`NAME_FILE`) and never appear in a table, a log or an event.
 
-```mermaid
-sequenceDiagram
-    participant Org as organization caller
-    participant JAG as JwtAuthGuard
-    participant CC as ChargesController
-    participant CS as ChargesService
-    participant DB as payment-service DB
-    participant EP as EventPublisher
-    participant Broker as RabbitMQ
+### 13.2 The deterministic test provider (defined here, **not implemented**) [T]
 
-    Org->>CC: POST /payment/charges/cash {productId, beneficiaryUserId?}
-    CC->>JAG: verify JWT
-    JAG-->>CC: {userId, organizationId}
-    CC->>CS: requestCashPayment(dto, organizationId, userId)
-    CS->>DB: SELECT Product WHERE id = productId
-    DB-->>CS: Product row
-    CS->>CS: validate beneficiaryUserId vs Product.type (400 on mismatch)
-    CS->>DB: INSERT Charge {method:'cash', status:'pending', productId, organizationId, payerId, submittedByUserId, amount, currency}
-    DB-->>CS: Charge row
-    CS->>EP: publish charge.cash_requested {chargeId, productId, organizationId, payerId, submittedByUserId, amount, currency, timestamp}
-    EP-)Broker: charge.cash_requested
-    CS-->>CC: Charge
-    CC-->>Org: 201 Charge
+Purpose: exercise every path without a real gateway. It is enabled only by configuration (`PAYMENT_TEST_PROVIDER=true`) and the service **refuses
+to start** with it enabled when `NODE_ENV=production`. Behaviour is selected by `providerOptions.scenario`:
+
+| Scenario | Behaviour |
+|---|---|
+| `success` | accepted; a signed success callback is delivered by the test harness |
+| `failure` (with a code) | rejected or a failure callback, `terminal` or `retryable` as requested |
+| `timeout_before_accept` | ambiguous with no provider record: resolves to `notFound` then `failed` (retryable) |
+| `timeout_after_accept` | ambiguous but the provider **did** record it: resolves by lookup or callback |
+| `retry` | first attempt fails retryably; the next succeeds |
+| `duplicate_callback` | the same signed event delivered twice or more |
+| `delayed_callback` | the callback is delivered only when the test says so (a controllable clock) |
+| `out_of_order` | a later-lifecycle event delivered before an earlier one |
+| `refund_success` / `refund_failure` | refund behaviours mirroring the above |
+
+Callbacks are signed with a test secret (HMAC) so the **real verification code path** runs; deliveries are made by an in-process harness (no
+network) so tests are deterministic. A test **producer fixture** (a test service token calling `POST /payment/payments`) stands in for billing.
+
+## 14. Billing integration boundary
+
+```
+Product service ─▶ Billing service ─▶ POST /payment/payments (payment request snapshot) ─▶ Payment service
+                                          ◀── events: payment.succeeded, failed, cancelled, expired, refund.* ── (never a call back)
 ```
 
-**(e) Admin confirms (or rejects) a pending cash charge**
+Payment does not create invoices, does not calculate product prices, does not hold entitlement state, and never calls billing to learn whether a
+payment succeeded or what was owed: it operates from the snapshot. **Billing-service does not exist**, so until it does, development and tests use
+the **producer fixture** described above, sending requests that conform to section 3.1 with a test service token. No billing stub *service* is built.
+The billing SDD must define how it reacts to payment events and how it cancels.
 
-Per `ADR-0021`, this flow now includes a synchronous, fail-closed call to `auth-service` between
-loading the target `Charge` and applying its state transition.
+## 15. Accounting integration boundary
 
-```mermaid
-sequenceDiagram
-    participant Admin as Admin user
-    participant JAG as JwtAuthGuard
-    participant RG as RolesGuard
-    participant CC as ChargesController
-    participant CS as ChargesService
-    participant PSS as PlatformScopeService
-    participant OLC as OrganizationLookupClient
-    participant AuthSvc as auth-service
-    participant DB as payment-service DB
+Payment emits `payment.succeeded` and `refund.succeeded` (and the other events); the future accounting-service consumes them idempotently (by
+`eventId`) into a double-entry ledger. Payment keeps **no** ledger, journal, chart of accounts or tax logic, and computes no fees. Fees are [X].
 
-    Admin->>CC: POST /payment/charges/:chargeId/cash/confirm (Authorization: Bearer <adminToken>)
-    CC->>JAG: verify JWT
-    JAG-->>CC: {userId, role, platformId}
-    CC->>RG: check role === 'admin'
-    RG-->>CC: allowed
-    CC->>CS: confirmCashPayment(chargeId, platformId, adminToken)
-    CS->>DB: SELECT Charge WHERE id = chargeId
-    DB-->>CS: Charge row (or none → 404)
-    CS->>PSS: assertOwnedByCallerPlatform(charge.organizationId, platformId, adminToken)
-    PSS->>OLC: getOrganization(charge.organizationId, adminToken)
-    OLC->>AuthSvc: GET /auth/organizations/:id, Authorization: Bearer <adminToken>
-    alt organization belongs to caller's platform
-        AuthSvc-->>OLC: 200 {id, platformId}
-        OLC-->>PSS: {id, platformId}
-        PSS-->>CS: ok
-        CS->>CS: 409 unless method='cash' AND status='pending'
-        CS->>DB: UPDATE Charge SET status='succeeded'
-        DB-->>CS: Charge row
-        CS->>CS: hand off to (out-of-scope) issuance step — must set License.type='standard'
-        CS-->>CC: Charge
-        CC-->>Admin: 200 Charge
-    else organization belongs to a different platform, or doesn't exist
-        AuthSvc-->>OLC: 404
-        OLC-->>PSS: null
-        PSS-->>CS: throw ForbiddenException
-        CS-->>CC: propagate
-        CC-->>Admin: 403 {statusCode: 403, message: "You do not have authority over this organization."}
-    else auth-service lookup fails or times out
-        AuthSvc--xOLC: timeout / 5xx
-        OLC-->>PSS: throw
-        PSS-->>CS: throw ServiceUnavailableException
-        CS-->>CC: propagate
-        CC-->>Admin: 503 {statusCode: 503, message: "Unable to verify organization; please try again."}
-    end
-```
+## 16. Configuration, security and observability
 
-`POST /payment/charges/:chargeId/cash/reject` follows the identical shape, differing only in
-setting `status='failed'` and skipping the issuance hand-off entirely.
+| Setting (environment) | Meaning |
+|---|---|
+| `DATABASE_URL` | runtime connection, **least-privilege role** (`payment_app`), never a superuser |
+| `MIGRATION_DATABASE_URL` | schema-owner role, used only by the explicit migration step |
+| `SERVICE_TOKENS` | accepted callers, `<caller>:<sha256 digest>` (kit) |
+| `AUTH_SERVICE_URL`, `AUTH_TIMEOUT_MS` | live identity and membership |
+| `RABBITMQ_URL` | event bus (a broker outage never blocks business work) |
+| `PAYMENT_SUPPORTED_CURRENCIES` | configured list, no code default [O-10] |
+| `PAYMENT_MAX_ATTEMPTS` | attempt limit, no business meaning [T] |
+| `IDEMPOTENCY_TTL_HOURS` | retention of header keys |
+| `PAYMENT_RETURN_URL_ALLOWLIST` | allowed `returnUrl` origins |
+| `PAYMENT_TEST_PROVIDER` | test provider switch; refused in production |
+| provider secrets (`PAYMENT_PROVIDER_<ID>_*` via `NAME_FILE`) | never stored in tables, logs or events |
+| `PORT`, `NODE_ENV`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS` | kit base configuration (fail-closed, values never echoed) |
 
-**(f) Admin lists pending cash charges, filtered to their own platform**
+Security: every external input is validated (unknown fields rejected); amounts and currency come from the snapshot, never from a user request;
+`userId`, `organizationId`, `platformId`, `role`, `permissions`, `amount`, `currency`, and beneficiary are never trusted from a client; rate limiting is
+required on payment creation, attempts, cash operations and the webhook route (**the service-kit has no rate limiter yet: a prerequisite**);
+errors are sanitized; logs carry request and correlation ids and **never** bodies of webhooks, secrets or card/bank data. Descriptive fields
+(`description`, `reference`, `note`) are length-bounded and treated as untrusted text. Observability: counters for payments by status, webhook
+outcomes, attempts in `unknown`, `unmatched` webhooks, expiry and resolver activity, outbox lag; alerts on stuck `unknown` attempts, `conflict`
+webhooks, and outbox age.
 
-```mermaid
-sequenceDiagram
-    participant Admin as Admin user
-    participant JAG as JwtAuthGuard
-    participant RG as RolesGuard
-    participant CC as ChargesController
-    participant CS as ChargesService
-    participant PSS as PlatformScopeService
-    participant OLC as OrganizationLookupClient
-    participant AuthSvc as auth-service
-    participant DB as payment-service DB
+## 17. Test strategy
 
-    Admin->>CC: GET /payment/charges?method=cash&status=pending (Authorization: Bearer <adminToken>)
-    CC->>JAG: verify JWT
-    JAG-->>CC: {userId, role, platformId}
-    CC->>RG: check role === 'admin'
-    RG-->>CC: allowed
-    CC->>CS: listPendingCash(platformId, adminToken)
-    CS->>DB: SELECT Charge WHERE method='cash' AND status='pending'
-    DB-->>CS: Charge rows (across potentially many organizations)
-    CS->>PSS: filterToCallerPlatform(charges, platformId, adminToken)
-    PSS->>PSS: dedupe distinct organizationId values across the rows
-    loop each distinct organizationId
-        PSS->>OLC: getOrganization(organizationId, adminToken)
-        OLC->>AuthSvc: GET /auth/organizations/:id, Authorization: Bearer <adminToken>
-        alt belongs to caller's platform
-            AuthSvc-->>OLC: 200 {id, platformId}
-        else different platform or not found
-            AuthSvc-->>OLC: 404
-        else lookup fails or times out
-            AuthSvc--xOLC: timeout / 5xx
-            OLC-->>PSS: throw
-            PSS-->>CS: throw ServiceUnavailableException (whole request fails closed)
-            CS-->>CC: propagate
-            CC-->>Admin: 503 {statusCode: 503, message: "Unable to verify organization; please try again."}
-        end
-    end
-    PSS-->>CS: rows whose organization matched, others silently omitted
-    CS-->>CC: Charge[]
-    CC-->>Admin: 200 Charge[]
-```
+Unit, integration against real PostgreSQL, API and security tests; each row below must exist before the feature is considered done.
 
-**(g) Lapse detected on a standard license → auto-grace issued, no suspension**
+| Area | Cases |
+|---|---|
+| Money and contract | invalid amount, currency, party; snapshot immutability; identical replay; conflicting replay |
+| State machines | every allowed transition; every forbidden one rejected **by the database trigger** as well as by code; terminal states final |
+| Recovery and stuck states | a `submitted` attempt with no webhook is settled or alerted after the TTL; a crash between webhook transactions A and B is reprocessed on the duplicate delivery; a stuck `initiated` attempt is resolved without a double charge; a success for an **inferred** failure is accepted, a success for a provider-confirmed failure is a `conflict`; cancel and expiry are refused while an attempt is open or cash is awaiting review; two payments locked in opposite orders never deadlock (fixed lock order) |
+| Concurrency | 8 simultaneous identical creates give one row; two attempts at once give one open attempt; concurrent cash confirmations give one decision; concurrent refunds never exceed the cap; unique provider ids |
+| Idempotency | same key same content (replay); same key different content (`422`); expired key; natural keys beyond expiry |
+| Provider (test provider) | amount or currency differing from the snapshot is a `conflict`; success; failure retryable and terminal; timeout with and without a provider record; retry; delayed, duplicate and out-of-order callbacks |
+| Webhooks | forged signature rejected and not persisted; duplicate; out of order; unmatched then matched; malformed; conflict; transient failure retried |
+| Cash | submit, confirm, reject; confirmer is not the payer; repeated decision refused; unauthorized attempts refused |
+| Refunds | request, success, failure, reservation released on failure, exceeds refundable, partial refused until approved, not-succeeded payment, provider without the refund capability, cash payment refused, refund executed against `succeededAttemptId` |
+| Isolation and authorization | a user in organizations A and B cannot reach organization C; organization A cannot read B (collapsed `404`); a pending or revoked membership grants nothing; the payer of one payment cannot read another's; the organization-as-merchant and organization-as-payer flows; Auth down fails closed |
+| Events | an event exists if and only if the transaction commits; duplicates absorbed by the inbox of a test consumer; no secret in any payload |
+| Security | service token missing, wrong, or a user token presented as a service token; secrets never in logs or responses; oversized or unknown-field bodies |
 
-```mermaid
-sequenceDiagram
-    participant LLS as LicenseLapseService
-    participant LS as LicensesService
-    participant DB as payment-service DB
-    participant EP as EventPublisher
-    participant Broker as RabbitMQ
+## 18. Deferred [X]
 
-    LLS->>LS: check License (organizationId)
-    LS->>DB: SELECT License WHERE organizationId = ?
-    DB-->>LS: License row (type='standard', expiresAt in the past)
-    LS-->>LLS: License
-    LLS->>LLS: type is 'standard' → issue grace instead of expiring
-    LLS->>LS: grant grace (organizationId)
-    LS->>DB: UPDATE License SET type='grace', expiresAt=now+24h (status stays 'active')
-    DB-->>LS: License row
-    LS-->>LLS: License (ownerId, organizationId, expiresAt)
-    LLS->>EP: publish license.grace_issued {organizationId, ownerId, expiresAt, timestamp}
-    EP-)Broker: license.grace_issued
-    Note over LLS: No UserSubscription suspension — org still reads as fully valid<br/>via GET /payment/licenses/:organizationId/status
-```
+Real gateway adapters (Flouci, Konnect, Paymee, Stripe) and their signature schemes; organization payment accounts; settlement; payouts;
+fees; custody; wallet or balance; any merchant-of-record behaviour; full periodic reconciliation against provider reports; withdrawing a cash
+submission; cancelling a requested refund; administrative or support tooling; caching of Auth answers; outbox and inbox pruning; consumers of
+events (the inbox is unused in this phase).
 
-**(h) Grace license itself lapses → real lockout**
+## 19. Open business, legal and architecture decisions
 
-Identical to flow (a) above, with the precondition that the lapsing `License.type` is already
-`'grace'` (i.e. the 24-hour window granted by flow (g) has now also elapsed). `type` is left as
-`'grace'` after this runs — per `ADR-0008`, this is what makes the existing idempotent
-`WHERE status = 'active'` sweep-selection naturally skip the row on any repeat run, with no
-additional guard needed.
+**Resolving ADRs to be written (pointers):** O-1, O-2, O-3 to an ADR on providers, merchant of record and settlement; O-4, O-5, O-6, O-18, O-20 to an ADR on the payment-domain authorization model; O-13, O-14, O-15 to an ADR on producer service-token scopes and hierarchy validation without user context (which also touches the deferred organization-service mechanism, ADR-0031); O-7 to an ADR on partial payments; O-10 to a currencies decision; O-12 to an Auth or billing ADR. Nothing below is decided or invented. "Can implementation proceed?" refers to **the parts of the service not touched by the decision**.
 
-## Error handling & edge cases
+| # | Decision | Why it matters | Components affected | Can implementation proceed without it? | Must be decided before |
+|---|---|---|---|---|---|
+| O-1 | **Provider contracts, fees, refunds and disputes** | defines what each provider can do, its signature scheme, refund and dispute rules | provider adapters, webhook verification, refund capability, chargebacks | yes, with the test provider | any real adapter |
+| O-2 | **Merchant-of-record model** | who is legally the seller to the customer; who bears disputes and liability | seller semantics, refunds, disputes, receipts | yes | any organization-as-merchant flow in production |
+| O-3 | **Settlement, custody, timing, currencies** | whether and how money reaches organizations | organization payment account, fees, payouts | yes (deferred) | the settlement phase |
+| O-4 | **Who may submit cash** | payer, seller-side staff, or both | cash submission authorization | yes, except the submit endpoint | implementing endpoint 6 |
+| O-5 | **Who may confirm or reject cash**, whether the confirmer may equal the submitter, whether a rejection ends the payment, and how the authority is modeled | the only guard against a false "paid" | cash authorization, `cash_payment` constraints, state machine | yes, except endpoints 7 and 8 | implementing endpoints 7 and 8 |
+| O-6 | **Who may refund**, partial refunds, refunds of cash payments, step-up | money leaves; abuse risk | refund authorization and scope, cap logic | yes, except refunds | implementing endpoint 10 |
+| O-7 | **Partial payments** | one request vs several payments | uniqueness on `(producer, paymentRequestId)`, invariants | yes (v1 is one payment per request) | if partial payments are wanted |
+| O-8 | **Dunning** | reminders and retries after failure | billing more than payment; payment's attempt limit | yes | billing's dunning design |
+| O-9 | **Legal issuer and tax identity** | who issues Nawara's invoices; tax content | billing and accounting; payment only carries parties | yes | billing and accounting SDDs |
+| O-10 | **Supported currencies beyond TND** | exponent table and provider support | currency table, validation | yes (configured list) | adding a currency |
+| O-11 | **Trials** | whether subscriptions start with a trial | billing entitlement; payment unaffected until a paid step | yes | billing SDD |
+| O-12 | **Auth's registration/join entitlement check** | Auth still calls `GET /payment/licenses/:organizationId/status` (`apps/auth-service/src/payment/payment-client.ts`); keep, repoint to billing, or remove | Auth client, billing entitlement API | yes **only while payment-service is not deployed to production**; once it is, that Auth route must exist or be repointed first | deploying payment-service to production |
+| O-13 | **Which product services may create billable obligations** | who can cause payments to exist | service-token issuance and authorization | yes | enabling any producer beyond the test fixture |
+| O-14 | **Service-token scopes for those producers** | limits which organizations a producer may bill | `ServiceTokenGuard` scope model (the kit guard has no scopes) | yes | endpoint 1 in production |
+| O-15 | **How organization to platform to company is validated with no user context** | a producer asserts `organizationId`; nothing verifies it | endpoint 1, isolation | yes (asserted value) | production use by non-trusted producers |
+| O-16 | **Maximum payment lifetime, and whether a payment may have no expiry** | unbounded open payments, stuck `pending` payments | expiry sweep, config, stuck-payment alert | yes | production |
+| O-19 | **What ends a payment as failed**: the attempt limit and its value, whether a declined attempt should end the payment | a decline ending the payment forces billing to issue a new request; not ending it lets the payer retry | payment state machine, `PAYMENT_MAX_ATTEMPTS` | yes (defaults in section 5.1: retry until the limit or expiry) | production |
+| O-20 | **Who may *read* a payment beyond its producer and payer** (organization members, seller staff) | privacy: payer, amount and reference become visible | read authorization, isolation tests | yes (no organization read access until decided) | any organization-facing screen |
+| O-17 | **Retention and privacy of raw webhook bodies and payment records** | legal retention and data protection | `webhook_event`, pruning | yes | production |
+| O-18 | **Who may pay on behalf of an organization** (for example an organization paying Nawara) | payer authorization for an organization | endpoints 3 and 4 for organization payers | yes, for user payers | implementing organization-payer flows |
 
-- Organization has no `License` row at all vs. an expired one → identical `{valid: false,
-  expiresAt: null}` response, deliberately not distinguished (see API contract).
-- User has no `UserSubscription` row at all → `{exists: false, valid: false, expiresAt: null}`;
-  `auth-service` treats `exists: false` as "not applicable," never as a block (per `ADR-0006`).
-- `LicenseLapseService.handleExpiry`/`handleReactivation` triggered more than once for the same
-  transition (whatever the eventual detection mechanism turns out to be) → idempotent:
-  `suspendAllForOrganization`/`resumeAllForOrganization` only operate on rows currently in the
-  opposite state (`active`→suspend, `suspended`→resume), so a repeat call finds nothing left to
-  do and is a no-op.
-- A `UserSubscription` that naturally reaches its own `expiresAt` (unrelated to any
-  organization license lapse) → moves directly to `expired`, not `suspended` — there is nothing
-  to freeze or later resume, since the user's own paid time genuinely ran out. The lapse-sweep
-  in flow (a) only selects rows still `active`, so an already-`expired` row is never touched.
-- A `UserSubscription` suspended due to an organization's license lapse, whose
-  `frozenRemainingSeconds` would have naturally expired *during* the suspension window (i.e.
-  its original `expiresAt` was already in the past at suspension time) → `frozenRemainingSeconds`
-  is computed as `expiresAt - now` at the moment of suspension per flow (a); if that value is
-  zero or negative, the subscription is moved directly to `expired` instead of `suspended` —
-  there's no remaining time to bank.
-- Publishing any of the six lifecycle events fails (once RabbitMQ infrastructure exists) →
-  not designed by this document; flagged as an open question (retry/outbox strategy) in the
-  ADD.
-- Concurrent purchase and lapse-detection for the same user/organization (e.g. a user buys a
-  subscription in the same moment their organization's license lapses) → not designed by this
-  document; deferred to a future TDD once the purchase flow itself is designed.
-- `POST /payment/charges/cash` called with `beneficiaryUserId` set for an `org_license` product,
-  or omitted for an `individual_subscription` product, or referencing a `one_time` product →
-  `400` in all three cases (per `ADR-0007`); `ChargesService` validates this server-side on every
-  request, since it's the only guard against a malformed cash request.
-- `POST /payment/charges/:chargeId/cash/confirm` or `.../reject` called on a `Charge` that is
-  not `method = 'cash'` (e.g. a gateway charge), or not currently `status = 'pending'` (already
-  confirmed, rejected, or a gateway-originated state) → `409` in both cases; neither endpoint
-  mutates a charge outside that exact precondition.
-- A real payment (gateway or Admin-confirmed cash) lands for an organization while its `License`
-  is currently `type = 'grace'` → per `ADR-0008`'s reset rule, the future issuance mechanism
-  unconditionally writes `type = 'standard'` alongside the new `status`/`expiresAt`/`chargeId`,
-  upgrading the same row early rather than waiting for the grace window to run out first. Not
-  itself a new code path in `LicenseLapseService` — the issuance mechanism (out of scope) is
-  solely responsible for this write.
-- The 24-hour grace window (flow (g)) is anchored to *detection time*, not the license's original
-  `expiresAt` — if the eventual lapse-detection sweep cadence is coarser than roughly an hour,
-  "exactly 24 hours" cannot be honored precisely, since the window starts whenever the sweep
-  happens to notice the lapse, not the instant it occurred (see `ADR-0008`'s Consequences).
-- `POST /payment/charges/:chargeId/cash/confirm` or `.../reject` called against a `Charge` whose
-  organization belongs to a different platform than the caller's own, or whose organization
-  doesn't exist at all → `403` (per `ADR-0021`), checked after the `404`-if-`chargeId`-not-found
-  check and before the `409` state-precondition check — an admin never learns whether a
-  foreign-platform charge is currently confirmable via the `409` signal, since the platform
-  check short-circuits first.
-- `auth-service` is unreachable, errors, or times out while `PlatformScopeService` is resolving
-  an `organizationId`'s `platformId` (single-target confirm/reject, or any one of the batched
-  lookups behind the pending-cash listing) → `503` in all cases (per `ADR-0021`); for the
-  listing endpoint specifically, this fails the **entire** request, never a partial/silently
-  filtered list.
-- A cash `Charge`'s organization genuinely belongs to a different platform than the listing
-  caller's own → not an error for `GET /payment/charges?method=cash&status=pending`; the row is
-  simply omitted from the response (per `ADR-0021`).
+## 20. Architecture consistency check
 
-## Open questions
+This SDD introduces none of the following, and each is checked in review:
 
-- The exact license-lapse detection mechanism (scheduled sweep vs. reacting to a
-  renew/revoke trigger) that calls `LicenseLapseService.handleExpiry`/`handleReactivation` in
-  the first place — not decided here (see the ADD's Open questions). Now additionally
-  constrains how precisely `ADR-0008`'s 24-hour grace window can be honored; a sub-hourly sweep
-  cadence is recommended if that precision matters.
-- Whether the two status endpoints need any authentication/authorization of their own beyond
-  implicit network trust, once more than one internal caller exists.
-- A retry/outbox strategy for the six lifecycle events once RabbitMQ infrastructure lands.
-- Locking/concurrency behavior for `suspendAllForOrganization`/`resumeAllForOrganization` at
-  scale (many subscriptions under one organization, or overlapping sweep runs) — deferred to a
-  future TDD.
-- ~~Whether `License`/`UserSubscription` should support a grace period before a lapse actually
-  triggers suspension~~ — resolved for `License` by
-  [`ADR-0008`](../adr/0008-automatic-grace-license-on-license-lapse.md); `UserSubscription` is
-  explicitly out of scope for that decision and remains unaddressed.
-- The purchase/checkout flow that creates `Product`/`Charge`/`License`/`UserSubscription` rows
-  in the first place, **and the `Charge → License`/`UserSubscription` issuance step** that both
-  that flow and `ADR-0007`'s cash-confirmation flow now depend on — out of scope for this pass.
-- Building `payment-service`'s own `JwtAuthGuard`/`RolesGuard` (per `ADR-0007`) and how it
-  obtains the JWT signing secret/key, given `auth-service`'s ADD's still-open
-  secret-distribution gap — see the ADD's Open questions.
-- Whether `POST /payment/charges/:chargeId/cash/reject` needs a reason/note field for the Admin
-  to record why a cash request was rejected (e.g. for the submitting organization's benefit) —
-  not required by `ADR-0007`, flagged as a possible follow-up.
-- Whether `GET /payment/charges?method=cash&status=pending` needs pagination once pending-cash
-  volume grows — not designed here, v1 returns an unpaginated list. Per `ADR-0021`, this now
-  compounds with the per-distinct-organization `auth-service` lookup cost that same endpoint's
-  platform-scope filtering adds — the two open questions are related but neither is resolved by
-  the other.
-- Whether `platformId` should eventually be denormalized onto `Charge`/`License`/
-  `UserSubscription` rows at write time, closing both the mutual `payment-service`↔`auth-service`
-  availability coupling and the pending-cash listing's batch-lookup cost in one move — `ADR-0021`
-  Option 2, deferred rather than adopted for this pass.
-- Whether the `ADR-0021` platform-scope check needs to be retrofitted onto the still-undesigned
-  gateway purchase/checkout flow or the `Charge → License`/`UserSubscription` issuance step, once
-  either is actually designed — not decided here, since neither exists yet.
+| Must not appear | Where this SDD stands |
+|---|---|
+| `User.organizationId`, `User.platformId`, product-specific user roles, a second membership store | none; only opaque ids and Auth's live answer |
+| Invoice ownership, an accounting ledger, a tax engine, a wallet or custody model, subscription or entitlement state | none; fees, settlement and balance are [X] |
+| Cross-service foreign keys or queries | none; all foreign keys are inside payment's own database |
+| Admin or user JWT forwarded between services | none; service tokens between services; the user's bearer only to Auth |
+| A synchronous payment-to-billing dependency | none; snapshot in, events out |
+| Payment doing Auth's job or Auth doing payment's | Auth answers identity and membership; payment decides payment operations |
+| Country-specific tax logic, product names, hard-coded currencies | none; currencies are configured; only neutral examples |
+| An organization anchor or copy in Auth, a new tenant layer | none; Company, Platform and Organization are untouched (ADR-0031) |
+
+## 21. Implementation plan
+
+**Prerequisites that live outside payment-service (small, in the service-kit):**
+
+1. an additive `code` field in the error body, and a `502` entry in its status text (section 10), with a note in ADR-0034;
+2. raw-body capture for the webhook route (section 7): verify first whether Nest's `rawBody` option together with `useBodyParser` can be set in payment-service itself, in which case no kit change is needed;
+3. a baseline rate limiter (section 16);
+4. a combined service-token-or-user guard, and optionally scopes in the service-token model (O-14).
+
+**First implementation task after this SDD is approved:** *convert the payment-service starter into a kit-based service with no domain* (Stage 1):
+configuration through `loadBaseConfig`, `HealthModule`, `DbModule` on the `payment` database with the runtime role, `ServiceAuthModule`, `EventsModule`
+(in-memory bus for tests, RabbitMQ by configuration), OpenAPI and the basic-auth guard for `/payment/docs`, a Dockerfile, `.env.example`, a README, an
+empty service migrations folder wired to the kit migrations, and tests for configuration, health versus readiness, the service-token guard and the
+migration/readiness behaviour. **No table, endpoint or domain type from this document is created in that task.**
+
+The remaining order (schema and triggers, creation, test provider and attempts, webhooks, events, isolation, then cash after O-4 and O-5 and refunds after O-6) is planned per feature in TDDs (`docs/tdd/`), not here. Real gateways and settlement stay deferred.

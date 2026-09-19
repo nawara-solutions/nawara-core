@@ -1,6 +1,6 @@
 # payment-service
 
-> **Superseded in its financial parts (2026-09-19).** The financial model below (`Product`, `Charge`, `License`, `UserSubscription` inside one payment-service, a JWT `organizationId` claim, the forwarded admin JWT, fire-and-forget events) is replaced by [`docs/architecture/financial-architecture.md`](../architecture/financial-architecture.md) and ADR-0035 to ADR-0038: billing-service (what is owed, entitlements), payment-service (how money moved), accounting-service (accounting effect). Read this document only for the history and for the rules of ADR-0006, ADR-0007 and ADR-0008 that survive.
+> **Superseded in its financial parts (2026-09-19).** The financial model below (`Product`, `Charge`, `License`, `UserSubscription` inside one payment-service, a JWT `organizationId` claim, the forwarded admin JWT, fire-and-forget events) is replaced by [`docs/architecture/financial-architecture.md`](../architecture/financial-architecture.md) and ADR-0035 to ADR-0038: billing-service (what is owed, entitlements), payment-service (how money moved), accounting-service (accounting effect). The new design contract is the [payment SDD](../sdd/payment-service.md). Read this document only for the history and for the rules of ADR-0006, ADR-0007 and ADR-0008 that survive.
 
 
 - **Status:** Draft <!-- Draft | Reviewed | Implemented -->

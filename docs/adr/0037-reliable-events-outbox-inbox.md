@@ -27,7 +27,7 @@ fire-and-forget, so delivery is not guaranteed. Notifications must never be a sy
   documented shape.
 - A consumer records `eventId` in its `inbox` in the same transaction as its effect (unique constraint), so processing is
   **idempotent**: a redelivered `payment.succeeded` creates one journal entry.
-- Events are named `invoice.*`, `payment.*`, `cash_payment.*`, `refund.*`, `license.*`, `subscription.*` (the old design's `charge.cash_requested` becomes `cash_payment.requested`); payloads contain no
+- Events are named `invoice.*`, `payment.*`, `cash_payment.*`, `refund.*`, `license.*`, `subscription.*` (the old design's `charge.cash_requested` is replaced; the payment event catalog is defined in the [payment SDD](../sdd/payment-service.md)); payloads contain no
   secret and no card or bank data.
 - Local and test runs use an in-memory bus behind the same port; production needs RabbitMQ deployed (a separate approval).
 

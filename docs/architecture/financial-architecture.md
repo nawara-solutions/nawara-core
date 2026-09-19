@@ -75,7 +75,7 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
 - **Organization sells to a user** (a service): invoice (seller = the organization, payer = the user) → payment → invoice paid.
 - **Nawara processes payments for an organization** (**subject to open decisions 4 and 5**: merchant of record and custody of funds): the same payment records, with the organization as beneficiary; the
   organization's payment account and settlement are Stage 6 and **not designed in detail** (section 9).
-- **Cash:** `Invoice → cash payment request → review → confirm | reject → payment succeeded`. Cash is a payment *method*, not an
+- **Cash:** `Invoice → payment request → cash submission → review → confirm | reject → payment succeeded`. Cash is a payment *method*, not an
   exception. Who confirms: **explicitly designated seller-side authority**, modeled in payment-service (whether that draws on an Auth capability, an
   owner or an assigned operator is undecided). **These authority rules are a proposed policy, not settled** (open decision 7); the generic controls proposed are that a payer cannot confirm their own cash payment (a CHECK `confirmer <> payer` is enforceable only when the payer is a `user`) and that confirmation cannot happen twice.
 
@@ -108,9 +108,9 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
 
 | Table | Key columns and rules |
 |---|---|
-| `payment` | id, invoiceId (opaque), payer, seller, organizationId, currency, amount, method (`gateway`, `cash`), status `pending → processing → succeeded \| failed \| cancelled`, idempotency key unique per (caller, scope); state moves enforced by trigger |
+| `payment` | id, the payment-request snapshot (paymentRequestId, sourceType/sourceId, payer, seller, organizationId, amount, currency, expiresAt, description, reference), settledMethod (`gateway` or `cash`, set on success), succeededAttemptId, status `created`, `pending`, then `succeeded`, `failed`, `cancelled` or `expired` (the state machine is defined in the [payment SDD](../sdd/payment-service.md), which is authoritative), natural idempotency key `(producer, paymentRequestId)`; state moves enforced by trigger |
 | `payment_attempt` | payment, provider, providerTransactionId (**unique per provider**), state, error class, timestamps; one payment may have several attempts |
-| `cash_payment` | payment, submittedBy, submittedAt, confirmedBy, confirmedAt, rejectedBy, rejectedAt; `pending → confirmed \| rejected`, final; CHECK confirmer ≠ payer |
+| `cash_payment` | payment, submittedBy, submittedAt, confirmedBy, confirmedAt, rejectedBy, rejectedAt; `submitted → confirmed \| rejected`, final; confirmer ≠ payer when the payer is a user |
 | `refund`, `refund_attempt` | refund amount, provider refund reference; CHECK sum of refunds ≤ paid amount; history is never overwritten |
 | `webhook_event` | provider, providerEventId (**unique**), raw body, signature verified, processing state, attempts |
 | `idempotency_key` | scope, key, request hash, stored response |
@@ -132,8 +132,7 @@ A correction is a **reversing entry**, never an update or delete.
 
 ## 6. Payment processing rules
 
-- **Idempotency:** creating a payment or refund requires an `Idempotency-Key`; the same key with the same request returns the
-  stored result, with a different request is rejected. Concurrent identical requests produce one row.
+- **Idempotency:** creating a payment and creating a refund use a **permanent natural key** (`(producer, paymentRequestId)` and `(paymentId, clientReference)`); other mutating operations take an `Idempotency-Key`. The full design is in the [payment SDD](../sdd/payment-service.md), section 6, which refines the header-only wording used earlier.
 - **Webhooks:** a provider event is stored raw, its **signature is verified server-side**, its `providerEventId` is unique
   (duplicates are no-ops), processing is retried, and out-of-order delivery is tolerated (state moves are validated, not assumed).
   A payment is **never** marked succeeded on a client's claim; only a verified provider confirmation, a verified webhook, or an

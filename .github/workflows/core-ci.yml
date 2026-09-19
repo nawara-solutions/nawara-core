@@ -19,6 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # The Node version the SERVICES run on: it matches the production image (node:22-alpine in apps/auth-service/Dockerfile).
+  # The setup-node ACTION itself runs on Node 24 (v7).
   NODE_VERSION: '22'
 
 jobs:
@@ -27,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -82,7 +84,7 @@ jobs:
       PGPASSWORD: pw
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -109,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
