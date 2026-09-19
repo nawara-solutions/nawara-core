@@ -6,6 +6,7 @@ import { InboxService, OutboxService, RateLimitService, DbService, kitMigrations
 import { billingMigrationsDir } from '../src/app.module.js';
 import { normaliseCreateInvoiceInput } from '../src/domain/invoice-input.js';
 import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
+import { PlatformCurrencyRepository } from '../src/currencies/platform-currency.repository.js';
 import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
@@ -144,6 +145,11 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     expect(req).toMatchObject({ status: 'created', amount: '5000' });
     expect((await db.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'invoice.created' AND payload->>'invoiceId' = $1`, [open.id])).rows[0].n).toBe(1);
     expect((await db.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityId" = ANY($1::uuid[])`, [[open.id, req.id]])).rows[0].n).toBe(3);
+    // Platform currency configuration works as the runtime role too, and leaves a row for the guard test below
+    const platforms = t.app.get(PlatformCurrencyRepository);
+    await platforms.enable('platform-rt', 'TND');
+    expect(await platforms.isPermitted('platform-rt', 'TND')).toBe(true);
+    expect((await platforms.disable('platform-rt', 'TND')).revision).toBe(1);
     // an event receipt, so the append-only guard below has a row to refuse to change (a row-level guard cannot fire on an empty table)
     const ignored = await requests.applyPaymentEvent(crypto.randomUUID(), {
       name: 'payment.failed', source: 'payment-service', paymentId: crypto.randomUUID(), paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: open.id,
@@ -157,6 +163,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     await app.connect();
     try {
       for (const statement of [
+        'ALTER TABLE platform_currency DISABLE TRIGGER USER',
         'ALTER TABLE invoice DISABLE TRIGGER USER',
         'ALTER TABLE invoice DISABLE TRIGGER invoice_10_immutable',
         'DROP TRIGGER invoice_20_lifecycle ON invoice',
@@ -182,6 +189,9 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
         'DELETE FROM payment_event_receipt',
         'UPDATE invoice_number_sequence SET "nextValue" = 2',
         'DELETE FROM invoice_number_sequence',
+        'UPDATE platform_currency SET "platformId" = \'elsewhere\'',
+        'UPDATE platform_currency SET currency = \'TND\', "createdAt" = now() - interval \'1 day\'',
+        'DELETE FROM platform_currency',
         'UPDATE currency SET exponent = 2',
         'DELETE FROM currency',
         'UPDATE price SET "unitAmount" = 1',

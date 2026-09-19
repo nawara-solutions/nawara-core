@@ -390,6 +390,66 @@ SELECT pg_temp.expect_error('IDEMPOTENCY', 'the same (producer, invoiceRequestId
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
   SELECT producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot" FROM invoice WHERE id = %L$$, :'d1'), '23505', 'invoice_request_unique');
 
+-- =================================================================================================================== CURRENCY (three layers)
+-- Global reference (currency) / Platform configuration (platform_currency) / historical invoice currency (invoice, invoice_line).
+SELECT pg_temp.expect_ok('CURRENCY', 'a platform can enable a currency that exists globally', $$INSERT INTO platform_currency ("platformId", currency) VALUES ('platform-1', 'TND')$$);
+SELECT pg_temp.expect_error('CURRENCY', 'a platform cannot enable an UNKNOWN currency', $$INSERT INTO platform_currency ("platformId", currency) VALUES ('platform-1', 'XXX')$$, '23503', 'platform_currency_currency_fkey');
+SELECT pg_temp.expect_error('CURRENCY', 'a currency is configured once per platform', $$INSERT INTO platform_currency ("platformId", currency) VALUES ('platform-1', 'TND')$$, '23505', 'platform_currency_pkey');
+SELECT pg_temp.expect_error('CURRENCY', 'an empty platform id is refused', $$INSERT INTO platform_currency ("platformId", currency) VALUES ('', 'TND')$$, '23514', 'platform_currency_platform_id_shape');
+SELECT pg_temp.expect_error('CURRENCY', 'a blank platform id is refused', $$INSERT INTO platform_currency ("platformId", currency) VALUES ('   ', 'TND')$$, '23514', 'platform_currency_platform_id_shape');
+SELECT pg_temp.expect_error('CURRENCY', 'a 129-character platform id is refused', $$INSERT INTO platform_currency ("platformId", currency) VALUES (repeat('p', 129), 'TND')$$, '23514', 'platform_currency_platform_id_shape');
+SELECT pg_temp.expect_error('CURRENCY', 'a platform currency is created at revision 0', $$INSERT INTO platform_currency ("platformId", currency, revision) VALUES ('platform-2', 'TND', 5)$$, '23514');
+SELECT pg_temp.assert_eq('CURRENCY', 'the platform is an OPAQUE reference: no foreign key leaves this table except the currency reference',
+  (SELECT string_agg(confrelid::regclass::text, ',' ORDER BY confrelid::regclass::text) FROM pg_constraint WHERE conrelid = 'platform_currency'::regclass AND contype = 'f'), 'currency');
+SELECT pg_temp.assert_eq('CURRENCY', 'global currency metadata cannot be reached through platform configuration: it has no exponent column',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name = 'platform_currency' AND column_name ~* 'expon|decimal|scale|precision'), '0');
+SELECT pg_temp.assert_eq('CURRENCY', 'no financial table references platform configuration, so configuration cannot reach a historical record',
+  (SELECT count(*)::text FROM pg_constraint WHERE contype = 'f' AND confrelid = 'platform_currency'::regclass), '0');
+
+SELECT pg_temp.assert_eq('CURRENCY', 'permitted: enabled for the platform', billing_currency_permitted('platform-1', 'TND')::text, 'true');
+SELECT pg_temp.assert_eq('CURRENCY', 'not permitted: no configuration for another platform', billing_currency_permitted('platform-other', 'TND')::text, 'false');
+SELECT pg_temp.assert_eq('CURRENCY', 'not permitted: a currency the platform never enabled', billing_currency_permitted('platform-1', 'EUR')::text, 'false');
+SELECT pg_temp.assert_eq('CURRENCY', 'not permitted: an unknown currency', billing_currency_permitted('platform-1', 'XXX')::text, 'false');
+
+SELECT pg_temp.expect_error('CURRENCY', 'a platform currency cannot be re-pointed to another currency', $$UPDATE platform_currency SET currency = 'TND', "platformId" = 'platform-9' WHERE "platformId" = 'platform-1'$$, '23514');
+SELECT pg_temp.expect_error('CURRENCY', 'a platform currency cannot be moved to another platform', $$UPDATE platform_currency SET "platformId" = 'platform-9' WHERE "platformId" = 'platform-1'$$, '23514');
+SELECT pg_temp.expect_error('CURRENCY', 'creation time cannot be rewritten', $$UPDATE platform_currency SET "createdAt" = now() - interval '1 year' WHERE "platformId" = 'platform-1'$$, '23514');
+SELECT pg_temp.expect_error('CURRENCY', 'a platform currency is never deleted (it is disabled)', $$DELETE FROM platform_currency$$, '23514');
+SELECT pg_temp.expect_error('CURRENCY', 'the global exponent cannot be changed', $$UPDATE currency SET exponent = 2 WHERE code = 'TND'$$, '23514');
+SELECT pg_temp.expect_error('CURRENCY', 'a globally referenced currency cannot be deleted', $$DELETE FROM currency WHERE code = 'TND'$$, '23514');
+
+-- disabling: a flag on a row, with a revision; caller-supplied revision and timestamps are overwritten
+SELECT pg_temp.expect_ok('CURRENCY', 'a platform can disable a currency for future use', $$UPDATE platform_currency SET enabled = false, revision = 99, "updatedAt" = '2001-01-01' WHERE "platformId" = 'platform-1' AND currency = 'TND'$$);
+SELECT pg_temp.assert_eq('CURRENCY', 'a disabled currency is not permitted for new billing operations', billing_currency_permitted('platform-1', 'TND')::text, 'false');
+SELECT pg_temp.assert_eq('CURRENCY', 'disabling advanced the revision by exactly one; a supplied revision is ignored',
+  (SELECT revision::text FROM platform_currency WHERE "platformId" = 'platform-1' AND currency = 'TND'), '1');
+UPDATE platform_currency SET enabled = false WHERE "platformId" = 'platform-1' AND currency = 'TND';
+SELECT pg_temp.assert_eq('CURRENCY', 'a no-op update changes neither the revision nor the update time',
+  (SELECT revision::text FROM platform_currency WHERE "platformId" = 'platform-1' AND currency = 'TND'), '1');
+UPDATE platform_currency SET enabled = true WHERE "platformId" = 'platform-1' AND currency = 'TND';
+SELECT pg_temp.assert_eq('CURRENCY', 'a platform can re-enable a disabled currency', billing_currency_permitted('platform-1', 'TND')::text, 'true');
+SELECT pg_temp.assert_eq('CURRENCY', 're-enabling advanced the revision', (SELECT revision::text FROM platform_currency WHERE "platformId" = 'platform-1' AND currency = 'TND'), '2');
+
+-- historical invoices: configuration controls FUTURE operations and never a historical record
+CREATE TEMP TABLE hist AS
+  SELECT i.id, i.currency, i.subtotal, i."taxTotal", i.total, i.status, i.number, i.revision, i."issuedAt",
+         (SELECT string_agg(l."lineNumber" || ':' || l.currency || ':' || l."unitAmount" || ':' || l."lineTotal", ',' ORDER BY l."lineNumber") FROM invoice_line l WHERE l."invoiceId" = i.id) AS lines,
+         (SELECT c.exponent FROM currency c WHERE c.code = i.currency) AS exponent
+    FROM invoice i WHERE i.status = 'open' AND i.currency = 'TND' LIMIT 1;
+SELECT pg_temp.assert_eq('CURRENCY', '(fixture) a historical open TND invoice exists', (SELECT count(*)::text FROM hist), '1');
+UPDATE platform_currency SET enabled = false WHERE "platformId" = 'platform-1' AND currency = 'TND';
+SELECT pg_temp.assert_eq('CURRENCY', 'disabling the platform currency leaves every historical invoice and line exactly as it was',
+  (SELECT count(*)::text FROM hist h JOIN invoice i ON i.id = h.id
+     WHERE i.currency = h.currency AND i.subtotal = h.subtotal AND i."taxTotal" = h."taxTotal" AND i.total = h.total AND i.status = h.status
+       AND i.number IS NOT DISTINCT FROM h.number AND i.revision = h.revision AND i."issuedAt" IS NOT DISTINCT FROM h."issuedAt"
+       AND (SELECT string_agg(l."lineNumber" || ':' || l.currency || ':' || l."unitAmount" || ':' || l."lineTotal", ',' ORDER BY l."lineNumber") FROM invoice_line l WHERE l."invoiceId" = i.id) = h.lines), '1');
+SELECT pg_temp.assert_eq('CURRENCY', 'a historical invoice still resolves its currency and exponent from the global reference after the platform disabled it',
+  (SELECT c.exponent::text FROM invoice i JOIN currency c ON c.code = i.currency JOIN hist h ON h.id = i.id), (SELECT exponent::text FROM hist));
+SELECT pg_temp.assert_eq('CURRENCY', 'the exponent an invoice sees is the immutable reference value (TND has three decimals)', (SELECT exponent::text FROM hist), '3');
+SELECT pg_temp.expect_error('CURRENCY', 'an invoice currency cannot be changed after creation, whatever the platform configuration says', format($$UPDATE invoice SET currency = 'TND' , subtotal = subtotal + 1 WHERE id = %L$$, (SELECT id FROM hist)), '23514');
+SELECT pg_temp.expect_error('CURRENCY', 'an invoice cannot be created in an unknown currency', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
+  VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'company', 'c1', 'user', 'u1', 'contract', 's', 'XXX', 1, 1, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23503');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

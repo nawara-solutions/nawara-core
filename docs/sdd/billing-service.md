@@ -171,6 +171,7 @@ Billing owns **none** of: payments, attempts, refunds, journal entries, tax ledg
 * JSON carries amounts as **integers** and validates them as safe integers. Every Billing amount is capped at **9007199254740991** (2^53 − 1) by a CHECK: Payment's contract caps `amount` there, so a Billing amount Payment would refuse **cannot exist**, and no event or representation can lose precision.
 * Arithmetic is done in the database or with `bigint` in code; multiplication uses checked arithmetic and refuses results above the cap.
 * Which currencies are supported is **configuration** (`BILLING_SUPPORTED_CURRENCIES`, no code default) and must also be enabled in Payment for collection: **[B, B-005]** (Payment O-10). A currency present in Billing but not in Payment fails only at payment-request time (`422`, section 21.2).
+* **Three layers, kept separate (Stage 2 amendment, [B, B-036]):** (1) the **global currency reference** (`currency`: code and exponent, immutable, never edited through business configuration); (2) **Platform-supported currencies** (`platform_currency`: which currencies a Platform has enabled for *future* billing work, disabling is a flag and never deletes); (3) the **historical invoice currency** (`invoice.currency`, immutable, never affected by (2)). A currency is usable for new work only if it exists globally *and* is permitted by the relevant Platform configuration. Stage 2 builds the table, its guards and the permission question only; nothing calls it yet. How an invoice determines its Platform is **not decided** (B-036).
 * Quantities are positive **integers** in v1. Fractional or metered quantities are **[X]** (B-034).
 * Negative amounts do not exist in v1: there are no discounts, adjustments or credit lines (**[X]**, B-033); a credit is a `credit_note` (**[B]**, B-016).
 * Cross-currency comparison or arithmetic is impossible by design: every invoice is single-currency.
@@ -846,6 +847,7 @@ Nothing below is decided or invented. Every entry is `[B]` (B-033 and B-034 stay
 | B-033 | **Discounts, coupons, promotions, adjustments** | BI-05 currently has none | invoice lines, totals | **[X]**; BI-05 changes with the decision |
 | B-034 | **Fractional and usage-based quantities and pricing** | integer quantities, `flat` only | price, line | **[X]** |
 | B-035 | **Does Auth keep a synchronous entitlement check** at registration/join (fin-arch 10.8; Payment O-12) | Auth ⇄ Billing coupling | 17 · Auth client | the Auth PR (16.4); Billing's route proceeds |
+| B-036 | **Platform currency configuration:** (a) how Billing learns the **Platform of an invoice** (it carries none; Auth or organization-service owns the hierarchy, and a client-supplied `platformId` is never authority, section 19); (b) **who administers** a Platform's enabled currencies and through which API (an Auth administrator is not a Billing administrator); (c) whether a Platform has a **default currency**; (d) whether an **Organization-level** restriction exists; (e) how the Platform set combines with `BILLING_SUPPORTED_CURRENCIES` and with the currencies **Payment** has enabled (Payment O-10); (f) whether an invoice or payment request in a **disabled** currency may still be issued or collected (historical data is unaffected either way); (g) who **owns the global currency reference and its seed** (the exponents of EUR and USD, B-005); (h) whether enabling or disabling is **audited** centrally | which currencies a customer can be billed in; consistency with Payment | `platform_currency`, `currency`, `invoice` · 7 · none | invoice creation cannot check the Platform set; the table, guards and permission question exist and are unused |
 
 ### 32.1 Which stage each decision blocks
 
@@ -876,6 +878,7 @@ A stage is blocked **only in the named part**; everything else in it proceeds.
 | B-032 | 9: retention, pruning, free-text fields |
 | B-033, B-034 | 3: any adjustment, discount, fractional or usage pricing (`[X]`) |
 | B-035 | 8: the Auth client PR |
+| B-036 | 3: checking a Platform's enabled currencies at invoice creation; any Platform currency administration API; 4: refusing a payment request in a disabled currency |
 
 ## 33. Deferred [X]
 

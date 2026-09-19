@@ -13,7 +13,7 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
 
 ### Implemented
 
-- **Schema** (`db/migrations/0001..0008`): `currency` (immutable reference, BI-21), `product` and `price` (immutable), `invoice`,
+- **Schema** (`db/migrations/0001..0009`): `currency` (immutable reference, BI-21), `platform_currency` (Platform-enabled currencies, foundation only, B-036), `product` and `price` (immutable), `invoice`,
   `invoice_line`, `invoice_number_sequence`, `payment_request`, `payment_event_receipt`, `billing_transition`. Integer minor units
   (`bigint`, capped at 2^53-1) only; no float or money type anywhere.
 - **Financial invariants BI-01 .. BI-21 enforced by the database** (CHECKs, composite foreign keys, unique and partial unique
@@ -24,13 +24,14 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).
 - **Numbering foundation**: a concurrency-safe counter per seller at issue; a rolled-back issue returns its number; gaplessness is
   **not** assumed (scope and format are B-004).
+- **Currency in three layers**: the global `currency` reference, Platform-enabled currencies (`platform_currency`, with a permission question nothing calls yet) and the immutable historical invoice currency. No Platform currency HTTP API; how an invoice gets its Platform is undecided (B-036).
 - **Payment-request mapping** as a pure function of two immutable rows, and **payment-event handling**: a pure decision function plus
   a durable receipt (duplicates, out-of-order, unknown, early events; a `paymentId` is never bound from an event).
 - **Persistence layer** (`src/invoices`): `InvoiceRepository` (create draft with natural-key idempotency, issue, discard, read) and
   `PaymentRequestRepository` (state-idempotent create, apply a Payment event). Every state change is one transaction: row lock,
   change, history row and, on issue, the `invoice.created` outbox event.
 - Tests: unit (domain rules, input normalisation, no-float source scan), integration (repositories, races, atomicity, ownership,
-  runtime role), and a database suite (`npm run test:db`: 153 assertions and 5 concurrency races).
+  runtime role), and a database suite (`npm run test:db`: 185 assertions and 5 concurrency races).
 
 ### Explicitly NOT implemented (later stages; see the SDD)
 

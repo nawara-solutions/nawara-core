@@ -8,6 +8,7 @@ import { AuthClientModule } from './auth/auth-client.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import type { BillingConfig } from './config/billing-config.js';
 import { BillingConfigModule } from './config/billing-config.module.js';
+import { CurrenciesModule } from './currencies/currencies.module.js';
 import { InvoicesModule } from './invoices/invoices.module.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
@@ -49,6 +50,7 @@ export class AppModule {
         RateLimitModule,
         AuthModule,
         InvoicesModule,
+        CurrenciesModule,
       ],
     };
   }
