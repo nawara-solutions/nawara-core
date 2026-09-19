@@ -4,7 +4,7 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
-> **Forward note (2026-09-19):** [ADR-0031](./0031-organization-ownership-and-tenancy-anchor.md) amends this decision: organization-service owns the organization record (reversing this ADR's rejection of a dedicated organization-service); auth-service keeps only the tenancy anchor. The rest stands.
+> **Forward note (2026-09-19):** [ADR-0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) records that organization-service is the *intended* future owner of Company, Platform and Organization (reversing this ADR's rejection of a dedicated organization-service for the long term). **Nothing changes today:** auth-service's tables stay as they are, and the cross-service mechanism is a separate decision when organization-service is built.
 
 > **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): `User.organizationId` now has a real FK and is `NOT NULL` for members (`kind = 'member'`), superseding this ADR's "no foreign key / no existence validation" position for `auth-service`'s own database — see ADR-0024.
 
