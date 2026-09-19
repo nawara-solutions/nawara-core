@@ -50,7 +50,7 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
   if (supportedCurrencies.length === 0 || supportedCurrencies.some((c) => !/^[A-Z]{3}$/.test(c))) {
-    throw new ConfigError('BILLING_SUPPORTED_CURRENCIES must list ISO 4217 codes such as TND, comma-separated');
+    throw new ConfigError('BILLING_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
   }
 
   return {

@@ -66,9 +66,30 @@ Not a numbered invariant but tested throughout: **ownership and isolation.** A c
 (the producer service, or a user who is the payer); anything else is a `404`. There is no user, organization or membership table in
 Billing, and an Auth administrator has no Billing relation (`relations.spec.ts`, `invoices.e2e-spec.ts`).
 
+## Currency: three layers (Stage 2 amendment)
+
+| Layer | Where | Owner | Rule |
+|---|---|---|---|
+| Global currency reference | `currency` (code, exponent) | Core reference data. **The exact owner is not established (B-036 g)**; Billing holds the table today, and no other service does | immutable, undeletable, never edited through Platform configuration; the only place an exponent lives (a test scans the source for any hard-coded code, exponent or decimal count) |
+| Platform-supported currencies | `platform_currency (platformId, currency, enabled, revision, createdAt, updatedAt)` | Platform-level configuration; `platformId` is an **opaque** reference (no Platform table and no cross-service FK in Billing) | may only name an existing global currency (FK); the platform and currency of a row never change; disabling is a flag, rows are never deleted; no column can carry an exponent |
+| Historical invoice currency | `invoice.currency`, `invoice_line.currency` | Billing financial truth | immutable (BI-03); no foreign key from any financial table to `platform_currency`, so configuration cannot reach a historical record |
+
+`billing_currency_permitted(platformId, currency)` (and `PlatformCurrencyRepository.isPermitted/assertPermitted`) answers "may this Platform
+use this currency for NEW work": the currency exists globally **and** the Platform enabled it; no configuration means no. Enable, disable and
+list are repository primitives for a future administrative API; **no HTTP API, no authorization and no UI exists**, and nothing in invoice creation calls the
+check yet. This keeps the deployment list `BILLING_SUPPORTED_CURRENCIES` (SDD 7) unchanged: today a currency must exist globally and be in that list.
+
+A later **Organization-level restriction** needs no change here: it would be its own table referencing `(platformId, currency)`.
+
+**Deliberately not built, open as B-036:** how an invoice determines its Platform (so invoice creation cannot yet enforce the Platform
+set), who may administer it, a Platform default currency, an Organization restriction, how the Platform set combines with the deployment
+list and with Payment's enabled currencies, whether an existing invoice in a disabled currency may still be issued or collected, the
+owner of the global reference and its seed (only TND is seeded; EUR and USD exponents wait for B-005), and whether changes are audited (the row keeps
+only `revision` and `updatedAt`; there is no history table).
+
 ## Files/components affected
 
-`apps/billing-service/db/migrations/0001..0008`, `db/tests/**`, `src/domain/**`, `src/invoices/**`, `src/app.module.ts`
+`apps/billing-service/db/migrations/0001..0009`, `db/tests/**`, `src/domain/**`, `src/invoices/**`, `src/currencies/**`, `src/app.module.ts`
 (`InvoicesModule`), `src/config/billing-config.ts` (`supportedCurrencies`), tests, `README.md`, `package.json` (`test:db`),
 `.github/workflows/core-ci.yml` (`database-tests: true` for billing), `docs/tdd/README.md`. No change to Auth, Payment or the service-kit.
 
@@ -91,14 +112,14 @@ Billing, and an Auth administrator has no Billing relation (`relations.spec.ts`,
 
 ## Data migration
 
-New database, no data to migrate. Eight forward-only migrations after the kit's.
+New database, no data to migrate. Nine forward-only migrations after the kit's.
 
 ## Test plan
 
 Unit (218): money, totals, state machines, canonical hash, snapshots, relations, input normalisation, payment mapping, event decision,
-no-float scan. Integration (89, real PostgreSQL): repositories, idempotency (identical, changed, concurrent), issue and numbering
+no-float scan. Integration (99, real PostgreSQL): repositories, idempotency (identical, changed, concurrent), issue and numbering
 races, atomicity with the outbox, ownership and isolation, payment request and event handling races, TS-versus-trigger agreement on every
-pair, runtime role. Database suite (`npm run test:db`): 153 assertions and 5 concurrency races.
+pair, runtime role, Platform currency configuration (enable, disable, re-enable, unknown currency, historical invoices unchanged). Database suite (`npm run test:db`): 185 assertions and 5 concurrency races.
 
 ## Rollout
 
