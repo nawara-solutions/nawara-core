@@ -76,9 +76,8 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
 - **Nawara processes payments for an organization** (**subject to open decisions 4 and 5**: merchant of record and custody of funds): the same payment records, with the organization as beneficiary; the
   organization's payment account and settlement are Stage 6 and **not designed in detail** (section 9).
 - **Cash:** `Invoice → cash payment request → review → confirm | reject → payment succeeded`. Cash is a payment *method*, not an
-  exception. Who confirms: the seller's authority. If the seller is an organization, that organization's admin authority (Auth's
-  organization-management capability, an owner, or an assigned operator); if the seller is Nawara, a platform owner or assigned
-  operator. **These authority rules are a proposed policy, not settled** (open decision 7); the generic controls proposed are that a payer cannot confirm their own cash payment (a CHECK `confirmer <> payer` is enforceable only when the payer is a `user`) and that confirmation cannot happen twice.
+  exception. Who confirms: **explicitly designated seller-side authority**, modeled in payment-service (whether that draws on an Auth capability, an
+  owner or an assigned operator is undecided). **These authority rules are a proposed policy, not settled** (open decision 7); the generic controls proposed are that a payer cannot confirm their own cash payment (a CHECK `confirmer <> payer` is enforceable only when the payer is a `user`) and that confirmation cannot happen twice.
 
 ## 4. Parties, money and references ([ADR-0036](../adr/0036-money-parties-and-source-references.md))
 
@@ -162,16 +161,22 @@ existing synchronous dependency; whether it stays is an open decision.)
   membership and authority for that organization (or platform access for an owner/operator) → operation. A user in organizations
   A and B cannot bill or pay for C; organization A cannot read organization B's records (collapsed 404); platform and company
   isolation as in Auth.
-- **Authority table:**
+- **Who may do what is decided by the service that owns the operation.** Auth supplies identity, **active** membership of the
+  organization, the generic user kind and security context; it is not the business-permission engine. Billing decides who may
+  create or void an invoice; payment-service decides who may submit or confirm cash, and who may refund. A generic Auth
+  capability (for example an organization-admin flag) may be an *input*, but it is **not automatically authority**: cash
+  confirmation authority must be **explicitly modeled and enforced** in payment-service, and its policy is an open decision
+  (item 7 below). What follows is the proposed shape, not settled policy.
+- **Authority table (proposed; every "authorized" is an explicit payment- or billing-domain decision):**
 
-| Operation | Allowed |
+| Operation | Proposed rule |
 |---|---|
-| create invoice for organization X | seller authority of X (organization admin, owner, assigned operator) or a trusted product service token |
-| view an invoice | its payer, or the seller authority |
-| pay | the payer, only for the invoice amount |
-| submit cash payment | the payer or the seller authority, per policy (open) |
-| confirm / reject cash | the **seller** authority only, never the payer |
-| refund | seller authority (Nawara-sold: platform owner/operator); step-up policy open |
+| create invoice for organization X | authorized by billing-service for the seller (who counts is open), or a trusted product service token |
+| view an invoice | its payer, or someone authorized for the seller |
+| pay | the payer, only for the payment-request amount |
+| submit cash payment | payer or seller-side, **open** (item 7) |
+| confirm / reject cash | **explicitly designated** seller-side authority only, never the payer (designation model open) |
+| refund | explicitly authorized seller-side authority; step-up policy open |
 
 - **Audit:** every financial state change records actor and time; central audit receives events asynchronously.
 - **Errors are sanitized;** rate limits and request-size limits apply as in the service-kit.

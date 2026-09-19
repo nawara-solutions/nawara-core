@@ -4,7 +4,7 @@
   still *Proposed* until merged. auth-service is described as it is on `main` after the multi-organization change ([ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md), merged).
 - **Date:** 2026-09-19
 - **Financial services:** see [financial-architecture.md](./financial-architecture.md) (billing, payment, accounting; assessment of the old payment design; unresolved decisions).
-- **Decisions recorded in:** [ADR-0031](../adr/0031-organization-ownership-and-tenancy-anchor.md),
+- **Decisions recorded in:** [ADR-0031](../adr/0031-organization-service-intended-owner-of-the-hierarchy.md),
   [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md),
   [ADR-0033](../adr/0033-service-to-service-authentication-and-user-identity.md),
   [ADR-0034](../adr/0034-shared-service-kit-and-api-conventions.md); financial: [ADR-0035](../adr/0035-financial-service-boundaries.md),
@@ -16,6 +16,9 @@ Core over the network. Nothing here may contain a concept that belongs to one pr
 only makes sense for one product, it belongs in that product.
 
 ## 1. The model everything shares
+
+**Invariant:** `Company 1 → N Platform`, `Platform 1 → N Organization`. An organization reaches its company only through its platform;
+there is no `Company → Organization` link. This is **not** a multi-company SaaS tenancy model and none is introduced.
 
 ```
 Company
@@ -34,8 +37,8 @@ Company
 
 | Service | Answers | Owns | Does **not** own | Own database | State today |
 |---|---|---|---|---|---|
-| **auth-service** | Who is this and how are they authenticated? | user, credentials, sessions, tokens, MFA, recovery, passkeys, **membership and its status/authority**, tenancy anchor (company, platform, organization ids), local security audit | organization profile/config/lifecycle, subscriptions, notification delivery | yes | **implemented and deployed** (data model frozen; multi-organization membership per [ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md)) |
-| **organization-service** | What is this organization and how is it configured? | organization record, profile, settings, policies, lifecycle (`provisioning → active ⇄ suspended → deactivated`) | users, credentials, sessions, **membership** | yes | to build (later, after the finance stages) |
+| **auth-service** | Who is this and how are they authenticated? | user, credentials, sessions, tokens, MFA, recovery, passkeys, **membership and its status/authority**, the Company → Platform → Organization tables **as they are today** ([ADR-0031](../adr/0031-organization-service-intended-owner-of-the-hierarchy.md)), local security audit | long-term: organization/platform/company lifecycle and settings (intended for organization-service); subscriptions; notification delivery | yes | **implemented and deployed** (data model frozen; multi-organization membership per [ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md)) |
+| **organization-service** | What is this organization and how is it configured? | **intended** owner of Company, Platform and Organization: lifecycle, metadata, settings, policies, and the Company → Platform → Organization relationships | users, credentials, sessions, **membership** | yes | **not built; mechanism with Auth undecided** (ADR-0031) |
 | **notification-service** | How is this delivered? | email/SMS/push/in-app delivery, templates, preferences, attempts, retries, providers | why something was triggered | yes (later) | 60-line starter |
 | **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring definitions, **entitlements** (organization license, user subscription) | how money moved; the ledger; product concepts | yes | to build (finance stages) |
 | **payment-service** | How was it paid, by which method, and what is the payment state? | payment, attempt, method, provider transaction, cash workflow, refund, webhooks, idempotency, reconciliation | what is owed; the ledger; entitlements | yes | 60-line starter; **redesigned** (financial-architecture.md) |
@@ -58,9 +61,7 @@ concern until there is a concrete cross-product need.
 |---|---|---|
 | User, credentials, session, refresh token, MFA factor, device | auth | `userId` |
 | Membership (user ↔ organization), status, org-admin capability, `audience` label | auth | `membershipId` only if needed; **never a copy of the status** |
-| Company, Platform | auth (unchanged; see O9) | `companyId`, `platformId` |
-| Tenancy anchor for an organization (id, platform, name) | auth | — |
-| **Organization** record, profile, settings, lifecycle | **organization-service** | `organizationId` |
+| Company, Platform, Organization (hierarchy records) | **auth today** (its tables stay); **organization-service intended** (ADR-0031, mechanism to be decided when it is built) | `companyId`, `platformId`, `organizationId` (opaque) |
 | Product, price, invoice, invoice line, credit note, **organization license, user subscription** | billing | `requiresSubscription` may exist as onboarding metadata but is **never** the authority |
 | Payment, attempt, cash payment, refund, provider transaction, webhook event | payment | `paymentId` |
 | Chart of accounts, journal entry, ledger, tax, fiscal period | accounting | — |
@@ -77,7 +78,7 @@ concern until there is a concrete cross-product need.
                        │ HTTP                                        │ HTTP
                        ▼                                             ▼
    ┌─────────► auth-service ◄──────── organization-service ──────► (events) ──┐
-   │  live      ▲   │  ▲   authorize + provision anchor                        │
+   │  live      ▲   │  ▲   authorize                                            │
    │  checks    │   │  │                                                       ▼
  file-service ──┘   │  └── payment-service (org → platform, membership)   notification-service
                     │ license status at registration/join (exists today)  audit-service
@@ -90,7 +91,6 @@ concern until there is a concrete cross-product need.
 | Caller → callee | Purpose | Failure behaviour |
 |---|---|---|
 | any service → auth | who is this user, what memberships, what platform access | fail closed (503) |
-| organization → auth | provision the tenancy anchor (idempotent by id) | organization stays `provisioning`, retried |
 | payment → auth | organization → platform, and membership check for who may act for an organization (mechanism per ADR-0033; **supersedes ADR-0021's forwarded-JWT choice**) | fail closed |
 | auth → payment | license status at registration and joining (**exists today**; entitlement moves to billing, so this call is to be repointed or removed: open decision) | fail closed (503) |
 | file → auth | authorize a download/upload for an organization | fail closed |
@@ -131,7 +131,10 @@ service itself validates), never from a token claim or a client-asserted header.
    `GET /auth/platform-access/:platformId`.
 3. It enforces tenant isolation itself: a resource of another organization/platform/company answers with the same
    **404** as a nonexistent one.
-4. Business permissions (what an administrator may do *inside a product*) are decided by the **product**, not Core. Generic *seller authority* over an organization's own invoices and cash confirmations (organization-management capability, owner, assigned operator) is a **proposed policy** of the financial services, listed as an open decision in [financial-architecture.md](./financial-architecture.md).
+4. **Operation authorization belongs to the service that owns the operation.** Auth supplies identity, active membership, generic
+   user kind and security context, and is not the universal business-permission engine: payment-service decides who may perform a
+   payment-domain operation, billing-service a billing operation. Business permissions (what an administrator may do *inside a
+   product*) are decided by the **product**, not Core. Generic *seller authority* over an organization's own invoices and cash confirmations (organization-management capability, owner, assigned operator) is a **proposed policy** of the financial services, listed as an open decision in [financial-architecture.md](./financial-architecture.md).
 
 Never trusted without server-side verification: `userId`, `organizationId`, `platformId`, `role`, `permissions`.
 
@@ -200,7 +203,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 
 | Service | Finding | Concrete change needed |
 |---|---|---|
-| auth-service | Data model frozen. `GET /auth/platform-access/:platformId` exists today; `GET /auth/me` returns `memberships[]`. It already calls payment with a service token. | **One additive route** to provision the tenancy anchor by id, guarded by a service token (a small Auth PR, after the service-kit and finance foundations). No schema change. |
+| auth-service | Data model frozen. `GET /auth/platform-access/:platformId` exists today; `GET /auth/me` returns `memberships[]`. It already calls payment with a service token. | **None now.** Auth's hierarchy tables stay unchanged; its client to payment is to be repointed or removed (open decision). |
 | notification-service | Unmodified starter; no providers, no consumers. | Nothing until built; it will consume events and expose a token-guarded send API. |
 | payment-service | Unmodified starter. Its ADD/SDD assume a single-organization JWT, forwarding the admin JWT (ADR-0021), `Charge` as the transaction and entitlements inside payment; none holds after ADR-0030, ADR-0033, ADR-0035 and ADR-0038. | Rebuilt on [financial-architecture.md](./financial-architecture.md); the old ADD/SDD are marked superseded in their financial parts. No code to migrate. |
 | ai-service | 8-line FastAPI app, `/health` only. | Later: `/ready`, request ids, config validation and the service-token guard in Python. Not rewritten now. |
@@ -209,7 +212,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 
 | # | Decision | Status |
 |---|---|---|
-| D1 | organization-service owns the organization record; Auth keeps only a minimal tenancy anchor, created idempotently by id | **confirmed** (ADR-0031) |
+| D1 | organization-service is the **intended** future owner of Company, Platform and Organization; Auth's hierarchy tables stay unchanged; the cross-service mechanism is a **separate decision when organization-service is built** (no anchor, synchronization or adoption flow is designed) | **confirmed as amended 2026-09-19** (ADR-0031) |
 | D2 | One database per service on a shared PostgreSQL server | **confirmed** (ADR-0032) |
 | D3 | Per-pair service tokens; end users identified by asking Auth live | **confirmed** (ADR-0033) |
 | D4 | Phased delivery with a small shared `service-kit` | **confirmed** (ADR-0034) |
@@ -228,13 +231,13 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | O6 | AI providers | not started |
 | O7 | Notification providers (SMS: Twilio is proposed in ADR-0019) | not started |
 | O8 | Auth ⇄ payment cycle (and its repointing to billing) | documented risk |
-| O9 | Who owns **platform** and **company** lifecycle (Auth keeps them today via its bootstrap tool) | unchanged |
+| O9 | How Auth references Company, Platform and Organization once organization-service exists (and who validates organization → platform → company for non-user requests) | **decide when organization-service is built** |
 | O10 | Reliable event delivery (outbox) and asymmetric token signing | out of scope |
 
 ## 12. Risks
 
-- **Two systems, one fact.** An organization exists in organization-service and as an anchor in Auth. Creation is
-  ordered (`provisioning` first, anchor second, `active` last) so a crash leaves a retryable row, never an orphan.
+- **Split hierarchy ownership.** The hierarchy tables live in Auth while organization-service is only the intended owner; the
+  reference mechanism is undecided (O9) and must not be improvised.
 - **Every service asks Auth live.** Auth becomes a hot dependency for every request; a slow Auth slows everything.
   Mitigation later (caching with a short TTL) needs an explicit revocation decision.
 - **No CI runs any suite,** for any service. This is the largest gap before production use.
