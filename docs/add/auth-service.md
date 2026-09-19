@@ -13,7 +13,7 @@ how it verifies credentials, issues/rotates/revokes tokens, exposes the generic 
 gates registration on an organization's license validity via a synchronous call to
 `payment-service` (per ADR-0004). (Trials are `payment-service` subscription state, not `auth-service` metadata — ADR-0026.) As of ADR-0026, login and token refresh do **not** re-validate a license or subscription:
 authentication is not entitlement, so a lapsed license never blocks authentication and
-`payment-service` availability does not affect login/refresh (only registration still asks). Per ADR-0001, every member belongs to exactly one organization and there is no org-less self-registration mode. **Since ADR-0028 the client no longer supplies `organizationId`:
+`payment-service` availability does not affect login/refresh (only registration still asks). Per ADR-0001 there is no org-less self-registration mode; **since ADR-0030 a member may belong to many organizations (one membership each)**. **Since ADR-0028 the client no longer supplies `organizationId`:
 `POST /auth/register` takes a join code and the organization is resolved server-side;**
 the only null-`organizationId` accounts are the platform's own `Admin` accounts, which are
 provisioned out-of-band and never created through this public endpoint (see Context).
@@ -937,10 +937,23 @@ The client-to-auth-service contract for joining an organization changed; the ser
   the code.
 - **New async events** (published on the existing bus; **nothing delivers them yet**, and a transactional outbox
   is the recommended delivery design once a broker exists): `membership.requested`
-  `{ userId, organizationId, audience, timestamp }`, `membership.approved` and `membership.rejected`
+  `{ userId, organizationId, audience, timestamp }`, `membership.approved`, `membership.rejected` and
+  `membership.revoked` (ADR-0030)
   `{ userId, organizationId, channel, destination, timestamp }`, and
   `member.contact_verification_requested` `{ userId, channel, destination, code, expiresAt }` (like the operator
   working code, the verification code travels only in this delivery event).
+
+### Multi-organization membership (ADR-0030)
+
+**Supersedes the one-organization statement above.** A member is one `user` with N `organization_membership` rows;
+the platform is derived (membership → organization → platform → company, view `member_platform`) and is never stored
+on the user. The join code's audience (or the invitation type) is stored on the membership as the opaque `audience`;
+`user.role` is the neutral `member`. Access tokens carry no organization, platform or business role: the resource in
+the URL selects the organization, and the live membership row decides. Endpoints added or changed:
+`POST /auth/onboarding/join` (an existing member joins another organization with a code),
+`POST /auth/organizations/:id/memberships/:membershipId/revoke`, and `GET /auth/me` now returns `memberships[]`.
+Membership state machine: `pending → active | rejected`, `active → revoked`; `rejected` and `revoked` are final.
+The former `organizationId` in `/auth/me`, the JWT and the guard actor no longer exists (breaking change).
 
 ## Non-functional constraints
 

@@ -62,9 +62,15 @@ BEGIN
   RETURN uid;
 END $$;
 
-CREATE FUNCTION pg_temp.new_member(org uuid, mail text, r text DEFAULT 'student') RETURNS uuid LANGUAGE sql AS $$
-  INSERT INTO "user"(kind, email, "passwordHash", role, "organizationId") VALUES ('member', mail, 'pw', r, org) RETURNING id;
-$$;
+-- A member identity (neutral role) with ONE active membership carrying the opaque label `r` (a member must always
+-- have at least one membership: deferred rule, so both rows are created in the same statement).
+CREATE FUNCTION pg_temp.new_member(org uuid, mail text, r text DEFAULT 'student') RETURNS uuid LANGUAGE plpgsql AS $$
+DECLARE uid uuid;
+BEGIN
+  INSERT INTO "user"(kind, email, "passwordHash", role) VALUES ('member', mail, 'pw', 'member') RETURNING id INTO uid;
+  INSERT INTO organization_membership("userId", "organizationId", status, audience, "approvedAt") VALUES (uid, org, 'active', r, now());
+  RETURN uid;
+END $$;
 
 -- REFERENCE authorization query for management identities. The service's
 -- PlatformAssignmentService.checkAccess MUST be semantically identical (SDD "Authorization flow").
@@ -92,9 +98,10 @@ CREATE FUNCTION pg_temp.resource_access(actor uuid, org uuid) RETURNS text LANGU
               ELSE pg_temp.platform_access(actor, (SELECT "platformId" FROM organization WHERE id = org)) END;
 $$;
 
--- Member tenancy: only the member's own organization.
+-- Member tenancy: only through an ACTIVE membership OF THAT organization (a user can have several).
 CREATE FUNCTION pg_temp.member_org_access(actor uuid, org uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
-  SELECT EXISTS (SELECT 1 FROM "user" WHERE id = actor AND kind = 'member' AND "organizationId" = org);
+  SELECT EXISTS (SELECT 1 FROM "user" u JOIN organization_membership m ON m."userId" = u.id
+                  WHERE u.id = actor AND u.kind = 'member' AND m."organizationId" = org AND m.status = 'active');
 $$;
 
 -- ------------------------------------------------------------------------------ fixtures ----
@@ -141,27 +148,31 @@ SELECT pg_temp.expect_error('A', 'platform without a company',
 SELECT pg_temp.expect_error('A', 'platform referencing a nonexistent company',
   $$INSERT INTO platform("companyId", name) VALUES (gen_random_uuid(), 'orphan')$$, '23503');
 
-SELECT pg_temp.expect_error('B', 'member with NULL organizationId',
-  $$INSERT INTO "user"(kind,email,"passwordHash",role) VALUES ('member','n@x.io','pw','student')$$, '23514');
-SELECT pg_temp.expect_error('C', 'member referencing a nonexistent organization',
-  $$INSERT INTO "user"(kind,email,"passwordHash",role,"organizationId") VALUES ('member','n@x.io','pw','student',gen_random_uuid())$$, '23503');
-SELECT pg_temp.expect_error('B', 'owner/operator cannot carry an organizationId',
-  format($$INSERT INTO "user"(kind,email,role,"organizationId") VALUES ('operator','n@x.io','admin',%L)$$, :orgA), '23514');
+SELECT pg_temp.expect_error('B', 'a member must have at least one membership (deferred rule)',
+  $$SET CONSTRAINTS ALL IMMEDIATE; INSERT INTO "user"(kind,email,"passwordHash",role) VALUES ('member','n@x.io','pw','member')$$, '23514');
+SELECT pg_temp.expect_error('C', 'a membership referencing a nonexistent organization',
+  format($$INSERT INTO organization_membership("userId","organizationId",status,audience,"approvedAt") VALUES (%L,gen_random_uuid(),'active','x',now())$$, :'user1'), '23503');
+SELECT pg_temp.assert_eq('B', 'the user table has NO organizationId column (memberships are the only link)',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name='user' AND column_name='organizationId'), '0');
+SELECT pg_temp.expect_error('B', 'a platform-specific label can never be the role of an identity',
+  $$INSERT INTO "user"(kind,email,"passwordHash",role) VALUES ('member','n@x.io','pw','teacher')$$, '23514');
+SELECT pg_temp.expect_error('B', 'a member cannot carry the management role, an operator cannot carry the member role',
+  $$INSERT INTO "user"(kind,email,role) VALUES ('operator','n@x.io','member')$$, '23514');
 
 SELECT pg_temp.expect_error('D', 'user.platformId does not exist as a column',
-  format($$INSERT INTO "user"(kind,email,"passwordHash",role,"organizationId","platformId") VALUES ('member','n@x.io','pw','student',%L,%L)$$, :orgA, :pSchool), '42703');
+  format($$INSERT INTO "user"(kind,email,"passwordHash",role,"platformId") VALUES ('member','n@x.io','pw','member',%L)$$, :pSchool), '42703');
 SELECT pg_temp.assert_eq('D', 'no platformId column on user/owner/operator',
   (SELECT count(*)::text FROM information_schema.columns
     WHERE table_schema='public' AND table_name IN ('user','owner','operator') AND column_name='platformId'), '0');
-SELECT pg_temp.assert_eq('R', 'user_platform view resolves user → organization → platform → company',
-  (SELECT "platformId"||'/'||"companyId" FROM user_platform WHERE "userId" = :'user1'),
+SELECT pg_temp.assert_eq('R', 'member_platform view resolves membership → organization → platform → company',
+  (SELECT "platformId"||'/'||"companyId" FROM member_platform WHERE "userId" = :'user1'),
   '00000000-0000-0000-0000-00000000a001/00000000-0000-0000-0000-0000000000c1');
-SELECT pg_temp.assert_eq('R', 'owners/operators have no row in user_platform',
-  (SELECT count(*)::text FROM user_platform WHERE "userId" IN (:'owner1', :'ahmed')), '0');
+SELECT pg_temp.assert_eq('R', 'owners/operators have no row in member_platform',
+  (SELECT count(*)::text FROM member_platform WHERE "userId" IN (:'owner1', :'ahmed')), '0');
 
 -- ------------------------------------------------------- 2. owner / operator separation ----
 SELECT pg_temp.expect_error('2', 'role=admin is reserved: a member cannot carry it',
-  format($$INSERT INTO "user"(kind,email,"passwordHash",role,"organizationId") VALUES ('member','n@x.io','pw','admin',%L)$$, :orgA), '23514');
+  $$INSERT INTO "user"(kind,email,"passwordHash",role) VALUES ('member','n@x.io','pw','admin')$$, '23514');
 SELECT pg_temp.expect_error('2', 'management identity must carry role=admin',
   $$INSERT INTO "user"(kind,email,role) VALUES ('operator','n@x.io','student')$$, '23514');
 SELECT pg_temp.expect_error('2', 'operator can never hold a password',
@@ -449,11 +460,12 @@ SELECT pg_temp.expect_error('SES', 'owner sessions never carry an operator ceili
 
 -- ---- members: email OR phone + password; no entitlement state on User ------------------------
 SELECT pg_temp.expect_ok('MEM', 'a member may register with a phone and no email',
-  format($$INSERT INTO "user"(kind,phone,"passwordHash",role,"organizationId") VALUES ('member','+21600000001','pw','student',%L)$$, :orgA));
+  format($$WITH u AS (INSERT INTO "user"(kind,phone,"passwordHash",role) VALUES ('member','+21600000001','pw','member') RETURNING id)
+     INSERT INTO organization_membership("userId","organizationId",status,audience,"approvedAt") SELECT id, %L, 'active', 'student', now() FROM u$$, :orgA));
 SELECT pg_temp.expect_error('MEM', 'a member with neither email nor phone is rejected',
-  format($$INSERT INTO "user"(kind,"passwordHash",role,"organizationId") VALUES ('member','pw','student',%L)$$, :orgA), '23514');
+  $$INSERT INTO "user"(kind,"passwordHash",role) VALUES ('member','pw','member')$$, '23514');
 SELECT pg_temp.expect_error('MEM', 'a member without a password is rejected',
-  format($$INSERT INTO "user"(kind,email,role,"organizationId") VALUES ('member','nopw@x.io','student',%L)$$, :orgA), '23514');
+  $$INSERT INTO "user"(kind,email,role) VALUES ('member','nopw@x.io','member')$$, '23514');
 SELECT pg_temp.assert_eq('LIC', 'User carries no subscription/license/trial/payment state',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('user','owner','operator','organization','platform','company')
      AND (column_name ILIKE '%subscri%' OR column_name ILIKE '%licen%' OR column_name ILIKE '%trial%' OR column_name ILIKE '%payment%' OR column_name ILIKE '%billing%' OR column_name ILIKE '%plan%')), '0');
@@ -579,10 +591,10 @@ SELECT pg_temp.expect_error('AUD', 'event types are a controlled vocabulary shap
 -- ------------------------------------- 0004: join codes, membership, contact verification ----
 -- (prefixes: JC join code, MEM membership, CV contact verification, PK platform key)
 \set orgE '\'00000000-0000-0000-0000-00000000b00e\''
-SELECT pg_temp.new_member(:orgA, 'm_pending@x.io',  'teacher') AS mpending  \gset
-SELECT pg_temp.new_member(:orgA, 'm_active@x.io',   'student') AS mactive   \gset
-SELECT pg_temp.new_member(:orgA, 'm_rejected@x.io', 'teacher') AS mrejected \gset
-SELECT pg_temp.new_member(:orgA, 'm_free@x.io',     'student') AS mfree     \gset
+SELECT pg_temp.new_member(:orgD, 'm_pending@x.io',  'teacher') AS mpending  \gset
+SELECT pg_temp.new_member(:orgD, 'm_active@x.io',   'student') AS mactive   \gset
+SELECT pg_temp.new_member(:orgD, 'm_rejected@x.io', 'teacher') AS mrejected \gset
+SELECT pg_temp.new_member(:orgD, 'm_free@x.io',     'student') AS mfree     \gset
 
 INSERT INTO organization_join_code ("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","expiresAt","maxUses","createdBy")
 VALUES (:orgA, :pSchool, repeat('a',64), 'teacher', true, false, now() + interval '30 days', 2, :'owner1') RETURNING id AS jca \gset
@@ -643,26 +655,26 @@ SELECT pg_temp.expect_error('JC', 'join codes are never deleted (revoke instead)
   format($$DELETE FROM organization_join_code WHERE id=%L$$, :'jca'), '23514');
 
 -- membership
-INSERT INTO organization_membership ("userId","organizationId",status,"joinCodeId") VALUES (:'mpending', :orgA, 'pending', :'jca') RETURNING id AS mempending \gset
-INSERT INTO organization_membership ("userId","organizationId",status,"approvedAt") VALUES (:'mactive', :orgA, 'active', now()) RETURNING id AS memactive \gset
-INSERT INTO organization_membership ("userId","organizationId",status,"rejectedAt","rejectedBy") VALUES (:'mrejected', :orgA, 'rejected', now(), :'owner1') RETURNING id AS memrejected \gset
+INSERT INTO organization_membership ("userId", "organizationId", audience, status, "joinCodeId") VALUES (:'mpending', :orgA, 'x', 'pending', :'jca') RETURNING id AS mempending \gset
+INSERT INTO organization_membership ("userId", "organizationId", audience, status, "approvedAt") VALUES (:'mactive', :orgA, 'x', 'active', now()) RETURNING id AS memactive \gset
+INSERT INTO organization_membership ("userId", "organizationId", audience, status, "rejectedAt", "rejectedBy") VALUES (:'mrejected', :orgA, 'x', 'rejected', now(), :'owner1') RETURNING id AS memrejected \gset
 
-SELECT pg_temp.expect_error('MEM', 'a membership can only name the member''s OWN organization',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'pending')$$, :'mfree', :orgB), '23503');
+SELECT pg_temp.expect_ok('MEM', 'one user can hold memberships in SEVERAL organizations (and platforms)',
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status) VALUES (%L,%L, 'x','pending')$$, :'mfree', :orgB));
 SELECT pg_temp.expect_error('MEM', 'an owner/operator (no organization) cannot have a membership',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'pending')$$, :'owner1', :orgA), '23503');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status) VALUES (%L,%L, 'x','pending')$$, :'owner1', :orgA), '23503');
 SELECT pg_temp.expect_error('MEM', 'one membership per (user, organization)',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'pending')$$, :'mpending', :orgA), '23505');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status) VALUES (%L,%L, 'x','pending')$$, :'mpending', :orgA), '23505');
 SELECT pg_temp.expect_error('MEM', 'the admitting join code must belong to the SAME organization',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status,"joinCodeId") VALUES (%L,%L,'pending',%L)$$, :'mfree', :orgA, :'jcb'), '23503');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status, "joinCodeId") VALUES (%L,%L, 'x','pending',%L)$$, :'mfree', :orgA, :'jcb'), '23503');
 SELECT pg_temp.expect_error('MEM', 'active needs an approval time',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'active')$$, :'mfree', :orgA), '23514');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status) VALUES (%L,%L, 'x','active')$$, :'mfree', :orgA), '23514');
 SELECT pg_temp.expect_error('MEM', 'pending cannot carry a decision',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status,"approvedAt") VALUES (%L,%L,'pending',now())$$, :'mfree', :orgA), '23514');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status, "approvedAt") VALUES (%L,%L, 'x','pending',now())$$, :'mfree', :orgA), '23514');
 SELECT pg_temp.expect_error('MEM', 'rejected needs who and when',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status) VALUES (%L,%L,'rejected')$$, :'mfree', :orgA), '23514');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status) VALUES (%L,%L, 'x','rejected')$$, :'mfree', :orgA), '23514');
 SELECT pg_temp.expect_error('MEM', 'a decision cannot be both approved and rejected',
-  format($$INSERT INTO organization_membership ("userId","organizationId",status,"approvedAt","rejectedAt","rejectedBy") VALUES (%L,%L,'active',now(),now(),%L)$$, :'mfree', :orgA, :'owner1'), '23514');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, status, "approvedAt", "rejectedAt", "rejectedBy") VALUES (%L,%L, 'x','active',now(),now(),%L)$$, :'mfree', :orgA, :'owner1'), '23514');
 SELECT pg_temp.expect_error('MEM', 'organization admin is only possible on an ACTIVE membership',
   format($$UPDATE organization_membership SET "isOrganizationAdmin"=true WHERE id=%L$$, :'mempending'), '23514');
 SELECT pg_temp.expect_ok('MEM', 'an active member can be made organization admin',
@@ -681,8 +693,6 @@ SELECT pg_temp.expect_error('MEM', 'the member cannot be re-pointed at another u
   format($$UPDATE organization_membership SET "userId"=%L WHERE id=%L$$, :'mfree', :'memactive'), '23514');
 SELECT pg_temp.expect_error('MEM', 'memberships are never deleted (history is kept)',
   format($$DELETE FROM organization_membership WHERE id=%L$$, :'memactive'), '23514');
-SELECT pg_temp.expect_error('MEM', 'a user with a membership cannot change organization underneath it',
-  format($$UPDATE "user" SET "organizationId"=%L WHERE id=%L$$, :orgB, :'mactive'), '23503');
 SELECT pg_temp.expect_error('MEM', 'a user with a membership cannot be deleted',
   format($$DELETE FROM "user" WHERE id=%L$$, :'mactive'), '23503');
 
@@ -769,16 +779,74 @@ SELECT pg_temp.expect_error('INV', 'the contact binding cannot be added later', 
 SELECT pg_temp.expect_error('INV', 'invitations are never deleted (revoke instead)', format($$DELETE FROM organization_admin_invitation WHERE id=%L$$, :'inv1'), '23514');
 
 -- membership provenance
+SELECT pg_temp.new_member(:orgD, 'inv_x@x.io', 'org_admin') AS invx \gset
 SELECT pg_temp.expect_error('INV', 'an invitation-admitted membership must be in the invitation''s own organization',
-  format($$INSERT INTO organization_membership ("userId","organizationId","status","invitationId","approvedAt") VALUES (%L,%L,'active',%L,now())$$, :'user4', :orgB, :'inv1'), '23503');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, "status", "invitationId", "approvedAt") VALUES (%L,%L, 'x','active',%L,now())$$, :'invx', :orgB, :'inv1'), '23503');
 SELECT pg_temp.expect_error('INV', 'a membership is admitted by a join code OR an invitation, never both',
-  format($$INSERT INTO organization_membership ("userId","organizationId","status","joinCodeId","invitationId","approvedAt") VALUES (%L,%L,'active',%L,%L,now())$$, :'mfree', :orgA, :'jca', :'inv1'), '23514');
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, "status", "joinCodeId", "invitationId", "approvedAt") VALUES (%L,%L, 'x','active',%L,%L,now())$$, :'mfree', :orgA, :'jca', :'inv1'), '23514');
 SELECT pg_temp.expect_ok('INV', 'a membership admitted by an invitation, carrying the management capability',
-  format($$INSERT INTO organization_membership ("userId","organizationId","status","invitationId","approvedAt","isOrganizationAdmin") VALUES (%L,%L,'active',%L,now(),true)$$, :'mfree', :orgA, :'inv1'));
+  format($$INSERT INTO organization_membership ("userId", "organizationId", audience, "status", "invitationId", "approvedAt", "isOrganizationAdmin") VALUES (%L,%L, 'x','active',%L,now(),true)$$, :'mfree', :orgA, :'inv1'));
 SELECT pg_temp.expect_error('INV', 'the membership provenance is immutable',
   format($$UPDATE organization_membership SET "invitationId"=NULL WHERE "userId"=%L$$, :'mfree'), '23514');
 SELECT pg_temp.expect_error('INV', 'the existing membership guard still forbids illegal transitions',
   format($$UPDATE organization_membership SET status='pending', "approvedAt"=NULL, "isOrganizationAdmin"=false WHERE "userId"=%L$$, :'mfree'), '23514');
+
+
+-- ------------------------------------- 0006/0007: one user, N memberships; REVOKED (MO) ----
+SELECT pg_temp.new_member(:orgD, 'mo_user@x.io', 'driver') AS mouser \gset
+INSERT INTO organization_membership ("userId","organizationId",audience,status,"approvedAt") VALUES (:'mouser', :orgA, 'teacher', 'active', now()) RETURNING id AS mo_a \gset
+INSERT INTO organization_membership ("userId","organizationId",audience,status,"approvedAt","isOrganizationAdmin") VALUES (:'mouser', :orgB, 'coach', 'active', now(), true) RETURNING id AS mo_b \gset
+
+SELECT pg_temp.assert_eq('MO', 'one identity, three memberships across two platforms (orgD on Drive; orgA and orgB on School)',
+  (SELECT count(*)::text FROM organization_membership WHERE "userId" = :'mouser'), '3');
+SELECT pg_temp.assert_eq('MO', 'member_platform resolves each membership to its own platform',
+  (SELECT count(DISTINCT "platformId")::text FROM member_platform WHERE "userId" = :'mouser'), '2');
+SELECT pg_temp.assert_eq('MO', 'the same identity carries a DIFFERENT opaque label per organization',
+  (SELECT string_agg(audience, ',' ORDER BY audience) FROM organization_membership WHERE "userId" = :'mouser'), 'coach,driver,teacher');
+SELECT pg_temp.assert_eq('MO', 'the identity itself carries no business role and no organization',
+  (SELECT role FROM "user" WHERE id = :'mouser'), 'member');
+
+-- label rules
+SELECT pg_temp.expect_error('MO', 'the membership label is a controlled shape',
+  format($$INSERT INTO organization_membership ("userId","organizationId",audience,status) VALUES (%L,%L,'Bad Label!','pending')$$, :'mfree', :orgD), '23514');
+SELECT pg_temp.expect_error('MO', 'the reserved word "admin" is refused as a membership label',
+  format($$INSERT INTO organization_membership ("userId","organizationId",audience,status) VALUES (%L,%L,'admin','pending')$$, :'mfree', :orgD), '23514');
+SELECT pg_temp.expect_error('MO', 'a membership label cannot be changed afterwards',
+  format($$UPDATE organization_membership SET audience='other' WHERE id=%L$$, :'mo_a'), '23514');
+SELECT pg_temp.expect_error('MO', 'a membership belongs to a MEMBER: userKind cannot be anything else',
+  format($$INSERT INTO organization_membership ("userId","userKind","organizationId",audience,status) VALUES (%L,'owner',%L,'x','pending')$$, :'owner1', :orgD), '23514');
+
+-- REVOKED: shape
+SELECT pg_temp.expect_error('MO', 'revoked needs who and when',
+  format($$UPDATE organization_membership SET status='revoked' WHERE id=%L$$, :'mo_a'), '23514');
+SELECT pg_temp.expect_error('MO', 'revocation fields exist only on a revoked membership',
+  format($$UPDATE organization_membership SET "revokedAt"=now(), "revokedBy"=%L WHERE id=%L$$, :'owner1', :'mo_a'), '23514');
+SELECT pg_temp.expect_error('MO', 'a pending membership can never be revoked (it can only be rejected)',
+  format($$UPDATE organization_membership SET status='revoked', "revokedAt"=now(), "revokedBy"=%L, "approvedAt"=now() WHERE id=%L$$, :'owner1', :'mempending'), '23514');
+SELECT pg_temp.expect_error('MO', 'a rejected membership can never be revoked',
+  format($$UPDATE organization_membership SET status='revoked', "revokedAt"=now(), "revokedBy"=%L WHERE id=%L$$, :'owner1', :'memrejected'), '23514');
+SELECT pg_temp.expect_error('MO', 'revoking an organization admin without clearing the capability is refused (capability only when active)',
+  format($$UPDATE organization_membership SET status='revoked', "revokedAt"=now(), "revokedBy"=%L WHERE id=%L$$, :'owner1', :'mo_b'), '23514');
+
+-- REVOKED: the legal move, and finality
+SELECT pg_temp.expect_ok('MO', 'active -> revoked, clearing the organization-management capability in the same statement',
+  format($$UPDATE organization_membership SET status='revoked', "revokedAt"=now(), "revokedBy"=%L, "isOrganizationAdmin"=false WHERE id=%L$$, :'owner1', :'mo_b'));
+SELECT pg_temp.expect_error('MO', 'revoked -> active is illegal (final)',
+  format($$UPDATE organization_membership SET status='active' WHERE id=%L$$, :'mo_b'), '23514');
+SELECT pg_temp.expect_error('MO', 'revoked -> pending is illegal',
+  format($$UPDATE organization_membership SET status='pending' WHERE id=%L$$, :'mo_b'), '23514');
+SELECT pg_temp.expect_error('MO', 'a revocation cannot be rewritten (revoker swapped)',
+  format($$UPDATE organization_membership SET "revokedBy"=%L WHERE id=%L$$, :'ahmed', :'mo_b'), '23514');
+SELECT pg_temp.expect_error('MO', 'the capability cannot be re-granted on a revoked membership',
+  format($$UPDATE organization_membership SET "isOrganizationAdmin"=true WHERE id=%L$$, :'mo_b'), '23514');
+SELECT pg_temp.expect_error('MO', 'a revoked membership keeps its approval as history and cannot lose it',
+  format($$UPDATE organization_membership SET "approvedAt"=NULL WHERE id=%L$$, :'mo_b'), '23514');
+SELECT pg_temp.expect_error('MO', 'a revoked membership is never deleted',
+  format($$DELETE FROM organization_membership WHERE id=%L$$, :'mo_b'), '23514');
+SELECT pg_temp.assert_eq('MO', 'revoking in ONE organization leaves the same user''s other memberships active',
+  (SELECT string_agg(status::text, ',' ORDER BY status::text) FROM organization_membership WHERE "userId" = :'mouser'), 'active,active,revoked');
+SELECT pg_temp.expect_error('MO', 'an organization with members cannot be deleted',
+  format($$DELETE FROM organization WHERE id=%L$$, :orgB), '23503');
 
 \o
 

@@ -29,7 +29,6 @@ export class SessionService {
       {
         sub: user.id,
         role: user.role,
-        organizationId: user.organizationId,
         adminTier: user.kind === 'member' ? undefined : user.kind,
         sid: familyId,
       },

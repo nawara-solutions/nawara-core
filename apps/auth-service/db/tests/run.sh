@@ -126,3 +126,30 @@ echo "PASS: M7 applies on data, and rollback then re-apply round-trips"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO organization_admin_invitation(\"organizationId\",\"platformId\",\"codeHash\",\"invitationType\",\"expiresAt\",\"createdBy\") VALUES ('00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001',repeat('a',64),'org_admin',now()+interval '1 day','00000000-0000-0000-0000-0000000000a1')"
 if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0005_organization_admin_invitations.down.sql" >/dev/null 2>&1; then fail "M7: rollback must refuse when invitations exist"; fi
 echo "PASS: M8 rollback refuses to destroy invitations"
+
+echo "== M9: migrations 0006+0007 move the label to the membership, keep every membership, and round-trip =="
+db="$(newdb mig7)"
+for f in "$mig"/0001_*.sql "$mig"/0002_*.sql "$mig"/0003_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f" || fail "M9: could not apply $f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" <<'SQL'
+INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara');
+INSERT INTO platform(id,"companyId",name) VALUES ('00000000-0000-0000-0000-00000000a001','00000000-0000-0000-0000-0000000000c1','P');
+INSERT INTO organization(id,"platformId",name) VALUES ('00000000-0000-0000-0000-00000000b00a','00000000-0000-0000-0000-00000000a001','Org A');
+INSERT INTO "user"(id,kind,email,"passwordHash",role,"organizationId") VALUES
+  ('00000000-0000-0000-0000-0000000000a1','member','m1@x.io','pw','teacher','00000000-0000-0000-0000-00000000b00a'),
+  ('00000000-0000-0000-0000-0000000000a2','member','m2@x.io','pw','student','00000000-0000-0000-0000-00000000b00a');
+SQL
+for f in "$mig"/0004_*.sql "$mig"/0005_*.sql "$mig"/0006_*.sql "$mig"/0007_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f" || fail "M9: could not apply $f on a database with data"; done
+[ "$(psql -Atq -d "$db" -c "SELECT string_agg(audience, ',' ORDER BY audience) FROM organization_membership")" = "student,teacher" ] || fail "M9: the old role label must move to the membership audience"
+[ "$(psql -Atq -d "$db" -c "SELECT string_agg(DISTINCT role, ',') FROM \"user\"")" = "member" ] || fail "M9: members must end with the neutral role"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM information_schema.columns WHERE table_name='user' AND column_name='organizationId'")" = 0 ] || fail "M9: user.organizationId must be gone"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0007_multi_organization_membership.down.sql" || fail "M9: rollback of 0007 must succeed with one membership per user"
+[ "$(psql -Atq -d "$db" -c "SELECT string_agg(role, ',' ORDER BY role) FROM \"user\"")" = "student,teacher" ] || fail "M9: rollback must restore the role label"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0007_multi_organization_membership.sql" || fail "M9: re-apply after rollback"
+echo "PASS: M9 label moves to the membership, memberships are kept, rollback then re-apply round-trips"
+
+echo "== M10: rollback of 0007 refuses when the multi-organization model is in use =="
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO organization(id,\"platformId\",name) VALUES ('00000000-0000-0000-0000-00000000b00b','00000000-0000-0000-0000-00000000a001','Org B'); INSERT INTO organization_membership(\"userId\",\"organizationId\",status,audience) VALUES ('00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-00000000b00b','pending','coach')"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0007_multi_organization_membership.down.sql" >/dev/null 2>&1; then fail "M10: rollback must refuse when a user has two memberships"; fi
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "DELETE FROM organization_membership WHERE FALSE" >/dev/null
+echo "PASS: M10 rollback refuses when a user has more than one membership"
+

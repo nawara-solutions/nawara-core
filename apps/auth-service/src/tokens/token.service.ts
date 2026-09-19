@@ -5,8 +5,8 @@ import { CLOCK, type Clock } from '../common/ports.js';
 
 export interface AccessClaims {
   sub: string;
+  /** 'admin' (owner/operator) or the neutral 'member'. Never an organization, platform or business role. */
   role: string;
-  organizationId?: string;
   adminTier?: 'owner' | 'operator';
   /** session (refresh-token family) id: lets live checks and step-ups bind to one session */
   sid: string;
@@ -17,7 +17,8 @@ export interface AccessClaims {
 /**
  * Access tokens: JWT, HS256 (HMAC-SHA-256 with JWT_SECRET, >=32 random bytes from config),
  * issuer + audience pinned, algorithm allow-list pinned on verify (no "none", no alg confusion).
- * They carry NO platform, company or entitlement claim: those are decided live, server-side.
+ * They carry NO organization, platform, company or entitlement claim: a user can belong to many organizations,
+ * so the context is decided live, server-side, from the resource being accessed and the current membership row.
  * Lifetime = accessTtl, clamped to an operator's session ceiling.
  */
 @Injectable()
@@ -28,7 +29,7 @@ export class TokenService {
   ) {}
 
   async sign(
-    c: { sub: string; role: string; organizationId?: string | null; adminTier?: 'owner' | 'operator'; sid: string },
+    c: { sub: string; role: string; adminTier?: 'owner' | 'operator'; sid: string },
     sessionExpiresAt?: Date | null,
   ): Promise<{ accessToken: string; expiresIn: number }> {
     const nowS = Math.floor(this.clock.now().getTime() / 1000);
@@ -36,7 +37,6 @@ export class TokenService {
     if (sessionExpiresAt) exp = Math.min(exp, Math.floor(sessionExpiresAt.getTime() / 1000));
     if (exp <= nowS) throw new UnauthorizedException('Session has ended.');
     const payload: Record<string, unknown> = { role: c.role, sid: c.sid };
-    if (c.organizationId) payload.organizationId = c.organizationId;
     if (c.adminTier) payload.adminTier = c.adminTier;
     const accessToken = await new SignJWT(payload)
       .setProtectedHeader({ alg: 'HS256' })

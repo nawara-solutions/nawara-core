@@ -67,7 +67,8 @@ export class PlatformAccessService {
   }
 
   /**
-   * Member tenancy: a member reaches only their own organization, and only through an ACTIVE membership.
+   * Member tenancy: a member reaches an organization only through THEIR ACTIVE membership OF THAT organization (a user
+   * can have many; one never grants access to another).
    * `pending` and `rejected` are authenticated-but-not-admitted: the account is valid ("isActive") yet the
    * organization has not accepted the person. Decided from current rows on every call, never from a token
    * claim. When contact verification is enforced, an unverified contact is also not admitted.
@@ -75,8 +76,8 @@ export class PlatformAccessService {
   async memberBelongsTo(memberId: string, organizationId: string, q: Queryable = this.db): Promise<boolean> {
     const { rowCount } = await q.query(
       `SELECT 1 FROM "user" u
-         JOIN organization_membership m ON m."userId" = u.id AND m."organizationId" = u."organizationId"
-        WHERE u.id = $1 AND u.kind = 'member' AND u."isActive" AND u."organizationId" = $2 AND m.status = 'active'
+         JOIN organization_membership m ON m."userId" = u.id AND m."organizationId" = $2
+        WHERE u.id = $1 AND u.kind = 'member' AND u."isActive" AND m.status = 'active'
           AND ($3::boolean = false OR u."contactVerifiedAt" IS NOT NULL)`,
       [memberId, organizationId, this.cfg.onboarding.requireContactVerification],
     );
@@ -99,8 +100,8 @@ export class PlatformAccessService {
     if (reason === 'ALLOW_OPERATOR') return 'operator';
     const { rowCount } = await q.query(
       `SELECT 1 FROM "user" u
-         JOIN organization_membership m ON m."userId" = u.id AND m."organizationId" = u."organizationId"
-        WHERE u.id = $1 AND u.kind = 'member' AND u."isActive" AND u."organizationId" = $2
+         JOIN organization_membership m ON m."userId" = u.id AND m."organizationId" = $2
+        WHERE u.id = $1 AND u.kind = 'member' AND u."isActive"
           AND m.status = 'active' AND m."isOrganizationAdmin"
           AND ($3::boolean = false OR u."contactVerifiedAt" IS NOT NULL)`,
       [actorId, organizationId, this.cfg.onboarding.requireContactVerification],

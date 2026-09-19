@@ -8,7 +8,7 @@ import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import type { OrgActor } from '../onboarding/onboarding.service.js';
 
-export type MembershipStatus = 'pending' | 'active' | 'rejected';
+export type MembershipStatus = 'pending' | 'active' | 'rejected' | 'revoked';
 
 /**
  * Organization membership (ADR-0028): the relationship between a member and their organization, kept
@@ -38,35 +38,40 @@ export class MembershipService {
 
   /** Called by registration inside ITS transaction. `pending` needs an organization decision. */
   async createForRegistration(
-    q: Queryable, a: { userId: string; organizationId: string; joinCodeId: string; requiresApproval: boolean },
+    q: Queryable, a: { userId: string; organizationId: string; joinCodeId: string; audience: string; requiresApproval: boolean },
   ): Promise<MembershipStatus> {
     const now = this.clock.now();
     const status: MembershipStatus = a.requiresApproval ? 'pending' : 'active';
     await q.query(
-      `INSERT INTO organization_membership("userId","organizationId",status,"joinCodeId","requestedAt","approvedAt","createdAt","updatedAt")
-       VALUES ($1,$2,$3,$4,$5,$6,$5,$5)`,
-      [a.userId, a.organizationId, status, a.joinCodeId, now, status === 'active' ? now : null],
+      `INSERT INTO organization_membership("userId","organizationId",status,"joinCodeId",audience,"requestedAt","approvedAt","createdAt","updatedAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$6,$6)`,
+      [a.userId, a.organizationId, status, a.joinCodeId, a.audience, now, status === 'active' ? now : null],
     );
     return status;
   }
 
-  /** The caller's own membership, for "your request is waiting for approval" screens. */
-  async mine(userId: string) {
+  /**
+   * ALL of the caller's memberships (a user can have many, across organizations and platforms), so an app can show
+   * "your request is waiting for approval" per organization. Membership is the only user-organization link.
+   */
+  async list(userId: string) {
     const { rows } = await this.db.query(
-      `SELECT m."organizationId", m.status, m."isOrganizationAdmin", (u."contactVerifiedAt" IS NOT NULL) AS "contactVerified"
-         FROM "user" u LEFT JOIN organization_membership m ON m."userId" = u.id AND m."organizationId" = u."organizationId"
-        WHERE u.id = $1`,
+      `SELECT m.id, m."organizationId", o.name AS "organizationName", o."platformId", p.key AS "platformKey", p.name AS "platformName",
+              m.status, m.audience, m."isOrganizationAdmin", m."requestedAt"
+         FROM organization_membership m
+         JOIN organization o ON o.id = m."organizationId"
+         JOIN platform p ON p.id = o."platformId"
+        WHERE m."userId" = $1 ORDER BY m."requestedAt", m.id`,
       [userId],
     );
-    const r = rows[0];
-    if (!r || !r.status) return null;
-    return {
-      organizationId: r.organizationId as string,
+    return rows.map((r) => ({
+      id: r.id as string,
+      organization: { id: r.organizationId as string, name: r.organizationName as string },
+      platform: { id: r.platformId as string, key: (r.platformKey ?? null) as string | null, name: r.platformName as string },
       status: r.status as MembershipStatus,
+      audience: r.audience as string,
       isOrganizationAdmin: r.isOrganizationAdmin as boolean,
-      contactVerified: r.contactVerified as boolean,
-      contactVerificationRequired: this.cfg.onboarding.requireContactVerification,
-    };
+    }));
   }
 
   private async authorize(q: Queryable, actor: OrgActor, organizationId: string) {
@@ -79,7 +84,7 @@ export class MembershipService {
     await this.authorize(this.db, actor, organizationId);
     const { rows } = await this.db.query(
       `SELECT m.id, m."userId", m.status, m."requestedAt", m."approvedAt", m."rejectedAt", m."isOrganizationAdmin",
-              u.email, u.phone, u.role AS audience, (u."contactVerifiedAt" IS NOT NULL) AS "contactVerified"
+              u.email, u.phone, m.audience, (u."contactVerifiedAt" IS NOT NULL) AS "contactVerified"
          FROM organization_membership m JOIN "user" u ON u.id = m."userId"
         WHERE m."organizationId" = $1 AND m.status = $2 ORDER BY m."requestedAt"`,
       [organizationId, status],
@@ -130,6 +135,49 @@ export class MembershipService {
       timestamp: this.clock.now().toISOString(),
     });
     return { id: membershipId, status: decision === 'approve' ? 'active' : 'rejected' };
+  }
+
+  /**
+   * active -> revoked (final), atomically. Row lock + conditional UPDATE, so a simultaneous approve/reject/revoke of
+   * the same membership leaves exactly one winner. The organization-management capability is cleared in the SAME
+   * statement (an admin who is removed loses the authority at once). Only THIS organization is affected: the user,
+   * their session and their other memberships are untouched. Nobody revokes themselves through this route, and an
+   * organization admin cannot revoke another administrator (only an Owner or an assigned Operator can), so admins
+   * cannot remove each other from an organization.
+   */
+  async revoke(actor: OrgActor, organizationId: string, membershipId: string, ip: string) {
+    await this.throttle.hit('membership_op_actor', actor.userId);
+    const outcome = await this.db.tx(async (q) => {
+      const { rows } = await q.query(
+        `SELECT m.id, m."userId", m."organizationId", m.status, m."isOrganizationAdmin", u.email, u.phone
+           FROM organization_membership m JOIN "user" u ON u.id = m."userId"
+          WHERE m.id = $1 AND m."organizationId" = $2 FOR UPDATE OF m`,
+        [membershipId, organizationId],
+      );
+      const m = rows[0];
+      if (!m) throw new NotFoundException();
+      const authority = await this.authorize(q, actor, m.organizationId);
+      if (m.userId === actor.userId) throw new NotFoundException();
+      if (authority === 'org_admin' && m.isOrganizationAdmin) throw new NotFoundException(); // collapsed: not yours to remove
+      if (m.status !== 'active') throw new ConflictException('Only an active membership can be revoked.');
+      const now = this.clock.now();
+      const { rowCount } = await q.query(
+        `UPDATE organization_membership SET status='revoked', "revokedAt"=$3, "revokedBy"=$4, "isOrganizationAdmin"=false, "updatedAt"=$3
+          WHERE id=$1 AND "organizationId"=$2 AND status='active'`,
+        [membershipId, m.organizationId, now, actor.userId],
+      );
+      if (rowCount !== 1) throw new ConflictException('Only an active membership can be revoked.');
+      await this.audit.record({
+        type: 'membership.revoked', outcome: 'success', actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip,
+        metadata: { organizationId: m.organizationId, authority, wasAdmin: m.isOrganizationAdmin },
+      }, q);
+      return { userId: m.userId as string, email: m.email as string | null, phone: m.phone as string | null };
+    });
+    this.bus.publish('membership.revoked', {
+      userId: outcome.userId, organizationId, channel: outcome.email ? 'email' : 'phone', destination: outcome.email ?? outcome.phone,
+      timestamp: this.clock.now().toISOString(),
+    });
+    return { id: membershipId, status: 'revoked' as const };
   }
 
   /** Owner-only, with step-up: minting an organization administrator is a privilege grant. */

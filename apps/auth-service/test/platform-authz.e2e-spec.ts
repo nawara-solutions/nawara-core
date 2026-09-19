@@ -184,9 +184,9 @@ describe('platform authorization: owner, operator, member, tenancy', () => {
       await access(tk, w.platformSchool).expect(403);
       await t.http.get(`/auth/admin/organizations/${w.orgSchool1}`).set(bearer(tk)).expect(403);
     });
-    it('resolves its platform only through User -> Organization -> Platform (no platformId anywhere)', async () => {
+    it('resolves its platform only through Membership -> Organization -> Platform (no platformId anywhere)', async () => {
       const m = await t.member(w.orgSchool1, 'path@a.test');
-      const r = await t.db.query(`SELECT "organizationId","platformId","companyId" FROM user_platform WHERE "userId"=$1`, [m.id]);
+      const r = await t.db.query(`SELECT "organizationId","platformId","companyId" FROM member_platform WHERE "userId"=$1`, [m.id]);
       expect(r.rows[0]).toEqual({ organizationId: w.orgSchool1, platformId: w.platformSchool, companyId: w.companyA });
       const cols = await t.db.query(`SELECT column_name FROM information_schema.columns WHERE table_name='user' AND column_name ILIKE '%platform%'`);
       expect(cols.rowCount).toBe(0);

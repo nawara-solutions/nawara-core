@@ -1,9 +1,9 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { EVENT_BUS, CLOCK, type Clock, type EventBus } from '../common/ports.js';
 import { PasswordService, assertPasswordPolicy } from '../crypto/password.js';
-import { DbService } from '../db/db.service.js';
+import { DbService, isUniqueViolation } from '../db/db.service.js';
 import { MembershipService } from '../membership/membership.service.js';
 import { OnboardingService } from '../onboarding/onboarding.service.js';
 import { OwnerAuthService } from '../owner/owner-auth.service.js';
@@ -44,7 +44,8 @@ export class AuthService {
    * (unknown body properties are rejected by the validation pipe).
    *
    * One transaction: spend one use of the code (atomic, so maxUses holds under concurrency), create the
-   * user (always kind=member; `role` is the opaque audience label), create the membership (`pending` when
+   * user (always kind=member, no organization and no business role on it), create the membership (which carries the
+   * opaque audience label) (`pending` when
    * the code requires approval, else `active`). A pending member is authenticated but NOT admitted.
    * payment-service is asked once whether the organization holds a valid license (fail closed); a bad
    * code and an unlicensed organization give the same generic 403, so neither is revealed.
@@ -74,8 +75,8 @@ export class AuthService {
     const passwordHash = await this.passwords.hash(dto.password);
     const result = await this.db.tx(async (q) => {
       const code = await this.onboarding.redeem(q, dto.joinCode); // atomic; refuses a code that just ran out or was revoked
-      const user = await this.users.createMember({ email, phone, passwordHash, role: code.audience, organizationId: code.organizationId }, q);
-      const status = await this.memberships.createForRegistration(q, { userId: user.id, organizationId: code.organizationId, joinCodeId: code.id, requiresApproval: code.requiresApproval });
+      const user = await this.users.createMember({ email, phone, passwordHash }, q);
+      const status = await this.memberships.createForRegistration(q, { userId: user.id, organizationId: code.organizationId, joinCodeId: code.id, audience: code.audience, requiresApproval: code.requiresApproval });
       await this.audit.record({ type: 'onboarding.join_code.used', outcome: 'success', actorId: user.id, targetId: code.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
       if (status === 'pending') {
         await this.audit.record({ type: 'membership.requested', outcome: 'success', actorId: user.id, targetId: user.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
@@ -94,6 +95,58 @@ export class AuthService {
         requiresSubscription: result.code.requiresSubscription,
         contactVerificationRequired: this.cfg.onboarding.requireContactVerification,
       },
+    };
+  }
+
+  /**
+   * An EXISTING member joins another organization with a join code (one identity, many organizations, possibly on
+   * different platforms). Same rules as registration: the code is re-resolved server-side, the organization must be
+   * licensed (payment-service, fail closed), one use is spent atomically, and the membership is `pending` or `active`
+   * per the code. It creates NO account and changes nothing about the user's other memberships or sessions. A second
+   * membership in the SAME organization is refused (409) and spends no use of the code.
+   */
+  async join(userId: string, dto: { joinCode: string }, client: ClientInfo) {
+    await this.throttle.hit('membership_join_user', userId);
+    await this.onboarding.guardGuessing(client);
+    const found = await this.onboarding.lookup(dto.joinCode);
+    if ('rejected' in found) {
+      await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', actorId: userId, ip: client.ip, metadata: { reason: found.rejected, stage: 'join' } });
+      throw new ForbiddenException(REGISTRATION_REFUSED);
+    }
+    let licensed: boolean;
+    try {
+      licensed = await this.payment.isOrganizationLicensed(found.row.organizationId);
+    } catch {
+      throw new ServiceUnavailableException(); // fail CLOSED
+    }
+    if (!licensed) throw new ForbiddenException(REGISTRATION_REFUSED);
+
+    const result = await this.db.tx(async (q) => {
+      const code = await this.onboarding.redeem(q, dto.joinCode);
+      let status;
+      try {
+        status = await this.memberships.createForRegistration(q, { userId, organizationId: code.organizationId, joinCodeId: code.id, audience: code.audience, requiresApproval: code.requiresApproval });
+      } catch (e) {
+        if (isUniqueViolation(e, 'membership_user_org_uk')) throw new ConflictException('You already have a membership in this organization.'); // rolls the spent use back
+        throw e;
+      }
+      await this.audit.record({ type: 'onboarding.join_code.used', outcome: 'success', actorId: userId, targetId: code.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience, existingAccount: true } }, q);
+      if (status === 'pending') {
+        await this.audit.record({ type: 'membership.requested', outcome: 'success', actorId: userId, targetId: userId, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
+      }
+      return { code, status };
+    });
+    if (result.status === 'pending') {
+      this.bus.publish('membership.requested', { userId, organizationId: result.code.organizationId, audience: result.code.audience, timestamp: this.clock.now().toISOString() });
+    }
+    return {
+      onboarding: {
+        audience: result.code.audience,
+        membershipStatus: result.status,
+        requiresSubscription: result.code.requiresSubscription,
+        contactVerificationRequired: this.cfg.onboarding.requireContactVerification,
+      },
+      organizationId: result.code.organizationId,
     };
   }
 
@@ -148,11 +201,15 @@ export class AuthService {
 
   async me(userId: string) {
     const u = await this.users.findById(userId);
+    const { rows } = await this.db.query(`SELECT ("contactVerifiedAt" IS NOT NULL) AS "contactVerified" FROM "user" WHERE id = $1`, [userId]);
     return {
-      id: u!.id, email: u!.email, phone: u!.phone, role: u!.role, organizationId: u!.organizationId,
+      id: u!.id, email: u!.email, phone: u!.phone,
       adminTier: u!.kind === 'member' ? null : u!.kind, isActive: u!.isActive,
-      // Members only: lets the app show "your request is waiting for approval". Never a token claim.
-      membership: u!.kind === 'member' ? await this.memberships.mine(userId) : null,
+      contactVerified: rows[0].contactVerified as boolean,
+      contactVerificationRequired: this.cfg.onboarding.requireContactVerification,
+      // Members: EVERY organization relationship (a user can have many). Never a token claim, always current rows.
+      // The platform-specific business role is the platform's concern; `audience` is only the opaque onboarding label.
+      memberships: u!.kind === 'member' ? await this.memberships.list(userId) : [],
     };
   }
 }

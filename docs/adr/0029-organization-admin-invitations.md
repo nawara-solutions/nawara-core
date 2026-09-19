@@ -4,6 +4,9 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-19):** acceptance now stores `invitationType` as the membership's `audience`; the user's `role` is the neutral `member`. See [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md).
+
+
 > **Extends** [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md) (join codes,
 > membership, the organization-management capability) and **narrows one statement of it**: ADR-0028 says an org
 > admin cannot mint other admins; that remains true of the flag grant/revoke route, but an org admin **can** now

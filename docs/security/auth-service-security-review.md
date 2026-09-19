@@ -215,3 +215,95 @@ Defaults are conservative starting points, not measured values: login 60/15 min 
 - **Residual risks.** An organization admin can mint further admins on their session alone (no member step-up
   exists); delivery of the code is out of band and unbuilt; recovery policy for an organization with no admin is
   undefined; acceptance asks no license (deliberate, ADR-0029).
+
+## N. Addendum: multi-organization membership and audit (2026-09-19, ADR-0030)
+
+Every row below is derived from the code (`organizationAuthority`, controller `@Actors`, `STEP_UP_METHODS`) and
+verified by a named test. **No permission is invented.** "404" is the collapsed answer (no such resource, not yours,
+not allowed: indistinguishable). "403" is the actor-kind refusal of the guard, which reveals nothing about a resource.
+
+### N1. Authorization matrix
+
+| Operation | Owner (own company) | Operator (assigned platform) | Org admin (that organization) | Active member | Pending member |
+|---|---|---|---|---|---|
+| Create organization | **No route in Auth** (no actor can; provisioned outside the API) | none | none | none | none |
+| Create platform | **No route in Auth** (`platform.create` step-up purpose is reserved, unused) | none | none | none | none |
+| Create join code | yes, factor or secret-key step-up `join_code.create` | yes, no step-up | yes, no step-up | 404 | 404 |
+| Revoke join code | yes, step-up `join_code.revoke` | yes | yes | 404 | 404 |
+| Approve / reject membership | yes, no step-up | yes | yes | 404 | 404 |
+| Revoke membership (ADR-0030) | yes | yes | yes, **not another admin** (404), never self | 404 | 404 |
+| Grant / revoke org admin | **Owner only**, factor-only step-up (`organization.admin.*`) | 403 | 403 | 403 | 403 |
+| Create / revoke admin invitation | yes, factor-only step-up | **404** (refused) | yes, session only | 404 | 404 |
+| Create operator | yes, step-up `operator.create` | 403 | 403 | 403 | 403 |
+| Assign / revoke operator platform | yes, step-up `platform_assignment.*` | 403 | 403 | 403 | 403 |
+
+Evidence: `test/tenant-isolation.e2e-spec.ts` (19 routes x 4 actor kinds), `test/members-payment.e2e-spec.ts`,
+`test/admin-invitation.e2e-spec.ts`, `test/multi-membership.e2e-spec.ts`, `test/platform-authz.e2e-spec.ts`.
+
+### N2. Tenant-isolation matrix (Company A actor against Company B resource)
+
+| Resource | Application check | Database constraint | Test | Result |
+|---|---|---|---|---|
+| Organization / membership list / decisions | `organizationAuthority` from the organization's platform's company | composite FKs company→platform→organization | tenant-isolation (19 routes) | uniform 404, identical to a nonexistent id, no state change |
+| Membership by id under another organization's URL | `WHERE id AND "organizationId"` | `membership_organization_fk`, `UNIQUE(userId, organizationId)` | tenant-isolation | 404 |
+| Join code / admin invitation | id scoped by organization | composite FK to organization and platform | tenant-isolation | 404 |
+| Operator and assignment | owner's company must match operator's | composite FK, assignment same-company guard | tenant-isolation, `platform-authz` | 404 |
+| Member reads another organization | active membership row of THAT organization | none needed | multi-membership | 404 |
+| Audit log | no API | append-only guard | (no route to test) | not reachable |
+
+### N3. Concurrency matrix (all run against real PostgreSQL)
+
+| Scenario | Mechanism | Test | Observed |
+|---|---|---|---|
+| Two people redeem a one-use code | conditional `UPDATE ... usedCount < maxUses` | concurrency, multi-membership (6 users, max 2) | exactly 2 |
+| Same user joins twice at once | `UNIQUE(userId, organizationId)`, tx rollback | multi-membership | 1 membership, 1 use spent |
+| Simultaneous approve/reject/revoke of one membership | row lock + conditional UPDATE + trigger | members-payment, multi-membership (8 revokes) | 1 winner, others 409, 1 audit event |
+| Revoke while the member's requests are in flight | live check per request | multi-membership | no 5xx; refused after commit |
+| Admin acts while being revoked | flag cleared in the same statement | multi-membership | no 5xx; authority gone |
+| Grant vs revoke of the admin capability | single-row UPDATE, audit only on change | multi-membership (3 rounds) | one serial order, audit count matches |
+| Operator assignment revoked while operating | live `check` per request | multi-membership | no 5xx; 404 after commit |
+| Two acceptances of one invitation | conditional consume | admin-invitation | exactly 1 |
+| Two logins consuming one step-up / recovery | conditional consume | step-up, recovery | exactly 1 |
+| WebAuthn counter replay | compare-and-set on one connection | webauthn | 1 winner (see F16) |
+
+Mutation checks (each guard broken on purpose, the tests must fail): revoke without the row lock and status
+predicate (3 failures), revoke without clearing the admin flag (3 failures), duplicate join not mapped to 409 (2),
+redeem without the `maxUses` predicate (1). All restored; the unmutated spec passes.
+
+### N4. Findings of this audit
+
+- **F17 (Medium, fixed) — a business label on the identity.** `user.role` held the join code's audience and flowed
+  into the JWT. It cannot describe several memberships and invites consumers to trust an Auth-issued business role.
+  Now `member` (neutral), enforced by `user_role_is_kind_neutral`; the label lives on the membership.
+- **F18 (Medium, fixed) — a person needed one account per organization.** Structural (`user.organizationId`). Now N
+  memberships; `POST /auth/onboarding/join`.
+- **F19 (Low, fixed) — no way to remove a member.** `revoked` state and route added.
+- **F20 (Low, fixed) — `CORS_ORIGINS` accepted `*`, paths and bare hosts unvalidated.** Now startup fails
+  (`ConfigError`) unless every entry is an exact http(s) origin. Unit test added.
+- **F21 (Low, fixed during implementation) — missing FK.** Dropping the user's organization column left
+  `membership.organizationId` without a foreign key; caught by the SQL suite and added (`membership_organization_fk`).
+- **F22 (Medium, open) — operators and org admins decide memberships, create join codes and revoke without step-up.**
+  Deliberate (ADR-0028: operators have no second factor; members have none); an admin cannot revoke another admin
+  and cannot grant the flag. Mitigations: audit on every action, per-actor throttle (`membership_op_actor`; the join route adds `membership_join_user`, 10/hour). Needs a decision on MFA for
+  operators before broader use.
+- **F23 (Info) — no API creates an organization or a platform.** The ADD describes an `OrganizationManagementService`
+  (`POST/PATCH /auth/admin/organizations`) that does **not exist in the code**: only `GET /auth/admin/organizations/:id`
+  does. Only the owner CLI creates a company. Where the
+  business creates them (platform services, SQL, a future admin API) is undecided; nothing was invented here.
+
+### N5. Production checklist
+
+| Item | State |
+|---|---|
+| Schema, constraints, migrations with rollback, SQL invariant suite | READY (verified on scratch PostgreSQL 16; migrations tested on data) |
+| Authentication, MFA, step-up, sessions, throttling, live authorization | READY |
+| Tenant isolation and 404 hiding | READY (tested) |
+| Deploy of `0006`/`0007` on merge | NEEDS VERIFICATION (watch `schema_migrations`; breaking token/`/auth/me` shape) |
+| CI that runs the suites; deploy that cannot mask a failed script (`-euo pipefail`, concurrency group) | **BLOCKER** (classified, not built by choice) |
+| Backup and **tested** restore | **BLOCKER** — never tested; needs a restore drill on the real volume |
+| Least-privilege database role (app connects as a superuser) | **BLOCKER** |
+| Production WebAuthn origin/RP id, first-owner bootstrap | **BLOCKER** (operational configuration) |
+| Event delivery (verification codes, invitations, approval notices) | BLOCKER for enabling `REQUIRE_CONTACT_VERIFICATION`; NEEDS IMPLEMENTATION |
+| Pruning of throttle/challenge rows | NEEDS IMPLEMENTATION (deferred) |
+| Owner password reset, device registration, payment-service authentication | NEEDS IMPLEMENTATION (deferred) |
+| Operator/org-admin step-up (F22), organization/platform creation path (F23) | NEEDS DECISION |

@@ -13,7 +13,6 @@ export interface Actor {
   kind: UserKind;
   sid: string;
   role: string;
-  organizationId: string | null;
 }
 export type AuthedRequest = Request & { actor: Actor };
 
@@ -51,7 +50,7 @@ export class AuthGuard implements CanActivate {
     if (scheme?.toLowerCase() !== 'bearer' || !token) throw new UnauthorizedException();
     const claims = await this.tokens.verify(token);
 
-    const { rows } = await this.db.query(`SELECT id, kind, role, "organizationId", "isActive" FROM "user" WHERE id = $1`, [claims.sub]);
+    const { rows } = await this.db.query(`SELECT id, kind, role, "isActive" FROM "user" WHERE id = $1`, [claims.sub]);
     const u = rows[0];
     const claimedTier = claims.adminTier ?? null;
     const actualTier = u && u.kind !== 'member' ? u.kind : null;
@@ -60,7 +59,7 @@ export class AuthGuard implements CanActivate {
 
     const kinds = this.reflector.getAllAndOverride<UserKind[]>(ACTOR_KINDS, [ctx.getHandler(), ctx.getClass()]) ?? [];
     if (kinds.length && !kinds.includes(u.kind)) throw new ForbiddenException();
-    req.actor = { userId: u.id, kind: u.kind, sid: claims.sid, role: u.role, organizationId: u.organizationId };
+    req.actor = { userId: u.id, kind: u.kind, sid: claims.sid, role: u.role };
     return true;
   }
 }

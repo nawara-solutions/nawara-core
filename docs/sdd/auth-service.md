@@ -1,7 +1,7 @@
 # auth-service
 
 - **Status:** Partially implemented <!-- Draft | Reviewed | Implemented --> — the authentication, session, MFA, step-up, recovery, operator-code and platform-authorization surface is implemented and tested (`apps/auth-service`); the rest is still design. Needs re-review after ADR-0024/0025/0026/0027.
-- **Canonical references:** the migrations (`apps/auth-service/db/migrations/0001…0004`) are the schema of record; ADR-0026 is the data-model/entitlement reference and [ADR-0027](../adr/0027-service-layer-security-model.md) the service-layer model; the implementation report is [`docs/security/auth-service-security-review.md`](../security/auth-service-security-review.md). Older PDFs of this model (`auth-service-data-model.pdf`, `…-adr-0024.pdf`) are **superseded**.
+- **Canonical references:** the migrations (`apps/auth-service/db/migrations/0001…0007`) are the schema of record; ADR-0026 is the data-model/entitlement reference and [ADR-0027](../adr/0027-service-layer-security-model.md) the service-layer model; the implementation report is [`docs/security/auth-service-security-review.md`](../security/auth-service-security-review.md). Older PDFs of this model (`auth-service-data-model.pdf`, `…-adr-0024.pdf`) are **superseded**.
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [docs/add/auth-service.md](../add/auth-service.md)
 - **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic
@@ -63,7 +63,7 @@
 `auth-service` owns `User` identity, credential verification, and the full JWT
 access-token/refresh-token lifecycle. It also now owns capturing — but not acting on —
 device/network fingerprint signals for future abuse-prevention work. It exposes generic
-`role` and `organizationId` claims to every other service and consuming app. (ADR-0005's per-login/per-refresh
+a `role` claim (and, since ADR-0030, no organization claim: the organization comes from the resource and the live membership) to every other service and consuming app. (ADR-0005's per-login/per-refresh
 license and subscription re-check was **removed by ADR-0026**: authentication is not
 entitlement, so login and refresh never consult `payment-service` — see "Authentication ≠
 entitlement" below.)
@@ -403,7 +403,7 @@ Notes:
   `User` still gains no access to `Organization`'s business fields.
 - **`User.platformId` (ADR-0009) is dropped entirely, per ADR-0022, and must never be
   reintroduced (ADR-0024).** No table has a `platformId` column that competes with the canonical
-  path `User → Organization → Platform → Company`, which is exposed once, as the `user_platform`
+  path `User → Membership → Organization → Platform → Company` (ADR-0030), which is exposed once, as the `member_platform`
   view. Every case it previously covered has a better source of truth: a member's platform is
   `organizationId → Organization.platformId`; an owner is company-wide by being an `Owner`
   (`Owner.companyId`); an operator's platform access lives entirely in `PlatformAssignment`, which
@@ -693,7 +693,7 @@ and it is exercised by
 | Question | The one path | Never |
 |---|---|---|
 | What is this identity? | `User.kind` (`member` \| `owner` \| `operator`), immutable; the JWT `adminTier` claim is derived from it | `role`, `secretKeyHash IS NOT NULL`, `organizationId IS NULL`, `contactVerifiedAt` |
-| Which platform is a member on? | `User → Organization → Platform` (view `user_platform`) | a `User.platformId` column (does not exist, must not be added) |
+| Which platform is a member on? | `User → Membership → Organization → Platform` (view `member_platform`, ADR-0030) | a `User.platformId` column (does not exist, must not be added) |
 | Which company is a platform/owner/operator in? | `Platform.companyId`, `Owner.companyId`, `Operator.companyId` | inferred from an env var or a JWT claim |
 | Which platforms may an operator access? | active rows in `PlatformAssignment` (`active = true`) | a JWT claim, a cached list, `Organization`, a client-supplied id |
 | Which platforms may an owner access? | every `Platform` where `Platform.companyId = Owner.companyId` | `PlatformAssignment` rows (owners have none) |
@@ -891,7 +891,7 @@ flowchart TB
       direction TB
       P1[Operator] --> P2["PlatformAssignment (active = true)"] --> P3[Assigned Platform] --> P4["Organizations inside that Platform"] --> P5["Users / resources"] --> P6{{"Permission check<br/>(owned by the resource's service)"}}
     end
-    subgraph MEMBER["NORMAL USER — exactly one organization"]
+    subgraph MEMBER["NORMAL USER — N memberships (ADR-0030; the diagram below is the pre-0030 single-organization view)"]
       direction TB
       U1[User] --> U2["Exactly ONE Organization (User.organizationId)"] --> U3["Exactly ONE Platform (Organization.platformId)"] --> U4["Company (Platform.companyId)"]
     end
@@ -1956,7 +1956,7 @@ operator with access to a platform get equal rights to manage that platform's or
   (family-wide "logout everywhere" is out of v1 — see Open questions).
 
 - **`GET /auth/me`** — requires `Authorization: Bearer` → `200 {id, email, phone, role,
-  organizationId, adminTier, isActive, contactVerifiedAt,
+  adminTier, isActive, contactVerifiedAt, memberships[] (ADR-0030; no organizationId),
   createdAt}` (`trialEndsAt` removed, ADR-0026). `phone`, `adminTier`, and `contactVerifiedAt` were added to this
   contract as a living-doc correction — these fields have existed on `User` since ADR-0009
   (`phone`, `adminTier`) and ADR-0015 (`contactVerifiedAt`), but were never
@@ -3371,8 +3371,30 @@ before it can pay, ADR-0007). The literal `admin` label stays reserved. First ad
 first invitation.
 
 **Not built (documented, not guessed).** Delivery of verification codes and approval notices (event only),
-the outbox, teacher-approval license re-check, membership revocation/suspension, multiple organizations per
+the outbox, teacher-approval license re-check, ~~membership revocation~~ and ~~multiple organizations per user~~ (both built by ADR-0030), per
 user, student checkout entry point. See the ADR's unresolved questions.
+
+## Multi-organization membership and the REVOKED state (ADR-0030)
+
+**Schema (migrations 0006, 0007).** `organization_membership` gains `audience`, `userKind` (= `member`),
+`revokedAt`, `revokedBy` and the FKs `(userId, userKind) → user(id, kind)` and `organizationId → organization(id)`;
+`UNIQUE(userId, organizationId)` stays. `user` loses `organizationId` (and `user_org_iff_member`,
+`user_id_organization_uk`, `user_organization_idx`, view `user_platform`); `user_role_is_kind_neutral` fixes members
+to `role = 'member'`. View `member_platform` derives platform and company per membership. A deferred constraint
+trigger requires every member to have a membership at commit. `membership_guard` allows `pending → active|rejected`
+and `active → revoked` only, freezes identity fields, and requires `revokedAt/revokedBy` exactly when revoked.
+
+**Code.** `MembershipService.revoke` takes a row lock, applies the authority rules (owner, operator, org admin;
+never self; an org admin cannot remove another admin), and runs one conditional `UPDATE ... WHERE status='active'`
+that also clears `isOrganizationAdmin`. `AuthService.join` reuses lookup, fail-closed license check and atomic
+`redeem`; a duplicate pair is a `membership_user_org_uk` violation mapped to 409 inside the transaction (the spent
+use rolls back). `PlatformAccessService` reads the membership of the organization in the URL for both member checks.
+`AuthGuard`, `SessionService` and `TokenService` no longer read or write an organization.
+
+**Rollback.** `0007.down` restores `organizationId` and `role` (from `audience`) and **refuses** when a user has more
+than one membership or any revoked one; `0006.down` only verifies `revoked` is unused (an enum value cannot be
+dropped). **Tests.** `multi-membership.e2e-spec.ts` (22), `tenant-isolation.e2e-spec.ts` (7), the SQL groups `MO`,
+`MEM`, `INV` and migration scenarios M9/M10, and the CORS unit test.
 
 ## Open questions
 

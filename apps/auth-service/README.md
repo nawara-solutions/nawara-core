@@ -15,7 +15,7 @@ It does **not** own licenses/subscriptions/billing (payment-service) or business
 
 ```bash
 cp .env.example .env         # local development ONLY; generate every secret: openssl rand -base64 32
-# apply db/migrations/0001..0003 to your database, then:
+# apply db/migrations/0001..0007 to your database, then:
 npm run start:dev -w auth-service
 ```
 
@@ -41,6 +41,13 @@ membership grants organization access, evaluated from current rows on every requ
   range, default 24 h, 15 min to 7 days; `INVITATION_*_MINUTES`), delivered out of band; `POST
   /auth/onboarding/invitations/accept` creates the account with the organization-management capability. The invitation
   is not a join code, a license or a session. First administrator: an Owner creates the first invitation.
+- **One identity, many organizations** (ADR-0030). A member is one account with N memberships; the platform is
+  derived from the organization, never stored on the user, and tokens carry no organization or business role.
+  `POST /auth/onboarding/join {joinCode}` lets a signed-in member join another organization (one contact is one
+  account). A membership goes `pending → active | rejected` and `active → revoked` (final states); revoking affects
+  only that organization. `GET /auth/me` returns `memberships[]`. The join code's audience is an opaque label on the
+  membership; Auth attaches no business meaning to it.
+- `CORS_ORIGINS` must be exact http(s) origins (no `*`, no paths); anything else stops the service at startup.
 - Payment stays the source of truth for subscriptions and licenses; `requiresSubscription` is only a hint for the app.
 
 ## Operations
