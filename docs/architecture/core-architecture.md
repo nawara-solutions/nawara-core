@@ -27,6 +27,9 @@ Company
               └── Membership ── User      one user, many memberships (Auth owns both)
 ```
 
+- **Platform already carries "which product"**: Nawara Driver, Nawara School, Nawara Flow (and any future product) are
+  each a `Platform` row. Whether a product requires organization context at initial entry, or is platform-wide, is a
+  per-product decision — see [ADR-0043](../adr/0043-product-specific-entry-context-and-licensed-organization-participation.md).
 - A **User** is one universal identity (Auth). It may belong to many organizations on many platforms.
 - Product services keep `userId`, `organizationId` and `platformId` as **opaque references**. They never create a
   second authentication identity. (A product's own domain entity that stores `userId` is correct; a product-specific
