@@ -15,6 +15,16 @@
 > [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) (the FK/immutability shape of the
 > hierarchy tables) and [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (the service-token
 > pattern this ADR reuses, not redesigns).
+>
+> **Factual correction (2026-09-20, Stage 9.1; no decision in this ADR is changed).** Phase C, "Migration phases", lists auth-service's
+> hierarchy-mutating endpoints as "today `POST`/`PATCH /auth/admin/platforms`, `POST`/`PATCH /auth/admin/organizations`, and company
+> creation via the bootstrap CLI". Checked against the source, **those four routes do not exist**. In auth-service the only statement that
+> writes `company`, `platform` or `organization` outside tests is the bootstrap CLI's `INSERT INTO company`; the only related HTTP route is
+> the read-only `GET /auth/admin/organizations/:id`. Platforms and organizations therefore reach Auth's database only by direct writes
+> (migrations, fixtures, operator SQL), which is what ADR-0031 already said ("no route creates a platform or an organization", finding
+> F23). Consequences to read into this ADR: the Phase C freeze must be designed against the paths that really write these tables, and the
+> "Failure handling" row about Auth's hierarchy-mutation endpoints has no endpoint to decommission today. Also, the row being imported
+> includes Auth's `platform.key` (migration 0004: optional, format-checked, unique), which organization-service carries since Stage 9.1.
 
 ## Context
 
@@ -131,7 +141,7 @@ A five-phase, one-time transition, each phase gated on the previous one completi
   and re-run (see "Failure handling").
 - **Phase C — Controlled write-freeze, narrowly scoped.** Once verification passes, mutations to `Company`,
   `Platform` and `Organization` in auth-service (creation and updates — today `POST`/`PATCH
-  /auth/admin/platforms`, `POST`/`PATCH /auth/admin/organizations`, and company creation via the bootstrap CLI) are
+  /auth/admin/platforms`, `POST`/`PATCH /auth/admin/organizations` [these routes do not exist: see the factual correction at the top], and company creation via the bootstrap CLI) are
   frozen for the short window between the last successful verification and cutover, so the imported copy cannot go
   stale in the middle of the switch. **The freeze applies to these three tables' own mutating endpoints only.**
   Ordinary Auth operation is explicitly unaffected: login, refresh, logout, registration, joining an organization,

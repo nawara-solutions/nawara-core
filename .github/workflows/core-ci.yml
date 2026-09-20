@@ -2,7 +2,7 @@ name: Core CI
 
 # Validates every Node workspace: lint, typecheck, unit tests, integration tests, build; plus the repository's static
 # safety and architecture checks. It builds and tests only: it never deploys, publishes an image or touches production.
-# Covered:      auth-service, notification-service, payment-service, billing-service, service-kit (Node), repository checks.
+# Covered:      auth-service, notification-service, payment-service, billing-service, organization-service, service-kit (Node), repository checks.
 # NOT covered:  ai-service (Python) has no CI job yet.
 on:
   pull_request:
@@ -62,6 +62,10 @@ jobs:
             integration: test:e2e
           - name: billing-service
             workspace: billing-service
+            integration: test:e2e
+            database-tests: true
+          - name: organization-service
+            workspace: organization-service
             integration: test:e2e
             database-tests: true
     services:
