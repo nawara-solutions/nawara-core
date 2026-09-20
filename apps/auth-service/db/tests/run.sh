@@ -153,3 +153,18 @@ if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0007_multi_organization_mem
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "DELETE FROM organization_membership WHERE FALSE" >/dev/null
 echo "PASS: M10 rollback refuses when a user has more than one membership"
 
+echo "== M11: migration 0009 relaxes member membership to [0..N]; rollback refuses while a zero-membership member exists =="
+db="$(newdb mig9)"; apply_all "$db"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara')"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO \"user\"(id,kind,email,\"passwordHash\",role) VALUES ('00000000-0000-0000-0000-0000000000f1','member','flow@x.io','pw','member')" \
+  || fail "M11: a member with zero memberships must be insertable after 0009"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM organization_membership WHERE \"userId\"='00000000-0000-0000-0000-0000000000f1'")" = 0 ] || fail "M11: the new member must have zero memberships"
+echo "PASS: M11a a member with zero memberships can be created once 0009 is applied"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0009_member_zero_membership.down.sql" >/dev/null 2>&1; then fail "M11: rollback of 0009 must refuse while a zero-membership member exists"; fi
+echo "PASS: M11b rollback of 0009 refuses while a zero-membership member exists"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "DELETE FROM \"user\" WHERE id='00000000-0000-0000-0000-0000000000f1'"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0009_member_zero_membership.down.sql" || fail "M11: rollback of 0009 must succeed once no zero-membership member exists"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO \"user\"(id,kind,email,\"passwordHash\",role) VALUES ('00000000-0000-0000-0000-0000000000f2','member','flow2@x.io','pw','member')" >/dev/null 2>&1; then fail "M11: after rollback, a member with zero memberships must be refused again"; fi
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0009_member_zero_membership.sql" || fail "M11: re-apply after rollback"
+echo "PASS: M11c rollback then re-apply round-trips, and the [1..N] rule is restored while rolled back"
+

@@ -55,8 +55,9 @@ export class UsersService {
 
   /**
    * A member identity. It carries NO organization and NO business role: the relationship to each organization is an
-   * OrganizationMembership row (with its own opaque `audience`), created by the caller in the SAME transaction. The
-   * database refuses (deferred) a member that ends a transaction without at least one membership.
+   * OrganizationMembership row (with its own opaque `audience`). A member may have zero or more memberships
+   * (owner decision 2026-09-20, migration 0009); zero memberships grants zero organization authority — every
+   * organization-scoped check still derives authority live from actual ACTIVE membership rows.
    */
   async createMember(
     a: { email?: string; phone?: string; passwordHash: string },
