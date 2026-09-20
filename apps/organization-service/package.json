@@ -19,7 +19,8 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "test:db": "bash db/tests/run.sh",
     "test:all": "vitest run && vitest run --config vitest.config.e2e.ts && bash db/tests/run.sh",
-    "migrate": "node ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations"
+    "migrate": "node ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations",
+    "ownership": "node dist/cli/ownership.js"
   },
   "dependencies": {
     "@nawara/service-kit": "*",

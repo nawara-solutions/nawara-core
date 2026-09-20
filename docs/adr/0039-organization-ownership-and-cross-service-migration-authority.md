@@ -1,6 +1,6 @@
 # 0039. Organization ownership and cross-service migration authority
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (**partly superseded by [ADR-0040](./0040-organization-ownership-migration-decisions.md)**, on the passages listed in that ADR's "Amendments to ADR-0039", by its decisions 1 to 4. ADR-0040 is **Accepted** (2026-09-20). The import mechanism this ADR left open is decided by ADR-0040 decision 5, and the interim id invariants by its decision 6. The rest of this ADR stands.)
 - **Date:** 2026-09-20
 - **Deciders:** Anwar (project owner)
 

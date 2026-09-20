@@ -167,7 +167,7 @@ describeWithEnv('platform.key (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
   });
 
   describe('upgrading a database that is already at the previous schema (0001 + 0002) with rows in it', () => {
-    it('applies 0003 alone, keeps every row and id, sets no key, generates nothing, and the key rules then apply', async () => {
+    it('applies 0003 (and the later inert 0004), keeps every row and id, sets no key, generates nothing, and the key rules then apply', async () => {
       const own = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'orgkeyup');
       const old = mkdtempSync(join(tmpdir(), 'org-mig-'));
       for (const f of readdirSync(organizationMigrationsDir).filter((f) => /^000[12]_/.test(f))) copyFileSync(join(organizationMigrationsDir, f), join(old, f));
@@ -181,7 +181,7 @@ describeWithEnv('platform.key (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
         expect((await sql(own.url, `SELECT 1 FROM information_schema.columns WHERE table_name='platform' AND column_name='key'`))).toHaveLength(0);
 
         const after = await runMigrations(own.url, [kitMigrationsDir, organizationMigrationsDir]); // the real directory: 0001/0002 unchanged checksums
-        expect(after.applied).toEqual(['0003_platform_key.sql']);
+        expect(after.applied).toEqual(['0003_platform_key.sql', '0004_ownership_transition.sql', '0005_admin_actor_record.sql']);
         const kept = await sql(own.url, `SELECT id, name, key, to_char("createdAt" AT TIME ZONE 'UTC','YYYY-MM-DD HH24:MI:SS.US') AS c FROM platform ORDER BY name`);
         expect(kept).toEqual([
           { id: rows[0], name: 'Old 0', key: null, c: '2021-01-01 00:00:00.000001' },

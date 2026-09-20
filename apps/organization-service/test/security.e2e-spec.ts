@@ -14,6 +14,13 @@ const EXPECTED_ROUTES = [
   'GET /organization/companies', 'POST /organization/companies', 'GET /organization/companies/{id}', 'PATCH /organization/companies/{id}',
   'GET /organization/platforms', 'POST /organization/platforms', 'GET /organization/platforms/{id}', 'PATCH /organization/platforms/{id}',
   'GET /organization/organizations', 'POST /organization/organizations', 'GET /organization/organizations/{id}', 'PATCH /organization/organizations/{id}',
+  // ADR-0042 decision 5: the reference read (ids and parents only). Still no delete, no membership, no import or ownership endpoint (CLI operations).
+  'GET /organization/reference/organizations/{id}',
+  // ADR-0042 decision 6 / Amendment 1: the human-admin surface. Deliberately no GET/list (not built) and no delete. These four
+  // routes use a DIFFERENT authentication model (a human's own bearer, forwarded to Auth) from every route above (a service
+  // token, verified locally, no network call) — see the "human-admin routes" describe block below, not the service-token sweeps.
+  'POST /organization/admin/platforms', 'PATCH /organization/admin/platforms/{id}',
+  'POST /organization/admin/organizations', 'PATCH /organization/admin/organizations/{id}',
 ].sort();
 
 describeWithEnv('security: authentication, authorization boundary and tampering (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
@@ -35,13 +42,22 @@ describeWithEnv('security: authentication, authorization boundary and tampering 
   };
   /** The domain routes: everything except the kit's two public probes, which are asserted separately. */
   const routes = (app = t.app) => allRoutes(app).filter((r) => r.path.startsWith('/organization/'));
+  /**
+   * The SERVICE-TOKEN routes only (excludes /organization/admin/*): a service token is verified locally, with no
+   * outbound call and no dependency on any other service being reachable, so "wrong token -> 401" holds unconditionally.
+   * The admin routes authenticate a human's OWN bearer by asking Auth (ADR-0042 decision 6) — a garbage bearer cannot be
+   * distinguished from a valid one without that round trip, so with no Auth reachable (as in this suite's test app) they
+   * correctly fail closed with 503, not 401. That behavior is covered on its own terms in admin.e2e-spec.ts (with a fake
+   * Auth client standing in) and by the "human-admin routes" block below (with the real, unreachable-by-design client).
+   */
+  const serviceTokenRoutes = (app = t.app) => routes(app).filter((r) => !r.path.startsWith('/organization/admin/'));
   const call = (method: string, path: string, headers: Record<string, string> = {}, body: object = {}) => {
     const url = path.replace('{id}', MISSING_ID);
     const req = (t.http() as any)[method.toLowerCase()](url).set(headers);
     return method === 'GET' ? req : req.set('Idempotency-Key', 'security-probe-key').send(body);
   };
 
-  it('exposes EXACTLY the twelve intended routes plus the two kit probes: no delete, no membership, no import, no ownership-migration endpoint', () => {
+  it('exposes EXACTLY the twelve intended routes plus the reference read and the two kit probes: no delete, no membership, no import, no ownership-migration endpoint', () => {
     expect(routes().map((r) => `${r.method} ${r.path}`).sort()).toEqual(EXPECTED_ROUTES);
     expect(allRoutes().filter((r) => !r.path.startsWith('/organization/')).map((r) => `${r.method} ${r.path}`).sort()).toEqual(['GET /health', 'GET /ready']);
   });
@@ -58,7 +74,7 @@ describeWithEnv('security: authentication, authorization boundary and tampering 
       { Authorization: 'Bearer ' },
       { Authorization: t.callers['billing-service']! },
     ];
-    for (const { method, path } of routes()) {
+    for (const { method, path } of serviceTokenRoutes()) {
       for (const headers of attempts) {
         const res = await call(method, path, headers);
         expect(res.status, `${method} ${path} with ${JSON.stringify(headers).slice(0, 40)}`).toBe(401);
@@ -83,7 +99,7 @@ describeWithEnv('security: authentication, authorization boundary and tampering 
   it('never accepts a USER token, never asks Auth about one, and makes no outbound HTTP call at all', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     try {
-      for (const { method, path } of routes()) expect((await call(method, path, bearer(USER_JWT))).status).toBe(401);
+      for (const { method, path } of serviceTokenRoutes()) expect((await call(method, path, bearer(USER_JWT))).status).toBe(401);
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
@@ -94,13 +110,38 @@ describeWithEnv('security: authentication, authorization boundary and tampering 
     const own = await createTestApp({ databaseUrl: db.url, env: { SERVICE_TOKENS: '' } });
     try {
       const anything = generateServiceToken().token;
-      for (const { method, path } of routes(own.app)) {
+      for (const { method, path } of serviceTokenRoutes(own.app)) {
         const res = await (own.http() as any)[method.toLowerCase()](path.replace('{id}', MISSING_ID)).set(bearer(anything)).send({});
         expect(res.status, `${method} ${path}`).toBe(401);
       }
     } finally {
       await own.app.close();
     }
+  });
+
+  describe('human-admin routes (ADR-0042 decision 6) — a different authentication model, not a weaker one', () => {
+    const adminRoutes = () => routes().filter((r) => r.path.startsWith('/organization/admin/'));
+
+    it('with no bearer at all: 401, locally, no outbound call (identical to the service-token routes)', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      try {
+        for (const { method, path } of adminRoutes()) expect((await call(method, path, {})).status, `${method} ${path}`).toBe(401);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('with a bearer but Auth unreachable: fails CLOSED (503), never silently authorizes', async () => {
+      for (const { method, path } of adminRoutes()) {
+        expect((await call(method, path, bearer('some-bearer-value'))).status, `${method} ${path}`).toBe(503);
+      }
+    });
+
+    it('a valid SERVICE token is not accepted as a human bearer either (it is forwarded to Auth, which — unreachable here — fails closed, not open)', async () => {
+      const res = await call('POST', '/organization/admin/platforms', bearer(t.callers['billing-service']!));
+      expect(res.status).toBe(503);
+    });
   });
 
   it('ignores identity-shaped HEADERS: they grant nothing without a token and change nothing with one', async () => {

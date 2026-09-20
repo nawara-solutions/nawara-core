@@ -12,7 +12,7 @@ import { loadOrganizationConfig } from '../config/organization-config.js';
  */
 describe('OpenAPI document', () => {
   it('builds, documents every implemented operation, and documents nothing that is deliberately absent', async () => {
-    const config = loadOrganizationConfig({ NODE_ENV: 'test', DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization' });
+    const config = loadOrganizationConfig({ NODE_ENV: 'test', DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization', AUTH_SERVICE_URL: 'http://localhost:3001' });
     const moduleRef = await Test.createTestingModule({ imports: [AppModule.register(config)] }).compile();
     const app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
     await app.init();
@@ -23,6 +23,9 @@ describe('OpenAPI document', () => {
       for (const entity of ['companies', 'platforms', 'organizations']) {
         expected.push([`/organization/${entity}`, 'post'], [`/organization/${entity}`, 'get'], [`/organization/${entity}/{id}`, 'get'], [`/organization/${entity}/{id}`, 'patch']);
       }
+      // Human admin (ADR-0042 decision 6): create is sensitive (step-up), update is not (OPEN-3 default). No GET/list/delete.
+      expected.push(['/organization/admin/platforms', 'post'], ['/organization/admin/platforms/{id}', 'patch']);
+      expected.push(['/organization/admin/organizations', 'post'], ['/organization/admin/organizations/{id}', 'patch']);
       for (const [path, method] of expected) {
         const op = document.paths[path]?.[method];
         expect(op, `${method.toUpperCase()} ${path} is documented`).toBeDefined();
@@ -34,10 +37,16 @@ describe('OpenAPI document', () => {
           expect(op!.requestBody, `${path} documents its request body`).toBeDefined();
         }
       }
-      // Deliberately absent: deletion (lifecycle undecided), membership (auth-service's), import/migration (a later stage).
+      // The two sensitive admin creates document the step-up header; the two non-sensitive updates do not require it.
+      for (const path of ['/organization/admin/platforms', '/organization/admin/organizations']) {
+        expect(JSON.stringify(document.paths[path]?.post?.parameters), `${path} documents the step-up header`).toContain('x-step-up-token');
+      }
+      // Deliberately absent: deletion (lifecycle undecided), membership (auth-service's), import/migration (a later stage),
+      // and a LIST/GET for the admin surface (not built — the admin module only creates/updates, ADR-0042 decision 6).
       for (const [path, item] of Object.entries(document.paths)) {
         expect(Object.keys(item as object), path).not.toContain('delete');
         expect(path, path).not.toMatch(/member|import|migrat|cutover|user|auth/i);
+        if (path.startsWith('/organization/admin/')) expect(Object.keys(item as object), path).not.toContain('get');
       }
       // Every schema property is described by an @ApiProperty (a field without one would be undocumented).
       const schemas = document.components?.schemas ?? {};

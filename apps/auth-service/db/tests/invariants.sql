@@ -62,8 +62,9 @@ BEGIN
   RETURN uid;
 END $$;
 
--- A member identity (neutral role) with ONE active membership carrying the opaque label `r` (a member must always
--- have at least one membership: deferred rule, so both rows are created in the same statement).
+-- A member identity (neutral role) with ONE active membership carrying the opaque label `r`. A member may
+-- also have zero memberships (owner decision 2026-09-20: [0..N], migration 0009) — this helper still creates
+-- one for fixtures that need an established organization relationship; see test 'B' below for the zero case.
 CREATE FUNCTION pg_temp.new_member(org uuid, mail text, r text DEFAULT 'student') RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE uid uuid;
 BEGIN
@@ -148,8 +149,14 @@ SELECT pg_temp.expect_error('A', 'platform without a company',
 SELECT pg_temp.expect_error('A', 'platform referencing a nonexistent company',
   $$INSERT INTO platform("companyId", name) VALUES (gen_random_uuid(), 'orphan')$$, '23503');
 
-SELECT pg_temp.expect_error('B', 'a member must have at least one membership (deferred rule)',
-  $$SET CONSTRAINTS ALL IMMEDIATE; INSERT INTO "user"(kind,email,"passwordHash",role) VALUES ('member','n@x.io','pw','member')$$, '23514');
+-- Owner decision 2026-09-20 (docs/architecture/stage-10/member-membership-invariant-owner-decision.md), migration 0009:
+-- a member may now have ZERO memberships. Zero memberships must still grant zero organization authority (proven below).
+SELECT pg_temp.expect_ok('B', 'a member may now have zero memberships ([0..N], migration 0009)',
+  $$SET CONSTRAINTS ALL IMMEDIATE; INSERT INTO "user"(kind,email,"passwordHash",role) VALUES ('member','zero-membership@x.io','pw','member')$$);
+SELECT pg_temp.assert_eq('B', 'a zero-membership member has zero organization_membership rows',
+  (SELECT count(*)::text FROM organization_membership m JOIN "user" u ON u.id = m."userId" WHERE u.email = 'zero-membership@x.io'), '0');
+SELECT pg_temp.assert_eq('B', 'a zero-membership member has NO row in member_platform (identity != organization authority)',
+  (SELECT count(*)::text FROM member_platform mp JOIN "user" u ON u.id = mp."userId" WHERE u.email = 'zero-membership@x.io'), '0');
 SELECT pg_temp.expect_error('C', 'a membership referencing a nonexistent organization',
   format($$INSERT INTO organization_membership("userId","organizationId",status,audience,"approvedAt") VALUES (%L,gen_random_uuid(),'active','x',now())$$, :'user1'), '23503');
 SELECT pg_temp.assert_eq('B', 'the user table has NO organizationId column (memberships are the only link)',

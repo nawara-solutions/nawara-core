@@ -35,3 +35,5 @@ export { RateLimitModule } from './rate-limit/rate-limit.module.js';
 export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';
 
 export { configureApp } from './bootstrap.js';
+
+export { canonicalJson, sha256Hex, digestRows, sealSnapshot, serializeSnapshot, verifySnapshot, SnapshotError, type SealedSnapshot, type SealInput, type SnapshotRow, type VerifyResult } from './snapshot/snapshot.js';

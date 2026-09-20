@@ -188,6 +188,11 @@ services:
       # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
       MIGRATION_DATABASE_URL: postgres://organization_migrator:${ORGANIZATION_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/organization
       SERVICE_TOKENS: ${ORGANIZATION_SERVICE_TOKENS:-}
+      # ADR-0042: every registered caller needs an explicit policy entry (capabilities and an explicit allowedPlatforms; no wildcard). The service
+      # REFUSES TO START when a registered token has no entry. Empty with no tokens is the default: nothing can call it.
+      SERVICE_POLICY: ${ORGANIZATION_SERVICE_POLICY:-}
+      # ADR-0042 decision 6: used ONLY by the human-admin module, to forward a caller's own bearer to Auth (/auth/grants, /auth/step-up/verify).
+      AUTH_SERVICE_URL: http://auth-service:3000
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

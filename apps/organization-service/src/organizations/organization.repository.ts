@@ -6,6 +6,7 @@ import type { ListQuery, Page } from '../common/pagination.js';
 import { notFound, organizationError } from '../domain/errors.js';
 import type { CreateOrganizationInput, UpdateOrganizationInput } from '../domain/organization-input.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
+import { OwnershipService } from '../ownership/ownership.service.js';
 
 export interface OrganizationRow {
   id: string;
@@ -28,12 +29,13 @@ const UPDATABLE = ['name', 'taxCode', 'address', 'phone', 'type'] as const;
  */
 @Injectable()
 export class OrganizationRepository {
-  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService) {}
+  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
 
   async create(caller: string, key: string, input: CreateOrganizationInput): Promise<{ organization: OrganizationRow; replayed: boolean }> {
     const id = randomUUID();
     try {
       return await this.db.tx(async (q) => {
+        await this.ownership.assertWritable(q);
         const reserved = await this.idempotency.reserve(q, {
           caller, operation: 'organization.create', key, requestHash: IdempotencyService.requestHash('organization.create', input), resourceId: id,
         });
@@ -60,13 +62,14 @@ export class OrganizationRepository {
     return rows[0];
   }
 
-  list(query: ListQuery): Promise<Page<OrganizationRow & { cursorAt: string }>> {
-    return listPage<OrganizationRow>(this.db, 'organization', query, { platformId: 'platformId' });
+  list(query: ListQuery, allowedPlatforms?: ReadonlySet<string> | null): Promise<Page<OrganizationRow & { cursorAt: string }>> {
+    return listPage<OrganizationRow>(this.db, 'organization', query, { platformId: 'platformId' }, allowedPlatforms === undefined ? undefined : { column: 'platformId', values: allowedPlatforms === null ? null : [...allowedPlatforms] });
   }
 
   /** Writes only the fields that actually change; a request that changes nothing writes nothing (and leaves `updatedAt` alone). */
   async update(id: string, input: UpdateOrganizationInput): Promise<OrganizationRow> {
     return this.db.tx(async (q) => {
+      await this.ownership.assertWritable(q);
       const { rows } = await q.query<OrganizationRow>('SELECT * FROM organization WHERE id = $1 FOR UPDATE', [id]);
       const current = rows[0];
       if (!current) throw notFound();

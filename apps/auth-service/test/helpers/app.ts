@@ -148,6 +148,15 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
       });
       return { id: u.id, email, password };
     },
+    /**
+     * A member identity with ZERO memberships (owner decision 2026-09-20, migration 0009: member is now
+     * [0..N]). Identity only — no organization relationship, and therefore no organization authority.
+     */
+    async memberNoOrg(email: string, password = 'member password 1') {
+      const hash = await passwords.hash(password);
+      const u = await dbs.tx((q) => users.createMember({ email, passwordHash: hash }, q));
+      return { id: u.id, email, password };
+    },
     /** Another organization relationship for an EXISTING user (one identity, many organizations). */
     async addMembership(userId: string, organizationId: string, audience = 'student', status: 'pending' | 'active' | 'rejected' | 'revoked' = 'active', q: { query: (sql: string, p?: unknown[]) => Promise<unknown> } = db) {
       if (status === 'active') {

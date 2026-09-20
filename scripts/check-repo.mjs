@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkCiCoverage, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkCiCoverage, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -36,9 +36,27 @@ for (const base of ['apps', 'libs']) {
   }
 }
 
+const readOrUndefined = (rel) => {
+  try {
+    return readFileSync(join(root, rel), 'utf8');
+  } catch {
+    return undefined;
+  }
+};
+problems.push(...checkHierarchyFixtures(
+  readOrUndefined('apps/auth-service/test/fixtures/hierarchy-snapshot.v1.json'),
+  readOrUndefined('apps/organization-service/test/fixtures/hierarchy-snapshot.v1.json'),
+));
+for (const svc of ['billing-service', 'payment-service']) {
+  const dir = join(root, 'apps', svc, 'db/migrations');
+  for (const f of readdirSync(dir).filter((n) => n.endsWith('.sql'))) {
+    problems.push(...checkNoPlatformIdOnFinancialRecords(`apps/${svc}/db/migrations/${f}`, readFileSync(join(dir, f), 'utf8')));
+  }
+}
+
 if (problems.length > 0) {
   console.error(`repository checks failed (${problems.length}):`);
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation');

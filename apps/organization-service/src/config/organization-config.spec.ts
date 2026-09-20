@@ -2,7 +2,7 @@ import { generateServiceToken } from '@nawara/service-kit';
 import { describe, expect, it } from 'vitest';
 import { loadOrganizationConfig } from './organization-config.js';
 
-const BASE = { NODE_ENV: 'test', DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization' };
+const BASE = { NODE_ENV: 'test', DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization', AUTH_SERVICE_URL: 'http://localhost:3001' };
 
 /** Every message must name the variable and NEVER echo a value (a value may be a password, a token or a URL with credentials). */
 const refusal = (env: NodeJS.ProcessEnv) => {
@@ -24,15 +24,28 @@ describe('loadOrganizationConfig', () => {
     expect(cfg.corsOrigins).toEqual([]);
   });
 
-  it('carries ONLY what this service uses: no Auth URL, no broker, no outbound token, no currencies (nothing to call, publish or price)', () => {
+  it('carries ONLY what this service uses: no broker, no outbound service token, no currencies (nothing to publish or price); the one bounded Auth dependency is the human-admin module\'s grant-facts/step-up client (ADR-0042 decision 6)', () => {
     expect(Object.keys(loadOrganizationConfig(BASE)).sort()).toEqual([
-      'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'serviceTokens', 'trustProxy',
+      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy',
     ]);
   });
 
   it('defaults to production behaviour when NODE_ENV is unset', () => {
-    const env = { DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization' };
+    const env = { DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization', AUTH_SERVICE_URL: 'http://localhost:3001' };
     expect(loadOrganizationConfig(env).isProduction).toBe(true);
+  });
+
+  it('requires AUTH_SERVICE_URL, and only an http(s) URL', () => {
+    expect(refusal({ NODE_ENV: 'test', DATABASE_URL: BASE.DATABASE_URL })).toContain('AUTH_SERVICE_URL');
+    expect(refusal({ ...BASE, AUTH_SERVICE_URL: 'ftp://auth' })).toContain('AUTH_SERVICE_URL');
+    expect(refusal({ ...BASE, AUTH_SERVICE_URL: 'not a url' })).toContain('AUTH_SERVICE_URL');
+  });
+
+  it('AUTH_TIMEOUT_MS defaults to 3000ms and is bounded 100-30000', () => {
+    expect(loadOrganizationConfig(BASE).authTimeoutMs).toBe(3000);
+    expect(loadOrganizationConfig({ ...BASE, AUTH_TIMEOUT_MS: '5000' }).authTimeoutMs).toBe(5000);
+    expect(refusal({ ...BASE, AUTH_TIMEOUT_MS: '50' })).toContain('AUTH_TIMEOUT_MS');
+    expect(refusal({ ...BASE, AUTH_TIMEOUT_MS: '99999' })).toContain('AUTH_TIMEOUT_MS');
   });
 
   it('requires DATABASE_URL, and only a postgres URL', () => {
@@ -43,10 +56,10 @@ describe('loadOrganizationConfig', () => {
 
   it('refuses a superuser or schema-owner database role in production (ADR-0032), but not in development', () => {
     for (const user of ['postgres', 'root', 'organization_migrator']) {
-      expect(refusal({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@h/organization` })).toContain('least-privilege');
-      expect(loadOrganizationConfig({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@h/organization` }).databaseUrl).toContain(user);
+      expect(refusal({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL })).toContain('least-privilege');
+      expect(loadOrganizationConfig({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL }).databaseUrl).toContain(user);
     }
-    expect(loadOrganizationConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgres://organization_app:pw@h/organization' }).isProduction).toBe(true);
+    expect(loadOrganizationConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgres://organization_app:pw@h/organization', AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL }).isProduction).toBe(true);
   });
 
   it('parses service tokens as <caller>:<digest>, keeps only digests, and refuses malformed entries', () => {

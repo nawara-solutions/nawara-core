@@ -22,6 +22,9 @@ export const STEP_UP_METHODS = {
   'platform_assignment.grant': ['totp', 'webauthn', 'secret_key'],
   'platform_assignment.revoke': ['totp', 'webauthn', 'secret_key'],
   'platform.create': ['totp', 'webauthn', 'secret_key'],
+  // Organization Service administration (ADR-0042 Amendment 1, A.2): owner-initiated create Organization
+  // is sensitive. Verified/consumed for organization-service via POST /auth/step-up/verify.
+  'organization.create': ['totp', 'webauthn', 'secret_key'],
   'operator.create': ['totp', 'webauthn', 'secret_key'],
   'owner.secret_key.rotate': ['totp', 'webauthn'],
   'owner.factor.enroll': ['totp', 'webauthn'],

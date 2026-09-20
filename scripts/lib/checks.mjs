@@ -101,3 +101,32 @@ export function checkSource(relPath, text) {
   }
   return problems;
 }
+
+/**
+ * The hierarchy snapshot contract (ADR-0040 decision 5): auth-service (the exporter) and organization-service (the importer) share NO code,
+ * only this golden artifact. It is written by auth-service's real exporter, so if either copy changes without the other the two
+ * implementations have drifted and the repository check fails.
+ */
+export function checkHierarchyFixtures(authText, orgText) {
+  const problems = [];
+  if (authText === undefined) problems.push('apps/auth-service/test/fixtures/hierarchy-snapshot.v1.json is missing');
+  if (orgText === undefined) problems.push('apps/organization-service/test/fixtures/hierarchy-snapshot.v1.json is missing');
+  if (authText !== undefined && orgText !== undefined && authText !== orgText) {
+    problems.push('the hierarchy snapshot golden fixtures of auth-service and organization-service differ: the exporter and the importer have drifted');
+  }
+  return problems;
+}
+
+/**
+ * Financial isolation (ADR-0042 DEC-5): a Billing invoice and a Payment record carry NO platformId. Platform scope is resolved through
+ * organization-service and is never a stored reference on a financial record. (Billing's own `platform_currency` is currency
+ * configuration, not transaction ownership, and lives in its own migration.)
+ */
+export function checkNoPlatformIdOnFinancialRecords(relPath, text) {
+  const problems = [];
+  const financial = /^apps\/(billing-service\/db\/migrations\/\d+_invoice[a-z_]*|payment-service\/db\/migrations\/\d+_payment[a-z_]*)\.sql$/.test(relPath);
+  if (financial && /platformId|platform_id/i.test(text.replace(/--.*$/gm, ''))) {
+    problems.push(`${relPath}: a financial record must not carry a platformId (Platform scope is resolved through organization-service, ADR-0042)`);
+  }
+  return problems;
+}

@@ -10,7 +10,11 @@ export type OrganizationErrorCode =
   | 'idempotency_key_reused'
   | 'company_not_found'
   | 'platform_not_found'
-  | 'not_found';
+  | 'not_authoritative'
+  | 'ownership_transition_rejected'
+  | 'not_found'
+  | 'admin_forbidden'
+  | 'step_up_required';
 
 export function organizationError(status: number, code: OrganizationErrorCode, message: string): HttpException {
   return new HttpException({ message, code }, status);
