@@ -26,7 +26,7 @@ describe('loadOrganizationConfig', () => {
 
   it('carries ONLY what this service uses: no Auth URL, no broker, no outbound token, no currencies (nothing to call, publish or price)', () => {
     expect(Object.keys(loadOrganizationConfig(BASE)).sort()).toEqual([
-      'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'serviceTokens', 'trustProxy',
+      'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy',
     ]);
   });
 

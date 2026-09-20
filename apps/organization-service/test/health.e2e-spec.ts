@@ -29,7 +29,7 @@ describeWithEnv('health, readiness and shutdown (real PostgreSQL)', ['TEST_DATAB
   });
 
   it('/ready fails closed with 503 when the database is unreachable, while /health stays 200; no host or credential appears', async () => {
-    const t: TestApp = await createTestApp({ databaseUrl: 'postgres://nobody:nothing@127.0.0.1:1/none' });
+    const t: TestApp = await createTestApp({ databaseUrl: 'postgres://nobody:nothing@127.0.0.1:1/none', ownership: 'inactive' });
     try {
       await t.http().get('/health').expect(200);
       const r = await t.http().get('/ready').expect(503);
@@ -41,7 +41,7 @@ describeWithEnv('health, readiness and shutdown (real PostgreSQL)', ['TEST_DATAB
   });
 
   it('a domain request while the database is down is an opaque 5xx: no SQL, host or credential in the body', async () => {
-    const t: TestApp = await createTestApp({ databaseUrl: 'postgres://nobody:nothing@127.0.0.1:1/none' });
+    const t: TestApp = await createTestApp({ databaseUrl: 'postgres://nobody:nothing@127.0.0.1:1/none', ownership: 'inactive' });
     try {
       const res = await t.http().get('/organization/companies').set('Authorization', `Bearer ${t.callers['billing-service']}`);
       expect(res.status).toBeGreaterThanOrEqual(500);
@@ -57,7 +57,7 @@ describeWithEnv('health, readiness and shutdown (real PostgreSQL)', ['TEST_DATAB
     try {
       await t.http().get('/ready').expect(200);
       // Break the database only, then prove the failing set is exactly what this service depends on.
-      const broken: TestApp = await createTestApp({ databaseUrl: 'postgres://nobody:nothing@127.0.0.1:1/none' });
+      const broken: TestApp = await createTestApp({ databaseUrl: 'postgres://nobody:nothing@127.0.0.1:1/none', ownership: 'inactive' });
       try {
         const r = await broken.http().get('/ready').expect(503);
         expect(r.body.failed.sort()).toEqual(['database', 'migrations']);

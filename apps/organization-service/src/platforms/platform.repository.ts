@@ -6,6 +6,7 @@ import type { ListQuery, Page } from '../common/pagination.js';
 import { notFound, organizationError } from '../domain/errors.js';
 import type { CreatePlatformInput, UpdatePlatformInput } from '../domain/platform-input.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
+import { OwnershipService } from '../ownership/ownership.service.js';
 
 export interface PlatformRow {
   id: string;
@@ -23,12 +24,13 @@ export interface PlatformRow {
  */
 @Injectable()
 export class PlatformRepository {
-  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService) {}
+  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
 
   async create(caller: string, key: string, input: CreatePlatformInput): Promise<{ platform: PlatformRow; replayed: boolean }> {
     const id = randomUUID();
     try {
       return await this.db.tx(async (q) => {
+        await this.ownership.assertWritable(q);
         const reserved = await this.idempotency.reserve(q, {
           caller, operation: 'platform.create', key, requestHash: IdempotencyService.requestHash('platform.create', input), resourceId: id,
         });
@@ -52,12 +54,13 @@ export class PlatformRepository {
     return rows[0];
   }
 
-  list(query: ListQuery): Promise<Page<PlatformRow & { cursorAt: string }>> {
-    return listPage<PlatformRow>(this.db, 'platform', query, { companyId: 'companyId' });
+  list(query: ListQuery, allowedPlatforms?: ReadonlySet<string> | null): Promise<Page<PlatformRow & { cursorAt: string }>> {
+    return listPage<PlatformRow>(this.db, 'platform', query, { companyId: 'companyId' }, allowedPlatforms === undefined ? undefined : { column: 'id', values: allowedPlatforms === null ? null : [...allowedPlatforms] });
   }
 
   async update(id: string, input: UpdatePlatformInput): Promise<PlatformRow> {
     return this.db.tx(async (q) => {
+      await this.ownership.assertWritable(q);
       const { rows } = await q.query<PlatformRow>('SELECT * FROM platform WHERE id = $1 FOR UPDATE', [id]);
       const current = rows[0];
       if (!current) throw notFound();

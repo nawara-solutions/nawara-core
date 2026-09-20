@@ -35,18 +35,41 @@ describe('service boundary (static)', () => {
     for (const f of shipped) expect(identifiers(f), f).not.toMatch(/\bgetIdentity\b|\bhasPlatformAccess\b|jsonwebtoken|\bJwtService\b|\bmemberships?\b/i);
   });
 
-  it('contains no migration, import or cutover machinery (ADR-0039 Phases A-E belong to a later stage)', () => {
-    for (const f of shipped) expect(code(f), f).not.toMatch(/\b(bootstrap-?import|importFromAuth|cutover|write-?freeze|authority[_-]?record|reconcil)/i);
+  // Stage 10.1 (ADR-0040, accepted) adds the ownership-transition machinery. It is allowed ONLY in the ownership module and its CLI;
+  // everywhere else (controllers, repositories, the API surface) the original prohibition of Stage 9 still holds.
+  const isOwnership = (f: string) => f.includes('/ownership/') || f.endsWith('/cli/ownership.ts');
+
+  it('contains no migration, import or cutover machinery outside the ownership module and its CLI', () => {
+    for (const f of shipped.filter((x) => !isOwnership(x))) expect(code(f), f).not.toMatch(/\b(bootstrap-?import|importFromAuth|cutover|write-?freeze|authority[_-]?record|reconcil)/i);
+  });
+
+  it('the ownership module transfers nothing by pg_dump, fdw or dblink, deletes nothing, and never UPDATEs a hierarchy row', () => {
+    const own = shipped.filter(isOwnership);
+    expect(own.length).toBeGreaterThan(3);
+    for (const f of own) expect(code(f), f).not.toMatch(/pg_dump|postgres_fdw|\bdblink\b|\bDELETE\s+FROM\b|\bTRUNCATE\b|\bUPDATE\s+(company|platform|organization)\b/i);
+  });
+
+  it('no runtime code path can change the ownership state: only the admin operations and the CLI write the ownership tables', () => {
+    for (const f of shipped.filter((x) => !x.endsWith('/ownership/ownership-admin.ts') && !x.endsWith('/cli/ownership.ts'))) {
+      expect(code(f), f).not.toMatch(/\bUPDATE\s+ownership_state\b|\bINSERT\s+INTO\s+ownership_(event|import_run)\b|\bOwnershipAdmin\b/i);
+    }
   });
 
   it('introduces no invented hierarchy entity', () => {
     for (const f of shipped) expect(code(f), f).not.toMatch(/\b(Tenant|Workspace|BusinessUnit|Department)\b/);
   });
 
-  it('every controller is guarded by the service-token guard (deny by default)', () => {
+  it('every controller is guarded by the token guard AND the policy guard (deny by default), and every route declares its capability', () => {
     const controllers = shipped.filter((f) => f.endsWith('.controller.ts'));
-    expect(controllers).toHaveLength(3);
-    for (const f of controllers) expect(code(f), f).toMatch(/@UseGuards\(ServiceTokenGuard\)\s*\n@Controller\(/);
+    expect(controllers).toHaveLength(4);
+    for (const f of controllers) {
+      const c = code(f);
+      expect(c, f).toMatch(/@UseGuards\(ServiceTokenGuard, ServicePolicyGuard\)\s*\n@Controller\(/);
+      const routes = (c.match(/^\s*@(Get|Post|Patch|Put|Delete)\(/gm) ?? []).length;
+      const declared = (c.match(/^\s*@RequireCapability\(/gm) ?? []).length;
+      expect(routes, f).toBeGreaterThan(0);
+      expect(declared, `${f}: every route must declare the ONE capability it needs`).toBe(routes);
+    }
   });
 
   it('no SQL statement in the shipped code names another service\'s tables, and no migration references another database', () => {

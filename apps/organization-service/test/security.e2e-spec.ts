@@ -14,6 +14,9 @@ const EXPECTED_ROUTES = [
   'GET /organization/companies', 'POST /organization/companies', 'GET /organization/companies/{id}', 'PATCH /organization/companies/{id}',
   'GET /organization/platforms', 'POST /organization/platforms', 'GET /organization/platforms/{id}', 'PATCH /organization/platforms/{id}',
   'GET /organization/organizations', 'POST /organization/organizations', 'GET /organization/organizations/{id}', 'PATCH /organization/organizations/{id}',
+  // ADR-0042 decision 5: the reference read (ids and parents only). It is the ONLY route added since Stage 9: still no delete, no membership,
+  // no import or ownership endpoint (those are CLI operations).
+  'GET /organization/reference/organizations/{id}',
 ].sort();
 
 describeWithEnv('security: authentication, authorization boundary and tampering (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
@@ -41,7 +44,7 @@ describeWithEnv('security: authentication, authorization boundary and tampering 
     return method === 'GET' ? req : req.set('Idempotency-Key', 'security-probe-key').send(body);
   };
 
-  it('exposes EXACTLY the twelve intended routes plus the two kit probes: no delete, no membership, no import, no ownership-migration endpoint', () => {
+  it('exposes EXACTLY the twelve intended routes plus the reference read and the two kit probes: no delete, no membership, no import, no ownership-migration endpoint', () => {
     expect(routes().map((r) => `${r.method} ${r.path}`).sort()).toEqual(EXPECTED_ROUTES);
     expect(allRoutes().filter((r) => !r.path.startsWith('/organization/')).map((r) => `${r.method} ${r.path}`).sort()).toEqual(['GET /health', 'GET /ready']);
   });

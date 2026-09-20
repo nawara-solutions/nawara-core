@@ -124,9 +124,9 @@ WITH gen AS (INSERT INTO company (name) VALUES ('Generated') RETURNING id)
 SELECT pg_temp.assert_eq('OM-04', 'an omitted id is still generated', (SELECT (id IS NOT NULL)::text FROM gen), 'true');
 
 -- ---- OS-01 .. : the schema holds nothing that belongs elsewhere ------------------------------------------------------------------------
-SELECT pg_temp.assert_eq   ('OS-01', 'exactly company, platform, organization and idempotency_key are this service''s own tables (the rest belong to the kit)',
+SELECT pg_temp.assert_eq   ('OS-01', 'exactly the hierarchy, its idempotency keys and the ownership-transition tables are this service''s own tables (the rest belong to the kit)',
   (SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema = 'public' AND table_name NOT IN ('inbox', 'outbox', 'kit_rate_limit', 'schema_migrations')),
-  'company,idempotency_key,organization,platform');
+  'company,hierarchy_id_ledger,idempotency_key,organization,ownership_event,ownership_import_run,ownership_state,platform');
 SELECT pg_temp.assert_eq   ('OS-02', 'every foreign key stays inside this database: only organization -> platform and platform -> company',
   (SELECT string_agg(conrelid::regclass::text||'->'||confrelid::regclass::text, ',' ORDER BY conrelid::regclass::text) FROM pg_constraint WHERE contype = 'f'),
   'organization->platform,platform->company');

@@ -231,13 +231,13 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | O6 | AI providers | not started |
 | O7 | Notification providers (SMS: Twilio is proposed in ADR-0019) | not started |
 | O8 | Auth ⇄ payment cycle (and its repointing to billing) | documented risk |
-| O9 | How Auth references Company, Platform and Organization once organization-service exists (and who validates organization → platform → company for non-user requests) | **decide when organization-service is built** |
+| O9 | **Decided, 2026-09-20:** Auth keeps a validated non-authoritative reference cache and organization-service is the validator for service requests ([ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1). Original text: How Auth references Company, Platform and Organization once organization-service exists (and who validates organization → platform → company for non-user requests) | **decided** (ADR-0040 Accepted; ADR-0042 Amendment 1); lifecycle semantics (BD-5) remain open |
 | O10 | Reliable event delivery (outbox) and asymmetric token signing | out of scope |
 
 ## 12. Risks
 
 - **Split hierarchy ownership.** The hierarchy tables live in Auth while organization-service is only the intended owner; the
-  reference mechanism is undecided (O9) and must not be improvised.
+  reference mechanism is **decided** (O9: a validated non-authoritative reference cache in Auth, [ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1; organization-service as the validator of service requests, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1); lifecycle semantics stay undecided and must not be improvised, and production readiness is gated by ADR-0040 decision 7.
 - **Every service asks Auth live.** Auth becomes a hot dependency for every request; a slow Auth slows everything.
   Mitigation later (caching with a short TTL) needs an explicit revocation decision.
 - **No CI runs any suite,** for any service. This is the largest gap before production use.

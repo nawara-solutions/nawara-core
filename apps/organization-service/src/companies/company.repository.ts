@@ -6,6 +6,7 @@ import type { ListQuery, Page } from '../common/pagination.js';
 import type { CreateCompanyInput, UpdateCompanyInput } from '../domain/company-input.js';
 import { notFound } from '../domain/errors.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
+import { OwnershipService } from '../ownership/ownership.service.js';
 
 export interface CompanyRow {
   id: string;
@@ -20,12 +21,13 @@ export interface CompanyRow {
  */
 @Injectable()
 export class CompanyRepository {
-  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService) {}
+  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
 
   /** The id is generated here, by this service. The database would also accept an explicit one (see migration 0001), but no API does. */
-  async create(caller: string, key: string, input: CreateCompanyInput): Promise<{ company: CompanyRow; replayed: boolean }> {
+  async create(caller: string, key: string, input: CreateCompanyInput, opts: { bootstrap?: boolean } = {}): Promise<{ company: CompanyRow; replayed: boolean }> {
     const id = randomUUID();
     return this.db.tx(async (q) => {
+      await this.ownership.assertWritable(q, opts.bootstrap ? 'bootstrap' : 'normal');
       const reserved = await this.idempotency.reserve(q, {
         caller, operation: 'company.create', key, requestHash: IdempotencyService.requestHash('company.create', input), resourceId: id,
       });
@@ -52,6 +54,7 @@ export class CompanyRepository {
   /** Only the name can change. A no-op update writes nothing (and leaves `updatedAt` alone). */
   async update(id: string, input: UpdateCompanyInput): Promise<CompanyRow> {
     return this.db.tx(async (q) => {
+      await this.ownership.assertWritable(q);
       const { rows } = await q.query<CompanyRow>('SELECT * FROM company WHERE id = $1 FOR UPDATE', [id]);
       const current = rows[0];
       if (!current) throw notFound();

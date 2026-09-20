@@ -5,6 +5,8 @@
 - **Deciders:** Anwar (project owner)
 
 > **Forward note (2026-09-19):** the state machine gains `revoked` and the audience label moves from `user.role` to `organization_membership.audience`; existing users can join with `POST /auth/onboarding/join`. See [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md).
+>
+> **Forward note (2026-09-20):** "Operators and org admins have no step-up mechanism" remains true of the membership operations in this ADR. [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) Amendment 1 (DEC-1) extends Auth's step-up mechanism to **operators** for sensitive Organization Service operations (single-use, session-bound, purpose-bound and short-lived). Organization administrators still have no step-up mechanism, and no operation in this ADR changes.
 
 
 > **Extends** [ADR-0020](./0020-organization-entity-and-platform-scoped-management.md),

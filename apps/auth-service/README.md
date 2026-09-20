@@ -60,6 +60,23 @@ BOOTSTRAP_COMPANY_NAME=... BOOTSTRAP_OWNER_EMAIL=... BOOTSTRAP_OWNER_PASSWORD=..
 npm run cli -w auth-service -- reseal-totp-keys     # remove the old key only when "still under an old key: 0"
 ```
 
+### Hierarchy authority (ADR-0040): the ownership transition from auth-service's side
+
+Migration `0008` adds `hierarchy_authority` and write guards on `company`, `platform` and `organization`. It is **inert** (mode `local`).
+
+```bash
+npm run cli -w auth-service -- hierarchy-status | hierarchy-verify               # content digest, comparable with organization-service
+npm run cli -w auth-service -- hierarchy-export --out snapshot.json --actor NAME # deterministic, checksummed; preparation runs are repeatable
+npm run cli -w auth-service -- hierarchy-freeze --actor NAME                     # lock, then marker: NO hierarchy write at all
+npm run cli -w auth-service -- hierarchy-export --final --out final.json --actor NAME   # only under the freeze
+npm run cli -w auth-service -- hierarchy-unfreeze --actor NAME                   # only before the switch
+npm run cli -w auth-service -- hierarchy-retire --actor NAME --evidence "..."    # the mirror, after organization-service ACTIVATE AUTHORITY
+```
+
+After `hierarchy-retire` (`org_authoritative`) auth-service is a non-authoritative reference cache: no free write, no delete, no reparenting;
+only the reference-cache protocol may place a validated row. **There is no way back.** In this mode `bootstrap-owner` never creates a
+Company: it needs `BOOTSTRAP_COMPANY_ID` and an existing validated reference row. The reference-cache `ensure` itself is **not implemented yet**.
+
 The bootstrap password is a **one-time credential**: deliver it out of band; the owner's first sign-in
 only allows enrolling a second factor.
 

@@ -8,6 +8,10 @@ import { normaliseCreateOrganization, normaliseUpdateOrganization } from '../dom
 import { requireIdempotencyKey } from '../idempotency/idempotency.service.js';
 import { CreateOrganizationDto, OrganizationDto, OrganizationPageDto, UpdateOrganizationDto } from './organization.dto.js';
 import { OrganizationRepository } from './organization.repository.js';
+import { ServicePolicyGuard } from '../authorization/service-policy.guard.js';
+import { RequireCapability, Scope, type ServiceScope } from '../authorization/capability.js';
+import { inScope } from '../authorization/service-policy.js';
+import { notFound } from '../domain/errors.js';
 
 /**
  * Organizations: each belongs to exactly one platform (`platformId`, immutable) and reaches its company only through it.
@@ -16,13 +20,14 @@ import { OrganizationRepository } from './organization.repository.js';
  */
 @ApiTags('organizations')
 @ApiBearerAuth()
-@UseGuards(ServiceTokenGuard)
+@UseGuards(ServiceTokenGuard, ServicePolicyGuard)
 @Controller('organization/organizations')
 export class OrganizationsController {
   private readonly log = new Logger('Organizations');
   constructor(private readonly organizations: OrganizationRepository) {}
 
   @Post()
+  @RequireCapability('hierarchy.write')
   @ApiOperation({ summary: 'Create an organization under an existing platform. Requires Idempotency-Key.' })
   @ApiHeader({ name: 'Idempotency-Key', required: true, description: '8 to 128 characters of A-Z a-z 0-9 . _ : -' })
   @ApiBody({ type: CreateOrganizationDto })
@@ -42,6 +47,7 @@ export class OrganizationsController {
   }
 
   @Get()
+  @RequireCapability('hierarchy.read')
   @ApiOperation({ summary: 'List organizations, newest first, optionally of one platform.' })
   @ApiQuery({ name: 'platformId', required: false, description: 'Only the organizations of this platform.' })
   @ApiQuery({ name: 'limit', required: false, description: 'Integer 1 to 100 (default 20).' })
@@ -49,20 +55,24 @@ export class OrganizationsController {
   @ApiResponse({ status: 200, type: OrganizationPageDto })
   @ApiResponse({ status: 400, description: 'invalid_query' })
   @ApiResponse({ status: 401 })
-  async list(@Query() query: Record<string, unknown>) {
-    return representPage(await this.organizations.list(parseListQuery(query, ['platformId'])), representOrganization);
+  async list(@Query() query: Record<string, unknown>, @Scope() scope: ServiceScope) {
+    return representPage(await this.organizations.list(parseListQuery(query, ['platformId']), scope.allowedPlatforms), representOrganization);
   }
 
   @Get(':id')
+  @RequireCapability('hierarchy.read')
   @ApiOperation({ summary: 'Get an organization.' })
   @ApiResponse({ status: 200, type: OrganizationDto })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 404 })
-  async get(@Param('id', new ParseUUIDPipe()) id: string) {
-    return representOrganization(await this.organizations.get(id));
+  async get(@Param('id', new ParseUUIDPipe()) id: string, @Scope() scope: ServiceScope) {
+    const organization = await this.organizations.get(id);
+    if (!inScope(scope.allowedPlatforms, organization.platformId)) throw notFound(); // organization -> platform, evaluated against the caller's explicit scope
+    return representOrganization(organization);
   }
 
   @Patch(':id')
+  @RequireCapability('hierarchy.write')
   @ApiOperation({ summary: 'Update an organization\'s name and descriptive fields. `platformId` is immutable and refused; null clears an optional field.' })
   @ApiBody({ type: UpdateOrganizationDto })
   @ApiResponse({ status: 200, type: OrganizationDto })

@@ -4,6 +4,8 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Extended by [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) Amendment 1 (2026-09-20):** the step-up mechanism is extended to operators for sensitive Organization Service operations. Every owner purpose in this ADR is unchanged and remains valid for owner operations. The allow-list gains **one new owner purpose**, for creating an Organization (ADR-0042 Amendment 1, A.2); nothing here is superseded.
+
 > **Amended by [ADR-0027](./0027-service-layer-security-model.md)** on two points: (1) **recovery is no longer immediate** — `start` (password + key) opens a cool-down request that changes nothing; `complete` (recovery token + key, after the cool-down) revokes factors/sessions, spends the key and returns only an enrollment token; (2) **password-only enrollment is limited to an owner who has never had a factor** — afterwards a password yields `recovery_required`. The rest of this ADR stands.
 
 > **Supersedes the login mechanism of [ADR-0010](./0010-owner-secret-key-login-with-device-alerting.md)**

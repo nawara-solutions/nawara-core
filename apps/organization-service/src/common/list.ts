@@ -10,12 +10,18 @@ export async function listPage<R extends { id: string }>(
   table: 'company' | 'platform' | 'organization',
   query: ListQuery,
   filterColumns: Record<string, string> = {},
+  /** A caller's Platform scope (ADR-0042): only rows whose `column` is in `values`. `null` = unrestricted (a test fixture); an empty list yields nothing. */
+  scope?: { column: string; values: readonly string[] | null },
 ): Promise<Page<R & { cursorAt: string }>> {
   const where: string[] = [];
   const params: unknown[] = [];
   for (const [name, value] of Object.entries(query.filters)) {
     params.push(value);
     where.push(`"${filterColumns[name]}" = $${params.length}`);
+  }
+  if (scope && scope.values !== null) {
+    params.push([...scope.values]);
+    where.push(`"${scope.column}" = ANY($${params.length}::uuid[])`);
   }
   if (query.cursor) {
     params.push(query.cursor.createdAt, query.cursor.id);

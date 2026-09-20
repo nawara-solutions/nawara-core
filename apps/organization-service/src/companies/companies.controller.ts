@@ -8,6 +8,9 @@ import { normaliseCreateCompany, normaliseUpdateCompany } from '../domain/compan
 import { requireIdempotencyKey } from '../idempotency/idempotency.service.js';
 import { CompanyPageDto, CompanyDto, CreateCompanyDto, UpdateCompanyDto } from './company.dto.js';
 import { CompanyRepository } from './company.repository.js';
+import { ServicePolicyGuard } from '../authorization/service-policy.guard.js';
+import { RequireCapability } from '../authorization/capability.js';
+import { COMPANY_UPDATE } from '../authorization/service-policy.js';
 
 /**
  * Companies. Service-token authentication ONLY, deny by default (ADR-0033): a user's bearer is never accepted here and never
@@ -16,13 +19,14 @@ import { CompanyRepository } from './company.repository.js';
  */
 @ApiTags('companies')
 @ApiBearerAuth()
-@UseGuards(ServiceTokenGuard)
+@UseGuards(ServiceTokenGuard, ServicePolicyGuard)
 @Controller('organization/companies')
 export class CompaniesController {
   private readonly log = new Logger('Companies');
   constructor(private readonly companies: CompanyRepository) {}
 
   @Post()
+  @RequireCapability('hierarchy.provision')
   @ApiOperation({ summary: 'Create a company. Requires Idempotency-Key; an identical replay returns the same company.' })
   @ApiHeader({ name: 'Idempotency-Key', required: true, description: '8 to 128 characters of A-Z a-z 0-9 . _ : -' })
   @ApiBody({ type: CreateCompanyDto })
@@ -33,7 +37,7 @@ export class CompaniesController {
   @ApiResponse({ status: 422, description: 'idempotency_key_reused: the key was used with a different request' })
   async create(@CallerService() caller: string, @Body() body: unknown, @Headers('idempotency-key') idempotencyKey: string | undefined, @Res({ passthrough: true }) res: Response) {
     const key = requireIdempotencyKey(idempotencyKey);
-    const { company, replayed } = await this.companies.create(caller, key, normaliseCreateCompany(body));
+    const { company, replayed } = await this.companies.create(caller, key, normaliseCreateCompany(body), { bootstrap: true });
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     else this.log.log(`company_created id=${company.id} caller=${caller}`);
@@ -41,6 +45,7 @@ export class CompaniesController {
   }
 
   @Get()
+  @RequireCapability('hierarchy.read')
   @ApiOperation({ summary: 'List companies, newest first.' })
   @ApiQuery({ name: 'limit', required: false, description: 'Integer 1 to 100 (default 20).' })
   @ApiQuery({ name: 'cursor', required: false, description: 'The nextCursor of the previous page.' })
@@ -52,6 +57,7 @@ export class CompaniesController {
   }
 
   @Get(':id')
+  @RequireCapability('hierarchy.read')
   @ApiOperation({ summary: 'Get a company.' })
   @ApiResponse({ status: 200, type: CompanyDto })
   @ApiResponse({ status: 401 })
@@ -61,6 +67,7 @@ export class CompaniesController {
   }
 
   @Patch(':id')
+  @RequireCapability(COMPANY_UPDATE)
   @ApiOperation({ summary: 'Update a company\'s name. Nothing else is client-writable.' })
   @ApiBody({ type: UpdateCompanyDto })
   @ApiResponse({ status: 200, type: CompanyDto })

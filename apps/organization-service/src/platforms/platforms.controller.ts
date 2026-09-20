@@ -8,17 +8,22 @@ import { normaliseCreatePlatform, normaliseUpdatePlatform } from '../domain/plat
 import { requireIdempotencyKey } from '../idempotency/idempotency.service.js';
 import { CreatePlatformDto, PlatformDto, PlatformPageDto, UpdatePlatformDto } from './platform.dto.js';
 import { PlatformRepository } from './platform.repository.js';
+import { ServicePolicyGuard } from '../authorization/service-policy.guard.js';
+import { RequireCapability, Scope, type ServiceScope } from '../authorization/capability.js';
+import { inScope } from '../authorization/service-policy.js';
+import { notFound } from '../domain/errors.js';
 
 /** Platforms: each belongs to exactly one company (`companyId`, immutable). Service-token authentication only, no DELETE route. */
 @ApiTags('platforms')
 @ApiBearerAuth()
-@UseGuards(ServiceTokenGuard)
+@UseGuards(ServiceTokenGuard, ServicePolicyGuard)
 @Controller('organization/platforms')
 export class PlatformsController {
   private readonly log = new Logger('Platforms');
   constructor(private readonly platforms: PlatformRepository) {}
 
   @Post()
+  @RequireCapability('hierarchy.write')
   @ApiOperation({ summary: 'Create a platform under an existing company. Requires Idempotency-Key.' })
   @ApiHeader({ name: 'Idempotency-Key', required: true, description: '8 to 128 characters of A-Z a-z 0-9 . _ : -' })
   @ApiBody({ type: CreatePlatformDto })
@@ -38,6 +43,7 @@ export class PlatformsController {
   }
 
   @Get()
+  @RequireCapability('hierarchy.read')
   @ApiOperation({ summary: 'List platforms, newest first, optionally of one company.' })
   @ApiQuery({ name: 'companyId', required: false, description: 'Only the platforms of this company.' })
   @ApiQuery({ name: 'limit', required: false, description: 'Integer 1 to 100 (default 20).' })
@@ -45,20 +51,25 @@ export class PlatformsController {
   @ApiResponse({ status: 200, type: PlatformPageDto })
   @ApiResponse({ status: 400, description: 'invalid_query' })
   @ApiResponse({ status: 401 })
-  async list(@Query() query: Record<string, unknown>) {
-    return representPage(await this.platforms.list(parseListQuery(query, ['companyId'])), representPlatform);
+  async list(@Query() query: Record<string, unknown>, @Scope() scope: ServiceScope) {
+    // Only the platforms inside the caller's explicit Platform scope; a client never widens it.
+    return representPage(await this.platforms.list(parseListQuery(query, ['companyId']), scope.allowedPlatforms), representPlatform);
   }
 
   @Get(':id')
+  @RequireCapability('hierarchy.read')
   @ApiOperation({ summary: 'Get a platform.' })
   @ApiResponse({ status: 200, type: PlatformDto })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 404 })
-  async get(@Param('id', new ParseUUIDPipe()) id: string) {
-    return representPlatform(await this.platforms.get(id));
+  async get(@Param('id', new ParseUUIDPipe()) id: string, @Scope() scope: ServiceScope) {
+    const platform = await this.platforms.get(id);
+    if (!inScope(scope.allowedPlatforms, platform.id)) throw notFound(); // collapsed: outside the scope is indistinguishable from absent
+    return representPlatform(platform);
   }
 
   @Patch(':id')
+  @RequireCapability('hierarchy.write')
   @ApiOperation({ summary: 'Update a platform\'s name. `companyId` is immutable and refused.' })
   @ApiBody({ type: UpdatePlatformDto })
   @ApiResponse({ status: 200, type: PlatformDto })
