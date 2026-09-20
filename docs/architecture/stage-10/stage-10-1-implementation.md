@@ -67,20 +67,38 @@ activation. See the READMEs of the two services and ADR-0040 Amendment 2, A2.5 a
 
 ## 4. Not implemented (follow-up required)
 
-1. **Human administration in Organization Service:** the Auth read endpoint for the caller's own grant facts, the Organization Service
-   evaluator (owner, operator, organization administrator) and the human routes, and the sensitive-operation flags.
-2. **Operator step-up (DEC-1):** the operator-sensitive purposes, the session binding, the short window, the authenticated request route and the
-   verify-and-consume endpoint in Auth. The operator working code is **not** reused as it is.
-3. **Auth's reference cache:** `ensure(id)` (Company, Platform, Organization; parents first; validated; fail closed), Auth's outbound client
-   to Organization Service, its first-touch flows in the six administrative paths, and the cache-write guard beyond the database guard already
-   present. Until then a fresh environment cannot complete its Auth-side bootstrap.
-4. **The durable actor record** for Organization Service writers (ADR-0042 decision 9): denials are logged only.
+> **Update 2026-09-20 (Stage 10 completion pass, owner-approved architecture, nothing activated):** items 1 (owner path) and 4 below are now
+> implemented; item 1's operator step-up half, and items 2, 3, 5, 6 and 7, are **not**. The section is kept as the record of what was open;
+> the status of each item is stated in its own line. Production authority is **not** activated anywhere and no cutover occurred.
+
+1. **Human administration in Organization Service.** **Implemented, owner path only (2026-09-20):**
+   - Auth: `GET /auth/grants` (the caller's own server-derived facts: Company ownership for an owner, active Platform assignments for an
+     operator, active organization-administrator memberships for a member; bearer-authenticated, no service-token callee side, not a general
+     profile API) and `POST /auth/step-up/verify` (verify-and-consume of an existing step-up proof, for the caller's session and the named
+     purpose), with the new owner step-up purpose `organization.create` (`platform.create` already existed).
+   - Organization Service: the `admin/` module: `HumanAuthGuard` (forwards the caller's OWN bearer to Auth; never a service credential), a pure
+     deterministic authority evaluator (owner / operator / organization administrator, `admin/authorization-evaluator.ts`), and the routes
+     `POST /organization/admin/platforms` and `POST /organization/admin/organizations` (sensitive: step-up required, verified through Auth),
+     `PATCH /organization/admin/platforms/:id` (owner; ordinary, OPEN-3 default) and `PATCH /organization/admin/organizations/:id` (owner,
+     assigned operator, organization administrator; ordinary). Company creation stays the provisioning identity's; Company PATCH stays denied
+     (OPEN-4). The static boundary test now carves out `admin/` exactly as it does `ownership/`; nothing outside `admin/` may call Auth or read
+     a user token, and the admin controller may never use a service-token guard.
+   - **Operators cannot complete a sensitive operation yet**: Auth has no operator step-up (item 2), so `POST /auth/step-up/verify` always
+     denies an operator and the create routes fail closed for them. Nothing in Organization Service changes when item 2 is built.
+2. **Operator step-up (DEC-1). NOT IMPLEMENTED.** The operator-sensitive purposes, the session binding, the short window, the authenticated
+   request route (a fresh out-of-band code requested inside the live session). The operator working code is **not** reused as it is.
+3. **Auth's reference cache. NOT IMPLEMENTED:** `ensure(id)` (Company, Platform, Organization; parents first; validated; fail closed), Auth's
+   outbound client to Organization Service, its first-touch flows in the six administrative paths, and the cache-write guard beyond the
+   database guard already present. Until then a fresh environment cannot complete its Auth-side bootstrap.
+4. **The durable actor record. Implemented (2026-09-20):** `admin_actor_event` (migration 0005; append-only by trigger and by privilege; no foreign
+   key) written by the admin module for every mutation and every denial (actor, kind, operation, target, correlation id, outcome, reason class).
+   Denials of the service-token routes are still logged only (those routes have no human actor and, for writes, no assignable capability).
 5. **Production readiness (BD-7, gates G1 to G7):** the production topology and its approval; a deployment workflow and gated migrations for
    Organization Service; production database roles for both services (**Auth's production runtime is still a superuser**); the backup job and a
    restore verified on the real volume; monitoring and alerts; the rehearsal plan and one successful production-like rehearsal with recorded
    evidence; the approver. **None of it exists.**
-6. **A cross-service integration test** (Auth exports, Organization Service imports) beyond the shared golden fixture and its repository check.
-7. Billing and Payment reference clients (the callers of the reference read) are not built; they stay off until the cutover verification.
+6. **A cross-service integration test** (Auth exports, Organization Service imports) beyond the shared golden fixture and its repository check. **NOT IMPLEMENTED.**
+7. Billing and Payment reference clients (the callers of the reference read) are not built; they stay off until the cutover verification. **NOT IMPLEMENTED.**
 
 ## 5. Decisions taken as implementation choices (for review)
 

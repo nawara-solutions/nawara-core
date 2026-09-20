@@ -7,6 +7,7 @@ import { AuditService } from './audit/audit.service.js';
 import { AuthController } from './auth/auth.controller.js';
 import { AuthGuard } from './auth/auth.guard.js';
 import { AuthService } from './auth/auth.service.js';
+import { GrantsService } from './auth/grants.service.js';
 import { SessionService } from './auth/session.service.js';
 import { CLOCK, EVENT_BUS, NoopEventBus, SystemClock } from './common/ports.js';
 import { APP_CONFIG, loadConfig, type AppConfig } from './config/app-config.js';
@@ -73,7 +74,7 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,
     OperatorAvailabilityService, OperatorCodeService, OperatorAdminService,
-    PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, AuthGuard,
+    PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, GrantsService, AuthGuard,
   ],
 })
 export class AppModule {}

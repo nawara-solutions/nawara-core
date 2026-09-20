@@ -18,3 +18,10 @@ export class LoginDto {
 export class RefreshDto {
   @ApiProperty() @IsString() @Length(20, 200) refreshToken!: string;
 }
+
+export class VerifyStepUpDto {
+  @ApiProperty({ description: 'The sensitive-operation purpose this step-up was issued for (e.g. "organization.create").' })
+  @IsString() @Length(1, 64) purpose!: string;
+  @ApiProperty({ description: 'The stepUpToken returned by POST /auth/admin/step-up.' })
+  @IsString() @Length(20, 200) stepUpToken!: string;
+}

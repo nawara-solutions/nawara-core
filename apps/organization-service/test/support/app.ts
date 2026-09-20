@@ -4,6 +4,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import pg from 'pg';
 import request from 'supertest';
 import { JsonLogger, ReadinessRegistry, configureApp, generateServiceToken, kitMigrationsDir, type ServiceTokenEntry } from '@nawara/service-kit';
+import type { AuthGrantsClient } from '../../src/admin/auth-grants-client.js';
 import { AppModule, organizationMigrationsDir } from '../../src/app.module.js';
 import { ServicePolicy } from '../../src/authorization/service-policy.js';
 import { loadOrganizationConfig, type OrganizationConfig } from '../../src/config/organization-config.js';
@@ -74,6 +75,8 @@ export async function createTestApp(opts: {
   callers?: string[];
   env?: NodeJS.ProcessEnv;
   migrationsDirs?: string[];
+  /** TEST FIXTURE ONLY: replaces the real HTTP call to Auth's grant-facts/step-up-verify endpoints (admin/ module). */
+  authGrantsClient?: AuthGrantsClient;
 }): Promise<TestApp> {
   if ((opts.ownership ?? 'authoritative') === 'authoritative') await activateOwnership(opts.databaseUrl);
   const logs: Record<string, unknown>[] = [];
@@ -84,11 +87,12 @@ export async function createTestApp(opts: {
     NODE_ENV: 'test',
     DATABASE_URL: opts.databaseUrl,
     SERVICE_TOKENS: entries.map((t) => `${t.caller}:${t.digest}`).join(','),
+    AUTH_SERVICE_URL: 'http://127.0.0.1:1', // unreachable by construction: only the admin-module suites exercise this, and they override it
     ...opts.env,
   });
   const logger = new JsonLogger(config.serviceName, 'debug', (l) => logs.push(JSON.parse(l)));
   const moduleRef = await Test.createTestingModule({
-    imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs ?? [kitMigrationsDir, organizationMigrationsDir], servicePolicy })],
+    imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs ?? [kitMigrationsDir, organizationMigrationsDir], servicePolicy, authGrantsClient: opts.authGrantsClient })],
   }).compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false, logger: false });
   configureApp(app, config, logger);

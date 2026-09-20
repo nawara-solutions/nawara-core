@@ -77,11 +77,15 @@ deny-by-default policy (`SERVICE_POLICY`), enforced by `ServicePolicyGuard` on e
   to combine provisioning with anything else, or tries to assign `hierarchy.write`. The unrestricted policy used by the older test suites is a
   fixture that production refuses.
 * Rate limiting (where present) is abuse protection and is **not** authorization.
-* A user's bearer is never accepted, and there is no Auth client and no outbound call: login, refresh and `/auth/me` cannot depend on this
-  service. **Human administration (Auth-derived facts, operator step-up) is not implemented yet**: see
-  [`docs/architecture/stage-10/stage-10-1-implementation.md`](../../docs/architecture/stage-10/stage-10-1-implementation.md).
-* Denials are logged as `service_authorization_denied caller=… capability=… reason=…` (never a secret). The durable actor record required
-  before production writers (ADR-0042 decision 9) is not built.
+* A user's bearer is never accepted as a **service** credential, and every service-token route makes no outbound call: login, refresh and
+  `/auth/me` cannot depend on this service. The one bounded exception is the **human-admin module** (`src/admin/`, ADR-0042 decision 6):
+  `POST /organization/admin/platforms`, `PATCH /organization/admin/platforms/:id`, `POST /organization/admin/organizations`,
+  `PATCH /organization/admin/organizations/:id`. It forwards the caller's OWN bearer to Auth (`GET /auth/grants`, and `POST /auth/step-up/verify`
+  for the two sensitive creates), evaluates authority server-side against this service's own hierarchy (owner: same company; operator: assigned
+  platform; organization administrator: that organization, updates only) and records every mutation and denial in `admin_actor_event`. It needs
+  `AUTH_SERVICE_URL`. The client supplies no role, ownership, assignment or scope. Operator step-up is **not built**, so operators are denied
+  the two sensitive creates (fail closed). `boundary.spec.ts` allows Auth access only under `admin/`.
+* Denials of the service-token routes are logged as `service_authorization_denied caller=… capability=… reason=…` (never a secret).
 
 ## Database
 
@@ -176,7 +180,7 @@ representability, and the runtime-role privileges.
 
 ## Not implemented, or not decided (do not infer)
 
-Human administration (Auth-derived facts, the operator step-up contract), Auth's reference-cache `ensure` and its first-touch flows, the
-durable actor record, production deployment, database roles and backups, monitoring and the production rehearsal (ADR-0040 gates G1 to G7:
+The operator step-up contract (Auth side), Auth's reference-cache `ensure` and its first-touch flows, the Billing and Payment reference
+clients, production deployment, database roles and backups, monitoring and the production rehearsal (ADR-0040 gates G1 to G7:
 **none is met**), lifecycle semantics beyond I1 and I2, service events, organization-payer authority (B-026/O-18) and platform currency
 administration (B-036). See `docs/architecture/stage-10/stage-10-1-implementation.md`.

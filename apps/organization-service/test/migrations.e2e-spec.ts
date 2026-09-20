@@ -8,9 +8,9 @@ import { describeWithEnv } from './support/env.js';
 import { MISSING_ID, client, sql } from './support/fixtures.js';
 
 const KIT_MIGRATIONS = ['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql', 'kit_0003_generic_triggers.sql'];
-const OWN_MIGRATIONS = ['0001_company_platform_organization.sql', '0002_idempotency_key.sql', '0003_platform_key.sql', '0004_ownership_transition.sql'];
+const OWN_MIGRATIONS = ['0001_company_platform_organization.sql', '0002_idempotency_key.sql', '0003_platform_key.sql', '0004_ownership_transition.sql', '0005_admin_actor_record.sql'];
 /** Exactly the schema of this stage. The exact-set assertion is the tripwire against a table for a concept this service must not own. */
-const TABLES = ['company', 'hierarchy_id_ledger', 'idempotency_key', 'inbox', 'kit_rate_limit', 'organization', 'outbox', 'ownership_event', 'ownership_import_run', 'ownership_state', 'platform', 'schema_migrations'];
+const TABLES = ['admin_actor_event', 'company', 'hierarchy_id_ledger', 'idempotency_key', 'inbox', 'kit_rate_limit', 'organization', 'outbox', 'ownership_event', 'ownership_import_run', 'ownership_state', 'platform', 'schema_migrations'];
 
 const tableNames = async (url: string) => (await sql<{ table_name: string }>(url, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1`)).map((r) => r.table_name);
 

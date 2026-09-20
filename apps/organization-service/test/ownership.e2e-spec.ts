@@ -418,7 +418,7 @@ describeWithEnv('ownership transition: state machine, gates, import, invariants 
       await sql(db.url, `INSERT INTO organization (id, "platformId", name) VALUES ('${ID.o1}', '${ID.p1}', 'Legacy O')`);
 
       const after = await runMigrations(db.url, [kitMigrationsDir, organizationMigrationsDir]);
-      expect(after.applied).toEqual(['0004_ownership_transition.sql']);
+      expect(after.applied).toEqual(['0004_ownership_transition.sql', '0005_admin_actor_record.sql']);
       expect(await counts(db)).toEqual({ c: 1, p: 1, o: 1 });
       expect(await state(db)).toMatchObject({ phase: 'PREPARED', authoritative: false });
       expect((await sql(db.url, 'SELECT count(*)::int AS n FROM hierarchy_id_ledger'))[0].n).toBe(3);

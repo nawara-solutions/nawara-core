@@ -23,21 +23,35 @@ const code = (f: string) => readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g,
 /** Code with string literals blanked, for checks about identifiers (documentation text may legitimately say "membership"). */
 const identifiers = (f: string) => code(f).replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''");
 
+// Stage 10.1 (ADR-0040, accepted) adds the ownership-transition machinery. It is allowed ONLY in the ownership module and its CLI;
+// everywhere else (controllers, repositories, the API surface) the original Stage-9 prohibition still holds.
+const isOwnership = (f: string) => f.includes('/ownership/') || f.endsWith('/cli/ownership.ts');
+// ADR-0042 decision 6 / Amendment 1: the human-admin module is the ONE bounded exception to "no Auth dependency, no
+// user-token handling" — it forwards a caller's OWN bearer to Auth's /auth/grants and /auth/step-up/verify, and only
+// there. Everywhere else in this service (every other controller, repository, the reference/ownership surfaces) the
+// original Stage-9 prohibition still holds, exactly as it already does for the ownership module above. The one file
+// outside `admin/` that legitimately names `AUTH_SERVICE_URL` is the shared config loader (it stores the URL string;
+// it makes no outbound call and imports no HTTP client — the admin module's own file-count assertion below still
+// requires the real client/guard/controller files to live under `admin/`).
+const isAdmin = (f: string) => f.includes('/admin/') || f.endsWith('/config/organization-config.ts');
+
 describe('service boundary (static)', () => {
   it('has source to inspect', () => expect(shipped.length).toBeGreaterThan(10));
 
-  it('makes no outbound call and has no Auth dependency: no fetch, no HTTP client, no Auth client, no broker, no events', () => {
+  it('makes no outbound call and has no Auth dependency outside admin/: no fetch, no HTTP client, no Auth client, no broker, no events', () => {
     const forbidden = /\bfetch\(|\bHttpAuthClient\b|\bAuthClient\b|\bAUTH_SERVICE_URL\b|\bamqplib\b|\bEventsModule\b|\bOutboxService\b|\bInboxService\b|\bRabbitMq|\baxios\b|node:https?['"]|\bgot\(/;
-    for (const f of shipped) expect(code(f), f).not.toMatch(forbidden);
+    for (const f of shipped.filter((x) => !isAdmin(x))) expect(code(f), f).not.toMatch(forbidden);
   });
 
-  it('never reads a user token: no user-guard, no JWT handling, no identity or membership lookups', () => {
-    for (const f of shipped) expect(identifiers(f), f).not.toMatch(/\bgetIdentity\b|\bhasPlatformAccess\b|jsonwebtoken|\bJwtService\b|\bmemberships?\b/i);
+  it('admin/ is the only module with an outbound Auth dependency, and it never imports a service-token concept (it authenticates a HUMAN bearer, never a service credential)', () => {
+    const admin = shipped.filter(isAdmin);
+    expect(admin.length).toBeGreaterThan(3);
+    for (const f of admin) expect(code(f), f).not.toMatch(/\bServiceTokenGuard\b|\bServicePolicyGuard\b|\bRequireCapability\b|\bCallerService\b/);
   });
 
-  // Stage 10.1 (ADR-0040, accepted) adds the ownership-transition machinery. It is allowed ONLY in the ownership module and its CLI;
-  // everywhere else (controllers, repositories, the API surface) the original prohibition of Stage 9 still holds.
-  const isOwnership = (f: string) => f.includes('/ownership/') || f.endsWith('/cli/ownership.ts');
+  it('never reads a user token outside admin/: no user-guard, no JWT handling, no identity or membership lookups', () => {
+    for (const f of shipped.filter((x) => !isAdmin(x))) expect(identifiers(f), f).not.toMatch(/\bgetIdentity\b|\bhasPlatformAccess\b|jsonwebtoken|\bJwtService\b|\bmemberships?\b/i);
+  });
 
   it('contains no migration, import or cutover machinery outside the ownership module and its CLI', () => {
     for (const f of shipped.filter((x) => !isOwnership(x))) expect(code(f), f).not.toMatch(/\b(bootstrap-?import|importFromAuth|cutover|write-?freeze|authority[_-]?record|reconcil)/i);
@@ -59,8 +73,8 @@ describe('service boundary (static)', () => {
     for (const f of shipped) expect(code(f), f).not.toMatch(/\b(Tenant|Workspace|BusinessUnit|Department)\b/);
   });
 
-  it('every controller is guarded by the token guard AND the policy guard (deny by default), and every route declares its capability', () => {
-    const controllers = shipped.filter((f) => f.endsWith('.controller.ts'));
+  it('every SERVICE-TOKEN controller is guarded by the token guard AND the policy guard (deny by default), and every route declares its capability', () => {
+    const controllers = shipped.filter((f) => f.endsWith('.controller.ts') && !isAdmin(f));
     expect(controllers).toHaveLength(4);
     for (const f of controllers) {
       const c = code(f);
@@ -69,6 +83,16 @@ describe('service boundary (static)', () => {
       const declared = (c.match(/^\s*@RequireCapability\(/gm) ?? []).length;
       expect(routes, f).toBeGreaterThan(0);
       expect(declared, `${f}: every route must declare the ONE capability it needs`).toBe(routes);
+    }
+  });
+
+  it('the admin controller is guarded by HumanAuthGuard ONLY (never the service-token guards) — it is a human-bearer surface, not a service-token one', () => {
+    const controllers = shipped.filter((f) => f.endsWith('.controller.ts') && isAdmin(f));
+    expect(controllers).toHaveLength(1);
+    for (const f of controllers) {
+      const c = code(f);
+      expect(c, f).toMatch(/@UseGuards\(HumanAuthGuard\)\s*\n@Controller\(/);
+      expect((c.match(/^\s*@(Get|Post|Patch|Put|Delete)\(/gm) ?? []).length, f).toBeGreaterThan(0);
     }
   });
 

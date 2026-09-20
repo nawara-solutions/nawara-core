@@ -2,8 +2,10 @@ import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseCo
 
 /**
  * organization-service configuration, layered on the kit's shared `BaseConfig`. It carries ONLY what this service uses today.
- * There is deliberately no Auth URL, no broker URL and no outbound service token: the service calls nothing and publishes
- * nothing (ADR-0039: no Auth dependency, no organization events until a concrete consumer needs them).
+ * There is deliberately no broker URL and no outbound service token: the service publishes nothing (ADR-0039). It DOES now
+ * carry one bounded, narrow Auth dependency (`authServiceUrl`): the human-admin module (ADR-0042 decision 6 / Amendment 1)
+ * forwards a caller's own bearer to Auth's `/auth/grants` and `/auth/step-up/verify` — never a service credential, never
+ * anything outside that module (see boundary.spec.ts's admin-module carve-out).
  */
 export interface OrganizationConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `organization_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -12,6 +14,9 @@ export interface OrganizationConfig extends BaseConfig {
   serviceTokens: ServiceTokenEntry[];
   /** The raw `SERVICE_POLICY` JSON (ADR-0042). Parsed and validated when the application module is built, i.e. at STARTUP: a registered caller with no entry refuses to boot. */
   servicePolicyRaw: string | undefined;
+  /** Auth's base URL, used only by the human-admin module (ADR-0042 decision 6). */
+  authServiceUrl: string;
+  authTimeoutMs: number;
   /** OpenAPI is mounted at /organization/docs behind basic auth, and only when a password is configured. */
   docs: { username: string; password?: string };
 }
@@ -34,6 +39,8 @@ export function loadOrganizationConfig(env: NodeJS.ProcessEnv = process.env): Or
     databaseUrl,
     serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
     servicePolicyRaw: reader.get('SERVICE_POLICY'),
+    authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
+    authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       // A password that protects API documentation of an authority service must not be trivial.
