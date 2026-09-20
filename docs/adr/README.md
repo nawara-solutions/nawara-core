@@ -79,3 +79,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0036](./0036-money-parties-and-source-references.md) | Money, explicit parties and generic source references | Proposed |
 | [0037](./0037-reliable-events-outbox-inbox.md) | Reliable events: RabbitMQ with a transactional outbox and an inbox | Proposed |
 | [0038](./0038-entitlement-in-billing-service.md) | Entitlement (licenses and subscriptions) lives in billing-service | Proposed |
+| [0039](./0039-organization-ownership-and-cross-service-migration-authority.md) | Organization ownership and cross-service migration authority: finalizes ADR-0031's deferred O9 mechanism | Proposed |
