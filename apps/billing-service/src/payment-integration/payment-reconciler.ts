@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { runWithRequestContext } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
-import { requestTransitionContext } from '../domain/actors.js';
+import { jobTransitionContext } from '../domain/actors.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
 import { PAYMENT_CLIENT } from './payment-client.token.js';
 import type { PaymentClient } from './payment-client.js';
@@ -44,21 +46,27 @@ export class PaymentReconciler {
     try {
       const stale = await this.requests.findStaleRequested(batchSize, staleRequestedMs);
       let settled = 0;
-      const ctx = requestTransitionContext({ type: 'system', id: null }); // `cause: reconciliation` is set below, per row
-      for (const { id, paymentId } of stale) {
+      for (const { id, paymentId, correlationId } of stale) {
+        const ctx = jobTransitionContext('reconciliation', id, correlationId);
         // One request that cannot be reconciled (Payment unreachable, a genuine conflict) must never block the others.
         try {
-          const snapshot = await this.paymentClient.getPayment(paymentId);
+          // Scopes the outbound call under the request's own correlation id (same reasoning as the dispatcher): a
+          // background job has no ambient AsyncLocalStorage context, so without this `correlationHeaders()` sends nothing.
+          const snapshot = await runWithRequestContext({ requestId: randomUUID(), correlationId }, () => this.paymentClient.getPayment(paymentId));
           if (!snapshot) {
-            this.logger.warn(`payment request ${id}: Payment no longer has payment ${paymentId} — needs manual reconciliation`);
+            this.logger.warn(`payment_reconcile_failure request=${id} correlationId=${correlationId}: Payment no longer has payment ${paymentId} — needs manual reconciliation`);
             continue;
           }
-          const result = await this.requests.applyReconciledSnapshot(snapshot, { ...ctx, cause: { type: 'reconciliation', id } });
+          const result = await this.requests.applyReconciledSnapshot(snapshot, ctx);
           if (result === null) continue; // still created/pending at Payment: not stale enough to act on yet
-          if (result.outcome === 'applied') settled++;
-          if (result.outcome === 'conflict') this.logger.error(`payment request ${id}: reconciliation found a conflict (${result.detail}) — needs manual review`);
+          if (result.outcome === 'applied') {
+            settled++;
+            this.logger.log(`payment_reconcile_success request=${id} correlationId=${correlationId} paymentId=${paymentId}`);
+          }
+          if (result.outcome === 'conflict') this.logger.error(`payment_reconcile_failure request=${id} correlationId=${correlationId} reason=conflict detail=${result.detail} — needs manual review`);
+          if (result.outcome === 'deferred') this.logger.warn(`payment_reconcile_deferred request=${id} correlationId=${correlationId} detail=${result.detail}`);
         } catch (e) {
-          this.logger.warn(`payment request ${id} could not be reconciled: ${e instanceof Error ? e.message : 'unknown error'}`);
+          this.logger.warn(`payment_reconcile_failure request=${id} correlationId=${correlationId} reason=exception: ${e instanceof Error ? e.message : 'unknown error'}`);
         }
       }
       return { checked: stale.length, settled };

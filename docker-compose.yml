@@ -1,11 +1,18 @@
 # Local development infrastructure ONLY. Nothing here is production configuration and none of these credentials is a real secret.
 #
 #   cp .env.example .env
-#   docker compose --profile db up -d --wait postgres     # PostgreSQL 16: one database per Core service (ADR-0032)
-#   docker compose up -d rabbitmq                          # RabbitMQ, for asynchronous domain events (ADR-0037)
+#   docker compose --profile db up -d --wait postgres rabbitmq   # infra first: PostgreSQL 16, one database per Core
+#                                                                  # service (ADR-0032); RabbitMQ (ADR-0037)
+#   docker compose --profile db run --rm auth-migrate             # apply each service's migrations ONCE, explicitly —
+#   docker compose --profile db run --rm billing-service npm run migrate  # Compose never runs a migration at
+#   docker compose --profile db run --rm payment-service npm run migrate  # container startup (see
+#                                                                          # docs/architecture/production-readiness.md)
+#   docker compose --profile db up -d auth-service billing-service payment-service
 #
-# Every service runs alone with only the pieces it needs; nothing here couples services to each other. Ports are bound to
-# loopback so they are not reachable from the network.
+# `--profile db` is required on every invocation that touches postgres or an app service (billing/payment/auth all
+# `depends_on` it) — profile activation is per-invocation, not persistent. Every service runs alone with only the
+# pieces it needs; nothing here couples services to each other at build time. Ports are bound to loopback so they
+# are not reachable from the network.
 services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -30,6 +37,8 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?copy .env.example to .env}
       # Per-service roles (see infra/postgres/init). Values are read by the init script, only on first start of an empty volume.
+      AUTH_MIGRATOR_PASSWORD: ${AUTH_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      AUTH_APP_PASSWORD: ${AUTH_APP_PASSWORD:?copy .env.example to .env}
       BILLING_MIGRATOR_PASSWORD: ${BILLING_MIGRATOR_PASSWORD:?copy .env.example to .env}
       BILLING_APP_PASSWORD: ${BILLING_APP_PASSWORD:?copy .env.example to .env}
       PAYMENT_MIGRATOR_PASSWORD: ${PAYMENT_MIGRATOR_PASSWORD:?copy .env.example to .env}
@@ -44,6 +53,117 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  # One-shot: applies auth-service's migrations (its own bespoke tracked-SQL mechanism, not the kit's `nawara-migrate` —
+  # auth-service predates @nawara/service-kit and does not depend on it) to the shared postgres. Never runs at
+  # container startup; an operator (or this Compose file's own usage comment) invokes it explicitly, exactly once
+  # per empty database, mirroring production's "migrations are an explicit step" policy.
+  auth-migrate:
+    profiles: [db]
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${AUTH_MIGRATOR_PASSWORD:?copy .env.example to .env}
+    volumes:
+      - ./apps/auth-service/db/migrations:/migrations:ro
+    entrypoint: ['sh', '-c']
+    command:
+      - |
+        set -e
+        for f in /migrations/[0-9]*.sql; do
+          echo "applying $$f"
+          psql -v ON_ERROR_STOP=1 -h postgres -U auth_migrator -d auth -f "$$f"
+        done
+
+  auth-service:
+    profiles: [db]
+    build:
+      context: .
+      dockerfile: apps/auth-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3000:3000'
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://auth_app:${AUTH_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/auth
+      JWT_SECRET: ${AUTH_JWT_SECRET:?copy .env.example to .env}
+      OPERATOR_CODE_PEPPER: ${AUTH_OPERATOR_CODE_PEPPER:?copy .env.example to .env}
+      SECRET_KEY_PEPPER: ${AUTH_SECRET_KEY_PEPPER:?copy .env.example to .env}
+      THROTTLE_KEY_PEPPER: ${AUTH_THROTTLE_KEY_PEPPER:?copy .env.example to .env}
+      JOIN_CODE_PEPPER: ${AUTH_JOIN_CODE_PEPPER:?copy .env.example to .env}
+      TOTP_ENCRYPTION_KEYS: k1:${AUTH_TOTP_KEY_K1:?copy .env.example to .env}
+      TOTP_ENCRYPTION_ACTIVE_KEY_ID: k1
+      # Only used if/when Auth's registration-time license check is exercised locally (SDD 16.4); payment-service
+      # does not yet implement the route it calls, so this is configuration wiring, not a working feature.
+      PAYMENT_SERVICE_URL: http://payment-service:3000
+      PAYMENT_SERVICE_TOKEN: ${AUTH_TO_PAYMENT_TOKEN:?copy .env.example to .env}
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/auth/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  billing-service:
+    profiles: [db]
+    build:
+      context: .
+      dockerfile: apps/billing-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3001:3000'
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://billing_app:${BILLING_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/billing
+      # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
+      MIGRATION_DATABASE_URL: postgres://billing_migrator:${BILLING_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/billing
+      AUTH_SERVICE_URL: http://auth-service:3000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      BILLING_SUPPORTED_CURRENCIES: TND
+      PAYMENT_SERVICE_URL: http://payment-service:3000
+      PAYMENT_SERVICE_TOKEN: ${BILLING_TO_PAYMENT_TOKEN:?copy .env.example to .env}
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  payment-service:
+    profiles: [db]
+    build:
+      context: .
+      dockerfile: apps/payment-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3002:3000'
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://payment_app:${PAYMENT_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/payment
+      # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
+      MIGRATION_DATABASE_URL: postgres://payment_migrator:${PAYMENT_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/payment
+      AUTH_SERVICE_URL: http://auth-service:3000
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      PAYMENT_SUPPORTED_CURRENCIES: TND
+      # Dev-only test gateway adapter (refused when NODE_ENV=production): lets a payment settle locally with no
+      # real provider credentials, so the Billing <-> Payment loop can be exercised end to end through Compose.
+      PAYMENT_TEST_PROVIDER: 'true'
+      SERVICE_TOKENS: billing-service:${BILLING_TO_PAYMENT_DIGEST:?copy .env.example to .env},auth-service:${AUTH_TO_PAYMENT_DIGEST:?copy .env.example to .env}
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
 volumes:
   nawara_pgdata:

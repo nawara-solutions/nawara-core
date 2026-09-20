@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { Module, type DynamicModule } from '@nestjs/common';
+import { Logger, Module, type DynamicModule } from '@nestjs/common';
 import {
   DbModule, EventsModule, HealthModule, InMemoryEventBus, RabbitMqEventBus, RateLimitModule, ServiceAuthModule, kitMigrationsDir,
   type AuthClient, type EventBus,
@@ -49,6 +49,8 @@ export class AppModule {
         EventsModule.forRoot({
           source: config.serviceName,
           bus: overrides.bus ?? (config.rabbitmqUrl ? new RabbitMqEventBus({ url: config.rabbitmqUrl }) : new InMemoryEventBus()),
+          // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
+          onError: (message) => new Logger('OutboxRelay').warn(`outbox_publish_failure ${message}`),
         }),
         RateLimitModule,
         AuthModule,

@@ -71,6 +71,8 @@ export interface PaymentRequestRow {
   status: PaymentRequestStatus;
   paymentId: string | null;
   expiresAt: Date | null;
+  /** The correlation id in effect when the request was created, null if there was no ambient request context. */
+  correlationId: string | null;
   mappingVersion: number;
   sendAttempts: number;
   sendingSince: Date | null;

@@ -128,3 +128,39 @@ jobs:
           docker compose --profile db up -d --wait postgres
       - name: verify least privilege, including the kit migrations under the runtime role
         run: bash infra/postgres/verify.sh --with-kit-migrations
+
+  e2e-real-broker:
+    name: Billing/Payment Stage 4 loop over a real RabbitMQ broker
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # This suite spawns billing-service and payment-service as separate OS processes from their OWN built
+      # `dist/main.js` (never one service's TypeScript imported into the other's test — see `scripts/lib/checks.mjs`),
+      # talking only over real HTTP and the real broker, so both must be built first.
+      - name: build service-kit, billing-service, payment-service
+        run: npm run build -w @nawara/service-kit -w billing-service -w payment-service
+      - name: real-broker Stage 4 E2E
+        run: npm run test:e2e -w @nawara/e2e-real-broker

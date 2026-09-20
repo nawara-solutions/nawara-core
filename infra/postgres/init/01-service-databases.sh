@@ -29,6 +29,7 @@ SQL
   echo "init: database and roles created for $svc"
 }
 
+create_service auth       "${AUTH_MIGRATOR_PASSWORD:-}"       "${AUTH_APP_PASSWORD:-}"
 create_service billing    "${BILLING_MIGRATOR_PASSWORD:-}"    "${BILLING_APP_PASSWORD:-}"
 create_service payment    "${PAYMENT_MIGRATOR_PASSWORD:-}"    "${PAYMENT_APP_PASSWORD:-}"
 create_service accounting "${ACCOUNTING_MIGRATOR_PASSWORD:-}" "${ACCOUNTING_APP_PASSWORD:-}"
