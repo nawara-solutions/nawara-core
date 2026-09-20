@@ -1,5 +1,5 @@
 #!/bin/sh
-# Creates, for each financial service, ONE database and TWO login roles (ADR-0032, least privilege):
+# Creates, for each Core service that has its own database, ONE database and TWO login roles (ADR-0032, least privilege):
 #   <svc>_migrator  owns the database and its schema; used ONLY by the explicit migration step (DDL).
 #   <svc>_app       the runtime role: CONNECT to its own database, DML on tables the migrator creates, nothing else.
 # No role is a superuser. Every role is barred from every other service's database. Runs once, on an empty data volume.
@@ -33,3 +33,4 @@ create_service auth       "${AUTH_MIGRATOR_PASSWORD:-}"       "${AUTH_APP_PASSWO
 create_service billing    "${BILLING_MIGRATOR_PASSWORD:-}"    "${BILLING_APP_PASSWORD:-}"
 create_service payment    "${PAYMENT_MIGRATOR_PASSWORD:-}"    "${PAYMENT_APP_PASSWORD:-}"
 create_service accounting "${ACCOUNTING_MIGRATOR_PASSWORD:-}" "${ACCOUNTING_APP_PASSWORD:-}"
+create_service organization "${ORGANIZATION_MIGRATOR_PASSWORD:-}" "${ORGANIZATION_APP_PASSWORD:-}"

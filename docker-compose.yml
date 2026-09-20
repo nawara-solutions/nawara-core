@@ -7,7 +7,8 @@
 #   docker compose --profile db run --rm billing-service npm run migrate  # Compose never runs a migration at
 #   docker compose --profile db run --rm payment-service npm run migrate  # container startup (see
 #                                                                          # docs/architecture/production-readiness.md)
-#   docker compose --profile db up -d auth-service billing-service payment-service
+#   docker compose --profile db run --rm organization-service npm run migrate
+#   docker compose --profile db up -d auth-service billing-service payment-service organization-service
 #
 # `--profile db` is required on every invocation that touches postgres or an app service (billing/payment/auth all
 # `depends_on` it) — profile activation is per-invocation, not persistent. Every service runs alone with only the
@@ -45,6 +46,8 @@ services:
       PAYMENT_APP_PASSWORD: ${PAYMENT_APP_PASSWORD:?copy .env.example to .env}
       ACCOUNTING_MIGRATOR_PASSWORD: ${ACCOUNTING_MIGRATOR_PASSWORD:?copy .env.example to .env}
       ACCOUNTING_APP_PASSWORD: ${ACCOUNTING_APP_PASSWORD:?copy .env.example to .env}
+      ORGANIZATION_MIGRATOR_PASSWORD: ${ORGANIZATION_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      ORGANIZATION_APP_PASSWORD: ${ORGANIZATION_APP_PASSWORD:?copy .env.example to .env}
     volumes:
       - nawara_pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -159,6 +162,32 @@ services:
       # real provider credentials, so the Billing <-> Payment loop can be exercised end to end through Compose.
       PAYMENT_TEST_PROVIDER: 'true'
       SERVICE_TOKENS: billing-service:${BILLING_TO_PAYMENT_DIGEST:?copy .env.example to .env},auth-service:${AUTH_TO_PAYMENT_DIGEST:?copy .env.example to .env}
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Implemented but NOT yet authoritative: auth-service still owns Company/Platform/Organization (ADR-0039). It depends on nothing
+  # but its own database: no Auth URL, no broker, no outbound token. SERVICE_TOKENS is deliberately left empty here (every call is
+  # refused) because no caller is registered yet; to exercise it locally, generate a token with generateServiceToken() and set
+  # SERVICE_TOKENS=<caller>:<digest> (see apps/organization-service/README.md).
+  organization-service:
+    profiles: [db]
+    build:
+      context: .
+      dockerfile: apps/organization-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3003:3000'
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://organization_app:${ORGANIZATION_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/organization
+      # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
+      MIGRATION_DATABASE_URL: postgres://organization_migrator:${ORGANIZATION_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/organization
+      SERVICE_TOKENS: ${ORGANIZATION_SERVICE_TOKENS:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s
