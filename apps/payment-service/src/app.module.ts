@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import {
   DbModule, EventsModule, HealthModule, InMemoryEventBus, RabbitMqEventBus, RateLimitModule, ServiceAuthModule, kitMigrationsDir,
 } from '@nawara/service-kit';
@@ -27,6 +27,8 @@ const config = loadPaymentConfig();
     EventsModule.forRoot({
       source: 'payment-service',
       bus: config.rabbitmqUrl ? new RabbitMqEventBus({ url: config.rabbitmqUrl }) : new InMemoryEventBus(),
+      // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
+      onError: (message) => new Logger('OutboxRelay').warn(`outbox_publish_failure ${message}`),
     }),
     RateLimitModule,
     ProvidersModule,

@@ -29,12 +29,19 @@ export interface EventApplication {
 export interface DispatchClaim {
   request: RequestForMapping;
   invoice: InvoiceForMapping;
+  /** The claimed request's originating correlation id, or a deterministic fallback if it never had one. */
+  correlationId: string;
+  /** True when this claim re-sends a row that was ALREADY `sending` past the stale threshold (a prior attempt that
+   * never got an answer), rather than a fresh `created` row — the `payment_dispatch_stale_recovery` signal. */
+  wasStale: boolean;
 }
 
 /** A `requested` request stale enough for the reconciler to ask Payment about directly. */
 export interface StaleRequested {
   id: string;
   paymentId: string;
+  /** The request's originating correlation id, or a deterministic fallback if it never had one. */
+  correlationId: string;
 }
 
 /**
@@ -62,8 +69,8 @@ export class PaymentRequestRepository {
 
       const actor = actorOf(caller);
       const inserted = await q.query<PaymentRequestRow>(
-        `INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType", "createdById") VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [invoiceId, invoice.total, invoice.currency, actor.type, actor.id],
+        `INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType", "createdById", "correlationId") VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [invoiceId, invoice.total, invoice.currency, actor.type, actor.id, ctx.correlationId ?? null],
       );
       const request = inserted.rows[0]!;
       await recordTransition(q, { entityType: 'payment_request', entityId: request.id, from: null, to: 'created', revision: request.revision, ctx });
@@ -88,6 +95,10 @@ export class PaymentRequestRepository {
       );
       const claims: DispatchClaim[] = [];
       for (const row of candidates) {
+        // The request's own originating correlation id if it has one, else a deterministic per-request fallback — never
+        // null, so the dispatch call and the transition it records are always traceable (Stage 5 hardening).
+        const correlationId = row.correlationId ?? `dispatch:${row.id}`;
+        const rowCtx: TransitionContext = { actor: ctx.actor, cause: { type: 'dispatcher', id: row.id }, correlationId };
         const { rows: updated } = await q.query<PaymentRequestRow>(
           `UPDATE payment_request SET status = 'sending', "sendAttempts" = "sendAttempts" + 1 WHERE id = $1 RETURNING *`,
           [row.id],
@@ -96,7 +107,7 @@ export class PaymentRequestRepository {
         // A re-claim of an already-stale `sending` row is a SAME-status update: the lifecycle trigger only bumps `revision`
         // on an actual status change (SDD 26), so `next.revision === row.revision` here — recording a transition anyway
         // would collide with the row already recorded for that revision. Only the genuine `created -> sending` move gets one.
-        if (row.status !== next.status) await recordTransition(q, { entityType: 'payment_request', entityId: next.id, from: row.status, to: 'sending', revision: next.revision, ctx });
+        if (row.status !== next.status) await recordTransition(q, { entityType: 'payment_request', entityId: next.id, from: row.status, to: 'sending', revision: next.revision, ctx: rowCtx });
         // Every field read here is immutable (BI-06/BI-07): no lock needed to read it safely.
         const { rows: invRows } = await q.query<InvoiceForMapping>(
           `SELECT id, number, "payerType", "payerId", "sellerType", "sellerId", "organizationId", currency, description FROM invoice WHERE id = $1`,
@@ -104,7 +115,7 @@ export class PaymentRequestRepository {
         );
         const invoice = invRows[0];
         if (!invoice) continue; // cannot happen (FK); defensive only
-        claims.push({ request: { id: next.id, amount: fromDbAmount(next.amount), expiresAt: next.expiresAt }, invoice });
+        claims.push({ request: { id: next.id, amount: fromDbAmount(next.amount), expiresAt: next.expiresAt }, invoice, correlationId, wasStale: row.status === 'sending' });
       }
       return claims;
     });
@@ -134,13 +145,14 @@ export class PaymentRequestRepository {
 
   /** `requested` rows old enough that the reconciler should ask Payment directly, rather than wait for an event (SDD 21.5). */
   async findStaleRequested(limit: number, staleRequestedMs: number): Promise<StaleRequested[]> {
-    const { rows } = await this.db.query<StaleRequested>(
-      `SELECT id, "paymentId" FROM payment_request
+    const { rows } = await this.db.query<{ id: string; paymentId: string; correlationId: string | null }>(
+      `SELECT id, "paymentId", "correlationId" FROM payment_request
         WHERE status = 'requested' AND "paymentId" IS NOT NULL AND "updatedAt" < now() - make_interval(secs => $1)
         ORDER BY "updatedAt" LIMIT $2`,
       [staleRequestedMs / 1000, limit],
     );
-    return rows;
+    // Never null: falls back to a deterministic per-request id so reconciliation is always traceable (Stage 5 hardening).
+    return rows.map((r) => ({ id: r.id, paymentId: r.paymentId, correlationId: r.correlationId ?? `reconcile:${r.id}` }));
   }
 
   /**

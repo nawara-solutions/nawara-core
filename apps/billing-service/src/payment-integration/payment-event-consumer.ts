@@ -80,13 +80,22 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnApplicati
   }
 
   private async handle(event: EventEnvelope): Promise<void> {
-    const facts = parseFacts(event); // throws on malformed input — the caller (EventBus) dead-letters it
+    const correlationId = event.headers.correlationId ?? `event:${event.id}`;
+    let facts: PaymentEventFacts;
+    try {
+      facts = parseFacts(event); // throws on malformed input — the caller (EventBus) dead-letters it
+    } catch (e) {
+      this.logger.error(`payment_event_dead_letter event=${event.id} name=${event.name} correlationId=${correlationId}: ${e instanceof Error ? e.message : 'malformed payload'}`);
+      throw e;
+    }
     const result = await this.requests.applyPaymentEvent(event.id, facts, {
       actor: { type: 'system', id: null },
       cause: { type: 'payment_event', id: event.id },
-      correlationId: event.headers.correlationId,
+      correlationId,
     });
-    if (result.outcome === 'conflict') this.logger.error(`event ${event.id} (${event.name}) is a conflict (${result.detail}) — needs manual review`);
-    if (result.outcome === 'deferred') this.logger.warn(`event ${event.id} (${event.name}) deferred (${result.detail}) — the reconciler will complete it`);
+    if (result.outcome === 'applied') this.logger.log(`payment_event_applied event=${event.id} name=${event.name} correlationId=${correlationId}`);
+    if (result.outcome === 'ignored') this.logger.log(`payment_event_ignored event=${event.id} name=${event.name} correlationId=${correlationId} detail=${result.detail}`);
+    if (result.outcome === 'conflict') this.logger.error(`payment_event_conflict event=${event.id} name=${event.name} correlationId=${correlationId} detail=${result.detail} — needs manual review`);
+    if (result.outcome === 'deferred') this.logger.warn(`payment_event_deferred event=${event.id} name=${event.name} correlationId=${correlationId} detail=${result.detail} — the reconciler will complete it`);
   }
 }

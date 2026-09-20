@@ -76,7 +76,19 @@ when comparing dumps, filter the per-dump `\restrict` line or every comparison "
 **Proposed procedure (not implemented):** a scheduled `docker exec <db> pg_dump -Fc` per database, written outside the database volume
 and copied **off the host**, encrypted; a restore drill into a scratch database on a schedule, verified by counts and a schema diff.
 **Undecided (business input):** retention, recovery point and recovery time objectives, and where off-host copies live.
-**Status:** a backup that has never been restored **on the real volume** is not proven; production remains a **BLOCKER** until that drill is done.
+
+**Application verification (Stage 5 hardening, completion pass — gap noted, not yet drilled):** the local drill above verifies only the
+database (row/constraint/trigger counts, schema diff) — it does not yet point a service at the restored database and confirm the
+application itself is usable. The smallest addition needed before a restore is proven end-to-end, not just at the database level: boot
+the affected service against the restored database and confirm `GET /ready` returns 2xx, then read back one row written before the dump
+(e.g. `GET /billing/invoices/:id` for a known id) and confirm it matches.
+**Success criteria:** the restore command exits 0; row, constraint and trigger counts match the source exactly; the schema/data diff is
+empty (ignoring the per-dump `\restrict` token); the application's `/ready` returns 2xx against the restored database; the known-id read
+returns the pre-dump data unchanged.
+**Failure criteria:** any restore command exits non-zero; any count or diff differs; `/ready` does not return 2xx against the restored
+database; or the known-id read is missing or does not match.
+**Status:** a backup that has never been restored **on the real volume**, and never verified at the application level, is not proven;
+production remains a **BLOCKER** until that drill is done.
 
 ## 4. Migrations
 
