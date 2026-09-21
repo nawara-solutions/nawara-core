@@ -108,7 +108,10 @@ export class PaymentRequestRepository {
         const correlationId = row.correlationId ?? `dispatch:${row.id}`;
         const rowCtx: TransitionContext = { actor: ctx.actor, cause: { type: 'dispatcher', id: row.id }, correlationId };
         const { rows: updated } = await q.query<PaymentRequestRow>(
-          `UPDATE payment_request SET status = 'sending', "sendAttempts" = "sendAttempts" + 1 WHERE id = $1 RETURNING *`,
+          // `sendingSince` is (re)stamped on EVERY claim: the lifecycle trigger stamps it only on a status change, so a stale `sending` row that is
+          // re-claimed (a same-status update) would otherwise stay stale and be re-claimed by every following pass, pinning the head of the batch.
+          // With the refresh, `staleSendingMs` is the interval between two attempts at the same request.
+          `UPDATE payment_request SET status = 'sending', "sendAttempts" = "sendAttempts" + 1, "sendingSince" = now() WHERE id = $1 RETURNING *`,
           [row.id],
         );
         const next = updated[0]!;
