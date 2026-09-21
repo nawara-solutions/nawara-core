@@ -49,9 +49,10 @@ export class AdminController {
     return getRequestContext()?.correlationId;
   }
 
-  private async requireStepUp(actor: AuthGrantFacts, bearer: string, purpose: string, token: string | undefined) {
+  /** `target` is the parent the create was aimed at (company for a platform, platform for an organization): known here, so recorded, like the authority denial before it. */
+  private async requireStepUp(actor: AuthGrantFacts, bearer: string, purpose: string, token: string | undefined, target: { type: 'company' | 'platform'; id: string }) {
     if (!token || !(await this.authGrants.verifyStepUp(bearer, purpose, token))) {
-      await this.actorRecord.record({ actor, operation: purpose, targetType: 'platform', targetId: null, correlationId: this.correlationId(), outcome: 'denied', reason: 'step_up_required' });
+      await this.actorRecord.record({ actor, operation: purpose, targetType: target.type, targetId: target.id, correlationId: this.correlationId(), outcome: 'denied', reason: 'step_up_required' });
       throw organizationError(403, 'step_up_required', 'A fresh step-up is required for this operation.');
     }
   }
@@ -83,11 +84,12 @@ export class AdminController {
       await this.actorRecord.record({ actor, operation: 'platform.create', targetType: 'company', targetId: company.id, correlationId: this.correlationId(), outcome: 'denied', reason: 'no_authority' });
       throw organizationError(403, 'admin_forbidden', 'Not authorized to create a platform for this company.');
     }
-    await this.requireStepUp(actor, bearer, 'platform.create', stepUpToken);
-    const { platform, replayed } = await this.platforms.create(`user:${actor.userId}`, key, input);
+    await this.requireStepUp(actor, bearer, 'platform.create', stepUpToken, { type: 'company', id: company.id });
+    // The success record is written inside the mutation's transaction (`within`): both commit, or neither does.
+    const { platform, replayed } = await this.platforms.create(`user:${actor.userId}`, key, input, (q, p) =>
+      this.actorRecord.record({ actor, operation: 'platform.create', targetType: 'platform', targetId: p.id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
-    await this.actorRecord.record({ actor, operation: 'platform.create', targetType: 'platform', targetId: platform.id, correlationId: this.correlationId(), outcome: 'succeeded', authority });
     this.log.log(`admin_platform_created id=${platform.id} companyId=${platform.companyId} actor=${actor.userId}`);
     return representPlatform(platform);
   }
@@ -107,8 +109,8 @@ export class AdminController {
       await this.actorRecord.record({ actor, operation: 'platform.update', targetType: 'platform', targetId: id, correlationId: this.correlationId(), outcome: 'denied', reason: 'no_authority' });
       throw organizationError(403, 'admin_forbidden', 'Not authorized to update this platform.');
     }
-    const platform = await this.platforms.update(id, input);
-    await this.actorRecord.record({ actor, operation: 'platform.update', targetType: 'platform', targetId: id, correlationId: this.correlationId(), outcome: 'succeeded', authority });
+    const platform = await this.platforms.update(id, input, (q) =>
+      this.actorRecord.record({ actor, operation: 'platform.update', targetType: 'platform', targetId: id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
     this.log.log(`admin_platform_updated id=${id} actor=${actor.userId}`);
     return representPlatform(platform);
   }
@@ -140,11 +142,11 @@ export class AdminController {
       await this.actorRecord.record({ actor, operation: 'organization.create', targetType: 'platform', targetId: platform.id, correlationId: this.correlationId(), outcome: 'denied', reason: 'no_authority' });
       throw organizationError(403, 'admin_forbidden', 'Not authorized to create an organization on this platform.');
     }
-    await this.requireStepUp(actor, bearer, 'organization.create', stepUpToken);
-    const { organization, replayed } = await this.organizations.create(`user:${actor.userId}`, key, input);
+    await this.requireStepUp(actor, bearer, 'organization.create', stepUpToken, { type: 'platform', id: platform.id });
+    const { organization, replayed } = await this.organizations.create(`user:${actor.userId}`, key, input, (q, o) =>
+      this.actorRecord.record({ actor, operation: 'organization.create', targetType: 'organization', targetId: o.id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
-    await this.actorRecord.record({ actor, operation: 'organization.create', targetType: 'organization', targetId: organization.id, correlationId: this.correlationId(), outcome: 'succeeded', authority });
     this.log.log(`admin_organization_created id=${organization.id} platformId=${organization.platformId} actor=${actor.userId}`);
     return representOrganization(organization);
   }
@@ -165,8 +167,8 @@ export class AdminController {
       await this.actorRecord.record({ actor, operation: 'organization.update', targetType: 'organization', targetId: id, correlationId: this.correlationId(), outcome: 'denied', reason: 'no_authority' });
       throw organizationError(403, 'admin_forbidden', 'Not authorized to update this organization.');
     }
-    const organization = await this.organizations.update(id, input);
-    await this.actorRecord.record({ actor, operation: 'organization.update', targetType: 'organization', targetId: id, correlationId: this.correlationId(), outcome: 'succeeded', authority });
+    const organization = await this.organizations.update(id, input, (q) =>
+      this.actorRecord.record({ actor, operation: 'organization.update', targetType: 'organization', targetId: id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
     this.log.log(`admin_organization_updated id=${id} actor=${actor.userId}`);
     return representOrganization(organization);
   }

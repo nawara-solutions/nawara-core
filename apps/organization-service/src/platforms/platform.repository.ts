@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { DbService, pgCode, pgConstraint } from '@nawara/service-kit';
+import { DbService, pgCode, pgConstraint, type Queryable } from '@nawara/service-kit';
 import { listPage } from '../common/list.js';
 import type { ListQuery, Page } from '../common/pagination.js';
 import { notFound, organizationError } from '../domain/errors.js';
@@ -26,7 +26,8 @@ export interface PlatformRow {
 export class PlatformRepository {
   constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
 
-  async create(caller: string, key: string, input: CreatePlatformInput): Promise<{ platform: PlatformRow; replayed: boolean }> {
+  /** `within` runs inside the transaction after the write (see `OrganizationRepository.create`): the success actor record commits or rolls back with the platform. */
+  async create(caller: string, key: string, input: CreatePlatformInput, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<{ platform: PlatformRow; replayed: boolean }> {
     const id = randomUUID();
     try {
       return await this.db.tx(async (q) => {
@@ -37,9 +38,11 @@ export class PlatformRepository {
         if (reserved.replay) {
           const { rows } = await q.query<PlatformRow>('SELECT * FROM platform WHERE id = $1', [reserved.resourceId]);
           if (!rows[0]) throw notFound();
+          await within?.(q, rows[0]);
           return { platform: rows[0], replayed: true };
         }
         const { rows } = await q.query<PlatformRow>('INSERT INTO platform (id, "companyId", name) VALUES ($1, $2, $3) RETURNING *', [id, input.companyId, input.name]);
+        await within?.(q, rows[0]!);
         return { platform: rows[0]!, replayed: false };
       });
     } catch (e) {
@@ -58,14 +61,18 @@ export class PlatformRepository {
     return listPage<PlatformRow>(this.db, 'platform', query, { companyId: 'companyId' }, allowedPlatforms === undefined ? undefined : { column: 'id', values: allowedPlatforms === null ? null : [...allowedPlatforms] });
   }
 
-  async update(id: string, input: UpdatePlatformInput): Promise<PlatformRow> {
+  async update(id: string, input: UpdatePlatformInput, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<PlatformRow> {
     return this.db.tx(async (q) => {
       await this.ownership.assertWritable(q);
       const { rows } = await q.query<PlatformRow>('SELECT * FROM platform WHERE id = $1 FOR UPDATE', [id]);
       const current = rows[0];
       if (!current) throw notFound();
-      if (input.name === undefined || input.name === current.name) return current;
+      if (input.name === undefined || input.name === current.name) {
+        await within?.(q, current);
+        return current;
+      }
       const updated = await q.query<PlatformRow>('UPDATE platform SET name = $2, "updatedAt" = now() WHERE id = $1 RETURNING *', [id, input.name]);
+      await within?.(q, updated.rows[0]!);
       return updated.rows[0]!;
     });
   }
