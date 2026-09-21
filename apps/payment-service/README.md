@@ -18,7 +18,7 @@ no production traffic can reach any of this (the test provider refuses to start 
 
 - Service foundation on `@nawara/service-kit`: configuration, database connection/migration wiring,
   `/health`/`/ready`, service-token authentication, a combined service-token-or-user guard, the event
-  bus (in-memory locally, RabbitMQ by configuration), a generic rate limiter, OpenAPI at
+  bus (RabbitMQ by configuration and **required when `NODE_ENV=production`**; the in-memory bus is for development and tests only), a generic rate limiter, OpenAPI at
   `/payment/docs` (basic auth, unmounted unless a password is configured), and raw-body capture for
   the webhook route (Nest's `rawBody: true`, no kit change needed).
 - Schema: `currency`, `payment`, `payment_attempt`, `idempotency_key`, `webhook_event` — financial

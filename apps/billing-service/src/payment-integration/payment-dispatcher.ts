@@ -29,7 +29,8 @@ export class PaymentDispatcher {
 
   start(intervalMs = this.config.dispatch.intervalMs): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.dispatchOnce(), intervalMs);
+    // A whole-pass failure (for example the claim query) must not escape as an unhandled rejection: log it and let the next tick run.
+    this.timer = setInterval(() => void this.dispatchOnce().catch((e) => this.logger.error(`payment_dispatch_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
     this.timer.unref?.();
   }
 

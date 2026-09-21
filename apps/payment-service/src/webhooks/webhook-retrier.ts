@@ -26,7 +26,8 @@ export class WebhookRetriever {
 
   start(intervalMs = 5000): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.drainOnce(), intervalMs);
+    // A whole-pass failure (for example the scan query) must not escape as an unhandled rejection: log it and let the next tick run.
+    this.timer = setInterval(() => void this.drainOnce().catch((e) => this.logger.error(`webhook_retrier_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
     this.timer.unref?.();
   }
 

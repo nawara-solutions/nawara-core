@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { JsonLogger, ReadinessRegistry, configureApp } from '@nawara/service-kit';
+import { EVENT_BUS, JsonLogger, RabbitMqEventBus, ReadinessRegistry, configureApp } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { loadBillingConfig } from './config/billing-config.js';
 import { mountDocs } from './docs/mount-docs.js';
@@ -14,7 +14,10 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule.register(config), { bodyParser: false, bufferLogs: true });
   configureApp(app, config, logger);
 
-  if (config.rabbitmqUrl) registerRabbitmqReadiness(app.get(ReadinessRegistry), config.rabbitmqUrl);
+  if (config.rabbitmqUrl) {
+    const bus = app.get(EVENT_BUS);
+    registerRabbitmqReadiness(app.get(ReadinessRegistry), config.rabbitmqUrl, bus instanceof RabbitMqEventBus ? bus : undefined);
+  }
 
   mountDocs(app, config);
 

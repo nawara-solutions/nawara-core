@@ -6,7 +6,7 @@ export interface PaymentConfig extends BaseConfig {
   serviceTokens: ServiceTokenEntry[];
   authServiceUrl: string;
   authTimeoutMs: number;
-  /** Unset means "use the in-memory event bus" (local/dev/test); set means RabbitMQ. */
+  /** Unset means "use the in-memory event bus" (local/dev/test only); set means RabbitMQ. Required when `NODE_ENV=production`. */
   rabbitmqUrl?: string;
   /** ISO 4217 codes accepted for `payment.currency`. No code default: configuration only (O-10). */
   supportedCurrencies: string[];
@@ -27,6 +27,13 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   if (testProviderEnabled && base.isProduction) {
     throw new ConfigError('PAYMENT_TEST_PROVIDER must not be enabled when NODE_ENV=production');
   }
+  const rabbitmqUrl = reader.optional('RABBITMQ_URL');
+  if (rabbitmqUrl !== undefined) reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']);
+  if (base.isProduction && rabbitmqUrl === undefined) {
+    // Without a broker the service would fall back to the in-memory bus: the outbox relay would mark every event published while
+    // nothing reaches Billing. A development convenience that must not survive into production (same rule as billing-service).
+    throw new ConfigError('RABBITMQ_URL is required in production (the in-memory event bus is for development and tests only)');
+  }
   const supportedCurrencies = (reader.optional('PAYMENT_SUPPORTED_CURRENCIES', 'TND') ?? '')
     .split(',')
     .map((s) => s.trim().toUpperCase())
@@ -38,7 +45,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
     authServiceUrl: reader.required('AUTH_SERVICE_URL'),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
-    rabbitmqUrl: reader.optional('RABBITMQ_URL'),
+    rabbitmqUrl,
     supportedCurrencies,
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
     idempotencyTtlHours: reader.int('IDEMPOTENCY_TTL_HOURS', { default: 24, min: 1, max: 24 * 30 }),

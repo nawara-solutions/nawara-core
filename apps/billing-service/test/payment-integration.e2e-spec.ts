@@ -328,6 +328,57 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       expect(payment.getCalls).not.toContain(paymentId);
     });
 
+    it('fairness (H-02): unpaid requests at the head of the scan never starve a later stale request, even when the batch is smaller than the backlog', async () => {
+      const early = [await requestedRow(), await requestedRow(), await requestedRow(), await requestedRow(), await requestedRow()];
+      for (const e of early) payment.whenGet(e.paymentId, snapshotFor(e.open, e.request, e.paymentId, 'pending'));
+      const late = await requestedRow();
+      payment.whenGet(late.paymentId, snapshotFor(late.open, late.request, late.paymentId, 'succeeded'));
+
+      const scanner = new PaymentReconciler(requests, payment, t.config);
+      const batch = 3;
+      const eligible = (await rows<{ n: number }>(`SELECT count(*)::int AS n FROM payment_request WHERE status = 'requested' AND "paymentId" IS NOT NULL`))[0]!.n;
+      const asked: string[] = [];
+      let passes = 0;
+      while ((await requestRow(late.request.id)).status !== 'paid' && passes <= Math.ceil(eligible / batch)) {
+        payment.getCalls = [];
+        await scanner.reconcileOnce(0, batch);
+        expect(payment.getCalls.length).toBeLessThanOrEqual(batch); // bounded work per pass
+        asked.push(...payment.getCalls);
+        passes += 1;
+      }
+      expect((await requestRow(late.request.id)).status).toBe('paid'); // reached although every earlier row stayed unresolved
+      expect(passes).toBeGreaterThan(1); // it was NOT in the first batch: the scan moved on
+      expect(new Set(asked).size).toBe(asked.length); // within one cycle no request is asked about twice
+      for (const e of early) expect((await requestRow(e.request.id)).status).toBe('requested'); // the unpaid ones are untouched
+    });
+
+    it('a restarted reconciler (no remembered position) still reaches later requests: nothing is skipped or lost', async () => {
+      const early = [await requestedRow(), await requestedRow(), await requestedRow(), await requestedRow()];
+      for (const e of early) payment.whenGet(e.paymentId, snapshotFor(e.open, e.request, e.paymentId, 'pending'));
+      const late = await requestedRow();
+      payment.whenGet(late.paymentId, snapshotFor(late.open, late.request, late.paymentId, 'succeeded'));
+      const eligible = (await rows<{ n: number }>(`SELECT count(*)::int AS n FROM payment_request WHERE status = 'requested' AND "paymentId" IS NOT NULL`))[0]!.n;
+
+      await new PaymentReconciler(requests, payment, t.config).reconcileOnce(0, 3); // a first process makes some progress, then "dies"
+      const restarted = new PaymentReconciler(requests, payment, t.config); // a second one starts with no position
+      for (let i = 0; i <= Math.ceil(eligible / 3) && (await requestRow(late.request.id)).status !== 'paid'; i++) await restarted.reconcileOnce(0, 3);
+      expect((await requestRow(late.request.id)).status).toBe('paid');
+    });
+
+    it('the scan resumes strictly after the last row it examined, in (updatedAt, id) order, and the supporting partial index exists', async () => {
+      const a = await requestedRow();
+      const b = await requestedRow();
+      const page1 = await requests.findStaleRequested(1000, 0);
+      const ids = page1.map((r) => r.id);
+      expect(ids.indexOf(a.request.id)).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf(a.request.id)).toBeLessThan(ids.indexOf(b.request.id));
+      const afterA = await requests.findStaleRequested(1000, 0, page1.find((r) => r.id === a.request.id)!.position);
+      expect(afterA.map((r) => r.id)).not.toContain(a.request.id);
+      expect(afterA.map((r) => r.id)).toContain(b.request.id);
+      const idx = await rows(`SELECT indexdef FROM pg_indexes WHERE indexname = 'payment_request_reconcile_idx'`);
+      expect(idx).toHaveLength(1);
+    });
+
     it('two overlapping reconciliation passes never run at once: the second call while one is in flight is a no-op', async () => {
       const { open, request, paymentId } = await requestedRow();
       payment.whenGet(paymentId, snapshotFor(open, request, paymentId, 'succeeded'));

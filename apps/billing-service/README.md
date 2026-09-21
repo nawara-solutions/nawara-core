@@ -42,9 +42,17 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   - `PaymentDispatcher` — a background job (same start/stop shape as the kit's `OutboxRelay`) that claims `created`/stale-`sending`
     payment requests and calls Payment's `POST /payment/payments`, never touching Payment's own state or database directly.
   - `PaymentEventConsumer` — subscribes to Payment's terminal events (`payment.succeeded/failed/cancelled/expired`) and feeds them
-    through the SAME decision procedure the reconciler uses; trusts nothing about the wire payload's shape.
+    through the SAME decision procedure the reconciler uses; trusts nothing about the wire payload's shape. Its RabbitMQ
+    subscription is supervised by the kit's bus: after a lost connection, a lost channel or a broker-side cancel it is
+    re-created with bounded backoff and drains the queued backlog; redeliveries are absorbed by `payment_event_receipt`. `/ready`
+    reports `rabbitmq-consumer` as failing while the consumer is not attached (the HTTP API does not depend on it, but an
+    instance that receives no Payment events should not look healthy).
   - `PaymentReconciler` — settles a `requested` payment request that has gone stale with no terminal event, by asking Payment
-    directly (`GET /payment/payments/{id}`) and applying the answer through that same decision procedure.
+    directly (`GET /payment/payments/{id}`) and applying the answer through that same decision procedure. A request Payment still
+    reports as unpaid is not updated, so the scan is a keyset walk over `(updatedAt, id)` (supported by
+    `payment_request_reconcile_idx`): each pass examines one batch and the next resumes after it, starting over from the oldest
+    when the end is reached, so later requests are reached however many earlier ones stay unpaid. The position is in memory only.
+    This changes no request lifetime: an unpaid request still never expires (B-009 is undecided).
   - Cancel (`POST /billing/payment-requests/{id}/cancel`, producer-only): a request never sent is cancelled locally; a request
     already sent stamps `cancelRequestedAt` and asks Payment to cancel — the request's own terminal state still arrives only
     through the normal event/reconciliation path, never set directly by this endpoint.

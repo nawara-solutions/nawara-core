@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
 import { DbService, OutboxService } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
 import type { PaymentRow } from './payment.types.js';
@@ -12,6 +12,7 @@ import type { PaymentRow } from './payment.types.js';
 export class ExpirySweeper {
   private timer?: NodeJS.Timeout;
   private running = false;
+  private readonly logger = new Logger(ExpirySweeper.name);
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -20,7 +21,8 @@ export class ExpirySweeper {
 
   start(intervalMs = 5000): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.sweepOnce(), intervalMs);
+    // A whole-pass failure (for example the scan query) must not escape as an unhandled rejection: log it and let the next tick run.
+    this.timer = setInterval(() => void this.sweepOnce().catch((e) => this.logger.error(`expiry_sweep_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
     this.timer.unref?.();
   }
 
