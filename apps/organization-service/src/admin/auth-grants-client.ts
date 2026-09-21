@@ -57,12 +57,20 @@ export class HttpAuthGrantsClient implements AuthGrantsClient {
     const res = await this.call('GET', '/auth/grants', userBearer);
     if (res.status === 401) throw new UnauthorizedException();
     if (!res.ok) throw new ServiceUnavailableException();
-    const b = (await res.json()) as Partial<AuthGrantFacts>;
+    let b: Partial<AuthGrantFacts>;
+    try {
+      b = (await res.json()) as Partial<AuthGrantFacts>;
+    } catch {
+      throw new ServiceUnavailableException(); // malformed JSON: never guess, fail closed
+    }
     if (
       typeof b.userId !== 'string' ||
       (b.kind !== 'member' && b.kind !== 'owner' && b.kind !== 'operator') ||
       !Array.isArray(b.platformAssignments) ||
-      !Array.isArray(b.organizationAdminMemberships)
+      !Array.isArray(b.organizationAdminMemberships) ||
+      // An owner's companyId is load-bearing for every authority check: a rename or drop of this
+      // field must never be silently reinterpreted as "owner with no company" (Stage 10.1 audit).
+      (b.kind === 'owner' ? typeof b.companyId !== 'string' || b.companyId === '' : b.companyId != null)
     ) {
       throw new ServiceUnavailableException(); // malformed response: never guess, fail closed
     }

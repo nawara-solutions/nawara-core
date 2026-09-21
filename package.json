@@ -10,7 +10,8 @@
     "prepare": "husky",
     "check:repo": "node scripts/check-repo.mjs",
     "test:repo": "node --test scripts/check-repo.test.mjs",
-    "test:e2e:real-broker": "npm run build -w @nawara/service-kit -w billing-service -w payment-service && npm run test:e2e -w @nawara/e2e-real-broker"
+    "test:e2e:real-broker": "npm run build -w @nawara/service-kit -w billing-service -w payment-service && npm run test:e2e -w @nawara/e2e-real-broker",
+    "test:e2e:auth-organization": "npm run build -w @nawara/service-kit -w auth-service -w organization-service && npm run test:e2e -w @nawara/e2e-auth-organization"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.2",
