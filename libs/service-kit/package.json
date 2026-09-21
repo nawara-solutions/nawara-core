@@ -25,6 +25,7 @@
   "bin": {
     "nawara-migrate": "./dist/cli/migrate.js",
     "nawara-check-dlq": "./dist/cli/check-dlq-depth.js",
+    "nawara-dlq": "./dist/cli/dlq.js",
     "nawara-check-outbox-lag": "./dist/cli/check-outbox-lag.js"
   },
   "scripts": {

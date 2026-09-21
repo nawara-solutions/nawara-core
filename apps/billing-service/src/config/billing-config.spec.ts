@@ -50,7 +50,7 @@ describe('loadBillingConfig', () => {
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'dispatch', 'docs', 'isProduction', 'logLevel',
-      'nodeEnv', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqUrl', 'rateLimits', 'reconcile',
+      'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqUrl', 'rateLimits', 'reconcile',
       'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
     ]);
   });
@@ -62,6 +62,26 @@ describe('loadBillingConfig', () => {
     expect(cfg.paymentTimeoutMs).toBe(5000);
     expect(cfg.dispatch).toEqual({ intervalMs: 2000, batchSize: 50, staleSendingMs: 60_000 });
     expect(cfg.reconcile).toEqual({ intervalMs: 30_000, staleRequestedMs: 300_000 });
+  });
+
+  it('has the M-07 Payment event retry policy defaults (3 retries, 5 s) and accepts overrides', () => {
+    expect(loadBillingConfig(BASE).paymentEventRetry).toEqual({ maxRetries: 3, delayMs: 5000 });
+    expect(loadBillingConfig({ ...BASE, BILLING_PAYMENT_EVENT_RETRY_MAX: '2', BILLING_PAYMENT_EVENT_RETRY_DELAY_MS: '100' }).paymentEventRetry).toEqual({ maxRetries: 2, delayMs: 100 });
+    expect(loadBillingConfig({ ...BASE, BILLING_PAYMENT_EVENT_RETRY_MAX: '0' }).paymentEventRetry.maxRetries).toBe(0); // 0 is valid: dead-letter on the first failure
+    expect(loadBillingConfig({ ...BASE, BILLING_PAYMENT_EVENT_RETRY_MAX: '10', BILLING_PAYMENT_EVENT_RETRY_DELAY_MS: '300000' }).paymentEventRetry).toEqual({ maxRetries: 10, delayMs: 300_000 });
+  });
+
+  it.each([
+    ['BILLING_PAYMENT_EVENT_RETRY_MAX', '-1'],
+    ['BILLING_PAYMENT_EVENT_RETRY_MAX', '11'],
+    ['BILLING_PAYMENT_EVENT_RETRY_MAX', '1.5'],
+    ['BILLING_PAYMENT_EVENT_RETRY_MAX', 'many'],
+    ['BILLING_PAYMENT_EVENT_RETRY_DELAY_MS', '99'],
+    ['BILLING_PAYMENT_EVENT_RETRY_DELAY_MS', '0'],
+    ['BILLING_PAYMENT_EVENT_RETRY_DELAY_MS', '300001'],
+    ['BILLING_PAYMENT_EVENT_RETRY_DELAY_MS', 'NaN'],
+  ])('refuses %s=%s, naming the variable', (name, value) => {
+    expect(refusal({ ...BASE, [name]: value })).toContain(name);
   });
 
   it('refuses a PAYMENT_SERVICE_TOKEN shorter than 32 characters, never echoing it', () => {
