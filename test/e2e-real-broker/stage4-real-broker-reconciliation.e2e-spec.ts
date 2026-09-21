@@ -198,11 +198,9 @@ describeWithEnv(
       const cancelResp = await asProducer('POST', `/billing/payment-requests/${requestId}/cancel`);
       expect(cancelResp.status).toBe(200);
 
-      // ---- Payment really did cancel and really did publish; the message is genuinely unroutable now, so the
-      //      request must sit `requested` for a while — proving this is not a race, it is a real miss ----
-      await new Promise((r) => setTimeout(r, RECONCILE_STALE_MS + 200));
-      const stillRequested = await asProducer('GET', `/billing/payment-requests/${requestId}`);
-      expect(stillRequested.json.status).toBe('requested');
+      // Nothing here asserts that the request is still `requested` after some wait: the reconciler is allowed to settle it from
+      // `RECONCILE_STALE_MS` after the cancel (its clock is `updatedAt`, bumped by the cancel), on a 1 s tick, so any wall-clock
+      // "still requested" check races it. What proves the event was missed is below: the cancel is recorded with causeType 'reconciliation'.
 
       // ---- the reconciler's own real HTTP lookup to Payment must be what settles it, once the row is stale enough ----
       let settled: any;
@@ -216,6 +214,20 @@ describeWithEnv(
         `payment request ${requestId} to reach 'cancelled' via PaymentReconciler, since the real event never arrived`,
       );
       expect(settled.status).toBe('cancelled');
+
+      // ---- the miss was real: Payment DID publish payment.cancelled (its outbox row is marked published), into an exchange Billing's queue
+      //      was unbound from, so the broker dropped it. Waited for on the condition (the relay publishes on its own interval), not on a clock ----
+      const paymentAdmin = new pg.Pool({ connectionString: paymentDb.url });
+      paymentAdmin.on('error', () => undefined);
+      try {
+        await waitFor(
+          async () => (await paymentAdmin.query(`SELECT 1 FROM outbox WHERE name = 'payment.cancelled' AND payload->>'paymentRequestId' = $1 AND "publishedAt" IS NOT NULL`, [requestId])).rowCount === 1,
+          15_000,
+          `Payment's payment.cancelled event for ${requestId} to be published (while unroutable for Billing)`,
+        );
+      } finally {
+        await paymentAdmin.end();
+      }
 
       // ---- proof it was reconciliation, not the consumer: `applyReconciledSnapshot` runs the SAME `applyPaymentEvent`
       //      procedure the consumer does (SDD 21.5), so a receipt row exists either way — the real discriminator is
