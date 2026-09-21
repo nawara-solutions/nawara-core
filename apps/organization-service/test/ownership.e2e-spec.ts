@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { copyFileSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +25,31 @@ async function failsWith(url: string, text: string, params: unknown[] = []): Pro
   } finally {
     await c.end();
   }
+}
+
+/**
+ * `organization_app` is a CLUSTER-wide role, and it is also the name of the real runtime role that `infra/postgres/init` creates for a developer's
+ * (or any persistent) Organization database. This suite needs to give it a password it knows, so it may do so ONLY on a cluster that is a disposable
+ * test cluster. There is no way to prove that from a connection string alone, so the guard refuses on every sign that the cluster hosts the real
+ * service, and the operator's explicit choice of `TEST_DATABASE_ADMIN_URL` (a cluster this suite may create and drop databases on) is the rest:
+ *  - the real service database `organization`, or the migrator role `organization_migrator`, exists (the init script always creates both); or
+ *  - a session is connected as `organization_app` right now (a running service, or another tool, is using it).
+ * On any of these the credentials are NOT touched and the suite fails loudly instead.
+ */
+async function assertDisposableTestCluster(admin: pg.Client, role: string): Promise<void> {
+  const real = await admin.query(`SELECT (SELECT count(*) FROM pg_database WHERE datname = 'organization')::int AS db, (SELECT count(*) FROM pg_roles WHERE rolname = 'organization_migrator')::int AS migrator`);
+  if (real.rows[0].db > 0 || real.rows[0].migrator > 0) {
+    throw new Error(`refusing to set a test password for "${role}": this cluster hosts the real Organization service (database "organization" or role "organization_migrator" exists). Point TEST_DATABASE_ADMIN_URL at a throwaway PostgreSQL.`);
+  }
+  const sessions = await admin.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename = $1`, [role]);
+  if (sessions.rows[0].n > 0) throw new Error(`refusing to set a test password for "${role}": it has ${sessions.rows[0].n} open session(s), so it is in use.`);
+}
+
+/** Makes `role` a non-privileged login role whose password is `password`, creating it if it is absent. The password goes through the driver's literal escaping (DDL cannot take bind parameters). */
+async function ensureTestRole(admin: pg.Client, role: string, password: string): Promise<void> {
+  const attributes = 'LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION';
+  const exists = (await admin.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role])).rowCount === 1;
+  await admin.query(`${exists ? 'ALTER' : 'CREATE'} ROLE ${admin.escapeIdentifier(role)} WITH ${attributes} PASSWORD ${admin.escapeLiteral(password)}`);
 }
 
 describeWithEnv('ownership transition: state machine, gates, import, invariants (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
@@ -112,10 +138,16 @@ describeWithEnv('ownership transition: state machine, gates, import, invariants 
     let db: TestDatabase;
     let rt: string;
     beforeAll(async () => {
+      // A per-run password the runtime URL below carries: the role must NOT inherit the admin URL's password, or authentication depends on the cluster's auth method.
+      const roleSecret = randomBytes(24).toString('hex');
       const a = new pg.Client({ connectionString: ADMIN });
       await a.connect();
-      await a.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${ROLE}') THEN CREATE ROLE ${ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF; END $$`);
-      await a.end();
+      try {
+        await assertDisposableTestCluster(a, ROLE);
+        await ensureTestRole(a, ROLE, roleSecret);
+      } finally {
+        await a.end();
+      }
       db = await createTestDatabase(ADMIN, 'own_role');
       dbs.push(db);
       // The infrastructure grants DML on every table the migrator creates; the migration then narrows it (as in production).
@@ -124,6 +156,7 @@ describeWithEnv('ownership transition: state machine, gates, import, invariants 
       await runMigrations(db.url, [kitMigrationsDir, organizationMigrationsDir]);
       const u = new URL(db.url);
       u.username = ROLE;
+      u.password = roleSecret;
       rt = u.toString();
     });
     afterAll(async () => {
