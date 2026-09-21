@@ -80,8 +80,47 @@ bus.subscribe({ queue: 'svc.thing', bindings: ['thing.*'], handler: (e) => inbox
 * The relay publishes **at least once**; consumers absorb duplicates through the inbox (inbox row and effect share one transaction).
 * A broker outage only delays delivery: the relay records the error class, backs off, and business transactions are unaffected.
 * Metadata (`eventId`, `occurredAt`, `correlationId`, `source`, `version`) travels in message **headers**; the payload keeps its flat shape. Payloads carry opaque ids and plain facts, never secrets.
-* A failing consumer dead-letters the message (`<queue>.dead`); nothing is dropped silently or retried in a hot loop.
+* A failing consumer is retried a bounded number of times, then dead-lettered (`<queue>.dead`) for an operator to inspect and replay; nothing is dropped silently or retried in a hot loop. See **Dead letters** below.
 * An event published while **no queue is bound** is dropped by the broker (normal topic-exchange behaviour): consumers must declare their queue before events matter.
+
+## Dead letters: retry, inspect, replay
+
+Topology per consumer queue `Q` (all durable, all declared by the consumer's `subscribe`; `Q`'s own arguments are unchanged):
+
+| Queue | Role |
+|---|---|
+| `Q` | work queue, bound to the shared topic exchange |
+| `Q.retry` | delay queue: nothing consumes it; a message's own `expiration` dead-letters it (default exchange) straight back into `Q` |
+| `Q.dead` | the dead-letter queue: holds a failed message until an operator replays it. Nothing deletes it automatically |
+
+**Failure handling.** A handler that rejects is classified by what it throws:
+
+* `PermanentEventFailure(reason)` (a malformed payload, an identifier that is not a valid id): dead-lettered at once, no retry.
+* anything else (a lost connection, a deadlock, a timeout): possibly transient, so retried up to `retry.maxRetries` (default **3**) times, `retry.delayMs` (default **5000**) apart, then dead-lettered as `retries_exhausted`. `maxRetries: 0` dead-letters on the first failure.
+* a message that is not an event at all (bad JSON, no message id or type): dead-lettered as `malformed`; the handler is never called.
+
+Retry and dead-lettering republish the message with its original body, message id, type and headers (so event id and correlation id never change) plus annotation headers (`x-nawara-retry-count`, and on the dead-letter copy `x-nawara-failure` = `malformed|permanent|retries_exhausted`, `-failure-reason`, `-failure-error` (an error class name, never a message), `-failed-at`, `-consumer`). The dead-letter queue is re-declared before every dead-lettering (a broker drops a message dead-lettered into a missing queue). The copy is confirmed by the broker before the original is acknowledged, so a crash in between duplicates (consumers de-duplicate) and never loses. Retried messages can be redelivered out of order relative to newer ones: consumers validate state, not order. Notices (via `onNotice`; never a URL, credential, payload or error message): `event_retry_scheduled`, `event_retry_exhausted`, `event_dead_lettered`, each with `queue=`, `event=`, `correlationId=`.
+
+**Inspect** (read-only; nothing is consumed or deleted):
+
+```bash
+# `nawara-dlq` is the kit's `bin`; from a built checkout or a service image run `node libs/service-kit/dist/cli/dlq.js` instead
+RABBITMQ_URL=amqp://... nawara-check-dlq --queue billing.payment-events.dead          # depth only; exits 1 if non-empty
+RABBITMQ_URL=amqp://... nawara-dlq list --queue billing.payment-events.dead --field paymentRequestId
+# dlq_depth queue=... depth=1 shown=1
+# dlq_message position=1 event=<id> name=payment.cancelled correlationId=<id> classification=retries_exhausted reason=- error=error retries=3 replays=0 failedAt=<iso> paymentRequestId=<id>
+```
+
+`--field <name>` shows the named top-level payload field (a scalar, truncated); payloads are never dumped otherwise.
+
+**Replay** moves ONE message back into its consumer's work queue, unchanged apart from a replay counter, and reports what became of it:
+
+```bash
+RABBITMQ_URL=amqp://... nawara-dlq replay --queue billing.payment-events.dead --event-id <id> [--wait-seconds 10]
+# dlq_replay_started ...   dlq_replay_result outcome=consumed|rejected_again|pending|not_found ...
+```
+
+Exit code `0` consumed, `2` rejected again (it is back in the DLQ, annotated, and can be replayed again), `3` still pending when the wait ended, `4` not found in the DLQ, `1` error. `consumed` means the consumer acknowledged it: what the consumer DID with it (applied, already applied, deferred, conflict) is that consumer's own log line and record. The tool only republishes to the work queue named by the `.dead` queue, never edits a body, and the message goes through the consumer's normal validation and de-duplication: it has no way to apply anything itself. It needs the broker credentials and nothing else; there is no HTTP endpoint and no application-level authorization: the boundary is the trusted infrastructure/operator boundary around `RABBITMQ_URL`. Printed values are limited to the fixed columns above (plus `--field`), reduced to printable ASCII and cut to 128 characters, because header values are written by whoever published the message. If the same event id is in the DLQ twice, one invocation replays the first.
 
 ## Rate limiting
 
@@ -100,7 +139,7 @@ await this.rateLimit.assert('signup', req.ip, { limit: 5, windowSec: 60 }); // t
 
 ## Not in the kit (yet)
 
-OpenAPI setup, a retry/delay policy for consumers beyond the dead-letter queue, outbox pruning, and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
+OpenAPI setup, outbox pruning, alerting on the dead-letter queue (the tools below read it; nothing here pages anyone), and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
 
 `RabbitMqEventBus` consumers are supervised: `subscribe()` fails fast when the broker is unreachable at start, but once attached a consumer that loses its connection, its channel or its queue is re-created with bounded exponential backoff (`consumerReconnect`) until `close()`. `consumerStatus()` reports `consuming` / `reconnecting` for readiness, and `onNotice` receives `rabbitmq_consumer_lost` / `rabbitmq_consumer_recovered` / `rabbitmq_settle_failed` (never a URL or credential). A message being handled when the channel dies is redelivered by the broker, so handlers must stay idempotent. `BrokerProxy` (`@nawara/service-kit/testing`) severs and restores a broker connection in tests.
 

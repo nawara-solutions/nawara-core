@@ -27,7 +27,7 @@ export { EventsModule, OutboxRelayService, EVENTS_OPTIONS, type EventsModuleOpti
 export { OutboxService, type NewEvent } from './events/outbox.service.js';
 export { OutboxRelay, type RelayOptions } from './events/outbox-relay.js';
 export { InboxService, type InboxOutcome } from './events/inbox.service.js';
-export { EVENT_BUS, EVENT_NAME, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription } from './events/types.js';
+export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription } from './events/types.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
 export { RabbitMqEventBus, type RabbitMqOptions, type ConsumerState, type ConsumerStatus } from './events/rabbitmq-event-bus.js';
 
@@ -37,3 +37,5 @@ export { RateLimitService, type RateLimitRule, type RateLimitResult } from './ra
 export { configureApp } from './bootstrap.js';
 
 export { canonicalJson, sha256Hex, digestRows, sealSnapshot, serializeSnapshot, verifySnapshot, SnapshotError, type SealedSnapshot, type SealInput, type SnapshotRow, type VerifyResult } from './snapshot/snapshot.js';
+export { inspectDeadLetters, replayDeadLetter, type DeadLetterInfo, type Inspection, type ReplayOutcome, type ReplayResult } from './events/dlq-tools.js';
+export { HEADER as DEAD_LETTER_HEADER, deadQueueName, retryQueueName } from './events/dead-letter.js';

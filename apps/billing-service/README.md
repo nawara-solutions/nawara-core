@@ -46,7 +46,12 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
     subscription is supervised by the kit's bus: after a lost connection, a lost channel or a broker-side cancel it is
     re-created with bounded backoff and drains the queued backlog; redeliveries are absorbed by `payment_event_receipt`. `/ready`
     reports `rabbitmq-consumer` as failing while the consumer is not attached (the HTTP API does not depend on it, but an
-    instance that receives no Payment events should not look healthy).
+    instance that receives no Payment events should not look healthy). A failure while applying an event is classified: a
+    malformed payload, or an identifier PostgreSQL rejects as the wrong type (SQLSTATE class 22, e.g. a `paymentRequestId` that
+    is not a uuid), is **permanent** and is dead-lettered at once; anything else (a lost connection, a deadlock) is retried by
+    the bus (default 3 retries, 5 s apart, through `billing.payment-events.retry`) and then dead-lettered. A `conflict` or
+    `deferred` outcome is not a failure: it is acknowledged and recorded in its `payment_event_receipt` row. See
+    "Dead-lettered Payment events" below.
   - `PaymentReconciler` — settles a `requested` payment request that has gone stale with no terminal event, by asking Payment
     directly (`GET /payment/payments/{id}`) and applying the answer through that same decision procedure. A request Payment still
     reports as unpaid is not updated, so the scan is a keyset walk over `(updatedAt, id)` (supported by
@@ -69,6 +74,43 @@ discounts, tax engine, credit notes, refunds, real payment providers, cash, payo
 infrastructure, merchant of record, external customers, branches, multiple legal entities, exchange rates, currency conversion,
 membership-based payment authorization, entitlements. No table exists for any of them (a test asserts the exact table set).
 
+## Dead-lettered Payment events (inspect and replay)
+
+Queues: `billing.payment-events` (work), `billing.payment-events.retry` (delay, no consumer), `billing.payment-events.dead` (the
+DLQ, durable, never emptied automatically). Log events (one structured line each, all carry `event=` and `correlationId=`):
+
+| Event | Meaning |
+|---|---|
+| `payment_event_processing_failure` | applying the event threw; `classification=transient\|permanent`, `retry=<n>`, `error=<class>`, `paymentRequestId=` |
+| `event_retry_scheduled` / `event_retry_exhausted` / `event_dead_lettered` | the bus retried, gave up, or moved it to the DLQ (`classification=malformed\|permanent\|retries_exhausted`) |
+| `payment_event_dead_letter` | the payload failed the shape check (permanent) |
+| `payment_event_replay_succeeded` | a replayed event was applied now |
+| `payment_event_replay_duplicate` | a replayed event had already been processed: nothing changed (`recordedOutcome=`) |
+| `payment_event_replay_ignored` / `_deferred` / `_conflict` | a replayed event was recorded as ignored / deferred / conflict, like a normal delivery |
+| `payment_event_replay_rejected` | a replayed event failed permanently again: it is back in the DLQ |
+
+Runbook (needs `RABBITMQ_URL` and the kit's built CLI, `node libs/service-kit/dist/cli/dlq.js`, which the service image contains like the migrate CLI; the steps abbreviate it as `nawara-dlq`):
+
+1. **Inspect the DLQ.** `nawara-check-dlq --queue billing.payment-events.dead` (depth; exits 1 if non-empty), then
+   `nawara-dlq list --queue billing.payment-events.dead --field paymentRequestId`. Nothing is consumed.
+2. **Identify the event** (`event=`) and read its `classification`, `reason`, `error` and `retries`. `retries_exhausted` usually means a
+   dependency was down (fix that first); `permanent` means the event itself is wrong and a replay will be rejected again unless
+   something else has changed.
+3. **Replay that one event.** `nawara-dlq replay --queue billing.payment-events.dead --event-id <id>`. Exit 0 = the consumer
+   acknowledged it, 2 = rejected again (still in the DLQ), 3 = still pending, 4 = not in the DLQ.
+4. **Verify the consumer's result** in Billing's log (`payment_event_replay_*` with the same `event=`), then in the database:
+   `SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = '<id>';` (exactly one row; `applied`, or `deferred` /
+   `conflict` which need the reconciler or a manual review as before).
+5. **Verify Billing state and that nothing was applied twice:** `SELECT status FROM payment_request WHERE id = '<paymentRequestId>';`
+   and `SELECT count(*) FROM billing_transition WHERE "entityId" = '<paymentRequestId>' AND "causeId" = '<id>';` (at most one).
+   Replaying an event that was already processed is a no-op (`payment_event_replay_duplicate`).
+
+Replay cannot settle money: it republishes the original bytes into the work queue and the normal consumer decides, under the
+invoice lock, with `payment_event_receipt` as the de-duplication authority. It is not an HTTP endpoint and has no authorization
+model of its own: the security boundary is the trusted infrastructure/operator boundary around the broker credentials (whoever holds
+them can run it, as with `rabbitmqctl`, and could equally publish to the broker directly). Verified against a real broker (a local test container, not a production broker) and two
+live processes in `test/e2e-real-broker/stage4-real-broker-dlq-replay.e2e-spec.ts`; **not** exercised in any deployed environment.
+
 ## Configuration
 
 Every value below is read at startup and validated; an invalid or missing required value stops the process.
@@ -85,6 +127,8 @@ Secrets may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME`. 
 | `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |
 | `BILLING_DISPATCH_INTERVAL_MS`, `BILLING_DISPATCH_BATCH_SIZE`, `BILLING_DISPATCH_STALE_SENDING_MS` | no | `PaymentDispatcher`'s poll interval, batch size and stale-`sending` retry threshold (defaults: 2000ms, 50, 60s) |
 | `BILLING_RECONCILE_INTERVAL_MS`, `BILLING_RECONCILE_STALE_REQUESTED_MS` | no | `PaymentReconciler`'s poll interval and stale-`requested` threshold (defaults: 30s, 5min) |
+| `BILLING_PAYMENT_EVENT_RETRY_MAX` | no | How many times a Payment event whose processing failed with a possibly-transient error is retried before it is dead-lettered (default 3, range 0-10; `0` = dead-letter on the first failure). A permanent failure is never retried. See "Dead-lettered Payment events" |
+| `BILLING_PAYMENT_EVENT_RETRY_DELAY_MS` | no | Wait between those retries (default 5000, range 100-300000) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | docs credentials; the password must be 16+ characters; without it the docs are not mounted |
 | `NODE_ENV`, `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY` | no | the kit's base configuration (`NODE_ENV` defaults to `production`) |
 

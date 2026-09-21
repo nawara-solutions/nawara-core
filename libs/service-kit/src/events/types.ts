@@ -7,6 +7,10 @@ export interface EventHeaders {
   source: string;
   /** Payload version; a breaking payload change publishes version + 1 under the same event name. */
   version: number;
+  /** Set by the consumer side of the bus, never by a producer: how many automatic retries this delivery is already into. Absent on a first delivery. */
+  retryCount?: number;
+  /** Set by the `nawara-dlq replay` tool, never by a producer: how many times an operator has replayed this message from its dead-letter queue. Absent on a message that was never replayed. */
+  replayCount?: number;
 }
 
 export interface EventEnvelope {
@@ -23,8 +27,25 @@ export interface EventSubscription {
   queue: string;
   /** Routing-key patterns: `*` matches one word, `#` zero or more. */
   bindings: string[];
-  /** Resolve = processed (acknowledge). Reject = failed (dead-lettered, never silently dropped). */
+  /**
+   * Resolve = processed (acknowledge). Reject = failed, and never silently dropped: a rejection is retried a bounded number of times
+   * (RabbitMQ implementation) and then dead-lettered for an operator to inspect and replay. A rejection with a
+   * `PermanentEventFailure` is dead-lettered at once (retrying cannot change the outcome).
+   */
   handler(event: EventEnvelope): Promise<void>;
+}
+
+/**
+ * Thrown by a handler to say "this event can never succeed as it stands" (a malformed payload, an identifier that is not a valid id):
+ * automatic retry would only repeat the failure, so the bus dead-letters it immediately. Any OTHER error is treated as possibly
+ * transient and retried a bounded number of times first. `reason` is a short stable code (lowercase, digits, underscore) that is
+ * recorded on the dead-lettered message; it must never carry payload data.
+ */
+export class PermanentEventFailure extends Error {
+  constructor(readonly reason: string, options?: { cause?: unknown }) {
+    super(reason, options);
+    this.name = 'PermanentEventFailure';
+  }
 }
 
 /**

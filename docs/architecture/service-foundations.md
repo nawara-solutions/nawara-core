@@ -36,8 +36,8 @@ and refund workflows; entitlements; the organization-service and how Auth refere
 
 ## 4. Deferred (consciously)
 
-Rate limiting and OpenAPI setup in the kit (ADR-0034 lists them; not yet built); consumer retry/delay policy beyond the dead-letter
-queue; outbox and inbox pruning; a CI job for ai-service (Python); formatting checks; deploy workflows for new services;
+Rate limiting and OpenAPI setup in the kit (ADR-0034 lists them; not yet built); dead-letter alerting (retry and replay tooling exist: M-07);
+outbox and inbox pruning; a CI job for ai-service (Python); formatting checks; deploy workflows for new services;
 production database roles, backups and RabbitMQ; migrating auth-service onto the kit.
 
 ## 5. Deployment safety (fixes in this change)
@@ -96,7 +96,7 @@ ai-service (no CI job); behaviour under load; anything in production beyond the 
 2. **`HttpAuthClient` in the kit** reads Auth's identity response (organization id, membership status). It holds no membership logic,
    but it does name those concepts, and it is the only file the architecture check allow-lists. Keep it in the kit, or move it to
    each service?
-3. **Failed event consumer → dead-letter queue immediately** (no retry delay). ADR-0037 does not specify a retry policy.
+3. **Failed event consumer → bounded retry (default 3 × 5 s, `<queue>.retry`), then the dead-letter queue; a permanent failure goes to the DLQ at once** (audit M-07; operator tooling: `nawara-dlq`, see `libs/service-kit/README.md`). ADR-0037 does not specify a retry policy.
 4. **Kit default `NODE_ENV` is `production`** when unset (safe by default; local runs must set `development`).
 5. **Relay holds row locks while publishing** a batch of up to 50 events. Fine at low volume; revisit before high volume.
 

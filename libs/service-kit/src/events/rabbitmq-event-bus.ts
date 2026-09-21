@@ -1,5 +1,6 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
-import { EVENT_NAME, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
+import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
+import { EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
   url: string;
@@ -8,7 +9,13 @@ export interface RabbitMqOptions {
   connectTimeoutMs?: number;
   /** Backoff between attempts to re-establish a consumer whose connection or channel was lost. Bounded; defaults 500 ms to 30 s. */
   consumerReconnect?: { baseDelayMs?: number; maxDelayMs?: number };
-  /** Operational notices (consumer lost / recovered / settle failed). Never carries a URL, credential or payload. */
+  /**
+   * Automatic retry of a handler that rejected with a possibly-transient error: up to `maxRetries` further attempts (default 3), each
+   * after `delayMs` (default 5000) in the durable `<queue>.retry` delay queue, then the message is dead-lettered. `maxRetries: 0`
+   * dead-letters on the first failure. A `PermanentEventFailure` is never retried.
+   */
+  retry?: { maxRetries?: number; delayMs?: number };
+  /** Operational notices (consumer lost / recovered, retry / dead-letter, settle failed). Never carries a URL, credential or payload. */
   onNotice?: (message: string) => void;
 }
 
@@ -38,6 +45,11 @@ interface ConsumerHandle {
  * (channel, topology, prefetch, consume) with bounded exponential backoff until `close()`. The FIRST `subscribe()` still
  * fails fast, so a service that cannot reach the broker at start does not pretend to be consuming. Redelivery after a
  * recovery is expected (at least once): consumers deduplicate.
+ *
+ * A handler that rejects is retried a bounded number of times through `<queue>.retry` (a durable delay queue that expires back into
+ * `<queue>`), then dead-lettered to `<queue>.dead` with annotations (failure class, retry count, time); a permanent failure skips the
+ * retries. The message is republished with its original id, type and headers (so the event and correlation ids never change) and
+ * acknowledged only after the broker has confirmed the copy.
  */
 export class RabbitMqEventBus implements EventBus {
   private readonly exchange: string;
@@ -123,9 +135,11 @@ export class RabbitMqEventBus implements EventBus {
       const dlx = `${this.exchange}.dlx`;
       await ch.assertExchange(this.exchange, 'topic', { durable: true });
       await ch.assertExchange(dlx, 'fanout', { durable: true });
-      await ch.assertQueue(`${sub.queue}.dead`, { durable: true });
-      await ch.bindQueue(`${sub.queue}.dead`, dlx, '');
-      await ch.assertQueue(sub.queue, { durable: true, arguments: { 'x-dead-letter-exchange': dlx } });
+      await ch.assertQueue(deadQueueName(sub.queue), { durable: true });
+      await ch.bindQueue(deadQueueName(sub.queue), dlx, '');
+      await ch.assertQueue(sub.queue, { durable: true, arguments: { 'x-dead-letter-exchange': dlx } }); // arguments unchanged: redeclaring an existing queue with different ones fails
+      // Delay queue: nothing consumes it; a message's own `expiration` dead-letters it through the default exchange back into the work queue.
+      await ch.assertQueue(retryQueueName(sub.queue), { durable: true, arguments: { 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': sub.queue } });
       for (const b of sub.bindings) await ch.bindQueue(sub.queue, this.exchange, b);
       await ch.prefetch(10);
       const { consumerTag } = await ch.consume(sub.queue, (msg) => {
@@ -197,23 +211,128 @@ export class RabbitMqEventBus implements EventBus {
   }
 
   private async deliver(ch: Channel, msg: ConsumeMessage, sub: EventSubscription): Promise<void> {
+    const h = msg.properties.headers ?? {};
+    const retryCount = counter(h[HEADER.retryCount]);
+    let event: EventEnvelope | undefined;
     try {
-      const h = msg.properties.headers ?? {};
-      const name = msg.properties.type;
       const id = msg.properties.messageId;
-      if (typeof id !== 'string' || typeof name !== 'string' || !EVENT_NAME.test(name)) throw new Error('malformed event');
-      const event: EventEnvelope = {
+      const name = msg.properties.type;
+      if (typeof id !== 'string' || typeof name !== 'string' || !EVENT_NAME.test(name)) throw new PermanentEventFailure('malformed_envelope');
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(msg.content.toString('utf8'));
+      } catch {
+        throw new PermanentEventFailure('malformed_envelope');
+      }
+      if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new PermanentEventFailure('malformed_envelope');
+      const replayCount = counter(h[HEADER.replayCount]);
+      event = {
         id,
         name,
-        payload: JSON.parse(msg.content.toString('utf8')),
-        headers: { eventId: id, occurredAt: String(h.occurredAt ?? ''), correlationId: typeof h.correlationId === 'string' ? h.correlationId : undefined, source: String(h.source ?? ''), version: Number(h.version ?? 1) },
+        payload,
+        headers: {
+          eventId: id,
+          occurredAt: String(h.occurredAt ?? ''),
+          correlationId: typeof h.correlationId === 'string' ? h.correlationId : undefined,
+          source: String(h.source ?? ''),
+          version: Number(h.version ?? 1),
+          ...(retryCount > 0 ? { retryCount } : {}),
+          ...(replayCount > 0 ? { replayCount } : {}),
+        },
       };
       await sub.handler(event);
-    } catch {
-      this.settle(() => ch.nack(msg, false, false), sub); // dead-lettered for inspection, never dropped silently, never hot-looped
+    } catch (e) {
+      await this.onFailure(ch, msg, sub, event, e, retryCount);
       return;
     }
     this.settle(() => ch.ack(msg), sub);
+  }
+
+  /** A failed delivery ends in exactly one of: a confirmed copy in `<queue>.retry`, or a confirmed copy in `<queue>.dead`, then an ack. */
+  private async onFailure(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, event: EventEnvelope | undefined, error: unknown, retryCount: number): Promise<void> {
+    const maxRetries = this.opts.retry?.maxRetries ?? 3;
+    const delayMs = this.opts.retry?.delayMs ?? 5000;
+    const permanent = error instanceof PermanentEventFailure;
+    const errorName = safeToken(error instanceof Error ? error.name : undefined, ERROR_NAME, 'Error');
+    const who = `queue=${sub.queue} event=${msg.properties.messageId ?? '-'} correlationId=${event?.headers.correlationId ?? '-'}`;
+
+    if (!permanent && retryCount < maxRetries) {
+      try {
+        await this.republish(retryQueueName(sub.queue), msg, { [HEADER.retryCount]: retryCount + 1 }, String(delayMs));
+        this.notice(`event_retry_scheduled ${who} attempt=${retryCount + 1}/${maxRetries} delayMs=${delayMs} error=${errorName}`);
+        this.settle(() => ch.ack(msg), sub);
+        return;
+      } catch {
+        // could not schedule the retry (broker trouble): fall through, the message is dead-lettered rather than lost or looped on
+      }
+    }
+
+    const failure: FailureClass = event === undefined ? 'malformed' : permanent ? 'permanent' : 'retries_exhausted';
+    if (failure === 'retries_exhausted') this.notice(`event_retry_exhausted ${who} retries=${retryCount} error=${errorName}`);
+    const reason = permanent ? safeToken((error as PermanentEventFailure).reason, REASON_CODE, 'unspecified') : undefined;
+    const outcome = `${who} classification=${failure}${reason ? ` reason=${reason}` : ''} retries=${retryCount} error=${errorName}`;
+    try {
+      await this.ensureDeadQueue(ch, sub);
+      await this.republish(deadQueueName(sub.queue), msg, {
+        [HEADER.failure]: failure,
+        ...(reason ? { [HEADER.failureReason]: reason } : {}),
+        [HEADER.failureError]: errorName,
+        [HEADER.failedAt]: new Date().toISOString(),
+        [HEADER.consumer]: sub.queue,
+        [HEADER.retryCount]: retryCount,
+      });
+      this.notice(`event_dead_lettered ${outcome}`);
+      this.settle(() => ch.ack(msg), sub);
+    } catch {
+      // the annotated copy could not be confirmed: the broker's own dead-lettering (the queue was just re-declared and bound) still moves the original, unannotated
+      this.notice(`event_dead_lettered ${outcome} annotated=false`);
+      this.settle(() => ch.nack(msg, false, false), sub);
+    }
+  }
+
+  /**
+   * The dead-letter queue and its binding are declared when the consumer attaches, but an operator can delete the queue while the consumer runs.
+   * A message dead-lettered into a missing queue is dropped by the broker, so the queue is re-declared (idempotent) before every dead-lettering.
+   */
+  private async ensureDeadQueue(ch: Channel, sub: EventSubscription): Promise<void> {
+    try {
+      await ch.assertQueue(deadQueueName(sub.queue), { durable: true });
+      await ch.bindQueue(deadQueueName(sub.queue), `${this.exchange}.dlx`, '');
+    } catch {
+      // a closed channel or a broker fault: the republish that follows reports it and the caller falls back
+    }
+  }
+
+  /**
+   * Publishes a copy of `msg` straight to a queue (default exchange) on the confirm channel and resolves once the broker has accepted it.
+   * Same body, message id, type, timestamp and headers, plus `annotations`; `mandatory` so a missing queue is an error, not a silent drop.
+   */
+  private async republish(queue: string, msg: ConsumeMessage, annotations: Record<string, unknown>, expiration?: string): Promise<void> {
+    const ch = await this.publishChannel();
+    let returned = false;
+    const onReturn = (m: { properties: { messageId?: unknown } }) => {
+      if (m.properties.messageId === msg.properties.messageId) returned = true;
+    };
+    ch.on('return', onReturn);
+    try {
+      ch.sendToQueue(queue, msg.content, {
+        persistent: true,
+        mandatory: true,
+        contentType: msg.properties.contentType,
+        messageId: msg.properties.messageId,
+        type: msg.properties.type,
+        timestamp: msg.properties.timestamp,
+        headers: { ...withoutBrokerHistory(msg.properties.headers), ...annotations },
+        ...(expiration ? { expiration } : {}),
+      });
+      await ch.waitForConfirms(); // a basic.return, if any, arrives before the confirm
+    } catch (e) {
+      this.publisher = undefined;
+      throw e;
+    } finally {
+      ch.off('return', onReturn);
+    }
+    if (returned) throw new Error('unroutable');
   }
 
   /**

@@ -36,6 +36,11 @@ export interface BillingConfig extends BaseConfig {
   dispatch: { intervalMs: number; batchSize: number; staleSendingMs: number };
   /** Reconciler polling and staleness threshold for `requested` rows with no terminal event yet (SDD section 21.5): technical tuning, no business meaning. */
   reconcile: { intervalMs: number; staleRequestedMs: number };
+  /**
+   * Retry policy of the Payment event consumer's RabbitMQ bus (audit M-07): how many times a possibly-transient processing failure is retried
+   * (0 = dead-letter on the first failure) and how long each retry waits in `billing.payment-events.retry`. Technical tuning, no business meaning.
+   */
+  paymentEventRetry: { maxRetries: number; delayMs: number };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -95,6 +100,10 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     reconcile: {
       intervalMs: reader.int('BILLING_RECONCILE_INTERVAL_MS', { default: 30_000, min: 1000, max: 3_600_000 }),
       staleRequestedMs: reader.int('BILLING_RECONCILE_STALE_REQUESTED_MS', { default: 300_000, min: 1000, max: 86_400_000 }),
+    },
+    paymentEventRetry: {
+      maxRetries: reader.int('BILLING_PAYMENT_EVENT_RETRY_MAX', { default: 3, min: 0, max: 10 }),
+      delayMs: reader.int('BILLING_PAYMENT_EVENT_RETRY_DELAY_MS', { default: 5000, min: 100, max: 300_000 }),
     },
   };
 }

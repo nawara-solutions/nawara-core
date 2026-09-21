@@ -59,7 +59,9 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
   it('dead-letters an event whose consumer fails, instead of dropping it or looping on it', async () => {
     const queue = `q.dead.${uniq()}`;
     let calls = 0;
-    const sub = await bus.subscribe({ queue, bindings: ['payment.#'], handler: async () => { calls++; throw new Error('cannot process'); } });
+    // `maxRetries: 0`: this test is about the dead-letter hop itself; retry behaviour has its own suite (rabbitmq-dlq-retry.int-spec.ts).
+    const noRetry = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange, retry: { maxRetries: 0 } });
+    const sub = await noRetry.subscribe({ queue, bindings: ['payment.#'], handler: async () => { calls++; throw new Error('cannot process'); } });
     const ev = envelope('payment.failed');
     await bus.publish(ev);
     const c = await amqp.connect(env.TEST_RABBITMQ_URL);
@@ -72,6 +74,7 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
     expect((dead as unknown as amqp.GetMessage).properties.messageId).toBe(ev.id);
     expect(calls).toBe(1); // tried once, not redelivered in a loop
     await sub.close();
+    await noRetry.close();
     await ch.close();
     await c.close();
   });
