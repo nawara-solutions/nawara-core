@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import pg from 'pg';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 
@@ -16,9 +16,14 @@ export interface Queryable {
 @Injectable()
 export class DbService implements Queryable, OnModuleDestroy {
   private readonly pool: pg.Pool;
+  private readonly logger = new Logger(DbService.name);
 
   constructor(@Inject(APP_CONFIG) cfg: AppConfig) {
     this.pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
+    // An IDLE client that loses its connection (PostgreSQL restart or failover, an administrator's terminate, a proxy's idle timeout) is reported
+    // on the POOL. `pg` discards that client itself and the next query opens a fresh connection, but an 'error' event with no listener is thrown
+    // by Node as an uncaught exception and ends the process. Only the error code is logged: a message can carry connection details.
+    this.pool.on('error', (e) => this.logger.warn(`db_pool_idle_client_error code=${pgCode(e) ?? 'unknown'} — the pool discards the client and reconnects on demand`));
   }
 
   query<R extends pg.QueryResultRow = any>(sql: string, params?: unknown[]) {
