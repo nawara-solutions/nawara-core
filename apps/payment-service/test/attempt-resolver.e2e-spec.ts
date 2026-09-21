@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'node:url';
+import { Logger } from '@nestjs/common';
 import request from 'supertest';
-import { afterAll, beforeAll, expect, it } from 'vitest';
-import { generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
+import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
+import { DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptResolver } from '../src/attempts/attempt-resolver.js';
 import { createTestApp, type TestApp } from './support/app.js';
@@ -77,6 +78,43 @@ describeWithEnv('attempt resolver (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     const after = await getPayment(payment.id).expect(200);
     expect(after.body.attempts[0].status).toBe('submitted'); // untouched — still needs a real sync/webhook
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('M-02: an attempt whose provider is not enabled is skipped and left as it is; the stuck attempts before and after it are still settled in the same pass', async () => {
+    // A provider is "not enabled" exactly when the registry does not hold it (disabled since the attempt was made, or never known): 'acme' is such a provider.
+    const sql = <R extends Record<string, any> = any>(text: string, params?: unknown[]) => t.app.get(DbService).query<R>(text, params);
+    const pause = () => new Promise((r) => setTimeout(r, 15)); // the resolver orders by initiatedAt: A, then B, then C
+
+    const a = await createPayment();
+    await startAttempt(a.id, 'm02-key-a', { scenario: 'timeout_after_accept' }).expect(201);
+    await pause();
+    const b = await createPayment();
+    const bAttemptId = crypto.randomUUID();
+    await sql(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, status) VALUES ($1, $2, 1, 'acme', 'unknown')`, [bAttemptId, b.id]);
+    await sql(`UPDATE payment SET status = 'pending' WHERE id = $1`, [b.id]);
+    await pause();
+    const c = await createPayment();
+    await startAttempt(c.id, 'm02-key-c', { scenario: 'timeout_after_accept' }).expect(201);
+
+    const warnings: string[] = [];
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation((m: unknown) => void warnings.push(String(m)));
+
+    await expect(t.app.get(AttemptResolver).drainOnce()).resolves.toBeDefined(); // used to reject on B's provider lookup
+
+    expect((await getPayment(a.id).expect(200)).body.status).toBe('succeeded'); // before it
+    expect((await getPayment(c.id).expect(200)).body.status).toBe('succeeded'); // after it: this one was starved before the fix
+
+    // B is untouched: attempt still unknown, payment still pending and not closed, no second attempt, no failure recorded
+    const attempt = (await sql(`SELECT status, "failureCode", "completedAt" FROM payment_attempt WHERE id = $1`, [bAttemptId])).rows[0];
+    expect(attempt).toMatchObject({ status: 'unknown', failureCode: null, completedAt: null });
+    const payment = (await sql(`SELECT status, "closedAt" FROM payment WHERE id = $1`, [b.id])).rows[0];
+    expect(payment).toMatchObject({ status: 'pending', closedAt: null });
+    expect((await sql(`SELECT count(*)::int AS n FROM payment_attempt WHERE "paymentId" = $1`, [b.id])).rows[0].n).toBe(1);
+    expect((await sql(`SELECT count(*)::int AS n FROM outbox WHERE payload->>'paymentId' = $1 AND name IN ('payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired')`, [b.id])).rows[0].n).toBe(0); // no terminal event for B
+
+    expect(warnings).toContain(`attempt_resolver_provider_unavailable attempt=${bAttemptId} provider=acme — left unresolved`);
   });
 
   it('is safe to run twice in a row (idempotent — no double effect)', async () => {
