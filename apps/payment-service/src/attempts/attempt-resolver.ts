@@ -55,7 +55,14 @@ export class AttemptResolver {
       let resolved = 0;
       const ctx = jobContext('attempt_resolver'); // one run, one correlation id for every event it causes
       for (const attempt of rows) {
-        const provider = this.providers.get(attempt.provider);
+        // An attempt whose provider is not enabled (disabled since the attempt was made, or never known) is left exactly as it is:
+        // nothing here may fail it, cancel anything or pick another provider. It must not stop the attempts behind it either, so the
+        // lookup is the non-throwing `tryGet` (the same as `WebhookRetriever`), never `get`.
+        const provider = this.providers.tryGet(attempt.provider);
+        if (!provider) {
+          this.logger.warn(`attempt_resolver_provider_unavailable attempt=${attempt.id} provider=${attempt.provider} — left unresolved`);
+          continue;
+        }
         if (attempt.status === 'initiated') {
           const waitMs = provider.capabilities.timeoutMs + provider.capabilities.visibilityLagMs;
           const ageMs = Date.now() - new Date(attempt.initiatedAt).getTime();
