@@ -1,0 +1,23 @@
+{
+  "name": "@nawara/e2e-auth-organization",
+  "private": true,
+  "description": "Stage 10.1 audit follow-up: the real HTTP wire contract between organization-service's HttpAuthGrantsClient and Auth's real /auth/grants and /auth/step-up/verify endpoints, over REAL HTTP between two separately spawned, already-built processes — never one process's TypeScript imported by the other (see scripts/lib/checks.mjs). Needs both services already built (npm run build -w auth-service -w organization-service -w @nawara/service-kit).",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "vitest run --config ./vitest.config.ts"
+  },
+  "dependencies": {
+    "@nawara/service-kit": "*",
+    "bcryptjs": "^3.0.3",
+    "otplib": "^13.5.0",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "typescript": "^6.0.2",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.1.2"
+  }
+}

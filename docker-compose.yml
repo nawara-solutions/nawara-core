@@ -168,10 +168,12 @@ services:
       timeout: 5s
       retries: 10
 
-  # Implemented but NOT yet authoritative: auth-service still owns Company/Platform/Organization (ADR-0039). It depends on nothing
-  # but its own database: no Auth URL, no broker, no outbound token. SERVICE_TOKENS is deliberately left empty here (every call is
-  # refused) because no caller is registered yet; to exercise it locally, generate a token with generateServiceToken() and set
-  # SERVICE_TOKENS=<caller>:<digest> (see apps/organization-service/README.md).
+  # Implemented but NOT yet authoritative: auth-service still owns Company/Platform/Organization (ADR-0039). It depends on no
+  # broker and has no outbound service token of its own. It DOES now carry one bounded, narrow Auth dependency (AUTH_SERVICE_URL,
+  # ADR-0042 decision 6): the human-admin module forwards a caller's own bearer to Auth's /auth/grants and /auth/step-up/verify,
+  # never a service credential, never anything outside that module. SERVICE_TOKENS is deliberately left empty here (every
+  # service-token call is refused) because no caller is registered yet; to exercise it locally, generate a token with
+  # generateServiceToken() and set SERVICE_TOKENS=<caller>:<digest> (see apps/organization-service/README.md).
   organization-service:
     profiles: [db]
     build:

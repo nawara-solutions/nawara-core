@@ -168,3 +168,32 @@ jobs:
         run: npm run build -w @nawara/service-kit -w billing-service -w payment-service
       - name: real-broker Stage 4 E2E
         run: npm run test:e2e -w @nawara/e2e-real-broker
+
+  e2e-auth-organization:
+    name: Stage 10.1 Auth/Organization human-admin wire contract over real HTTP
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # This suite spawns auth-service and organization-service as separate OS processes from their OWN built
+      # `dist/main.js` (never one service's TypeScript imported into the other's test — see `scripts/lib/checks.mjs`),
+      # talking only over real HTTP, so both must be built first.
+      - name: build service-kit, auth-service, organization-service
+        run: npm run build -w @nawara/service-kit -w auth-service -w organization-service
+      - name: Stage 10.1 Auth/Organization wire-contract E2E
+        run: npm run test:e2e -w @nawara/e2e-auth-organization
