@@ -102,6 +102,8 @@ await this.rateLimit.assert('signup', req.ip, { limit: 5, windowSec: 60 }); // t
 
 OpenAPI setup, a retry/delay policy for consumers beyond the dead-letter queue, outbox pruning, and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
 
+`RabbitMqEventBus` consumers are supervised: `subscribe()` fails fast when the broker is unreachable at start, but once attached a consumer that loses its connection, its channel or its queue is re-created with bounded exponential backoff (`consumerReconnect`) until `close()`. `consumerStatus()` reports `consuming` / `reconnecting` for readiness, and `onNotice` receives `rabbitmq_consumer_lost` / `rabbitmq_consumer_recovered` / `rabbitmq_settle_failed` (never a URL or credential). A message being handled when the channel dies is redelivered by the broker, so handlers must stay idempotent. `BrokerProxy` (`@nawara/service-kit/testing`) severs and restores a broker connection in tests.
+
 ## Tests
 
 ```bash

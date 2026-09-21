@@ -4,7 +4,7 @@ import { runWithRequestContext } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { jobTransitionContext } from '../domain/actors.js';
-import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
+import { PaymentRequestRepository, type ScanPosition } from '../invoices/payment-request.repository.js';
 import { PAYMENT_CLIENT } from './payment-client.token.js';
 import type { PaymentClient } from './payment-client.js';
 
@@ -20,6 +20,13 @@ import type { PaymentClient } from './payment-client.js';
 export class PaymentReconciler {
   private timer?: NodeJS.Timeout;
   private running = false;
+  /**
+   * Where the previous full pass stopped. Requests Payment still reports as unpaid are never updated, so they stay at the head of
+   * a `updatedAt` scan: resuming after the last row examined lets every later request be reached, one batch per pass, before the
+   * scan starts over from the oldest. In memory on purpose: a restart merely begins again from the oldest row (nothing is skipped,
+   * nothing is lost), and each request's outcome is decided by Payment's answer, never by this position.
+   */
+  private cursor: ScanPosition | null = null;
   private readonly logger = new Logger(PaymentReconciler.name);
 
   constructor(
@@ -30,7 +37,8 @@ export class PaymentReconciler {
 
   start(intervalMs = this.config.reconcile.intervalMs): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.reconcileOnce(), intervalMs);
+    // A whole-pass failure (for example the scan query) must not escape as an unhandled rejection: log it and let the next tick run.
+    this.timer = setInterval(() => void this.reconcileOnce().catch((e) => this.logger.error(`payment_reconcile_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
     this.timer.unref?.();
   }
 
@@ -44,7 +52,9 @@ export class PaymentReconciler {
     if (this.running) return { checked: 0, settled: 0 }; // a previous pass is still running; do not overlap
     this.running = true;
     try {
-      const stale = await this.requests.findStaleRequested(batchSize, staleRequestedMs);
+      const stale = await this.requests.findStaleRequested(batchSize, staleRequestedMs, this.cursor);
+      // A short page means the end of the scan was reached: start over from the oldest next time.
+      this.cursor = stale.length < batchSize ? null : stale[stale.length - 1]!.position;
       let settled = 0;
       for (const { id, paymentId, correlationId } of stale) {
         const ctx = jobTransitionContext('reconciliation', id, correlationId);

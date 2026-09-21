@@ -42,6 +42,14 @@ export interface StaleRequested {
   paymentId: string;
   /** The request's originating correlation id, or a deterministic fallback if it never had one. */
   correlationId: string;
+  /** This row's position in the reconciler's scan order, to resume after it. `updatedAt` is carried as text: a JS Date would drop its microseconds. */
+  position: ScanPosition;
+}
+
+/** Where a reconciliation pass stopped: the next pass resumes strictly after this `(updatedAt, id)`. */
+export interface ScanPosition {
+  updatedAt: string;
+  id: string;
 }
 
 /**
@@ -143,16 +151,21 @@ export class PaymentRequestRepository {
     });
   }
 
-  /** `requested` rows old enough that the reconciler should ask Payment directly, rather than wait for an event (SDD 21.5). */
-  async findStaleRequested(limit: number, staleRequestedMs: number): Promise<StaleRequested[]> {
-    const { rows } = await this.db.query<{ id: string; paymentId: string; correlationId: string | null }>(
-      `SELECT id, "paymentId", "correlationId" FROM payment_request
+  /**
+   * `requested` rows old enough that the reconciler should ask Payment directly, rather than wait for an event (SDD 21.5), in
+   * `(updatedAt, id)` order and strictly AFTER `after` when given. A request that Payment still reports as unpaid is not updated,
+   * so it keeps its place: without a resume position, the oldest `limit` unpaid requests would be the only ones ever examined.
+   */
+  async findStaleRequested(limit: number, staleRequestedMs: number, after: ScanPosition | null = null): Promise<StaleRequested[]> {
+    const { rows } = await this.db.query<{ id: string; paymentId: string; correlationId: string | null; updatedAtText: string }>(
+      `SELECT id, "paymentId", "correlationId", "updatedAt"::text AS "updatedAtText" FROM payment_request
         WHERE status = 'requested' AND "paymentId" IS NOT NULL AND "updatedAt" < now() - make_interval(secs => $1)
-        ORDER BY "updatedAt" LIMIT $2`,
-      [staleRequestedMs / 1000, limit],
+          AND ($3::timestamptz IS NULL OR ("updatedAt", id) > ($3::timestamptz, $4::uuid))
+        ORDER BY "updatedAt", id LIMIT $2`,
+      [staleRequestedMs / 1000, limit, after?.updatedAt ?? null, after?.id ?? null],
     );
     // Never null: falls back to a deterministic per-request id so reconciliation is always traceable (Stage 5 hardening).
-    return rows.map((r) => ({ id: r.id, paymentId: r.paymentId, correlationId: r.correlationId ?? `reconcile:${r.id}` }));
+    return rows.map((r) => ({ id: r.id, paymentId: r.paymentId, correlationId: r.correlationId ?? `reconcile:${r.id}`, position: { updatedAt: r.updatedAtText, id: r.id } }));
   }
 
   /**

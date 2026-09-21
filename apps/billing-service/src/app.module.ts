@@ -48,7 +48,9 @@ export class AppModule {
         BillingConfigModule.forRoot(config),
         EventsModule.forRoot({
           source: config.serviceName,
-          bus: overrides.bus ?? (config.rabbitmqUrl ? new RabbitMqEventBus({ url: config.rabbitmqUrl }) : new InMemoryEventBus()),
+          bus: overrides.bus ?? (config.rabbitmqUrl
+            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, onNotice: (message) => new Logger('RabbitMqEventBus').warn(message) })
+            : new InMemoryEventBus()),
           // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
           onError: (message) => new Logger('OutboxRelay').warn(`outbox_publish_failure ${message}`),
         }),
