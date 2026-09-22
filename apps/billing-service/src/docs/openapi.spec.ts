@@ -47,6 +47,7 @@ describe('OpenAPI document (Stage 3 + Stage 4)', () => {
         ['/billing/invoices/{invoiceId}/payment-requests', 'post'],
         ['/billing/payment-requests/{id}', 'get'],
         ['/billing/payment-requests/{id}/cancel', 'post'],
+        ['/billing/organizations/{organizationId}/entitlement', 'get'],
       ];
       for (const [path, method] of expectedOperations) {
         const operation = document.paths[path]?.[method];
