@@ -110,6 +110,24 @@ describeWithEnv('outbox and inbox (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
       expect(await relay.drainOnce()).toEqual({ published: 2, failed: 0 });
     });
 
+    it('a row that fails repeatedly is retried, not skipped, but its own backoff excludes it from the next poll, so a healthy row behind it is never starved indefinitely (Stage 12.7 outbox-starvation review)', async () => {
+      // A failing publish stops the WHOLE batch for that tick (by design, see OutboxRelay's doc comment) rather
+      // than skipping ahead to later rows — but the failing row's own backoff removes it from the very next SELECT
+      // once it elapses, so rows behind it are only ever delayed, bounded by how many times the row ahead of them
+      // fails, never blocked indefinitely. n=0..2 simulate the SAME row failing three times in a row; n=3 is a
+      // genuinely healthy row that must still be delivered once the row ahead of it stops failing.
+      await seed(4);
+      const bus = new InMemoryEventBus();
+      bus.failNextPublishes(3);
+      const relay = new OutboxRelay(db, bus, { source: 'payment-service', baseBackoffMs: 1 });
+      for (let i = 0; i < 3; i++) {
+        expect(await relay.drainOnce()).toEqual({ published: 0, failed: 1 }); // the earliest row fails again; nothing behind it is even attempted this tick
+        await new Promise((r) => setTimeout(r, 20)); // well past baseBackoffMs=1: the failed row is excluded from the next SELECT once backed off
+      }
+      expect(await relay.drainOnce()).toEqual({ published: 4, failed: 0 }); // bounded: exactly 4 poll cycles total, never an indefinite block
+      expect(bus.published.map((e) => e.payload.n)).toEqual([0, 1, 2, 3]);
+    });
+
     it('two relays draining at once never publish the same event concurrently (SKIP LOCKED)', async () => {
       await seed(20);
       const bus = new InMemoryEventBus();
