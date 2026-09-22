@@ -126,7 +126,7 @@ describeWithEnv('dispatcher stale-retry interval (audit L-12, real PostgreSQL)',
     const poisoned = [await newRequest(), await newRequest(), await newRequest()];
     const healthy = [await newRequest(), await newRequest(), await newRequest()];
     // the poisoned ones are OLDER, so they head `ORDER BY createdAt`; an unconfigured request answers `transient` every time
-    for (const h of healthy) payment.when(h.id, { kind: 'accepted', snapshot: { paymentId: crypto.randomUUID(), paymentRequestId: h.id, status: 'pending', amount: Number(h.invoice.total), currency: h.invoice.currency, sourceType: 'invoice', sourceId: h.invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG } });
+    for (const h of healthy) payment.when(h.id, { kind: 'accepted', snapshot: { paymentId: crypto.randomUUID(), paymentRequestId: h.id, status: 'pending', amount: Number(h.invoice.total), currency: h.invoice.currency, sourceType: 'invoice', sourceId: h.invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, closedAt: null } });
     const before = (id: string) => payment.callsFor(id);
 
     await dispatcher.dispatchOnce(STALE_MS, 3); // pass 1: the three poisoned ones (the head), all transient
@@ -152,7 +152,7 @@ describeWithEnv('dispatcher stale-retry interval (audit L-12, real PostgreSQL)',
       if (body.paymentRequestId === a.id) throw new Error('connection reset (simulated)');
       return original(body);
     };
-    payment.when(b.id, { kind: 'accepted', snapshot: { paymentId: crypto.randomUUID(), paymentRequestId: b.id, status: 'pending', amount: Number(b.invoice.total), currency: b.invoice.currency, sourceType: 'invoice', sourceId: b.invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG } });
+    payment.when(b.id, { kind: 'accepted', snapshot: { paymentId: crypto.randomUUID(), paymentRequestId: b.id, status: 'pending', amount: Number(b.invoice.total), currency: b.invoice.currency, sourceType: 'invoice', sourceId: b.invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, closedAt: null } });
     try {
       await dispatcher.dispatchOnce(STALE_MS, 50);
     } finally {

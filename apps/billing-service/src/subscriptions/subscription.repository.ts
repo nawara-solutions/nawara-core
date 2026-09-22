@@ -38,25 +38,28 @@ export class SubscriptionRepository {
    * disguised upgrade/downgrade (that remains a deliberately unimplemented, explicit future operation).
    */
   async create(organizationId: string, productId: string, priceId: string, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    return this.db.tx(async (q) => {
-      // ON CONFLICT DO NOTHING: a concurrent create never raises the unique violation, so the loser simply reads the winner's row.
-      const res = await q.query<SubscriptionRow>(
-        `INSERT INTO subscription ("organizationId", "productId", "priceId") VALUES ($1, $2, $3)
-         ON CONFLICT ("organizationId") DO NOTHING RETURNING *`,
-        [organizationId, productId, priceId],
-      );
-      const inserted = res.rows[0];
-      if (inserted) {
-        await recordTransition(q, { entityType: 'subscription', entityId: inserted.id, from: null, to: 'pending', revision: inserted.revision, ctx });
-        return { subscription: inserted, changed: true };
-      }
-      const existing = await this.findByOrganization(q, organizationId);
-      if (!existing) throw billingError(409, 'subscription_conflict', 'The subscription request conflicts with another request.');
-      if (existing.productId !== productId || existing.priceId !== priceId) {
-        throw billingError(409, 'subscription_conflict', 'This organization already has a subscription to a different product or price.');
-      }
-      return { subscription: existing, changed: false };
-    });
+    return this.db.tx((q) => this.createTx(q, organizationId, productId, priceId, ctx));
+  }
+
+  /** The composable core of `create` (Stage 12.4): callable from within an ALREADY-OPEN transaction (`applySuccessfulPayment`), never opening its own. */
+  private async createTx(q: Queryable, organizationId: string, productId: string, priceId: string, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
+    // ON CONFLICT DO NOTHING: a concurrent create never raises the unique violation, so the loser simply reads the winner's row.
+    const res = await q.query<SubscriptionRow>(
+      `INSERT INTO subscription ("organizationId", "productId", "priceId") VALUES ($1, $2, $3)
+       ON CONFLICT ("organizationId") DO NOTHING RETURNING *`,
+      [organizationId, productId, priceId],
+    );
+    const inserted = res.rows[0];
+    if (inserted) {
+      await recordTransition(q, { entityType: 'subscription', entityId: inserted.id, from: null, to: 'pending', revision: inserted.revision, ctx });
+      return { subscription: inserted, changed: true };
+    }
+    const existing = await this.findByOrganization(q, organizationId);
+    if (!existing) throw billingError(409, 'subscription_conflict', 'The subscription request conflicts with another request.');
+    if (existing.productId !== productId || existing.priceId !== priceId) {
+      throw billingError(409, 'subscription_conflict', 'This organization already has a subscription to a different product or price.');
+    }
+    return { subscription: existing, changed: false };
   }
 
   /**
@@ -90,32 +93,67 @@ export class SubscriptionRepository {
    * been activated and has no period to renew (`activate` is the first step).
    */
   async renew(organizationId: string, now: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    return this.db.tx(async (q) => {
-      const row = await this.lock(q, organizationId);
-      if (row.status === 'pending') throw billingError(409, 'invalid_subscription_transition', 'A pending subscription must be activated before it can be renewed.');
-      const anchor = renewalAnchor({ currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil }, now);
-      const graceDays = this.config.subscriptionGraceDays ?? null;
-      // Calendar arithmetic (month/year/days) on a `timestamptz` is otherwise done in the SESSION's TimeZone, which
-      // could shift the result across a DST boundary (section 17: server/database UTC semantics, never a local
-      // clock). The `AT TIME ZONE 'UTC'` round trips force every addition to happen in UTC wall-clock time, with no
-      // DST. `graceUntil` is recomputed from the NEW `currentPeriodEnd` here too (R1): a renewal always rolls the
-      // grace boundary forward with it, in the same statement, so it is never stale relative to the new period
-      // (`subscription_grace_after_period` would refuse the write outright if it ever were).
-      const { rows } = await q.query<SubscriptionRow>(
-        `UPDATE subscription s SET status = 'active', "currentPeriodStart" = calc."newStart", "currentPeriodEnd" = calc."newEnd",
-                "graceUntil" = CASE WHEN $3::int IS NULL THEN NULL ELSE (calc."newEnd" AT TIME ZONE 'UTC' + ($3::int || ' days')::interval) AT TIME ZONE 'UTC' END
-           FROM (
-             SELECT $2::timestamptz AS "newStart",
-                    (($2::timestamptz AT TIME ZONE 'UTC') + (p."intervalCount" || ' ' || p."intervalUnit")::interval) AT TIME ZONE 'UTC' AS "newEnd"
-               FROM price p WHERE p.id = (SELECT "priceId" FROM subscription WHERE id = $1)
-           ) calc
-           WHERE s.id = $1 RETURNING s.*`,
-        [row.id, anchor, graceDays],
-      );
-      const updated = rows[0]!;
-      await this.record(q, row, updated, ctx);
-      return { subscription: updated, changed: true };
-    });
+    return this.db.tx((q) => this.renewTx(q, organizationId, now, ctx));
+  }
+
+  /** The composable core of `renew` (Stage 12.4): callable from within an ALREADY-OPEN transaction. */
+  private async renewTx(q: Queryable, organizationId: string, now: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
+    const row = await this.lock(q, organizationId);
+    if (row.status === 'pending') throw billingError(409, 'invalid_subscription_transition', 'A pending subscription must be activated before it can be renewed.');
+    const anchor = renewalAnchor({ currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil }, now);
+    return this.rollPeriod(q, row, anchor, ctx);
+  }
+
+  /**
+   * Rolls a subscription's period forward to start at `anchor`, extending by its own price's recurring interval, and
+   * recomputing `graceUntil` from the configured policy (R1) — the one place that actually performs this UPDATE.
+   * `renewTx` computes `anchor` via the frozen renewal-anchor rule; `applySuccessfulPayment`'s first-activation branch
+   * uses the authoritative settlement instant directly as `anchor` instead (there is no prior period to anchor from).
+   * Either way this is the SAME move the database allows from `pending`, `active`, `grace` or `expired` alike.
+   */
+  private async rollPeriod(q: Queryable, row: SubscriptionRow, anchor: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
+    const graceDays = this.config.subscriptionGraceDays ?? null;
+    // Calendar arithmetic (month/year/days) on a `timestamptz` is otherwise done in the SESSION's TimeZone, which
+    // could shift the result across a DST boundary (section 17: server/database UTC semantics, never a local
+    // clock). The `AT TIME ZONE 'UTC'` round trips force every addition to happen in UTC wall-clock time, with no
+    // DST. `graceUntil` is recomputed from the NEW `currentPeriodEnd` here too (R1): every roll forward carries the
+    // grace boundary forward with it, in the same statement, so it is never stale relative to the new period
+    // (`subscription_grace_after_period` would refuse the write outright if it ever were).
+    const { rows } = await q.query<SubscriptionRow>(
+      `UPDATE subscription s SET status = 'active', "currentPeriodStart" = calc."newStart", "currentPeriodEnd" = calc."newEnd",
+              "graceUntil" = CASE WHEN $3::int IS NULL THEN NULL ELSE (calc."newEnd" AT TIME ZONE 'UTC' + ($3::int || ' days')::interval) AT TIME ZONE 'UTC' END
+         FROM (
+           SELECT $2::timestamptz AS "newStart",
+                  (($2::timestamptz AT TIME ZONE 'UTC') + (p."intervalCount" || ' ' || p."intervalUnit")::interval) AT TIME ZONE 'UTC' AS "newEnd"
+             FROM price p WHERE p.id = (SELECT "priceId" FROM subscription WHERE id = $1)
+         ) calc
+         WHERE s.id = $1 RETURNING s.*`,
+      [row.id, anchor, graceDays],
+    );
+    const updated = rows[0]!;
+    await this.record(q, row, updated, ctx);
+    return { subscription: updated, changed: true };
+  }
+
+  /**
+   * Stage 12.4: applies an authoritative, already-validated successful settlement to the Organization's Subscription,
+   * within the CALLER's own transaction (`q`) — never opening its own, so the receipt, the PaymentRequest/Invoice
+   * transition and this Subscription effect commit or roll back as one unit (section 15). Ensures the subscription
+   * exists for this exact `(organizationId, productId, priceId)` offering (idempotent; throws `subscription_conflict`
+   * if the organization already has a DIFFERENT offering — never a silent, disguised upgrade), then either performs
+   * the FIRST activation (anchored on `settledAt` itself, since there is no prior period to compare against) or a
+   * normal renewal (anchored per the frozen rule against whatever period/grace the row already has) — the same
+   * `rollPeriod` primitive either way, so period/grace arithmetic is never duplicated here.
+   */
+  async applySuccessfulPayment(
+    q: Queryable,
+    params: { organizationId: string; productId: string; priceId: string; settledAt: Date },
+    ctx: TransitionContext,
+  ): Promise<SubscriptionWriteResult> {
+    await this.createTx(q, params.organizationId, params.productId, params.priceId, ctx); // idempotent; conflict on offering mismatch
+    const row = await this.lock(q, params.organizationId); // re-read UNDER LOCK: createTx's own "existing" read is not locked
+    const anchor = row.status === 'pending' ? params.settledAt : renewalAnchor({ currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil }, params.settledAt);
+    return this.rollPeriod(q, row, anchor, ctx);
   }
 
   /**

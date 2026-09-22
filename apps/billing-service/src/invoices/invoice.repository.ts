@@ -50,6 +50,14 @@ export class InvoiceRepository {
       const currency = priced[0]!.price.currency;
       if (priced.some((x) => x.price.currency !== currency)) throw billingError(422, 'price_not_available', 'All lines of an invoice must share one currency.');
       if (!supportedCurrencies.includes(currency)) throw billingError(422, 'unsupported_currency', 'The currency is not supported.');
+      // Stage 12.4 R1: Billing can fulfil at most ONE recurring (Subscription) obligation per invoice — a Subscription
+      // is one product/price per Organization (Stage 12.2), so a second recurring line could never be fulfilled by
+      // anything Billing owns, whatever seller/organization is involved. Rejected HERE, before any PaymentRequest or
+      // provider settlement exists, rather than accepted and silently left commercially unfulfilled once paid. A
+      // recurring line alongside any number of one-time lines remains unambiguous and is untouched by this check.
+      if (priced.filter((x) => x.price.interval === 'recurring').length > 1) {
+        throw billingError(422, 'ambiguous_subscription_obligation', 'An invoice may contain at most one recurring line.');
+      }
 
       const totals = computeTotals(priced.map((x) => ({ quantity: x.line.quantity, unitAmount: fromDbAmount(x.price.unitAmount) })));
 

@@ -61,6 +61,20 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     if (o.archived) await admin.query(`UPDATE product SET status = 'archived' WHERE id = $1`, [product.rows[0].id]);
     return price.rows[0].id;
   }
+  /** A recurring (Stage 12.2 Subscription-eligible) price, otherwise identical to `seedPrice`. */
+  async function seedRecurringPrice(o: { unit?: number; seller?: string } = {}): Promise<string> {
+    seq += 1;
+    const product = await admin.query(
+      `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status) VALUES ('test-producer', 'organization', $1, $2, $3, 'active') RETURNING id`,
+      [o.seller ?? ORG, `sub-prod-${seq}-${Math.random().toString(36).slice(2, 8)}`, `Subscription product ${seq}`],
+    );
+    const price = await admin.query(
+      `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+       VALUES ($1, $2, 'TND', $3, 'recurring', 'month', 1) RETURNING id`,
+      [product.rows[0].id, `ref-${seq}`, o.unit ?? 5000],
+    );
+    return price.rows[0].id;
+  }
 
   async function draftInput(o: { priceId?: string; quantity?: number; payerId?: string; payerType?: string; dueAt?: string; request?: string } = {}): Promise<NormalisedCreateInvoiceInput> {
     const priceId = o.priceId ?? (await seedPrice());
@@ -162,6 +176,43 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     it('an amount above what Payment and a JSON number can carry is refused, not stored (BI-01)', async () => {
       const price = await seedPrice({ unit: 9_007_199_254_740_991 });
       await expect(create(await draftInput({ priceId: price, quantity: 2 }))).rejects.toThrow();
+    });
+
+    // ---------------------------------------------------------------------------------------------- Stage 12.4 R1
+    describe('at most one recurring (Subscription) line per invoice, rejected BEFORE any PaymentRequest exists', () => {
+      it('exactly one recurring line is accepted', async () => {
+        const recurring = await seedRecurringPrice();
+        const { invoice } = await create(await draftInput({ priceId: recurring }));
+        expect(invoice.lines.map((l) => l.interval)).toEqual(['recurring']);
+      });
+
+      it('one recurring line plus any number of one-time lines remains unambiguous and is accepted', async () => {
+        const recurring = await seedRecurringPrice();
+        const oneTimeA = await seedPrice();
+        const oneTimeB = await seedPrice();
+        const input = await draftInput({ priceId: recurring });
+        input.lines.push({ priceId: oneTimeA, quantity: 1, description: null, sourceType: null, sourceId: null });
+        input.lines.push({ priceId: oneTimeB, quantity: 1, description: null, sourceType: null, sourceId: null });
+        const { invoice } = await create(input);
+        expect(invoice.lines.map((l) => l.interval).sort()).toEqual(['one_time', 'one_time', 'recurring']);
+      });
+
+      it('two recurring lines are refused as an ambiguous Subscription obligation, and nothing is written', async () => {
+        const recurringA = await seedRecurringPrice();
+        const recurringB = await seedRecurringPrice();
+        const input = await draftInput({ priceId: recurringA });
+        input.lines.push({ priceId: recurringB, quantity: 1, description: null, sourceType: null, sourceId: null });
+        const before = (await rows(`SELECT count(*)::int AS n FROM invoice`))[0].n;
+        await rejects(create(input), 422, 'ambiguous_subscription_obligation');
+        expect((await rows(`SELECT count(*)::int AS n FROM invoice`))[0].n).toBe(before); // no draft, so no PaymentRequest can ever follow
+      });
+
+      it('the SAME recurring price used twice (two lines) is still two recurring lines, and is refused identically', async () => {
+        const recurring = await seedRecurringPrice();
+        const input = await draftInput({ priceId: recurring });
+        input.lines.push({ priceId: recurring, quantity: 1, description: null, sourceType: null, sourceId: null });
+        await rejects(create(input), 422, 'ambiguous_subscription_obligation');
+      });
     });
   });
 
@@ -367,7 +418,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
       const open = await openInvoice();
       const first = (await requests.createForInvoice(open.id, producer, ctx)).request;
       const paymentId = await dispatch(first.id);
-      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, first, paymentId, 'payment.failed'), paymentCtx);
+      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, first, paymentId, 'payment.failed'), paymentCtx, new Date());
       const second = await requests.createForInvoice(open.id, producer, ctx);
       expect(second.created).toBe(true);
       expect(second.request.id).not.toBe(first.id);
@@ -386,7 +437,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
 
     it('payment.succeeded settles the request and the invoice in ONE transaction, with history and a receipt', async () => {
       const { open, request, paymentId } = await requested();
-      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx);
+      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx, new Date());
       expect(r).toMatchObject({ outcome: 'applied', firstDelivery: true });
       expect((await invoices.findForCaller(open.id, producer))).toMatchObject({ status: 'paid', revision: 2 });
       expect((await invoices.findForCaller(open.id, producer)).paidAt).toBeInstanceOf(Date);
@@ -399,8 +450,8 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     it('a redelivery of the SAME event id changes nothing and reports the first outcome', async () => {
       const { open, request, paymentId } = await requested();
       const id = crypto.randomUUID();
-      await requests.applyPaymentEvent(id, eventFor(open, request, paymentId), paymentCtx);
-      const again = await requests.applyPaymentEvent(id, eventFor(open, request, paymentId), paymentCtx);
+      await requests.applyPaymentEvent(id, eventFor(open, request, paymentId), paymentCtx, new Date());
+      const again = await requests.applyPaymentEvent(id, eventFor(open, request, paymentId), paymentCtx, new Date());
       expect(again).toMatchObject({ outcome: 'applied', firstDelivery: false });
       expect(await receipts(request.id)).toHaveLength(1);
       expect((await history(open.id)).filter((h) => h.toStatus === 'paid')).toHaveLength(1);
@@ -408,8 +459,8 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
 
     it('a DIFFERENT event id for the same terminal outcome is ignored as already applied', async () => {
       const { open, request, paymentId } = await requested();
-      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx);
-      const second = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx);
+      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx, new Date());
+      const second = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx, new Date());
       expect(second).toMatchObject({ outcome: 'ignored', detail: 'already_applied', firstDelivery: true });
       expect((await invoices.findForCaller(open.id, producer)).revision).toBe(2);
     });
@@ -417,7 +468,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     it('an event for a request Billing never had is ignored and recorded, and creates nothing', async () => {
       const open = await openInvoice();
       const ghost = { id: crypto.randomUUID() };
-      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, ghost, crypto.randomUUID()), paymentCtx);
+      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, ghost, crypto.randomUUID()), paymentCtx, new Date());
       expect(r).toMatchObject({ outcome: 'ignored', detail: 'unknown_payment_request' });
       expect((await rows(`SELECT count(*)::int AS n FROM payment_request WHERE id = $1`, [ghost.id]))[0].n).toBe(0);
       expect(await receipts(ghost.id)).toHaveLength(1);
@@ -428,7 +479,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
       const open = await openInvoice();
       const request = (await requests.createForInvoice(open.id, producer, ctx)).request;
       const smuggled = crypto.randomUUID();
-      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, smuggled), paymentCtx);
+      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, smuggled), paymentCtx, new Date());
       expect(r).toMatchObject({ outcome: 'deferred', detail: 'payment_id_not_recorded' });
       const after = await requests.findForCaller(request.id, producer);
       expect(after).toMatchObject({ status: 'created', paymentId: null });
@@ -447,7 +498,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
       ['a different producer (Stage 4)', (p: PaymentEventFacts) => ({ ...p, producer: 'other-producer' }), 'producer_mismatch'],
     ])('an event with %s is a recorded conflict and changes no state', async (_n, mutate, detail) => {
       const { open, request, paymentId } = await requested();
-      const r = await requests.applyPaymentEvent(crypto.randomUUID(), mutate(eventFor(open, request, paymentId)), paymentCtx);
+      const r = await requests.applyPaymentEvent(crypto.randomUUID(), mutate(eventFor(open, request, paymentId)), paymentCtx, new Date());
       expect(r).toMatchObject({ outcome: 'conflict', detail });
       expect((await requests.findForCaller(request.id, producer)).status).toBe('requested');
       expect((await invoices.findForCaller(open.id, producer)).status).toBe('open');
@@ -455,10 +506,10 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
 
     it('payment.failed closes the request but leaves the invoice open; a LATE success afterwards is a conflict, never a transition', async () => {
       const { open, request, paymentId } = await requested();
-      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.failed'), paymentCtx);
+      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.failed'), paymentCtx, new Date());
       expect((await requests.findForCaller(request.id, producer)).status).toBe('failed');
       expect((await invoices.findForCaller(open.id, producer)).status).toBe('open');
-      const late = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.succeeded'), paymentCtx);
+      const late = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.succeeded'), paymentCtx, new Date());
       expect(late).toMatchObject({ outcome: 'conflict', detail: 'request_already_terminal' });
       expect((await invoices.findForCaller(open.id, producer)).status).toBe('open');
     });
@@ -474,7 +525,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
       } finally {
         c.release();
       }
-      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx);
+      const r = await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId), paymentCtx, new Date());
       expect(r).toMatchObject({ outcome: 'conflict', detail: 'invoice_not_open' });
       expect((await requests.findForCaller(request.id, producer)).status).toBe('requested');
     });
@@ -482,7 +533,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     it('6 concurrent deliveries of ONE event apply it exactly once', async () => {
       const { open, request, paymentId } = await requested();
       const id = crypto.randomUUID();
-      const results = await Promise.all(Array.from({ length: 6 }, () => requests.applyPaymentEvent(id, eventFor(open, request, paymentId), paymentCtx)));
+      const results = await Promise.all(Array.from({ length: 6 }, () => requests.applyPaymentEvent(id, eventFor(open, request, paymentId), paymentCtx, new Date())));
       expect(results.filter((r) => r.firstDelivery)).toHaveLength(1);
       expect(new Set(results.map((r) => r.outcome))).toEqual(new Set(['applied']));
       expect(await receipts(request.id)).toHaveLength(1);
@@ -492,8 +543,8 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     it('a success and a failure racing for one request settle it once: one applied, the other a conflict, and the invoice is paid at most once', async () => {
       const { open, request, paymentId } = await requested();
       const [a, b] = await Promise.all([
-        requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.succeeded'), paymentCtx),
-        requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.failed'), paymentCtx),
+        requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.succeeded'), paymentCtx, new Date()),
+        requests.applyPaymentEvent(crypto.randomUUID(), eventFor(open, request, paymentId, 'payment.failed'), paymentCtx, new Date()),
       ]);
       expect([a.outcome, b.outcome].sort()).toEqual(['applied', 'conflict']);
       const finalRequest = await requests.findForCaller(request.id, producer);
@@ -503,7 +554,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
 
     it('two racing events for two requests of different invoices do not block or corrupt each other', async () => {
       const [x, y] = await Promise.all([requested(), requested()]);
-      const out = await Promise.all([x, y].map((s) => requests.applyPaymentEvent(crypto.randomUUID(), eventFor(s.open, s.request, s.paymentId), paymentCtx)));
+      const out = await Promise.all([x, y].map((s) => requests.applyPaymentEvent(crypto.randomUUID(), eventFor(s.open, s.request, s.paymentId), paymentCtx, new Date())));
       expect(out.map((o) => o.outcome)).toEqual(['applied', 'applied']);
     });
   });

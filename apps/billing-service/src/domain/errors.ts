@@ -19,6 +19,7 @@ export type BillingErrorCode =
   | 'idempotency_key_required'
   | 'unsupported_currency'
   | 'price_not_available'
+  | 'ambiguous_subscription_obligation'
   | 'subscription_conflict'
   | 'invalid_subscription_transition'
   | 'invalid_subscription_period'

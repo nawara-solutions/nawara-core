@@ -152,7 +152,8 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
 
   const snapshotFor = (invoice: { id: string; total: string; currency: string }, request: { id: string }, paymentId: string, status = 'succeeded', over: Partial<PaymentSnapshot> = {}): PaymentSnapshot => ({
     paymentId, paymentRequestId: request.id, status, amount: Number(invoice.total), currency: invoice.currency,
-    sourceType: 'invoice', sourceId: invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, ...over,
+    sourceType: 'invoice', sourceId: invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG,
+    closedAt: new Date(), ...over,
   });
 
   const factsFor = (invoice: { id: string; total: string; currency: string }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded', over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({

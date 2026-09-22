@@ -98,19 +98,27 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnApplicati
     // An operator replay of a dead-lettered message is the same delivery in every respect but this marker, which only names the log lines.
     const tag = (base: string, replayed: string) => (replay > 0 ? `${replayed} ${who} replays=${replay}` : `${base} ${who}`);
     let facts: PaymentEventFacts;
+    let settledAt: Date;
     try {
       facts = parseFacts(event); // throws on malformed input — the caller (EventBus) dead-letters it
+      // Stage 12.4: the authoritative settlement instant for any resulting Subscription activation/renewal — Payment's
+      // own header, set once when the fact was recorded in its outbox, unchanged across every retry or operator
+      // replay of this SAME delivery (never `new Date()` here, which would let a late/replayed delivery shift the
+      // period). A missing or unparseable header is exactly as malformed as a bad payload: never retryable.
+      settledAt = new Date(event.headers.occurredAt);
+      if (Number.isNaN(settledAt.getTime())) throw new MalformedPaymentEventError();
     } catch (e) {
       this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`);
       throw e;
     }
     let result;
     try {
-      result = await this.requests.applyPaymentEvent(event.id, facts, {
-        actor: { type: 'system', id: null },
-        cause: { type: 'payment_event', id: event.id },
-        correlationId,
-      });
+      result = await this.requests.applyPaymentEvent(
+        event.id,
+        facts,
+        { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: event.id }, correlationId },
+        settledAt,
+      );
     } catch (e) {
       const permanent = pgCode(e)?.startsWith('22') === true;
       const errorName = e instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(e.name) ? e.name : 'Error';
@@ -131,5 +139,9 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnApplicati
     if (result.outcome === 'ignored') this.logger.log(`${tag('payment_event_ignored', 'payment_event_replay_ignored')} ${at} detail=${result.detail}`);
     if (result.outcome === 'conflict') this.logger.error(`${tag('payment_event_conflict', 'payment_event_replay_conflict')} ${at} detail=${result.detail} — needs manual review`);
     if (result.outcome === 'deferred') this.logger.warn(`${tag('payment_event_deferred', 'payment_event_replay_deferred')} ${at} detail=${result.detail} — the reconciler will complete it`);
+    // Stage 12.4: only meaningful once the payment itself was applied — a settled offering that conflicts with the
+    // organization's existing Subscription never rolls back the payment (section 24), so it needs its own, separately
+    // visible signal rather than being folded into `payment_event_conflict` above.
+    if (result.subscription === 'conflict') this.logger.error(`payment_event_subscription_conflict ${who} ${at} — settlement applied but its offering conflicts with the organization's existing Subscription; needs manual review`);
   }
 }
