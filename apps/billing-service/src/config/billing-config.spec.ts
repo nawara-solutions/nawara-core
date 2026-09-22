@@ -47,11 +47,23 @@ describe('loadBillingConfig', () => {
     for (const bad of ['TN', 'TNDD', 'T1D', ',', 'tnd;usd']) expect(refusal({ ...BASE, BILLING_SUPPORTED_CURRENCIES: bad })).toContain('BILLING_SUPPORTED_CURRENCIES');
   });
 
+  it('R1: SUBSCRIPTION_GRACE_DAYS has NO code default either — undefined means this deployment offers no grace at all', () => {
+    expect(loadBillingConfig(BASE).subscriptionGraceDays).toBeUndefined();
+    expect(loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '7' }).subscriptionGraceDays).toBe(7);
+    expect(loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '1' }).subscriptionGraceDays).toBe(1);
+    expect(loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '365' }).subscriptionGraceDays).toBe(365);
+    for (const bad of ['0', '366', '-1', '3.5', 'seven', '']) {
+      const cfg = { ...BASE, SUBSCRIPTION_GRACE_DAYS: bad };
+      if (bad === '') expect(loadBillingConfig(cfg).subscriptionGraceDays).toBeUndefined(); // empty means unset, like every other optional value
+      else expect(refusal(cfg)).toContain('SUBSCRIPTION_GRACE_DAYS');
+    }
+  });
+
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'dispatch', 'docs', 'isProduction', 'logLevel',
       'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqUrl', 'rateLimits', 'reconcile',
-      'serviceName', 'serviceTokens', 'supportedCurrencies', 'trustProxy',
+      'serviceName', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy',
     ]);
   });
 

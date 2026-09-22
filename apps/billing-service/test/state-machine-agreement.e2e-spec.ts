@@ -4,7 +4,8 @@ import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { billingMigrationsDir } from '../src/app.module.js';
 import {
-  INVOICE_STATUSES, PAYMENT_REQUEST_STATUSES, canTransitionInvoice, canTransitionPaymentRequest, type InvoiceStatus, type PaymentRequestStatus,
+  INVOICE_STATUSES, PAYMENT_REQUEST_STATUSES, SUBSCRIPTION_STATUSES, canTransitionInvoice, canTransitionPaymentRequest, canTransitionSubscription,
+  type InvoiceStatus, type PaymentRequestStatus, type SubscriptionStatus,
 } from '../src/domain/state-machines.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -85,7 +86,7 @@ describeWithEnv('TypeScript and database state machines agree on every pair (rea
   }
 
   /** Attempts the move with triggers ON. Returns null on success or the database's message. The history row is written in the same transaction so BI-19 never masks the answer. */
-  async function attempt(table: 'invoice' | 'payment_request', id: string, from: string, to: string): Promise<string | null> {
+  async function attempt(table: 'invoice' | 'payment_request' | 'subscription', id: string, from: string, to: string): Promise<string | null> {
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
@@ -103,6 +104,34 @@ describeWithEnv('TypeScript and database state machines agree on every pair (rea
     } finally {
       c.release();
     }
+  }
+
+  const subscriptionColumns: Record<SubscriptionStatus, string> = {
+    pending: '',
+    active: `, "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01'`,
+    grace: `, "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-08'`,
+    expired: `, "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01'`,
+  };
+
+  /** A product + its immutable, recurring price, and a subscription against it, placed directly in `status` with triggers off. */
+  async function makeSubscription(status: SubscriptionStatus): Promise<string> {
+    return unguarded(async (c) => {
+      const productId = crypto.randomUUID();
+      const priceId = crypto.randomUUID();
+      await c.query(
+        `INSERT INTO product (id, producer, "sellerType", "sellerId", code, name) VALUES ($1, 'test-producer', 'organization', $2, $3, 'A product')`,
+        [productId, ORG, `sub-${crypto.randomUUID().slice(0, 8)}`],
+      );
+      await c.query(
+        `INSERT INTO price (id, "productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+         VALUES ($1, $2, $3, 'TND', 1000, 'recurring', 'month', 1)`,
+        [priceId, productId, crypto.randomUUID()],
+      );
+      const id = crypto.randomUUID();
+      await c.query(`INSERT INTO subscription (id, "organizationId", "productId", "priceId") VALUES ($1, $2, $3, $4)`, [id, crypto.randomUUID(), productId, priceId]);
+      if (status !== 'pending') await c.query(`UPDATE subscription SET status = '${status}'${subscriptionColumns[status]} WHERE id = $1`, [id]);
+      return id;
+    });
   }
 
   it('invoice: all 16 pairs — the trigger refuses "cannot move" exactly where the TypeScript table forbids it', async () => {
@@ -132,5 +161,20 @@ describeWithEnv('TypeScript and database state machines agree on every pair (rea
       }
     }
     expect(checked).toBe(56);
+  });
+
+  it('subscription: all 16 pairs, INCLUDING the active->active self-loop — the trigger refuses exactly where the TypeScript table forbids it', async () => {
+    let checked = 0;
+    for (const from of SUBSCRIPTION_STATUSES) {
+      for (const to of SUBSCRIPTION_STATUSES) {
+        // Unlike invoice/payment_request, a same-status move IS meaningful here (active->active is the renewal/cancellation-toggle
+        // self-loop) and must be attempted, not skipped — the lifecycle trigger refuses every OTHER self-loop explicitly.
+        const message = await attempt('subscription', await makeSubscription(from), from, to);
+        const refusedAsMove = message !== null && /cannot move from|has no in-place change/.test(message);
+        expect(refusedAsMove, `${from} -> ${to}: ${message}`).toBe(!canTransitionSubscription(from, to));
+        checked += 1;
+      }
+    }
+    expect(checked).toBe(16);
   });
 });

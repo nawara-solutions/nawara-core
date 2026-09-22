@@ -18,7 +18,11 @@ export type BillingErrorCode =
   | 'payment_request_in_flight'
   | 'idempotency_key_required'
   | 'unsupported_currency'
-  | 'price_not_available';
+  | 'price_not_available'
+  | 'subscription_conflict'
+  | 'invalid_subscription_transition'
+  | 'invalid_subscription_period'
+  | 'subscription_grace_unavailable';
 
 export function billingError(status: number, code: BillingErrorCode, message: string): HttpException {
   return new HttpException({ message, code }, status);

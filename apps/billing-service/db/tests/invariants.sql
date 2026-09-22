@@ -454,6 +454,109 @@ SELECT pg_temp.expect_error('CURRENCY', 'an invoice currency cannot be changed a
 SELECT pg_temp.expect_error('CURRENCY', 'an invoice cannot be created in an unknown currency', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
   VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'company', 'c1', 'user', 'u1', 'contract', 's', 'XXX', 1, 1, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23503');
 
+-- =================================================================================================================== SUB (Stage 12.2)
+-- Creation shape: born pending, with no lifecycle data, and only against a recurring, non-retired price of its own product.
+SELECT pg_temp.expect_error('SUB', 'cannot be created with a period already set', format($$INSERT INTO subscription ("organizationId", "productId", "priceId", "currentPeriodStart")
+  SELECT gen_random_uuid(), "productId", id, now() FROM price WHERE id = %L$$, t_mk_recurring_price()), '23514');
+SELECT pg_temp.expect_error('SUB', 'cannot be created already active', format($$INSERT INTO subscription ("organizationId", "productId", "priceId", status)
+  SELECT gen_random_uuid(), "productId", id, 'active' FROM price WHERE id = %L$$, t_mk_recurring_price()), '23514');
+SELECT t_mk_price(1000) AS one_time_price \gset
+SELECT pg_temp.expect_error('SUB', 'cannot reference a one-time price: a subscription always needs a recurring interval', format($$INSERT INTO subscription ("organizationId", "productId", "priceId")
+  SELECT gen_random_uuid(), "productId", id FROM price WHERE id = %L$$, :'one_time_price'), '23514');
+SELECT t_mk_recurring_price() AS retiring_price \gset
+UPDATE price SET "retiredAt" = now() WHERE id = :'retiring_price';
+SELECT pg_temp.expect_error('SUB', 'cannot be created against a retired price', format($$INSERT INTO subscription ("organizationId", "productId", "priceId")
+  SELECT gen_random_uuid(), "productId", id FROM price WHERE id = %L$$, :'retiring_price'), '23514');
+SELECT t_mk_subscription() AS ok_created \gset
+SELECT pg_temp.assert_eq('SUB', 'created pending, against a recurring price, with a default-false cancellation flag', (SELECT "cancelAtPeriodEnd"::text FROM subscription WHERE id = :'ok_created'), 'false');
+
+-- one current subscription per Organization (a plain UNIQUE, not a partial index: section 13 — this row IS the current state)
+SELECT '00000000-0000-4000-8000-0000000000b1'::uuid AS sub_org \gset
+SELECT t_mk_subscription(:'sub_org') AS first_sub \gset
+SELECT pg_temp.expect_error('SUB', 'a second subscription for the SAME organization is refused', format($$INSERT INTO subscription ("organizationId", "productId", "priceId")
+  SELECT %L, "productId", id FROM price WHERE id = %L$$, :'sub_org', t_mk_recurring_price()), '23505', 'subscription_organization_unique');
+SELECT pg_temp.expect_ok('SUB', 'a DIFFERENT organization can hold its own subscription against the very same price', format($$
+  WITH ins AS (INSERT INTO subscription ("organizationId", "productId", "priceId")
+    SELECT gen_random_uuid(), "productId", "priceId" FROM subscription WHERE id = %L RETURNING id, revision)
+  SELECT t_hist('subscription', id, NULL, 'pending', revision) FROM ins$$, :'first_sub'));
+
+-- product/price integrity: the composite FK refuses a price that does not belong to the given product
+SELECT t_mk_recurring_price() AS mismatched_price \gset
+SELECT pg_temp.expect_error('SUB', 'the priceId must belong to the productId (composite FK, mirrors invoice''s own pattern)', format($$INSERT INTO subscription ("organizationId", "productId", "priceId")
+  VALUES (gen_random_uuid(), gen_random_uuid(), %L)$$, :'mismatched_price'), '23503');
+
+-- lifecycle: activation, period order, grace, termination
+SELECT t_mk_subscription() AS pend \gset
+SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd <= currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
+SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd < currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-02', "currentPeriodEnd" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
+SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to grace', format($$UPDATE subscription SET status = 'grace', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-08' WHERE id = %L$$, :'pend'), '23514');
+SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to expired', format($$UPDATE subscription SET status = 'expired', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01' WHERE id = %L$$, :'pend'), '23514');
+-- Success-path UPDATEs pair the mutation with its history row in ONE multi-statement EXECUTE (mirrors line ~320's own
+-- "UPDATE ...; SET CONSTRAINTS ALL IMMEDIATE" pattern): every subscription mutation needs a matching `billing_transition`
+-- row at COMMIT (BI-19, deferred), so a bare UPDATE with no paired history insert would abort this whole script at the
+-- statement's own commit, outside any handler here — never something `expect_ok`/`expect_error` could turn into a clean result.
+SELECT pg_temp.expect_ok('SUB', 'pending -> active with a valid period', format($$
+  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'pending', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+SELECT pg_temp.assert_eq('SUB', 'activation advanced the revision to 1', (SELECT revision::text FROM subscription WHERE id = :'pend'), '1');
+SELECT pg_temp.expect_error('SUB', 'a self-loop is refused for any status OTHER than active (no in-place change while pending/grace/expired)',
+  format($$UPDATE subscription SET "cancelAtPeriodEnd" = false WHERE id = %L$$, t_mk_subscription()), '23514');
+
+SELECT pg_temp.expect_error('SUB', 'graceUntil at or before currentPeriodEnd is refused', format($$UPDATE subscription SET status = 'grace', "graceUntil" = '2026-02-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_grace_after_period');
+SELECT pg_temp.expect_error('SUB', 'graceUntil before currentPeriodEnd is refused', format($$UPDATE subscription SET status = 'grace', "graceUntil" = '2026-01-15' WHERE id = %L$$, :'pend'), '23514', 'subscription_grace_after_period');
+SELECT pg_temp.expect_ok('SUB', 'active -> grace with a graceUntil strictly after the period end', format($$
+  UPDATE subscription SET status = 'grace', "graceUntil" = '2026-02-08' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'grace', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+SELECT pg_temp.expect_error('SUB', 'grace cannot re-extend itself: grace -> grace is not an allowed move (never keep extending a grace window)',
+  format($$UPDATE subscription SET "graceUntil" = '2026-02-20' WHERE id = %L$$, :'pend'), '23514');
+SELECT pg_temp.expect_ok('SUB', 'grace -> active clears graceUntil unconditionally, even if the caller tried to keep it', format($$
+  UPDATE subscription SET status = 'active', "graceUntil" = '2026-02-08' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'grace', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+SELECT pg_temp.assert_eq('SUB', 'graceUntil was force-cleared on the move into active', (SELECT "graceUntil"::text FROM subscription WHERE id = :'pend'), NULL);
+
+SELECT pg_temp.expect_ok('SUB', 'active -> expired (natural expiry, no effectiveTerminationAt)', format($$
+  UPDATE subscription SET status = 'expired' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+SELECT pg_temp.assert_eq('SUB', 'a naturally expired subscription has no effectiveTerminationAt', (SELECT "effectiveTerminationAt"::text FROM subscription WHERE id = :'pend'), NULL);
+SELECT pg_temp.expect_ok('SUB', 'expired -> active: a late renewal can always reactivate', format($$
+  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-03-01', "currentPeriodEnd" = '2026-04-01' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'expired', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+
+-- effective termination: may only SHORTEN access, and never survives past its own `expired` episode (a later
+-- reactivation clears it — see the migration comment on why no separate "set once" check is needed)
+SELECT t_mk_active_subscription('2026-06-01'::timestamptz) AS term_sub \gset
+SELECT pg_temp.expect_error('SUB', 'effectiveTerminationAt after currentPeriodEnd would EXTEND access: refused', format($$UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = '2026-06-02' WHERE id = %L$$, :'term_sub'), '23514', 'subscription_termination_shape');
+SELECT pg_temp.expect_ok('SUB', 'effectiveTerminationAt at or before currentPeriodEnd shortens access: accepted', format($$
+  UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = '2026-05-15' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L))$$, :'term_sub', :'term_sub', :'term_sub'));
+SELECT pg_temp.expect_error('SUB', 'an already-expired subscription accepts no in-place change at all, so its effectiveTerminationAt cannot be revised either',
+  format($$UPDATE subscription SET "effectiveTerminationAt" = '2026-05-16' WHERE id = %L$$, :'term_sub'), '23514');
+
+-- a rolled-forward period always starts uncancelled, even if the caller tries to keep cancelAtPeriodEnd set
+SELECT t_mk_active_subscription('2026-07-01'::timestamptz) AS cancel_sub \gset
+SELECT pg_temp.assert_eq('SUB', '(fixture) cancelAtPeriodEnd defaults to false', (SELECT "cancelAtPeriodEnd"::text FROM subscription WHERE id = :'cancel_sub'), 'false');
+SELECT t_set_cancel(:'cancel_sub', true);
+SELECT pg_temp.assert_eq('SUB', 'cancelAtPeriodEnd can be scheduled while active (an active->active self-loop, auditable)', (SELECT "cancelAtPeriodEnd"::text FROM subscription WHERE id = :'cancel_sub'), 'true');
+SELECT t_set_period_end(:'cancel_sub', '2026-08-01', true);
+SELECT pg_temp.assert_eq('SUB', 'a period change (renewal) force-clears cancelAtPeriodEnd, even though the statement tried to set it true', (SELECT "cancelAtPeriodEnd"::text FROM subscription WHERE id = :'cancel_sub'), 'false');
+
+-- BI-19 for subscription: every mutation (not only a status change) needs its history row, checked at COMMIT
+SELECT pg_temp.expect_error('SUB', 'a mutation with no matching history row cannot commit (BI-19)',
+  format($$UPDATE subscription SET "cancelAtPeriodEnd" = true WHERE id = %L; SET CONSTRAINTS ALL IMMEDIATE$$, t_mk_active_subscription()), '23514');
+
+-- immutability: organizationId/productId/priceId/createdAt never change
+SELECT pg_temp.expect_error('SUB', 'organizationId is immutable', format($$UPDATE subscription SET "organizationId" = gen_random_uuid() WHERE id = %L$$, t_mk_active_subscription()), '23514');
+SELECT pg_temp.expect_error('SUB', 'productId is immutable (no plan-change operation exists yet)', format($$UPDATE subscription SET "productId" = gen_random_uuid() WHERE id = %L$$, t_mk_active_subscription()), '23514');
+SELECT pg_temp.expect_error('SUB', 'a subscription is never deleted', format($$DELETE FROM subscription WHERE id = %L$$, t_mk_active_subscription()), '23514');
+
+-- renewal (the database half, mirroring SubscriptionRepository.renew exactly): the frozen anchor rule
+SELECT t_mk_active_subscription('2026-11-01T00:00:00Z'::timestamptz) AS early_sub \gset
+SELECT t_try_renew(:'early_sub');
+-- compared as VALUES, not text: the session's display timezone (not necessarily UTC) would otherwise show a different offset
+SELECT pg_temp.assert_eq('SUB', 'early renewal anchors on the ORIGINAL currentPeriodEnd', (SELECT ("currentPeriodStart" = '2026-11-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'early_sub'), 'true');
+SELECT pg_temp.assert_eq('SUB', 'early renewal extends by exactly one recurring interval', (SELECT ("currentPeriodEnd" = '2026-12-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'early_sub'), 'true');
+SELECT pg_temp.assert_eq('SUB', 'the renewal is its own auditable revision', (SELECT revision::text FROM subscription WHERE id = :'early_sub'), '2');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

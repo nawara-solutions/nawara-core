@@ -13,7 +13,7 @@ import { invoiceCreatedEvent } from './billing-events.js';
 import {
   INVOICE_COLUMNS, type InvoiceLineRow, type InvoiceListFilters, type InvoiceListRow, type InvoiceRecord, type InvoiceRow, type PriceForInvoice,
 } from './invoice.types.js';
-import { recordTransition } from './transitions.js';
+import { recordTransition } from '../domain/transitions.js';
 
 export interface WriteResult {
   invoice: InvoiceRecord;

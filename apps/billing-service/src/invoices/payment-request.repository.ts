@@ -10,7 +10,7 @@ import { relationTo } from '../domain/relations.js';
 import { ACTIVE_PAYMENT_REQUEST_STATUSES } from '../domain/state-machines.js';
 import type { PaymentSnapshot } from '../payment-integration/payment-client.js';
 import { INVOICE_COLUMNS, type InvoiceRow, type PaymentRequestRow } from './invoice.types.js';
-import { recordTransition } from './transitions.js';
+import { recordTransition } from '../domain/transitions.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;

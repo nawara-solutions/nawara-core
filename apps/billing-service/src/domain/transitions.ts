@@ -1,8 +1,8 @@
 import type { Queryable } from '@nawara/service-kit';
-import type { TransitionContext } from '../domain/actors.js';
+import type { TransitionContext } from './actors.js';
 
 export interface TransitionRecord {
-  entityType: 'invoice' | 'payment_request';
+  entityType: 'invoice' | 'payment_request' | 'subscription';
   entityId: string;
   from: string | null;
   to: string;
