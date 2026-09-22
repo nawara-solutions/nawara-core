@@ -77,9 +77,9 @@ type) rather than a parallel mechanism. States: `pending, active, grace, expired
 (a renewal or a cancellation toggle); there is no `cancel_scheduled`, `terminated`, `past_due` or similar. `SubscriptionRepository`
 (`src/subscriptions`) is the only writer: `create`, `activate`, `renew` (one operation for early/on-time/grace/late renewal —
 the anchor rule in `src/domain/subscription-period.ts` already accounts for every case), `enterGrace`, `expire`,
-`scheduleCancellation`/`reverseCancellation`, `terminate`. No controller, no public API, no Entitlement derivation and no
-Payment-event consumption yet — those are later Stage 12 work; today every operation is exercised directly (tests, and later a
-Stage 12.4 event consumer).
+`scheduleCancellation`/`reverseCancellation`, `terminate`. No controller, no public API and no Payment-event consumption
+yet — those are later Stage 12 work; today every operation is exercised directly (tests, and later a Stage 12.4 event
+consumer).
 
 `graceUntil` has exactly one trusted authority: `SUBSCRIPTION_GRACE_DAYS` (optional; unset means this deployment offers no
 grace at all — no Nawara-wide default exists). `activate`/`renew` precompute it from that policy in the SAME statement as
@@ -91,13 +91,26 @@ it is never a disguised upgrade/downgrade. `productId`/`priceId` are immutable t
 block a future offering-change operation: exactly like every other Billing table, a later migration simply widens the
 existing `billing_immutable_except` allow-list the day that operation is actually built.
 
+### Entitlement derivation (Stage 12.3; a logical capability, not a service, not a table)
+
+`deriveEntitlement` (`src/domain/entitlement.ts`) answers, purely from an already-loaded Subscription and an explicitly
+supplied `now`, whether an Organization has effective commercial access right now: `{ valid: boolean, expiresAt: Date |
+null }` — the frozen V1 contract, nothing else (no reason code, no feature flags). No database query, no HTTP call, no
+RabbitMQ, no configuration read (grace policy already did its job when Stage 12.2 precomputed `graceUntil`), no `new
+Date()` inside it — `now` is always the caller's. It never reads `cancelAtPeriodEnd` at all (structurally, not just
+behaviorally, irrelevant to already-purchased access) and treats `active`, `grace` and a possibly-premature `expired`
+identically: only `pending` (or no subscription) short-circuits to invalid, because Stage 12.2 already guarantees
+`graceUntil`/`effectiveTerminationAt` are authoritative timestamps a delayed status-normalizing sweeper — never
+built — cannot invalidate. No controller yet: the read-only effective-access HTTP contract is Stage 12.5's.
+
 ### Explicitly NOT implemented (later stages; see the SDD)
 
 Invoice rendering, templates, PDF, File Service, delivery, QR, signatures, dunning, trials, proration, discounts, tax engine,
 credit notes, refunds, real payment providers, cash, payouts, wallets, accounting ledger, settlement infrastructure, merchant of
 record, external customers, branches, multiple legal entities, exchange rates, currency conversion, membership-based payment
-authorization, entitlements, a Subscription HTTP API, Plan/SubscriptionPlan, user-scoped subscriptions. No table exists for any
-of the still-fully-deferred ones (a test asserts the exact table set).
+authorization, an Entitlement table or persistence of any kind, feature/quota entitlements, an effective-access or Subscription
+HTTP API, Plan/SubscriptionPlan, user-scoped subscriptions. No table exists for any of the still-fully-deferred ones (a test
+asserts the exact table set).
 
 ## Dead-lettered Payment events (inspect and replay)
 

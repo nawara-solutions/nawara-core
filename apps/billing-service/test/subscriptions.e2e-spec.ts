@@ -4,6 +4,7 @@ import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { billingMigrationsDir } from '../src/app.module.js';
 import type { TransitionContext } from '../src/domain/actors.js';
+import { deriveEntitlement } from '../src/domain/entitlement.js';
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
@@ -402,5 +403,39 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const final = await subs.getByOrganization(raceOrg);
     expect(['active', 'expired']).toContain(final.status); // whichever ran last, deterministically, under the row lock
     expect(final.revision).toBe(3); // create(0) + activate(1) + exactly 2 more operations, neither lost
+  });
+
+  describe('Stage 12.3: deriveEntitlement against a real, repository-loaded row', () => {
+    it('a subscription created, activated and read back through the real repository derives entitlement identically to the unit fixtures', async () => {
+      const organizationId = org();
+      const { productId, priceId } = await recurringPrice();
+      await subs.create(organizationId, productId, priceId, ctx);
+      const start = new Date('2026-10-01T00:00:00Z');
+      const end = new Date('2026-11-01T00:00:00Z');
+      await subs.activate(organizationId, { start, end }, ctx);
+      const row = await subs.getByOrganization(organizationId); // round-tripped through `pg`: timestamptz -> JS Date
+      // `activate` also precomputed graceUntil (the test app's default SUBSCRIPTION_GRACE_DAYS=7), so the row's OWN
+      // effective boundary is graceUntil, not currentPeriodEnd — exactly what a real, grace-configured deployment sees.
+      expect(row.graceUntil).toEqual(new Date('2026-11-08T00:00:00Z'));
+
+      expect(deriveEntitlement(row, new Date('2026-10-15T00:00:00Z'))).toEqual({ valid: true, expiresAt: row.graceUntil });
+      expect(deriveEntitlement(row, end)).toEqual({ valid: true, expiresAt: row.graceUntil }); // still within grace at the paid-period end
+      expect(deriveEntitlement(row, row.graceUntil!)).toEqual({ valid: false, expiresAt: null });
+    });
+
+    it('a subscription still `active` past its period end, but inside the real repository-computed graceUntil, derives valid — the exact Stage 12.2/12.3 sweeper-independence guarantee, over real PostgreSQL', async () => {
+      const organizationId = org();
+      const { productId, priceId } = await recurringPrice();
+      await subs.create(organizationId, productId, priceId, ctx);
+      const start = new Date(Date.now() - 40 * day);
+      const end = new Date(Date.now() - 3 * day); // period already ended
+      await subs.activate(organizationId, { start, end }, ctx); // graceUntil is precomputed here (7-day test default), status stays 'active'
+      const row = await subs.getByOrganization(organizationId);
+      expect(row.status).toBe('active');
+      expect(row.graceUntil).not.toBeNull();
+
+      const result = deriveEntitlement(row, new Date());
+      expect(result).toEqual({ valid: true, expiresAt: row.graceUntil });
+    });
   });
 });
