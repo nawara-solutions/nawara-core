@@ -154,7 +154,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     const ignored = await requests.applyPaymentEvent(crypto.randomUUID(), {
       name: 'payment.failed', source: 'payment-service', paymentId: crypto.randomUUID(), producer: 'billing-service', paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: open.id,
       payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: org }, organizationId: org, amount: 5000, currency: 'TND', revision: 1,
-    }, { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'e1' } });
+    }, { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'e1' } }, new Date());
     expect(ignored).toMatchObject({ outcome: 'ignored', detail: 'unknown_payment_request' });
   });
 

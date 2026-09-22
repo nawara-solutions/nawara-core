@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import { actorOf, type Caller, type TransitionContext } from '../domain/actors.js';
 import { deterministicEventId } from '../common/deterministic-id.js';
@@ -11,6 +11,7 @@ import { ACTIVE_PAYMENT_REQUEST_STATUSES } from '../domain/state-machines.js';
 import type { PaymentSnapshot } from '../payment-integration/payment-client.js';
 import { INVOICE_COLUMNS, type InvoiceRow, type PaymentRequestRow } from './invoice.types.js';
 import { recordTransition } from '../domain/transitions.js';
+import { SubscriptionRepository } from '../subscriptions/subscription.repository.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;
@@ -18,11 +19,17 @@ export interface PaymentRequestResult {
   created: boolean;
 }
 
+/** Stage 12.4: what a successfully-applied `payment.succeeded` did to the Organization's Subscription, if anything.
+ * `null` whenever there is nothing to report — the event was not applied at all, the invoice has no organization, or
+ * its lines do not identify exactly one recurring (Subscription) obligation (never guessed from more than one). */
+export type SubscriptionSettlementOutcome = 'settled' | 'conflict' | null;
+
 export interface EventApplication {
   outcome: Decision['outcome'];
   detail: string | null;
   /** false for a redelivery: the recorded outcome of the first delivery is returned and nothing is written. */
   firstDelivery: boolean;
+  subscription: SubscriptionSettlementOutcome;
 }
 
 /** A `created`/stale-`sending` request claimed by the dispatcher, joined with exactly what `buildPaymentRequestBody` needs. */
@@ -58,7 +65,10 @@ export interface ScanPosition {
  */
 @Injectable()
 export class PaymentRequestRepository {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly subscriptions: SubscriptionRepository,
+  ) {}
 
   /** State-idempotent creation (BI-13): the current active request is returned instead of a second one. */
   async createForInvoice(invoiceId: string, caller: Caller, ctx: TransitionContext): Promise<PaymentRequestResult> {
@@ -201,7 +211,14 @@ export class PaymentRequestRepository {
       currency: snapshot.currency,
       revision: 0, // not from a real event; decidePaymentEvent never reads it (informational only, SDD 21.4)
     };
-    return this.applyPaymentEvent(eventId, facts, ctx);
+    // Stage 12.4 R2: `snapshot.closedAt` is the SAME authoritative instant a live event's `occurredAt` header would
+    // carry for this same settlement fact (Payment sets `closedAt` in the same transaction as the terminal status
+    // write, and the outbox row is written in that same transaction too — `now()` is transaction-stable in
+    // PostgreSQL) — using it here converges the live-event and reconciliation paths on one Subscription anchor.
+    // `closedAt` is structurally always set once `status` is terminal (the only case reachable past the `name`
+    // guard above); the `?? new Date()` is a defensive fallback for that theoretically-impossible case only, never
+    // the expected path.
+    return this.applyPaymentEvent(eventId, facts, ctx, snapshot.closedAt ?? new Date());
   }
 
   /** Endpoint 15, case 1 (SDD 17.3): a request never sent (still `created`) is cancelled locally — no Payment call, no event. */
@@ -264,8 +281,14 @@ export class PaymentRequestRepository {
    * Applies one Payment event exactly once. The decision is the pure `decidePaymentEvent`, evaluated UNDER the invoice lock; the receipt (the
    * durable twin of the inbox) records what happened. Duplicates, out-of-order, unknown and early events are all handled here and none of them
    * can bind a `paymentId`. A `conflict` or `deferred` outcome changes no state.
+   *
+   * `settledAt` (Stage 12.4) anchors any resulting Subscription activation/renewal (`linkSubscription`) — the
+   * AUTHORITATIVE settlement instant, never `new Date()` at delivery time (section 21/22): a live event's own
+   * `occurredAt` header (immutable across retries/replays, set when Payment recorded the fact, never regenerated on
+   * redelivery), or (Stage 12.4 R2) the reconciler's `snapshot.closedAt` (see `applyReconciledSnapshot`) — the same
+   * underlying instant Payment recorded, so both paths converge on one anchor for the same settlement fact.
    */
-  async applyPaymentEvent(eventId: string, event: PaymentEventFacts, ctx: TransitionContext): Promise<EventApplication> {
+  async applyPaymentEvent(eventId: string, event: PaymentEventFacts, ctx: TransitionContext, settledAt: Date): Promise<EventApplication> {
     return this.db.tx(async (q) => {
       // Find the invoice without a lock, lock it, then re-read the request under the lock (lock order: invoice, then payment_request).
       const probe = await q.query<{ invoiceId: string }>(`SELECT "invoiceId" FROM payment_request WHERE id = $1`, [event.paymentRequestId]);
@@ -278,7 +301,7 @@ export class PaymentRequestRepository {
       }
 
       const seen = await q.query<{ outcome: string; detailCode: string | null }>(`SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = $1`, [eventId]);
-      if (seen.rows[0]) return { outcome: seen.rows[0].outcome as Decision['outcome'], detail: seen.rows[0].detailCode, firstDelivery: false };
+      if (seen.rows[0]) return { outcome: seen.rows[0].outcome as Decision['outcome'], detail: seen.rows[0].detailCode, firstDelivery: false, subscription: null };
 
       const decision = decidePaymentEvent(
         event,
@@ -296,18 +319,56 @@ export class PaymentRequestRepository {
         [eventId, event.name, event.paymentRequestId, request ? request.paymentId : null, decision.outcome, 'detail' in decision ? decision.detail : null, event.revision],
       );
       const detail = 'detail' in decision ? decision.detail : null;
-      if (receipt.rowCount === 0) return { outcome: decision.outcome, detail, firstDelivery: false };
+      if (receipt.rowCount === 0) return { outcome: decision.outcome, detail, firstDelivery: false, subscription: null };
 
+      let subscription: SubscriptionSettlementOutcome = null;
       if (decision.outcome === 'applied' && request && invoice) {
         await this.transitionRequest(q, request, decision.requestTo, ctx);
         if (decision.invoiceTo === 'paid') {
           // the request is `paid` first: the invoice trigger insists on it (BI-14)
           const updated = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'paid', "paidAt" = now() WHERE id = $1 RETURNING *`, [invoice.id]);
           await recordTransition(q, { entityType: 'invoice', entityId: invoice.id, from: 'open', to: 'paid', revision: updated.rows[0]!.revision, ctx });
+          subscription = await this.linkSubscription(q, invoice, settledAt, ctx);
         }
       }
-      return { outcome: decision.outcome, detail, firstDelivery: true };
+      return { outcome: decision.outcome, detail, firstDelivery: true, subscription };
     });
+  }
+
+  /**
+   * Stage 12.4: identifies whether the now-paid invoice represents a recurring Subscription obligation and, if so,
+   * applies the settlement to it — WITHIN the same transaction as the invoice/payment_request effect (section 15), so
+   * the receipt, the financial transition and the Subscription effect commit or roll back as one unit.
+   *
+   * Classification (section 7/26) reuses the fact Stage 12.2 already requires: a Subscription's price must be
+   * `recurring` (its own insert guard). No new "isSubscription" flag is invented. An invoice with anything OTHER than
+   * EXACTLY ONE recurring line — zero, or more than one — is NOT treated as a Subscription obligation: never guessed,
+   * never defaulted to the first line (section 27). Subscription is organization-scoped only, so an invoice with no
+   * `organizationId` at all is likewise not a Subscription obligation, whatever its lines say.
+   *
+   * An offering that conflicts with the organization's EXISTING subscription (a different product or price — an
+   * upgrade/downgrade, deliberately unimplemented, section 24) is reported as `'conflict'`, never silently mutated —
+   * and never allowed to roll back the payment itself: the money still genuinely settled regardless of what Billing
+   * can or cannot do with the commercial classification.
+   */
+  private async linkSubscription(q: Queryable, invoice: InvoiceRow, settledAt: Date, ctx: TransitionContext): Promise<SubscriptionSettlementOutcome> {
+    if (invoice.organizationId === null) return null;
+    const { rows: lines } = await q.query<{ productId: string; priceId: string; interval: string }>(
+      `SELECT "productId", "priceId", "interval" FROM invoice_line WHERE "invoiceId" = $1`,
+      [invoice.id],
+    );
+    const recurring = lines.filter((l) => l.interval === 'recurring');
+    if (recurring.length !== 1) return null;
+    const { productId, priceId } = recurring[0]!;
+    try {
+      await this.subscriptions.applySuccessfulPayment(q, { organizationId: invoice.organizationId, productId, priceId, settledAt }, ctx);
+      return 'settled';
+    } catch (e) {
+      const response = e instanceof HttpException ? e.getResponse() : null;
+      const code = typeof response === 'object' && response !== null ? (response as { code?: string }).code : undefined;
+      if (code === 'subscription_conflict') return 'conflict';
+      throw e;
+    }
   }
 
   private async transitionRequest(q: Queryable, request: PaymentRequestRow, to: string, ctx: TransitionContext): Promise<void> {

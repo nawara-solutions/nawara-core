@@ -19,6 +19,16 @@ export interface PaymentSnapshot {
   payer: { type: string; id: string };
   seller: { type: string; id: string };
   organizationId: string | null;
+  /**
+   * Stage 12.4 R2: the instant Payment's own row closed (set once, in the SAME transaction as the terminal status
+   * write — `payment.representation.ts`'s own field, already returned by both `GET` and `POST`). `null` for a
+   * non-terminal payment (freshly created/pending); always present once `status` is terminal, which is the only case
+   * `applyReconciledSnapshot` ever acts on. This is the SAME instant a live `payment.succeeded` event's
+   * `occurredAt` header carries (`now()` is transaction-stable in PostgreSQL, and the outbox row recording that same
+   * event is written in that same transaction) — reusing it here lets the live-event and reconciliation paths
+   * converge on the identical Subscription anchor for the same settlement fact.
+   */
+  closedAt: Date | null;
 }
 
 /**
@@ -74,6 +84,7 @@ interface PaymentResponseBody {
   payer?: { type?: string; id?: string };
   seller?: { type?: string; id?: string };
   organizationId?: string | null;
+  closedAt?: string | null;
   code?: string;
 }
 
@@ -90,10 +101,13 @@ function parseSnapshot(res: PaymentResponseBody | null): PaymentSnapshot | null 
     typeof res.payer?.type !== 'string' ||
     typeof res.payer?.id !== 'string' ||
     typeof res.seller?.type !== 'string' ||
-    typeof res.seller?.id !== 'string'
+    typeof res.seller?.id !== 'string' ||
+    (res.closedAt !== undefined && res.closedAt !== null && typeof res.closedAt !== 'string')
   ) {
     return null;
   }
+  const closedAt = typeof res.closedAt === 'string' ? new Date(res.closedAt) : null;
+  if (closedAt !== null && Number.isNaN(closedAt.getTime())) return null;
   return {
     paymentId: res.id,
     paymentRequestId: res.paymentRequestId,
@@ -105,6 +119,7 @@ function parseSnapshot(res: PaymentResponseBody | null): PaymentSnapshot | null 
     payer: { type: res.payer.type, id: res.payer.id },
     seller: { type: res.seller.type, id: res.seller.id },
     organizationId: res.organizationId ?? null,
+    closedAt,
   };
 }
 
