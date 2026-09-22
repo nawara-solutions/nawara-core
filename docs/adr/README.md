@@ -78,9 +78,10 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed |
 | [0036](./0036-money-parties-and-source-references.md) | Money, explicit parties and generic source references | Proposed |
 | [0037](./0037-reliable-events-outbox-inbox.md) | Reliable events: RabbitMQ with a transactional outbox and an inbox | Proposed |
-| [0038](./0038-entitlement-in-billing-service.md) | Entitlement (licenses and subscriptions) lives in billing-service | Proposed |
+| [0038](./0038-entitlement-in-billing-service.md) | Entitlement (licenses and subscriptions) lives in billing-service | Proposed (schema superseded in part by 0044; ownership principle stands) |
 | [0039](./0039-organization-ownership-and-cross-service-migration-authority.md) | Organization ownership and cross-service migration authority: finalizes ADR-0031's deferred O9 mechanism | Proposed (partly superseded by ADR-0040, which is Accepted) |
 | [0040](./0040-organization-ownership-migration-decisions.md) | Organization ownership migration: Auth's reference model, cutover mechanism, one-way door and import | Accepted (2026-09-20; Amendments 1 and 2; production gates in decision 7) |
 | [0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) | Administrative capabilities are domain-owned, client-neutral APIs (no client technology decided) | Proposed |
 | [0042](./0042-service-token-scopes-and-administrative-authorization.md) | Service-token scopes, hierarchy validation and administrative authorization (BD-4) | Accepted (Amendment 1, 2026-09-20) |
 | [0043](./0043-product-specific-entry-context-and-licensed-organization-participation.md) | Product-specific entry context and licensed organization participation: products declare their own entry model; Flow's organization participation is licensed, not universal | Proposed |
+| [0044](./0044-subscription-entitlement-final-model.md) | Subscription and Entitlement final model: one organization-scoped Subscription, no License/UserSubscription split | Proposed (records already-merged Stage 12.1-12.7) |

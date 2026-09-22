@@ -10,9 +10,11 @@ App-specific logic (driving lessons, exam rules, course content — anything uni
 
 | Service                  | Responsibility                                                                                                                                  | Consumed by                          |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| **auth-service**         | Registration, login, JWT/refresh tokens, role management                                                                                        | Any app needing user identity        |
+| **auth-service**         | Registration, login, JWT/refresh tokens, role management. No commercial dependency: never checks subscription, license or entitlement state.   | Any app needing user identity        |
+| **organization-service** | Company/Platform/Organization ownership. Implemented but not yet authoritative — auth-service still owns these entities.                        | Any app needing organization identity |
 | **notification-service** | Generic push (FCM), SMS, email dispatch, triggered by events from any service/app                                                               | Any app needing to notify users      |
-| **payment-service**      | Gateway-agnostic billing engine — supports multiple "products" (e.g. subscriptions, licenses, one-off charges) across multiple payment gateways | Any app needing to charge/bill users |
+| **billing-service**      | What is owed: Product, Price, Invoice, PaymentRequest, and the Subscription/Entitlement model (one Subscription per Organization; see [ADR-0044](docs/adr/0044-subscription-entitlement-final-model.md)) | Any app needing to bill or check commercial access |
+| **payment-service**      | How money was paid and the payment state only — payments, attempts, gateway adapters, transactional outbox to RabbitMQ. Not the billing or accounting system. | Billing, or any app needing to charge users |
 | **ai-service**           | Generic LLM-backed service (chat, Q&A, content generation) — configurable knowledge base/prompt per calling app                                 | Any app needing AI features          |
 
 Each service:
@@ -34,8 +36,10 @@ Each service:
 nawara-core/
 ├── apps/
 │   ├── auth-service/           # implemented and deployed
+│   ├── organization-service/   # implemented, not yet authoritative (auth-service still owns Company/Platform/Organization)
+│   ├── billing-service/        # implemented through Stage 12.7: catalog, invoices, Subscription/Entitlement
+│   ├── payment-service/        # implemented through Stage 12.7: settlement, attempts, outbox, real-broker publishing
 │   ├── notification-service/   # NestJS starter only
-│   ├── payment-service/        # NestJS starter only (target architecture is designed, not built)
 │   └── ai-service/             # FastAPI starter (/health only)
 ├── libs/
 │   └── service-kit/            # technical foundations for new services (no business logic); see its README
@@ -78,4 +82,9 @@ POST https://api.nawara-solutions.com/ai/chat
 
 ## Status
 
-🚧 Early-stage / scaffolding phase.
+auth-service is implemented and deployed. billing-service and payment-service are implemented through Stage 12.7
+(catalog, invoicing, settlement, Subscription/Entitlement, and a real-broker Payment→Billing integration — none of
+this is production-deployed yet). organization-service is implemented but not yet authoritative. notification-service
+and ai-service remain starters. See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md)
+for the detailed implemented/designed/deferred breakdown (dated; re-verify against `docs/sdd/*` for the current state
+of any one service).

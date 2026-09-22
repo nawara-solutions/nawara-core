@@ -5,11 +5,15 @@ Answers: **what is owed, why, how much, in which currency, by whom, to whom, and
 [`docs/architecture/financial-architecture.md`](../../docs/architecture/financial-architecture.md). It is **not** the payment or
 accounting system: it never moves money and keeps no ledger.
 
-## Status: Stage 4 (Payment integration: dispatch, cancel, event consumption, reconciliation)
+## Status: Stage 4 (Payment integration) + Stage 12.2-12.7 (Subscription/Entitlement, real-broker integration)
 
 The full cross-service loop with payment-service (SDD section 21), on top of Stage 3's HTTP API and the Stage 2 domain/schema
-foundation. Billing can now actually ask Payment to collect an invoice, learn the outcome, and recover from a distributed
-failure — end to end, not just record the request. **Not production-ready** and not deployed.
+foundation, plus the Subscription domain, entitlement derivation, Payment→Subscription linking, the effective-access HTTP
+contract, concurrency hardening and real-RabbitMQ-broker integration built in Stage 12 (sections below). Billing can now
+actually ask Payment to collect an invoice, learn the outcome, recover from a distributed failure, and — for a recurring
+obligation — activate/renew an Organization's Subscription and answer "does this Organization have effective commercial
+access" over a real broker. **Not production-ready** and not deployed. See
+[ADR-0044](../../docs/adr/0044-subscription-entitlement-final-model.md) for the Subscription/Entitlement decision record.
 Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs/tdd/billing-service-domain-schema.md) and
 [`docs/tdd/billing-service-http-api.md`](../../docs/tdd/billing-service-http-api.md).
 
@@ -77,9 +81,9 @@ type) rather than a parallel mechanism. States: `pending, active, grace, expired
 (a renewal or a cancellation toggle); there is no `cancel_scheduled`, `terminated`, `past_due` or similar. `SubscriptionRepository`
 (`src/subscriptions`) is the only writer: `create`, `activate`, `renew` (one operation for early/on-time/grace/late renewal —
 the anchor rule in `src/domain/subscription-period.ts` already accounts for every case), `enterGrace`, `expire`,
-`scheduleCancellation`/`reverseCancellation`, `terminate`. No controller, no public API and no Payment-event consumption
-yet — those are later Stage 12 work; today every operation is exercised directly (tests, and later a Stage 12.4 event
-consumer).
+`scheduleCancellation`/`reverseCancellation`, `terminate`. Payment-event consumption (Stage 12.4) and the public
+effective-access route (Stage 12.5) are described in their own sections below; this section covers the domain/database
+foundation only.
 
 `graceUntil` has exactly one trusted authority: `SUBSCRIPTION_GRACE_DAYS` (optional; unset means this deployment offers no
 grace at all — no Nawara-wide default exists). `activate`/`renew` precompute it from that policy in the SAME statement as
@@ -101,15 +105,51 @@ Date()` inside it — `now` is always the caller's. It never reads `cancelAtPeri
 behaviorally, irrelevant to already-purchased access) and treats `active`, `grace` and a possibly-premature `expired`
 identically: only `pending` (or no subscription) short-circuits to invalid, because Stage 12.2 already guarantees
 `graceUntil`/`effectiveTerminationAt` are authoritative timestamps a delayed status-normalizing sweeper — never
-built — cannot invalidate. No controller yet: the read-only effective-access HTTP contract is Stage 12.5's.
+built — cannot invalidate. The read-only effective-access HTTP contract is Stage 12.5's, described below.
 
-### Explicitly NOT implemented (later stages; see the SDD)
+### Payment → Subscription integration (Stage 12.4)
 
-Invoice rendering, templates, PDF, File Service, delivery, QR, signatures, dunning, trials, proration, discounts, tax engine,
-credit notes, refunds, real payment providers, cash, payouts, wallets, accounting ledger, settlement infrastructure, merchant of
+A settled `payment.succeeded` for a PaymentRequest whose invoice has exactly one recurring line reaches
+`linkSubscription` inside `PaymentRequestRepository.applyPaymentEvent` — the **same** transaction as the
+`payment_event_receipt` write and the PaymentRequest/Invoice transition, so all three commit or roll back together.
+An invoice with more than one recurring line is rejected at draft creation (`ambiguous_subscription_obligation`,
+`invoice.repository.ts`), before any PaymentRequest or Subscription obligation exists. An offering mismatch against
+an *existing* Subscription (a settled payment for a different product/price) is recorded as its own conflict
+classification but never blocks the underlying financial settlement.
+
+### Effective-access HTTP contract (Stage 12.5)
+
+`GET /billing/organizations/:organizationId/entitlement` (`EntitlementController`, service-token only) — the one
+public route, `200 { valid, expiresAt }`, composing `EffectiveAccessService` (`organizationId -> SubscriptionRepository.findForOrganization -> deriveEntitlement`) with the caller-supplied request-time clock. No Subscription,
+`pending`, not-yet-started or expired are all `valid: false`, never a 404.
+
+### Concurrency/lifecycle hardening (Stage 12.6)
+
+Real-PostgreSQL concurrency races, calling the repository/consumer layer directly (not a real broker — that is
+Stage 12.7's): duplicate and concurrent-duplicate delivery, distinct legitimate concurrent renewals, concurrent
+first activation, offering-conflict behaviour, live-event-vs-reconciliation overlap, renewal/termination and
+renewal/cancellation races, tenant isolation, and the fixed `invoice -> payment_request -> subscription` lock order
+under a mixed-race storm (`test/subscription-hardening.e2e-spec.ts`).
+
+### Real-broker integration (Stage 12.7)
+
+Extends the real-broker suite (see "Dead-lettered Payment events" below) through `payment.succeeded` into
+Subscription activation and the effective-access contract, against a real RabbitMQ broker and real PostgreSQL, two
+separately-spawned already-built processes: golden path, duplicate real-broker delivery (one Subscription effect),
+a spoofed event naming a different organization's real PaymentRequest (rejected, zero cross-tenant mutation), Billing
+unavailable while Payment settles (durable retention, restart resumes, anchored on the original settlement instant,
+not the delayed processing time), and the broker itself unreachable (Payment/outbox unaffected, delivery resumes
+once the broker returns) — `test/e2e-real-broker/stage12-7-real-broker-subscription.e2e-spec.ts`.
+
+### Explicitly NOT implemented (deferred by decision, not forgotten; see ADR-0044 and the SDD)
+
+Invoice rendering, templates, PDF, File Service, delivery, QR, signatures, dunning, trials, proration, upgrade/downgrade,
+pause/resume, discounts, tax engine, credit notes, refunds (including refund-driven entitlement revocation), real payment
+providers, cash, payouts, wallets, accounting ledger, settlement infrastructure, merchant of
 record, external customers, branches, multiple legal entities, exchange rates, currency conversion, membership-based payment
-authorization, an Entitlement table or persistence of any kind, feature/quota entitlements, an effective-access or Subscription
-HTTP API, Plan/SubscriptionPlan, user-scoped subscriptions. No table exists for any of the still-fully-deferred ones (a test
+authorization, an Entitlement table or persistence of any kind (Entitlement stays a pure derivation, never stored),
+feature/quota entitlements, Plan/SubscriptionPlan as a concept above Product/Price, user-scoped (per-user-within-organization)
+subscriptions — rejected, not merely deferred, ADR-0044. No table exists for any of the still-fully-deferred ones (a test
 asserts the exact table set).
 
 ## Dead-lettered Payment events (inspect and replay)

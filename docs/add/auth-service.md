@@ -8,12 +8,16 @@
 ## Scope
 
 This document covers `auth-service`'s v1 architecture as a boundary within `nawara-core`:
-how it verifies credentials, issues/rotates/revokes tokens, exposes the generic `role` and
-`organizationId` claims other services and consuming apps rely on (per ADR-0001), and how it
-gates registration on an organization's license validity via a synchronous call to
-`payment-service` (per ADR-0004). (Trials are `payment-service` subscription state, not `auth-service` metadata — ADR-0026.) As of ADR-0026, login and token refresh do **not** re-validate a license or subscription:
-authentication is not entitlement, so a lapsed license never blocks authentication and
-`payment-service` availability does not affect login/refresh (only registration still asks). Per ADR-0001 there is no org-less self-registration mode; **since ADR-0030 a member may belong to many organizations (one membership each)**. **Since ADR-0028 the client no longer supplies `organizationId`:
+how it verifies credentials, issues/rotates/revokes tokens, and exposes the generic `role` and
+`organizationId` claims other services and consuming apps rely on (per ADR-0001). **Stage 12.1 update (commit
+`f1901f9`, supersedes the paragraph ADR-0004 originally described here): registration no longer gates on any
+license/entitlement check at all.** The synchronous call to `payment-service` this section once described
+(`GET /payment/licenses/:organizationId/status`, ADR-0004) was removed outright, not repointed to billing-service —
+see [ADR-0044](../adr/0044-subscription-entitlement-final-model.md) and `docs/sdd/billing-service.md` §16.4.
+Registration and join never check subscription, license or entitlement state, and Auth calls no other service to
+decide them. (Trials remain billing-service's undecided territory, not `auth-service` metadata — ADR-0026.) As of
+ADR-0026, login and token refresh do **not** re-validate a license or subscription either: authentication is not
+entitlement. Per ADR-0001 there is no org-less self-registration mode; **since ADR-0030 a member may belong to many organizations (one membership each)**. **Since ADR-0028 the client no longer supplies `organizationId`:
 `POST /auth/register` takes a join code and the organization is resolved server-side;**
 the only null-`organizationId` accounts are the platform's own `Admin` accounts, which are
 provisioned out-of-band and never created through this public endpoint (see Context).
@@ -920,10 +924,12 @@ The client-to-auth-service contract for joining an organization changed; the ser
   password}` replaces the previous body. `organizationId`, `platformId`, `role` and `audience` are never accepted
   from the client. Membership and its approval are `POST/GET /auth/organizations/:id/...` (owner, assigned
   operator or organization admin); `GET /auth/me` reports `membership.status`.
-- **`auth-service` ⇄ `payment-service`.** Unchanged: one registration-time license question, fail closed, one
-  generic 403. Auth stores no subscription or license state; `requiresSubscription` is only a hint to the app.
-  Missing contracts (student checkout entry point, teacher-approval license re-check) are open questions in
-  ADR-0028, not invented here.
+- **`auth-service` ⇄ `payment-service`/`billing-service`.** **Changed, Stage 12.1 (commit `f1901f9`):** there is no
+  registration-time license/entitlement question at all any more — removed outright, not repointed to
+  billing-service (ADR-0044). Auth stores no subscription or license state; `requiresSubscription` is only a
+  non-authoritative hint to the app, never enforced by Auth. The student-checkout-entry-point and
+  teacher-approval-license-recheck questions ADR-0028 once left open are moot for Auth for the same reason: Auth
+  performs no commercial check at any onboarding step.
 - **Admin invitations (ADR-0029).** `POST/GET /auth/organizations/:id/admin-invitations` and `.../:invId/revoke`
   (owner with step-up, or organization admin); `POST /auth/onboarding/invitations/resolve|accept` (public, rate
   limited). The administrator's business role is the platform's concern: Auth carries only an opaque label and the

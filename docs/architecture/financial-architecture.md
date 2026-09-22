@@ -4,8 +4,13 @@
   ([0035](../adr/0035-financial-service-boundaries.md), [0036](../adr/0036-money-parties-and-source-references.md),
   [0037](../adr/0037-reliable-events-outbox-inbox.md), [0038](../adr/0038-entitlement-in-billing-service.md)) are *Proposed*.
 - **Date:** 2026-09-19
-- **Scope:** design only. `payment-service` is an unmodified NestJS starter and no financial code, table or route exists.
-  Nothing below is implemented.
+- **Scope:** design only, **as of 2026-09-19**. `billing-service` and `payment-service` are now both implemented
+  through Stage 12.7 (Stage 12.8 closure note, 2026-09-22): the "current state" and "data model" sections below
+  describe the pre-implementation design and are **stale where they describe entitlement** (§5's
+  `organization_license`/`user_subscription`/`product.type` shape was not built — see
+  [ADR-0044](../adr/0044-subscription-entitlement-final-model.md) for what was, and
+  [`docs/sdd/billing-service.md`](../sdd/billing-service.md) for the current technical contract, which is now the
+  living document; this one stays as a historical snapshot of the pre-implementation design decisions).
 - **Related:** [core-architecture.md](./core-architecture.md); this document **replaces the financial parts** of
   `docs/add/payment-service.md` and `docs/sdd/payment-service.md`, which pre-date multi-organization membership
   ([ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md)) and the broader requirements below.
@@ -36,7 +41,7 @@
 | A7 | Events are fire-and-forget | Accounting needs exactly-once *effect* | outbox + inbox ([ADR-0037](../adr/0037-reliable-events-outbox-inbox.md)) |
 | A8 | One "admin" role confirms cash | Two cases: organization-collected cash and Nawara-collected cash | authority derived from who the **seller** is |
 | A9 | Gateway flow "out of scope" | Webhooks, idempotency and reconciliation are the core of a payment service | designed in section 6 |
-| A10 | Auth calls `GET /payment/licenses/:org/status` at registration and joining | Entitlement moves to billing | Auth client repointed in a separate small, additive PR (not in this phase) |
+| A10 | Auth calls `GET /payment/licenses/:org/status` at registration and joining | Entitlement moves to billing | **Resolved, Stage 12.1 (`f1901f9`):** removed outright, never repointed — Auth makes no synchronous commercial check at all |
 
 ## 2. Boundaries
 
@@ -49,7 +54,7 @@ Business      → product services (outside Core)
 
 | Service | Question | Owns | Does **not** own |
 |---|---|---|---|
-| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring definitions, **entitlements** (organization license, user subscription), and (future) invoice presentation: templates, template versions and document metadata ([billing SDD](../sdd/billing-service.md) section 36) | how money moved; accounting; product concepts |
+| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring billing (via `price.interval`, no separate "recurring definition" entity), **Subscription and its derived Entitlement** (one row per Organization — not the `organization license`/`user subscription` split originally proposed here; see [ADR-0044](../adr/0044-subscription-entitlement-final-model.md)), and (future) invoice presentation: templates, template versions and document metadata ([billing SDD](../sdd/billing-service.md) section 36) | how money moved; accounting; product concepts |
 | **payment-service** | How was it paid, by which method, and what is the payment state? | payment, payment attempt, payment method, provider transaction, cash payment workflow, refund, webhooks, idempotency, reconciliation; later organization payment account and settlement | what is owed; the ledger; entitlements |
 | **accounting-service** | What accounting effect did it have? | chart of accounts, journal, journal entry and lines, ledger, fiscal period, tax, tax rate, tax transaction, reconciliation, reports | payments, invoices as source of truth |
 
@@ -70,8 +75,9 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
                                                                └─► notification (receipt)
 ```
 
-- **Nawara sells to an organization** (license): invoice (seller = Nawara's company, payer = the organization) → payment
-  (gateway or cash) → `payment.succeeded` → billing activates the `OrganizationLicense`.
+- **Nawara sells to an organization** (its commercial access): invoice (seller = Nawara's company, payer = the organization) →
+  payment (gateway or cash) → `payment.succeeded` → billing activates the Organization's Subscription (one row, not a
+  separate `OrganizationLicense` entity — [ADR-0044](../adr/0044-subscription-entitlement-final-model.md)).
 - **Organization sells to a user** (a service): invoice (seller = the organization, payer = the user) → payment → invoice paid.
 - **Nawara processes payments for an organization** (**subject to open decisions 4 and 5**: merchant of record and custody of funds): the same payment records, with the organization as beneficiary; the
   organization's payment account and settlement are Stage 6 and **not designed in detail** (section 9).
@@ -88,20 +94,31 @@ product service ("a customer owes 30 TND for X", sourceType/sourceId)
   (customer → organization, organization → Nawara) are therefore unambiguous, never encoded by overloading one column.
 - **Source reference:** `sourceType`/`sourceId` are opaque, format-checked strings. No foreign key to any product database.
 
-## 5. Data model (design)
+## 5. Data model (design, pre-implementation — see below for what was actually built)
+
+> **This section describes the pre-implementation design (2026-09-19).** As actually built (Stage 12.2, ADR-0044):
+> `product` still has an `entitlementKind` column with these literal values (`none`|`organization_license`|`user_subscription`,
+> migration `0002`) — it exists, accepts writes, and is **not dead code that was removed** — but it is **not what
+> drives Subscription behaviour**: `linkSubscription` decides whether a settlement is a recurring obligation from
+> `invoice_line.interval` (a snapshot of `price.interval`) alone, never from `entitlementKind`. There is no
+> `organization_license` table and no `user_subscription` table. Instead, one `subscription` table (`organizationId`
+> UNIQUE — one current row per Organization, no per-user dimension), columns `productId`, `priceId`, `status`
+> (`pending`|`active`|`grace`|`expired`), `currentPeriodStart`, `currentPeriodEnd`, `graceUntil`,
+> `cancelAtPeriodEnd`, `effectiveTerminationAt`, `revision`. See `docs/sdd/billing-service.md` §§15-18 (R-2 in
+> particular) for the current, maintained technical contract. The rest of this table (invoice, invoice_line,
+> payment_request, outbox) was built close to as designed here.
 
 **billing-service**
 
 | Table | Key columns and rules |
 |---|---|
-| `product` | id, type (`one_time`, `recurring`, `organization_license`, `user_subscription`), name, seller party, active |
-| `price` | product, currency, amount (minor units), interval (nullable), effective dates |
+| `product` | id, seller party, active (no `type` enum — corrected above) |
+| `price` | product, currency, amount (minor units), interval (`one_time`\|`recurring`, with `intervalUnit`/`intervalCount` when recurring), effective dates |
 | `invoice` | id, number (unique per seller), seller, payer, organizationId context, currency, subtotal, tax (**who computes it is open decision 10**), total, status `draft → open → paid \| void \| uncollectible`, dueAt, sourceType/sourceId; CHECK totals equal the sum of lines; `overdue` is **derived** from `dueAt`, not stored |
 | `invoice_line` | invoice, description, quantity, unit amount, line total, sourceType/sourceId |
 | `payment_request` | invoice, amount, status; asks payment-service to collect and carries an **immutable snapshot** (invoice id, amount, currency, payer, seller) so payment-service **never calls billing back** (no cycle); partial payments allowed by design, policy open |
-| `credit_note` | invoice, amount ≤ invoiced amount, reason |
-| `organization_license` | organizationId (unique active), invoice/payment refs (opaque), type `standard \| grace`, status, expiresAt |
-| `user_subscription` | userId, organizationId (many per user), status `active \| suspended \| expired`, expiresAt xor frozenRemainingSeconds |
+| `credit_note` | invoice, amount ≤ invoiced amount, reason (not built; B-016) |
+| `subscription` | **corrected above** — one row per Organization, not the `organization_license`/`user_subscription` split this row once proposed |
 | `outbox`, `inbox` | reliable events ([ADR-0037](../adr/0037-reliable-events-outbox-inbox.md)) |
 
 **payment-service**
@@ -145,11 +162,14 @@ A correction is a **reversing entry**, never an update or delete.
 
 ## 7. Entitlement is not authentication ([ADR-0038](../adr/0038-entitlement-in-billing-service.md))
 
-Identity, sessions and login (Auth) never depend on billing or payment. If a license or subscription lapses the **user stays a
-valid identity**; the consuming application or service asks billing's entitlement-status API at the point of use and denies the
-protected capability. Renewal restores it. A user may hold subscriptions under several organizations. The reservation and grace
-rules of ADR-0006 and ADR-0008 are re-expressed on billing events in Stage 4. (Auth's registration/join check is the one
-existing synchronous dependency; whether it stays is an open decision.)
+Identity, sessions and login (Auth) never depend on billing or payment. If an Organization's Subscription lapses the **user
+stays a valid identity**; the consuming application or service asks billing's entitlement-status API
+(`GET /billing/organizations/:organizationId/entitlement`, implemented Stage 12.5) at the point of use and denies the
+protected capability. Renewal restores it. **Resolved, corrects this section's original framing:** there is no
+per-user subscription in the built system (ADR-0044 rejected ADR-0006/0008's per-user reservation model — B-021);
+entitlement is Organization-scoped only. Auth's registration/join check — the "one existing synchronous dependency"
+this section once called an open decision — was **removed outright** in Stage 12.1 (commit `f1901f9`), not kept and
+not repointed to billing.
 
 ## 8. Security and multi-organization authority
 
@@ -195,7 +215,7 @@ existing synchronous dependency; whether it stays is an open decision.)
 5. **Settlement and payouts:** legality, custody of funds, float, timing, minimums, currencies.
 6. **Chart of accounts template and fiscal year;** currencies beyond TND.
 7. **Policies:** partial payments, dunning and overdue handling, who may submit cash, refund step-up, grace-period rules on the new model.
-8. **Auth ⇄ billing:** whether registration/join keeps a synchronous entitlement check.
+8. ~~**Auth ⇄ billing:** whether registration/join keeps a synchronous entitlement check.~~ **Resolved, Stage 12.1:** no — removed outright (see A10 above, ADR-0044).
 9. **Trusted product service tokens:** which product services may create invoices for which organizations.
 10. **Tax computation on an invoice:** billing stores tax lines but tax rates, periods and tax transactions belong to accounting; who computes the tax (billing from its own configured rate, or a call/replicated configuration from accounting) is undecided.
 11. **Trials:** the old design started a trial subscription on Auth's `user.registered` event; Auth no longer holds trial state (ADR-0026). Whether billing offers trials, and how they start, is undecided.

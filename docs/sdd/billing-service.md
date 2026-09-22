@@ -1,6 +1,18 @@
 # billing-service
 
-- **Status:** Draft, **for review**. **Stages 1 to 3** are implemented in `apps/billing-service` — the service foundation (see `docs/tdd/billing-service-foundation.md`), the domain schema and financial invariants with the Platform currency foundation (see `docs/tdd/billing-service-domain-schema.md`), and the HTTP API of section 18 (products, prices, invoice create/get/list/issue/discard, and Billing-side payment-request create/read — record only, never sent to Payment, per the Stage 3/4 note under section 18); everything else here is designed, not built.
+- **Status:** Draft, **for review**. **Stages 1 to 4** (foundation; domain schema and financial invariants with the
+  Platform currency foundation; the HTTP API of section 18; Payment integration — dispatcher, event consumer,
+  reconciler, cancel) are implemented, plus the **Subscription/Entitlement work of Stage 12.1–12.7** (org-wide
+  roadmap numbering, `CLAUDE.md`/`apps/billing-service/README.md`): the Subscription domain and database foundation
+  (12.2), entitlement derivation as a pure function (12.3), Payment→Subscription linking (12.4), the effective-access
+  HTTP contract (12.5), concurrency/lifecycle hardening under real PostgreSQL (12.6), and the real-broker
+  Payment→RabbitMQ→Billing→Subscription integration (12.7) — see [ADR-0044](../adr/0044-subscription-entitlement-final-model.md),
+  which is now the structural source of truth for sections 15–18's entitlement content (ADR-0038's proposed
+  `organization_license`/`user_subscription` shape was not built). Stage 7 (recurring billing as originally
+  conceived, a `recurring_definition` runner) and Stage 8 (as originally conceived, `organization_license` +
+  `user_subscription`) were **not** built as designed below; Stage 12 built recurring/entitlement access a
+  different, simpler way (ADR-0044). Void, credit notes, refunds, dunning, trials, proration, pause/resume and
+  organization/company payer authorization remain designed-but-not-built, gated by their `[B]` decisions as before.
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md), [financial-architecture.md](../architecture/financial-architecture.md) (root architecture documents)
 - **Related SDD:** [payment-service.md](./payment-service.md) (Billing's only outbound API dependency and its main event source; **not redesigned here**)
@@ -13,8 +25,9 @@
   [0035](../adr/0035-financial-service-boundaries.md) (billing, payment, accounting),
   [0036](../adr/0036-money-parties-and-source-references.md) (money, parties, source references),
   [0037](../adr/0037-reliable-events-outbox-inbox.md) (outbox and inbox),
-  [0038](../adr/0038-entitlement-in-billing-service.md) (entitlement lives in billing).
-  ADR-0004, 0006 and 0008 are **amended in location** by ADR-0038; whether their *rules* carry over is a decision (B-020, B-021, section 5, R-8).
+  [0038](../adr/0038-entitlement-in-billing-service.md) (entitlement lives in billing),
+  [0044](../adr/0044-subscription-entitlement-final-model.md) (final Subscription/Entitlement model — structural source of truth for sections 15-18, superseding ADR-0038's proposed schema).
+  ADR-0004, 0006 and 0008 are **amended in location** by ADR-0038; ADR-0044 resolves whether their *rules* carry over: they do not (B-020 grace is a new, simpler model; B-021 per-user reservation is rejected, not carried over).
 
 This document is the design contract for the Billing implementation phase. It defines what can be defined and marks what cannot be decided from the repository. It reuses the structure, markers and guardrail of the [payment SDD](./payment-service.md) so both services are implemented and reviewed the same way.
 
@@ -68,9 +81,9 @@ Billing must never become, and this document does not design: the payment servic
         │  POST /billing/invoices/{id}/payment-requests                │
         │  then pays at payment-service (POST /payment/payments/{id}/attempts, user bearer)
                                                                        ▼
-   payment-service ── payment.succeeded / failed / cancelled / expired ──► billing (inbox) ──► invoice paid / request closed
+   payment-service ── payment.succeeded / failed / cancelled / expired ──► billing (payment_event_receipt, 21.4) ──► invoice paid / request closed / Subscription activated-renewed
    billing ── invoice.created / paid / voided / overdue ── outbox ──► RabbitMQ (nawara.events) ──► accounting, notification, audit
-   platform services ── GET /billing/licenses/... (service token) ──► entitlement status                       (Stage 8)
+   platform services ── GET /billing/organizations/{organizationId}/entitlement (service token) ──► effective access   (implemented, Stage 12.5)
 ```
 
 | Concern | Owner |
@@ -123,13 +136,13 @@ What was inspected on `main` (merge of PR #43) and what it means for Billing. **
 | # | Finding | Consequence for Billing |
 |---|---|---|
 | R-1 | **Canonical invoice vocabulary.** The only existing statement of invoice states is `financial-architecture.md` section 5: `draft → open → paid \| void \| uncollectible`, with `overdue` **derived** from `dueAt`. `core-architecture.md` (events) uses the past-participle forms `invoice.paid` and `invoice.voided`, which name the same `paid` and `void` states and do not conflict with it. The words `issued`, `voided` (as a state), `cancelled` (for an invoice) and `partially_paid` appear in **no** existing document; they came from the brief this SDD was commissioned from (not stored in the repository). | The **canonical states are the architecture's**: `draft`, `open`, `paid`, `void`; `overdue` stays derived. "Issued" is the *operation* that moves `draft → open` (endpoint 10), not a state. `partially_paid` needs partial payments (**B-010**; Payment v1 is one payment per request) and `uncollectible` needs a write-off decision (**B-014**): both stay reserved and unimplemented. A separate `cancelled` adds nothing (discarding a draft is `draft → void`, 17.1). **No behaviour was invented and no owner approval is needed for the vocabulary.** |
-| R-2 | The architecture's `product.type` (`one_time`, `recurring`, `organization_license`, `user_subscription`) mixes *billing interval* with *entitlement kind*. | Split: the **interval belongs to the price**, the **entitlement kind to the product** (`none` \| `organization_license` \| `user_subscription`, Stage 8). |
+| R-2 | The architecture's `product.type` (`one_time`, `recurring`, `organization_license`, `user_subscription`) mixes *billing interval* with *entitlement kind*. | Split as designed: the **interval belongs to the price** (`price.interval`, built and load-bearing). The **entitlement-kind split** (`product.entitlementKind`) was also built (migrations `0002`, `0004`) but **turned out not to be what drives Subscription behaviour** — Stage 12.4's `linkSubscription` keys off `price.interval = 'recurring'` alone, never reads `product.entitlementKind` at all. The column and its CHECK constraint (`none`\|`organization_license`\|`user_subscription`) still exist and still accept input; they are dead weight now, not a mechanism — a documentation finding for a future cleanup (drop the column, or wire it to something), not something this closure pass changes. |
 | R-3 | **Invoice event names.** `core-architecture.md` lists `invoice.created/due/overdue/paid/voided` and draws `invoice.created` going to notification as "you owe 30 TND". That flow only makes sense when the invoice becomes owed. The documents do not say whether a draft is announced. | This SDD **keeps the documented name `invoice.created`** and defines its *timing* as the transition `draft → open` (a draft is never announced), which is the only reading under which the documented flow is correct. The name is therefore slightly misleading (it fires at "open", not at row creation). Renaming it (an earlier draft of this SDD used `invoice.issued`) would change a documented contract and is **not adopted**; it is an optional owner decision (section 35, item 1). `invoice.due` has no defined semantics in any document and is **B-013**. No edit to `core-architecture.md` is needed. |
 | R-4 | ADR-0034 says resource-creating `POST`s take `Idempotency-Key`. | As the payment SDD already does (its section 6), Billing uses a **permanent natural key** where one exists and **state-based** idempotency elsewhere (section 25). **No `Idempotency-Key` header and no `idempotency_key` table exist in Billing.** |
-| R-5 | **Auth still depends on a payment route that does not exist.** `apps/auth-service/src/payment/payment-client.ts` calls `GET {PAYMENT_SERVICE_URL}/payment/licenses/{organizationId}/status` with `PAYMENT_SERVICE_TOKEN`, expects `{ "valid": boolean }`, treats **404 as "not licensed"** and anything else non-2xx as `503`. It is used at registration and when joining an organization only (`AuthService`, ADR-0004 as narrowed by ADR-0026). Payment Phase 1 on `main` has no such route. Auth's own tests use a **stub** payment client (`test/members-payment.e2e-spec.ts`, 10 passing), so the real client's 404 mapping is **not covered by any test**. The join-code migration also carries a stale comment ("Entitlement is owned by payment-service"), superseded by ADR-0038. | If Auth were pointed at payment-service today, every organization would read as "not licensed" (fail closed, silently wrong). See section 16.4 for ownership, migration and the compatibility contract. Payment SDD O-12 already gates this before payment-service reaches production. |
+| R-5 | ~~**Auth still depends on a payment route that does not exist.**~~ **Resolved, Stage 12.1 (commit `f1901f9`).** `apps/auth-service/src/payment/payment-client.ts` and the registration/join license-check block it describes were **deleted outright**, not repointed. This row is kept for history: it correctly predicted the risk ("every organization would read as not licensed") that removal, rather than a silent misconfiguration, avoided entirely. See section 16.4. | Historical: informed the Stage 12.1 decision to remove rather than repoint. No longer a live risk — Auth calls no financial service at all. |
 | R-6 | Payment events on `main` (`payment.created/succeeded/failed/cancelled/expired`) carry `paymentRequestId`, `sourceType`, `sourceId`, parties, `amount`, `currency`, `status`, `revision`, `actor`, `cause` and correlation id, but **not `producer`**. Payment's natural key is `(producer, paymentRequestId)`. | Another producer with a valid token could create a payment reusing Billing's `paymentRequestId`; its event would then look like Billing's. Billing therefore **verifies more than the id** (section 21.4): the `paymentId` recorded from Billing's own call (assigned by Payment, unforgeable) plus full snapshot equality, and it **never binds a `paymentId` from an event**. **Recommended additive Payment change (not made here):** carry `producer` in the payment event payload. |
 | R-7 | Payment on `main` has **no cancel route** (endpoint 9 exists only at the service layer), **cannot start an attempt for an organization payer** (O-18), and has **no cash path** (O-4, O-5). Production use of payment creation by a non-test producer needs O-13, O-14, O-15. | Billing can create and issue invoices for any payer, but **can only complete a gateway collection for a `user` payer**, and cannot cancel a payment request that already reached Payment until Payment ships cancel. Combined with a null `expiresAt` (B-009) and BI-13, a request that Payment can never complete would be **unclosable**, which is why v1 refuses requests for non-`user` payers (13.1) and why **enabling payment requests outside the test fixture requires Payment's cancel route** (34.3). The headline flow "Nawara invoices an organization for a license" is **not completable** until B-001, B-026 (= Payment O-18) and the cash decisions are made. |
-| R-8 | ADR-0006 (per-user subscription reservation) and ADR-0008 (automatic 24-hour grace license) are **Accepted**, and ADR-0038 says their rules are "kept". `financial-architecture.md` section 10, item 7 nevertheless lists "grace-period rules on the new model" as **unresolved**. | The two documents disagree. This SDD treats the ADRs as evidence of intent, **not** as approval for the invoice-driven model, and marks re-expression **[B]** (B-020, B-021). The owner should say which one governs. |
+| R-8 | ADR-0006 (per-user subscription reservation) and ADR-0008 (automatic 24-hour grace license) are **Accepted**, and ADR-0038 says their rules are "kept". `financial-architecture.md` section 10, item 7 nevertheless lists "grace-period rules on the new model" as **unresolved**. | **Resolved by ADR-0044 (Stage 12.2):** grace (B-020) got a new, simpler model (`SUBSCRIPTION_GRACE_DAYS`, frozen per period) — ADR-0008's specific 24-hour hard-coded rule was not carried over. Per-user reservation (B-021, ADR-0006) was **rejected**, not carried over: there is no per-user entitlement dimension in the built system. |
 | R-9 | Kit gaps for Billing: no pagination helper (ADR-0034 lists one; `libs/service-kit` has none); the combined service-token-or-user guard, the deterministic event id and the test-app harness (the kit only ships the throwaway-database helper) live **inside payment-service**; a failed consumer goes straight to the dead-letter queue (no retry delay); no metrics facility. | None of the three is *required*: each can be implemented **locally in Billing** (section 34.1, Stage 0). Extracting the guard and the deterministic id into the kit is an optional, separate kit change with its own review; not done here. |
 | R-10 | `apps/payment-service` obeys `scripts/lib/checks.mjs`: product terms (student, teacher, driver, lesson, classroom, instructor, vehicle) are forbidden in `apps/billing-service/src/`, and no service may import another's source. | Applies to Billing code from Stage 1; `check:repo` enforces it. |
 | R-11 | **Organization identity data already exists elsewhere.** Auth's `organization` table holds `name`, `taxCode`, `address`, `phone` and an opaque `type` (migration 0001); the intended future owner is organization-service (ADR-0031). Billing cannot read Auth's database, and `GET /auth/me` returns only the organization `id`. | Billing **snapshots** identity facts at creation (`issuerSnapshot`, `billToSnapshot`, section 9) and **never owns or synchronises** them; a future Billing Profile (36.2) holds only invoicing-purpose settings and overrides. Where the snapshot content comes from until then is the producer's request (B-029), not a query of Auth. |
@@ -144,7 +157,9 @@ Product 1───N Price                       (catalog: what can be sold, at w
 Invoice 1───N InvoiceLine ───► Price      (line = immutable SNAPSHOT of a price at invoicing time; the link is provenance only)
 Invoice 1───N PaymentRequest ──(paymentId, opaque)──► payment-service Payment
 Invoice 1───N CreditNote                  (shape only, gated: B-016)
-Invoice line ─(entitlement snapshot)─► OrganizationLicense | UserSubscription   (Stage 8, gated)
+payment.succeeded (recurring line, exactly one) ─► Subscription (one per Organization)   (implemented, Stage 12.4, ADR-0044 —
+                                                                                            not the OrganizationLicense/UserSubscription
+                                                                                            snapshot link this diagram once showed)
 ```
 
 | Entity | Purpose | Status |
@@ -159,9 +174,9 @@ Invoice line ─(entitlement snapshot)─► OrganizationLicense | UserSubscript
 | `payment_event_receipt` | how each consumed Payment event was applied (applied, ignored, conflict, deferred) | [T] |
 | `billing_transition` | append-only history of every state change with actor and cause | [T] |
 | `credit_note` | a document reducing what is owed on an invoice | shape [T], behaviour **[B, B-016]** |
-| `organization_license`, `user_subscription` | billing-derived entitlement | structure [D, ADR-0038], rules **[B]** |
+| `subscription` | billing-derived entitlement, one row per Organization (**not** `organization_license`/`user_subscription` — ADR-0044 replaces the row this table once had here) | structure [D, ADR-0044], implemented Stage 12.2 |
 | `outbox`, `inbox` | reliable events (kit migration `kit_0001`) | [D] |
-| `recurring_definition` | schedules that create invoices | **[X]** until B-018 |
+| ~~`recurring_definition`~~ | not built and not planned — recurring billing works through `price.interval` instead (section 15, ADR-0044) | **[X], not applicable** |
 
 Billing owns **none** of: payments, attempts, refunds, journal entries, tax ledgers, identities, memberships, organizations, product concepts.
 
@@ -247,7 +262,8 @@ InvoiceLine { id, lineNumber, productCode, description, quantity, unitAmount, li
 | `currency` | equals the invoice's (BI-04, composite FK) |
 | `priceId`, `productId` | provenance within Billing's own database. **In v1 every line references a catalog price**; the amount comes from that price, server-side |
 | `productCode`, `description`, `unitAmount` | **snapshots copied from the price/product at creation** (BI-06) |
-| `entitlementKind`, `entitlementInterval` | snapshot of the product's kind and the price's interval, so an entitlement decision at payment time uses **what was sold**, not what the catalog says later (Stage 8) |
+| `interval`, `intervalUnit`, `intervalCount` | **live, load-bearing:** a snapshot of the price's interval at invoicing time — `linkSubscription` (21.4) reads this column directly (`SELECT "interval" FROM invoice_line`) to decide whether a settled invoice has a recurring obligation, never today's `price` table |
+| `entitlementKind` | present in the schema (migration `0004`), **but not read by anything** — corrects this row's original claim that it drives an entitlement decision (R-2/section 15): the actual mechanism is the `interval` column above, not this one |
 | `quantity` | integer, `>= 1` |
 | `lineTotal` | `quantity × unitAmount`, CHECKed |
 | `taxAmount` | `>= 0`, `0` while `taxTreatment = not_determined` |
@@ -260,7 +276,7 @@ Lines have **no lifecycle**: insert once, never updated or deleted (BI-07). A li
 | Aspect | Definition |
 |---|---|
 | Purpose | A generic billable thing a seller offers. **Not a Nawara software product**: it may be any service. Billing knows nothing about what it means |
-| Fields | `id`, `seller{type,id}`, `code` (`^[a-z][a-z0-9_-]{1,62}$`), `name` (at most 140), `description` (at most 280, nullable), `entitlementKind` (`none` \| `organization_license` \| `user_subscription`, default `none`; only meaningful in Stage 8), `status` (`active` \| `archived`), `revision`, timestamps |
+| Fields | `id`, `seller{type,id}`, `code` (`^[a-z][a-z0-9_-]{1,62}$`), `name` (at most 140), `description` (at most 280, nullable), `entitlementKind` (`none` \| `organization_license` \| `user_subscription`, default `none` — **accepted and stored, but not read by anything**: Subscription-linking (section 15/21.4) keys off `price.interval = 'recurring'` alone, never this field; kept for history, a cleanup candidate, see R-2), `status` (`active` \| `archived`), `revision`, timestamps |
 | Uniqueness | `UNIQUE (sellerType, sellerId, code)` (natural key; creation is a replay when identical, `409` when different) |
 | Immutable | everything except `status` (`active → archived`, one way) and the descriptive `name`/`description` are **[X]** to edit in v1 (no edit route; archive and create a new one) |
 | Isolation | reached by the producer that created it (scopes **[B, B-029]**, **B-031**) |
@@ -330,18 +346,36 @@ The architecture lists a `credit_note` (invoice, amount `<=` invoiced amount, re
 | Event | `credit_note.issued` (section 23), consumed by Accounting |
 | **Open** | full vs partial (B-016); credit against an **unpaid** vs a **paid** invoice, and how a paid one relates to a refund (B-016, B-017); legal numbering and content (B-007); who may issue and void (B-016, B-028); whether the invoice moves to `paid` when credit reduces due to zero (B-011, B-016); effect on entitlement (B-025) |
 
-## 15. Subscription and recurring billing boundary [X until B-018]
+## 15. Subscription and recurring billing boundary [D, ADR-0044 — implemented, Stage 12.2/12.4]
 
-The architecture assigns "recurring definitions" and a "recurring-billing runner and dunning" to Billing but **defers them** (financial-architecture section 12). **No recurring behaviour is designed for implementation.**
+**B-018 is resolved: recurring billing exists.** It was built a different way than this section originally proposed
+— see [ADR-0044](../adr/0044-subscription-entitlement-final-model.md) for the full decision record. This section is
+kept (not deleted) because the *rejected* alternative below is useful history for a future contributor who might
+otherwise re-propose it.
 
-What *is* fixed, so a later decision cannot force a redesign:
+**What was actually built:** a `subscription` row (one per Organization, `db/migrations/0013_subscription.sql`) is
+created and renewed only as the *result* of a settled Payment for an invoice with exactly one recurring line
+(`price.interval = 'recurring'`; a second recurring line on the same invoice is refused at draft creation,
+`ambiguous_subscription_obligation`). There is no scheduled runner, no cron job that issues cycle invoices on its
+own, and no separate `recurring_definition` entity. The price's `interval`/`intervalUnit`/`intervalCount` fields
+carry the whole cadence (as this section already anticipated). `SubscriptionRepository`
+(`src/subscriptions/subscription.repository.ts`) is the only writer: `create`, `activate`, `renew` (one operation
+for early/on-time/grace/late renewal — `renewalAnchor()` in `src/domain/subscription-period.ts` accounts for every
+case, ADR-0044), `enterGrace`, `expire`, `scheduleCancellation`/`reverseCancellation`, `terminate`.
 
-* A recurring definition, if approved, is a **separate entity** (`recurring_definition`), not a state of `invoice` and **not** the entitlement `user_subscription` (which is *what was bought and is it valid*, not *when do we bill*).
-* Cycle invoices use a **natural key** `UNIQUE (recurringDefinitionId, periodStart)`, so a crashed or duplicated runner cannot bill a period twice (section 25).
-* **Lock order** for the runner and manual actions is fixed in section 26 (definition first; no path locks a definition after an invoice), so "recurring job vs manual cancellation" cannot deadlock.
-* The price's `interval` fields already carry the cadence.
+**What was proposed here and NOT built (rejected, not merely deferred — kept for history):** a separate
+`recurring_definition` entity distinct from `invoice`/Subscription, a natural-key `(recurringDefinitionId,
+periodStart)` cycle-invoice mechanism, and a background runner that itself issues invoices. None of this is needed
+because Stage 12's simpler model (Payment settlement is always what triggers a Subscription effect, never a
+scheduled job) covers the whole V1 requirement. If a future stage genuinely needs Billing-initiated (not
+payment-triggered) cycle invoicing, that is a new decision, not a resumption of this design.
 
-Every behavioural question is **[B]** and none is decided: whether recurring billing exists (B-018), trials (B-019), grace (B-020), retry/dunning after failure (B-012, B-013), cancellation timing (B-022), proration (B-023), upgrade/downgrade (B-023), pause/resume (B-024), automatic renewal (B-018), payment-retry count (B-012).
+**Still `[B]`, unresolved, exactly as before:** trials (B-019), proration and upgrade/downgrade (B-023),
+pause/resume (B-024). **Resolved by ADR-0044, see section 32:** grace (B-020, now `[D]`), reservation/per-user
+subscription (B-021, now rejected, not merely deferred), cancellation timing (B-022, now `[D]`,
+`cancelAtPeriodEnd`, at-period-end only), entitlement expiry/stacking (B-025, now `[D]`, `renewalAnchor()`).
+Retry/dunning after a failed *recurring* payment (B-012, B-013) remains exactly as undecided as for any other
+invoice — Subscription has no dunning behaviour of its own.
 
 ## 16. Entitlement boundary
 
@@ -355,38 +389,53 @@ Auth:     "Who is this, are they active, what memberships do they have?"    → 
 
 Billing stores **whether something bought is still valid**. It stores no product role, no permission, no capability list, and never product-role concepts (for example a role or permission named after a product). Authentication **never** depends on entitlement (ADR-0026, ADR-0038): a lapsed license leaves the user a valid identity; the consuming service asks Billing at the point of use and denies the protected capability.
 
-### 16.2 Structure [D, ADR-0038], rules [B]
+### 16.2 Structure [D, ADR-0044 — implemented, Stage 12.2]
 
-| Table | Structure [D] | Rules |
+**Not what ADR-0038 originally proposed** (kept below for history; see [ADR-0044](../adr/0044-subscription-entitlement-final-model.md) for the full decision): a two-table `organization_license` + `user_subscription` model, with a per-user reservation-on-lapse mechanic. **What was actually built** is one table:
+
+| Table | Structure [D, implemented] | Rules |
 |---|---|---|
-| `organization_license` | `organizationId` (**one active per organization**), `type` (`standard` \| `grace`), `status`, `expiresAt`, opaque `invoiceId` / `paymentId` references | activation and extension math, grace, expiry: **B-020, B-025** |
-| `user_subscription` | `userId` **and** `organizationId` (a user may hold subscriptions under many organizations), `status` (`active` \| `suspended` \| `expired`), `expiresAt` xor `frozenRemainingSeconds` | reservation on lapse, resume: **B-021** |
+| `subscription` (`db/migrations/0013_subscription.sql`) | `organizationId` (**UNIQUE — one current, mutable row per organization**; no per-user row exists or is planned, B-021), `productId`, `priceId`, `status` (`pending`\|`active`\|`grace`\|`expired`), `currentPeriodStart`, `currentPeriodEnd`, `graceUntil`, `cancelAtPeriodEnd`, `effectiveTerminationAt`, `revision` | activation/renewal math: `renewalAnchor()` (B-025, resolved); grace: `SUBSCRIPTION_GRACE_DAYS` (B-020, resolved); cancellation: `cancelAtPeriodEnd` (B-022, resolved) |
 
-Entitlement changes **only from events**: a `payment.succeeded` applied to an invoice whose line snapshot has an `entitlementKind` activates or extends it. It uses the **line snapshot** (BI-06), never today's catalog. **How much time a payment buys and whether renewals stack from the old expiry or from the payment date is [B, B-025].**
+There is no `organization_license` table and no `user_subscription` table anywhere in the schema (a repository test
+asserts the exact table set). Entitlement changes **only as a result of a settled Payment event**: a
+`payment.succeeded` for a PaymentRequest whose invoice has exactly one recurring line activates or extends
+Subscription, inside the same transaction as the Payment-event receipt (section 21.4). It never reads today's
+catalog — the invoice's own line snapshot (BI-06) already fixed the product/price at issue time, and Subscription's
+`productId`/`priceid` are copied from that settlement, not re-read live. How much time a payment buys and whether
+renewals stack from the old expiry or the payment date (B-025) is **resolved**: see `renewalAnchor()` and ADR-0044.
 
-### 16.3 Status API [D shape, T route]
+### 16.3 Status API [D, implemented — Stage 12.5]
 
-Platform services call, with a **service token** (Stage 8):
+**Not two routes** (ADR-0038's original proposal, kept for history): there is no per-user dimension to ask about
+separately, so there is one route, not `/billing/licenses/{organizationId}/status` +
+`/billing/subscriptions/{userId}/status`.
 
 | Route | Answer |
 |---|---|
-| `GET /billing/licenses/{organizationId}/status` | `200 { "valid": boolean, "expiresAt": string \| null }` |
-| `GET /billing/subscriptions/{userId}/status?organizationId=…` | same shape |
+| `GET /billing/organizations/:organizationId/entitlement` (`EntitlementController`) | `200 { "valid": boolean, "expiresAt": string \| null }` |
 
-"None" and "expired" give the **same answer** (`valid: false`), so the API is not an existence oracle [D, ADR-0038]. An unknown organization is `200 { valid: false }`, **never a 404** (a 404 must mean "no such route", see 16.4). Each consumer documents whether it fails open or closed when Billing is unreachable [D]. The path deliberately mirrors the route Auth already calls, so the repointing is a host, path and credential change (16.4).
+Service-token only (`ServiceTokenGuard`). "No Subscription", `pending`, not-yet-started and expired all give the
+**same answer** (`valid: false`), so the API is not an existence oracle [D, ADR-0038/0044]. An unknown organization
+is `200 { valid: false }`, **never a 404**. Each consumer documents whether it fails open or closed when Billing is
+unreachable [D]. `deriveEntitlement` (section 17.5) is the pure function behind this route; the route itself does
+one indexed lookup (`subscription_organization_unique` serves it directly) and no other I/O.
 
-### 16.4 Auth entitlement cleanup (documentation only; nothing is changed by this phase)
+### 16.4 Auth entitlement cleanup — DONE (Stage 12.1), not via the phased plan originally proposed here
 
-| Item | State |
+**Resolves B-035.** The phased migration strategy this section originally proposed (Stage 8 ships Billing's route →
+a separate additive Auth PR adds a Billing client behind configuration → cutover → the Payment client is removed
+last) was **not** the path taken. Instead, Stage 12.1 (commit `f1901f9`, "remove the dead payment-service license
+check from registration and join") deleted the check **outright, in one change**:
+
+| Item | Final state |
 |---|---|
-| Current behaviour | See R-5. Auth's `HttpPaymentClient.isOrganizationLicensed()` calls `GET /payment/licenses/{organizationId}/status`, sends `PAYMENT_SERVICE_TOKEN` as a bearer, requires `{ valid: true }`, maps 404 to "no license" and any other failure to `503`. Called only at registration and when joining an organization. |
-| Payment reality | payment-service (`main`) **implements no such route**; per Payment SDD O-12 this is acceptable **only while payment-service is not deployed to production**. |
-| Desired ownership | Auth = identity, security, membership. **Billing = billing-derived entitlement.** Whether Auth keeps a synchronous check at all is **[B, B-035]** (financial-architecture section 10, item 8). |
-| Migration strategy | (1) Stage 8 ships the status route above in Billing, registering `auth-service` as a caller (digest in `SERVICE_TOKENS`). (2) A **separate, additive Auth PR** adds `BILLING_SERVICE_URL` / `BILLING_SERVICE_TOKEN` and a client for the Billing path, selected by configuration; the old client stays until cutover. (3) Cutover is a configuration change; (4) the Payment reference is removed in a later Auth PR. No behaviour of Auth's own API changes at any step. |
-| Compatibility requirement | Billing's answer keeps Auth's parsed shape (`valid: boolean`); fail-closed behaviour is unchanged; unknown organization is `200 valid:false`. A **contract test** (Billing route against Auth's client parsing) is required at Stage 8. |
-| Documentation debt | Auth's SDD and the `requiresSubscription` migration comment still name payment-service as the entitlement owner (ADR-0026 wording); they are updated with the Auth PR, not here. |
-| Dependency | Billing Stage 8, which is itself gated by B-020, B-025 for real activation logic. Until then nothing changes and nothing is moved silently. |
-| Risk to check before any production deploy | The production value of `PAYMENT_SERVICE_URL` in Auth was **not inspected** (no production access). If it points at payment-service, org registration is already reading as "not licensed". |
+| What was removed | `apps/auth-service/src/payment/payment-client.ts` (the whole file: `PaymentClient`/`HttpPaymentClient`, `isOrganizationLicensed()`), and the license-check block in both `register()` and `join()` in `auth.service.ts`. `login()` never called it. |
+| Why removal, not repointing | The route it called, `GET /payment/licenses/{organizationId}/status`, was **never implemented** on the payment-service side and never will be — payment-service is settlement-only (ADR-0035). Repointing to Billing's new route (16.3) was considered and rejected: Auth owns identity/membership only and never needs to make a synchronous commercial decision at registration/join (this section's own principle, confirmed). |
+| Current behaviour | Registration and join never check subscription, license or entitlement state, and Auth calls no other service to decide them (`apps/auth-service/README.md`). |
+| `requiresSubscription` | Retained on `organization_join_code`, as a **non-authoritative onboarding hint only** — Auth stores and returns it (`@ApiProperty`: "carries no commercial authority"); no code path reads it to gate anything. |
+| Compatibility requirement (original) | Not applicable — there was no cutover; the check was removed, not repointed, so no compatibility shim was needed. |
+| Contract test | Not applicable for the same reason. Billing's actual `EntitlementController` has its own tests (`effective-access.service.spec.ts`, `test/entitlement.e2e-spec.ts`); nothing in Auth calls it. |
 
 ## 17. State machines
 
@@ -435,13 +484,49 @@ A `sending` request whose dispatch finishes after `cancelRequestedAt` is set is 
 
 Shape only: `(none) → issued` (terminal). Nothing else is defined until B-016 is decided.
 
-### 17.5 Entitlement **[B]**
+### 17.5 Entitlement [D, ADR-0044 — implemented, Stage 12.3]
 
-`organization_license`: `active(standard)` → (expiry) → `active(grace)` → `expired`, and back to `active(standard)` on renewal; `user_subscription`: `active` ⇄ `suspended` → `expired`. These are the **ADR-0006/0008 shapes** (R-8) and are **not approved for the invoice-driven model**: every transition, its trigger, and its timing is **[B, B-020, B-021, B-025]**. Only the *structure* of section 16.2 and the read-only status API can be built without them.
+Not a state machine of its own: `deriveEntitlement` (`src/domain/entitlement.ts`) is a **pure function** of
+Subscription's already-established fields and a caller-supplied `now` — it has no rows, no transitions and no
+persistence to describe. It reads whichever boundary is already on the Subscription row (`graceUntil` if present,
+else `currentPeriodEnd`, further shortened by `effectiveTerminationAt` if present) and answers `valid = true` while
+`currentPeriodStart <= now < boundary`. `cancelAtPeriodEnd` is structurally not part of its input, so a pending
+cancellation never affects already-purchased access. A subscription with a non-`pending` status but no period (a
+state the database's own `subscription_active_has_period` CHECK already forbids) is treated as an invariant
+violation (`EntitlementError`), never as a silent `valid: false`. This replaces the `organization_license`/
+`user_subscription` state-machine shapes ADR-0038 proposed here (ADR-0006/0008-style `active(standard)` →
+`active(grace)` → `expired`, and a separate `active ⇄ suspended → expired` for `user_subscription`) — neither
+exists; see section 17.6 for the one real state machine underneath this derivation.
 
-### 17.6 Subscription **[X]**
+### 17.6 Subscription [D, ADR-0044 — implemented, Stage 12.2]
 
-Not designed (section 15).
+States: `pending` (born state, no period yet), `active`, `grace`, `expired`. Enforced by a database trigger
+(`billing_subscription_lifecycle`, `db/migrations/0013_subscription.sql`), not only application code.
+
+| From | To | Caused by |
+|---|---|---|
+| (none) | `pending` | `create`: against a `recurring` price of its own product only; born with no period/grace/termination data |
+| `pending` | `active` | `activate`: sets the first period and, from `SUBSCRIPTION_GRACE_DAYS`, `graceUntil`, in the same statement |
+| `active` | `active` | the ONE self-loop: `renew` (early/on-time/grace/late, `renewalAnchor()`) or a `cancelAtPeriodEnd` toggle — both real, auditable commercial events (`revision` bumps on every one, not only a status change) |
+| `active` | `grace` | `enterGrace`: normalizes the status label once `now` has passed `currentPeriodEnd` — it does not compute `graceUntil` (already precomputed at `activate`/`renew`) and is refused if none was configured (`subscription_grace_unavailable`) |
+| `active` \| `grace` | `expired` | `expire`, or a renewal reaching this SDD's `renewalAnchor()` late-renewal branch first re-activates from `expired` (see next row) rather than compounding through `expired` |
+| `grace` | `active` | `renew` inside the grace window (anchors on the ORIGINAL `currentPeriodEnd`, section 15/ADR-0044) |
+| `expired` | `active` | `renew` after full expiry (late renewal: anchors on the settlement instant itself, no back-charging) |
+
+Forbidden: `grace → grace` (a repeated payment failure cannot re-extend an already-normalized grace window); any
+in-place change while `pending`, `grace` or `expired` (only `active` has a self-loop); reversing `expired` any way
+other than a fresh `active`. `effectiveTerminationAt` (section 16, "termination") can shorten the effective access
+boundary at any point but is force-cleared on a move into `active` with a **changed** `currentPeriodEnd` (a fresh
+period is never pre-shortened by a stale value) and is otherwise immutable for the life of one `expired` episode —
+the self-loop guard makes a second write impossible while it would matter.
+
+**No sweeper exists, and none is required for correctness.** `enterGrace`/`expire` only normalize the `status`
+*label* on the row; `deriveEntitlement` (17.5) never reads `status` to decide validity beyond the `pending`
+short-circuit — it reads the precomputed timestamps directly, so a subscription whose label is still `active` (or
+even prematurely `expired`) but whose `now` already falls inside `[currentPeriodEnd, graceUntil)` answers exactly
+as if it were labelled `grace`. Today nothing calls `enterGrace`/`expire`/`terminate` in production (no controller,
+no scheduled job) — they exist for a future operator/admin surface or sweeper to call, and the correctness of
+`{valid, expiresAt}` does not wait for one to exist.
 
 ## 18. API design
 
@@ -465,8 +550,7 @@ Public prefix `/billing` [D, ADR-0034]; no version segment in v1; errors and lis
 | 14 | `GET /billing/payment-requests/{id}` | service token or user bearer | n/a | 3 (reads Billing's own record only; a live Payment status read is Stage 4) |
 | 15 | `POST /billing/payment-requests/{id}/cancel` | service token | by state | 4; needs Payment cancel (R-7) |
 | 16 | `POST /billing/credit-notes` | — | — | **blocked: B-016** |
-| 17 | `GET /billing/licenses/{organizationId}/status` | service token | n/a | 8; **B-020, B-025** for activation |
-| 18 | `GET /billing/subscriptions/{userId}/status` | service token | n/a | 8; **B-021, B-025** |
+| 17 | `GET /billing/organizations/{organizationId}/entitlement` | service token | n/a | **implemented, Stage 12.5** (ADR-0044; replaces the two routes originally numbered 17-18 here) |
 
 **Stage 3 vs. Stage 4, made explicit for endpoints 13–15 (reconciles an earlier inconsistency between this table and 34.1, where endpoint 13 was dated both "4" and, in 34.1's Stage 6 row, "6"):** Billing-side payment-request **creation** (endpoint 13) and **read** (endpoint 14) are Stage 3 — they only ever produce or read a durable row in Billing's own `payment_request` table, `[T]` per 19.4, gated by nothing but B-026 for an organization payer. That row is never, on its own, evidence that Payment has accepted it, started processing it, or that money moved; until Stage 4 exists, every created request has `status: "created"` and `paymentId: null`, because nothing sends it anywhere. Stage 4 owns everything that crosses the service boundary: the dispatcher, the Payment client, `paymentId` ever being set, the event consumer, the reconciler, and therefore endpoint 15 (cancel, which needs Payment's own cancel route, R-7) and `invoice.paid`.
 
@@ -504,9 +588,8 @@ Public prefix `/billing` [D, ADR-0034]; no version segment in v1; errors and lis
 
 **16. Create credit note.** **Blocked (B-016).** No behaviour is defined.
 
-**17. License status.** Section 16.3. Service token only; `200 { valid, expiresAt }`, never `404` for an unknown organization.
-
-**18. Subscription status.** Section 16.3. Service token only; same shape.
+**17. Effective access (entitlement) status.** Section 16.3. Service token only; `200 { valid, expiresAt }`, never
+`404` for an unknown organization. One route, not two (there is no per-user status question — B-021, ADR-0044).
 
 ### 18.2 Error model
 
@@ -615,12 +698,14 @@ The request is section 13.2. Payment's answers and Billing's handling:
 
 ### 21.3 Events consumed
 
-Queue `billing.payment-events`, bindings `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` (`payment.created` and everything else are **not** subscribed). `cash_payment.*` and `refund.*` are **not** consumed in v1 (`refund.*`: **B-017**). The payload is Payment's: `paymentId`, `paymentRequestId`, `sourceType`, `sourceId`, `organizationId`, `payer`, `seller`, `amount`, `currency`, `status`, `revision`, `actor`, `cause`, plus `settledMethod`, `succeededAt` (succeeded), `failureCode` (failed) and `expiresAt` (expired). Amounts are JSON integers; Billing reads them as `bigint`.
+Queue `billing.payment-events`, bindings `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` (`payment.created` and everything else are **not** subscribed). `cash_payment.*` and `refund.*` are **not** consumed in v1 (`refund.*`: **B-017**). The payload is Payment's: `paymentId`, `paymentRequestId`, `sourceType`, `sourceId`, `organizationId`, `payer`, `seller`, `amount`, `currency`, `status`, `revision`, `actor`, `cause`, plus `settledMethod`, `succeededAt` (succeeded), `failureCode` (failed) and `expiresAt` (expired). Amounts are JSON integers; Billing reads them as `bigint`. A `payment.succeeded` for a PaymentRequest whose invoice has exactly one recurring line additionally reaches the Subscription step of 21.4 (Stage 12.4, ADR-0044) — the event contract itself carries nothing Subscription-specific beyond what is already listed here.
 
-### 21.4 Consumption procedure (one transaction, kit `InboxService.handle`)
+### 21.4 Consumption procedure (one transaction; Billing's own `payment_event_receipt`, not the kit's generic inbox — Stage 12 correction, see below)
+
+**Correction to the mechanism named in this heading:** the kit's generic `InboxService`/`inbox` table is not what Billing actually uses for Payment-event deduplication (`apps/billing-service/README.md` explains why: dedup here carries Billing business semantics — an outcome, a detail code, the request/invoice it settles — that does not belong in shared infrastructure). The real mechanism is `payment_event_receipt` (`db/migrations/0007_payment_event_receipt.sql`), applied by `PaymentRequestRepository.applyPaymentEvent`. The procedure below is otherwise accurate; only the table/service name in step 1 is corrected.
 
 ```
-insert inbox(eventId)  ── duplicate ──► stop (nothing happens twice)
+check payment_event_receipt for this eventId  ── already seen ──► stop, return its already-recorded outcome (nothing happens twice)
 find payment_request by paymentRequestId
    ─ none  ──► receipt: ignored            (someone else's payment: Payment events carry no `producer` (R-6), and another
                                             producer may legitimately use the same sourceType, so an unknown id is never an alert)
@@ -636,7 +721,14 @@ apply by event:
               invoice void / request already terminal in another way → receipt: conflict + alert, no change (money moved: reconciliation, out of scope [X])
    failed | expired | cancelled: request → that terminal state; invoice unchanged
    an event for a request already in that terminal state → receipt: ignored (idempotent)
-write receipt(outcome, paymentRevision) + billing_transition rows + outbox events, commit.
+insert payment_event_receipt(eventId, outcome, paymentRevision) via ON CONFLICT DO NOTHING (settles a concurrent-duplicate race with no error; the loser returns the same outcome the winner computed)
+IF outcome = applied AND the invoice has exactly one recurring line (section 15/ADR-0044):
+   lock (or create, if none exists) the Organization's subscription row, in the SAME transaction, and activate/renew it
+   (`linkSubscription` → `SubscriptionRepository.applySuccessfulPayment`) — an offering mismatch against an EXISTING
+   subscription is recorded as its own conflict classification but never blocks the invoice/request transition above
+write billing_transition rows + outbox events, commit (receipt, PaymentRequest/Invoice transition and any Subscription
+effect are ONE transaction — section 26/13 atomicity, proven in `payment-subscription-integration.e2e-spec.ts` test 13
+by forcing the Subscription step to fail and asserting nothing else committed either).
 ```
 
 `revision` is **recorded** in the receipt but not used to order events: Payment emits **at most one terminal event per payment** (`payment.succeeded`, `.failed`, `.cancelled` or `.expired`; its state machine makes them mutually exclusive, and a late success after a terminal state is a Payment-side conflict that emits no `payment.succeeded`), so `succeeded → failed → succeeded` and `failed → succeeded` cannot be produced by Payment. If one ever arrived it would be handled by the state checks above (a recorded `conflict`), never by inventing a payment state. The `deferred` outcome is safe because the inbox row is committed with it and the **reconciler, not a redelivery,** completes the request.
@@ -675,14 +767,14 @@ Events go through the transactional outbox and are published at least once to `n
 | `invoice.voided` | `open → void` (**B-015**) | `voidReasonCode` | accounting, notification, audit |
 | `invoice.overdue` | sweep, once | `overdueAt` | notification, audit (**B-013** for what happens next) |
 | `credit_note.issued` | credit note `issued` (**B-016**) | `creditNoteId`, `amount`, `reasonCode` | accounting, notification, audit |
-| `license.*`, `subscription.*` | Stage 8 (**B-020, B-021, B-025**) | as designed then | notification, audit, analytics |
+| ~~`license.*`, `subscription.*`~~ | **not built, still [X]** — corrected by ADR-0044: Subscription does not emit its own outbox events. Its state changes are internal, applied inside the same transaction as the triggering `payment.succeeded` consumption (21.4); a consumer that needs to know about a Subscription effect reads Billing's effective-access route (16.3) rather than subscribing to an event this row once proposed. If a future need for a `subscription.*` notification/analytics event arises, that is a new, undecided addition, not something already designed here. | — |
 
 **Deliberately not emitted:** draft creation and discard, payment-request lifecycle (payment events already carry it), `invoice.due` (B-013), product and price events (no consumer; **[X]**).
 
 ## 24. Outbox and inbox [D]
 
 * **Outbox:** every event-producing transition writes its row in the same `Queryable` as the state change (BI-12); the kit relay publishes with `FOR UPDATE SKIP LOCKED` (several instances are safe). A broker outage never blocks a business transaction.
-* **Inbox:** the Payment consumer records `eventId` in the same transaction as its effect (`InboxService.handle`): a redelivered event is skipped, and a failed effect leaves no row.
+* **Inbox:** the Payment consumer records `eventId` in the same transaction as its effect — via Billing's own `payment_event_receipt` (section 21.4 correction), not the kit's generic `InboxService`: a redelivered event is skipped, and a failed effect leaves no row.
 * Pruning of both tables is **[X]** (Foundations section 4) and is listed as a hardening risk.
 * **Atomicity is proven by a test that makes the outbox insert fail** and asserts the state change rolled back (`apps/payment-service/test/review-adversarial.e2e-spec.ts`, the two outbox-failure cases), not by inspection.
 
@@ -700,21 +792,21 @@ Two mechanisms, chosen by whether the operation has a natural key [T]. **Every B
 | Void (B-015) | state and `reasonCode` | `200` replay when the reason matches | `409` when it differs | same |
 | **Create payment request** | state: at most one active (BI-13) | `200` the current active request | n/a (no body) | partial unique index; the loser reads the winner |
 | **Send to Payment** | Payment's natural key `(billing-service, paymentRequestId)` | `200 Idempotent-Replayed` | `409` (a defect) | Payment guarantees one payment |
-| **Payment event** | `eventId` (inbox) **and** request/invoice state | no second effect | n/a | one processed |
-| Cycle invoice (**[X]**) | `(recurringDefinitionId, periodStart)` | replay | — | one row |
+| **Payment event** | `eventId` (`payment_event_receipt`, not the kit inbox — 21.4) **and** request/invoice state | no second effect | n/a | one processed |
+| **Subscription effect of a Payment event** | same `payment_event_receipt` row as above — there is no separate Subscription-level idempotency key; a redelivery never reaches `linkSubscription` a second time because the receipt short-circuits first (21.4, ADR-0044) | no second effect | n/a | exactly one activation/renewal (`revision` bumps once; proven under real concurrent duplicate delivery, `subscription-hardening.e2e-spec.ts`) |
+| Cycle invoice (**[X], not built** — B-018 resolved a different way, section 15) | `(recurringDefinitionId, periodStart)` | replay | — | one row |
 | Credit note (**B-016**) | to be defined with the decision | — | — | — |
 
 An "identical replay" of creation means **every field** of the request matches the stored snapshot; any difference (including `dueAt`, `description`, a line's quantity) is a different snapshot and is a conflict. A producer that must send a changed obligation uses a **new** `invoiceRequestId`. A replay does **not** re-execute the operation: no second event, no second number, no second payment request.
 
 ## 26. Concurrency
 
-**Lock order is fixed** (a deadlock is a design defect): **`recurring_definition` → `invoice` → `payment_request` → `credit_note` → sequence rows (`invoice_number_sequence` and any credit-note counter) → `organization_license` → `user_subscription`**. Nothing locks an earlier entry after a later one. Invoice lines are immutable and need no lock. Conditional updates (`WHERE status = …`) apply every change; **the database, not application code alone,** is the referee (partial unique indexes, CHECKs, triggers).
+**Lock order is fixed** (a deadlock is a design defect): **`invoice` → `payment_request` → `subscription`**, then sequence rows (`invoice_number_sequence`); `recurring_definition` and `credit_note` are not built (B-018 resolved without a `recurring_definition` entity, section 15; credit notes remain **B-016**) and are removed from this order — **corrects the order this section originally proposed**, which named those two unbuilt entities and a two-table `organization_license`/`user_subscription` pair instead of the single `subscription` table actually built (ADR-0044). This `invoice → payment_request → subscription` order is the one actually proven, not merely designed: `apps/billing-service/db/tests/run.sh`'s concurrency races and `subscription-hardening.e2e-spec.ts` exercise it under real contention. Nothing locks an earlier entry after a later one. Invoice lines are immutable and need no lock. Conditional updates (`WHERE status = …`) apply every change; **the database, not application code alone,** is the referee (partial unique indexes, CHECKs, triggers).
 
-Why this order (each edge is a real path, none is inherited from Payment):
+Why this order (each edge is a real path):
 
-* `recurring_definition → invoice`: the runner locks the definition, then **inserts** new invoices (new rows have no contenders). Nothing locks a definition after an invoice.
 * `invoice → payment_request`: every path that touches both (create request, cancel, the consumer, the reconciler) locks the invoice first. The consumer reads the request **unlocked** only to learn its invoice id (immutable), then locks in order.
-* `payment_request → credit_note`, then `→ license → subscription`: a payment success locks invoice, request, then any entitlement rows it extends; a credit note (B-016), if it ever affects entitlement, locks invoice, credit note, then the same entitlement rows. A license lapse locks the license before its subscriptions (ADR-0006).
+* `payment_request → subscription`: a settled `payment.succeeded` locks the invoice, then the payment_request, then (only if the invoice has a recurring line) the Organization's subscription row — all in the one transaction of 21.4.
 * `invoice → sequence`: only `issue` takes a counter, after the invoice.
 * **Rule for cross-table triggers:** a trigger that locks the invoice (BI-08, BI-09, BI-14, BI-17) may fire only on `INSERT` and on the transition to `paid`, and those writers already hold the invoice lock. The **dispatcher's** transitions (`created → sending → requested | rejected`, retries) **never fire such a trigger and never lock the invoice**, so a dispatcher holding a request row can never wait on an invoice held by the consumer. The dispatcher's claim (`FOR UPDATE SKIP LOCKED`) is its own short transaction and locks only the request row.
 * There is no path from any later entry back to an earlier one, so no cycle exists. A **deterministic `NOWAIT` test** (as in Payment's `review-adversarial.e2e-spec.ts`, the lock-order case) must prove the `invoice → payment_request` edge, and a mixed-race storm must show no `40P01`.
@@ -726,11 +818,13 @@ Why this order (each edge is a real path, none is inherited from Payment):
 | Many issues for one seller | the seller's counter row locked in the issue transaction (after the invoice) | distinct, consecutive numbers (BI-10) |
 | Payment event vs void | invoice locked first; void requires no active request, so a `requested` request blocks the void | either the void is refused, or (a `cancelled` request) the event is a no-op |
 | Payment event vs manual cancel of the request | same lock; the terminal state that arrives first wins; the other is a recorded no-op or conflict | one terminal state |
-| Duplicate payment events | inbox; a second delivery is skipped | one effect |
+| Duplicate payment events | `payment_event_receipt`; a second delivery is skipped | one effect |
 | Payment event vs reconciler | both use the consumption procedure under the invoice lock | one effect |
 | Two payment-request creations | partial unique index (BI-13) | one active request |
 | Dispatcher instances | `FOR UPDATE SKIP LOCKED` claim; the natural key makes a duplicate send harmless | one Payment payment |
-| Recurring job vs manual cancellation (**[X]**) | definition row locked first by both | serialized |
+| Concurrent duplicate delivery of the SAME Subscription-linked payment event (real PostgreSQL) | `payment_event_receipt` unique index on `eventId`; the loser returns the winner's outcome before ever reaching `linkSubscription` | exactly one Subscription effect, never doubled (`subscription-hardening.e2e-spec.ts`) |
+| A live event and the reconciler settling the SAME settlement under DIFFERENT event ids | both read `PaymentRequest.status` under the invoice/request lock before touching Subscription; the second to acquire the lock sees the already-applied status and is a no-op | exactly one Subscription effect, never two (`subscription-hardening.e2e-spec.ts`; ADR-0044) |
+| Concurrent first activation, or concurrent renewal, for the SAME Organization | `subscription_organization_unique`, plus the row lock taken under `payment_request → subscription` | exactly one create, or the period advances by exactly the number of genuine distinct settlements (never lost, never doubled) |
 | Credit note vs payment (**B-016**) | invoice locked first; the cap trigger sums under the lock | never above `total` |
 
 Lessons from Payment's acceptance review that are **requirements here**: a domain conflict (a duplicate or late event) must be a **recorded conflict, not a database error surfacing as `500`** (a 500 makes the broker or provider retry forever); every background job **isolates per-item failures**, is batched and ordered; **T2-style updates are conditional**; "the row is locked in the same order everywhere" is proven by a **deterministic `NOWAIT` test**, not asserted.
@@ -743,12 +837,13 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 | Payment unavailable or slow | the payment request is **already committed**; the dispatcher retries the identical request every `BILLING_DISPATCH_STALE_SENDING_MS` (default 60 s: each claim restamps `sendingSince`, so that threshold is the interval between two attempts at the same request); the API answers immediately; nothing waits on Payment inside a transaction |
 | Timeout during the call to Payment | the request stays `sending`; the next attempt is a byte-identical replay (safe) |
 | Crash after Payment accepted, before Billing stored `paymentId` | `sending` is retried; Payment answers `200 Idempotent-Replayed` and Billing records `paymentId`; an event that arrives first is `deferred` (21.4) and the reconciler completes it |
-| Duplicate payment event | inbox; no second effect |
+| Duplicate payment event | `payment_event_receipt`; no second effect, including any Subscription effect (21.4) |
 | Delayed or out-of-order event | state and snapshot are validated, not order; a terminal event for a request already terminal is ignored |
 | Payment event lost or dead-lettered | the reconciler settles the request from `GET /payment/payments/{id}` |
-| Broker unavailable | the outbox keeps events; business transactions are unaffected |
-| Billing crash mid-consumption | one transaction: the inbox row and the effect commit together or not at all |
-| Recurring job crash (**[X]**) | natural key per period makes the re-run safe |
+| Broker unavailable (Payment's outbox, or RabbitMQ itself) | proven with a real broker (Stage 12.7): Payment's outbox keeps the event, its own settlement transaction is unaffected; once the broker returns, delivery resumes with no operator intervention |
+| Billing unavailable while a settlement event is durably queued | proven with a real broker (Stage 12.7): the message is retained; once Billing restarts and its consumer reconnects, the event is processed and any Subscription effect anchors on the ORIGINAL settlement instant, never on the delayed processing time |
+| Billing crash mid-consumption | one transaction: the `payment_event_receipt` row, the PaymentRequest/Invoice transition and any Subscription effect commit together or not at all |
+| Recurring job crash (**[X], not applicable** — no scheduled recurring job exists; section 15) | — |
 | Invoice creation / issue retry | natural key / state idempotency |
 | Stuck records | alerts (section 30): `sending` older than a threshold, `requested` older than a threshold, dead-lettered events, `conflict` receipts and `deferred` receipts not settled, unpublished outbox age |
 | Auth unavailable | user operations fail closed with `503`; service-token operations and event consumption continue |
@@ -776,7 +871,7 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 | Forged invoice / payment-request id | relation check; a request id is never accepted from a client |
 | Mass assignment | whitelist DTOs (`forbidNonWhitelisted`), no generic update route |
 | Replay / duplicate requests | natural keys and state idempotency (section 25); the same key with different content is a conflict |
-| Event replay / forged event | inbox by `eventId`; source header, `paymentId` and full snapshot check (R-6); **a `paymentId` is never bound from an event**; a mismatch is a recorded conflict, never applied |
+| Event replay / forged event | `payment_event_receipt` by `eventId`; source header, `paymentId` and full snapshot check (R-6); **a `paymentId` is never bound from an event**; a mismatch is a recorded conflict, never applied, and never mutates a different organization's Invoice/PaymentRequest/Subscription (proven against a real broker with a spoofed event, Stage 12.7) |
 | Service token theft | digest-only storage, constant-time compare, two tokens per caller for rotation, one token per pair, never logged |
 | Sensitive logging | no service token, bearer, payment payload, description, or raw event body is ever logged; ids and codes only (kit redaction) |
 | Secret handling | `NAME_FILE`/environment, never a table or event |
@@ -833,14 +928,14 @@ Nothing below is decided or invented. Every entry is `[B]` (B-033 and B-034 stay
 | B-015 | **Voiding an issued invoice vs crediting it;** who may void; conditions | legality, accounting, payment in flight | `open → void` · 12 · `invoice.voided` | endpoint 12; draft discard proceeds |
 | B-016 | **Credit notes:** authority to issue, full/partial, numbering, effect on paid and unpaid invoices, relation to refunds | `amountDue`, accounting | `credit_note` · 16 · `credit_note.issued` | the whole feature |
 | B-017 | **Refund vs credit note vs invoice/entitlement effect of `refund.succeeded`** | what Billing does when Payment returns money | `refund.*` consumption · invoice · entitlement | consuming `refund.*` |
-| B-018 | **Does recurring billing exist,** and its model: interval anchor, renewal date, automatic renewal | a whole subsystem | `recurring_definition` · events | Stage 7 (not planned) |
-| B-019 | **Trials** (fin-arch 10.11) | entitlement start | entitlement · events | trial behaviour |
-| B-020 | **Grace periods** on the new model (re-expressing ADR-0008; R-8) | when access lapses | `organization_license` · `license.grace_issued` | grace behaviour |
-| B-021 | **Reservation / suspension** of user subscriptions on license lapse (re-expressing ADR-0006; R-8) | paid time preserved or lost | `user_subscription` · `subscription.suspended/resumed` | reservation behaviour |
-| B-022 | **Cancellation rules** (immediate vs at period end; refund) | access and money | subscription, invoice | cancellation behaviour |
-| B-023 | **Proration, upgrades and downgrades** | amounts | invoice lines | any proration |
-| B-024 | **Pause and resume** | access | entitlement | pause/resume |
-| B-025 | **Entitlement expiry and stacking:** how much time a payment buys; renewals extend from old expiry or from payment date; what "valid" means at the boundary | correctness of `{ valid, expiresAt }` | entitlement · 17, 18 · `license.*` | activation and extension logic; structure and read API proceed |
+| B-018 | ~~**Does recurring billing exist,** and its model: interval anchor, renewal date, automatic renewal~~ **RESOLVED by [ADR-0044](../adr/0044-subscription-entitlement-final-model.md), Stage 12.2/12.4.** Yes, via Product+Price (`interval='recurring'`), never a scheduled runner — no `recurring_definition` entity was built or is planned. | a whole subsystem | `subscription` · section 15 | **none — implemented** |
+| B-019 | **Trials** (fin-arch 10.11) — **still undecided**, unchanged by Stage 12 | entitlement start | entitlement · events | trial behaviour |
+| B-020 | ~~**Grace periods** on the new model~~ **RESOLVED by ADR-0044, Stage 12.2.** `SUBSCRIPTION_GRACE_DAYS` (optional, no hard-coded default), precomputed and frozen per period at `activate`/`renew`. | when access lapses | `subscription.graceUntil` · section 12/§16.2 | **none — implemented** |
+| B-021 | ~~**Reservation / suspension** of user subscriptions on license lapse~~ **REJECTED by ADR-0044, Stage 12.2 — not merely deferred.** No per-user-within-organization entitlement dimension exists or is planned; `user_subscription` was never built. | paid time preserved or lost | (not built — no table) | **decided: will not be built as originally proposed; a genuinely new requirement would need a new ADR** |
+| B-022 | ~~**Cancellation rules** (immediate vs at period end; refund)~~ **RESOLVED by ADR-0044, Stage 12.2.** At period end only (`cancelAtPeriodEnd`), never immediate; never a reason to revoke already-purchased access; force-cleared on a period change. Refund-driven revocation remains undecided (B-017). | access and money | `subscription.cancelAtPeriodEnd` | **none — implemented** |
+| B-023 | **Proration, upgrades and downgrades** — **still undecided**, unchanged by Stage 12; `productId`/`priceId` stay immutable on an existing Subscription | amounts | invoice lines | any proration |
+| B-024 | **Pause and resume** — **still undecided**, unchanged by Stage 12; not built | access | entitlement | pause/resume |
+| B-025 | ~~**Entitlement expiry and stacking**~~ **RESOLVED by ADR-0044, Stage 12.2.** `renewalAnchor()`: renewing at/before the access boundary anchors on the ORIGINAL `currentPeriodEnd` (no lost or double-credited time); renewing after full expiry anchors on the settlement instant (no back-charging). `{valid, expiresAt}` boundary rules: section 17.5. | correctness of `{ valid, expiresAt }` | `subscription` · section 15-17 | **none — implemented** |
 | B-026 | **Who may pay on behalf of an organization** (Payment O-18) | collection for organization payers | 13 · `payer` | organization-payer collection |
 | B-027 | **Read access beyond producer and user payer:** organization members, seller staff (Payment O-20) | privacy | 8, 9, 14 | any organization-facing read |
 | B-028 | **Write authority via a user bearer:** who may create, issue, void, credit; whether any Auth capability counts | who can create financial obligations | 7, 10, 12, 16 (endpoint 13 is **not** included: a `user` payer requesting collection of their own invoice is the `payer` relation, [T]) | every user-bearer write except endpoint 13; producer writes proceed |
@@ -850,7 +945,7 @@ Nothing below is decided or invented. Every entry is `[B]` (B-033 and B-034 stay
 | B-032 | **Personal data and retention:** which invoice data is personal (including the party snapshots, rendered documents, template versions and access logs), retention periods, deletion and anonymisation (Payment O-17) | privacy, law | descriptions, notes, events, history | retention/pruning and free-text fields |
 | B-033 | **Discounts, coupons, promotions, adjustments** | BI-05 currently has none | invoice lines, totals | **[X]**; BI-05 changes with the decision |
 | B-034 | **Fractional and usage-based quantities and pricing** | integer quantities, `flat` only | price, line | **[X]** |
-| B-035 | **Does Auth keep a synchronous entitlement check** at registration/join (fin-arch 10.8; Payment O-12) | Auth ⇄ Billing coupling | 17 · Auth client | the Auth PR (16.4); Billing's route proceeds |
+| B-035 | ~~**Does Auth keep a synchronous entitlement check** at registration/join~~ **RESOLVED, Stage 12.1 (commit `f1901f9`).** No: removed entirely, not repointed to Billing. See section 16.4. | Auth ⇄ Billing coupling | 17 · Auth client | **none — done** |
 | B-036 | **Platform currency configuration:** (a) how Billing learns the **Platform of an invoice** (it carries none; Auth or organization-service owns the hierarchy, and a client-supplied `platformId` is never authority, section 19); (b) **who administers** a Platform's enabled currencies and through which API (an Auth administrator is not a Billing administrator); (c) whether a Platform has a **default currency**; (d) whether an **Organization-level** restriction exists; (e) how the Platform set combines with `BILLING_SUPPORTED_CURRENCIES` and with the currencies **Payment** has enabled (Payment O-10); (f) whether an invoice or payment request in a **disabled** currency may still be issued or collected (historical data is unaffected either way); (g) who **owns the global currency reference and its seed** (the exponents of EUR and USD, B-005); (h) whether enabling or disabling is **audited** centrally | which currencies a customer can be billed in; consistency with Payment | `platform_currency`, `currency`, `invoice` · 7 · none | invoice creation cannot check the Platform set; the table, guards and permission question exist and are unused |
 
 ### 32.1 Which stage each decision blocks
@@ -872,8 +967,8 @@ A stage is blocked **only in the named part**; everything else in it proceeds.
 | B-014 | 3: the `uncollectible` state |
 | B-015 | 7: void (endpoint 12); draft discard proceeds |
 | B-016, B-017 | 7: credit notes; consuming `refund.*` |
-| B-018 to B-024 | 7: recurring billing, trials, grace, reservation, cancellation, proration, pause (not planned) |
-| B-020, B-021, B-025 | 8: entitlement activation, extension, grace, reservation (structure and read API proceed) |
+| B-018, B-020, B-021, B-022, B-025 | **resolved, Stage 12.2/12.4 (ADR-0044) — nothing blocked** |
+| B-019, B-023, B-024 | still block: trials; proration/upgrade-downgrade; pause/resume |
 | B-026 | 3: creating a payment request for an organization payer (refused, `payment_request_not_supported`); 4: actually collecting from one |
 | B-027 | 6: organization-facing reads and lists |
 | B-028 | 3, 6: user-bearer writes except endpoint 13 |
@@ -881,12 +976,12 @@ A stage is blocked **only in the named part**; everything else in it proceeds.
 | B-030 | 3: ad hoc lines |
 | B-032 | 9: retention, pruning, free-text fields |
 | B-033, B-034 | 3: any adjustment, discount, fractional or usage pricing (`[X]`) |
-| B-035 | 8: the Auth client PR |
+| B-035 | **resolved, Stage 12.1 — nothing blocked** |
 | B-036 | 3: checking a Platform's enabled currencies at invoice creation; any Platform currency administration API; 4: refusing a payment request in a disabled currency |
 
 ## 33. Deferred [X]
 
-Recurring billing runner, subscriptions and dunning (until B-018, B-013); trials; proration; usage-based, tiered and volume pricing; discounts, coupons, promotions and adjustments; fractional quantities; ad hoc (producer-priced) lines; automatic payment-request creation at issue; invoice rendering, PDF, numbering templates, localization and delivery; a tax engine; bundles; multi-currency conversion; write-off (`uncollectible`); administrative or support tooling; product and price edits and their events; consumer retry policy beyond the dead-letter queue; caching of Auth answers; outbox, inbox and history pruning; periodic reconciliation beyond the stuck-request poll; reporting; any Accounting, Organization Service, settlement, payout, wallet, custody, fee, merchant-of-record, cash or gateway behaviour; any product-specific logic; **the invoice template designer, template versions, invoice documents, rendering and PDF, localisation content, delivery, secure and public access, QR and verification, document integrity and electronic signatures (section 36)**.
+~~Recurring billing runner, subscriptions~~ **Subscription and recurring billing are implemented (Stage 12.2/12.4, ADR-0044) — removed from this deferred list.** Still deferred: dunning after a failed *recurring* payment (until B-013); trials (B-019); proration and upgrade/downgrade (B-023); pause/resume (B-024); usage-based, tiered and volume pricing; discounts, coupons, promotions and adjustments; fractional quantities; ad hoc (producer-priced) lines; automatic payment-request creation at issue; invoice rendering, PDF, numbering templates, localization and delivery; a tax engine; bundles; multi-currency conversion; write-off (`uncollectible`); administrative or support tooling; product and price edits and their events; consumer retry policy beyond the dead-letter queue; caching of Auth answers; outbox, inbox and history pruning; periodic reconciliation beyond the stuck-request poll; reporting; any Accounting, Organization Service, settlement, payout, wallet, custody, fee, merchant-of-record, cash or gateway behaviour; any product-specific logic; a persisted Entitlement table or service, an Entitlement cache/projection, refund-driven entitlement revocation (B-017), `Plan`/`SubscriptionPlan` as a concept above Product/Price, any frontend/consuming-app subscription UX; **the invoice template designer, template versions, invoice documents, rendering and PDF, localisation content, delivery, secure and public access, QR and verification, document integrity and electronic signatures (section 36)**.
 
 ## 34. Implementation plan, readiness gate and acceptance criteria
 
@@ -903,15 +998,20 @@ Only justified stages are listed. Each stage ends with its tests green **includi
 | **4 Payment integration** | the dispatcher, the Payment client (a port with a test double and an integration run against Payment `main` with its test provider), the event consumer with inbox and receipts, the reconciler, `invoice.paid`, and payment-request cancel (endpoint 15, needs Payment's cancel route, R-7). The `payment_request` table and its Billing-side creation/read (endpoints 13, 14) already exist from Stage 3; this stage is what actually **sends** a request to Payment, learns its outcome, and can therefore set `paymentId` and mark an invoice `paid` | Stage 3; Payment on `main`; production needs Payment O-13, O-14, O-15 |
 | **5 Events and sweep** | completes the event catalog: `invoice.overdue` sweep, DLQ handling and alerts, correlation ids for system events; outbox-atomicity failure-injection tests | Stage 4 |
 | **6 Authorization and isolation** | organization-member and platform-staff relations, once B-026, B-027, B-028 are decided, and the isolation/IDOR test set that follows from them. The producer and payer relations (endpoints 8, 9, 13, 14) and their own IDOR tests already exist from Stage 3; this stage is only the **organization-scoped** expansion | B-026, B-027, B-028 |
-| **7 Recurring billing, credit notes, void** | **not planned.** Each unlocks only when B-018/B-013, B-016/B-017, B-015 are decided, with its own TDD | the owner |
-| **8 Entitlement** | the structure of 16.2 and the read-only status routes (`{ valid, expiresAt }`), with the compatibility contract test for Auth; activation/extension/grace/reservation **only after B-020, B-021, B-025**; the Auth client PR is separate (16.4) | Stage 4; B-020, B-021, B-025, B-035 |
+| **7 Credit notes, void** | **not planned.** Each unlocks only when B-016/B-017, B-015 is decided, with its own TDD. (Recurring billing, originally planned for this stage, is **implemented** — see Stage 12.2/12.4 row below; it needed none of B-016/B-017/B-015.) | the owner |
+| **12.2 Subscription domain** *(implemented; org-wide roadmap numbering — not a continuation of Stage 1-9's count)* | schema and lifecycle (section 17.6), `SubscriptionRepository`, `renewalAnchor()`, `SUBSCRIPTION_GRACE_DAYS` — resolves B-018, B-020, B-021, B-022, B-025 (ADR-0044) | Stage 4 |
+| **12.3 Entitlement derivation** *(implemented)* | `deriveEntitlement` (section 17.5), pure, no persistence | 12.2 |
+| **12.4 Payment → Subscription integration** *(implemented)* | `linkSubscription` inside `applyPaymentEvent` (section 21.4), `ambiguous_subscription_obligation` | 12.2, 12.3, Stage 4 |
+| **12.5 Effective-access HTTP contract** *(implemented)* | `GET /billing/organizations/:organizationId/entitlement` (section 16.3), replaces the two status routes 17/18 originally planned in Stage 8 | 12.3 |
+| **12.6 Concurrency/lifecycle hardening** *(implemented)* | real-PostgreSQL races: duplicate/concurrent delivery, live-vs-reconciliation, renewal/termination/cancellation races, tenant isolation | 12.2-12.5 |
+| **12.7 Real-broker integration** *(implemented)* | proves 12.4's loop through a real RabbitMQ broker: duplicate/delayed delivery, broker/Billing outage-recovery, tenant isolation, all against a real broker (not the in-memory bus) | 12.4, ADR-0037 |
 | **9 Hardening** | observability (a metrics mechanism, alerts of section 30), load and concurrency soak, a security review of the consumer and authorization, pruning policy (B-032), CI and least-privilege verification (`infra/postgres/verify.sh`), production readiness review | Stages 1 to 6 |
 
 Each feature is planned in its own TDD (`docs/tdd/`) before code, as for Payment.
 
 ### 34.2 Reality check
 
-Today: the kit provides configuration, request and correlation ids, the error filter with a `code` field, health and readiness, the service-token guard, the Auth client, database access, the migration runner, outbox, inbox and the RabbitMQ bus, a fixed-window rate limiter, and generic immutability triggers. Payment on `main` (Phase 1: create, get, start and sync an attempt, webhooks, resolver, expiry sweeper, events, test provider only) is the integration target. **Stages 1 to 3 are built** (foundation; domain schema, financial invariants and the Platform currency foundation; the HTTP API of section 18, including invoice read/list for the producer and payer and Billing-side payment-request creation, record only — see the Stage 3/4 note under section 18); everything else in this SDD is designed, not built.
+Today: the kit provides configuration, request and correlation ids, the error filter with a `code` field, health and readiness, the service-token guard, the Auth client, database access, the migration runner, outbox, inbox and the RabbitMQ bus, a fixed-window rate limiter, and generic immutability triggers. Payment is fully implemented through its own Stage 12.7 (settlement, attempts, webhooks, reconciliation, transactional outbox, real-broker publishing). **Stages 1 to 4 are built** (foundation; domain schema, financial invariants and the Platform currency foundation; the HTTP API of section 18; Payment integration — dispatcher, event consumer, reconciler, cancel), **plus the Subscription/Entitlement work of Stage 12.2-12.7** (34.1's rows above; ADR-0044 is the structural source of truth for it, not this section's original Stage 7/8 proposal). Still designed, not built: void, credit notes, recurring-billing dunning, organization/company payer authorization, trials, proration/upgrade-downgrade, pause/resume, refund-driven entitlement effects, and everything else this document still marks `[B]` or `[X]`.
 
 ### 34.3 Implementation readiness gate
 
@@ -926,7 +1026,7 @@ Per feature, not for the document as a whole: a feature enters implementation on
 7. its Payment integration (success, timeout, conflict, duplicate, out-of-order) is covered where it touches Payment;
 8. its outbox behaviour is covered by a **failure-injection** test where it emits an event.
 
-**Blocked under this gate until the named decision is recorded as `[D]` or the named dependency exists:** **payment requests outside the test fixture until Payment ships its cancel route** (a request Payment cannot complete or cancel would be unclosable, R-7; 13.1); issuing invoices to real customers (B-001, B-002, B-004, B-006, B-007); any organization-payer collection (B-003, B-026); production use by any non-test producer (B-029); user-bearer writes **other than a payer creating their own payment request** (B-028); void (B-015); credit notes (B-016); recurring billing (B-018); entitlement activation, grace and reservation (B-020, B-021, B-025); payment lifetime, retries and dunning (B-009, B-012, B-013). **Independent and not blocked:** Stage 1; the schema and state machines with the provisional numbering counter; catalog and invoice creation, issue and discard with the test producer; invoice read and list for the producer and the payer (19.3's relations, both `[T]`); Billing's own `payment_request` creation and read (endpoints 13, 14 — record only, never sent to Payment); the Payment integration for **user payers** through Payment's test provider; the read-only entitlement status shape.
+**Blocked under this gate until the named decision is recorded as `[D]` or the named dependency exists:** issuing invoices to real customers (B-001, B-002, B-004, B-006, B-007); any organization-payer collection (B-003, B-026); production use by any non-test producer (B-029); user-bearer writes **other than a payer creating their own payment request** (B-028); void (B-015); credit notes (B-016); payment lifetime, retries and dunning (B-009, B-012, B-013); trials (B-019); proration/upgrade-downgrade (B-023); pause/resume (B-024). **No longer blocked (resolved by ADR-0044, Stage 12.2-12.7 — listed for history, since earlier drafts of this document blocked them):** recurring billing (B-018); entitlement activation and grace (B-020, ~~B-021~~ rejected, not merely unblocked); cancellation (B-022); renewal anchor/stacking (B-025); Payment's cancel route (shipped; Billing's `cancel` endpoint and `payment_request_in_flight` handling are exercised in `payment-integration.e2e-spec.ts` and the real-broker suite). **Independent and not blocked:** Stage 1; the schema and state machines with the provisional numbering counter; catalog and invoice creation, issue and discard with the test producer; invoice read and list for the producer and the payer (19.3's relations, both `[T]`); the full Payment integration and Subscription/Entitlement stack (Stage 4, 12.2-12.7).
 
 ### 34.4 Acceptance criteria
 
