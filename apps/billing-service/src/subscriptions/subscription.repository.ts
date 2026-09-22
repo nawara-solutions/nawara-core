@@ -237,6 +237,14 @@ export class SubscriptionRepository {
     return row;
   }
 
+  /**
+   * Stage 12.5: the same tenant-scoped read as `getByOrganization`, but for the effective-access contract, where no
+   * Subscription is a normal commercial outcome (`deriveEntitlement(null, now)`), never a 404.
+   */
+  async findForOrganization(organizationId: string): Promise<SubscriptionRow | null> {
+    return this.findByOrganization(this.db, organizationId);
+  }
+
   private async lock(q: Queryable, organizationId: string): Promise<SubscriptionRow> {
     const { rows } = await q.query<SubscriptionRow>(`SELECT * FROM subscription WHERE "organizationId" = $1 FOR UPDATE`, [organizationId]);
     const row = rows[0];
