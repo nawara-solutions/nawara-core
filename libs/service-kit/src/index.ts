@@ -17,6 +17,7 @@ export { hashServiceToken, generateServiceToken, parseServiceTokens, MAX_TOKENS_
 export { ServiceTokenGuard, CallerService, SERVICE_TOKENS, type ServiceRequest } from './service-auth/service-token.guard.js';
 export { ServiceAuthModule } from './service-auth/service-auth.module.js';
 export { HttpAuthClient, type AuthClient, type AuthIdentity, type AuthMembership, type HttpAuthClientOptions } from './service-auth/auth-client.js';
+export { ServiceOrUserGuard, RequestCaller, AUTH_CLIENT, type Caller, type CallerRequest } from './service-auth/service-or-user.guard.js';
 
 export { DbModule } from './db/db.module.js';
 export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, type DbOptions, type Queryable, type IsolationLevel } from './db/db.service.js';

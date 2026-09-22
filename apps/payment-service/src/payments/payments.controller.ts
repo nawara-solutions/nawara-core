@@ -1,12 +1,10 @@
 import { Body, Controller, Get, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CallerService, DbService, RateLimitService, ServiceTokenGuard } from '@nawara/service-kit';
+import { CallerService, DbService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { AuthorizationService } from '../authorization/authorization.service.js';
-import type { CallerRequest } from '../auth/service-or-user.guard.js';
-import { ServiceOrUserGuard } from '../auth/service-or-user.guard.js';
 import { notFound, paymentError } from '../errors.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { representPayment } from './payment.representation.js';

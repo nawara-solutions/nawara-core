@@ -1,9 +1,15 @@
 import { timingSafeEqual } from 'node:crypto';
 import { CanActivate, ExecutionContext, Inject, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common';
 import type { Request } from 'express';
-import { hashServiceToken, SERVICE_TOKENS, type AuthClient, type ServiceTokenEntry } from '@nawara/service-kit';
-import { AUTH_CLIENT } from './auth-client.token.js';
-import type { Caller } from './caller.js';
+import { hashServiceToken, type ServiceTokenEntry } from './service-token.js';
+import { SERVICE_TOKENS } from './service-token.guard.js';
+import type { AuthClient, AuthIdentity } from './auth-client.js';
+
+/** DI token for the `AuthClient` this guard asks when no service token matches. */
+export const AUTH_CLIENT = Symbol('AUTH_CLIENT');
+
+/** Who is making the request: a service (identified by its token) or an end user (identified live by Auth). */
+export type Caller = { kind: 'service'; service: string } | { kind: 'user'; identity: AuthIdentity };
 
 export type CallerRequest = Request & { caller?: Caller };
 
@@ -12,6 +18,9 @@ export type CallerRequest = Request & { caller?: Caller };
  * tried FIRST; on a match the caller is that service and the bearer is NEVER sent to Auth. Only when no service token
  * matches is the bearer treated as a user token and asked of Auth, live. An inactive identity is refused (401); Auth
  * being unreachable surfaces as the kit's own fail-closed 503 (thrown by `AuthClient.getIdentity`).
+ * Stage 13.3: the single canonical implementation (billing-service and payment-service previously carried byte-identical
+ * local copies). Each consumer provides `SERVICE_TOKENS` and `AUTH_CLIENT` in its own module graph; this guard makes no
+ * assumption about either provider beyond the shape of `ServiceTokenEntry`/`AuthClient`.
  */
 @Injectable()
 export class ServiceOrUserGuard implements CanActivate {

@@ -1,8 +1,7 @@
 import { Body, Controller, Get, HttpException, Inject, Module, Post, Req, UseGuards } from '@nestjs/common';
 import { IsString, MaxLength } from 'class-validator';
-import { CallerService, DbService, ServiceTokenGuard } from '@nawara/service-kit';
+import { CallerService, DbService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
 import { AuthModule } from '../../src/auth/auth.module.js';
-import { ServiceOrUserGuard, type CallerRequest } from '../../src/auth/service-or-user.guard.js';
 
 class EchoDto {
   @IsString()

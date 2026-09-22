@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ServiceOrUserGuard } from './service-or-user.guard.js';
+import { ServiceOrUserGuard } from '@nawara/service-kit';
 
 @Module({
   providers: [ServiceOrUserGuard],
