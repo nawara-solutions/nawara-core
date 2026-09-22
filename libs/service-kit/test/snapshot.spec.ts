@@ -22,6 +22,40 @@ describe('canonicalJson', () => {
     expect(() => canonicalJson(() => 1)).toThrow(SnapshotError);
     expect(() => canonicalJson(10n)).toThrow(SnapshotError);
   });
+
+  // Golden vectors: the exact bytes the hierarchy snapshot digests are built from. A change here breaks every persisted digest.
+  it.each<[string, unknown, string]>([
+    ['empty object', {}, '{}'],
+    ['empty array', [], '[]'],
+    ['nested, keys sorted at every depth', { z: 1, a: { y: 2, b: 3 } }, '{"a":{"b":3,"y":2},"z":1}'],
+    ['array order kept, objects inside sorted', [3, { b: 1, a: 2 }, [2, 1]], '[3,{"a":2,"b":1},[2,1]]'],
+    ['null, booleans, empty string', { n: null, t: true, f: false, s: '' }, '{"f":false,"n":null,"s":"","t":true}'],
+    ['numbers', { i: 42, f: 3.25, neg: -17, zero: 0, negzero: -0, big: 1e21, small: 1e-7 }, '{"big":1e+21,"f":3.25,"i":42,"neg":-17,"negzero":0,"small":1e-7,"zero":0}'],
+    ['keys sorted by UTF-16 code unit, integer-like keys included', { b: 1, B: 2, _: 3, '10': 4, '9': 5, '1': 6 }, '{"1":6,"10":4,"9":5,"B":2,"_":3,"b":1}'],
+    ['unicode kept as is', { 'é': 'ñ', '日本': '語', e: '😀' }, '{"e":"😀","é":"ñ","日本":"語"}'],
+    ['JSON string escaping', { q: '"', bs: '\\', nl: '\n', ctl: '\u0001', 'k"': 1 }, '{"bs":"\\\\","ctl":"\\u0001","k\\"":1,"nl":"\\n","q":"\\""}'],
+  ])('golden vector: %s', (_name, value, expected) => {
+    expect(canonicalJson(value)).toBe(expected);
+  });
+
+  it('golden digest: sha256 of the canonical bytes', () => {
+    expect(sha256Hex(canonicalJson({ z: 1, a: { y: 2, b: 3 } }))).toBe('10d6b907e50339871355376854e16e87112120f63b9ce9bca2913907cd2a124d');
+  });
+
+  it('gives one output for every insertion order of a nested object', () => {
+    const entries: [string, unknown][] = [['c', 1], ['a', { y: [1, 2], x: null }], ['b', 's'], ['d', [{ q: 1, p: 2 }]]];
+    const perms = <T>(xs: T[]): T[][] => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => perms([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
+    const outputs = new Set(perms(entries).map((p) => canonicalJson(Object.fromEntries(p))));
+    expect([...outputs]).toEqual(['{"a":{"x":null,"y":[1,2]},"b":"s","c":1,"d":[{"p":2,"q":1}]}']);
+  });
+
+  it('does not mutate its input', () => {
+    const value = { b: [3, 1, { z: 1, y: 2 }], a: 1 };
+    canonicalJson(value);
+    expect(Object.keys(value)).toEqual(['b', 'a']);
+    expect(value.b).toEqual([3, 1, { z: 1, y: 2 }]);
+    expect(Object.keys(value.b[2] as object)).toEqual(['z', 'y']);
+  });
 });
 
 describe('sealSnapshot', () => {
