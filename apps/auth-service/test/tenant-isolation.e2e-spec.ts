@@ -19,8 +19,6 @@ describe('tenant isolation: Company A actors against Company B resources', () =>
   beforeAll(async () => {
     t = await createTestApp();
     w = await t.world(); // companyA: platformSchool/platformDrive/orgSchool1..; companyB: platformClinic/orgClinic
-    t.payment.licensed.add(w.orgSchool1);
-    t.payment.licensed.add(w.orgClinic);
 
     // ---- Company A actors
     A.owner = await t.readyOwner(w.companyA, `ownera${uniq()}@a.test`);

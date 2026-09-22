@@ -19,7 +19,6 @@ describe('one user, many organizations: membership is the only link', () => {
     t = await createTestApp();
     await t.app.listen(0); // listen once: parallel supertest bursts otherwise ECONNRESET
     w = await t.world(); // platformSchool: orgSchool1/orgSchool2; platformDrive: orgDrive (company A); platformClinic: orgClinic (company B)
-    for (const o of [w.orgSchool1, w.orgSchool2, w.orgDrive, w.orgClinic]) t.payment.licensed.add(o);
     ownerA = await t.readyOwner(w.companyA, `ownera${uniq()}@a.test`);
     ownerB = await t.readyOwner(w.companyB, `ownerb${uniq()}@b.test`);
   });
@@ -111,29 +110,14 @@ describe('one user, many organizations: membership is the only link', () => {
 
   // ------------------------------------------------------------------------------ the join route
   describe('POST /auth/onboarding/join', () => {
-    it('refuses: unauthenticated (401), owner/operator (403), a bad code and an unlicensed organization (the same generic 403)', async () => {
+    it('refuses: unauthenticated (401), owner/operator (403), and a bad code (403), with no commercial check in the path', async () => {
       const s = await student();
       const c = await t.joinCode(w.orgDrive, { audience: 'driver' });
       await t.http.post('/auth/onboarding/join').send({ joinCode: c.code }).expect(401);
       await join(ownerA.tokens, c.code).expect(403);
-      t.payment.licensed.delete(w.orgDrive);
-      try {
-        const unlicensed = await join(s.tokens, c.code);
-        const bad = await join(s.tokens, 'ABCDE-FGHJK');
-        expect(unlicensed.status).toBe(403);
-        expect(bad.status).toBe(403);
-        expect(unlicensed.body).toEqual(bad.body);
-      } finally { t.payment.licensed.add(w.orgDrive); }
+      const bad = await join(s.tokens, 'ABCDE-FGHJK');
+      expect(bad.status).toBe(403);
       expect((await memberships(s.id)).length).toBe(1);
-    });
-
-    it('fails CLOSED when payment-service is down and spends no use of the code', async () => {
-      const s = await student();
-      const c = await t.joinCode(w.orgDrive, { audience: 'driver', maxUses: 1 });
-      t.payment.down = true;
-      try { await join(s.tokens, c.code).expect(503); } finally { t.payment.down = false; }
-      expect((await t.db.query(`SELECT "usedCount" FROM organization_join_code WHERE id=$1`, [c.id])).rows[0].usedCount).toBe(0);
-      await join(s.tokens, c.code).expect(201); // still usable
     });
 
     it('a second membership in the SAME organization is a 409 and spends nothing; a rejected or revoked one cannot be re-opened', async () => {

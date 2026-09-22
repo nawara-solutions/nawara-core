@@ -16,7 +16,7 @@ export class CreateJoinCodeDto {
   @IsString() @Matches(/^(?!admin$)[a-z][a-z0-9_-]{0,31}$/) audience!: string;
   @ApiProperty({ description: 'New members start as PENDING and need an organization decision.' })
   @IsBoolean() requiresApproval!: boolean;
-  @ApiProperty({ description: 'Onboarding hint for the app only; entitlement is owned by payment-service.' })
+  @ApiProperty({ description: 'Onboarding hint for the app only. Auth stores it but enforces nothing from it; it carries no commercial authority.' })
   @IsBoolean() requiresSubscription!: boolean;
   @ApiPropertyOptional({ description: 'Days until the code expires (default 30, max 365). Codes are never permanent.' })
   @IsOptional() @IsInt() @Min(1) @Max(365) expiresInDays?: number;

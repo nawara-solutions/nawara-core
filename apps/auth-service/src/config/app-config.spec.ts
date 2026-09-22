@@ -51,12 +51,11 @@ describe('configuration and key management fail closed', () => {
     const e = good(); delete e.JWT_SECRET; e.JWT_SECRET_FILE = f;
     expect(Buffer.from(loadConfig(e).jwt.secret).toString('base64')).toBe(secret);
   });
-  it('production demands https WebAuthn origins, an RP id and a payment service token', () => {
+  it('production demands https WebAuthn origins and an RP id', () => {
     const p = { ...good(), NODE_ENV: 'production' };
     expect(() => loadConfig(p)).toThrow(/WEBAUTHN/);
     expect(() => loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'http://a.test' })).toThrow(/https/);
-    expect(() => loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test' })).toThrow(/PAYMENT_SERVICE_TOKEN/);
-    expect(loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test', PAYMENT_SERVICE_TOKEN: 'x'.repeat(40) }).env).toBe('production');
+    expect(loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test' }).env).toBe('production');
   });
   it('a step-up can never be configured longer than the 15-minute database limit', () => {
     expect(() => loadConfig({ ...good(), STEP_UP_TTL_SEC: '901' })).toThrow(ConfigError);

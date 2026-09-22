@@ -1,14 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
 
-describe('members, and the payment boundary (authentication is not entitlement)', () => {
+describe('members, and commercial independence (authentication is not entitlement)', () => {
   let t: TestCtx;
   let w: Awaited<ReturnType<TestCtx['world']>>;
   let code: string; // an auto-approved "student" code for orgSchool1
   beforeAll(async () => {
     t = await createTestApp();
     w = await t.world();
-    t.payment.licensed.add(w.orgSchool1);
     code = (await t.joinCode(w.orgSchool1, { audience: 'student', requiresApproval: false, requiresSubscription: true })).code;
   });
   afterAll(() => t.close());
@@ -43,45 +42,37 @@ describe('members, and the payment boundary (authentication is not entitlement)'
     expect(n.rows[0].n).toBe(0);
   });
 
-  it('a bad code, an exhausted code and an unlicensed organization give the same generic 403 (nothing is revealed)', async () => {
-    const unlicensed = await t.joinCode(w.orgSchool2, { audience: 'student' }); // orgSchool2 has no license
+  it('a bad, malformed and exhausted code all give the same generic 403 (nothing is revealed)', async () => {
     const exhausted = await t.joinCode(w.orgSchool1, { maxUses: 1 });
     await reg({ joinCode: exhausted.code }).expect(201);
     const results = [
       await reg({ joinCode: 'ABCDE-FGHJK' }), // well-formed but unknown
       await reg({ joinCode: 'not a code' }), // malformed
       await reg({ joinCode: exhausted.code }),
-      await reg({ joinCode: unlicensed.code }),
     ];
     for (const r of results) expect(r.status).toBe(403);
     for (const r of results.slice(1)) expect(r.body).toEqual(results[0].body);
   });
 
-  it('registration fails CLOSED when payment-service is down, and creates nothing (no use of the code is spent)', async () => {
-    const before = (await t.db.query(`SELECT "usedCount" FROM organization_join_code WHERE "codeHash" IS NOT NULL ORDER BY "createdAt" LIMIT 1`)).rows[0].usedCount;
-    t.payment.down = true;
-    const r = await reg({ email: 'down@a.test' });
-    t.payment.down = false;
-    expect(r.status).toBe(503);
-    const n = await t.db.query(`SELECT count(*)::int n FROM "user" WHERE email='down@a.test'`);
-    expect(n.rows[0].n).toBe(0);
-    const after = (await t.db.query(`SELECT "usedCount" FROM organization_join_code WHERE "codeHash" IS NOT NULL ORDER BY "createdAt" LIMIT 1`)).rows[0].usedCount;
-    expect(after).toBe(before);
+  it('registration and every membership rule keep working with no commercial subscription/license concept configured', async () => {
+    // Registration has no Payment/Billing/Entitlement dependency at all (Stage 11/12 decoupling): the
+    // running app was booted with no PAYMENT_SERVICE_URL/PAYMENT_SERVICE_TOKEN and no such client exists
+    // in its dependency graph (see app.module.ts). `requiresSubscription` on the code is a passthrough
+    // hint only and never gates registration, whichever value it carries.
+    expect(Object.keys(t.cfg)).not.toContain('payment');
+    const noSub = await t.joinCode(w.orgSchool1, { requiresSubscription: false });
+    const withSub = await t.joinCode(w.orgSchool1, { requiresSubscription: true });
+    await reg({ email: 'nosub@a.test', joinCode: noSub.code }).expect(201);
+    await reg({ email: 'withsub@a.test', joinCode: withSub.code }).expect(201);
   });
 
-  it('LOGIN AND REFRESH NEVER CALL payment-service, and keep working when it is down or the license has lapsed', async () => {
+  it('LOGIN AND REFRESH remain independent of any commercial state', async () => {
     await reg({ email: 'lapse@a.test' }).expect(201);
-    const callsBefore = t.payment.calls.length;
-    t.payment.licensed.delete(w.orgSchool1); // organization license lapses
-    t.payment.down = true; // and payment-service is unreachable
-    try {
-      const login = await t.http.post('/auth/login').send({ email: 'lapse@a.test', password: 'member password 1' });
-      expect(login.status).toBe(200); // identity still authenticates
-      const ref = await t.http.post('/auth/refresh').send({ refreshToken: login.body.refreshToken });
-      expect(ref.status).toBe(200);
-      await t.http.get('/auth/me').set(bearer(ref.body)).expect(200);
-    } finally { t.payment.down = false; t.payment.licensed.add(w.orgSchool1); }
-    expect(t.payment.calls.length).toBe(callsBefore); // not a single call
+    const login = await t.http.post('/auth/login').send({ email: 'lapse@a.test', password: 'member password 1' });
+    expect(login.status).toBe(200); // identity still authenticates
+    const ref = await t.http.post('/auth/refresh').send({ refreshToken: login.body.refreshToken });
+    expect(ref.status).toBe(200);
+    await t.http.get('/auth/me').set(bearer(ref.body)).expect(200);
   });
 
   it('auth-service holds no entitlement STATE: no license/subscription/trial/plan/billing column, only the onboarding hint flag', async () => {
