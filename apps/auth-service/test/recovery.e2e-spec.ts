@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 describe('owner recovery (MFA must not be bypassable)', () => {
   let t: TestCtx;
@@ -22,8 +22,8 @@ describe('owner recovery (MFA must not be bypassable)', () => {
     const b = await start(o, { password: 'not the password' }); // key only (password wrong)
     const c = await start({ email: 'ghost@a.test', password: o.password, key: o.key }); // unknown account
     for (const r of [a, b, c]) expect(r.status).toBe(401);
-    expect(a.body).toEqual(b.body);
-    expect(b.body).toEqual(c.body);
+    expect(noReqId(a.body)).toEqual(noReqId(b.body));
+    expect(noReqId(b.body)).toEqual(noReqId(c.body));
     const n = await t.db.query(`SELECT count(*)::int n FROM owner_recovery_request WHERE "ownerId"=$1`, [o.id]);
     expect(n.rows[0].n).toBe(0);
   });

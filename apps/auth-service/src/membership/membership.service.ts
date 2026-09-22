@@ -1,8 +1,9 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
+import { authError, notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -76,7 +77,7 @@ export class MembershipService {
 
   private async authorize(q: Queryable, actor: OrgActor, organizationId: string) {
     const authority = await this.access.organizationAuthority(actor.userId, organizationId, q);
-    if (!authority) throw new NotFoundException(); // collapsed 404
+    if (!authority) throw notFound(); // collapsed 404
     return authority;
   }
 
@@ -106,12 +107,12 @@ export class MembershipService {
       const m = rows[0];
       // The organization is checked from the ROW, and must equal the one in the URL: an id from another
       // organization is indistinguishable from a missing one.
-      if (!m) throw new NotFoundException();
+      if (!m) throw notFound();
       const authority = await this.authorize(q, actor, m.organizationId);
-      if (m.userId === actor.userId) throw new NotFoundException(); // nobody decides their own membership
-      if (m.status !== 'pending') throw new ConflictException('This request has already been decided.');
+      if (m.userId === actor.userId) throw notFound(); // nobody decides their own membership
+      if (m.status !== 'pending') throw authError(409, 'membership_already_decided', 'This request has already been decided.');
       if (decision === 'approve' && this.cfg.onboarding.requireContactVerification && !m.contactVerifiedAt) {
-        throw new ConflictException('The applicant has not verified their contact yet.');
+        throw authError(409, 'contact_not_verified', 'The applicant has not verified their contact yet.');
       }
       const now = this.clock.now();
       const { rowCount } = await q.query(
@@ -122,7 +123,7 @@ export class MembershipService {
               WHERE id=$1 AND "organizationId"=$2 AND status='pending'`,
         [membershipId, m.organizationId, now, actor.userId],
       );
-      if (rowCount !== 1) throw new ConflictException('This request has already been decided.');
+      if (rowCount !== 1) throw authError(409, 'membership_already_decided', 'This request has already been decided.');
       await this.audit.record({
         type: decision === 'approve' ? 'membership.approved' : 'membership.rejected', outcome: 'success',
         actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip, metadata: { organizationId: m.organizationId, authority },
@@ -155,18 +156,18 @@ export class MembershipService {
         [membershipId, organizationId],
       );
       const m = rows[0];
-      if (!m) throw new NotFoundException();
+      if (!m) throw notFound();
       const authority = await this.authorize(q, actor, m.organizationId);
-      if (m.userId === actor.userId) throw new NotFoundException();
-      if (authority === 'org_admin' && m.isOrganizationAdmin) throw new NotFoundException(); // collapsed: not yours to remove
-      if (m.status !== 'active') throw new ConflictException('Only an active membership can be revoked.');
+      if (m.userId === actor.userId) throw notFound();
+      if (authority === 'org_admin' && m.isOrganizationAdmin) throw notFound(); // collapsed: not yours to remove
+      if (m.status !== 'active') throw authError(409, 'membership_not_active', 'Only an active membership can be revoked.');
       const now = this.clock.now();
       const { rowCount } = await q.query(
         `UPDATE organization_membership SET status='revoked', "revokedAt"=$3, "revokedBy"=$4, "isOrganizationAdmin"=false, "updatedAt"=$3
           WHERE id=$1 AND "organizationId"=$2 AND status='active'`,
         [membershipId, m.organizationId, now, actor.userId],
       );
-      if (rowCount !== 1) throw new ConflictException('Only an active membership can be revoked.');
+      if (rowCount !== 1) throw authError(409, 'membership_not_active', 'Only an active membership can be revoked.');
       await this.audit.record({
         type: 'membership.revoked', outcome: 'success', actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip,
         metadata: { organizationId: m.organizationId, authority, wasAdmin: m.isOrganizationAdmin },
@@ -185,7 +186,7 @@ export class MembershipService {
     await this.throttle.hit('membership_op_actor', actor.userId);
     await this.db.tx(async (q) => {
       const authority = await this.authorize(q, actor, organizationId);
-      if (authority !== 'owner') throw new NotFoundException(); // operators and org admins cannot mint admins
+      if (authority !== 'owner') throw notFound(); // operators and org admins cannot mint admins
       await this.stepUp.consume(q, {
         ownerId: actor.userId, sid: actor.sid, purpose: admin ? 'organization.admin.grant' : 'organization.admin.revoke', token: stepUpToken,
       });
@@ -194,7 +195,7 @@ export class MembershipService {
           WHERE id=$1 AND "organizationId"=$2 AND status='active' AND "isOrganizationAdmin" <> $3 RETURNING "userId"`,
         [membershipId, organizationId, admin, this.clock.now()],
       );
-      if (!rows[0]) throw new NotFoundException(); // rolls back: the step-up is not burned
+      if (!rows[0]) throw notFound(); // rolls back: the step-up is not burned
       await this.audit.record({
         type: admin ? 'organization.admin.granted' : 'organization.admin.revoked', outcome: 'success',
         actorId: actor.userId, targetId: rows[0].userId, sessionFamilyId: actor.sid, ip, metadata: { organizationId },

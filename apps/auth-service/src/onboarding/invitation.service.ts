@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { SessionService } from '../auth/session.service.js';
 import type { ClientInfo } from '../common/client-info.js';
@@ -7,6 +7,7 @@ import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { generateInvitationCode, hashInvitationCode, hashInviteeContact, normalizeInvitationCode } from '../crypto/join-code.js';
 import { PasswordService, assertPasswordPolicy } from '../crypto/password.js';
 import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.js';
+import { authError, notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -67,7 +68,7 @@ export class InvitationService {
   private contactHash(contact: { email?: string; phone?: string }): string {
     if (contact.email) return hashInviteeContact(this.cfg.secrets.joinCodePepper, `email:${normalizeEmail(contact.email)}`);
     const phone = normalizePhone(contact.phone!);
-    if (!PHONE_RE.test(phone)) throw new BadRequestException('Invalid phone number.');
+    if (!PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
     return hashInviteeContact(this.cfg.secrets.joinCodePepper, `phone:${phone}`);
   }
 
@@ -105,7 +106,7 @@ export class InvitationService {
     const r = await this.lookup(rawCode);
     if ('rejected' in r) {
       await this.audit.tryRecord({ type: 'onboarding.admin_invitation.resolve_failed', outcome: 'failure', ip: client.ip, metadata: { reason: r.rejected } });
-      throw new NotFoundException(INVITATION_INVALID);
+      throw authError(404, 'invitation_invalid', INVITATION_INVALID);
     }
     const i = r.row;
     await this.audit.tryRecord({ type: 'onboarding.admin_invitation.resolved', outcome: 'success', targetId: i.id, ip: client.ip, metadata: { organizationId: i.organizationId } });
@@ -130,18 +131,18 @@ export class InvitationService {
   async accept(dto: { invitationCode: string; email?: string; phone?: string; password: string }, client: ClientInfo) {
     await this.throttle.hit('invitation_accept_ip', client.ip);
     await this.guardGuessing(client);
-    if (!dto.email && !dto.phone) throw new BadRequestException('Provide an email or a phone number.');
-    if (dto.email && dto.phone) throw new BadRequestException('Provide exactly one of email or phone.');
+    if (!dto.email && !dto.phone) throw authError(400, 'validation_error', 'Provide an email or a phone number.');
+    if (dto.email && dto.phone) throw authError(400, 'validation_error', 'Provide exactly one of email or phone.');
     const email = dto.email ? normalizeEmail(dto.email) : undefined;
     const phone = dto.phone ? normalizePhone(dto.phone) : undefined;
-    if (phone && !PHONE_RE.test(phone)) throw new BadRequestException('Invalid phone number.');
+    if (phone && !PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
     assertPasswordPolicy(dto.password);
     const contactHash = this.contactHash({ email, phone });
 
     const found = await this.lookup(dto.invitationCode, contactHash);
     if ('rejected' in found) {
       await this.audit.tryRecord({ type: 'onboarding.admin_invitation.resolve_failed', outcome: 'failure', ip: client.ip, metadata: { reason: found.rejected, stage: 'accept' } });
-      throw new ForbiddenException(ACCEPT_REFUSED);
+      throw authError(403, 'invitation_not_acceptable', ACCEPT_REFUSED);
     }
     const inv = found.row;
     const normalized = normalizeInvitationCode(dto.invitationCode)!;
@@ -157,7 +158,7 @@ export class InvitationService {
         RETURNING id`,
         [this.hash(normalized), now, user.id, contactHash],
       );
-      if (!rows[0]) throw new ForbiddenException(ACCEPT_REFUSED); // lost the race, revoked, or expired meanwhile: rolls the user back
+      if (!rows[0]) throw authError(403, 'invitation_not_acceptable', ACCEPT_REFUSED); // lost the race, revoked, or expired meanwhile: rolls the user back
       await q.query(
         `INSERT INTO organization_membership("userId","organizationId",status,"invitationId",audience,"requestedAt","approvedAt","approvedBy","isOrganizationAdmin","createdAt","updatedAt")
          VALUES ($1,$2,'active',$3,$6,$4,$4,$5,true,$4,$4)`,
@@ -186,7 +187,7 @@ export class InvitationService {
   /** Only an Owner of the organization's company or an existing organization admin. Operators are NOT allowed. */
   private async authorize(q: Queryable, actor: OrgActor, organizationId: string) {
     const authority = await this.access.organizationAuthority(actor.userId, organizationId, q);
-    if (authority !== 'owner' && authority !== 'org_admin') throw new NotFoundException(); // collapsed 404
+    if (authority !== 'owner' && authority !== 'org_admin') throw notFound(); // collapsed 404
     return authority;
   }
 
@@ -195,7 +196,7 @@ export class InvitationService {
     const { minMinutes, defaultMinutes, maxMinutes } = this.cfg.onboarding.invitation;
     const minutes = requested ?? defaultMinutes;
     if (!Number.isInteger(minutes) || minutes < minMinutes || minutes > maxMinutes) {
-      throw new BadRequestException(`expiresInMinutes must be between ${minMinutes} and ${maxMinutes}.`);
+      throw authError(400, 'validation_error', `expiresInMinutes must be between ${minMinutes} and ${maxMinutes}.`);
     }
     return minutes;
   }
@@ -230,7 +231,7 @@ export class InvitationService {
         }, q);
         return { ...rows[0], contactBound: !!bound, code: code.display };
       } catch (e) {
-        if (isUniqueViolation(e)) throw new ConflictException('Please try again.'); // a 60-bit collision is astronomically unlikely
+        if (isUniqueViolation(e)) throw authError(409, 'conflict', 'Please try again.'); // a 60-bit collision is astronomically unlikely
         throw e;
       }
     });
@@ -248,7 +249,7 @@ export class InvitationService {
           WHERE id = $1 AND "organizationId" = $2 AND "consumedAt" IS NULL AND "revokedAt" IS NULL`,
         [invitationId, organizationId, this.clock.now(), actor.userId],
       );
-      if (rowCount !== 1) throw new NotFoundException(); // nothing to revoke (already consumed/revoked): rolls back, step-up not burned
+      if (rowCount !== 1) throw notFound(); // nothing to revoke (already consumed/revoked): rolls back, step-up not burned
       await this.audit.record({ type: 'onboarding.admin_invitation.revoked', outcome: 'success', actorId: actor.userId, targetId: invitationId, sessionFamilyId: actor.sid, ip, metadata: { organizationId, authority } }, q);
     });
   }

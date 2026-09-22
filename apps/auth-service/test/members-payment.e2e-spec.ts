@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 describe('members, and commercial independence (authentication is not entitlement)', () => {
   let t: TestCtx;
@@ -51,7 +51,7 @@ describe('members, and commercial independence (authentication is not entitlemen
       await reg({ joinCode: exhausted.code }),
     ];
     for (const r of results) expect(r.status).toBe(403);
-    for (const r of results.slice(1)) expect(r.body).toEqual(results[0].body);
+    for (const r of results.slice(1)) expect(noReqId(r.body)).toEqual(noReqId(results[0].body));
   });
 
   it('registration and every membership rule keep working with no commercial subscription/license concept configured', async () => {
@@ -102,7 +102,7 @@ describe('members, and commercial independence (authentication is not entitlemen
     const a = await t.http.post('/auth/login').send({ email: 'reg@a.test', password: 'wrong password' });
     const b = await t.http.post('/auth/login').send({ email: 'ghost@a.test', password: 'wrong password' });
     expect(a.status).toBe(401);
-    expect(a.body).toEqual(b.body);
+    expect(noReqId(a.body)).toEqual(noReqId(b.body));
   });
 
   it('platform-specific audience labels stay opaque to auth (any valid label is stored as the role, none is interpreted)', async () => {

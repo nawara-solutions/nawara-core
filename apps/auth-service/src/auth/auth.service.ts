@@ -1,9 +1,10 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { EVENT_BUS, CLOCK, type Clock, type EventBus } from '../common/ports.js';
 import { PasswordService, assertPasswordPolicy } from '../crypto/password.js';
 import { DbService, isUniqueViolation } from '../db/db.service.js';
+import { authError } from '../errors.js';
 import { MembershipService } from '../membership/membership.service.js';
 import { OnboardingService } from '../onboarding/onboarding.service.js';
 import { OwnerAuthService } from '../owner/owner-auth.service.js';
@@ -52,16 +53,16 @@ export class AuthService {
   async register(dto: { email?: string; phone?: string; password: string; joinCode: string }, client: ClientInfo) {
     await this.throttle.hit('register_ip', client.ip);
     await this.onboarding.guardGuessing(client);
-    if (!dto.email && !dto.phone) throw new BadRequestException('Provide an email or a phone number.');
+    if (!dto.email && !dto.phone) throw authError(400, 'validation_error', 'Provide an email or a phone number.');
     const email = dto.email ? normalizeEmail(dto.email) : undefined;
     const phone = dto.phone ? normalizePhone(dto.phone) : undefined;
-    if (phone && !PHONE_RE.test(phone)) throw new BadRequestException('Invalid phone number.');
+    if (phone && !PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
     assertPasswordPolicy(dto.password);
 
     const found = await this.onboarding.lookup(dto.joinCode);
     if ('rejected' in found) {
       await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', ip: client.ip, metadata: { reason: found.rejected, stage: 'register' } });
-      throw new ForbiddenException(REGISTRATION_REFUSED);
+      throw authError(403, 'registration_refused', REGISTRATION_REFUSED);
     }
 
     const passwordHash = await this.passwords.hash(dto.password);
@@ -103,7 +104,7 @@ export class AuthService {
     const found = await this.onboarding.lookup(dto.joinCode);
     if ('rejected' in found) {
       await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', actorId: userId, ip: client.ip, metadata: { reason: found.rejected, stage: 'join' } });
-      throw new ForbiddenException(REGISTRATION_REFUSED);
+      throw authError(403, 'registration_refused', REGISTRATION_REFUSED);
     }
 
     const result = await this.db.tx(async (q) => {
@@ -112,7 +113,7 @@ export class AuthService {
       try {
         status = await this.memberships.createForRegistration(q, { userId, organizationId: code.organizationId, joinCodeId: code.id, audience: code.audience, requiresApproval: code.requiresApproval });
       } catch (e) {
-        if (isUniqueViolation(e, 'membership_user_org_uk')) throw new ConflictException('You already have a membership in this organization.'); // rolls the spent use back
+        if (isUniqueViolation(e, 'membership_user_org_uk')) throw authError(409, 'membership_conflict', 'You already have a membership in this organization.'); // rolls the spent use back
         throw e;
       }
       await this.audit.record({ type: 'onboarding.join_code.used', outcome: 'success', actorId: userId, targetId: code.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience, existingAccount: true } }, q);
@@ -148,13 +149,13 @@ export class AuthService {
     const passwordOk = await this.passwords.verify(user?.passwordHash, dto.password);
     if (!user || !passwordOk || !user.isActive) {
       await this.audit.tryRecord({ type: 'auth.login', outcome: 'failure', ip: client.ip, actorId: user?.id });
-      throw new UnauthorizedException(INVALID_CREDENTIALS);
+      throw authError(401, 'invalid_credentials', INVALID_CREDENTIALS);
     }
     if (user.kind === 'owner') {
       await this.audit.tryRecord({ type: 'owner.login.password', outcome: 'success', actorId: user.id, ip: client.ip });
       return this.ownerAuth.beginLogin(user);
     }
-    if (user.kind !== 'member') throw new UnauthorizedException(INVALID_CREDENTIALS);
+    if (user.kind !== 'member') throw authError(401, 'invalid_credentials', INVALID_CREDENTIALS);
     await this.throttle.reset('login_identifier', 'email' in id ? id.email : id.phone);
     const s = await this.db.tx(async (q) => {
       const t = await this.sessions.issue(q, user);
@@ -170,12 +171,15 @@ export class AuthService {
     const r = await this.refresh.rotate(rawToken, client.ip);
     if (!r.ok) {
       if (r.reason === 'session_ceiling_reached') {
-        throw new UnauthorizedException({ reason: 'session_ceiling_reached', message: 'Your session has ended. Please request a new login code to continue.' });
+        throw new HttpException(
+          { reason: 'session_ceiling_reached', message: 'Your session has ended. Please request a new login code to continue.', code: 'session_ceiling_reached' },
+          401,
+        );
       }
-      throw new UnauthorizedException('Invalid refresh token.');
+      throw authError(401, 'invalid_refresh_token', 'Invalid refresh token.');
     }
     const user = await this.users.findById(r.userId);
-    if (!user || !user.isActive) throw new UnauthorizedException('Invalid refresh token.');
+    if (!user || !user.isActive) throw authError(401, 'invalid_refresh_token', 'Invalid refresh token.');
     const { accessToken, expiresIn } = await this.sessions.access(user, r.familyId, r.sessionExpiresAt);
     return { accessToken, refreshToken: r.raw, expiresIn };
   }

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 const uniq = () => Math.random().toString(36).slice(2);
 const statuses = (res: Array<{ status: number }>) => res.map((r) => r.status).sort((a, b) => a - b);
@@ -80,7 +80,7 @@ describe('organization join codes, smart registration and membership approval', 
         await resolve(inactive.code), await resolve(exhausted.code), await resolve(expiring.code),
       ];
       for (const r of res) expect(r.status).toBe(404);
-      for (const r of res.slice(1)) expect(r.body).toEqual(res[0].body);
+      for (const r of res.slice(1)) expect(noReqId(r.body)).toEqual(noReqId(res[0].body));
       const audit = await t.db.query(`SELECT metadata->>'reason' AS reason FROM auth_audit_event WHERE type='onboarding.join_code.resolve_failed'`);
       expect(audit.rows.map((r) => r.reason)).toEqual(expect.arrayContaining(['unknown', 'malformed', 'revoked', 'inactive', 'exhausted', 'expired']));
       t.clock.advance(-2 * 86_400_000);
@@ -214,7 +214,7 @@ describe('organization join codes, smart registration and membership approval', 
       const missing = await approve(ownerA.tokens, w.orgSchool1, '00000000-0000-4000-8000-00000000dead');
       expect(foreign.status).toBe(404);
       expect(missing.status).toBe(404);
-      expect(foreign.body).toEqual(missing.body);
+      expect(noReqId(foreign.body)).toEqual(noReqId(missing.body));
       expect((await membershipOf(inOrg2.id)).status).toBe('pending');
     });
 

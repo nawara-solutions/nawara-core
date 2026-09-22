@@ -1,10 +1,11 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { generateJoinCode, hashJoinCode, normalizeJoinCode } from '../crypto/join-code.js';
 import { DbService, type Queryable } from '../db/db.service.js';
+import { authError, notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -90,7 +91,7 @@ export class OnboardingService {
     const r = await this.lookup(rawCode);
     if ('rejected' in r) {
       await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', ip: client.ip, metadata: { reason: r.rejected } });
-      throw new NotFoundException(JOIN_CODE_INVALID);
+      throw authError(404, 'join_code_invalid', JOIN_CODE_INVALID);
     }
     const c = r.row;
     return {
@@ -111,7 +112,7 @@ export class OnboardingService {
    */
   async redeem(q: Queryable, rawCode: string): Promise<ResolvedJoinCode> {
     const normalized = normalizeJoinCode(rawCode);
-    if (!normalized) throw new ForbiddenException(JOIN_CODE_INVALID);
+    if (!normalized) throw authError(403, 'join_code_invalid', JOIN_CODE_INVALID);
     const { rows } = await q.query(
       `UPDATE organization_join_code SET "usedCount" = "usedCount" + 1
         WHERE "codeHash" = $1 AND "isActive" AND "revokedAt" IS NULL
@@ -120,14 +121,14 @@ export class OnboardingService {
         RETURNING id, "organizationId", "platformId", audience, "requiresApproval", "requiresSubscription"`,
       [hashJoinCode(this.cfg.secrets.joinCodePepper, normalized), this.clock.now()],
     );
-    if (!rows[0]) throw new ForbiddenException(JOIN_CODE_INVALID);
+    if (!rows[0]) throw authError(403, 'join_code_invalid', JOIN_CODE_INVALID);
     return rows[0] as ResolvedJoinCode;
   }
 
   // ------------------------------------------------------------------------- administration
   private async authorize(q: Queryable, actor: OrgActor, organizationId: string) {
     const authority = await this.access.organizationAuthority(actor.userId, organizationId, q);
-    if (!authority) throw new NotFoundException(); // "no such organization", "not yours" and "not allowed" are one 404
+    if (!authority) throw notFound(); // "no such organization", "not yours" and "not allowed" are one 404
     return authority;
   }
 
@@ -176,7 +177,7 @@ export class OnboardingService {
           WHERE id = $1 AND "organizationId" = $2 AND "revokedAt" IS NULL`,
         [codeId, organizationId, now, actor.userId],
       );
-      if (rowCount !== 1) throw new NotFoundException(); // rolls back: the step-up is not burned
+      if (rowCount !== 1) throw notFound(); // rolls back: the step-up is not burned
       await this.audit.record({ type: 'onboarding.join_code.revoked', outcome: 'success', actorId: actor.userId, targetId: codeId, sessionFamilyId: actor.sid, ip, metadata: { organizationId, authority } }, q);
     });
   }

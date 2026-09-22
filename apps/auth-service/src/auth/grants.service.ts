@@ -1,5 +1,6 @@
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { DbService } from '../db/db.service.js';
+import { unauthenticated } from '../errors.js';
 
 export interface GrantFacts {
   userId: string;
@@ -35,7 +36,7 @@ export class GrantsService {
     const u = rows[0];
     // Defense in depth only: AuthGuard already rejects an unknown or inactive caller before this
     // service ever runs. Fail closed rather than fabricate an empty-grants shape for a bad id.
-    if (!u) throw new UnauthorizedException();
+    if (!u) throw unauthenticated();
 
     let platformAssignments: string[] = [];
     if (u.kind === 'operator') {

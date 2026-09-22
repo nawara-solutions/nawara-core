@@ -1,9 +1,10 @@
 import {
-  CanActivate, ExecutionContext, ForbiddenException, Inject, Injectable, SetMetadata, UnauthorizedException, UseGuards, applyDecorators,
+  CanActivate, ExecutionContext, Inject, Injectable, SetMetadata, UseGuards, applyDecorators,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { DbService } from '../db/db.service.js';
+import { forbidden, unauthenticated } from '../errors.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { TokenService } from '../tokens/token.service.js';
 import type { UserKind } from '../users/users.service.js';
@@ -47,18 +48,18 @@ export class AuthGuard implements CanActivate {
     const req = ctx.switchToHttp().getRequest<AuthedRequest>();
     const header = req.headers.authorization ?? '';
     const [scheme, token] = header.split(' ');
-    if (scheme?.toLowerCase() !== 'bearer' || !token) throw new UnauthorizedException();
+    if (scheme?.toLowerCase() !== 'bearer' || !token) throw unauthenticated();
     const claims = await this.tokens.verify(token);
 
     const { rows } = await this.db.query(`SELECT id, kind, role, "isActive" FROM "user" WHERE id = $1`, [claims.sub]);
     const u = rows[0];
     const claimedTier = claims.adminTier ?? null;
     const actualTier = u && u.kind !== 'member' ? u.kind : null;
-    if (!u || !u.isActive || claimedTier !== actualTier) throw new UnauthorizedException();
-    if (!(await this.refresh.isSessionActive(u.id, claims.sid))) throw new UnauthorizedException();
+    if (!u || !u.isActive || claimedTier !== actualTier) throw unauthenticated();
+    if (!(await this.refresh.isSessionActive(u.id, claims.sid))) throw unauthenticated();
 
     const kinds = this.reflector.getAllAndOverride<UserKind[]>(ACTOR_KINDS, [ctx.getHandler(), ctx.getClass()]) ?? [];
-    if (kinds.length && !kinds.includes(u.kind)) throw new ForbiddenException();
+    if (kinds.length && !kinds.includes(u.kind)) throw forbidden();
     req.actor = { userId: u.id, kind: u.kind, sid: claims.sid, role: u.role };
     return true;
   }

@@ -1,4 +1,4 @@
-import { ForbiddenException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
@@ -7,6 +7,7 @@ import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { PasswordService } from '../crypto/password.js';
 import { randomToken, sha256Hex } from '../crypto/random.js';
 import { DbService } from '../db/db.service.js';
+import { authError } from '../errors.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { UsersService, toIdentifier } from '../users/users.service.js';
@@ -62,7 +63,7 @@ export class RecoveryService {
     const keyOk = await this.secretKeys.verify(owner?.id ?? randomUUID(), a.secretKey);
     if (!owner || !passwordOk || !keyOk) {
       await this.audit.tryRecord({ type: 'owner.recovery.start', outcome: 'failure', ip: client.ip, actorId: owner?.id });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'recovery_failed', GENERIC);
     }
     const now = this.clock.now();
     const token = randomToken();
@@ -104,21 +105,21 @@ export class RecoveryService {
     const req = rows[0];
     if (!req || req.expiresAt <= now) {
       await this.audit.tryRecord({ type: 'owner.recovery.complete', outcome: 'failure', ip: client.ip });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'recovery_failed', GENERIC);
     }
     await this.throttle.hit('recovery_identifier', req.ownerId);
     const owner = await this.users.findById(req.ownerId);
     if (!owner?.isActive || !(await this.secretKeys.verify(req.ownerId, a.secretKey))) {
       await this.audit.tryRecord({ type: 'owner.recovery.complete', outcome: 'failure', actorId: req.ownerId, ip: client.ip });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'recovery_failed', GENERIC);
     }
     if (now < req.availableAt) {
       await this.audit.tryRecord({ type: 'owner.recovery.complete', outcome: 'denied', actorId: req.ownerId, ip: client.ip, metadata: { reason: 'cooldown' } });
-      throw new ForbiddenException(`Recovery is not available until ${req.availableAt.toISOString()}.`);
+      throw authError(403, 'recovery_not_available', `Recovery is not available until ${req.availableAt.toISOString()}.`);
     }
     const enrollment = await this.db.tx(async (q) => {
       const { rowCount } = await q.query(`UPDATE owner_recovery_request SET status='completed', "resolvedAt"=$2 WHERE id=$1 AND status='pending'`, [req.id, now]);
-      if (rowCount !== 1) throw new UnauthorizedException(GENERIC); // lost a race: single use
+      if (rowCount !== 1) throw authError(401, 'recovery_failed', GENERIC); // lost a race: single use
       await this.factors.revokeAll(q, req.ownerId);
       await this.refresh.revokeAllForUser(q, req.ownerId);
       await this.secretKeys.spend(q, req.ownerId);

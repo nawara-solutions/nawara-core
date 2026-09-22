@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 describe('platform authorization: owner, operator, member, tenancy', () => {
   let t: TestCtx;
@@ -37,7 +37,7 @@ describe('platform authorization: owner, operator, member, tenancy', () => {
       const missing = await access(ownerA.tokens, randomUUID());
       expect(foreign.status).toBe(404);
       expect(missing.status).toBe(404);
-      expect(foreign.body).toEqual(missing.body);
+      expect(noReqId(foreign.body)).toEqual(noReqId(missing.body));
       await access(ownerB.tokens, w.platformSchool).expect(404);
       await access(ownerB.tokens, w.platformClinic).expect(200);
     });

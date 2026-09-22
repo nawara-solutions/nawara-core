@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hmacHex } from '../src/crypto/hmac.js';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 const WED_0900 = new Date('2026-03-04T09:00:00Z'); // a Wednesday (dow 3)
 const WED_1630 = new Date('2026-03-04T16:30:00Z');
@@ -62,15 +62,15 @@ describe('operator working code and session', () => {
     const code = (await t.operatorCode(op.email))!;
     const wrong = code === '000000' ? '111111' : '000000';
     const bodies = new Set<string>();
-    for (let i = 0; i < 5; i++) { const r = await verify(op.email, wrong); expect(r.status).toBe(401); bodies.add(JSON.stringify(r.body)); }
+    for (let i = 0; i < 5; i++) { const r = await verify(op.email, wrong); expect(r.status).toBe(401); bodies.add(JSON.stringify(noReqId(r.body))); }
     const stored = await t.db.query(`SELECT "attemptCount" FROM admin_operator_code WHERE "userId"=$1`, [op.id]);
     expect(stored.rows[0].attemptCount).toBe(5);
     const right = await verify(op.email, code);
     expect(right.status).toBe(401);
-    bodies.add(JSON.stringify(right.body));
+    bodies.add(JSON.stringify(noReqId(right.body)));
     // unknown identifier gives the very same answer: no oracle for "which stage failed"
     const ghost = await verify('nobody@a.test', '123456');
-    bodies.add(JSON.stringify(ghost.body));
+    bodies.add(JSON.stringify(noReqId(ghost.body)));
     expect(bodies.size).toBe(1);
     // asking for a fresh code recovers (the old one is superseded, not deleted)
     const fresh = (await t.operatorCode(op.email))!;

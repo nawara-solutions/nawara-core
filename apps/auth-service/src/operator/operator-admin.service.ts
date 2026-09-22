@@ -1,6 +1,7 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { DbService } from '../db/db.service.js';
+import { notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { UsersService, toIdentifier } from '../users/users.service.js';
@@ -22,7 +23,7 @@ export class OperatorAdminService {
     const id = toIdentifier(ident);
     return this.db.tx(async (q) => {
       const companyId = await this.users.ownerCompany(owner.userId, q);
-      if (!companyId) throw new NotFoundException();
+      if (!companyId) throw notFound();
       await this.stepUp.consume(q, { ownerId: owner.userId, sid: owner.sid, purpose: 'operator.create', token: stepUpToken });
       const op = await this.users.createOperator({ companyId, ...id }, q);
       await this.codes.issueConfirmation(q, op);
@@ -34,7 +35,7 @@ export class OperatorAdminService {
   private async scoped(ownerId: string, operatorId: string) {
     const companyId = await this.users.ownerCompany(ownerId);
     const { rowCount } = await this.db.query(`SELECT 1 FROM operator WHERE "userId"=$1 AND "companyId"=$2`, [operatorId, companyId]);
-    if (!companyId || !rowCount) throw new NotFoundException();
+    if (!companyId || !rowCount) throw notFound();
   }
 
   /** Blocking is an EMERGENCY control, deliberately not behind step-up: it ends every session now. */

@@ -1,5 +1,6 @@
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
+import { ReadinessRegistry } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 
 export interface Queryable {
@@ -14,16 +15,26 @@ export interface Queryable {
  * transactions, so the service talks to the schema directly.
  */
 @Injectable()
-export class DbService implements Queryable, OnModuleDestroy {
+export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
   private readonly pool: pg.Pool;
   private readonly logger = new Logger(DbService.name);
 
-  constructor(@Inject(APP_CONFIG) cfg: AppConfig) {
+  constructor(
+    @Inject(APP_CONFIG) cfg: AppConfig,
+    @Optional() @Inject(ReadinessRegistry) private readonly readiness?: ReadinessRegistry,
+  ) {
     this.pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
     // An IDLE client that loses its connection (PostgreSQL restart or failover, an administrator's terminate, a proxy's idle timeout) is reported
     // on the POOL. `pg` discards that client itself and the next query opens a fresh connection, but an 'error' event with no listener is thrown
     // by Node as an uncaught exception and ends the process. Only the error code is logged: a message can carry connection details.
     this.pool.on('error', (e) => this.logger.warn(`db_pool_idle_client_error code=${pgCode(e) ?? 'unknown'} — the pool discards the client and reconnects on demand`));
+  }
+
+  /** Stage 13.2: the one dependency GET /ready actually needs. Cheap (a single SELECT), never on the request hot path. */
+  onModuleInit(): void {
+    this.readiness?.register('database', async () => {
+      await this.pool.query('SELECT 1');
+    });
   }
 
   query<R extends pg.QueryResultRow = any>(sql: string, params?: unknown[]) {

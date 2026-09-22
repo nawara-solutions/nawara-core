@@ -1,9 +1,10 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { AuditService } from '../audit/audit.service.js';
 import { SessionService } from '../auth/session.service.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
+import { authError } from '../errors.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { UsersService } from '../users/users.service.js';
 import { ChallengeService } from './challenge.service.js';
@@ -38,15 +39,15 @@ export class EnrollmentService {
 
   async fromToken(token: string): Promise<EnrollCtx> {
     const ch = await this.challenges.findByToken('enrollment', token);
-    if (!ch) throw new UnauthorizedException('Verification failed.');
-    if ((await this.factors.countConfirmed(ch.ownerId)) > 0) throw new ForbiddenException();
+    if (!ch) throw authError(401, 'verification_failed', 'Verification failed.');
+    if ((await this.factors.countConfirmed(ch.ownerId)) > 0) throw authError(403, 'factor_already_enrolled', 'Forbidden');
     // A token minted before the owner's FIRST confirmed factor is a bootstrap token, and bootstrap
     // enrollment is a one-time state: once any factor has existed, only a recovery-issued token
     // (created afterwards) may enroll. This holds however the factor came to be revoked.
     const { rows } = await this.db.query(`SELECT min("confirmedAt") AS first FROM owner_auth_factor WHERE "ownerId"=$1`, [ch.ownerId]);
-    if (rows[0].first && ch.createdAt <= rows[0].first) throw new UnauthorizedException('Verification failed.');
+    if (rows[0].first && ch.createdAt <= rows[0].first) throw authError(401, 'verification_failed', 'Verification failed.');
     const u = await this.users.findById(ch.ownerId);
-    if (!u?.isActive) throw new UnauthorizedException('Verification failed.');
+    if (!u?.isActive) throw authError(401, 'verification_failed', 'Verification failed.');
     return { ownerId: ch.ownerId, enrollmentChallengeId: ch.id };
   }
 
@@ -75,12 +76,12 @@ export class EnrollmentService {
       return await this.db.tx(async (q) => {
         const hadFactors = (await this.factors.countConfirmed(c.ownerId, q)) > 0;
         if (c.enrollmentChallengeId) {
-          if (hadFactors) throw new ForbiddenException();
-          if (!(await this.challenges.consume(q, c.enrollmentChallengeId))) throw new UnauthorizedException('Verification failed.');
+          if (hadFactors) throw authError(403, 'factor_already_enrolled', 'Forbidden');
+          if (!(await this.challenges.consume(q, c.enrollmentChallengeId))) throw authError(401, 'verification_failed', 'Verification failed.');
         } else if (hadFactors) {
           await this.stepUp.consume(q, { ownerId: c.ownerId, sid: c.sid!, purpose: 'owner.factor.enroll', token: stepUpToken });
         }
-        if (!(await confirm(q))) throw new BadRequestException('Verification failed.');
+        if (!(await confirm(q))) throw authError(400, 'verification_failed', 'Verification failed.');
         await this.audit.record({ type: 'owner.factor.enrolled', outcome: 'success', actorId: c.ownerId, sessionFamilyId: c.sid, metadata: { method, first: !hadFactors } }, q);
         if (!c.enrollmentChallengeId) return { session: null };
         const owner = (await this.users.findById(c.ownerId, q))!;
@@ -114,7 +115,7 @@ export class EnrollmentService {
     await this.throttle.hit('factor_enroll_owner', c.ownerId);
     const ch = await this.challenges.findById(challengeId, 'webauthn_registration', c.ownerId);
     // The registration challenge must be bound to THIS session (or this enrollment) and is single use.
-    if (!ch || ch.sessionFamilyId !== this.bindingId(c) || !ch.webauthnChallenge) throw new BadRequestException('Verification failed.');
+    if (!ch || ch.sessionFamilyId !== this.bindingId(c) || !ch.webauthnChallenge) throw authError(400, 'verification_failed', 'Verification failed.');
     const expected = ch.webauthnChallenge;
     try {
       return await this.finish(c, stepUpToken, async (q) => {
@@ -123,9 +124,9 @@ export class EnrollmentService {
         return true;
       }, 'webauthn');
     } catch (e) {
-      if (e instanceof ForbiddenException || e instanceof UnauthorizedException || e instanceof BadRequestException) throw e;
+      if (e instanceof HttpException) throw e;
       if ((e as { status?: number }).status) throw e;
-      throw new BadRequestException('Verification failed.'); // protocol verification error: no detail to the client
+      throw authError(400, 'verification_failed', 'Verification failed.'); // protocol verification error: no detail to the client
     }
   }
 }

@@ -1,9 +1,10 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { hmacHex } from '../crypto/hmac.js';
+import { authError } from '../errors.js';
 import { randomSixDigitCode, safeEqualHex } from '../crypto/random.js';
 import { DbService } from '../db/db.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -81,7 +82,7 @@ export class ContactVerificationService {
     });
     if (!ok) {
       await this.audit.tryRecord({ type: 'member.contact.verified', outcome: 'failure', actorId: userId, ip: client.ip });
-      throw new BadRequestException(GENERIC);
+      throw authError(400, 'contact_code_invalid', GENERIC);
     }
   }
 }
