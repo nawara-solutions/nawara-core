@@ -33,7 +33,7 @@ export class AuthController {
   @Post('register')
   @ApiOperation({ summary: 'Register a member with an organization join code (public). Always kind=member; organization, platform and audience come from the code.' })
   @ApiResponse({ status: 201, description: 'Tokens plus the onboarding context (audience, membership status, hints).' })
-  @ApiResponse({ status: 403, description: 'Bad/expired/exhausted code or unlicensed organization (same response for all).' })
+  @ApiResponse({ status: 403, description: 'Bad, expired or exhausted join code (same response for every case, since Stage 12.1: no commercial/entitlement check runs here).' })
   register(@Body() dto: RegisterDto, @Req() req: Request) {
     return this.auth.register(dto, this.client(req));
   }
@@ -44,7 +44,7 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Join ANOTHER organization with a join code, using the existing account (one identity, many organizations).' })
   @ApiResponse({ status: 201, description: 'The onboarding context (membership pending or active). Creates no account; other memberships and the session are untouched.' })
-  @ApiResponse({ status: 403, description: 'Bad/expired/exhausted code or unlicensed organization (same response for all).' })
+  @ApiResponse({ status: 403, description: 'Bad, expired or exhausted join code (same response for every case, since Stage 12.1: no commercial/entitlement check runs here).' })
   @ApiResponse({ status: 409, description: 'You already have a membership in that organization.' })
   join(@Body() dto: ResolveJoinCodeDto, @Req() req: AuthedRequest) {
     return this.auth.join(req.actor.userId, dto, this.client(req));

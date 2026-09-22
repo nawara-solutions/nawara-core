@@ -1,6 +1,10 @@
 # 0038. Entitlement (licenses and subscriptions) lives in billing-service
 
-- **Status:** Proposed
+- **Status:** Proposed (superseded in part by [ADR-0044](./0044-subscription-entitlement-final-model.md) — see its
+  "Amends ADR-0038" note. The ownership principle below — billing-service, not payment-service, owns entitlement;
+  authentication never depends on it — stands and is confirmed by the built system. The proposed **schema**
+  (`organization_license` + `user_subscription`, two tables, user-and-organization scope, two status routes) was
+  never built and is replaced by ADR-0044's single organization-scoped `subscription` table and one status route.)
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 

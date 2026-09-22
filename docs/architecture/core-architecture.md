@@ -43,8 +43,8 @@ Company
 | **auth-service** | Who is this and how are they authenticated? | user, credentials, sessions, tokens, MFA, recovery, passkeys, **membership and its status/authority**, the Company → Platform → Organization tables **as they are today** ([ADR-0031](../adr/0031-organization-service-intended-owner-of-the-hierarchy.md)), local security audit | long-term: organization/platform/company lifecycle and settings (intended for organization-service); subscriptions; notification delivery | yes | **implemented and deployed** (data model frozen; multi-organization membership per [ADR-0030](../adr/0030-multi-organization-membership-and-revoked-state.md)) |
 | **organization-service** | What is this organization and how is it configured? | **intended** owner of Company, Platform and Organization: lifecycle, metadata, settings, policies, and the Company → Platform → Organization relationships | users, credentials, sessions, **membership** | yes | **implemented (Stage 9), NOT authoritative:** service-token API for the three entities exists and is tested; auth-service still owns them and the ownership migration ([ADR-0039](../adr/0039-organization-ownership-and-cross-service-migration-authority.md)) has not occurred. See its [SDD](../sdd/organization-service.md) |
 | **notification-service** | How is this delivered? | email/SMS/push/in-app delivery, templates, preferences, attempts, retries, providers | why something was triggered | yes (later) | 60-line starter |
-| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring definitions, **entitlements** (organization license, user subscription), and (future) invoice presentation: templates, template versions and document metadata ([billing SDD](../sdd/billing-service.md) section 36) | how money moved; the ledger; product concepts | yes | **Stages 1-4 implemented** (foundation, domain schema/invariants, Platform currency foundation, HTTP API for catalog/invoices/Billing-side payment requests, Payment integration: dispatch/cancel/event consumption/reconciliation) |
-| **payment-service** | How was it paid, by which method, and what is the payment state? | payment, attempt, method, provider transaction, cash workflow, refund, webhooks, idempotency, reconciliation | what is owed; the ledger; entitlements | yes | 60-line starter; **redesigned** (financial-architecture.md) |
+| **billing-service** | What is owed, why, how much, when due? | product, price, invoice, invoice line, payment request, credit note, due/overdue, recurring billing (via `price.interval`), **Subscription and its derived Entitlement** (one row per Organization — see [ADR-0044](../adr/0044-subscription-entitlement-final-model.md), not the `organization license`/`user subscription` split this row once named), and (future) invoice presentation: templates, template versions and document metadata ([billing SDD](../sdd/billing-service.md) section 36) | how money moved; the ledger; product concepts | yes | **Stages 1-4 implemented, plus Subscription/Entitlement Stage 12.2-12.7** (foundation, domain schema/invariants, Platform currency foundation, HTTP API, Payment integration: dispatch/cancel/event consumption/reconciliation; Subscription domain, entitlement derivation, Payment→Subscription linking, the effective-access HTTP contract, concurrency hardening, and real-RabbitMQ-broker integration) |
+| **payment-service** | How was it paid, by which method, and what is the payment state? | payment, attempt, method, provider transaction, cash workflow, refund, webhooks, idempotency, reconciliation | what is owed; the ledger; entitlements | yes | **implemented through Stage 12.7**: settlement, attempts, the `test` provider, webhooks, resolver/expiry sweeper, transactional outbox, real RabbitMQ publishing (proven end-to-end into billing-service's Subscription, Stage 12.7) |
 | **accounting-service** | What accounting effect did this have? | chart of accounts, journal, entries and lines, ledger, fiscal periods, tax, reports | payments and invoices as a source of truth | yes | to build (finance stages) |
 | **ai-service** | How do services use AI? | provider abstraction, model config, usage, quotas, cost, safety | product AI workflows | yes (later) | 8-line FastAPI, `/health` only |
 | **file-service** | Where is this file and who may read it? | file metadata, ownership, access control, lifecycle, storage port, limits, checksums | the binary in PostgreSQL | yes | to build (later, skeleton) |
@@ -65,7 +65,7 @@ concern until there is a concrete cross-product need.
 | User, credentials, session, refresh token, MFA factor, device | auth | `userId` |
 | Membership (user ↔ organization), status, org-admin capability, `audience` label | auth | `membershipId` only if needed; **never a copy of the status** |
 | Company, Platform, Organization (hierarchy records) | **auth today** (its tables stay); **organization-service intended**, now built but not authoritative (ADR-0031; migration mechanism ADR-0039, not yet performed) | `companyId`, `platformId`, `organizationId` (opaque) |
-| Product, price, invoice, invoice line, credit note, **organization license, user subscription** | billing | `requiresSubscription` may exist as onboarding metadata but is **never** the authority |
+| Product, price, invoice, invoice line, credit note, **Subscription (one per Organization) and its derived Entitlement** | billing | `requiresSubscription` may exist as onboarding metadata but is **never** the authority |
 | Payment, attempt, cash payment, refund, provider transaction, webhook event | payment | `paymentId` |
 | Chart of accounts, journal entry, ledger, tax, fiscal period | accounting | — |
 | Notification, template, delivery attempt | notification | — |
@@ -84,10 +84,14 @@ concern until there is a concrete cross-product need.
    │  live      ▲   │  ▲   authorize                                            │
    │  checks    │   │  │                                                       ▼
  file-service ──┘   │  └── payment-service (org → platform, membership)   notification-service
-                    │ license status at registration/join (exists today)  audit-service
+                    │                                                     audit-service
                     ▼                                                     search-service
               payment-service                                             analytics-service
 ```
+
+**Auth calls no financial service.** Registration and join made a synchronous `license status` check against
+payment-service until Stage 12.1 (commit `f1901f9`), which removed it outright — the diagram above no longer shows
+that edge (it is not repointed to billing-service either; see ADR-0044 and `docs/sdd/billing-service.md` §16.4).
 
 **Synchronous calls (all authenticated, all documented):**
 
@@ -95,10 +99,10 @@ concern until there is a concrete cross-product need.
 |---|---|---|
 | any service → auth | who is this user, what memberships, what platform access | fail closed (503) |
 | payment → auth | organization → platform, and membership check for who may act for an organization (mechanism per ADR-0033; **supersedes ADR-0021's forwarded-JWT choice**) | fail closed |
-| auth → payment | license status at registration and joining (**exists today**; entitlement moves to billing, so this call is to be repointed or removed: open decision) | fail closed (503) |
+| ~~auth → payment~~ | **removed, Stage 12.1 (`f1901f9`).** Auth makes no synchronous financial-service call of any kind; the `requiresSubscription` field it stores is a non-authoritative onboarding hint (row below), never read to gate anything. | n/a |
 | file → auth | authorize a download/upload for an organization | fail closed |
 | billing, payment → auth | who is the caller, and is their membership active for this organization; seller authority for cash confirmation and invoicing | fail closed |
-| platform services → billing | entitlement status (license/subscription valid?) at the point of use | each consumer documents fail-open or fail-closed |
+| platform services → billing | effective-access status (`GET /billing/organizations/:organizationId/entitlement`, implemented Stage 12.5) at the point of use | each consumer documents fail-open or fail-closed |
 | billing → payment | create a payment request carrying an **immutable snapshot** (invoice id, amount, currency, payer, seller); payment **never calls billing back** and reports only through events | fail closed for the caller; billing retries |
 | product services → billing | "this customer owes X for `sourceType/sourceId`" (service token) | fail closed |
 
@@ -175,7 +179,12 @@ Decision D3 ([ADR-0033](../adr/0033-service-to-service-authentication-and-user-i
 |---|---|---|
 | auth | `user.registered`, `membership.requested/approved/rejected/revoked`, `member.contact_verification_requested`, operator/owner alerts | notification (delivery), audit, analytics |
 | organization | `organization.created`, `.updated`, `.suspended`, `.activated`, `.deactivated` | audit, search, analytics |
-| billing | `invoice.created/due/overdue/paid/voided` (`overdue` is emitted by a billing sweep of `dueAt`), `license.expired/reactivated/grace_issued`, `subscription.suspended/resumed/expired` | notification, accounting, audit, analytics |
+| billing | `invoice.created/due/overdue/paid/voided` (`overdue` is emitted by a billing sweep of `dueAt`) | notification, accounting, audit, analytics |
+
+Subscription does **not** emit its own domain events (corrects this row's original `license.*`/`subscription.*`
+entries — ADR-0044): its state changes are internal, applied inside the same transaction as the triggering
+`payment.succeeded` consumption. A consumer that needs to know about commercial access reads the effective-access
+route (§4's `platform services → billing` row) rather than subscribing to an event.
 | payment | `payment.created/succeeded/failed/cancelled/expired`, `cash_payment.submitted/confirmed/rejected`, `refund.requested/succeeded/failed` (the authoritative catalog is in the [payment SDD](../sdd/payment-service.md); it supersedes the earlier `payment.pending`, `payment.refunded`, `refund.created` and `cash_payment.requested`) | billing (invoice paid, entitlement), accounting (journal entry), notification, audit, analytics |
 | accounting | `journal_entry.posted` (optional) | audit, analytics |
 | file | `file.uploaded`, `file.deleted` | audit, search, analytics |
@@ -219,7 +228,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | D2 | One database per service on a shared PostgreSQL server | **confirmed** (ADR-0032) |
 | D3 | Per-pair service tokens; end users identified by asking Auth live | **confirmed** (ADR-0033) |
 | D4 | Phased delivery with a small shared `service-kit` | **confirmed** (ADR-0034) |
-| E1 | Entitlement (organization license, user subscription) is owned by billing-service | **confirmed** (ADR-0038) |
+| E1 | Entitlement is owned by billing-service | **confirmed and implemented** (ADR-0038's ownership principle; ADR-0044 for the final, built shape — one Subscription per Organization, not a separate organization-license/user-subscription split) |
 | E2 | RabbitMQ with a transactional outbox (producers) and inbox (consumers) for the financial services | **confirmed** (ADR-0037) |
 | E3 | Order: docs, service-kit, finance foundations, billing, payment, entitlement, accounting; organization-service and the other skeletons later; settlement waits for business/legal input | **confirmed** |
 | E4 | One matrix CI workflow (typecheck, lint, tests, Docker build without push) for new services and auth-service; no deploy workflow or server provisioning yet | **confirmed** |
