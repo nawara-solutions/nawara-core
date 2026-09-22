@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ACTIVE_PAYMENT_REQUEST_STATUSES, INVOICE_STATUSES, PAYMENT_REQUEST_STATUSES, canTransitionInvoice, canTransitionPaymentRequest, isOverdue, isTerminalInvoiceStatus, isTerminalPaymentRequestStatus,
+  ACTIVE_PAYMENT_REQUEST_STATUSES, INVOICE_STATUSES, PAYMENT_REQUEST_STATUSES, SUBSCRIPTION_STATUSES, canTransitionInvoice, canTransitionPaymentRequest, canTransitionSubscription,
+  isOverdue, isTerminalInvoiceStatus, isTerminalPaymentRequestStatus,
 } from './state-machines.js';
 
 describe('invoice state machine (SDD 17.1, BI-16)', () => {
@@ -43,5 +44,33 @@ describe('payment request state machine (SDD 17.3)', () => {
     for (const s of ['paid', 'failed', 'cancelled', 'expired', 'rejected'] as const) expect(isTerminalPaymentRequestStatus(s)).toBe(true);
     expect([...ACTIVE_PAYMENT_REQUEST_STATUSES]).toEqual(['created', 'sending', 'requested']);
     for (const s of ACTIVE_PAYMENT_REQUEST_STATUSES) expect(isTerminalPaymentRequestStatus(s)).toBe(false);
+  });
+});
+
+describe('subscription state machine (Stage 12.2)', () => {
+  it('has exactly pending, active, grace, expired; no cancel_scheduled, terminated, past_due or similar', () => {
+    expect([...SUBSCRIPTION_STATUSES]).toEqual(['pending', 'active', 'grace', 'expired']);
+    for (const forbidden of ['cancel_scheduled', 'terminated', 'renewing', 'payment_failed', 'past_due', 'unpaid', 'paused']) {
+      expect(SUBSCRIPTION_STATUSES as readonly string[], forbidden).not.toContain(forbidden);
+    }
+  });
+
+  it('allows exactly pending->active, active->active|grace|expired, grace->active|expired, expired->active', () => {
+    const allowed = SUBSCRIPTION_STATUSES.flatMap((f) => SUBSCRIPTION_STATUSES.filter((t) => canTransitionSubscription(f, t)).map((t) => `${f}>${t}`));
+    expect(allowed.sort()).toEqual([
+      'active>active', 'active>expired', 'active>grace', 'expired>active', 'grace>active', 'grace>expired', 'pending>active',
+    ]);
+  });
+
+  it('active is the ONLY self-loop (renewal / cancellation toggle): grace and expired never repeat themselves', () => {
+    expect(canTransitionSubscription('active', 'active')).toBe(true);
+    expect(canTransitionSubscription('grace', 'grace')).toBe(false);
+    expect(canTransitionSubscription('expired', 'expired')).toBe(false);
+    expect(canTransitionSubscription('pending', 'pending')).toBe(false);
+  });
+
+  it('a lapsed subscription can always be reactivated by a late renewal; a pending one is never reachable from anywhere but itself', () => {
+    expect(canTransitionSubscription('expired', 'active')).toBe(true);
+    for (const from of SUBSCRIPTION_STATUSES) if (from !== 'pending') expect(canTransitionSubscription(from, 'pending')).toBe(false);
   });
 });

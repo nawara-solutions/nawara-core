@@ -54,3 +54,21 @@ export function isTerminalPaymentRequestStatus(s: PaymentRequestStatus): boolean
 
 /** BI-13: at most one request in these states per invoice. */
 export const ACTIVE_PAYMENT_REQUEST_STATUSES: readonly PaymentRequestStatus[] = ['created', 'sending', 'requested'];
+
+// -------------------------------------------------------------------------------------------------------------- subscription
+export const SUBSCRIPTION_STATUSES = ['pending', 'active', 'grace', 'expired'] as const;
+export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
+
+// `active -> active` is the ONLY self-loop: an early/on-time renewal or a cancellation toggle stays `active` (SDD
+// Stage 12.2 section 33). There is no `cancel_scheduled`, `terminated`, `past_due` or similar status: cancellation is a
+// field (`cancelAtPeriodEnd`), and administrative termination reuses `expired` (`effectiveTerminationAt` records why).
+const SUBSCRIPTION_ALLOWED: Record<SubscriptionStatus, readonly SubscriptionStatus[]> = {
+  pending: ['active'],
+  active: ['active', 'grace', 'expired'],
+  grace: ['active', 'expired'],
+  expired: ['active'],
+};
+
+export function canTransitionSubscription(from: SubscriptionStatus, to: SubscriptionStatus): boolean {
+  return SUBSCRIPTION_ALLOWED[from].includes(to);
+}

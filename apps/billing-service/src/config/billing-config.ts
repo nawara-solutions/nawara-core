@@ -41,6 +41,14 @@ export interface BillingConfig extends BaseConfig {
    * (0 = dead-letter on the first failure) and how long each retry waits in `billing.payment-events.retry`. Technical tuning, no business meaning.
    */
   paymentEventRetry: { maxRetries: number; delayMs: number };
+  /**
+   * Stage 12.2 R1: the ONE trusted authority for a Subscription's grace-period length. `undefined` means this
+   * deployment offers no grace at all (subscriptions go straight from `active` to `expired`). A business value with NO
+   * Nawara-wide default — an operator must say, exactly like `supportedCurrencies` — so no caller of the Subscription
+   * domain can grant an arbitrary commercial extension by supplying its own `graceUntil`; only this configured
+   * duration, applied by `SubscriptionRepository` itself at activate/renew time, ever produces one.
+   */
+  subscriptionGraceDays?: number;
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -72,10 +80,20 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     throw new ConfigError('BILLING_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
   }
 
+  // No default: an unset SUBSCRIPTION_GRACE_DAYS means this deployment offers no grace at all, never "pick a number for it".
+  const graceDaysRaw = reader.optional('SUBSCRIPTION_GRACE_DAYS');
+  let subscriptionGraceDays: number | undefined;
+  if (graceDaysRaw !== undefined) {
+    const n = Number(graceDaysRaw);
+    if (!Number.isInteger(n) || n < 1 || n > 365) throw new ConfigError('SUBSCRIPTION_GRACE_DAYS must be an integer between 1 and 365');
+    subscriptionGraceDays = n;
+  }
+
   return {
     ...base,
     databaseUrl,
     supportedCurrencies: [...new Set(supportedCurrencies)],
+    subscriptionGraceDays,
     serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),

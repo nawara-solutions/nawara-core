@@ -53,6 +53,9 @@ export async function createTestApp(opts: {
     // allows up to an hour, so it is set further out.
     BILLING_DISPATCH_INTERVAL_MS: '300000',
     BILLING_RECONCILE_INTERVAL_MS: '3600000',
+    // A fixture value, not a Nawara business default (none exists — see billing-config.ts): tests that need grace
+    // disabled override it with an empty string via `env`.
+    SUBSCRIPTION_GRACE_DAYS: '7',
     ...(opts.tokens?.length ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(',') } : {}),
     ...opts.env,
   });

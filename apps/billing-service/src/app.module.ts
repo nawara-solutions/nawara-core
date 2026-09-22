@@ -12,6 +12,7 @@ import { BillingConfigModule } from './config/billing-config.module.js';
 import { CurrenciesModule } from './currencies/currencies.module.js';
 import { InvoicesModule } from './invoices/invoices.module.js';
 import { PaymentIntegrationModule } from './payment-integration/payment-integration.module.js';
+import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
 export const billingMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -60,6 +61,7 @@ export class AppModule {
         CatalogModule,
         CurrenciesModule,
         PaymentIntegrationModule,
+        SubscriptionsModule,
       ],
     };
   }

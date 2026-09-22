@@ -8,7 +8,7 @@ import { normaliseCreateInvoiceInput, type NormalisedCreateInvoiceInput } from '
 import type { PaymentEventFacts } from '../src/domain/payment-event-decision.js';
 import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
 import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
-import { recordTransition } from '../src/invoices/transitions.js';
+import { recordTransition } from '../src/domain/transitions.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 

@@ -79,3 +79,50 @@ rstat=$(q "SELECT status FROM payment_request WHERE id = '$req'"); istat=$(q "SE
 { [ "$applied" -eq 1 ] && [ "$errs" -eq 0 ] && { { [ "$rstat" = paid ] && [ "$istat" = paid ]; } || { [ "$rstat" = cancelled ] && [ "$istat" = open ]; }; }; } \
   || fail "success vs cancel: applied=$applied errors=$errs request=$rstat invoice=$istat (want exactly one terminal state, consistent)"
 echo "PASS: race — payment success x$racers applied once; success vs cancel ended $rstat/$istat with no deadlock"
+
+# ---- subscription (Stage 12.2) ---------------------------------------------------------------------------------------
+
+echo "== concurrency: $racers simultaneous renewals of ONE subscription never lose purchased time"
+newdb subrenew; db="$DBNAME"; apply_all "$db"; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/fixtures.sql" >/dev/null
+sub=$(q "SELECT t_mk_active_subscription()")
+before=$(q "SELECT \"currentPeriodEnd\" FROM subscription WHERE id = '$sub'")
+run_racers "SELECT t_try_renew('$sub')"
+errs=$(cat "$outdir"/*.out | grep -ciE "error|deadlock" || true)
+rev=$(q "SELECT revision FROM subscription WHERE id = '$sub'")
+after=$(q "SELECT \"currentPeriodEnd\" FROM subscription WHERE id = '$sub'")
+expected=$(q "SELECT ((('$before'::timestamptz AT TIME ZONE 'UTC') + (\"intervalCount\" || ' ' || \"intervalUnit\")::interval * $racers) AT TIME ZONE 'UTC')::text FROM subscription s JOIN price p ON p.id = s.\"priceId\" WHERE s.id = '$sub'")
+rm -rf "$outdir"
+[ "$errs" -eq 0 ] && [ "$rev" -eq $((1 + racers)) ] && [ "$after" = "$expected" ] \
+  || fail "concurrent renewals: errors=$errs revision=$rev (want $((1 + racers))) end=$after (want $expected) — lost update or lost time"
+echo "PASS: race — $racers concurrent renewals advanced the period by exactly $racers intervals, revision $rev, no deadlock"
+
+echo "== concurrency: a renewal racing a termination on the SAME subscription ends in one consistent, auditable state"
+newdb subrace; db="$DBNAME"; apply_all "$db"; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/fixtures.sql" >/dev/null
+sub=$(q "SELECT t_mk_active_subscription()")
+outdir="$(mktemp -d)"
+for i in 1 2 3 4; do
+  ( psql -Atq -d "$db" >"$outdir/r$i.out" 2>&1 -c "SELECT t_try_renew('$sub')" ) &
+  ( psql -Atq -d "$db" >"$outdir/t$i.out" 2>&1 -c "SELECT t_try_terminate('$sub')" ) &
+done
+wait
+errs=$(cat "$outdir"/*.out | grep -ciE "error|deadlock" || true); rm -rf "$outdir"
+rev=$(q "SELECT revision FROM subscription WHERE id = '$sub'")
+status=$(q "SELECT status FROM subscription WHERE id = '$sub'")
+# every renew always applies (active|grace|expired -> active) and every terminate either applies (active|grace -> expired)
+# or is a safe no-op once already expired: total history rows is always the creation row (revision 0) plus one per
+# revision since, so history == revision + 1 whenever nothing is silently lost to the race.
+history=$(q "SELECT count(*) FROM billing_transition WHERE \"entityType\"='subscription' AND \"entityId\"='$sub'")
+[ "$errs" -eq 0 ] && [ "$history" -eq $((rev + 1)) ] && [ "$rev" -ge 2 ] && { [ "$status" = active ] || [ "$status" = expired ]; } \
+  || fail "renew/terminate race: errors=$errs revision=$rev history=$history status=$status (want history=revision+1, revision>=2, one consistent status)"
+echo "PASS: race — renew vs terminate ended in status=$status, revision=$rev, matching history rows, no deadlock"
+
+echo "== concurrency: $racers concurrent creations for the SAME organization give exactly one subscription"
+newdb subdup; db="$DBNAME"; apply_all "$db"; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/fixtures.sql" >/dev/null
+org="00000000-0000-4000-8000-0000000000d2"
+prid=$(q "SELECT t_mk_recurring_price()")
+run_racers "SELECT t_try_create_subscription('$org'::uuid, '$prid'::uuid)"
+won=$(cat "$outdir"/*.out | grep -c '^t$' || true)
+errs=$(cat "$outdir"/*.out | grep -ciE "error|deadlock" || true); rm -rf "$outdir"
+rows=$(q "SELECT count(*) FROM subscription WHERE \"organizationId\" = '$org'")
+[ "$won" -eq 1 ] && [ "$errs" -eq 0 ] && [ "$rows" -eq 1 ] || fail "duplicate subscription creates: won=$won errors=$errs rows=$rows (want 1, 0, 1)"
+echo "PASS: race — $racers concurrent creates for one organization gave exactly one subscription"

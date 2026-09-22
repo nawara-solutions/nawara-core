@@ -65,14 +65,39 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   from client input), checked here as extra isolation evidence alongside the full snapshot Billing already validates.
 - Tests: unit (domain rules, input normalisation, no-float source scan), integration (repositories, HTTP API, the dispatcher,
   reconciler, event consumer and cancel endpoint under duplicate/out-of-order/timeout/conflict/deferred scenarios, races, atomicity,
-  ownership, runtime role), and a database suite (`npm run test:db`: 188 assertions and 5 concurrency races).
+  ownership, runtime role), and a database suite (`npm run test:db`: 225 assertions and 8 concurrency races).
+
+### Subscription domain (Stage 12.2 of the org-wide roadmap; domain/database foundation only)
+
+`subscription` (`db/migrations/0013_subscription.sql`): the CURRENT commercial access period an Organization has purchased
+("what access period exists right now?" — never "is this user authorized?", never "was money collected?"). One mutable row per
+Organization (`organizationId` is the whole scope; Platform is always derivable through Organization and is never duplicated
+here), with the same append-only `billing_transition` history invoice/payment_request already use (widened to a third entity
+type) rather than a parallel mechanism. States: `pending, active, grace, expired` — `active -> active` is the one self-loop
+(a renewal or a cancellation toggle); there is no `cancel_scheduled`, `terminated`, `past_due` or similar. `SubscriptionRepository`
+(`src/subscriptions`) is the only writer: `create`, `activate`, `renew` (one operation for early/on-time/grace/late renewal —
+the anchor rule in `src/domain/subscription-period.ts` already accounts for every case), `enterGrace`, `expire`,
+`scheduleCancellation`/`reverseCancellation`, `terminate`. No controller, no public API, no Entitlement derivation and no
+Payment-event consumption yet — those are later Stage 12 work; today every operation is exercised directly (tests, and later a
+Stage 12.4 event consumer).
+
+`graceUntil` has exactly one trusted authority: `SUBSCRIPTION_GRACE_DAYS` (optional; unset means this deployment offers no
+grace at all — no Nawara-wide default exists). `activate`/`renew` precompute it from that policy in the SAME statement as
+`currentPeriodEnd`, so it is a trustworthy timestamp from the moment a period exists, not only once some later sweeper calls
+`enterGrace` — `enterGrace` itself takes no timestamp at all; it only normalizes the status label once a grace window that
+was already computed exists. `create` distinguishes an identical replay (same organization, same product AND price — state
+idempotent) from a genuinely conflicting request (same organization, a DIFFERENT product or price — `409 subscription_conflict`);
+it is never a disguised upgrade/downgrade. `productId`/`priceId` are immutable today (no method changes them), which does not
+block a future offering-change operation: exactly like every other Billing table, a later migration simply widens the
+existing `billing_immutable_except` allow-list the day that operation is actually built.
 
 ### Explicitly NOT implemented (later stages; see the SDD)
 
-Invoice rendering, templates, PDF, File Service, delivery, QR, signatures, recurring billing, dunning, trials, proration,
-discounts, tax engine, credit notes, refunds, real payment providers, cash, payouts, wallets, accounting ledger, settlement
-infrastructure, merchant of record, external customers, branches, multiple legal entities, exchange rates, currency conversion,
-membership-based payment authorization, entitlements. No table exists for any of them (a test asserts the exact table set).
+Invoice rendering, templates, PDF, File Service, delivery, QR, signatures, dunning, trials, proration, discounts, tax engine,
+credit notes, refunds, real payment providers, cash, payouts, wallets, accounting ledger, settlement infrastructure, merchant of
+record, external customers, branches, multiple legal entities, exchange rates, currency conversion, membership-based payment
+authorization, entitlements, a Subscription HTTP API, Plan/SubscriptionPlan, user-scoped subscriptions. No table exists for any
+of the still-fully-deferred ones (a test asserts the exact table set).
 
 ## Dead-lettered Payment events (inspect and replay)
 

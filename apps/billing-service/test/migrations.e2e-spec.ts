@@ -21,12 +21,12 @@ const KIT_MIGRATIONS = ['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql', 
 const BILLING_MIGRATIONS = [
   '0001_currency.sql', '0002_product_price.sql', '0003_invoice.sql', '0004_invoice_line.sql',
   '0005_invoice_number_sequence.sql', '0006_payment_request.sql', '0007_payment_event_receipt.sql', '0008_billing_transition.sql', '0009_platform_currency.sql',
-  '0010_product_producer.sql', '0011_payment_request_correlation_id.sql', '0012_payment_request_reconcile_index.sql',
+  '0010_product_producer.sql', '0011_payment_request_correlation_id.sql', '0012_payment_request_reconcile_index.sql', '0013_subscription.sql',
 ];
-/** The Stage 2/3 schema, exactly (SDD 28 and 34.1; migrations 0010/0011 add a column and 0012 an index, not a table). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
+/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011 add a column and 0012 an index, not a table). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
   'billing_transition', 'currency', 'inbox', 'invoice', 'invoice_line', 'invoice_number_sequence', 'kit_rate_limit', 'outbox',
-  'payment_event_receipt', 'payment_request', 'platform_currency', 'price', 'product', 'schema_migrations',
+  'payment_event_receipt', 'payment_request', 'platform_currency', 'price', 'product', 'schema_migrations', 'subscription',
 ];
 
 /** Migration infrastructure and the Stage 2 schema (SDD section 28), against a real PostgreSQL. */
@@ -37,17 +37,17 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
   });
   afterAll(() => db.drop());
 
-  it('applies the kit migrations and the twelve Billing migrations from an empty database, in order, and creates exactly the Stage 2/3 tables', async () => {
+  it('applies the kit migrations and the thirteen Billing migrations from an empty database, in order, and creates exactly the Stage 2/3 + 12.2 tables', async () => {
     const first = await runMigrations(db.url, [kitMigrationsDir, billingMigrationsDir]);
     expect(first.applied).toEqual([...KIT_MIGRATIONS, ...BILLING_MIGRATIONS]);
     expect(await tables(db.url)).toEqual(STAGE_2_TABLES);
   });
 
-  it('creates NO table for a deferred concept: no credit note, billing profile, template, document, recurring definition, entitlement, subscription or user/organization copy', async () => {
+  it('creates NO table for a deferred concept: no credit note, billing profile, template, document, recurring definition, entitlement, plan or user/organization copy', async () => {
     const present = await tables(db.url);
     for (const deferred of [
       'credit_note', 'billing_profile', 'invoice_template', 'invoice_template_version', 'invoice_document', 'template', 'document',
-      'recurring_definition', 'subscription', 'organization_license', 'user_subscription', 'user', 'organization', 'membership', 'company', 'platform',
+      'recurring_definition', 'entitlement', 'plan', 'subscription_plan', 'plan_tier', 'organization_license', 'user_subscription', 'user', 'organization', 'membership', 'company', 'platform',
     ]) {
       expect(present, deferred).not.toContain(deferred);
     }
@@ -74,7 +74,7 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
     expect(again.alreadyApplied).toHaveLength(KIT_MIGRATIONS.length + BILLING_MIGRATIONS.length);
   });
 
-  it('the service migrations folder holds exactly the twelve Stage 2/3 migrations, and none is edited in place afterwards (checksums)', async () => {
+  it('the service migrations folder holds exactly the thirteen Stage 2/3 + 12.2 migrations, and none is edited in place afterwards (checksums)', async () => {
     const { readdirSync } = await import('node:fs');
     expect(readdirSync(billingMigrationsDir).filter((n) => n.endsWith('.sql')).sort()).toEqual(BILLING_MIGRATIONS);
   });
