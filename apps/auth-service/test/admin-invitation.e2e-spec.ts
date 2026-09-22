@@ -150,12 +150,10 @@ describe('organization admin invitations (privileged provisioning)', () => {
 
   // ------------------------------------------------------------------------------ acceptance
   describe('accepting an invitation (single use)', () => {
-    it('creates a kind=member with an ACTIVE membership carrying the management capability, and a normal session, without any license', async () => {
+    it('creates a kind=member with an ACTIVE membership carrying the management capability, and a normal session, without any commercial check', async () => {
       const inv = await ownerInvite({ invitationType: 'org_admin' });
-      const callsBefore = t.payment.calls.length;
       const email = `first${uniq()}@a.test`;
       const r = await accept(inv.body.code, { email }).expect(201);
-      expect(t.payment.calls.length).toBe(callsBefore); // no license question: an organization needs a member before it can pay
       expect(r.body.onboarding).toMatchObject({ invitationType: 'org_admin', membershipStatus: 'active', isOrganizationAdmin: true });
       const uid = (await userIdOf(email))!;
       expect((await t.db.query(`SELECT u.kind, u.role, u."isActive", m."organizationId", m.audience FROM "user" u JOIN organization_membership m ON m."userId" = u.id WHERE u.id=$1`, [uid])).rows[0])
@@ -227,7 +225,6 @@ describe('organization admin invitations (privileged provisioning)', () => {
   describe('credentials are never interchangeable', () => {
     it('a join code is not an invitation, and an invitation is not a join code', async () => {
       const jc = await t.joinCode(w.orgSchool1, { audience: 'teacher', requiresApproval: true });
-      t.payment.licensed.add(w.orgSchool1);
       const inv = await ownerInvite();
       await resolve(jc.code).expect(404); // join code as invitation
       await accept(jc.code).expect(403);
@@ -266,7 +263,6 @@ describe('organization admin invitations (privileged provisioning)', () => {
     });
 
     it('an admin created by an invitation can approve a pending request and invite the next administrator', async () => {
-      t.payment.licensed.add(w.orgSchool1);
       const jc = await t.joinCode(w.orgSchool1, { audience: 'teacher', requiresApproval: true });
       const teacherEmail = `teach${uniq()}@a.test`;
       await t.http.post('/auth/register').send({ email: teacherEmail, password: 'member password 1', joinCode: jc.code }).expect(201);

@@ -92,7 +92,6 @@ export interface AppConfig {
     confirmationTtlSec: number;
   };
   rate: Record<RateBucket, RateRule>;
-  payment: { baseUrl: string; serviceToken: string; timeoutMs: number };
   onboarding: {
     /** When true, organization access also requires a verified e-mail/phone. Off until a delivery channel exists. */
     requireContactVerification: boolean;
@@ -186,10 +185,6 @@ export function loadConfig(
   }
   const databaseUrl = env.DATABASE_URL ?? '';
   if (!databaseUrl) throw new ConfigError('DATABASE_URL is required');
-  const payToken = src.get('PAYMENT_SERVICE_TOKEN') ?? '';
-  if (nodeEnv === 'production' && payToken.length < 32) {
-    throw new ConfigError('PAYMENT_SERVICE_TOKEN (>= 32 chars) is required in production');
-  }
 
   const invitation = {
     minMinutes: int(env, 'INVITATION_MIN_MINUTES', 15, 1, 1440),
@@ -284,11 +279,6 @@ export function loadConfig(
       invitation_resolve_global: rule(env, 'INVITATION_RESOLVE_GLOBAL', 500, 60),
       invitation_accept_ip: rule(env, 'INVITATION_ACCEPT_IP', 10, 900),
       invitation_manage_actor: rule(env, 'INVITATION_MANAGE_ACTOR', 20, 3600),
-    },
-    payment: {
-      baseUrl: env.PAYMENT_SERVICE_URL ?? '',
-      serviceToken: payToken,
-      timeoutMs: int(env, 'PAYMENT_TIMEOUT_MS', 3000, 100, 30_000),
     },
     onboarding: {
       requireContactVerification: env.REQUIRE_CONTACT_VERIFICATION === 'true',

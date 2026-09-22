@@ -12,7 +12,6 @@ describe('secrets are never logged, audited or stored in plaintext', () => {
   beforeAll(async () => {
     t = await createTestApp();
     const w = await t.world();
-    t.payment.licensed.add(w.orgSchool1);
 
     // member: password + refresh token
     const jc = await t.joinCode(w.orgSchool1, { audience: 'student' });

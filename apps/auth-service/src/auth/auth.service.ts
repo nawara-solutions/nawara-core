@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { EVENT_BUS, CLOCK, type Clock, type EventBus } from '../common/ports.js';
@@ -7,7 +7,6 @@ import { DbService, isUniqueViolation } from '../db/db.service.js';
 import { MembershipService } from '../membership/membership.service.js';
 import { OnboardingService } from '../onboarding/onboarding.service.js';
 import { OwnerAuthService } from '../owner/owner-auth.service.js';
-import { PAYMENT_CLIENT, type PaymentClient } from '../payment/payment-client.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
@@ -15,7 +14,7 @@ import { UsersService, normalizeEmail, normalizePhone, PHONE_RE, toIdentifier } 
 import { SessionService } from './session.service.js';
 
 const INVALID_CREDENTIALS = 'Invalid credentials.';
-/** One answer for a bad/expired/exhausted code AND an unlicensed organization, so neither is revealed. */
+/** One answer for a bad, expired, revoked or exhausted code, so none of those reasons is revealed. */
 const REGISTRATION_REFUSED = 'Registration is not available with this code. Please contact your organization.';
 
 @Injectable()
@@ -29,7 +28,6 @@ export class AuthService {
     @Inject(RefreshTokenService) private readonly refresh: RefreshTokenService,
     @Inject(OwnerAuthService) private readonly ownerAuth: OwnerAuthService,
     @Inject(AuditService) private readonly audit: AuditService,
-    @Inject(PAYMENT_CLIENT) private readonly payment: PaymentClient,
     @Inject(EVENT_BUS) private readonly bus: EventBus,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
@@ -47,8 +45,9 @@ export class AuthService {
    * user (always kind=member, no organization and no business role on it), create the membership (which carries the
    * opaque audience label) (`pending` when
    * the code requires approval, else `active`). A pending member is authenticated but NOT admitted.
-   * payment-service is asked once whether the organization holds a valid license (fail closed); a bad
-   * code and an unlicensed organization give the same generic 403, so neither is revealed.
+   * Registration has no commercial dependency: identity and membership creation never check subscription,
+   * license or entitlement state (Stage 11/12 decoupling). A bad, expired, revoked or exhausted code is the
+   * only reason registration is refused here.
    */
   async register(dto: { email?: string; phone?: string; password: string; joinCode: string }, client: ClientInfo) {
     await this.throttle.hit('register_ip', client.ip);
@@ -64,13 +63,6 @@ export class AuthService {
       await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', ip: client.ip, metadata: { reason: found.rejected, stage: 'register' } });
       throw new ForbiddenException(REGISTRATION_REFUSED);
     }
-    let licensed: boolean;
-    try {
-      licensed = await this.payment.isOrganizationLicensed(found.row.organizationId);
-    } catch {
-      throw new ServiceUnavailableException(); // fail CLOSED whatever the client implementation throws
-    }
-    if (!licensed) throw new ForbiddenException(REGISTRATION_REFUSED);
 
     const passwordHash = await this.passwords.hash(dto.password);
     const result = await this.db.tx(async (q) => {
@@ -100,10 +92,10 @@ export class AuthService {
 
   /**
    * An EXISTING member joins another organization with a join code (one identity, many organizations, possibly on
-   * different platforms). Same rules as registration: the code is re-resolved server-side, the organization must be
-   * licensed (payment-service, fail closed), one use is spent atomically, and the membership is `pending` or `active`
-   * per the code. It creates NO account and changes nothing about the user's other memberships or sessions. A second
-   * membership in the SAME organization is refused (409) and spends no use of the code.
+   * different platforms). Same rules as registration: the code is re-resolved server-side, one use is spent
+   * atomically, and the membership is `pending` or `active` per the code. No commercial check runs here either
+   * (Stage 11/12 decoupling). It creates NO account and changes nothing about the user's other memberships or
+   * sessions. A second membership in the SAME organization is refused (409) and spends no use of the code.
    */
   async join(userId: string, dto: { joinCode: string }, client: ClientInfo) {
     await this.throttle.hit('membership_join_user', userId);
@@ -113,13 +105,6 @@ export class AuthService {
       await this.audit.tryRecord({ type: 'onboarding.join_code.resolve_failed', outcome: 'failure', actorId: userId, ip: client.ip, metadata: { reason: found.rejected, stage: 'join' } });
       throw new ForbiddenException(REGISTRATION_REFUSED);
     }
-    let licensed: boolean;
-    try {
-      licensed = await this.payment.isOrganizationLicensed(found.row.organizationId);
-    } catch {
-      throw new ServiceUnavailableException(); // fail CLOSED
-    }
-    if (!licensed) throw new ForbiddenException(REGISTRATION_REFUSED);
 
     const result = await this.db.tx(async (q) => {
       const code = await this.onboarding.redeem(q, dto.joinCode);
@@ -153,7 +138,7 @@ export class AuthService {
   /**
    * Password login. Members get tokens. An owner NEVER gets tokens from a password alone: they get a
    * second-factor (or first-enrollment) challenge. Operators have no password and cannot log in here.
-   * There is NO payment-service call (ADR-0026). Every failure is the same generic 401.
+   * No commercial check runs here (ADR-0026; Stage 11/12 decoupling). Every failure is the same generic 401.
    */
   async login(dto: { email?: string; phone?: string; password: string }, client: ClientInfo) {
     const id = toIdentifier(dto);

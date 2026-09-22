@@ -37,7 +37,6 @@ import { RecoveryService } from './owner/recovery.service.js';
 import { SecretKeyService } from './owner/secret-key.service.js';
 import { StepUpService } from './owner/step-up.service.js';
 import { WebAuthnService } from './owner/webauthn.service.js';
-import { PAYMENT_CLIENT, HttpPaymentClient } from './payment/payment-client.js';
 import { AssignmentService } from './platform/assignment.service.js';
 import { PlatformAccessService } from './platform/platform-access.service.js';
 import { PlatformController } from './platform/platform.controller.js';
@@ -69,7 +68,6 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     },
     { provide: PasswordService, useFactory: (c: AppConfig) => new PasswordService(c.bcryptCost), inject: [APP_CONFIG] },
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
-    { provide: PAYMENT_CLIENT, useClass: HttpPaymentClient },
     DbService, AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,

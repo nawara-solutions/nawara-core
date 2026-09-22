@@ -12,7 +12,6 @@ import { APP_CONFIG, loadConfig, type AppConfig } from '../../src/config/app-con
 import { generateJoinCode, hashJoinCode } from '../../src/crypto/join-code.js';
 import { PasswordService } from '../../src/crypto/password.js';
 import { DbService } from '../../src/db/db.service.js';
-import { PAYMENT_CLIENT, type PaymentClient } from '../../src/payment/payment-client.js';
 import { UsersService } from '../../src/users/users.service.js';
 
 export class FakeClock implements Clock {
@@ -27,17 +26,6 @@ export class RecordingBus implements EventBus {
   publish(key: string, payload: object) { this.events.push({ key, payload }); }
   last(key: string) { return [...this.events].reverse().find((e) => e.key === key)?.payload; }
   all(key: string) { return this.events.filter((e) => e.key === key).map((e) => e.payload); }
-}
-
-export class FakePayment implements PaymentClient {
-  licensed = new Set<string>();
-  down = false;
-  calls: string[] = [];
-  async isOrganizationLicensed(id: string) {
-    this.calls.push(id);
-    if (this.down) throw new Error('payment down');
-    return this.licensed.has(id);
-  }
 }
 
 export class CapturingLogger implements LoggerService {
@@ -83,14 +71,12 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const cfg: AppConfig = loadConfig(env as NodeJS.ProcessEnv);
   const clock = new FakeClock();
   const bus = new RecordingBus();
-  const payment = new FakePayment();
   const logger = new CapturingLogger();
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(APP_CONFIG).useValue(cfg)
     .overrideProvider(CLOCK).useValue(clock)
     .overrideProvider(EVENT_BUS).useValue(bus)
-    .overrideProvider(PAYMENT_CLIENT).useValue(payment)
     .setLogger(logger)
     .compile();
   const app = moduleRef.createNestApplication();
@@ -105,7 +91,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const dbs = app.get(DbService);
 
   const ctx = {
-    app, cfg, clock, bus, payment, logger, db, http, users, dbs, env,
+    app, cfg, clock, bus, logger, db, http, users, dbs, env,
     async close() {
       await db.end();
       await app.close();

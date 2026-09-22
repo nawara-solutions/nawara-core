@@ -15,8 +15,6 @@ describe('organization join codes, smart registration and membership approval', 
     t = await createTestApp();
     await t.app.listen(0);
     w = await t.world();
-    t.payment.licensed.add(w.orgSchool1);
-    t.payment.licensed.add(w.orgSchool2);
     await t.db.query(`UPDATE platform SET key='nawara-drive' WHERE id=$1`, [w.platformSchool]);
     ownerA = await t.readyOwner(w.companyA, `ownera${uniq()}@a.test`);
     ownerB = await t.readyOwner(w.companyB, `ownerb${uniq()}@b.test`);
@@ -115,8 +113,8 @@ describe('organization join codes, smart registration and membership approval', 
   });
 
   // ------------------------------------------------------------------------------ student flow
-  describe('student: join code -> registration -> payment-required context', () => {
-    it('creates a kind=member with an ACTIVE membership, a payment-required hint, and NO teacher/approval state', async () => {
+  describe('student: join code -> registration -> a subscription HINT, no subscription check', () => {
+    it('creates a kind=member with an ACTIVE membership, a subscription hint, and NO teacher/approval state', async () => {
       const c = await t.joinCode(w.orgSchool1, { audience: 'student', requiresApproval: false, requiresSubscription: true });
       const email = `student${uniq()}@a.test`;
       const r = await register(c.code, { email }).expect(201);
@@ -128,8 +126,7 @@ describe('organization join codes, smart registration and membership approval', 
       const pending = await t.db.query(`SELECT count(*)::int n FROM organization_membership WHERE "userId"=$1 AND status<>'active'`, [u.id]);
       expect(pending.rows[0].n).toBe(0);
       await reach(r.body, w.orgSchool1).expect(204); // admitted
-      // auth stores no subscription: entitlement is payment-service's (asked once, at registration)
-      expect(t.payment.calls.at(-1)).toBe(w.orgSchool1);
+      // auth stores no subscription and asks no other service about one: `requiresSubscription` is a passthrough hint only
     });
 
     it('a student code that the client tries to relabel as teacher stays a student', async () => {
@@ -447,7 +444,6 @@ describe('member contact verification (behind REQUIRE_CONTACT_VERIFICATION)', ()
     t = await createTestApp({ REQUIRE_CONTACT_VERIFICATION: 'true' });
     await t.app.listen(0);
     w = await t.world();
-    t.payment.licensed.add(w.orgSchool1);
     owner = await t.readyOwner(w.companyA, `owner${uniq()}@a.test`);
   });
   afterAll(() => t.close());

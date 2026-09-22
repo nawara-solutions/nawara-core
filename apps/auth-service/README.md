@@ -48,7 +48,9 @@ membership grants organization access, evaluated from current rows on every requ
   only that organization. `GET /auth/me` returns `memberships[]`. The join code's audience is an opaque label on the
   membership; Auth attaches no business meaning to it.
 - `CORS_ORIGINS` must be exact http(s) origins (no `*`, no paths); anything else stops the service at startup.
-- Payment stays the source of truth for subscriptions and licenses; `requiresSubscription` is only a hint for the app.
+- Auth has no commercial dependency: registration and join never check subscription, license or entitlement state,
+  and Auth calls no other service to decide them. `requiresSubscription` is stored and returned as an onboarding
+  hint for the app only; it carries no backend authority.
 
 ## Operations
 

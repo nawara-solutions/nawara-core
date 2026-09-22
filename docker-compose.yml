@@ -100,10 +100,6 @@ services:
       JOIN_CODE_PEPPER: ${AUTH_JOIN_CODE_PEPPER:?copy .env.example to .env}
       TOTP_ENCRYPTION_KEYS: k1:${AUTH_TOTP_KEY_K1:?copy .env.example to .env}
       TOTP_ENCRYPTION_ACTIVE_KEY_ID: k1
-      # Only used if/when Auth's registration-time license check is exercised locally (SDD 16.4); payment-service
-      # does not yet implement the route it calls, so this is configuration wiring, not a working feature.
-      PAYMENT_SERVICE_URL: http://payment-service:3000
-      PAYMENT_SERVICE_TOKEN: ${AUTH_TO_PAYMENT_TOKEN:?copy .env.example to .env}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/auth/health >/dev/null || exit 1']
       interval: 10s
