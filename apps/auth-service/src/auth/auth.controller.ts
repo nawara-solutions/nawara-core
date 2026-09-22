@@ -3,8 +3,8 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import type { Request } from 'express';
 import { clientInfo } from '../common/client-info.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
-import { NotFoundException } from '@nestjs/common';
 import { DbService } from '../db/db.service.js';
+import { notFound } from '../errors.js';
 import { StepUpService, type StepUpPurpose } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { Actors, type AuthedRequest } from './auth.guard.js';
@@ -124,6 +124,6 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Does the calling member belong to this organization? 204, else 404.' })
   async membership(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthedRequest) {
-    if (!(await this.access.memberBelongsTo(req.actor.userId, id))) throw new NotFoundException();
+    if (!(await this.access.memberBelongsTo(req.actor.userId, id))) throw notFound();
   }
 }

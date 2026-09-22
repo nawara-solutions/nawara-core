@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 const uniq = () => Math.random().toString(36).slice(2);
 
@@ -105,7 +105,7 @@ describe('tenant isolation: Company A actors against Company B resources', () =>
         const g = await attack(tokens(), c, ghost());
         if (f.status >= 200 && f.status < 300) mismatches.push(`${c[0]}: foreign resource answered ${f.status}`);
         if (f.status >= 500) mismatches.push(`${c[0]}: server error ${f.status}`);
-        if (f.status !== g.status || JSON.stringify(f.body) !== JSON.stringify(g.body)) {
+        if (f.status !== g.status || JSON.stringify(noReqId(f.body)) !== JSON.stringify(noReqId(g.body))) {
           mismatches.push(`${c[0]}: foreign=${f.status} ${JSON.stringify(f.body)} vs ghost=${g.status} ${JSON.stringify(g.body)}`);
         }
       }
@@ -121,7 +121,7 @@ describe('tenant isolation: Company A actors against Company B resources', () =>
     for (const c of CASES) {
       const f = await attack(B.owner.tokens, c, foreign);
       const g = await attack(B.owner.tokens, c, ghost());
-      if (f.status < 300 || f.status >= 500 || f.status !== g.status || JSON.stringify(f.body) !== JSON.stringify(g.body)) bad.push(`${c[0]}: ${f.status} vs ${g.status}`);
+      if (f.status < 300 || f.status >= 500 || f.status !== g.status || JSON.stringify(noReqId(f.body)) !== JSON.stringify(noReqId(g.body))) bad.push(`${c[0]}: ${f.status} vs ${g.status}`);
     }
     expect(bad).toEqual([]);
     expect(await snapshot(w.orgSchool1, w.platformSchool, A.operatorUser.id)).toBe(before);
@@ -134,7 +134,7 @@ describe('tenant isolation: Company A actors against Company B resources', () =>
     const su2 = await t.stepUpToken(A.owner.tokens, 'admin_invitation.create', A.owner.totpSecret);
     const ghostOrg = await t.http.post(`/auth/organizations/${randomUUID()}/admin-invitations`).set(bearer(A.owner.tokens)).set('X-Step-Up-Token', su2).send({ invitationType: 'org_admin' });
     expect(ghostOrg.status).toBe(404);
-    expect(ghostOrg.body).toEqual(foreign.body);
+    expect(noReqId(ghostOrg.body)).toEqual(noReqId(foreign.body));
     expect((await t.db.query(`SELECT count(*)::int n FROM organization_admin_invitation WHERE "organizationId"=$1 AND "createdBy"=$2`, [w.orgClinic, A.owner.id])).rows[0].n).toBe(0);
     // and the un-burned step-up remains usable inside its own company
     const ok = await t.http.post(`/auth/organizations/${w.orgSchool1}/admin-invitations`).set(bearer(A.owner.tokens)).set('X-Step-Up-Token', su).send({ invitationType: 'org_admin' });

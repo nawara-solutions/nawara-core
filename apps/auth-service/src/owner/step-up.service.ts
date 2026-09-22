@@ -1,10 +1,11 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { AuditService } from '../audit/audit.service.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
+import { authError } from '../errors.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { ChallengeService } from './challenge.service.js';
 import { FactorService } from './factor.service.js';
@@ -75,7 +76,7 @@ export class StepUpService {
 
   /** WebAuthn step-up needs a server challenge first; bound to this session and purpose. */
   async webauthnOptions(ownerId: string, sid: string, purpose: string, ip: string) {
-    if (!this.allowed(purpose, 'webauthn')) throw new BadRequestException('Unsupported step-up.');
+    if (!this.allowed(purpose, 'webauthn')) throw authError(400, 'step_up_unsupported', 'Unsupported step-up.');
     await this.throttle.hit('step_up_ip', ip);
     await this.throttle.hit('step_up_owner', ownerId);
     const options = await this.factors.webauthnAuthenticationOptions(ownerId);
@@ -86,12 +87,12 @@ export class StepUpService {
   }
 
   async issue(r: StepUpRequest, ip: string): Promise<{ stepUpToken: string; expiresAt: Date }> {
-    if (!this.allowed(r.purpose, r.method)) throw new BadRequestException('Unsupported step-up.');
+    if (!this.allowed(r.purpose, r.method)) throw authError(400, 'step_up_unsupported', 'Unsupported step-up.');
     await this.throttle.hit('step_up_ip', ip);
     await this.throttle.hit('step_up_owner', r.ownerId);
 
     const { rows: u } = await this.db.query(`SELECT "isActive" FROM "user" WHERE id=$1 AND kind='owner'`, [r.ownerId]);
-    if (!u[0]?.isActive) throw new UnauthorizedException('Verification failed.');
+    if (!u[0]?.isActive) throw authError(401, 'verification_failed', 'Verification failed.');
 
     let factorId: string | null = null;
     let ok = false;
@@ -110,7 +111,7 @@ export class StepUpService {
     }
     if (!ok) {
       await this.audit.tryRecord({ type: 'owner.step_up', outcome: 'failure', actorId: r.ownerId, sessionFamilyId: r.sid, ip, metadata: { purpose: r.purpose, method: r.method } });
-      throw new UnauthorizedException('Verification failed.');
+      throw authError(401, 'verification_failed', 'Verification failed.');
     }
     const now = this.clock.now();
     const expiresAt = new Date(now.getTime() + this.cfg.stepUp.ttlSec * 1000);
@@ -133,7 +134,7 @@ export class StepUpService {
   async consume(q: Queryable, a: { ownerId: string; sid: string; purpose: StepUpPurpose; token: string | undefined }): Promise<void> {
     const denied = async () => {
       await this.audit.tryRecord({ type: 'owner.step_up.consume', outcome: 'denied', actorId: a.ownerId, sessionFamilyId: a.sid, metadata: { purpose: a.purpose } });
-      return new ForbiddenException('A valid step-up verification is required for this action.');
+      return authError(403, 'step_up_required', 'A valid step-up verification is required for this action.');
     };
     if (!a.token || !UUID_RE.test(a.token)) throw await denied();
     const { rows } = await q.query(

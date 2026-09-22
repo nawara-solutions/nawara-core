@@ -1,9 +1,10 @@
-import { Body, Controller, Delete, Get, Headers, HttpCode, Inject, NotFoundException, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { Actors, type AuthedRequest } from '../auth/auth.guard.js';
 import { clientInfo } from '../common/client-info.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
+import { notFound } from '../errors.js';
 import { GrantAssignmentDto } from '../operator/dto.js';
 import { AssignmentService } from './assignment.service.js';
 import { PlatformAccessService, isAllowed } from './platform-access.service.js';
@@ -35,7 +36,7 @@ export class PlatformController {
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 404, description: 'Unknown, other company, or not assigned — indistinguishable.' })
   async platformAccess(@Param('platformId', ParseUUIDPipe) platformId: string, @Req() req: AuthedRequest) {
-    if (!isAllowed(await this.access.check(req.actor.userId, platformId))) throw new NotFoundException();
+    if (!isAllowed(await this.access.check(req.actor.userId, platformId))) throw notFound();
     return { platformId, allowed: true };
   }
 
@@ -46,7 +47,7 @@ export class PlatformController {
   @ApiOperation({ summary: 'Organization lookup, authorized via resource -> organization -> platform -> caller.' })
   async organization(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthedRequest) {
     const p = await this.access.platformOfOrganization(id);
-    if (!p || !isAllowed(await this.access.check(req.actor.userId, p.platformId))) throw new NotFoundException();
+    if (!p || !isAllowed(await this.access.check(req.actor.userId, p.platformId))) throw notFound();
     return { id, platformId: p.platformId };
   }
 

@@ -117,6 +117,32 @@ export function checkHierarchyFixtures(authText, orgText) {
   return problems;
 }
 
+const AUTH_ERRORS_FILE = 'apps/auth-service/src/errors.ts';
+// health.controller.ts's ServiceUnavailableException is infra readiness (Stage 13.2), not a business error: allowlisted by file, not by class.
+const AUTH_INFRA_EXCEPTION_ALLOWLIST = new Set(['apps/auth-service/src/health/health.controller.ts']);
+const NEST_HTTP_EXCEPTION_CTOR = /\bnew\s+(BadRequest|Unauthorized|Forbidden|NotFound|Conflict|Gone|PayloadTooLarge|UnsupportedMediaType|UnprocessableEntity|TooManyRequests|InternalServerError|NotImplemented|BadGateway|ServiceUnavailable|GatewayTimeout|HttpVersionNotSupported|MethodNotAllowed|RequestTimeout|PreconditionFailed|ImATeapot)Exception\s*\(/;
+
+/**
+ * Auth error-code coverage (Stage 13.2, ADR-0044 follow-on): every business error auth-service raises must carry
+ * a stable, machine-readable `code` (`errors.ts`'s `authError()`/`notFound()`/`unauthenticated()`/`forbidden()`),
+ * not a raw Nest exception class or an uncoded `HttpException`, so a future call site cannot silently regress
+ * to the pre-Stage-13.2 uncoded shape.
+ */
+export function checkAuthErrorCoverage(relPath, text) {
+  const problems = [];
+  if (!relPath.startsWith('apps/auth-service/src/') || relPath === AUTH_ERRORS_FILE) return problems;
+  if (!AUTH_INFRA_EXCEPTION_ALLOWLIST.has(relPath) && NEST_HTTP_EXCEPTION_CTOR.test(text)) {
+    problems.push(`${relPath}: throws a raw Nest HTTP exception class; use authError()/notFound()/unauthenticated()/forbidden() from errors.ts so every business error carries a stable code (Stage 13.2)`);
+  }
+  for (const m of text.matchAll(/new\s+HttpException\s*\(/g)) {
+    const idx = m.index ?? 0;
+    if (!/\bcode\s*:/.test(text.slice(idx, idx + 300))) {
+      problems.push(`${relPath}: throws a raw HttpException with no "code" field (near offset ${idx}); use authError() from errors.ts, or include an explicit code`);
+    }
+  }
+  return problems;
+}
+
 /**
  * Financial isolation (ADR-0042 DEC-5): a Billing invoice and a Payment record carry NO platformId. Platform scope is resolved through
  * organization-service and is never a stored reference on a financial record. (Billing's own `platform_currency` is currency

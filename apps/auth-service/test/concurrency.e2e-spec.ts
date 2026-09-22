@@ -1,3 +1,4 @@
+import type { HttpException } from '@nestjs/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { bootstrapOwner } from '../src/cli/owner-tools.js';
 import { PasswordService } from '../src/crypto/password.js';
@@ -134,11 +135,11 @@ describe('concurrency: security invariants hold under simultaneous requests', ()
       const t1 = t.dbs.tx(async (q) => { await factors.removeSafely(q, o.id, o.f1); await gate; });
       await sleep(200);
       // ... while T2 tries to remove factor 2. It must not be allowed to count a stale "2 confirmed".
-      const t2 = t.dbs.tx((q) => factors.removeSafely(q, o.id, o.f2)).then(() => 'removed', (e: Error) => e.constructor.name);
+      const t2 = t.dbs.tx((q) => factors.removeSafely(q, o.id, o.f2)).then(() => 'removed', (e: HttpException) => e.getStatus());
       await sleep(500);
       release();
       await t1;
-      expect(await t2).toBe('ConflictException');
+      expect(await t2).toBe(409); // rejected as a conflict (factor_required) — same HTTP contract as before Stage 13.2's error-code migration
       expect(await confirmedCount(o.id)).toBe(1);
     });
 

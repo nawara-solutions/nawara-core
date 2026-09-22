@@ -1,7 +1,8 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.js';
+import { authError, notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
 
 export interface OwnerActor {
@@ -31,13 +32,13 @@ export class AssignmentService {
 
   private async ownerCompany(q: Queryable, ownerId: string): Promise<string> {
     const { rows } = await q.query(`SELECT o."companyId" FROM owner o JOIN "user" u ON u.id=o."userId" WHERE o."userId"=$1 AND u."isActive"`, [ownerId]);
-    if (!rows[0]) throw new NotFoundException();
+    if (!rows[0]) throw notFound();
     return rows[0].companyId;
   }
 
   private async assertOperatorInCompany(q: Queryable, operatorId: string, companyId: string) {
     const { rowCount } = await q.query(`SELECT 1 FROM operator WHERE "userId"=$1 AND "companyId"=$2`, [operatorId, companyId]);
-    if (!rowCount) throw new NotFoundException();
+    if (!rowCount) throw notFound();
   }
 
   async grant(actor: OwnerActor, operatorId: string, platformId: string, stepUpToken: string | undefined, ip: string) {
@@ -45,7 +46,7 @@ export class AssignmentService {
       const companyId = await this.ownerCompany(q, actor.userId);
       await this.assertOperatorInCompany(q, operatorId, companyId);
       const pl = await q.query(`SELECT 1 FROM platform WHERE id=$1 AND "companyId"=$2`, [platformId, companyId]);
-      if (!pl.rowCount) throw new NotFoundException();
+      if (!pl.rowCount) throw notFound();
       await this.stepUp.consume(q, { ownerId: actor.userId, sid: actor.sid, purpose: 'platform_assignment.grant', token: stepUpToken });
       try {
         const { rows } = await q.query(
@@ -56,7 +57,7 @@ export class AssignmentService {
         await this.audit.record({ type: 'platform_assignment.grant', outcome: 'success', actorId: actor.userId, targetId: operatorId, sessionFamilyId: actor.sid, ip, metadata: { platformId } }, q);
         return rows[0];
       } catch (e) {
-        if (isUniqueViolation(e, 'platform_assignment_one_active')) throw new ConflictException('An active assignment already exists.');
+        if (isUniqueViolation(e, 'platform_assignment_one_active')) throw authError(409, 'assignment_conflict', 'An active assignment already exists.');
         throw e;
       }
     });
@@ -74,7 +75,7 @@ export class AssignmentService {
           WHERE "operatorId"=$1 AND "platformId"=$2 AND "companyId"=$3 AND active`,
         [operatorId, platformId, companyId, actor.userId, now],
       );
-      if (rowCount !== 1) throw new NotFoundException(); // rolls back: the step-up is not burned
+      if (rowCount !== 1) throw notFound(); // rolls back: the step-up is not burned
       await this.audit.record({ type: 'platform_assignment.revoke', outcome: 'success', actorId: actor.userId, targetId: operatorId, sessionFamilyId: actor.sid, ip, metadata: { platformId } }, q);
     });
   }

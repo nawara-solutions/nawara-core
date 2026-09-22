@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { generateSecret, generateURI, verifySync } from 'otplib';
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
@@ -7,6 +7,7 @@ import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { TotpSecretCipher } from '../crypto/totp-cipher.js';
 import { DbService, type Queryable } from '../db/db.service.js';
+import { authError, notFound } from '../errors.js';
 import { CloneSuspected, WebAuthnService, type StoredPasskey } from './webauthn.service.js';
 
 export interface FactorSummary {
@@ -169,7 +170,7 @@ export class FactorService {
         [id, ownerId, c.credentialId, c.publicKey, c.signCount, c.transports, now],
       );
     } catch (e) {
-      if ((e as { code?: string }).code === '23505') throw new ConflictException('Credential already registered.');
+      if ((e as { code?: string }).code === '23505') throw authError(409, 'factor_already_registered', 'Credential already registered.');
       throw e;
     }
     return id;
@@ -177,7 +178,7 @@ export class FactorService {
 
   async webauthnAuthenticationOptions(ownerId: string, q: Queryable = this.db) {
     const creds = await this.passkeys(ownerId, q);
-    if (creds.length === 0) throw new BadRequestException('No passkey registered.');
+    if (creds.length === 0) throw authError(400, 'factor_unavailable', 'No passkey registered.');
     return this.webauthn.authenticationOptions(creds);
   }
 
@@ -254,9 +255,9 @@ export class FactorService {
       [ownerId],
     );
     const target = rows.find((r) => r.id === factorId);
-    if (!target) throw new NotFoundException();
+    if (!target) throw notFound();
     if (target.confirmed && rows.filter((r) => r.confirmed).length <= 1) {
-      throw new ConflictException('You cannot remove your only authentication factor.');
+      throw authError(409, 'factor_required', 'You cannot remove your only authentication factor.');
     }
     await this.revoke(q, ownerId, factorId);
   }

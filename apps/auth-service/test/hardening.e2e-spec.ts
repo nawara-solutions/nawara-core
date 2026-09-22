@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 const uniq = () => Math.random().toString(36).slice(2);
 
@@ -59,7 +59,7 @@ describe('hardening: stale tokens, error disclosure, expiry and key-ring failure
       const missing = await t.http.get('/auth/platform-access/00000000-0000-4000-8000-00000000dead').set(bearer(tokens));
       expect(foreign.status).toBe(404);
       expect(missing.status).toBe(404);
-      expect(foreign.body).toEqual(missing.body);
+      expect(noReqId(foreign.body)).toEqual(noReqId(missing.body));
     });
   });
 
@@ -80,7 +80,7 @@ describe('hardening: stale tokens, error disclosure, expiry and key-ring failure
       const res = [];
       for (const a of attempts) res.push(await t.http.post('/auth/login').send(a));
       for (const r of res) expect(r.status).toBe(401);
-      for (const r of res.slice(1)) expect(r.body).toEqual(res[0].body);
+      for (const r of res.slice(1)) expect(noReqId(r.body)).toEqual(noReqId(res[0].body));
     });
 
     it('owner login MFA: unknown challenge, expired challenge and wrong code all answer the same 401', async () => {
@@ -91,7 +91,7 @@ describe('hardening: stale tokens, error disclosure, expiry and key-ring failure
       t.clock.advance(3600 * 1000); // past the challenge lifetime
       const expired = await t.http.post('/auth/admin/login/owner/verify').send({ challengeToken: login.challengeToken, method: 'totp', code: t.nextCode(owner.totpSecret) });
       expect([wrong.status, unknown.status, expired.status]).toEqual([401, 401, 401]);
-      expect(unknown.body).toEqual(expired.body);
+      expect(noReqId(unknown.body)).toEqual(noReqId(expired.body));
     });
   });
 

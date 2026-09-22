@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkCiCoverage, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkAuthErrorCoverage, checkCiCoverage, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -32,7 +32,10 @@ try {
 for (const base of ['apps', 'libs']) {
   for (const file of walk(join(root, base))) {
     if (!/\.(ts|mjs|js)$/.test(file) || file.endsWith('.d.ts')) continue;
-    problems.push(...checkSource(relative(root, file).split('\\').join('/'), readFileSync(file, 'utf8')));
+    const rel = relative(root, file).split('\\').join('/');
+    const text = readFileSync(file, 'utf8');
+    problems.push(...checkSource(rel, text));
+    problems.push(...checkAuthErrorCoverage(rel, text));
   }
 }
 
@@ -59,4 +62,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage');

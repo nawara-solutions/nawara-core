@@ -1,10 +1,11 @@
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { SessionService } from '../auth/session.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { hmacHex } from '../crypto/hmac.js';
+import { authError } from '../errors.js';
 import { randomSixDigitCode, safeEqualHex } from '../crypto/random.js';
 import { DbService, type Queryable } from '../db/db.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -154,7 +155,7 @@ export class OperatorCodeService {
     }
     if (!outcome.ok) {
       await this.audit.tryRecord({ type: 'operator.login', outcome: 'failure', actorId: op?.user.id, ip: client.ip });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'operator_code_invalid', GENERIC);
     }
     await this.throttle.reset('operator_verify_identifier', idKey);
     const { sid: _sid, ...tokens } = outcome.result;
@@ -177,6 +178,6 @@ export class OperatorCodeService {
         await this.audit.record({ type: 'operator.contact.confirmed', outcome: 'success', actorId: op.user.id, ip: client.ip }, q);
       }, false)).ok;
     }
-    if (!ok) throw new UnauthorizedException(GENERIC);
+    if (!ok) throw authError(401, 'operator_code_invalid', GENERIC);
   }
 }

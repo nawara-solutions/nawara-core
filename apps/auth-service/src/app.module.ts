@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { HealthModule as KitHealthModule } from '@nawara/service-kit';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuditService } from './audit/audit.service.js';
@@ -53,6 +54,10 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     // Coarse per-IP baseline for every route. The security-relevant limits are the bucketed,
     // DB-backed ones in ThrottleService (per identifier / per operator / global), not this.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.BASELINE_RATE_LIMIT_PER_MINUTE ?? 100) }]),
+    // Adds root GET /health (pure liveness) and GET /ready (ReadinessRegistry, DB check registered by
+    // DbService below) alongside Auth's own existing GET /auth/health, which is unchanged and stays the
+    // route production deploy tooling and Compose already poll (Stage 13.2: additive, not a replacement).
+    KitHealthModule.forRoot({ checkTimeoutMs: 1500 }),
     ...(eventsEnabled ? [EventsModule] : []),
   ],
   controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController],

@@ -6,7 +6,9 @@ import { generateSync } from 'otplib';
 import pg from 'pg';
 import request from 'supertest';
 import { inject } from 'vitest';
+import { JsonLogger, requestContextMiddleware } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
+import { AuthExceptionFilter } from '../../src/errors.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../../src/common/ports.js';
 import { APP_CONFIG, loadConfig, type AppConfig } from '../../src/config/app-config.js';
 import { generateJoinCode, hashJoinCode } from '../../src/crypto/join-code.js';
@@ -81,7 +83,15 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
     .compile();
   const app = moduleRef.createNestApplication();
   app.useLogger(logger);
+  // Same HTTP baseline main.ts wires (Stage 13.2): request-context first, then the additive exception
+  // filter. A SEPARATE real JsonLogger (not the CapturingLogger above) feeds the filter, exactly as
+  // production does; its structured JSON lines are captured here for tests that need to inspect them.
+  const jsonLogs: Record<string, unknown>[] = [];
+  const jsonLogger = new JsonLogger('auth-service', 'debug', (l) => jsonLogs.push(JSON.parse(l)));
+  app.use(requestContextMiddleware);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
+  app.useGlobalFilters(new AuthExceptionFilter(jsonLogger));
+  app.enableShutdownHooks();
   await app.init();
 
   const db = new pg.Pool({ connectionString: databaseUrl, max: 3 });
@@ -91,7 +101,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const dbs = app.get(DbService);
 
   const ctx = {
-    app, cfg, clock, bus, logger, db, http, users, dbs, env,
+    app, cfg, clock, bus, logger, jsonLogs, db, http, users, dbs, env,
     async close() {
       await db.end();
       await app.close();
@@ -234,3 +244,15 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
 export interface Tokens { accessToken: string; refreshToken: string; expiresIn: number }
 export const bearer = (t: Tokens | string) => ({ Authorization: `Bearer ${typeof t === 'string' ? t : t.accessToken}` });
 export const claims = (t: Tokens) => decodeJwt(t.accessToken);
+
+/**
+ * An error body minus `requestId` (Stage 13.2): every request now gets its own correlation id, by design, so
+ * two responses that are otherwise byte-identical (the whole point of a collapsed 404/401/403) legitimately
+ * differ on that one field. Tests that prove "these two responses are indistinguishable" compare this instead
+ * of the raw body — `requestId` is observability metadata, not part of that security property.
+ */
+export const noReqId = (body: unknown): unknown => {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return body;
+  const { requestId: _requestId, ...rest } = body as Record<string, unknown>;
+  return rest;
+};

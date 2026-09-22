@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 const uniq = () => Math.random().toString(36).slice(2);
 const statuses = (res: Array<{ status: number }>) => res.map((r) => r.status).sort((a, b) => a - b);
@@ -117,7 +117,7 @@ describe('organization admin invitations (privileged provisioning)', () => {
       try {
         const res = [await resolve('ABCD-EFGH-JKMN'), await resolve('this is not an invitation!'), await resolve(revoked.body.code), await resolve(consumed.body.code), await resolve(expiring.body.code)];
         for (const r of res) expect(r.status).toBe(404);
-        for (const r of res.slice(1)) expect(r.body).toEqual(res[0].body);
+        for (const r of res.slice(1)) expect(noReqId(r.body)).toEqual(noReqId(res[0].body));
       } finally { t.clock.advance(-20 * MIN); }
       const reasons = (await t.db.query(`SELECT metadata->>'reason' AS reason FROM auth_audit_event WHERE type='onboarding.admin_invitation.resolve_failed'`)).rows.map((r) => r.reason);
       expect(reasons).toEqual(expect.arrayContaining(['unknown', 'malformed', 'revoked', 'consumed', 'expired']));

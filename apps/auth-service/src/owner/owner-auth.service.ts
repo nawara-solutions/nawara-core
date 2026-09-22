@@ -1,10 +1,11 @@
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { AuditService } from '../audit/audit.service.js';
 import { SessionService } from '../auth/session.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService } from '../db/db.service.js';
+import { authError } from '../errors.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import type { UserRow } from '../users/users.service.js';
 import { UsersService } from '../users/users.service.js';
@@ -58,7 +59,7 @@ export class OwnerAuthService {
   async webauthnLoginOptions(challengeToken: string, ip: string) {
     await this.throttle.hit('owner_verify_ip', ip);
     const ch = await this.challenges.findByToken('login_mfa', challengeToken);
-    if (!ch) throw new UnauthorizedException(GENERIC);
+    if (!ch) throw authError(401, 'verification_failed', GENERIC);
     await this.throttle.hit('owner_verify_owner', ch.ownerId);
     const options = await this.factors.webauthnAuthenticationOptions(ch.ownerId);
     await this.challenges.setWebauthnChallenge(this.db, ch.id, options.challenge);
@@ -73,13 +74,13 @@ export class OwnerAuthService {
     const ch = await this.challenges.findByToken('login_mfa', a.challengeToken);
     if (!ch) {
       await this.audit.tryRecord({ type: 'owner.login', outcome: 'failure', ip: client.ip, metadata: { stage: 'challenge' } });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'verification_failed', GENERIC);
     }
     await this.throttle.hit('owner_verify_owner', ch.ownerId);
     const owner = await this.users.findById(ch.ownerId);
     if (!owner || owner.kind !== 'owner' || !owner.isActive) {
       await this.audit.tryRecord({ type: 'owner.login', outcome: 'denied', actorId: ch.ownerId, ip: client.ip, metadata: { stage: 'account' } });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'verification_failed', GENERIC);
     }
 
     const session = await this.db.tx(async (q) => {
@@ -96,7 +97,7 @@ export class OwnerAuthService {
     if (!session) {
       await this.challenges.recordFailure(ch.id);
       await this.audit.tryRecord({ type: 'owner.login', outcome: 'failure', actorId: owner.id, ip: client.ip, metadata: { stage: 'factor', method: a.method } });
-      throw new UnauthorizedException(GENERIC);
+      throw authError(401, 'verification_failed', GENERIC);
     }
     await this.throttle.reset('owner_verify_owner', owner.id);
     await this.devices.checkAndRecord(owner.id, client.userAgent, client.ip, owner.email ? { channel: 'email', destination: owner.email } : owner.phone ? { channel: 'phone', destination: owner.phone } : null);

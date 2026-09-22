@@ -1,7 +1,8 @@
-import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { APP_CONFIG, type AppConfig, type RateBucket } from '../config/app-config.js';
 import { hmacHex } from '../crypto/hmac.js';
 import { DbService } from '../db/db.service.js';
+import { authError } from '../errors.js';
 
 /**
  * Shared (Postgres-backed, so correct across instances) fixed-window rate limiter.
@@ -35,7 +36,7 @@ export class ThrottleService {
       [bucket, this.key(bucket, raw), rule.windowSec],
     );
     if (rows[0].count > rule.limit) {
-      throw new HttpException('Too many attempts. Please try again later.', HttpStatus.TOO_MANY_REQUESTS);
+      throw authError(429, 'rate_limited', 'Too many attempts. Please try again later.');
     }
   }
 

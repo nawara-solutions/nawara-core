@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
+import { bearer, createTestApp, noReqId, type TestCtx } from './helpers/app.js';
 
 describe('owner authentication', () => {
   let t: TestCtx;
@@ -81,7 +81,7 @@ describe('owner authentication', () => {
     const b = await t.http.post('/auth/login').send({ email: 'nobody@a.test', password: 'wrong password!!' });
     expect(a.status).toBe(401);
     expect(b.status).toBe(401);
-    expect(a.body).toEqual(b.body);
+    expect(noReqId(a.body)).toEqual(noReqId(b.body));
   });
 
   it('an enrollment token cannot add a factor once the owner already has one', async () => {
