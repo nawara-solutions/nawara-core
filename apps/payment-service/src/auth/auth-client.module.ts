@@ -1,6 +1,5 @@
 import { DynamicModule, Global, Module } from '@nestjs/common';
-import { HttpAuthClient, type AuthClient } from '@nawara/service-kit';
-import { AUTH_CLIENT } from './auth-client.token.js';
+import { AUTH_CLIENT, HttpAuthClient, type AuthClient } from '@nawara/service-kit';
 
 /** Global: every feature module needs AUTH_CLIENT (the combined service-or-user guard, in particular), not per-module state. */
 @Global()

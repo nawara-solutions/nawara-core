@@ -1,8 +1,9 @@
 import type { ExecutionContext } from '@nestjs/common';
 import { UnauthorizedException } from '@nestjs/common';
-import { hashServiceToken, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { describe, expect, it, vi } from 'vitest';
+import { hashServiceToken } from './service-token.js';
 import { ServiceOrUserGuard, type CallerRequest } from './service-or-user.guard.js';
+import type { AuthClient, AuthIdentity } from './auth-client.js';
 
 const ctxFor = (req: Partial<CallerRequest>): ExecutionContext =>
   ({ switchToHttp: () => ({ getRequest: () => req }) }) as unknown as ExecutionContext;

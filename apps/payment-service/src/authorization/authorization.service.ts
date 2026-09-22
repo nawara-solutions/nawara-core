@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Caller } from '../auth/caller.js';
+import type { Caller } from '@nawara/service-kit';
 import { notFound, operationNotPermitted } from '../errors.js';
 import type { PaymentRow } from '../payments/payment.types.js';
 

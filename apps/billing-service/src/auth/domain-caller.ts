@@ -1,5 +1,5 @@
+import type { Caller as AuthCaller } from '@nawara/service-kit';
 import type { Caller as DomainCaller } from '../domain/actors.js';
-import type { Caller as AuthCaller } from './caller.js';
 
 /**
  * Maps the guard's `Caller` (which carries the full `AuthIdentity` from the kit) to the domain layer's `Caller` (which

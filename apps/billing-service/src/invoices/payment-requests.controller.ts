@@ -1,10 +1,8 @@
 import { Controller, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CallerService, RateLimitService, ServiceTokenGuard } from '@nawara/service-kit';
+import { CallerService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
 import { toDomainCaller } from '../auth/domain-caller.js';
-import type { CallerRequest } from '../auth/service-or-user.guard.js';
-import { ServiceOrUserGuard } from '../auth/service-or-user.guard.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { Caller } from '../domain/actors.js';
