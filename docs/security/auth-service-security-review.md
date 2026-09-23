@@ -101,6 +101,11 @@ All cryptography is from Node `crypto`, `bcryptjs`, `jose`, `otplib`, `@simplewe
 
 ## F. Payment integration (review of the Auth ↔ Payment boundary)
 
+> **Historical (this review is dated 2026-09-18).** The Auth → Payment license call described in this section, and its
+> `PAYMENT_SERVICE_TOKEN`, were removed by Stage 12.1 (commit `f1901f9`, [ADR-0044](../adr/0044-subscription-entitlement-final-model.md)).
+> Auth now makes no commercial call; entitlement is billing-service's (`{ valid, expiresAt }` from the Organization's
+> Subscription) and payment-service only settles payments. The principle below — Auth never answers entitlement — still holds.
+
 **Principle held:** Auth answers *who and which authenticated context*; Payment answers *what entitlement*; platform services answer *what business action*. Verified by tests: no license/subscription/trial/plan/billing column in any auth table; no such claim in any token; login/refresh **never** call payment-service (including when it is down or the license lapsed); no cross-service FK.
 
 **Contract (what each side must do):**
