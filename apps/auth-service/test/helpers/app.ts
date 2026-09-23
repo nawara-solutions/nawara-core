@@ -62,7 +62,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const databaseUrl = adminUrl.replace(/\/[^/]*$/, `/${dbName}`);
 
   const env: Record<string, string> = {
-    NODE_ENV: 'test', DATABASE_URL: databaseUrl,
+    NODE_ENV: 'test', DATABASE_URL: databaseUrl, AUTH_EVENTS: 'off', // no RabbitMQ in tests; events are captured by a recording bus
     JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(), JOIN_CODE_PEPPER: rand(),
     TOTP_ENCRYPTION_KEYS: `k1:${rand()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1',
     WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
@@ -75,7 +75,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const bus = new RecordingBus();
   const logger = new CapturingLogger();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule.register(cfg)] })
     .overrideProvider(APP_CONFIG).useValue(cfg)
     .overrideProvider(CLOCK).useValue(clock)
     .overrideProvider(EVENT_BUS).useValue(bus)

@@ -64,7 +64,16 @@ export type RateBucket =
 
 export interface AppConfig {
   env: 'development' | 'test' | 'production';
+  /** HTTP listen port. */
+  port: number;
+  /** Runtime connection. In production it must be the least-privilege runtime role (ADR-0032), never a superuser or the schema owner. */
   databaseUrl: string;
+  /**
+   * Fire-and-forget event publishing (ADR-0018). `AUTH_EVENTS=off` disables it (tests, runs without a broker; the production
+   * deploy sets it off today). When enabled, `rabbitmqUrl` is set: production requires an explicit `RABBITMQ_URL`; only
+   * development and test fall back to a local broker.
+   */
+  events: { enabled: boolean; rabbitmqUrl?: string };
   trustProxy: boolean;
   corsOrigins: string[];
   baselineRateLimitPerMinute: number;
@@ -137,6 +146,15 @@ function rule(env: NodeJS.ProcessEnv, name: string, limit: number, windowSec: nu
   };
 }
 
+/**
+ * Database users that must never run the service in production: the default superuser name, any schema-owner role, and
+ * `auth`, the database owner the production deploy creates (apps/auth-service/deploy/provision-and-deploy.sh).
+ */
+const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|auth|.+_migrator)$/;
+
+/** Development/test convenience only (a broker on the developer's machine); refused as a silent default in production. */
+const LOCAL_DEV_RABBITMQ_URL = 'amqp://guest:guest@localhost:5672';
+
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   src: SecretSource = new EnvSecretSource(env),
@@ -185,6 +203,28 @@ export function loadConfig(
   }
   const databaseUrl = env.DATABASE_URL ?? '';
   if (!databaseUrl) throw new ConfigError('DATABASE_URL is required');
+  let dbUrl: URL;
+  try { dbUrl = new URL(databaseUrl); } catch { throw new ConfigError('DATABASE_URL must be a valid URL'); }
+  if (!['postgres:', 'postgresql:'].includes(dbUrl.protocol)) throw new ConfigError('DATABASE_URL must use postgres: or postgresql:');
+  if (nodeEnv === 'production' && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(dbUrl.username))) {
+    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
+    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
+  }
+
+  const eventsEnabled = env.AUTH_EVENTS !== 'off';
+  let rabbitmqUrl: string | undefined;
+  if (eventsEnabled) {
+    rabbitmqUrl = env.RABBITMQ_URL || undefined;
+    if (rabbitmqUrl === undefined) {
+      // Never connect a production service to a guessed broker with default credentials: fail closed instead.
+      if (nodeEnv === 'production') throw new ConfigError('RABBITMQ_URL is required in production while events are enabled (set AUTH_EVENTS=off to run without a broker)');
+      rabbitmqUrl = LOCAL_DEV_RABBITMQ_URL;
+    } else {
+      let parsed: URL | undefined;
+      try { parsed = new URL(rabbitmqUrl); } catch { /* reported below */ }
+      if (!parsed || !['amqp:', 'amqps:'].includes(parsed.protocol)) throw new ConfigError('RABBITMQ_URL must be a valid amqp:// or amqps:// URL');
+    }
+  }
 
   const invitation = {
     minMinutes: int(env, 'INVITATION_MIN_MINUTES', 15, 1, 1440),
@@ -212,7 +252,9 @@ export function loadConfig(
 
   return {
     env: nodeEnv,
+    port: int(env, 'PORT', 3000, 1, 65_535),
     databaseUrl,
+    events: { enabled: eventsEnabled, rabbitmqUrl },
     trustProxy: env.TRUST_PROXY === 'true',
     corsOrigins,
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),

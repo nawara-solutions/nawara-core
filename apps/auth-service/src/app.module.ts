@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { HealthModule as KitHealthModule } from '@nawara/service-kit';
@@ -11,7 +11,7 @@ import { AuthService } from './auth/auth.service.js';
 import { GrantsService } from './auth/grants.service.js';
 import { SessionService } from './auth/session.service.js';
 import { CLOCK, EVENT_BUS, NoopEventBus, SystemClock } from './common/ports.js';
-import { APP_CONFIG, loadConfig, type AppConfig } from './config/app-config.js';
+import { APP_CONFIG, type AppConfig } from './config/app-config.js';
 import { PasswordService } from './crypto/password.js';
 import { TotpSecretCipher } from './crypto/totp-cipher.js';
 import { DbService } from './db/db.service.js';
@@ -46,25 +46,15 @@ import { RefreshTokenService } from './tokens/refresh-token.service.js';
 import { TokenService } from './tokens/token.service.js';
 import { UsersService } from './users/users.service.js';
 
-// Broker wiring can be switched off (tests, local runs without RabbitMQ): AUTH_EVENTS=off.
-const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
-
+/**
+ * The whole module graph, built from the ALREADY-VALIDATED configuration (`loadConfig`): `main.ts`, the CLI and the test
+ * suites all go through `AppModule.register(cfg)`, so no module reads `process.env` on its own.
+ */
 @Module({
-  imports: [
-    // Coarse per-IP baseline for every route. The security-relevant limits are the bucketed,
-    // DB-backed ones in ThrottleService (per identifier / per operator / global), not this.
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: Number(process.env.BASELINE_RATE_LIMIT_PER_MINUTE ?? 100) }]),
-    // Adds root GET /health (pure liveness) and GET /ready (ReadinessRegistry, DB check registered by
-    // DbService below) alongside Auth's own existing GET /auth/health, which is unchanged and stays the
-    // route production deploy tooling and Compose already poll (Stage 13.2: additive, not a replacement).
-    KitHealthModule.forRoot({ checkTimeoutMs: 1500 }),
-    ...(eventsEnabled ? [EventsModule] : []),
-  ],
   controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
-    { provide: APP_CONFIG, useFactory: (): AppConfig => loadConfig() },
     { provide: CLOCK, useClass: SystemClock },
     {
       provide: EVENT_BUS,
@@ -80,4 +70,22 @@ const eventsEnabled = process.env.AUTH_EVENTS !== 'off';
     PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, GrantsService, AuthGuard,
   ],
 })
-export class AppModule {}
+export class AppModule {
+  static register(cfg: AppConfig): DynamicModule {
+    return {
+      module: AppModule,
+      imports: [
+        // Coarse per-IP baseline for every route. The security-relevant limits are the bucketed,
+        // DB-backed ones in ThrottleService (per identifier / per operator / global), not this.
+        ThrottlerModule.forRoot([{ ttl: 60_000, limit: cfg.baselineRateLimitPerMinute }]),
+        // Adds root GET /health (pure liveness) and GET /ready (ReadinessRegistry, DB check registered by
+        // DbService below) alongside Auth's own existing GET /auth/health, which is unchanged and stays the
+        // route production deploy tooling and Compose already poll (Stage 13.2: additive, not a replacement).
+        KitHealthModule.forRoot({ checkTimeoutMs: 1500 }),
+        // Broker wiring is switched off with AUTH_EVENTS=off (tests, runs without RabbitMQ).
+        ...(cfg.events.enabled && cfg.events.rabbitmqUrl ? [EventsModule.register(cfg.events.rabbitmqUrl)] : []),
+      ],
+      providers: [{ provide: APP_CONFIG, useValue: cfg }],
+    };
+  }
+}

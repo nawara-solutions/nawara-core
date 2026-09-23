@@ -9,7 +9,12 @@
 #
 # State kept on the server (mode 0700 dir, 0600 files), default $HOME/nawara-core/auth-service:
 #   db.env  POSTGRES_USER / POSTGRES_DB / POSTGRES_PASSWORD  (consumed by the postgres container)
+#           AUTH_APP_PASSWORD  (the least-privilege runtime role's password, Stage 14.3)
 #   .env    the auth-service environment, names as in apps/auth-service/.env.example
+#
+# Database roles (ADR-0032): POSTGRES_USER (`auth`) is the database's bootstrap owner. It applies the migrations below and
+# nothing else. The service itself connects as `auth_app`: CONNECT plus DML on the application tables, no DDL, no role or
+# database creation, not a superuser. auth-service refuses to start in production as `auth`, `postgres` or a *_migrator.
 set -euo pipefail
 umask 077
 
@@ -77,12 +82,46 @@ for f in $(docker run --rm --entrypoint sh "$IMAGE" -c 'cd db/migrations && ls 0
   fi
 done
 
+# ---------------------------------------------------------------- runtime role (least privilege)
+# Re-applied on every deploy, after the migrations, so a table a new migration created is covered too. The password is
+# generated once and fed to psql on stdin (never on a command line, never printed).
+APP_ROLE=auth_app
+ensure "$DB_ENV" AUTH_APP_PASSWORD "$(openssl rand -hex 24)"
+APP_PASS=$(sed -n 's/^AUTH_APP_PASSWORD=//p' "$DB_ENV")
+log "ensuring the least-privilege runtime role $APP_ROLE"
+{
+  printf '%s\n' 'DO $role$ BEGIN'
+  printf "  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s; END IF;\n" "$APP_ROLE" "$APP_ROLE"
+  printf '%s\n' 'END $role$;'
+  printf "ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '%s';\n" "$APP_ROLE" "$APP_PASS"
+  printf 'REVOKE ALL ON DATABASE %s FROM PUBLIC;\n' "$PGDB"
+  printf 'GRANT CONNECT ON DATABASE %s TO %s;\n' "$PGDB" "$APP_ROLE"
+  printf 'REVOKE ALL ON SCHEMA public FROM PUBLIC;\n'
+  printf 'GRANT USAGE ON SCHEMA public TO %s;\n' "$APP_ROLE"
+  printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s;\n' "$APP_ROLE"
+  printf 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s;\n' "$APP_ROLE"
+  # the deploy's own migration bookkeeping is not application data
+  printf 'REVOKE ALL ON TABLE schema_migrations FROM %s;\n' "$APP_ROLE"
+  printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s;\n' "$PGUSER" "$APP_ROLE"
+  printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s;\n' "$PGUSER" "$APP_ROLE"
+} | psql_stdin
+
 # ---------------------------------------------------------------- application environment
-log "ensuring $APP_ENV (existing values are never overwritten)"
+log "ensuring $APP_ENV (existing values are never overwritten, except below)"
 touch "$APP_ENV"; chmod 600 "$APP_ENV"
 b64() { openssl rand -base64 32; }
 ensure "$APP_ENV" NODE_ENV production
-ensure "$APP_ENV" DATABASE_URL "postgres://$PGUSER:$PGPASS@$DB:5432/$PGDB"
+RUNTIME_DB_URL="postgres://$APP_ROLE:$APP_PASS@$DB:5432/$PGDB"
+if grep -q "^DATABASE_URL=postgres://$PGUSER:" "$APP_ENV"; then
+  # The one value this script ever rewrites: an existing install that still runs as the database OWNER (before Stage 14.3)
+  # is moved to the runtime role. Any other DATABASE_URL an operator set is left alone.
+  tmp=$(mktemp "$DIR/.env.XXXXXX")
+  grep -v '^DATABASE_URL=' "$APP_ENV" >"$tmp" || true
+  printf 'DATABASE_URL=%s\n' "$RUNTIME_DB_URL" >>"$tmp"
+  chmod 600 "$tmp"; mv "$tmp" "$APP_ENV"
+  log "  ~ DATABASE_URL (moved from the database owner to the runtime role $APP_ROLE)"
+fi
+ensure "$APP_ENV" DATABASE_URL "$RUNTIME_DB_URL"
 ensure "$APP_ENV" JWT_SECRET "$(b64)"
 ensure "$APP_ENV" OPERATOR_CODE_PEPPER "$(b64)"
 ensure "$APP_ENV" SECRET_KEY_PEPPER "$(b64)"

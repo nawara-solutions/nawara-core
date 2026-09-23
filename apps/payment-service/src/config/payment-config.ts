@@ -20,6 +20,9 @@ export interface PaymentConfig extends BaseConfig {
   docs: { username: string; password?: string };
 }
 
+/** Database users that must never run the service in production: the default superuser name and any schema-owner role (same rule as billing-service and organization-service). */
+const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
+
 export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): PaymentConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig('payment-service', env, reader);
@@ -34,19 +37,26 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     // nothing reaches Billing. A development convenience that must not survive into production (same rule as billing-service).
     throw new ConfigError('RABBITMQ_URL is required in production (the in-memory event bus is for development and tests only)');
   }
+  const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
+  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
+    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
+    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
+  }
   const supportedCurrencies = (reader.optional('PAYMENT_SUPPORTED_CURRENCIES', 'TND') ?? '')
     .split(',')
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
-  if (supportedCurrencies.length === 0) throw new ConfigError('PAYMENT_SUPPORTED_CURRENCIES must list at least one currency code');
+  if (supportedCurrencies.length === 0 || supportedCurrencies.some((c) => !/^[A-Z]{3}$/.test(c))) {
+    throw new ConfigError('PAYMENT_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
+  }
   return {
     ...base,
-    databaseUrl: reader.url('DATABASE_URL', ['postgres:', 'postgresql:']),
+    databaseUrl,
     serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
-    authServiceUrl: reader.required('AUTH_SERVICE_URL'),
+    authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,
-    supportedCurrencies,
+    supportedCurrencies: [...new Set(supportedCurrencies)],
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
     idempotencyTtlHours: reader.int('IDEMPOTENCY_TTL_HOURS', { default: 24, min: 1, max: 24 * 30 }),
     testProviderEnabled,
@@ -55,6 +65,10 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
       createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),
       attemptPerMinute: reader.int('PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE', { default: 30, min: 1, max: 100_000 }),
     },
-    docs: { username: reader.optional('SWAGGER_USERNAME', 'docs') as string, password: reader.optional('SWAGGER_PASSWORD') },
+    docs: {
+      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
+      // A password that protects financial API documentation must not be trivial (same rule as billing-service and organization-service).
+      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
+    },
   };
 }

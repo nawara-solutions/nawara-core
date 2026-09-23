@@ -55,7 +55,7 @@ describe('configuration and key management fail closed', () => {
     const p = { ...good(), NODE_ENV: 'production' };
     expect(() => loadConfig(p)).toThrow(/WEBAUTHN/);
     expect(() => loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'http://a.test' })).toThrow(/https/);
-    expect(loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test' }).env).toBe('production');
+    expect(loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test', AUTH_EVENTS: 'off' }).env).toBe('production');
   });
   it('a step-up can never be configured longer than the 15-minute database limit', () => {
     expect(() => loadConfig({ ...good(), STEP_UP_TTL_SEC: '901' })).toThrow(ConfigError);
@@ -71,5 +71,52 @@ describe('configuration and key management fail closed', () => {
     for (const bad of ['*', 'https://*.a.test', 'a.test', 'https://a.test/', 'https://a.test/path', 'ftp://a.test', 'null', 'https://a.test,*']) {
       expect(() => loadConfig({ ...good(), CORS_ORIGINS: bad }), bad).toThrow(ConfigError);
     }
+  });
+});
+
+describe('runtime configuration is validated once and fails closed (Stage 14.3)', () => {
+  const prod = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+    ...good(), NODE_ENV: 'production', DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off',
+    WEBAUTHN_RP_ID: 'example.com', WEBAUTHN_ORIGINS: 'https://app.example.com', ...over,
+  });
+
+  it('accepts a production configuration that uses the least-privilege runtime role', () => {
+    const c = loadConfig(prod());
+    expect(c.databaseUrl).toBe('postgres://auth_app:pw@db:5432/auth');
+    expect(c.events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+  });
+  it.each(['postgres', 'root', 'auth', 'auth_migrator'])('refuses the %s database user in production (superuser / schema owner), without echoing the URL', (user) => {
+    try { loadConfig(prod({ DATABASE_URL: `postgres://${user}:s3cret-value@db:5432/auth` })); throw new Error('no throw'); } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toMatch(/least-privilege runtime role/);
+      expect((err as Error).message).not.toContain('s3cret-value');
+    }
+  });
+  it('allows any database user outside production (tests and local runs use an admin connection)', () => {
+    expect(loadConfig({ ...good(), DATABASE_URL: 'postgres://postgres@localhost:5432/auth' }).databaseUrl).toContain('postgres@');
+  });
+  it.each(['not a url', 'mysql://u:p@h/db', 'http://h/db'])('refuses a malformed or non-PostgreSQL DATABASE_URL: %s', (url) => {
+    expect(() => loadConfig({ ...good(), DATABASE_URL: url })).toThrow(ConfigError);
+  });
+  it('production with events enabled requires an explicit RABBITMQ_URL: no silent default broker or default credentials', () => {
+    expect(() => loadConfig(prod({ AUTH_EVENTS: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
+    expect(loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: true, rabbitmqUrl: 'amqps://u:p@broker:5671' });
+  });
+  it('outside production, events enabled without RABBITMQ_URL keep the local development broker', () => {
+    expect(loadConfig(good()).events).toEqual({ enabled: true, rabbitmqUrl: 'amqp://guest:guest@localhost:5672' });
+  });
+  it.each(['http://broker:5672', 'broker:5672'])('refuses a RABBITMQ_URL that is not amqp:// or amqps://: %s', (url) => {
+    expect(() => loadConfig({ ...good(), RABBITMQ_URL: url })).toThrow(/RABBITMQ_URL must be/);
+  });
+  it('AUTH_EVENTS=off disables events and ignores RABBITMQ_URL', () => {
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'not validated when off' }).events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+  });
+  it('PORT and BASELINE_RATE_LIMIT_PER_MINUTE are validated integers with the previous defaults (3000, 100)', () => {
+    const c = loadConfig(good());
+    expect(c.port).toBe(3000);
+    expect(c.baselineRateLimitPerMinute).toBe(100);
+    expect(loadConfig({ ...good(), PORT: '8080', BASELINE_RATE_LIMIT_PER_MINUTE: '250' })).toMatchObject({ port: 8080, baselineRateLimitPerMinute: 250 });
+    for (const bad of ['0', '70000', 'abc', '3.5']) expect(() => loadConfig({ ...good(), PORT: bad })).toThrow(/PORT/);
+    for (const bad of ['0', 'abc']) expect(() => loadConfig({ ...good(), BASELINE_RATE_LIMIT_PER_MINUTE: bad })).toThrow(/BASELINE_RATE_LIMIT_PER_MINUTE/);
   });
 });

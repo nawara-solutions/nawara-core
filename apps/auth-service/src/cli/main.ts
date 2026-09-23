@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module.js';
-import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
+import { APP_CONFIG, loadConfig, type AppConfig } from '../config/app-config.js';
 import { PasswordService } from '../crypto/password.js';
 import { TotpSecretCipher } from '../crypto/totp-cipher.js';
 import { DbService } from '../db/db.service.js';
@@ -25,7 +25,7 @@ import { bootstrapOwner, checkTotpKeys, resealTotpSecrets } from './owner-tools.
  */
 const cmd = process.argv[2];
 process.env.AUTH_EVENTS = 'off';
-const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error'] });
+const app = await NestFactory.createApplicationContext(AppModule.register(loadConfig()), { logger: ['error'] });
 try {
   if (cmd === 'bootstrap-owner') {
     const { BOOTSTRAP_COMPANY_NAME: company, BOOTSTRAP_OWNER_EMAIL: email, BOOTSTRAP_OWNER_PASSWORD: password, BOOTSTRAP_COMPANY_ID: companyId } = process.env;
