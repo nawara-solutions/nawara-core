@@ -174,6 +174,24 @@ payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOU
   accepted, and the caller retries the same call; the retry is a replay.
 - Details: `core-validation.md` sections 13.5 (initial failure), 13.5.1 (patch 1) and 13.5.2 (patch 2, F-H).
 
+**Cross-service failures (Stage 15.6).**
+- No service's readiness depends on another service, and each service keeps doing its own work while another is down:
+  - Billing issues invoices and accepts payment requests while Payment is down;
+  - Payment takes cancellations and payments while Billing is down; the events wait durably;
+  - Auth and Organization are unaffected by Billing, Payment or the broker.
+- Calls that need another service answer truthfully and within a bound:
+  - Billing's cancel gets `503 payment_unavailable` within 5 s;
+  - a payer route with Auth unavailable gets 503;
+  - bad service credentials get 401.
+- After any combination of outages, in any recovery order, Billing and Payment converge by themselves: outbox, queue redelivery,
+  receipts, the reconciler, and Payment's natural key for resends. No manual repair; one effect per event.
+- **Operational notes:**
+  - Billing must run under a restart policy (it exits at startup while RabbitMQ is unreachable);
+  - Billing and Payment report unready during a broker outage although their HTTP keeps working (decision open, SRE);
+  - a request whose send failed is resent only after the 60 s stale window;
+  - a message dead-lettered during a long database outage stays in the DLQ after the reconciler has applied it (replay is safe).
+- Details: `core-validation.md` section 13.6.
+
 **Signals and tools:** the log signals (`*_pass_failure`, `readiness_check_failed|recovered`, `outbox_publish_failure`,
 `rabbitmq_confirm_timeout`, `worker_drain_timeout`, `webhook_retry_exhausted`, `service_started`, `service_shutdown_*`) and the CLIs
 (`nawara-migrate`, `nawara-check-outbox-lag`, `nawara-check-dlq`, `nawara-dlq`) are described in the

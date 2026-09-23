@@ -1103,7 +1103,7 @@ C.dockerFrozenBrokerFinal = async () => {
             paused = true;
             if (service === 'payment-service') pending = await paymentThrough(c.base, token, { cancel: true }); // publish in flight: confirm pending
             await h.sleep(1500);
-            const stopMs = c.stop(['-t', '45']);
+            const stopMs = c.stop(['-t', '60']);
             const st = c.state();
             const lifecycle = c.lifecycle();
             const rowAtExit = pending ? (await h.adminQuery(db.url, `SELECT count(*) FILTER (WHERE "publishedAt" IS NULL)::int AS unpublished, max(attempts)::int AS attempts FROM outbox WHERE payload->>'paymentId' = $1`, [pending.id]))[0] : null;
@@ -1161,7 +1161,7 @@ C.dockerConsumerInFlightFrozen = async () => {
         rabbit.pause();
         paused = true;
         await h.sleep(500);
-        const stopMs = c.stop(['-t', '45']);
+        const stopMs = c.stop(['-t', '60']);
         const st = c.state();
         const [atExit] = await h.adminQuery(db.url, 'SELECT count(*)::int AS n FROM payment_event_receipt WHERE "eventId"::text = $1', [eventId]);
         await gate.q('SELECT pg_advisory_unlock(4242)');
@@ -1209,7 +1209,7 @@ C.dockerBrokerVanishes = async () => {
             await h.waitFor(async () => (await h.adminQuery(db.url, `SELECT count(*)::int AS n FROM outbox WHERE "publishedAt" IS NULL`))[0].n === 0, 15_000, 50);
           } else await h.sleep(1500);
           broker.pause();
-          const stopping = c.stopAsync(['-t', '45']);
+          const stopping = c.stopAsync(['-t', '60']);
           await h.sleep(2000);
           spawnSync('docker', ['rm', '-f', own(broker.name)]);
           const stopMs = await stopping;
@@ -1248,7 +1248,7 @@ C.dockerFrozenCycles = async () => {
       rabbit.pause();
       payments.push(await paymentThrough(pay.base, token, { cancel: true })); // pending at the freeze
       await h.sleep(1000);
-      const [bMs, pMs] = await Promise.all([bill.stopAsync(['-t', '45']), pay.stopAsync(['-t', '45'])]);
+      const [bMs, pMs] = await Promise.all([bill.stopAsync(['-t', '60']), pay.stopAsync(['-t', '60'])]);
       const exits = [bill.state().ExitCode, pay.state().ExitCode];
       rabbit.unpause();
       await Promise.all([bill.start(), pay.start()]);
@@ -1272,6 +1272,85 @@ C.dockerFrozenCycles = async () => {
     cw.close();
     await bdb.drop();
     await pdb.drop();
+  }
+};
+
+C.dockerCrossServiceOutage = async () => {
+  // Stage 15.6 production-container checks (Node = PID 1, `docker stop -t 60`, the adopted grace):
+  //   (1) RabbitMQ STOPPED (not frozen) while Billing and Payment containers run and Payment cancels (its event waits in the outbox);
+  //       both containers stopped and started again while the broker is still down (Billing keeps exiting: fail-fast startup, restarted
+  //       by the harness as a restart policy would), then the broker returns: both natural exits, one consumer, the event applied once;
+  //   (2) the throwaway PostgreSQL container paused (every database hangs) while a Payment container is stopped: it must exit naturally
+  //       within the Core bound (worker drains, then the query deadline), then start again and be ready. 3 runs each.
+  const { generateServiceToken } = await import('../../libs/service-kit/dist/index.js');
+  const cw = await containerWorld();
+  const out = { rabbitStopped: [], databasePaused: [] };
+  try {
+    for (let i = 0; i < 3; i++) {
+      const bdb = await h.throwawayDatabase(ADMIN, 'billing-service');
+      const pdb = await h.throwawayDatabase(ADMIN, 'payment-service');
+      const token = generateServiceToken();
+      let stopped = false;
+      try {
+        const bill = await cw.run('billing-service', bdb);
+        const pay = await cw.run('payment-service', pdb, { SERVICE_TOKENS: `billing-service:${token.digest}` });
+        rabbit.appStop();
+        stopped = true;
+        const p = await paymentThrough(pay.base, token, { cancel: true });
+        await h.sleep(1500);
+        const [bMs, pMs] = await Promise.all([bill.stopAsync(['-t', '60']), pay.stopAsync(['-t', '60'])]);
+        const exits = [bill.state().ExitCode, pay.state().ExitCode];
+        spawnSync('docker', ['start', pay.name]);
+        spawnSync('docker', ['start', bill.name]);
+        await h.sleep(4000);
+        const billingWhileBrokerDown = bill.state();
+        await rabbit.appStart();
+        stopped = false;
+        let billingStarts = 1;
+        const back = await h.waitFor(async () => {
+          if (!bill.state().Running) { spawnSync('docker', ['start', bill.name]); billingStarts++; }
+          return Number(rabbit.queues().find((q) => q.name === 'billing.payment-events')?.consumers) === 1;
+        }, 60_000, 1000);
+        const drained = await h.waitFor(async () => (await h.adminQuery(pdb.url, `SELECT count(*)::int AS n FROM outbox WHERE "publishedAt" IS NULL`))[0].n === 0, 60_000, 200);
+        const [ev] = await h.adminQuery(pdb.url, `SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.cancelled' AND payload->>'paymentId' = $1`, [p.id]);
+        out.rabbitStopped.push({ stopMs: [bMs, pMs], exits, billingRunningWhileBrokerDown: billingWhileBrokerDown.Running, billingExitWhileBrokerDown: billingWhileBrokerDown.ExitCode, billingStarts, consumerBack: Boolean(back), outboxDrained: Boolean(drained), cancelledEvents: ev.n });
+        bill.stop(['-t', '60']);
+        pay.stop(['-t', '60']);
+      } finally {
+        if (stopped) await rabbit.appStart();
+        await bdb.drop();
+        await pdb.drop();
+      }
+    }
+    log(`dockerCrossServiceOutage rabbitStopped: ${JSON.stringify(out.rabbitStopped.map((r) => [r.stopMs, r.exits, r.billingStarts, r.consumerBack, r.outboxDrained, r.cancelledEvents]))}`);
+    for (let i = 0; i < 3; i++) {
+      const pdb = await h.throwawayDatabase(ADMIN, 'payment-service');
+      const token = generateServiceToken();
+      let paused = false;
+      try {
+        const pay = await cw.run('payment-service', pdb, { SERVICE_TOKENS: `billing-service:${token.digest}` });
+        await paymentThrough(pay.base, token, {});
+        await h.sleep(6000); // Payment's workers have started a pass
+        dockerCmd('pause', own(pgc.name));
+        paused = true;
+        await h.sleep(6000); // every worker is now hung in the database
+        const ms = pay.stop(['-t', '60']);
+        const st = pay.state();
+        dockerCmd('unpause', own(pgc.name));
+        paused = false;
+        const t = h.now();
+        const ready = await pay.start();
+        out.databasePaused.push({ stopMs: ms, exitCode: st.ExitCode, lifecycle: pay.lifecycle().slice(-3), restartedReady: Boolean(ready), readyMs: h.round(h.now() - t) });
+        pay.stop(['-t', '60']);
+      } finally {
+        if (paused) dockerCmd('unpause', own(pgc.name));
+        await pdb.drop();
+      }
+    }
+    log(`dockerCrossServiceOutage databasePaused: ${JSON.stringify(out.databasePaused.map((r) => [r.stopMs, r.exitCode]))}`);
+    return { ...out, rabbitStoppedExitCodes: [...new Set(out.rabbitStopped.flatMap((r) => r.exits))], databasePausedStopMs: h.stats(out.databasePaused.map((r) => r.stopMs)), databasePausedExitCodes: [...new Set(out.databasePaused.map((r) => r.exitCode))] };
+  } finally {
+    cw.close();
   }
 };
 
