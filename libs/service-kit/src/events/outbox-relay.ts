@@ -1,4 +1,5 @@
 import { redactString } from '../logging/redact.js';
+import { PollLoop, type DrainOutcome } from '../workers/poll-loop.js';
 import type { Queryable } from '../db/db.service.js';
 import type { EventBus, EventEnvelope } from './types.js';
 
@@ -27,16 +28,16 @@ interface OutboxRow {
  * transaction that claimed it; a crash between publish and stamp re-publishes it, which consumers absorb via the inbox.
  */
 export class OutboxRelay {
-  private timer?: NodeJS.Timeout;
-  private inFlight?: Promise<unknown>;
-  private stopped = true;
+  private readonly loop: PollLoop;
 
   constructor(
     private readonly db: { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> },
     private readonly bus: EventBus,
     private readonly opts: RelayOptions,
     private readonly onError: (message: string) => void = () => undefined,
-  ) {}
+  ) {
+    this.loop = new PollLoop(() => this.drainOnce(), (e) => this.onError(`outbox relay error: ${e instanceof Error ? e.name : 'unknown'}`));
+  }
 
   async drainOnce(): Promise<{ published: number; failed: number }> {
     const batch = this.opts.batchSize ?? 50;
@@ -76,25 +77,17 @@ export class OutboxRelay {
     });
   }
 
-  /** Starts polling. The broker being down only delays delivery; it never affects the business transactions. */
+  /** Starts polling (first pass right away). The broker being down only delays delivery; it never affects the business transactions. */
   start(intervalMs = 1000): void {
-    if (!this.stopped) return;
-    this.stopped = false;
-    const tick = () => {
-      if (this.stopped) return;
-      this.inFlight = this.drainOnce()
-        .catch((e) => this.onError(`outbox relay error: ${e instanceof Error ? e.name : 'unknown'}`))
-        .finally(() => {
-          if (!this.stopped) this.timer = setTimeout(tick, intervalMs);
-        });
-    };
-    tick();
+    this.loop.start(intervalMs, 0);
   }
 
-  /** Stops polling and waits for an in-flight batch to finish (graceful shutdown). */
-  async stop(): Promise<void> {
-    this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
-    await this.inFlight;
+  /**
+   * Stops polling and waits, at most `drainTimeoutMs`, for an in-flight batch (graceful shutdown). A batch waiting on the broker is
+   * itself bounded by the bus's publisher-confirm timeout, so a timeout here means only that shutdown proceeds; the batch's
+   * transaction then ends with the database pool (its rows stay unpublished and are relayed again: at least once).
+   */
+  async stop(drainTimeoutMs?: number): Promise<DrainOutcome> {
+    return this.loop.stop(drainTimeoutMs);
   }
 }

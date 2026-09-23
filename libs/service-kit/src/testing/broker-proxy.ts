@@ -8,6 +8,8 @@ import net from 'node:net';
 export class BrokerProxy {
   private server?: net.Server;
   private readonly sockets = new Set<net.Socket>();
+  private readonly upstreams = new Set<net.Socket>();
+  private frozen = false;
   port = 0;
   accepted = 0;
   constructor(private readonly target: { host: string; port: number }) {}
@@ -15,9 +17,11 @@ export class BrokerProxy {
     this.server = net.createServer((client) => {
       this.accepted++;
       const upstream = net.connect(this.target.port, this.target.host);
+      this.upstreams.add(upstream);
+      if (this.frozen) upstream.pause();
       for (const s of [client, upstream]) {
         this.sockets.add(s);
-        s.on('close', () => { this.sockets.delete(s); (s === client ? upstream : client).destroy(); });
+        s.on('close', () => { this.sockets.delete(s); this.upstreams.delete(s); (s === client ? upstream : client).destroy(); });
         s.on('error', () => undefined);
       }
       client.pipe(upstream);
@@ -31,6 +35,18 @@ export class BrokerProxy {
     this.server = undefined;
     for (const s of this.sockets) s.destroy();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  /**
+   * Stalls the BROKER-to-client direction without closing anything: the client can still send (a publish reaches the broker) but
+   * receives nothing (no publisher confirm, no delivery, no heartbeat) — a stalled or blocked broker, not a dead one.
+   */
+  freeze(): void {
+    this.frozen = true;
+    for (const u of this.upstreams) u.pause();
+  }
+  thaw(): void {
+    this.frozen = false;
+    for (const u of this.upstreams) u.resume();
   }
   get url(): string {
     return `amqp://guest:guest@127.0.0.1:${this.port}`;

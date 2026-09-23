@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { runWithRequestContext } from '@nawara/service-kit';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { runWithRequestContext, PollLoop, type DrainOutcome } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { jobTransitionContext, type TransitionContext } from '../domain/actors.js';
@@ -17,7 +17,8 @@ import type { PaymentClient } from './payment-client.js';
  */
 @Injectable()
 export class PaymentDispatcher {
-  private timer?: NodeJS.Timeout;
+  // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
+  private readonly loop = new PollLoop(() => this.dispatchOnce(), (e) => this.logger.error(`payment_dispatch_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
   private running = false;
   private readonly logger = new Logger(PaymentDispatcher.name);
 
@@ -28,15 +29,13 @@ export class PaymentDispatcher {
   ) {}
 
   start(intervalMs = this.config.dispatch.intervalMs): void {
-    if (this.timer) return;
     // A whole-pass failure (for example the claim query) must not escape as an unhandled rejection: log it and let the next tick run.
-    this.timer = setInterval(() => void this.dispatchOnce().catch((e) => this.logger.error(`payment_dispatch_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
-    this.timer.unref?.();
+    this.loop.start(intervalMs);
   }
 
-  async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+  /** Stops scheduling passes and waits, bounded, for the one in flight (see `PollLoop`). */
+  async stop(drainTimeoutMs?: number): Promise<DrainOutcome> {
+    return this.loop.stop(drainTimeoutMs);
   }
 
   /** One pass: claim, then call Payment for each claim OUTSIDE any transaction. Exposed directly for tests. */
@@ -86,12 +85,16 @@ export class PaymentDispatcher {
 }
 
 @Injectable()
-export class PaymentDispatcherService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class PaymentDispatcherService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly dispatcher: PaymentDispatcher) {}
   onApplicationBootstrap(): void {
     this.dispatcher.start();
   }
-  async onApplicationShutdown(): Promise<void> {
+  /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
+  async beforeApplicationShutdown(): Promise<void> {
     await this.dispatcher.stop();
+  }
+  async onApplicationShutdown(): Promise<void> {
+    await this.dispatcher.stop(); // idempotent: already stopped when Nest drives the shutdown
   }
 }

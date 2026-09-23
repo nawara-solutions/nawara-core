@@ -62,7 +62,7 @@ describe('loadBillingConfig', () => {
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'isProduction', 'logLevel',
-      'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqUrl', 'rateLimits', 'reconcile',
+      'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqUrl', 'rateLimits', 'reconcile',
       'serviceName', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy',
     ]);
   });
@@ -184,5 +184,12 @@ describe('loadBillingConfig', () => {
     it('does not apply the database-role rule outside production (local development uses whatever the developer has)', () => {
       expect(loadBillingConfig({ ...BASE, DATABASE_URL: 'postgres://postgres:pw@localhost:5433/billing' }).isProduction).toBe(false);
     });
+  });
+
+  // Stage 14.6: bound on a RabbitMQ publisher confirm (a timeout fails the publish; the outbox keeps the event and retries it).
+  it('RABBITMQ_CONFIRM_TIMEOUT_MS defaults to 5000 and is bounded (100-60000)', () => {
+    expect(loadBillingConfig(BASE).rabbitmqConfirmTimeoutMs).toBe(5000);
+    expect(loadBillingConfig({ ...BASE, RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).rabbitmqConfirmTimeoutMs).toBe(2000);
+    for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadBillingConfig({ ...BASE, RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
   });
 });

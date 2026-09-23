@@ -12,7 +12,7 @@ const config = { dispatch: { intervalMs: 5, batchSize: 5, staleSendingMs: 1000 }
 
 interface Job {
   start(intervalMs: number): void;
-  stop(): Promise<void>;
+  stop(): Promise<unknown>;
   run(): Promise<unknown>;
 }
 const jobs: Array<{ name: string; event: string; make: (fail: unknown) => { job: Job; firstCall: ReturnType<typeof vi.fn> } }> = [

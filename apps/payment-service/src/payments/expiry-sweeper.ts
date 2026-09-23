@@ -1,5 +1,5 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { DbService, OutboxService } from '@nawara/service-kit';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { DbService, OutboxService, PollLoop, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
 import type { PaymentRow } from './payment.types.js';
 
@@ -10,7 +10,8 @@ import type { PaymentRow } from './payment.types.js';
  */
 @Injectable()
 export class ExpirySweeper {
-  private timer?: NodeJS.Timeout;
+  // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
+  private readonly loop = new PollLoop(() => this.sweepOnce(), (e) => this.logger.error(`expiry_sweep_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
   private running = false;
   private readonly logger = new Logger(ExpirySweeper.name);
 
@@ -20,15 +21,13 @@ export class ExpirySweeper {
   ) {}
 
   start(intervalMs = 5000): void {
-    if (this.timer) return;
     // A whole-pass failure (for example the scan query) must not escape as an unhandled rejection: log it and let the next tick run.
-    this.timer = setInterval(() => void this.sweepOnce().catch((e) => this.logger.error(`expiry_sweep_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
-    this.timer.unref?.();
+    this.loop.start(intervalMs);
   }
 
-  async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+  /** Stops scheduling passes and waits, bounded, for the one in flight (see `PollLoop`). */
+  async stop(drainTimeoutMs?: number): Promise<DrainOutcome> {
+    return this.loop.stop(drainTimeoutMs);
   }
 
   async sweepOnce(): Promise<{ expired: number }> {
@@ -67,12 +66,16 @@ export class ExpirySweeper {
 }
 
 @Injectable()
-export class ExpirySweeperService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class ExpirySweeperService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly sweeper: ExpirySweeper) {}
   onApplicationBootstrap(): void {
     this.sweeper.start();
   }
-  async onApplicationShutdown(): Promise<void> {
+  /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
+  async beforeApplicationShutdown(): Promise<void> {
     await this.sweeper.stop();
+  }
+  async onApplicationShutdown(): Promise<void> {
+    await this.sweeper.stop(); // idempotent: already stopped when Nest drives the shutdown
   }
 }

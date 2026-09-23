@@ -17,6 +17,22 @@ export interface RabbitMqOptions {
   retry?: { maxRetries?: number; delayMs?: number };
   /** Operational notices (consumer lost / recovered, retry / dead-letter, settle failed). Never carries a URL, credential or payload. */
   onNotice?: (message: string) => void;
+  /**
+   * Bound on waiting for the broker's publisher confirm (default 5000 ms), for publishes and for retry/dead-letter copies. Past it
+   * the publish FAILS and the confirm channel is discarded. A timeout means "not confirmed", not "not sent": the caller (the outbox
+   * relay) keeps the event pending and publishes it again, so a duplicate is possible and consumers deduplicate (at least once).
+   */
+  confirmTimeoutMs?: number;
+  /** Bound on waiting, when a consumer is closed, for deliveries its handler is still processing (default 5000 ms). */
+  drainTimeoutMs?: number;
+}
+
+/** Thrown when the broker does not confirm a publish in time. The message may or may not have been stored by the broker. */
+export class PublisherConfirmTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`publisher confirm not received within ${timeoutMs} ms`);
+    this.name = 'PublisherConfirmTimeoutError';
+  }
 }
 
 export type ConsumerState = 'consuming' | 'reconnecting' | 'closed';
@@ -34,6 +50,8 @@ interface ConsumerHandle {
   timer?: NodeJS.Timeout;
   attempts: number;
   closed: boolean;
+  /** Deliveries whose handler (and settlement) is still running: awaited, bounded, before the channel is closed. */
+  inFlight: Set<Promise<void>>;
 }
 
 /**
@@ -100,10 +118,33 @@ export class RabbitMqEventBus implements EventBus {
         timestamp: Math.floor(new Date(event.headers.occurredAt).getTime() / 1000),
         headers: { ...event.headers },
       });
-      await ch.waitForConfirms();
+      await this.confirmed(ch);
     } catch (e) {
       this.publisher = undefined;
       throw e;
+    }
+  }
+
+  /** Waits for the broker's confirms, bounded. On timeout the channel is discarded so a late confirm can never be misattributed. */
+  private async confirmed(ch: ConfirmChannel): Promise<void> {
+    const timeoutMs = this.opts.confirmTimeoutMs ?? 5000;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        ch.waitForConfirms(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new PublisherConfirmTimeoutError(timeoutMs)), timeoutMs);
+        }),
+      ]);
+    } catch (e) {
+      if (e instanceof PublisherConfirmTimeoutError) {
+        if (this.publisher === ch) this.publisher = undefined;
+        this.notice(`rabbitmq_confirm_timeout timeoutMs=${timeoutMs}`);
+        void ch.close().catch(() => undefined);
+      }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -113,7 +154,7 @@ export class RabbitMqEventBus implements EventBus {
   }
 
   async subscribe(sub: EventSubscription) {
-    const handle: ConsumerHandle = { sub, state: 'reconnecting', attempts: 0, closed: false };
+    const handle: ConsumerHandle = { sub, state: 'reconnecting', attempts: 0, closed: false, inFlight: new Set() };
     this.consumers.add(handle);
     try {
       await this.attach(handle);
@@ -149,7 +190,8 @@ export class RabbitMqEventBus implements EventBus {
           this.consumerLost(h, ch);
           return;
         }
-        void this.deliver(ch, msg, sub);
+        const delivery: Promise<void> = this.deliver(ch, msg, sub).finally(() => h.inFlight.delete(delivery));
+        h.inFlight.add(delivery);
       });
       if (h.closed) throw new Error('consumer closed while attaching');
       h.channel = ch;
@@ -201,7 +243,21 @@ export class RabbitMqEventBus implements EventBus {
     const ch = h.channel;
     h.channel = undefined;
     if (ch) {
+      // 1. No new deliveries. 2. Let the ones already being handled finish and settle (bounded). 3. Close the channel.
       if (h.consumerTag) await ch.cancel(h.consumerTag).catch(() => undefined);
+      if (h.inFlight.size > 0) {
+        const drainMs = this.opts.drainTimeoutMs ?? 5000;
+        let timer: NodeJS.Timeout | undefined;
+        const outcome = await Promise.race([
+          Promise.allSettled([...h.inFlight]).then(() => 'drained' as const),
+          new Promise<'timeout'>((resolve) => {
+            timer = setTimeout(() => resolve('timeout'), drainMs);
+          }),
+        ]);
+        if (timer) clearTimeout(timer);
+        // Unsettled deliveries are redelivered by the broker once the channel closes (at least once; consumers deduplicate).
+        if (outcome === 'timeout') this.notice(`rabbitmq_consumer_drain_timeout queue=${h.sub.queue} inFlight=${h.inFlight.size}`);
+      }
       await ch.close().catch(() => undefined);
     }
   }
@@ -325,7 +381,7 @@ export class RabbitMqEventBus implements EventBus {
         headers: { ...withoutBrokerHistory(msg.properties.headers), ...annotations },
         ...(expiration ? { expiration } : {}),
       });
-      await ch.waitForConfirms(); // a basic.return, if any, arrives before the confirm
+      await this.confirmed(ch); // bounded; a basic.return, if any, arrives before the confirm
     } catch (e) {
       this.publisher = undefined;
       throw e;
