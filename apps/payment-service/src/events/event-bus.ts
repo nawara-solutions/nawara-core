@@ -8,11 +8,12 @@ import type { PaymentConfig } from '../config/payment-config.js';
  * repeats the rule at the point of choice so no future caller can select the in-memory bus in production by accident.
  * Stage 14.7: the bus's operational notices (publisher-confirm timeouts, above all) are logged; they were previously dropped here.
  */
-export function createEventBus(config: Pick<PaymentConfig, 'rabbitmqUrl' | 'isProduction'> & Partial<Pick<PaymentConfig, 'rabbitmqConfirmTimeoutMs'>>): EventBus {
+export function createEventBus(config: Pick<PaymentConfig, 'rabbitmqUrl' | 'isProduction'> & Partial<Pick<PaymentConfig, 'rabbitmqConfirmTimeoutMs' | 'rabbitmqHeartbeatS'>>): EventBus {
   if (config.rabbitmqUrl) {
     return new RabbitMqEventBus({
       url: config.rabbitmqUrl,
       confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs,
+      heartbeatS: config.rabbitmqHeartbeatS, // Stage 15.3 (I9); omitted, the kit's default (10 s) applies
       onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message),
     });
   }

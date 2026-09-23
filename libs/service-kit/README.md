@@ -146,7 +146,8 @@ search for the name, never for the prose after the `—`. A failure is described
 text). Kinds: `db_statement_timeout`, `db_idle_in_transaction_timeout`, `db_connect_timeout` (pool acquisition or connect past
 `DB_CONNECTION_TIMEOUT_MS`), `db_query_timeout` (no answer within `DB_QUERY_TIMEOUT_MS` from a silent server or network; the
 connection is destroyed), `db_connection_lost`, `db_unavailable`, `db_auth_failed`, `db_serialization_failure`, `db_deadlock`,
-`broker_confirm_timeout`, `network_unreachable`.
+`broker_confirm_timeout`, `broker_connection_lost` (the broker connection was torn down: a missed heartbeat, a closed socket,
+and the channel operations it rejected), `network_unreachable`.
 
 | Signal | Level | Emitted by | Key fields |
 |---|---|---|---|
@@ -175,6 +176,13 @@ migration lock (the wait itself is unchanged).
 ## Not in the kit (yet)
 
 OpenAPI setup, outbox pruning, alerting on the dead-letter queue (the tools below read it; nothing here pages anyone), and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.
+
+`RabbitMqEventBus` requests its own AMQP heartbeat (`heartbeatS`, default 10 s; services configure `RABBITMQ_HEARTBEAT_S`, 5-60).
+The negotiated value is the smaller of this and the broker's proposal, or this one when the broker turns heartbeats off, so a silent
+broker is detected within about 3 heartbeats whatever the broker's configuration: the connection is torn down and every channel
+operation still waiting on it (channel open, declare, consume, cancel) fails (`kind=broker_connection_lost`). Closing is bounded by the
+same 3 heartbeats: amqplib never settles a close whose connection dies mid-close, so the bus stops waiting and never reuses that
+connection (Stage 15.3, invariant I9).
 
 `RabbitMqEventBus` consumers are supervised: `subscribe()` fails fast when the broker is unreachable at start, but once attached a consumer that loses its connection, its channel or its queue is re-created with bounded exponential backoff (`consumerReconnect`) until `close()`. `consumerStatus()` reports `consuming` / `reconnecting` for readiness, and `onNotice` receives `rabbitmq_consumer_lost` / `rabbitmq_consumer_recovered` / `rabbitmq_settle_failed` (never a URL or credential). A message being handled when the channel dies is redelivered by the broker, so handlers must stay idempotent. `BrokerProxy` (`@nawara/service-kit/testing`) severs and restores a broker connection in tests.
 

@@ -1,4 +1,4 @@
-import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
+import { ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
 
 /** payment-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16). */
 export interface PaymentConfig extends BaseConfig {
@@ -10,6 +10,12 @@ export interface PaymentConfig extends BaseConfig {
   rabbitmqUrl?: string;
   /** `RABBITMQ_CONFIRM_TIMEOUT_MS` (default 5000, 100-60000): bound on a publisher confirm; past it the publish fails and the outbox retries it. */
   rabbitmqConfirmTimeoutMs: number;
+  /**
+   * `RABBITMQ_HEARTBEAT_S` (Stage 15.3; default 10, 5-60): the AMQP heartbeat this service requests. A broker that goes silent is
+   * detected within about 3 x this value whatever the broker proposes (including heartbeats turned off), ending every channel operation
+   * still waiting on it.
+   */
+  rabbitmqHeartbeatS: number;
   /** ISO 4217 codes accepted for `payment.currency`. No code default: configuration only (O-10). */
   supportedCurrencies: string[];
   maxAttempts: number;
@@ -59,6 +65,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
+    rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     supportedCurrencies: [...new Set(supportedCurrencies)],
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
     idempotencyTtlHours: reader.int('IDEMPOTENCY_TTL_HOURS', { default: 24, min: 1, max: 24 * 30 }),

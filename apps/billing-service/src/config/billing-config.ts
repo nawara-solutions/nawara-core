@@ -1,4 +1,4 @@
-import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
+import { ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
 
 /**
  * billing-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16 lists the settings a Core
@@ -17,6 +17,12 @@ export interface BillingConfig extends BaseConfig {
   rabbitmqUrl?: string;
   /** `RABBITMQ_CONFIRM_TIMEOUT_MS` (default 5000, 100-60000): bound on a publisher confirm; past it the publish fails and the outbox retries it. */
   rabbitmqConfirmTimeoutMs: number;
+  /**
+   * `RABBITMQ_HEARTBEAT_S` (Stage 15.3; default 10, 5-60): the AMQP heartbeat this service requests. A broker that goes silent is
+   * detected within about 3 x this value whatever the broker proposes (including heartbeats turned off), ending every channel operation
+   * still waiting on it.
+   */
+  rabbitmqHeartbeatS: number;
   /**
    * ISO 4217 codes this deployment accepts on an invoice or price (BI-11). NO code default: which currencies are supported is B-005, so
    * an operator must say. A code must also exist in the immutable `currency` table (BI-21), which is seeded by migration.
@@ -101,6 +107,7 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
+    rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       // A password that protects financial API documentation must not be trivial.

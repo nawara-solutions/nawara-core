@@ -141,4 +141,12 @@ describe('loadPaymentConfig', () => {
     expect(loadPaymentConfig({ ...BASE_ENV, RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).rabbitmqConfirmTimeoutMs).toBe(2000);
     for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadPaymentConfig({ ...BASE_ENV, RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
   });
+
+  // Stage 15.3 (I9): the heartbeat this service requests; 0 (off) is refused, so a silent broker is always detected by Core's own bound.
+  it('RABBITMQ_HEARTBEAT_S defaults to 10 and is bounded (5-60); 0 is refused', () => {
+    expect(loadPaymentConfig(BASE_ENV).rabbitmqHeartbeatS).toBe(10);
+    expect(loadPaymentConfig({ ...BASE_ENV, RABBITMQ_HEARTBEAT_S: '5' }).rabbitmqHeartbeatS).toBe(5);
+    expect(loadPaymentConfig({ ...BASE_ENV, RABBITMQ_HEARTBEAT_S: '60' }).rabbitmqHeartbeatS).toBe(60);
+    for (const bad of ['0', '4', '61', '-1', 'abc', '2.5']) expect(() => loadPaymentConfig({ ...BASE_ENV, RABBITMQ_HEARTBEAT_S: bad })).toThrow(/RABBITMQ_HEARTBEAT_S must be an integer between 5 and 60/);
+  });
 });

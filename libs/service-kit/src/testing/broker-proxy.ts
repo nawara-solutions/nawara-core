@@ -18,7 +18,6 @@ export class BrokerProxy {
       this.accepted++;
       const upstream = net.connect(this.target.port, this.target.host);
       this.upstreams.add(upstream);
-      if (this.frozen) upstream.pause();
       for (const s of [client, upstream]) {
         this.sockets.add(s);
         s.on('close', () => { this.sockets.delete(s); this.upstreams.delete(s); (s === client ? upstream : client).destroy(); });
@@ -26,6 +25,8 @@ export class BrokerProxy {
       }
       client.pipe(upstream);
       upstream.pipe(client);
+      // After pipe(), which resumes its source: pausing first had no effect, so a connection opened DURING a freeze was not frozen (Stage 15.3).
+      if (this.frozen) upstream.pause();
     });
     await new Promise<void>((resolve) => this.server!.listen(this.port, '127.0.0.1', resolve));
     this.port = (this.server.address() as net.AddressInfo).port;
