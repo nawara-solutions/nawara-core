@@ -5,12 +5,12 @@ import helmet from 'helmet';
 import { JsonLogger, requestContextMiddleware } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { basicAuth } from './docs/basic-auth.js';
-import { APP_CONFIG, type AppConfig } from './config/app-config.js';
+import { loadConfig } from './config/app-config.js';
 import { AuthExceptionFilter } from './errors.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
-  const cfg = app.get<AppConfig>(APP_CONFIG); // throws (fail closed) if any secret is missing/weak
+  const cfg = loadConfig(); // throws ConfigError (fail closed) if any setting or secret is missing/invalid, before anything starts
+  const app = await NestFactory.create(AppModule.register(cfg), { bufferLogs: true });
   const logger = new JsonLogger('auth-service', 'info');
 
   // Request/correlation id first, so every log line and error response from this point on can carry it.
@@ -43,6 +43,6 @@ async function bootstrap() {
     SwaggerModule.setup('auth/docs', app, SwaggerModule.createDocument(app, config));
   }
 
-  await app.listen(process.env.PORT ?? 3000);
+  await app.listen(cfg.port);
 }
 await bootstrap();

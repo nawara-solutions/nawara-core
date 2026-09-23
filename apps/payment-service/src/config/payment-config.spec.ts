@@ -94,4 +94,44 @@ describe('loadPaymentConfig', () => {
       for (const NODE_ENV of ['development', 'test']) expect(loadPaymentConfig({ ...BASE_ENV, NODE_ENV }).rabbitmqUrl).toBeUndefined();
     });
   });
+
+  // Stage 14.3: parity with billing-service/organization-service configuration rules.
+  const PROD_ENV = { ...BASE_ENV, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://broker:5672' };
+
+  it('accepts the least-privilege runtime role in production', () => {
+    expect(loadPaymentConfig(PROD_ENV).databaseUrl).toBe(BASE_ENV.DATABASE_URL);
+  });
+
+  it.each(['postgres', 'root', 'payment_migrator'])('refuses the %s database user in production, without echoing the URL', (user) => {
+    try {
+      loadPaymentConfig({ ...PROD_ENV, DATABASE_URL: `postgres://${user}:s3cret-value@localhost:5433/payment` });
+      throw new Error('no throw');
+    } catch (err) {
+      expect((err as Error).message).toMatch(/least-privilege runtime role/);
+      expect((err as Error).message).not.toContain('s3cret-value');
+    }
+  });
+
+  it('allows any database user outside production (tests use an admin connection)', () => {
+    expect(loadPaymentConfig({ ...BASE_ENV, DATABASE_URL: 'postgres://postgres:pw@localhost:5433/payment' }).databaseUrl).toContain('postgres:pw');
+  });
+
+  it.each(['not a url', 'ftp://auth:3000', 'auth-service:3000'])('refuses a malformed AUTH_SERVICE_URL: %s', (url) => {
+    expect(() => loadPaymentConfig({ ...BASE_ENV, AUTH_SERVICE_URL: url })).toThrow(/AUTH_SERVICE_URL/);
+  });
+
+  it('SWAGGER_PASSWORD, when set, must be at least 16 characters (docs stay unmounted when unset)', () => {
+    expect(() => loadPaymentConfig({ ...BASE_ENV, SWAGGER_PASSWORD: 'short' })).toThrow(/SWAGGER_PASSWORD must be at least 16/);
+    expect(loadPaymentConfig({ ...BASE_ENV, SWAGGER_PASSWORD: 'x'.repeat(16) }).docs.password).toBe('x'.repeat(16));
+    expect(loadPaymentConfig(BASE_ENV).docs.password).toBeUndefined();
+  });
+
+  it.each(['TN', 'TNDX', 'T1D', 'TND,US$'])('refuses a malformed PAYMENT_SUPPORTED_CURRENCIES entry: %s', (list) => {
+    expect(() => loadPaymentConfig({ ...BASE_ENV, PAYMENT_SUPPORTED_CURRENCIES: list })).toThrow(/three-letter ISO 4217/);
+  });
+
+  it('de-duplicates the currency list and still refuses an empty one', () => {
+    expect(loadPaymentConfig({ ...BASE_ENV, PAYMENT_SUPPORTED_CURRENCIES: 'tnd,TND, eur' }).supportedCurrencies).toEqual(['TND', 'EUR']);
+    expect(() => loadPaymentConfig({ ...BASE_ENV, PAYMENT_SUPPORTED_CURRENCIES: ' , ' })).toThrow(/PAYMENT_SUPPORTED_CURRENCIES/);
+  });
 });
