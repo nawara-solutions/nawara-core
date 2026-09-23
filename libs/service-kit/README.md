@@ -137,6 +137,40 @@ await this.rateLimit.assert('signup', req.ip, { limit: 5, windowSec: 60 }); // t
 * Identifiers are hashed (sha256) before being stored; nothing raw (IP, email, token) sits in `kit_rate_limit`.
 * `reset()` clears one identifier's counter, for example after a legitimate success that should not count against it.
 
+## Operational signals (Stage 14.7)
+
+Logs are the diagnosis channel (one JSON line on stdout per event, `JsonLogger`); `/ready` is only the orchestration state and
+the CLIs below are for targeted checks. There is no metrics or tracing stack. Each signal is a stable `event_name key=value` message:
+search for the name, never for the prose after the `—`. A failure is described by `describeFailure(e)` as
+`error=<class> [code=<SQLSTATE|errno>] [kind=<kind>]` and NEVER by its message (messages can carry hosts, SQL values, provider
+text). Kinds: `db_statement_timeout`, `db_idle_in_transaction_timeout`, `db_connect_timeout` (pool acquisition or connect past
+`DB_CONNECTION_TIMEOUT_MS`), `db_connection_lost`, `db_unavailable`, `db_auth_failed`, `db_serialization_failure`, `db_deadlock`,
+`broker_confirm_timeout`, `network_unreachable`.
+
+| Signal | Level | Emitted by | Key fields |
+|---|---|---|---|
+| `readiness_check_failed` / `readiness_check_recovered` | warn / info | `ReadinessRegistry`, on a check's state CHANGE only (not per probe) | `check=`, failure |
+| `db_pool_idle_client_error` | warn | `DbService` pool | failure |
+| `outbox_publish_failure` | warn (via `onError`) | `OutboxRelay`, per failed publish | `eventId= name= correlationId= attempt= ageSeconds= retryInMs=`, failure |
+| `outbox_relay_pass_failure` | warn (via `onError`) | `OutboxRelay`, a pass that failed (e.g. the claim query) | failure |
+| `worker_drain_timeout` | warn | every `PollLoop` user (`onDrainTimeout`), incl. `worker=outbox_relay` | `worker= drainTimeoutMs=` |
+| `rabbitmq_confirm_timeout` | warn | `RabbitMqEventBus` | `eventId=`, `name=` or `target=`, `timeoutMs=`, `outcome=unconfirmed` (may have been stored: not "failed") |
+| `rabbitmq_consumer_lost` / `_reconnect_failed` / `_recovered` | warn / warn / info | consumer supervision | `queue=` |
+| `rabbitmq_consumer_drain_timeout` | warn | consumer close | `queue= inFlight=` |
+| `event_retry_scheduled` / `event_retry_exhausted` / `event_dead_lettered` | warn / warn / error | consumer failure path | `queue= event= correlationId=` ... |
+| `service_shutdown_started` / `service_shutdown_complete` | info | `HealthModule` (Nest lifecycle) | `signal=` |
+
+`onNotice(message, level)` passes the level above; `onError(message)` for the relay is one level (the services log it at warn).
+Services add their own worker signals in the same shape (`*_pass_failure` with the failure, `webhook_retry_exhausted`, ...) and a
+`service_started` line (`port`, `environment`, no configuration values).
+
+`nawara-check-outbox-lag --database-url <url> [--max-age-seconds 60]` prints `pending`, `oldest pending age`, `retrying` (pending rows
+that already failed a publish), `max attempts`, and the oldest pending row's `id`/`name`/`attempts`/`nextAttemptAt` and last recorded
+error (class and redacted message, never a payload). Exit `0` when no pending row is older than the threshold, `1` when one is or
+when the check itself fails (connect is bounded at 10 s). Retries stay unlimited: a high `max attempts` with an old row means an event
+has been retrying for a long time, not a brief broker blip. `nawara-migrate` prints a line when it has to wait for another runner's
+migration lock (the wait itself is unchanged).
+
 ## Not in the kit (yet)
 
 OpenAPI setup, outbox pruning, alerting on the dead-letter queue (the tools below read it; nothing here pages anyone), and any service-specific configuration. RabbitMQ is **not** deployed to production; the kit runs against a local broker.

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { DbService, PollLoop, type DrainOutcome } from '@nawara/service-kit';
+import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import type { WebhookEventRow } from './webhook-event.types.js';
 import { WebhookService } from './webhook.service.js';
@@ -15,6 +15,7 @@ const STUCK_THRESHOLD_MS = 10_000; // a delivery left in a non-terminal state th
 export const WEBHOOK_RETRY_MAX_ATTEMPTS = 10;
 const RETRYABLE = `state IN ('received', 'processing', 'failed', 'unmatched')
   AND NOT (state = 'failed' AND outcome IN ('malformed_body', 'retries_exhausted'))`; // malformed: will never parse differently (SDD section 7)
+const STILL_RETRYABLE = new Set(['received', 'processing', 'failed', 'unmatched']); // mirrors RETRYABLE, for the log line only
 const DUE = `"receivedAt" <= now() - make_interval(secs => $1 * power(2, LEAST(attempts, 30)))`;
 
 /**
@@ -25,7 +26,12 @@ const DUE = `"receivedAt" <= now() - make_interval(secs => $1 * power(2, LEAST(a
 @Injectable()
 export class WebhookRetriever {
   // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
-  private readonly loop = new PollLoop(() => this.drainOnce(), (e) => this.logger.error(`webhook_retrier_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
+  // Stage 14.7: the failure's class, code and kind (a statement timeout, an unreachable database...), never its message; a bounded drain that ran out is reported.
+  private readonly loop = new PollLoop(
+    () => this.drainOnce(),
+    (e) => this.logger.error(`webhook_retrier_pass_failure ${describeFailure(e)} — the next pass retries`),
+    (ms) => this.logger.warn(`worker_drain_timeout worker=webhook_retrier drainTimeoutMs=${ms} — shutdown proceeds; the interrupted pass's work is picked up again after restart`),
+  );
   private running = false;
   private readonly logger = new Logger(WebhookRetriever.name);
 
@@ -49,13 +55,23 @@ export class WebhookRetriever {
     if (this.running) return { retried: 0, exhausted: 0 };
     this.running = true;
     try {
-      // Rows that used every attempt become terminal once (and stop occupying the head of the queue).
-      const exhausted = await this.db.query<{ id: string }>(
-        `UPDATE webhook_event SET state = 'failed', outcome = 'retries_exhausted', "lastError" = 'retry attempts exhausted'
-          WHERE ${RETRYABLE} AND attempts >= $1 RETURNING id`,
+      // Rows that used every attempt become terminal once (and stop occupying the head of the queue). Stage 14.7: the UPDATE and its
+      // WHERE are unchanged; the read-only `prev` snapshot only reports the state the event was stuck in (e.g. `unmatched` vs a
+      // transient failure), which the UPDATE itself overwrites.
+      const exhausted = await this.db.query<{ id: string; provider: string; previousState: string | null; previousOutcome: string | null }>(
+        `WITH prev AS (SELECT id, state, outcome FROM webhook_event WHERE ${RETRYABLE} AND attempts >= $1)
+         UPDATE webhook_event SET state = 'failed', outcome = 'retries_exhausted', "lastError" = 'retry attempts exhausted'
+          WHERE ${RETRYABLE} AND attempts >= $1
+         RETURNING id, provider,
+           (SELECT prev.state FROM prev WHERE prev.id = webhook_event.id) AS "previousState",
+           (SELECT prev.outcome FROM prev WHERE prev.id = webhook_event.id) AS "previousOutcome"`,
         [WEBHOOK_RETRY_MAX_ATTEMPTS],
       );
-      for (const r of exhausted.rows) this.logger.warn(`webhook_retry_exhausted event=${r.id} attempts=${WEBHOOK_RETRY_MAX_ATTEMPTS} — terminal for the retrier; an operator must look at it`);
+      for (const r of exhausted.rows) {
+        this.logger.error(
+          `webhook_retry_exhausted event=${r.id} provider=${r.provider} attempts=${WEBHOOK_RETRY_MAX_ATTEMPTS} lastState=${r.previousState ?? '-'} lastOutcome=${r.previousOutcome ?? '-'} — terminal for the retrier (failed/retries_exhausted); an operator must look at it`,
+        );
+      }
 
       // Only rows whose backoff is due: a failing row waits its turn instead of blocking newer ones (no head-of-line blocking).
       const { rows } = await this.db.query<WebhookEventRow>(
@@ -76,14 +92,21 @@ export class WebhookRetriever {
               `SELECT * FROM webhook_event WHERE id = $2 AND attempts = $4 AND ${RETRYABLE} AND attempts < $3 AND ${DUE} FOR UPDATE SKIP LOCKED`,
               [STUCK_THRESHOLD_MS / 1000, candidate.id, WEBHOOK_RETRY_MAX_ATTEMPTS, candidate.attempts],
             );
-            if (!claimed[0]) return false;
+            if (!claimed[0]) return null;
             await this.webhooks.reprocess(claimed[0], provider, q);
-            return true;
+            // Stage 14.7: read back (same transaction, same lock) where the retry left the event, for the log line below.
+            const { rows: after } = await q.query<{ state: string; outcome: string | null }>('SELECT state, outcome FROM webhook_event WHERE id = $1', [candidate.id]);
+            return after[0] ?? { state: 'unknown', outcome: null };
           });
-          if (done) retried++;
+          if (done) {
+            retried++;
+            const facts = `event=${candidate.id} provider=${candidate.provider} attempt=${candidate.attempts + 1}/${WEBHOOK_RETRY_MAX_ATTEMPTS} state=${done.state} outcome=${done.outcome ?? '-'}`;
+            if (STILL_RETRYABLE.has(done.state) && done.outcome !== 'malformed_body') this.logger.warn(`webhook_retry_unresolved ${facts} — retried again after its backoff`);
+            else this.logger.log(`webhook_retry_processed ${facts}`);
+          }
         } catch (e) {
           // One bad event must not stop the rest of the pass (it is retried on a later one, within its attempt budget).
-          this.logger.warn(`webhook event ${candidate.id} could not be reprocessed: ${e instanceof Error ? e.name : 'error'}`);
+          this.logger.warn(`webhook_retry_failure event=${candidate.id} provider=${candidate.provider} attempt=${candidate.attempts + 1}/${WEBHOOK_RETRY_MAX_ATTEMPTS} ${describeFailure(e)} — retried on a later pass`);
         }
       }
       return { retried, exhausted: exhausted.rows.length };
