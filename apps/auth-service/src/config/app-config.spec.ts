@@ -120,3 +120,21 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
     for (const bad of ['0', 'abc']) expect(() => loadConfig({ ...good(), BASELINE_RATE_LIMIT_PER_MINUTE: bad })).toThrow(/BASELINE_RATE_LIMIT_PER_MINUTE/);
   });
 });
+
+describe('database runtime limits are validated (Stage 14.4)', () => {
+  it('defaults: pool 10, connection 5 s, statement 30 s, idle in transaction 60 s', () => {
+    expect(loadConfig(good()).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000 });
+  });
+  it('accepts values inside the bounds', () => {
+    const c = loadConfig({ ...good(), DB_POOL_MAX: '20', DB_CONNECTION_TIMEOUT_MS: '2000', DB_STATEMENT_TIMEOUT_MS: '15000', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '120000' });
+    expect(c.db).toEqual({ poolMax: 20, connectionTimeoutMs: 2000, statementTimeoutMs: 15000, idleInTransactionTimeoutMs: 120000 });
+  });
+  it.each([
+    ['DB_POOL_MAX', '0'], ['DB_POOL_MAX', '101'], ['DB_POOL_MAX', 'ten'],
+    ['DB_CONNECTION_TIMEOUT_MS', '0'], ['DB_CONNECTION_TIMEOUT_MS', '-1'], ['DB_CONNECTION_TIMEOUT_MS', '1.5'],
+    ['DB_STATEMENT_TIMEOUT_MS', '0'], ['DB_STATEMENT_TIMEOUT_MS', '999'], ['DB_STATEMENT_TIMEOUT_MS', 'NaN'],
+    ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '0'], ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '3600001'],
+  ])('refuses %s=%s (zero, negative, fractional, non-numeric or unbounded values)', (name, value) => {
+    expect(() => loadConfig({ ...good(), [name]: value })).toThrow(new RegExp(name));
+  });
+});

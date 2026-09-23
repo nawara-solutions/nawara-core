@@ -23,7 +23,16 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
     @Inject(APP_CONFIG) cfg: AppConfig,
     @Optional() @Inject(ReadinessRegistry) private readonly readiness?: ReadinessRegistry,
   ) {
-    this.pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
+    this.pool = new pg.Pool({
+      connectionString: cfg.databaseUrl,
+      max: cfg.db.poolMax,
+      // Stage 14.4 (same semantics as the service-kit's DbService): one bound on getting a pooled client or opening a connection;
+      // PostgreSQL itself cancels a statement past statement_timeout (57014) and ends a session idle inside a transaction past
+      // idle_in_transaction_session_timeout (25P03), releasing its locks.
+      connectionTimeoutMillis: cfg.db.connectionTimeoutMs,
+      statement_timeout: cfg.db.statementTimeoutMs,
+      idle_in_transaction_session_timeout: cfg.db.idleInTransactionTimeoutMs,
+    });
     // An IDLE client that loses its connection (PostgreSQL restart or failover, an administrator's terminate, a proxy's idle timeout) is reported
     // on the POOL. `pg` discards that client itself and the next query opens a fresh connection, but an 'error' event with no listener is thrown
     // by Node as an uncaught exception and ends the process. Only the error code is logged: a message can carry connection details.
@@ -43,6 +52,14 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
 
   async tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
+    // While a client is checked out `pg-pool` removes its own error listener. If PostgreSQL terminates the session meanwhile
+    // (idle-in-transaction timeout, administrator, failover), the client emits 'error' and, with no listener, Node would crash the
+    // process. Record it instead: the transaction's next statement fails, it rolls back, and the broken client is destroyed.
+    let broken: Error | undefined;
+    const onError = (e: Error) => {
+      broken = e;
+    };
+    client.on('error', onError);
     try {
       await client.query('BEGIN');
       const out = await fn(client);
@@ -52,7 +69,8 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
       await client.query('ROLLBACK').catch(() => undefined);
       throw e;
     } finally {
-      client.release();
+      client.removeListener('error', onError);
+      client.release(broken); // an error destroys the client instead of returning it to the pool
     }
   }
 

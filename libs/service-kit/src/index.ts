@@ -1,6 +1,6 @@
 // @nawara/service-kit: technical foundations shared by Nawara Core services. NO business logic lives here.
 export { ConfigError, EnvReader, type FileReader } from './config/config.js';
-export { loadBaseConfig, parseCorsOrigins, NODE_ENVS, LOG_LEVELS, type BaseConfig, type NodeEnv, type LogLevel } from './config/base-config.js';
+export { loadBaseConfig, loadDbRuntimeConfig, parseCorsOrigins, NODE_ENVS, LOG_LEVELS, type BaseConfig, type DbRuntimeConfig, type NodeEnv, type LogLevel } from './config/base-config.js';
 
 export { requestContextMiddleware, getRequestContext, runWithRequestContext, correlationHeaders, REQUEST_ID_HEADER, CORRELATION_ID_HEADER, type RequestContext } from './context/request-context.js';
 

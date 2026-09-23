@@ -42,6 +42,11 @@ export class AppModule {
         DbModule.forRoot({
           url: config.databaseUrl,
           applicationName: config.serviceName,
+          // Stage 14.4: bounded pool wait/connect, statement and idle-in-transaction limits (validated in the kit's base config).
+          max: config.db.poolMax,
+          connectionTimeoutMs: config.db.connectionTimeoutMs,
+          statementTimeoutMs: config.db.statementTimeoutMs,
+          idleInTransactionTimeoutMs: config.db.idleInTransactionTimeoutMs,
           migrations: { dirs: overrides.migrationsDirs ?? [kitMigrationsDir, billingMigrationsDir] },
         }),
         ServiceAuthModule.forRoot(config.serviceTokens),

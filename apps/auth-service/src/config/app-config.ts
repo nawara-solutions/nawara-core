@@ -69,6 +69,12 @@ export interface AppConfig {
   /** Runtime connection. In production it must be the least-privilege runtime role (ADR-0032), never a superuser or the schema owner. */
   databaseUrl: string;
   /**
+   * Database pool and session limits (Stage 14.4). Same names, defaults and bounds as the service-kit's `loadDbRuntimeConfig`:
+   * DB_POOL_MAX (10, 1-100), DB_CONNECTION_TIMEOUT_MS (5000, 100-60000), DB_STATEMENT_TIMEOUT_MS (30000, 1000-600000),
+   * DB_IDLE_IN_TRANSACTION_TIMEOUT_MS (60000, 1000-3600000). Every value is bounded; none may be "infinite".
+   */
+  db: { poolMax: number; connectionTimeoutMs: number; statementTimeoutMs: number; idleInTransactionTimeoutMs: number };
+  /**
    * Fire-and-forget event publishing (ADR-0018). `AUTH_EVENTS=off` disables it (tests, runs without a broker; the production
    * deploy sets it off today). When enabled, `rabbitmqUrl` is set: production requires an explicit `RABBITMQ_URL`; only
    * development and test fall back to a local broker.
@@ -254,6 +260,12 @@ export function loadConfig(
     env: nodeEnv,
     port: int(env, 'PORT', 3000, 1, 65_535),
     databaseUrl,
+    db: {
+      poolMax: int(env, 'DB_POOL_MAX', 10, 1, 100),
+      connectionTimeoutMs: int(env, 'DB_CONNECTION_TIMEOUT_MS', 5_000, 100, 60_000),
+      statementTimeoutMs: int(env, 'DB_STATEMENT_TIMEOUT_MS', 30_000, 1_000, 600_000),
+      idleInTransactionTimeoutMs: int(env, 'DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 60_000, 1_000, 3_600_000),
+    },
     events: { enabled: eventsEnabled, rabbitmqUrl },
     trustProxy: env.TRUST_PROXY === 'true',
     corsOrigins,

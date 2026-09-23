@@ -11,8 +11,20 @@ export interface Queryable {
 export interface DbOptions {
   /** Runtime connection string. Should be a least-privilege role (DML only), never a superuser (ADR-0032). */
   url: string;
+  /** Pool size (default 10). */
   max?: number;
+  /** Server-enforced `statement_timeout` for every session (default 30 s): PostgreSQL cancels a longer statement (SQLSTATE 57014). */
   statementTimeoutMs?: number;
+  /**
+   * `pg-pool`'s `connectionTimeoutMillis` (default 5 s). ONE bound for two waits: getting a client from an exhausted pool, and
+   * establishing a new connection. Past it the caller gets an error instead of waiting forever.
+   */
+  connectionTimeoutMs?: number;
+  /**
+   * Server-enforced `idle_in_transaction_session_timeout` (default 60 s): a session left idle inside an open transaction is
+   * terminated by PostgreSQL (SQLSTATE 25P03), which releases its locks. `tx()` absorbs that termination (see there).
+   */
+  idleInTransactionTimeoutMs?: number;
   applicationName?: string;
   /** When set, `/ready` fails while any of these migration directories has an unapplied file. */
   migrations?: { dirs: string[] };
@@ -37,7 +49,9 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
     this.pool = new pg.Pool({
       connectionString: options.url,
       max: options.max ?? 10,
+      connectionTimeoutMillis: options.connectionTimeoutMs ?? 5_000,
       statement_timeout: options.statementTimeoutMs ?? 30_000,
+      idle_in_transaction_session_timeout: options.idleInTransactionTimeoutMs ?? 60_000,
       application_name: options.applicationName,
     });
     // An idle client erroring (server restart) must not crash the process; the next query reconnects.
@@ -61,6 +75,14 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
   /** Runs `fn` in one transaction: commit on success, rollback on any error. Business change and outbox event go here together. */
   async tx<T>(fn: (q: Queryable) => Promise<T>, isolation: IsolationLevel = 'READ COMMITTED'): Promise<T> {
     const client = await this.pool.connect();
+    // While a client is checked out `pg-pool` removes its own error listener. If PostgreSQL terminates the session meanwhile
+    // (idle-in-transaction timeout, administrator, failover), the client emits 'error' and, with no listener, Node would crash the
+    // process. Record it instead: the transaction's next statement fails, it rolls back, and the broken client is destroyed.
+    let broken: Error | undefined;
+    const onError = (e: Error) => {
+      broken = e;
+    };
+    client.on('error', onError);
     try {
       await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
       const out = await fn(client);
@@ -70,7 +92,8 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
       await client.query('ROLLBACK').catch(() => undefined);
       throw e;
     } finally {
-      client.release();
+      client.removeListener('error', onError);
+      client.release(broken); // an error destroys the client instead of returning it to the pool
     }
   }
 
