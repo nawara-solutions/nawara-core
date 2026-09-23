@@ -20,6 +20,11 @@ const config = loadPaymentConfig();
     DbModule.forRoot({
       url: config.databaseUrl,
       applicationName: 'payment-service',
+      // Stage 14.4: bounded pool wait/connect, statement and idle-in-transaction limits (validated in the kit's base config).
+      max: config.db.poolMax,
+      connectionTimeoutMs: config.db.connectionTimeoutMs,
+      statementTimeoutMs: config.db.statementTimeoutMs,
+      idleInTransactionTimeoutMs: config.db.idleInTransactionTimeoutMs,
       migrations: { dirs: [kitMigrationsDir, fileURLToPath(new URL('../db/migrations/', import.meta.url))] },
     }),
     ServiceAuthModule.forRoot(config.serviceTokens),

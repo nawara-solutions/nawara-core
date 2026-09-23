@@ -26,7 +26,7 @@ describe('loadOrganizationConfig', () => {
 
   it('carries ONLY what this service uses: no broker, no outbound service token, no currencies (nothing to publish or price); the one bounded Auth dependency is the human-admin module\'s grant-facts/step-up client (ADR-0042 decision 6)', () => {
     expect(Object.keys(loadOrganizationConfig(BASE)).sort()).toEqual([
-      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'docs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy',
+      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'docs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy',
     ]);
   });
 

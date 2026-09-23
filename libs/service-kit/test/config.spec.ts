@@ -69,3 +69,21 @@ describe('loadBaseConfig', () => {
     }
   });
 });
+
+describe('database runtime limits (Stage 14.4)', () => {
+  it('defaults: pool 10, connection 5 s, statement 30 s, idle in transaction 60 s', () => {
+    expect(loadBaseConfig('billing-service', {}).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000 });
+  });
+  it('accepts values inside the bounds', () => {
+    const env = { DB_POOL_MAX: '25', DB_CONNECTION_TIMEOUT_MS: '100', DB_STATEMENT_TIMEOUT_MS: '600000', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '3600000' };
+    expect(loadBaseConfig('billing-service', env).db).toEqual({ poolMax: 25, connectionTimeoutMs: 100, statementTimeoutMs: 600000, idleInTransactionTimeoutMs: 3600000 });
+  });
+  it.each([
+    ['DB_POOL_MAX', '0'], ['DB_POOL_MAX', '101'], ['DB_POOL_MAX', 'ten'],
+    ['DB_CONNECTION_TIMEOUT_MS', '0'], ['DB_CONNECTION_TIMEOUT_MS', '-1'], ['DB_CONNECTION_TIMEOUT_MS', '1.5'], ['DB_CONNECTION_TIMEOUT_MS', '60001'],
+    ['DB_STATEMENT_TIMEOUT_MS', '0'], ['DB_STATEMENT_TIMEOUT_MS', '999'], ['DB_STATEMENT_TIMEOUT_MS', 'NaN'],
+    ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '0'], ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '3600001'],
+  ])('refuses %s=%s (zero, negative, fractional, non-numeric or unbounded), naming the variable', (name, value) => {
+    expect(() => loadBaseConfig('billing-service', { [name]: value })).toThrow(new RegExp(name));
+  });
+});
