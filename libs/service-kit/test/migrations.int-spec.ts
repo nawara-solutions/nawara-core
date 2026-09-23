@@ -41,7 +41,7 @@ describeWithEnv('migration runner (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
     expect(await tableExists(db.url, 'inbox')).toBe(true);
     expect(await tableExists(db.url, 'kit_rate_limit')).toBe(true);
     const second = await runMigrations(db.url, [kitMigrationsDir]);
-    expect(second).toEqual({ applied: [], alreadyApplied: ['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql', 'kit_0003_generic_triggers.sql'] });
+    expect(second).toEqual({ applied: [], alreadyApplied: ['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql', 'kit_0003_generic_triggers.sql'], adopted: [] });
   });
 
   it('orders files deterministically: directories in the order given, files by name', () => {

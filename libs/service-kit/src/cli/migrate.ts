@@ -21,6 +21,7 @@ async function main() {
   if (!url) throw new Error('MIGRATION_DATABASE_URL (or DATABASE_URL) is required');
   const result = await runMigrations(url, [...(withKit ? [kitMigrationsDir] : []), ...dirs]);
   for (const n of result.alreadyApplied) console.log(`  = ${n} (already applied)`);
+  for (const n of result.adopted) console.log(`  ~ ${n} (checksum recorded)`);
   for (const n of result.applied) console.log(`  > ${n}`);
   console.log(`migrations: ${result.applied.length} applied, ${result.alreadyApplied.length} already applied`);
 }

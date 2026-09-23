@@ -70,17 +70,18 @@ psql_db() { docker exec "$DB" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDB"
 psql_stdin() { docker exec -i "$DB" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDB" -f -; }
 
 # ---------------------------------------------------------------- migrations (tracked)
+# Stage 14.5: the service-kit migration runner, run FROM THIS EXACT IMAGE as the database owner ($PGUSER), never as auth_app:
+# one advisory lock for the whole run (released by PostgreSQL if the runner dies), each migration and its bookkeeping row in ONE
+# transaction, a stored checksum that must match on every later run, and a refusal of any history this release cannot explain
+# (an unknown or out-of-order applied migration). Rows recorded by the previous runner get their checksum recorded once (logged).
+# A refusal or failure stops the deploy BEFORE the running service is touched.
 log "applying pending migrations from the image"
-psql_db -c 'CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())'
-for f in $(docker run --rm --entrypoint sh "$IMAGE" -c 'cd db/migrations && ls 0*.sql' | sort); do
-  if [ "$(psql_db -tA -c "SELECT count(*) FROM schema_migrations WHERE name='$f'")" = 1 ]; then
-    log "  = $f (already applied)"
-  else
-    log "  > $f"
-    docker run --rm --entrypoint cat "$IMAGE" "db/migrations/$f" | psql_stdin
-    psql_db -c "INSERT INTO schema_migrations(name) VALUES ('$f')"
-  fi
-done
+MIG_ENV=$(mktemp "$DIR/.migrate.XXXXXX")
+trap 'rm -f "$MIG_ENV"' EXIT
+printf 'MIGRATION_DATABASE_URL=postgres://%s:%s@%s:5432/%s\n' "$PGUSER" "$PGPASS" "$DB" "$PGDB" >"$MIG_ENV"
+docker run --rm --network "$NET" --env-file "$MIG_ENV" --entrypoint node "$IMAGE" dist/cli/migrate.js \
+  || die "migrations failed or were refused; the running service was not touched"
+rm -f "$MIG_ENV"
 
 # ---------------------------------------------------------------- runtime role (least privilege)
 # Re-applied on every deploy, after the migrations, so a table a new migration created is covered too. The password is
@@ -100,8 +101,10 @@ log "ensuring the least-privilege runtime role $APP_ROLE"
   printf 'GRANT USAGE ON SCHEMA public TO %s;\n' "$APP_ROLE"
   printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s;\n' "$APP_ROLE"
   printf 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s;\n' "$APP_ROLE"
-  # the deploy's own migration bookkeeping is not application data
+  # the deploy's own migration bookkeeping is not application data: READ-only, so /ready can see whether this release's
+  # migrations are applied (Stage 14.5); never written by the runtime role
   printf 'REVOKE ALL ON TABLE schema_migrations FROM %s;\n' "$APP_ROLE"
+  printf 'GRANT SELECT ON TABLE schema_migrations TO %s;\n' "$APP_ROLE"
   printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s;\n' "$PGUSER" "$APP_ROLE"
   printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s;\n' "$PGUSER" "$APP_ROLE"
 } | psql_stdin

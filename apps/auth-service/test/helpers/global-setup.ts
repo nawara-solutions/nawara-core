@@ -1,10 +1,12 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import type { TestProject } from 'vitest/node';
+import { runMigrations } from '@nawara/service-kit';
+import { AUTH_MIGRATION_OPTIONS } from '../../src/db/migrations.js';
 
 declare module 'vitest' {
   export interface ProvidedContext {
@@ -71,12 +73,9 @@ export default async function setup(project: TestProject) {
   await admin.query('CREATE DATABASE auth_template');
   await admin.end();
 
-  const tpl = new pg.Client({ connectionString: adminUrl.replace(/\/[^/]*$/, '/auth_template') });
-  await tpl.connect();
-  for (const f of readdirSync(MIGRATIONS).filter((n) => /^\d{4}_.*\.sql$/.test(n)).sort()) {
-    await tpl.query(readFileSync(join(MIGRATIONS, f), 'utf8'));
-  }
-  await tpl.end();
+  // The template is migrated by the SAME runner and options production uses (Stage 14.5), so every suite runs on a
+  // schema_migrations history identical in shape to a deployed one.
+  await runMigrations(adminUrl.replace(/\/[^/]*$/, '/auth_template'), [MIGRATIONS], AUTH_MIGRATION_OPTIONS);
 
   project.provide('pgAdminUrl', adminUrl);
   project.provide('pgTemplate', 'auth_template');

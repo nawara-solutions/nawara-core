@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
-import { ReadinessRegistry } from '@nawara/service-kit';
+import { ReadinessRegistry, listMigrationFiles, pendingOf } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
+import { AUTH_MIGRATIONS_DIR, AUTH_MIGRATION_OPTIONS } from './migrations.js';
 
 export interface Queryable {
   query<R extends pg.QueryResultRow = any>(sql: string, params?: unknown[]): Promise<pg.QueryResult<R>>;
@@ -43,6 +44,18 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     this.readiness?.register('database', async () => {
       await this.pool.query('SELECT 1');
+    });
+    // Stage 14.5: not ready while a migration this release ships is unapplied. The file list is read ONCE here (no per-request
+    // filesystem work); each /ready only reads the bookkeeping table. Readiness observes migration state, it never migrates.
+    let expected: string[] | undefined;
+    try {
+      expected = listMigrationFiles([AUTH_MIGRATIONS_DIR], AUTH_MIGRATION_OPTIONS).map((f) => f.name);
+    } catch (e) {
+      this.logger.error(`db_migrations_unreadable error=${e instanceof Error ? e.name : 'unknown'} — /ready reports migrations until fixed`);
+    }
+    this.readiness?.register('migrations', async () => {
+      if (!expected) throw new Error('migration files unreadable');
+      if ((await pendingOf(this, expected)).length > 0) throw new Error('pending migrations');
     });
   }
 

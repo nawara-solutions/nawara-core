@@ -23,7 +23,8 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "test:db": "bash db/tests/run.sh",
     "test:all": "vitest run && vitest run --config vitest.config.e2e.ts",
-    "cli": "node dist/cli/main.js"
+    "cli": "node dist/cli/main.js",
+    "migrate": "node dist/cli/migrate.js"
   },
   "dependencies": {
     "@golevelup/nestjs-rabbitmq": "^9.0.2",

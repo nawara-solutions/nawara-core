@@ -62,23 +62,18 @@ services:
   # container startup; an operator (or this Compose file's own usage comment) invokes it explicitly, exactly once
   # per empty database, mirroring production's "migrations are an explicit step" policy.
   auth-migrate:
+    # Stage 14.5: the same migration runner production uses (advisory lock, checksums, atomic bookkeeping), from the Auth image,
+    # as the schema owner auth_migrator — never the runtime role.
     profiles: [db]
-    image: postgres:16-alpine
+    build:
+      context: .
+      dockerfile: apps/auth-service/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      PGPASSWORD: ${AUTH_MIGRATOR_PASSWORD:?copy .env.example to .env}
-    volumes:
-      - ./apps/auth-service/db/migrations:/migrations:ro
-    entrypoint: ['sh', '-c']
-    command:
-      - |
-        set -e
-        for f in /migrations/[0-9]*.sql; do
-          echo "applying $$f"
-          psql -v ON_ERROR_STOP=1 -h postgres -U auth_migrator -d auth -f "$$f"
-        done
+      MIGRATION_DATABASE_URL: postgres://auth_migrator:${AUTH_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/auth
+    entrypoint: ['node', 'dist/cli/migrate.js']
 
   auth-service:
     profiles: [db]
