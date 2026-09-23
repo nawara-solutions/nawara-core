@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { DbService, PollLoop, type DrainOutcome } from '@nawara/service-kit';
+import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext } from '../events/payment-events.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import { AttemptService } from './attempt.service.js';
@@ -17,7 +17,12 @@ const LONG_SUBMITTED_MS = 5 * 60 * 1000; // an attempt "stuck" in submitted this
 @Injectable()
 export class AttemptResolver {
   // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
-  private readonly loop = new PollLoop(() => this.drainOnce(), (e) => this.logger.error(`attempt_resolver_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
+  // Stage 14.7: the failure's class, code and kind (a statement timeout, an unreachable database...), never its message; a bounded drain that ran out is reported.
+  private readonly loop = new PollLoop(
+    () => this.drainOnce(),
+    (e) => this.logger.error(`attempt_resolver_pass_failure ${describeFailure(e)} — the next pass retries`),
+    (ms) => this.logger.warn(`worker_drain_timeout worker=attempt_resolver drainTimeoutMs=${ms} — shutdown proceeds; the interrupted pass's work is picked up again after restart`),
+  );
   private running = false;
   private readonly logger = new Logger(AttemptResolver.name);
 
@@ -76,7 +81,8 @@ export class AttemptResolver {
           resolved++;
         } catch (e) {
           const code = (e as { response?: { code?: string } })?.response?.code;
-          this.logger.warn(`attempt ${attempt.id} could not be resolved: ${code ?? (e instanceof Error ? e.name : 'error')}`);
+          // Stage 14.7: a stable event name and the attempt's identity; the attempt stays as it is and is asked about again next pass.
+          this.logger.warn(`attempt_resolver_failure attempt=${attempt.id} provider=${attempt.provider} status=${attempt.status} ${code ? `reason=${code}` : describeFailure(e)} — left as is; retried on the next pass`);
         }
       }
       return { resolved };

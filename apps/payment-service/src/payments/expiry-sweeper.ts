@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { DbService, OutboxService, PollLoop, type DrainOutcome } from '@nawara/service-kit';
+import { DbService, OutboxService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
 import type { PaymentRow } from './payment.types.js';
 
@@ -11,7 +11,12 @@ import type { PaymentRow } from './payment.types.js';
 @Injectable()
 export class ExpirySweeper {
   // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
-  private readonly loop = new PollLoop(() => this.sweepOnce(), (e) => this.logger.error(`expiry_sweep_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
+  // Stage 14.7: the failure's class, code and kind (a statement timeout, an unreachable database...), never its message; a bounded drain that ran out is reported.
+  private readonly loop = new PollLoop(
+    () => this.sweepOnce(),
+    (e) => this.logger.error(`expiry_sweep_pass_failure ${describeFailure(e)} — the next pass retries`),
+    (ms) => this.logger.warn(`worker_drain_timeout worker=expiry_sweeper drainTimeoutMs=${ms} — shutdown proceeds; the interrupted pass's work is picked up again after restart`),
+  );
   private running = false;
   private readonly logger = new Logger(ExpirySweeper.name);
 

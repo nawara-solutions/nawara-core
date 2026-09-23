@@ -12,11 +12,15 @@ import { AUTH_MIGRATION_OPTIONS, AUTH_MIGRATIONS_DIR } from '../db/migrations.js
 async function main() {
   const url = process.env.MIGRATION_DATABASE_URL;
   if (!url) throw new MigrationError('MIGRATION_DATABASE_URL is required (the schema owner, not the runtime role)');
-  const r = await runMigrations(url, [AUTH_MIGRATIONS_DIR], AUTH_MIGRATION_OPTIONS);
+  const r = await runMigrations(url, [AUTH_MIGRATIONS_DIR], { ...AUTH_MIGRATION_OPTIONS, onLockWait });
   for (const n of r.alreadyApplied) console.log(`  = ${n} (already applied)`);
   for (const n of r.adopted) console.log(`  ~ ${n} (checksum recorded: applied before checksums were kept)`);
   for (const n of r.applied) console.log(`  > ${n}`);
   console.log(`migrations: ${r.applied.length} applied, ${r.alreadyApplied.length} already applied, ${r.adopted.length} checksum(s) recorded`);
+}
+
+function onLockWait(): void {
+  console.log('migration lock is held by another runner: waiting for it to finish (nothing has been changed yet)');
 }
 
 main().catch((e: unknown) => {

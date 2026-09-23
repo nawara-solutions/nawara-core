@@ -6,12 +6,13 @@ export { requestContextMiddleware, getRequestContext, runWithRequestContext, cor
 
 export { JsonLogger, type LogSink } from './logging/json-logger.js';
 export { redact, redactString } from './logging/redact.js';
+export { describeFailure, failureFacts, type FailureFacts, type FailureKind } from './logging/failure.js';
 
 export { KitExceptionFilter, type ErrorBody } from './errors/exception.filter.js';
 
 export { HealthModule } from './health/health.module.js';
 export { HealthController } from './health/health.controller.js';
-export { ReadinessRegistry, type ReadinessCheck, type ReadinessResult } from './health/readiness.registry.js';
+export { ReadinessRegistry, ReadinessCheckTimeout, type ReadinessCheck, type ReadinessResult, type ReadinessLog } from './health/readiness.registry.js';
 
 export { hashServiceToken, generateServiceToken, parseServiceTokens, MAX_TOKENS_PER_CALLER, type ServiceTokenEntry } from './service-auth/service-token.js';
 export { ServiceTokenGuard, CallerService, SERVICE_TOKENS, type ServiceRequest } from './service-auth/service-token.guard.js';
@@ -30,7 +31,7 @@ export { OutboxRelay, type RelayOptions } from './events/outbox-relay.js';
 export { InboxService, type InboxOutcome } from './events/inbox.service.js';
 export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription } from './events/types.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
-export { RabbitMqEventBus, PublisherConfirmTimeoutError, type RabbitMqOptions, type ConsumerState, type ConsumerStatus } from './events/rabbitmq-event-bus.js';
+export { RabbitMqEventBus, PublisherConfirmTimeoutError, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus } from './events/rabbitmq-event-bus.js';
 
 export { RateLimitModule } from './rate-limit/rate-limit.module.js';
 export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';

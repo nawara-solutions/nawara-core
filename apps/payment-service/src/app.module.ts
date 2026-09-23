@@ -34,7 +34,8 @@ const config = loadPaymentConfig();
       source: 'payment-service',
       bus: createEventBus(config),
       // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
-      onError: (message) => new Logger('OutboxRelay').warn(`outbox_publish_failure ${message}`),
+      // Stage 14.7: each relay message carries its own event name (`outbox_publish_failure eventId=...`, `outbox_relay_pass_failure`, ...).
+      onError: (message) => new Logger('OutboxRelay').warn(message),
     }),
     RateLimitModule,
     ProvidersModule,

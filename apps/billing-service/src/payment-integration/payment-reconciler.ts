@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { runWithRequestContext, PollLoop, type DrainOutcome } from '@nawara/service-kit';
+import { runWithRequestContext, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { jobTransitionContext } from '../domain/actors.js';
@@ -19,7 +19,12 @@ import type { PaymentClient } from './payment-client.js';
 @Injectable()
 export class PaymentReconciler {
   // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
-  private readonly loop = new PollLoop(() => this.reconcileOnce(), (e) => this.logger.error(`payment_reconcile_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
+  // Stage 14.7: the failure's class, code and kind (a statement timeout, an unreachable database...), never its message; a bounded drain that ran out is reported.
+  private readonly loop = new PollLoop(
+    () => this.reconcileOnce(),
+    (e) => this.logger.error(`payment_reconcile_pass_failure ${describeFailure(e)} — the next pass retries`),
+    (ms) => this.logger.warn(`worker_drain_timeout worker=payment_reconciler drainTimeoutMs=${ms} — shutdown proceeds; the interrupted pass's work is picked up again after restart`),
+  );
   private running = false;
   /**
    * Where the previous full pass stopped. Requests Payment still reports as unpaid are never updated, so they stay at the head of

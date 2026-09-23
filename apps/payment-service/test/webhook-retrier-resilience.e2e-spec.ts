@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { Logger } from '@nestjs/common';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { DbService, generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { ProviderRegistry } from '../src/providers/provider-registry.js';
@@ -138,6 +139,25 @@ describeWithEnv('webhook retrier: bounded, backed off, claimed (real PostgreSQL)
     } finally {
       webhooks.reprocess = original;
       release();
+    }
+  });
+
+  it('Stage 14.7: an unresolved retry is a warn naming the event and its attempt; exhaustion is an ERROR naming the state it was stuck in', async () => {
+    const lines: Array<[string, string]> = [];
+    for (const level of ['log', 'warn', 'error'] as const) vi.spyOn(Logger.prototype, level).mockImplementation((m: unknown) => void lines.push([level, String(m)]));
+    try {
+      const id = await stored({ secondsAgo: 86_400, attempts: WEBHOOK_RETRY_MAX_ATTEMPTS - 1 });
+      await retrier().drainOnce(); // its last attempt: still unmatched
+      await retrier().drainOnce(); // budget spent: terminal
+      const mine = lines.filter(([, m]) => m.includes(`event=${id}`));
+      expect(mine).toEqual([
+        ['warn', `webhook_retry_unresolved event=${id} provider=test attempt=${WEBHOOK_RETRY_MAX_ATTEMPTS}/${WEBHOOK_RETRY_MAX_ATTEMPTS} state=unmatched outcome=- — retried again after its backoff`],
+        ['error', `webhook_retry_exhausted event=${id} provider=test attempts=${WEBHOOK_RETRY_MAX_ATTEMPTS} lastState=unmatched lastOutcome=- — terminal for the retrier (failed/retries_exhausted); an operator must look at it`],
+      ]);
+      expect(await row(id)).toEqual({ state: 'failed', outcome: 'retries_exhausted', attempts: WEBHOOK_RETRY_MAX_ATTEMPTS }); // behaviour unchanged
+      expect(lines.map(([, m]) => m).join('\n')).not.toMatch(/ghost-|rawBody/); // never the stored provider body
+    } finally {
+      vi.restoreAllMocks();
     }
   });
 });

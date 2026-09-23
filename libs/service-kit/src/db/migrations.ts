@@ -43,6 +43,11 @@ export interface MigrationOptions {
    * the file's current checksum is recorded for it ONCE, reported in `adopted`, and enforced on every later run.
    */
   adoptLegacyChecksums?: boolean;
+  /**
+   * Stage 14.7: called once when another runner holds the migration lock, just before this one starts waiting for it (the wait
+   * itself is unchanged: unbounded, released by the other runner or by PostgreSQL when its session ends). Lets a CLI say why it is idle.
+   */
+  onLockWait?: () => void;
 }
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/;
@@ -140,7 +145,11 @@ export async function runMigrations(connectionString: string, dirs: string[], op
   await client.connect();
   const result: MigrationResult = { applied: [], alreadyApplied: [], adopted: [] };
   try {
-    await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
+    const { rows: got } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [LOCK_KEY]);
+    if (!got[0]?.locked) {
+      opts.onLockWait?.();
+      await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
+    }
     await client.query(`CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (name text PRIMARY KEY, checksum text, applied_at timestamptz NOT NULL DEFAULT now())`);
     await client.query(`ALTER TABLE ${MIGRATIONS_TABLE} ADD COLUMN IF NOT EXISTS checksum text`);
     const { rows } = await client.query<{ name: string; checksum: string | null }>(`SELECT name, checksum FROM ${MIGRATIONS_TABLE}`);

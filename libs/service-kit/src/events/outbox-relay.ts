@@ -1,3 +1,4 @@
+import { describeFailure } from '../logging/failure.js';
 import { redactString } from '../logging/redact.js';
 import { PollLoop, type DrainOutcome } from '../workers/poll-loop.js';
 import type { Queryable } from '../db/db.service.js';
@@ -36,7 +37,11 @@ export class OutboxRelay {
     private readonly opts: RelayOptions,
     private readonly onError: (message: string) => void = () => undefined,
   ) {
-    this.loop = new PollLoop(() => this.drainOnce(), (e) => this.onError(`outbox relay error: ${e instanceof Error ? e.name : 'unknown'}`));
+    this.loop = new PollLoop(
+      () => this.drainOnce(),
+      (e) => this.onError(`outbox_relay_pass_failure ${describeFailure(e)} — the next pass retries`),
+      (ms) => this.onError(`worker_drain_timeout worker=outbox_relay drainTimeoutMs=${ms} — shutdown proceeds; the batch's rows stay unpublished and are relayed again (at least once)`),
+    );
   }
 
   async drainOnce(): Promise<{ published: number; failed: number }> {
@@ -67,7 +72,12 @@ export class OutboxRelay {
             `UPDATE outbox SET attempts = attempts + 1, "lastError" = $2, "availableAt" = now() + ($3 || ' milliseconds')::interval WHERE id = $1`,
             [r.id, reason, String(delay)],
           );
-          this.onError(`outbox publish failed for ${r.name}`);
+          // Stage 14.7: enough to follow ONE event (id, correlation id) and to tell a brief broker blip (attempt 1, seconds old) from an
+          // event that has been retrying for a long time (attempts, age). Retries stay unlimited: this only reports them.
+          const ageSeconds = Math.max(0, Math.round((Date.now() - r.occurredAt.getTime()) / 1000));
+          this.onError(
+            `outbox_publish_failure eventId=${r.id} name=${r.name} correlationId=${r.correlationId ?? '-'} attempt=${r.attempts + 1} ageSeconds=${ageSeconds} retryInMs=${delay} ${describeFailure(e)} — the event stays pending and is published again (at least once)`,
+          );
           return { published, failed: 1 };
         }
         await q.query(`UPDATE outbox SET "publishedAt" = now(), attempts = attempts + 1, "lastError" = NULL WHERE id = $1`, [r.id]);

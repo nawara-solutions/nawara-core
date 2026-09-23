@@ -19,11 +19,15 @@ async function main() {
   }
   const url = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
   if (!url) throw new Error('MIGRATION_DATABASE_URL (or DATABASE_URL) is required');
-  const result = await runMigrations(url, [...(withKit ? [kitMigrationsDir] : []), ...dirs]);
+  const result = await runMigrations(url, [...(withKit ? [kitMigrationsDir] : []), ...dirs], { onLockWait });
   for (const n of result.alreadyApplied) console.log(`  = ${n} (already applied)`);
   for (const n of result.adopted) console.log(`  ~ ${n} (checksum recorded)`);
   for (const n of result.applied) console.log(`  > ${n}`);
   console.log(`migrations: ${result.applied.length} applied, ${result.alreadyApplied.length} already applied`);
+}
+
+function onLockWait(): void {
+  console.log('migration lock is held by another runner: waiting for it to finish (nothing has been changed yet)');
 }
 
 main().catch((e: unknown) => {

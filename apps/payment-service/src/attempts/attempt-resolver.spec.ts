@@ -53,7 +53,7 @@ describe('AttemptResolver provider isolation', () => {
     const line = logs.find((l) => l.startsWith('attempt_resolver_provider_unavailable'));
     expect(line).toBe('attempt_resolver_provider_unavailable attempt=B-attempt-id provider=acme — left unresolved');
     expect(logs.filter((l) => l.startsWith('attempt_resolver_provider_unavailable'))).toHaveLength(1); // one per unavailable attempt, none for the healthy one
-    expect(logs.some((l) => l.includes('could not be resolved'))).toBe(false); // not reported as a failure of the attempt
+    expect(logs.some((l) => l.startsWith('attempt_resolver_failure'))).toBe(false); // not reported as a failure of the attempt
   });
 
   it('a provider-unavailable attempt at the head of the queue does not starve the ones behind it', async () => {

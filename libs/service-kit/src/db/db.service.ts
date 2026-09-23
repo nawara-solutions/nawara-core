@@ -1,6 +1,7 @@
-import { Inject, Injectable, Optional, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
 import { ReadinessRegistry } from '../health/readiness.registry.js';
+import { describeFailure } from '../logging/failure.js';
 import { pendingMigrations } from './migrations.js';
 
 /** Anything that can run a parameterized statement: the pool, or a client inside a transaction. */
@@ -54,8 +55,10 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
       idle_in_transaction_session_timeout: options.idleInTransactionTimeoutMs ?? 60_000,
       application_name: options.applicationName,
     });
-    // An idle client erroring (server restart) must not crash the process; the next query reconnects.
-    this.pool.on('error', () => undefined);
+    // An idle client erroring (server restart, failover, terminated session) must not crash the process; the next query reconnects.
+    // Stage 14.7: reported (class and code only: a message can carry connection details), as auth-service already did.
+    const logger = new Logger('DbService');
+    this.pool.on('error', (e) => logger.warn(`db_pool_idle_client_error ${describeFailure(e)} — the pool discards the client and reconnects on demand`));
   }
 
   onModuleInit(): void {

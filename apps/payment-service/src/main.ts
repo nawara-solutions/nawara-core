@@ -33,5 +33,7 @@ async function bootstrap() {
   }
 
   await app.listen(config.port);
+  // Stage 14.7: one line that identifies this instance (no URL, credential or config dump). Liveness is /health, readiness /ready.
+  logger.info('service_started', { port: config.port, environment: config.nodeEnv, logLevel: config.logLevel, eventBus: config.rabbitmqUrl ? 'rabbitmq' : 'in-memory' });
 }
 await bootstrap();

@@ -15,8 +15,12 @@ export interface RabbitMqOptions {
    * dead-letters on the first failure. A `PermanentEventFailure` is never retried.
    */
   retry?: { maxRetries?: number; delayMs?: number };
-  /** Operational notices (consumer lost / recovered, retry / dead-letter, settle failed). Never carries a URL, credential or payload. */
-  onNotice?: (message: string) => void;
+  /**
+   * Operational notices, each a complete `event_name key=value` line (consumer lost / recovered, retry / dead-letter, confirm and drain
+   * timeouts, settle failed), with the level it deserves: `info` for a recovery, `error` for a terminal dead-letter, `warn` otherwise.
+   * Never carries a URL, credential or payload.
+   */
+  onNotice?: (message: string, level: NoticeLevel) => void;
   /**
    * Bound on waiting for the broker's publisher confirm (default 5000 ms), for publishes and for retry/dead-letter copies. Past it
    * the publish FAILS and the confirm channel is discarded. A timeout means "not confirmed", not "not sent": the caller (the outbox
@@ -34,6 +38,12 @@ export class PublisherConfirmTimeoutError extends Error {
     this.name = 'PublisherConfirmTimeoutError';
   }
 }
+
+export type NoticeLevel = 'info' | 'warn' | 'error';
+
+// Message ids reach a log line: anything that is not a short, predictable token (a malformed or foreign message) is not echoed.
+const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const messageIdOf = (id: unknown): string => safeToken(id, MESSAGE_ID, '-');
 
 export type ConsumerState = 'consuming' | 'reconnecting' | 'closed';
 export interface ConsumerStatus {
@@ -118,15 +128,18 @@ export class RabbitMqEventBus implements EventBus {
         timestamp: Math.floor(new Date(event.headers.occurredAt).getTime() / 1000),
         headers: { ...event.headers },
       });
-      await this.confirmed(ch);
+      await this.confirmed(ch, `eventId=${messageIdOf(event.id)} name=${event.name}`);
     } catch (e) {
       this.publisher = undefined;
       throw e;
     }
   }
 
-  /** Waits for the broker's confirms, bounded. On timeout the channel is discarded so a late confirm can never be misattributed. */
-  private async confirmed(ch: ConfirmChannel): Promise<void> {
+  /**
+   * Waits for the broker's confirms, bounded. On timeout the channel is discarded so a late confirm can never be misattributed.
+   * `subject` identifies the message in the timeout notice (Stage 14.7).
+   */
+  private async confirmed(ch: ConfirmChannel, subject: string): Promise<void> {
     const timeoutMs = this.opts.confirmTimeoutMs ?? 5000;
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -139,7 +152,8 @@ export class RabbitMqEventBus implements EventBus {
     } catch (e) {
       if (e instanceof PublisherConfirmTimeoutError) {
         if (this.publisher === ch) this.publisher = undefined;
-        this.notice(`rabbitmq_confirm_timeout timeoutMs=${timeoutMs}`);
+        // Unconfirmed is NOT undelivered: the broker may have stored it. The caller does not treat it as sent (at least once).
+        this.notice(`rabbitmq_confirm_timeout ${subject} timeoutMs=${timeoutMs} outcome=unconfirmed — delivery state unknown (the broker may have stored it); not treated as sent, so it is sent again (at least once)`);
         void ch.close().catch(() => undefined);
       }
       throw e;
@@ -224,7 +238,7 @@ export class RabbitMqEventBus implements EventBus {
       h.timer = undefined;
       if (h.closed) return;
       this.attach(h).then(
-        () => this.notice(`rabbitmq_consumer_recovered queue=${h.sub.queue}`),
+        () => this.notice(`rabbitmq_consumer_recovered queue=${h.sub.queue}`, 'info'),
         () => {
           h.attempts += 1;
           this.notice(`rabbitmq_consumer_reconnect_failed queue=${h.sub.queue} attempt=${h.attempts}`);
@@ -262,8 +276,8 @@ export class RabbitMqEventBus implements EventBus {
     }
   }
 
-  private notice(message: string): void {
-    this.opts.onNotice?.(message);
+  private notice(message: string, level: NoticeLevel = 'warn'): void {
+    this.opts.onNotice?.(message, level);
   }
 
   private async deliver(ch: Channel, msg: ConsumeMessage, sub: EventSubscription): Promise<void> {
@@ -310,7 +324,7 @@ export class RabbitMqEventBus implements EventBus {
     const delayMs = this.opts.retry?.delayMs ?? 5000;
     const permanent = error instanceof PermanentEventFailure;
     const errorName = safeToken(error instanceof Error ? error.name : undefined, ERROR_NAME, 'Error');
-    const who = `queue=${sub.queue} event=${msg.properties.messageId ?? '-'} correlationId=${event?.headers.correlationId ?? '-'}`;
+    const who = `queue=${sub.queue} event=${messageIdOf(msg.properties.messageId)} correlationId=${messageIdOf(event?.headers.correlationId)}`;
 
     if (!permanent && retryCount < maxRetries) {
       try {
@@ -337,11 +351,11 @@ export class RabbitMqEventBus implements EventBus {
         [HEADER.consumer]: sub.queue,
         [HEADER.retryCount]: retryCount,
       });
-      this.notice(`event_dead_lettered ${outcome}`);
+      this.notice(`event_dead_lettered ${outcome}`, 'error');
       this.settle(() => ch.ack(msg), sub);
     } catch {
       // the annotated copy could not be confirmed: the broker's own dead-lettering (the queue was just re-declared and bound) still moves the original, unannotated
-      this.notice(`event_dead_lettered ${outcome} annotated=false`);
+      this.notice(`event_dead_lettered ${outcome} annotated=false`, 'error');
       this.settle(() => ch.nack(msg, false, false), sub);
     }
   }
@@ -381,7 +395,7 @@ export class RabbitMqEventBus implements EventBus {
         headers: { ...withoutBrokerHistory(msg.properties.headers), ...annotations },
         ...(expiration ? { expiration } : {}),
       });
-      await this.confirmed(ch); // bounded; a basic.return, if any, arrives before the confirm
+      await this.confirmed(ch, `eventId=${messageIdOf(msg.properties.messageId)} target=${queue}`); // bounded; a basic.return, if any, arrives before the confirm
     } catch (e) {
       this.publisher = undefined;
       throw e;
