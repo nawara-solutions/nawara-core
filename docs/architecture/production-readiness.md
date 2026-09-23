@@ -129,10 +129,13 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | `DB_CONNECTION_TIMEOUT_MS` | 5000 | 100–60000 | same | bound on getting a pooled client or opening a connection |
 | `DB_STATEMENT_TIMEOUT_MS` | 30000 | 1000–600000 | same | PostgreSQL cancels a longer statement (57014) |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60000 | 1000–3600000 | same | PostgreSQL ends a session idle inside a transaction (25P03) |
+| `DB_QUERY_TIMEOUT_MS` (Stage 15.2) | statement timeout + 5000 | 1000–660000, must exceed `DB_STATEMENT_TIMEOUT_MS` | same | client-side deadline for a query's answer when the server or network goes silent; the connection is destroyed, never reused |
 | `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment | bound on a publisher confirm; a timeout keeps the outbox row pending (at least once) |
 | `WEBHOOK_RETRY_MAX_ATTEMPTS` (constant) | 10 | – | Payment | stored webhook retried at 10 s × 2ⁿ after receipt, then `failed` / `retries_exhausted` |
 | worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown |
 
+`DB_QUERY_TIMEOUT_MS` is enforced to stay above `DB_STATEMENT_TIMEOUT_MS`: PostgreSQL cancels a slow statement first (57014), the client
+deadline only ends a wait on a silent server (`kind=db_query_timeout`). Raising the statement timeout raises the default deadline with it.
 Keep `RABBITMQ_CONFIRM_TIMEOUT_MS` below `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`: the relay waits for the confirm inside its claiming
 transaction, so a longer confirm wait lets PostgreSQL end the session (the row stays pending and is published again: safe, but wasted).
 

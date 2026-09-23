@@ -72,11 +72,11 @@ describe('loadBaseConfig', () => {
 
 describe('database runtime limits (Stage 14.4)', () => {
   it('defaults: pool 10, connection 5 s, statement 30 s, idle in transaction 60 s', () => {
-    expect(loadBaseConfig('billing-service', {}).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000 });
+    expect(loadBaseConfig('billing-service', {}).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000, queryTimeoutMs: 35000 });
   });
   it('accepts values inside the bounds', () => {
     const env = { DB_POOL_MAX: '25', DB_CONNECTION_TIMEOUT_MS: '100', DB_STATEMENT_TIMEOUT_MS: '600000', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '3600000' };
-    expect(loadBaseConfig('billing-service', env).db).toEqual({ poolMax: 25, connectionTimeoutMs: 100, statementTimeoutMs: 600000, idleInTransactionTimeoutMs: 3600000 });
+    expect(loadBaseConfig('billing-service', env).db).toEqual({ poolMax: 25, connectionTimeoutMs: 100, statementTimeoutMs: 600000, idleInTransactionTimeoutMs: 3600000, queryTimeoutMs: 605000 });
   });
   it.each([
     ['DB_POOL_MAX', '0'], ['DB_POOL_MAX', '101'], ['DB_POOL_MAX', 'ten'],
@@ -85,5 +85,29 @@ describe('database runtime limits (Stage 14.4)', () => {
     ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '0'], ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '3600001'],
   ])('refuses %s=%s (zero, negative, fractional, non-numeric or unbounded), naming the variable', (name, value) => {
     expect(() => loadBaseConfig('billing-service', { [name]: value })).toThrow(new RegExp(name));
+  });
+});
+
+describe('client-side query deadline (Stage 15.2, I9)', () => {
+  const db = (env: Record<string, string>) => loadBaseConfig('billing-service', env).db;
+  it('defaults to the statement timeout + 5 s, following a changed statement timeout', () => {
+    expect(db({}).queryTimeoutMs).toBe(35000);
+    expect(db({ DB_STATEMENT_TIMEOUT_MS: '1000' }).queryTimeoutMs).toBe(6000);
+    expect(db({ DB_STATEMENT_TIMEOUT_MS: '600000' }).queryTimeoutMs).toBe(605000);
+  });
+  it('accepts an explicit value above the statement timeout, up to the bound', () => {
+    expect(db({ DB_QUERY_TIMEOUT_MS: '30001' }).queryTimeoutMs).toBe(30001);
+    expect(db({ DB_STATEMENT_TIMEOUT_MS: '1000', DB_QUERY_TIMEOUT_MS: '1001' }).queryTimeoutMs).toBe(1001);
+    expect(db({ DB_STATEMENT_TIMEOUT_MS: '600000', DB_QUERY_TIMEOUT_MS: '660000' }).queryTimeoutMs).toBe(660000);
+  });
+  it.each(['0', '-1', '999', '660001', '1.5', 'ten', 'NaN'])('refuses DB_QUERY_TIMEOUT_MS=%s (outside 1000-660000 or not an integer)', (value) => {
+    expect(() => db({ DB_QUERY_TIMEOUT_MS: value })).toThrow(/DB_QUERY_TIMEOUT_MS must be an integer between 1000 and 660000/);
+  });
+  it.each([
+    [{ DB_QUERY_TIMEOUT_MS: '30000' }], // equal to the default statement timeout
+    [{ DB_QUERY_TIMEOUT_MS: '20000' }], // below it
+    [{ DB_STATEMENT_TIMEOUT_MS: '60000', DB_QUERY_TIMEOUT_MS: '35000' }], // a raised statement timeout left above an explicit deadline
+  ])('refuses a deadline that is not above the statement timeout (the server must cancel a slow statement first): %o', (env) => {
+    expect(() => db(env)).toThrow(/DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS/);
   });
 });

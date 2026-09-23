@@ -31,15 +31,33 @@ export interface DbRuntimeConfig {
   statementTimeoutMs: number;
   /** `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`: PostgreSQL `idle_in_transaction_session_timeout` (default 60000, 1000-3600000). */
   idleInTransactionTimeoutMs: number;
+  /**
+   * `DB_QUERY_TIMEOUT_MS` (Stage 15.2, I9): the CLIENT-side deadline for one query's answer (default `DB_STATEMENT_TIMEOUT_MS` + 5000,
+   * 1000-660000, must be greater than `DB_STATEMENT_TIMEOUT_MS`). A slow statement is still cancelled by the server first; this bound only
+   * ends the wait when the server or the network goes silent after accepting a query, which `statement_timeout` cannot do.
+   */
+  queryTimeoutMs: number;
 }
+
+/**
+ * How much later than `statement_timeout` the client-side deadline fires, by default. The server's own cancellation must win for a
+ * slow statement: its answer needs a network round trip (measured ~1-15 ms locally, Stage 15.2); 5 s is the repository's bound for
+ * waiting on a peer (connection, broker confirm, Payment/Auth calls), which leaves ample room for a slow network.
+ */
+export const DB_QUERY_TIMEOUT_MARGIN_MS = 5_000;
+export const DB_QUERY_TIMEOUT_BOUNDS = { min: 1_000, max: 660_000 } as const;
 
 /** The database limits every Core service shares. Exported so a service with its own configuration loader can reuse the rule. */
 export function loadDbRuntimeConfig(reader: EnvReader): DbRuntimeConfig {
+  const statementTimeoutMs = reader.int('DB_STATEMENT_TIMEOUT_MS', { default: 30_000, min: 1_000, max: 600_000 });
+  const queryTimeoutMs = reader.int('DB_QUERY_TIMEOUT_MS', { default: statementTimeoutMs + DB_QUERY_TIMEOUT_MARGIN_MS, ...DB_QUERY_TIMEOUT_BOUNDS });
+  if (queryTimeoutMs <= statementTimeoutMs) throw new ConfigError('DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS');
   return {
     poolMax: reader.int('DB_POOL_MAX', { default: 10, min: 1, max: 100 }),
     connectionTimeoutMs: reader.int('DB_CONNECTION_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
-    statementTimeoutMs: reader.int('DB_STATEMENT_TIMEOUT_MS', { default: 30_000, min: 1_000, max: 600_000 }),
+    statementTimeoutMs,
     idleInTransactionTimeoutMs: reader.int('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', { default: 60_000, min: 1_000, max: 3_600_000 }),
+    queryTimeoutMs,
   };
 }
 

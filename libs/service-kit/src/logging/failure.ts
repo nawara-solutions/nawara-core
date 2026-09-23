@@ -20,6 +20,7 @@ export type FailureKind =
   | 'db_auth_failed'
   | 'db_serialization_failure'
   | 'db_deadlock'
+  | 'db_query_timeout'
   | 'broker_confirm_timeout'
   | 'network_unreachable';
 
@@ -55,6 +56,7 @@ const BY_PG_MESSAGE: Array<[string, FailureKind]> = [
   ['Connection terminated due to connection timeout', 'db_connect_timeout'],
   ['Client has encountered a connection error and is not queryable', 'db_connection_lost'],
   ['Connection terminated unexpectedly', 'db_connection_lost'],
+  ['Query read timeout', 'db_query_timeout'], // client-side query_timeout: no answer from a silent server or network (Stage 15.2)
 ];
 
 /**

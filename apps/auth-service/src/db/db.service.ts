@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
-import { ReadinessRegistry, describeFailure, listMigrationFiles, pendingOf } from '@nawara/service-kit';
+import { DB_QUERY_TIMEOUT_MARGIN_MS, ReadinessRegistry, describeFailure, isQueryTimeout, listMigrationFiles, pendingOf } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { AUTH_MIGRATIONS_DIR, AUTH_MIGRATION_OPTIONS } from './migrations.js';
 
@@ -33,6 +33,9 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
       connectionTimeoutMillis: cfg.db.connectionTimeoutMs,
       statement_timeout: cfg.db.statementTimeoutMs,
       idle_in_transaction_session_timeout: cfg.db.idleInTransactionTimeoutMs,
+      // Stage 15.2 (I9): the client-side deadline for a query's answer when the server or network goes silent after accepting it (same
+      // contract as the service-kit's DbService). A directly constructed service without it gets the same derived default.
+      query_timeout: cfg.db.queryTimeoutMs ?? cfg.db.statementTimeoutMs + DB_QUERY_TIMEOUT_MARGIN_MS,
     });
     // An IDLE client that loses its connection (PostgreSQL restart or failover, an administrator's terminate, a proxy's idle timeout) is reported
     // on the POOL. `pg` discards that client itself and the next query opens a fresh connection, but an 'error' event with no listener is thrown
@@ -79,7 +82,15 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
       await client.query('COMMIT');
       return out;
     } catch (e) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      // Stage 15.2 (I9), same rule as the service-kit's DbService: after a client-side query timeout the silent statement is still in
+      // flight, so the client must never return to the pool (its next borrower would run, and COMMIT, inside this open transaction). It is
+      // destroyed without a ROLLBACK (which would only queue behind the silent statement); PostgreSQL rolls back when the session ends.
+      if (isQueryTimeout(e)) broken ??= e as Error;
+      else {
+        await client.query('ROLLBACK').catch((r: unknown) => {
+          if (isQueryTimeout(r)) broken ??= r as Error;
+        });
+      }
       throw e;
     } finally {
       client.removeListener('error', onError);

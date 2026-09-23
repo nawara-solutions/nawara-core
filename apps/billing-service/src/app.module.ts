@@ -47,6 +47,7 @@ export class AppModule {
           connectionTimeoutMs: config.db.connectionTimeoutMs,
           statementTimeoutMs: config.db.statementTimeoutMs,
           idleInTransactionTimeoutMs: config.db.idleInTransactionTimeoutMs,
+          queryTimeoutMs: config.db.queryTimeoutMs, // Stage 15.2 (I9): client-side deadline for a silent server
           migrations: { dirs: overrides.migrationsDirs ?? [kitMigrationsDir, billingMigrationsDir] },
         }),
         ServiceAuthModule.forRoot(config.serviceTokens),
