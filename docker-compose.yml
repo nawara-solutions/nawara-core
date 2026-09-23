@@ -77,6 +77,8 @@ services:
 
   auth-service:
     profiles: [db]
+    # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded at about 40 s.
+    stop_grace_period: 60s
     build:
       context: .
       dockerfile: apps/auth-service/Dockerfile
@@ -103,6 +105,8 @@ services:
 
   billing-service:
     profiles: [db]
+    # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded at about 40 s.
+    stop_grace_period: 60s
     build:
       context: .
       dockerfile: apps/billing-service/Dockerfile
@@ -131,6 +135,8 @@ services:
 
   payment-service:
     profiles: [db]
+    # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded at about 40 s.
+    stop_grace_period: 60s
     build:
       context: .
       dockerfile: apps/payment-service/Dockerfile
@@ -167,6 +173,8 @@ services:
   # generateServiceToken() and set SERVICE_TOKENS=<caller>:<digest> (see apps/organization-service/README.md).
   organization-service:
     profiles: [db]
+    # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded at about 40 s.
+    stop_grace_period: 60s
     build:
       context: .
       dockerfile: apps/organization-service/Dockerfile

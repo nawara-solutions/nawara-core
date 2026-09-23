@@ -38,6 +38,8 @@ export class ReadinessRegistry {
   constructor(
     private readonly timeoutMs = 2000,
     private readonly log: ReadinessLog = nestLog(),
+    /** Stage 15.5: true once shutdown has started. The instance is then not ready, whatever its dependencies say. */
+    private readonly draining: () => boolean = () => false,
   ) {}
 
   register(name: string, check: ReadinessCheck): void {
@@ -45,6 +47,7 @@ export class ReadinessRegistry {
   }
 
   async run(): Promise<ReadinessResult> {
+    if (this.draining()) return { ok: false, failed: ['shutting_down'] };
     const failed: string[] = [];
     await Promise.all(
       [...this.checks].map(async ([name, check]) => {

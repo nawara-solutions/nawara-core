@@ -15,6 +15,11 @@ export async function fakePayment() {
   const maxInFlight = new Map();
   const gets = new Map(); // paymentId -> physical get calls
   let hook = async () => 'normal'; // (paymentRequestId) => 'normal' | 'abort' (never processed, no answer) | 'drop' (created, no answer)
+  // (paymentId) => 'normal' | 'unavailable' (503, nothing done: Payment restarting or overloaded) | 'drop' (cancelled, the response lost)
+  // | 'open_attempt' (409 payment_has_open_attempt: money may be in flight, nothing done). May be async (to hold the call).
+  let cancelHook = async () => 'normal';
+  const cancels = new Map(); // paymentId -> physical cancel calls
+  const logicalCancels = new Map(); // paymentId -> times the payment actually moved to `cancelled` (must never exceed 1)
   const sockets = new Set();
 
   const send = (res, status, body) => {
@@ -63,7 +68,20 @@ export async function fakePayment() {
         return send(res, 200, p);
       }
       if (req.method === 'POST' && m[2]) {
-        if (p.status === 'pending' || p.status === 'created') Object.assign(p, { status: 'cancelled', closedAt: new Date().toISOString() });
+        cancels.set(p.id, (cancels.get(p.id) ?? 0) + 1);
+        const mode = await cancelHook(p.id);
+        if (mode === 'unavailable') return send(res, 503, { code: 'service_unavailable' });
+        if (mode === 'open_attempt') return send(res, 409, { code: 'payment_has_open_attempt' });
+        // Payment's real semantics (Billing always sends the same Idempotency-Key): a replay of a cancellation answers the cancelled
+        // payment again; any other terminal state is refused with invalid_state_transition.
+        if (p.status === 'pending' || p.status === 'created') {
+          Object.assign(p, { status: 'cancelled', closedAt: new Date().toISOString() });
+          logicalCancels.set(p.id, (logicalCancels.get(p.id) ?? 0) + 1);
+        } else if (p.status !== 'cancelled') return send(res, 409, { code: 'invalid_state_transition' });
+        if (mode === 'drop') {
+          req.socket.destroy();
+          return;
+        }
         return send(res, 200, p);
       }
     }
@@ -78,7 +96,8 @@ export async function fakePayment() {
   return {
     url: `http://127.0.0.1:${port}`,
     setHook: (fn) => (hook = fn),
-    payments, byRequest, creates, maxInFlight, gets,
+    setCancelHook: (fn) => (cancelHook = fn),
+    payments, byRequest, creates, maxInFlight, gets, cancels, logicalCancels,
     /** Marks a payment terminal (what Payment's own state machine would record), for the reconciler and for events. */
     settle: (paymentId, status, closedAt = new Date()) => Object.assign(payments.get(paymentId), { status, closedAt: closedAt.toISOString() }),
     close: async () => {

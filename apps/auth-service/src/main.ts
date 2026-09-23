@@ -2,7 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
-import { JsonLogger, requestContextMiddleware } from '@nawara/service-kit';
+import { JsonLogger, ShutdownState, requestContextMiddleware, shutdownAdmission } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { basicAuth } from './docs/basic-auth.js';
 import { loadConfig } from './config/app-config.js';
@@ -13,6 +13,8 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule.register(cfg), { bufferLogs: true });
   const logger = new JsonLogger('auth-service', 'info');
 
+  // Stage 15.5: once shutdown starts, a new request is refused (503, Connection: close) instead of feeding a closing process.
+  app.use(shutdownAdmission(app.get(ShutdownState)));
   // Request/correlation id first, so every log line and error response from this point on can carry it.
   app.use(requestContextMiddleware);
   app.use(helmet());

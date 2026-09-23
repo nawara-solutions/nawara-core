@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext } from '../events/payment-events.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
@@ -93,16 +93,23 @@ export class AttemptResolver {
 }
 
 @Injectable()
-export class AttemptResolverService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
+export class AttemptResolverService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly resolver: AttemptResolver) {}
   onApplicationBootstrap(): void {
     this.resolver.start();
+  }
+  /**
+   * Stage 15.5 (F-D): the drain STARTS at shutdown start (Nest runs every onModuleDestroy before any beforeApplicationShutdown), so the
+   * service's workers drain concurrently instead of one module after another; `stop()` is idempotent and the later hooks await it.
+   */
+  onModuleDestroy(): void {
+    void this.resolver.stop();
   }
   /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
   async beforeApplicationShutdown(): Promise<void> {
     await this.resolver.stop();
   }
   async onApplicationShutdown(): Promise<void> {
-    await this.resolver.stop(); // idempotent: already stopped when Nest drives the shutdown
+    await this.resolver.stop(); // idempotent: the same drain, already finished when Nest drives the shutdown
   }
 }

@@ -16,7 +16,7 @@ const config = loadPaymentConfig();
 
 @Module({
   imports: [
-    HealthModule.forRoot(),
+    HealthModule.forRoot({ httpDrainTimeoutMs: config.httpDrainTimeoutMs }), // Stage 15.5: bounded HTTP drain
     DbModule.forRoot({
       url: config.databaseUrl,
       applicationName: 'payment-service',

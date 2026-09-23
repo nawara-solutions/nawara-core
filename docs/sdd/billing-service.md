@@ -584,7 +584,7 @@ Public prefix `/billing` [D, ADR-0034]; no version segment in v1; errors and lis
 
 **14. Get payment request.** `200` with `{ id, invoiceId, status, amount, currency, paymentId }`; `404` when the caller has no relation to the invoice.
 
-**15. Cancel payment request.** `200` when a request that was **never sent** is cancelled locally; `202` when a cancel was requested of Payment (the terminal state then arrives as `payment.cancelled`); `409 payment_request_in_flight` when Payment refuses because an attempt is open or cash is awaiting review (21.2). Needs Payment's cancel route for any request that reached Payment (R-7).
+**15. Cancel payment request.** `200` when a request that was **never sent** is cancelled locally; `202` when a cancel was requested of Payment (the terminal state then arrives as `payment.cancelled`); `409 payment_request_in_flight` when Payment refuses because an attempt is open or cash is awaiting review (21.2). Needs Payment's cancel route for any request that reached Payment (R-7). *(As implemented: a confirmed cancel is answered `200`, not `202`.)* **Stage 15.5:** success is answered only when Payment **confirmed** the cancel (or is already terminal); when Payment cannot confirm (unreachable, timeout, 5xx, a credential or unknown-payment fault) the answer is `503 payment_unavailable` and nothing is claimed, so the caller retries the same call (a replay: same idempotency key, marker not re-stamped). A request already `cancelled` answers `200` with itself (a retry after a lost answer).
 
 **16. Create credit note.** **Blocked (B-016).** No behaviour is defined.
 
@@ -607,6 +607,7 @@ Reuses the kit body `{ statusCode, message, error, code?, requestId }`. Messages
 | `payment_request_not_supported` | 409 | a payment request for a payer type Payment cannot collect from yet (B-026) |
 | `invoice_has_active_payment_request` | 409 | void while a payment request is active (a draft cannot have one) |
 | `payment_request_in_flight` | 409 | cancel refused by Payment |
+| `payment_unavailable` | 503 | Payment could not confirm a cancel; nothing accepted, retry the same call (Stage 15.5) |
 | `unsupported_currency` / `price_not_available` | 422 | not in the configured list / price cannot be used |
 | `rate_limited` | 429 | baseline limit (section 29) |
 | `auth_unavailable` | 503 | Auth cannot be asked; fail closed |
@@ -694,7 +695,7 @@ The request is section 13.2. Payment's answers and Billing's handling:
 | `401`, `403` | service token / producer authorization (O-13, O-14) | retry with backoff; alert (a configuration fault, not the invoice's) |
 | `429`, `5xx`, timeout, connection lost | transient | retry the **same** request (safe by the natural key) |
 
-**Cancel.** Payment's cancel requires an `Idempotency-Key` (Payment SDD 6 and 9). Billing sends the deterministic key `billing-cancel-{paymentRequestId}` (8 to 128 characters of `[A-Za-z0-9._:-]`), so a retried cancel is a replay. Payment's answers: `200` cancelled (the terminal state still arrives as `payment.cancelled`); `409 payment_has_open_attempt` or `409 cash_submission_exists` mean money may be in flight, surfaced as `409 payment_request_in_flight` with nothing changed; `409 invalid_state_transition` means Payment already reached a terminal state, which Billing settles from the terminal event or the reconciler (no error to the caller); `404` means the payment does not exist (an alert).
+**Cancel.** Payment's cancel requires an `Idempotency-Key` (Payment SDD 6 and 9). Billing sends the deterministic key `billing-cancel-{paymentRequestId}` (8 to 128 characters of `[A-Za-z0-9._:-]`), so a retried cancel is a replay. Payment's answers: `200` cancelled (the terminal state still arrives as `payment.cancelled`); `409 payment_has_open_attempt` or `409 cash_submission_exists` mean money may be in flight, surfaced as `409 payment_request_in_flight` with nothing changed; `409 invalid_state_transition` means Payment already reached a terminal state, which Billing settles from the terminal event or the reconciler (no error to the caller); `404` means the payment does not exist (an alert). Stage 15.5: a network error, a timeout, a 5xx, a `401`/`403` or a `404` is **not** a confirmation: Billing answers `503 payment_unavailable` (logged `payment_cancel_unconfirmed`), never a success, because nothing re-sends a cancel on its own (the reconciler only reads Payment).
 
 ### 21.3 Events consumed
 

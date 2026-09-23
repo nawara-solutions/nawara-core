@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS } from '@nawara/service-kit';
+import { DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS } from '@nawara/service-kit';
 
 /**
  * All configuration and ALL secrets enter the service through this file, once, at startup.
@@ -76,6 +76,8 @@ export interface AppConfig {
    * answer (default statement timeout + 5000, 1000-660000, must exceed DB_STATEMENT_TIMEOUT_MS). Every value is bounded; none may be "infinite".
    */
   db: { poolMax: number; connectionTimeoutMs: number; statementTimeoutMs: number; idleInTransactionTimeoutMs: number; queryTimeoutMs: number };
+  /** `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5), same default and bounds as the kit: once shutdown starts, how long running requests may finish. */
+  httpDrainTimeoutMs: number;
   /**
    * Fire-and-forget event publishing (ADR-0018). `AUTH_EVENTS=off` disables it (tests, runs without a broker; the production
    * deploy sets it off today). When enabled, `rabbitmqUrl` is set: production requires an explicit `RABBITMQ_URL`; only
@@ -273,6 +275,7 @@ export function loadConfig(
       idleInTransactionTimeoutMs: int(env, 'DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 60_000, 1_000, 3_600_000),
       queryTimeoutMs,
     },
+    httpDrainTimeoutMs: int(env, 'HTTP_DRAIN_TIMEOUT_MS', DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS.min, HTTP_DRAIN_TIMEOUT_BOUNDS.max),
     events: { enabled: eventsEnabled, rabbitmqUrl },
     trustProxy: env.TRUST_PROXY === 'true',
     corsOrigins,

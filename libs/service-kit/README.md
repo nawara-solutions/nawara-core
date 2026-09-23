@@ -161,6 +161,29 @@ and the channel operations it rejected), `network_unreachable`.
 | `rabbitmq_consumer_drain_timeout` | warn | consumer close | `queue= inFlight=` |
 | `event_retry_scheduled` / `event_retry_exhausted` / `event_dead_lettered` | warn / warn / error | consumer failure path | `queue= event= correlationId=` ... |
 | `service_shutdown_started` / `service_shutdown_complete` | info | `HealthModule` (Nest lifecycle) | `signal=` |
+| `http_drain_timeout` | warn | `HealthModule` (`HttpDrain`), connections still open at the HTTP drain deadline | `drainTimeoutMs= openConnections=` |
+| `rabbitmq_connection_abandoned` | warn (via `onNotice`) | `RabbitMqEventBus.close()`, the broker never answered the close within the bound: the transport was destroyed | `closeBoundMs=` |
+
+**Graceful shutdown (Stage 15.5).** When shutdown starts (Nest's `onModuleDestroy`, the first hook), `HealthModule` marks the service
+draining: `/ready` answers 503 (`shutting_down`), and `configureApp`'s first middleware (`shutdownAdmission`; Auth installs it itself)
+refuses a new request with 503 and `Connection: close` (`/health` is still answered). The HTTP server stops accepting connections at
+once. Requests already running may finish; after `HTTP_DRAIN_TIMEOUT_MS` (default 5000, 500-120000), every connection still open is
+closed. No client, keep-alive or not, can extend this. Workers start draining at the same moment. `PollLoop.stop()` is idempotent: later
+hooks await the same drain, so a hung pass costs one drain budget, not one per hook. The database pool and the broker close last, in
+`onApplicationShutdown`.
+
+**Broker connection disposal (Stage 15.5, F-H).** amqplib ends a connection with a half-close (`stream.end()`), and a silent broker never
+completes it, so the socket would stay open (`FIN_WAIT2`) and keep Node's event loop alive. In a container Node is PID 1, and it would
+never exit. The bus therefore **destroys the transport of every connection it gives up on**:
+- a connection closed by an error (heartbeat timeout, socket error, a close forced by the broker);
+- a `close()` the broker does not answer within the bound (3 × heartbeat); this also logs `rabbitmq_connection_abandoned`.
+
+A clean close (close-ok from a healthy broker) keeps amqplib's graceful FIN.
+- A closed connection is never reused; the next use opens a new one.
+- `close()` has one deadline for the publisher channel and the connection together.
+- Every bounded wait in `close()` and in a consumer's stop also ends as soon as the connection itself has closed.
+- The destroy is the kit's only use of amqplib's undocumented `ChannelModel.connection.stream` (the net/tls socket), in
+  `destroyTransport()`, guarded, and pinned by `rabbitmq-transport-disposal.int-spec` (amqplib 2.0.1).
 
 `onNotice(message, level)` passes the level above; `onError(message)` for the relay is one level (the services log it at warn).
 Services add their own worker signals in the same shape (`*_pass_failure` with the failure, `webhook_retry_exhausted`, ...) and a

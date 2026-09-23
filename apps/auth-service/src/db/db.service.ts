@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
 import { DB_QUERY_TIMEOUT_MARGIN_MS, ReadinessRegistry, describeFailure, isQueryTimeout, listMigrationFiles, pendingOf } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
@@ -16,7 +16,7 @@ export interface Queryable {
  * transactions, so the service talks to the schema directly.
  */
 @Injectable()
-export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
+export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown {
   private readonly pool: pg.Pool;
   private readonly logger = new Logger(DbService.name);
 
@@ -98,7 +98,11 @@ export class DbService implements Queryable, OnModuleInit, OnModuleDestroy {
     }
   }
 
-  onModuleDestroy() {
+  /**
+   * Stage 15.5 (F-C): closed in `onApplicationShutdown`, which Nest runs after the HTTP server has closed (and the kit's HTTP drain has
+   * ended). It used to close in `onModuleDestroy`, the FIRST shutdown hook, while HTTP still admitted requests that need the database.
+   */
+  onApplicationShutdown() {
     return this.pool.end();
   }
 }

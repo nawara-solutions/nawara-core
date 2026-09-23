@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, HttpCode, Inject, Logger, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CallerService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
@@ -9,6 +9,7 @@ import type { Caller } from '../domain/actors.js';
 import { actorOf, requestTransitionContext } from '../domain/actors.js';
 import { PAYMENT_CLIENT } from '../payment-integration/payment-client.token.js';
 import type { PaymentClient } from '../payment-integration/payment-client.js';
+import { billingError } from '../domain/errors.js';
 import { representPaymentRequest } from './payment-request.representation.js';
 import { PaymentRequestRepository } from './payment-request.repository.js';
 
@@ -23,6 +24,8 @@ import { PaymentRequestRepository } from './payment-request.repository.js';
 @ApiTags('payment-requests')
 @Controller('billing')
 export class PaymentRequestsController {
+  private readonly logger = new Logger('PaymentRequests');
+
   constructor(
     private readonly paymentRequests: PaymentRequestRepository,
     private readonly rateLimit: RateLimitService,
@@ -84,7 +87,8 @@ export class PaymentRequestsController {
   @ApiResponse({ status: 200, description: 'Cancelled locally (never sent), or cancellation requested at Payment (terminal state arrives later).' })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 404 })
-  @ApiResponse({ status: 409, description: 'payment_request_in_flight: still being sent, or already closed' })
+  @ApiResponse({ status: 409, description: 'payment_request_in_flight: still being sent, already closed, or Payment refused (an attempt or cash submission is in progress)' })
+  @ApiResponse({ status: 503, description: 'payment_unavailable: Payment could not confirm the cancellation; nothing was accepted. Retrying the same call is safe.' })
   async cancel(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string) {
     const caller: Caller = { kind: 'service', service: producer };
     const ctx = requestTransitionContext(actorOf(caller));
@@ -93,12 +97,28 @@ export class PaymentRequestsController {
     if (request.status === 'created') {
       return representPaymentRequest(await this.paymentRequests.cancelUnsent(id, caller, ctx));
     }
+    // Stage 15.5 (F-B): a retry after a lost answer may find the cancellation already applied; that is its success, not a conflict.
+    if (request.status === 'cancelled') return representPaymentRequest(request);
 
     const marked = await this.paymentRequests.markCancelRequested(id, caller); // throws 409 payment_request_in_flight for any other status
     // The deterministic key means a retried cancel call is a safe replay at Payment (SDD 21.2).
-    await this.paymentClient.cancelPayment(marked.paymentId!, `billing-cancel-${marked.id}`);
-    // Whatever Payment answered, Billing's own request status changes ONLY through the event/reconciliation path —
-    // never directly from this response, so a lost or slow Payment answer can never leave Billing's record wrong.
-    return representPaymentRequest(marked);
+    const outcome = await this.paymentClient.cancelPayment(marked.paymentId!, `billing-cancel-${marked.id}`);
+    // Stage 15.5 (F-B): success is answered ONLY when Payment confirmed the cancellation (or already reached a terminal state, which
+    // the event/reconciliation path settles, SDD 21.2). Anything else used to be answered 200 too, and nothing ever re-sent it: a
+    // cancellation made while Payment was unavailable was silently lost and the payment stayed payable. The caller now gets a
+    // retryable 503 (a retry is a safe replay: same idempotency key, marker not re-stamped).
+    switch (outcome.kind) {
+      case 'cancelled':
+      case 'already_terminal':
+        // Billing's own request status still changes ONLY through the event/reconciliation path, never from this response.
+        return representPaymentRequest(marked);
+      case 'in_flight':
+        throw billingError(409, 'payment_request_in_flight', 'Payment refused the cancellation: a payment attempt or cash submission is in progress.');
+      default:
+        this.logger[outcome.kind === 'transient' ? 'warn' : 'error'](
+          `payment_cancel_unconfirmed request=${marked.id} outcome=${outcome.kind} — answered 503; the caller must retry`,
+        );
+        throw billingError(503, 'payment_unavailable', 'Payment could not confirm the cancellation. Retry the same request.');
+    }
   }
 }

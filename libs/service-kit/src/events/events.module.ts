@@ -1,4 +1,4 @@
-import { DynamicModule, Global, Inject, Injectable, Module, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { DynamicModule, Global, Inject, Injectable, Module, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService } from '../db/db.service.js';
 import { InboxService } from './inbox.service.js';
 import { OutboxRelay } from './outbox-relay.js';
@@ -25,7 +25,7 @@ export interface EventsModuleOptions {
  * broker; the bus itself closes afterwards, in `onApplicationShutdown`.
  */
 @Injectable()
-export class OutboxRelayService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
+export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
   readonly relay: OutboxRelay;
 
   constructor(@Inject(DbService) db: DbService, @Inject(EVENT_BUS) private readonly bus: EventBus, @Inject(EVENTS_OPTIONS) private readonly opts: EventsModuleOptions) {
@@ -36,12 +36,17 @@ export class OutboxRelayService implements OnApplicationBootstrap, BeforeApplica
     if (this.opts.relay?.enabled ?? true) this.relay.start(this.opts.relay?.intervalMs ?? 1000);
   }
 
+  /** Stage 15.5 (F-D): the drain starts at shutdown start, concurrently with the service's other workers; later hooks await it. */
+  onModuleDestroy(): void {
+    void this.relay.stop();
+  }
+
   async beforeApplicationShutdown(): Promise<void> {
     await this.relay.stop(); // a drain timeout is reported by the relay itself (`worker_drain_timeout worker=outbox_relay`)
   }
 
   async onApplicationShutdown(): Promise<void> {
-    await this.relay.stop(); // idempotent: already stopped by beforeApplicationShutdown when Nest drives the shutdown
+    await this.relay.stop(); // idempotent: the same drain, already finished by beforeApplicationShutdown
     await this.bus.close();
   }
 }

@@ -56,7 +56,7 @@ describe('Auth database: client-side query deadline on a stalled connection', ()
   });
   afterAll(async () => {
     proxy.thaw();
-    for (const s of services) await s.onModuleDestroy().catch(() => undefined);
+    for (const s of services) await s.onApplicationShutdown().catch(() => undefined);
     await proxy.sever();
     await admin('DROP TABLE IF EXISTS validation_marker');
     await t.close();

@@ -283,6 +283,9 @@ campaign.
 | 15.3 | 2026-09-23 | `33a0225` | RabbitMQ, outbox and consumer failure (17 campaigns, kit and live services) | **FAIL** on I9 (channel-level broker operations have no Core-configured bound); I1–I8, I10, I13 PASS; no lost event, no duplicate effect | section 13.3 |
 | 15.3 | 2026-09-23 | `33a0225` + corrective patch | I9 correction (`RABBITMQ_HEARTBEAT_S`, bounded closes) and the full 15.3 matrix re-run (19 campaigns) | PASS: I9 bounded by Core whatever the broker's heartbeat policy; no regression | section 13.3.1 |
 | 15.4 | 2026-09-23 | `a760c85` | Workers and concurrency (23 campaigns: kit, Payment workers, live Billing / Payment fleets; race campaigns ≥ 20 iterations) | PASS on C1–C13: no duplicate protected effect, no lost work, no invalid state, no cross-tenant write, no lock leak; throughput / amplification findings carried to 15.8 | section 13.4 |
+| 15.5 | 2026-09-23 | `804dc72` | Shutdown and restart (17 campaigns: SIGTERM / SIGKILL / `docker stop` windows, frozen dependencies, restart cycles, rolling restart, backlog, dependency-down startup) | **FAIL** on S2/S8 (a busy keep-alive connection keeps a SIGTERMed service serving, and `/ready` 200, with no Core bound) and on S3 (a cancellation accepted while Payment is unavailable is silently lost); every crash / kill window otherwise PASS (no lost, partial or duplicated effect; no manual repair) | section 13.5 |
+| 15.5 | 2026-09-23 | `804dc72` + corrective patch | F-A (bounded HTTP drain, readiness at shutdown start), F-C (Auth pool order), F-D (one concurrent drain per worker), F-B (cancellation answered only when Payment confirmed); full 15.5 matrix re-run (21 campaigns) plus the new cancellation campaigns | F-A, F-B, F-C, F-D corrected and revalidated (no client can extend the HTTP drain; `/ready` 503 from the first moment; each worker drains once, concurrently; 0 accepted-but-lost cancellations; every crash window as before) — **FAIL on S8/S10 in containers (new finding F-H)**: with the broker frozen, Nest completes its shutdown but PID 1 never exits (an AMQP socket left half-closed keeps Node's event loop alive); SIGKILL even with a 45 s grace | section 13.5.1 |
+| 15.5 | 2026-09-23 | `804dc72` + corrective patches 1 and 2 | F-H: the kit bus destroys the transport of every connection it gives up on (error close, abandoned close); one close deadline; waits end when the connection is gone. Full 15.5 matrix + new container campaigns, full 15.3 matrix, 15.4 subset | **PASS**: frozen broker in the production image → natural exit (exit 0) at 27–29 s, 12/12 plus 20/20 cycles, with the broker's heartbeat on or off; every crash window, cancellation and accounting as before; worst graceful shutdown 39.8 s → **60 s** stop grace set in the Auth deploy and Compose | section 13.5.2 |
 
 ### 13.1 Baseline (15.1)
 
@@ -736,6 +739,536 @@ state of every row an instance had claimed but not yet sent when it was killed; 
 reclaimed (every live run). Retry state (C10): outbox attempts only increase and a row is never taken while locked; webhook attempts
 stop at 10 and `retries_exhausted` is written once; resolver writes after a terminal state are refused.
 
+### 13.5 Shutdown and restart (15.5)
+
+**Question.** When a service gets SIGTERM, `docker stop`, SIGKILL or a restart while real work is in flight, does it stop within a
+Core-controlled bound without losing durable work, corrupting state, duplicating a protected effect, leaking resources or needing manual
+repair? Graceful-shutdown results and correctness results are reported separately: a SIGKILL after the grace period followed by a
+clean recovery is a correctness PASS and a graceful-shutdown finding.
+
+**Harness (test-only).** `scripts/validation/shutdown-campaigns.mjs` (17 campaigns) on the Stage 15 harness:
+- `lib/live-core.mjs` starts services from `dist`, signals them and rebuilds the shutdown timeline from their own log lines while
+  probing `/ready` and `/health` every 25 ms on fresh connections (see F-A: a pooled keep-alive probe would itself hold the server open);
+- `lib/payment-world.mjs` is the 15.4 in-process Payment layer, moved into a shared module (15.4's Payment campaigns re-run unchanged);
+- the fake Payment gained a cancel hook;
+- container campaigns run `validation-<service>:15-5` images built from this checkout (same Dockerfile, `node dist/main.js` as PID 1,
+  default stop signal) on a `validation-net-*` network;
+- barriers inside transactions are test-only triggers in throwaway databases, released through advisory locks;
+- a frozen database is a TCP proxy that stalls server-to-client traffic; a frozen broker is `docker pause`;
+- a kill as PostgreSQL sees it is `pg_terminate_backend` of one simulated instance's sessions.
+
+Reference run: all campaigns in one pass (54 min), 0 uncaught errors, every `validation-*` container and network removed. `main` at
+`804dc72` (15.2 query deadline, 15.3 heartbeat and bounded closes, 15.4 tooling present); F2 open.
+
+**Invariants.** S1 SIGTERM handled; S2 new work stops; S3 every in-flight operation ends completed, rolled back, retryable, redelivered
+or reconciled, never silently lost; S4 no partial transaction; S5 no outbox loss; S6 ack only after durable success; S7 worker drain
+bounded; S8 no dependency (or client) makes shutdown unbounded; S9 pool close bounded; S10 broker close bounded; S11 SIGKILL after the
+grace period recoverable; S12 restart needs no repair; S13 one protected effect; S14 no resource multiplication; S15 readiness truthful.
+
+**Shutdown order (Nest 12.0.3, from its source; verified by the logs).** `enableShutdownHooks()` listens to every signal; one shutdown
+runs at a time (a second signal is ignored). Each step:
+1. `prepareClose`: the Express adapter marks itself closing. No effect: its 503-on-closing option is not enabled.
+2. `onModuleDestroy` (all modules): `service_shutdown_started`. **Auth closes its database pool here, while its HTTP server still
+   serves.**
+3. `beforeApplicationShutdown`: **modules one after another**; inside one module, providers of the same dependency level in parallel.
+   - Every worker `stop()`: `PollLoop` drain, at most 5 s.
+   - Billing's consumer: cancel (≤ 3 × heartbeat), in-flight deliveries drain (≤ 5 s), channel close (≤ 3 × heartbeat).
+   - **HTTP still accepts connections and `/ready` still answers 200.**
+4. `dispose`: HTTP `server.close()`. No socket is force-closed (`forceCloseConnections` is off). Node closes the connections idle at
+   that instant and waits for the others, with no bound.
+5. `onApplicationShutdown`: modules one after another.
+   - **Every worker `stop()` again**: a pass still hung is waited for a second time.
+   - Consumer close (idempotent).
+   - Relay `stop()` again, then `bus.close()`: publisher and connection close, each ≤ 3 × heartbeat.
+   - `DbService` `pool.end()` waits for checked-out clients, bounded only by `DB_QUERY_TIMEOUT_MS`.
+   - `service_shutdown_complete`.
+6. Nest re-raises the signal. Outside a container it terminates the process. Inside a container, as PID 1, it is ignored and Node exits
+   when its event loop is empty (exit 0).
+
+**Theoretical budget at the defaults (worst case, Billing / Payment).**
+
+| Step | Bound | Sequential with | Billing | Payment |
+|---|---|---|---|---|
+| worker drains, `beforeApplicationShutdown` | 5 s per module with a hung pass | modules sequential | 2 modules (dispatcher/reconciler/consumer; relay) ≤ 10 s | 4 modules (resolver, retrier, sweeper, relay) ≤ 20 s |
+| consumer cancel + drain + channel close | 3 × `RABBITMQ_HEARTBEAT_S` + 5 s + 3 × heartbeat | the drains | ≤ 65 s | – |
+| HTTP close | **none** (longest in-flight request; a busy keep-alive connection: unbounded) | everything | ≤ 35 s per in-flight DB-bound request, else ∞ | same |
+| worker `stop()` repeated, `onApplicationShutdown` | 5 s per module again | modules sequential | ≤ 10 s | ≤ 20 s |
+| bus close | 3 × heartbeat per close | – | ≤ 30 s measured | ≤ 30 s measured |
+| pool close | `DB_QUERY_TIMEOUT_MS` (35 s) per stuck client | – | ≤ 35 s | ≤ 35 s |
+
+The waits overlap in practice (one stuck resource usually explains all of them), so the measured worst cases are 28–35 s, but no single
+Core setting bounds the total, and the HTTP step has no bound at all.
+
+**Deployment contract (repository).**
+- Auth is the only deployed service.
+  - `provision-and-deploy.sh` stops the old container with plain `docker stop` (SIGTERM, Docker's default 10 s grace, then SIGKILL),
+    renames it, then starts the new one: **not a rolling deploy; downtime between the two**.
+  - It has no `--stop-timeout` and no `--init` (Node is PID 1), with `--restart unless-stopped`.
+- Billing, Payment and Organization have **no production deployment definition** (unknown production setting).
+- Compose sets no `stop_grace_period`, so the default of 10 s applies.
+- The Dockerfiles set no `STOPSIGNAL` (SIGTERM).
+- Classification: **implicit / default-dependent** (10 s) for Auth and compose; **unknown** for the other services.
+
+**Results** (every correctness row: 0 lost, 0 partial, 0 duplicated effects; 0 sessions idle in transaction and 0 locks after every
+death; no manual repair):
+
+| Campaign | Runs | Observed | Graceful | Correct |
+|---|---|---|---|---|
+| Idle SIGTERM (Auth, Organization, Billing, Payment) | 3 each | exit 21 / 22 / 26 / 18 ms (medians); `/ready` refused from the HTTP close on | yes | – |
+| Idle `docker stop` | 3 each | 0.36–0.40 s, exit 0 (PID 1 exits cleanly) | yes | – |
+| HTTP request in flight (Billing `issue` waiting on a row lock) | 1 + 1 | released at 2 s: request completes 200, invoice issued, exit 2.05 s; never released: 500 at the 30 s statement timeout, invoice still `draft`, exit 30.0 s | bounded by the request | PASS |
+| **Keep-alive connection busy at SIGTERM** (`/ready` in flight, client continues on the same connection) | 3 + 3 | **never exits while the client continues** (20 s observed, ~286 requests served, all `/ready` 200), exits 6.1 s after the client stops; controls: idle keep-alive 13–28 ms, fresh connections 44–73 ms | **no bound** | – |
+| Auth requests across SIGTERM | 3 | pool closed first: `/auth/health` 503 until the HTTP close (2 of 3 runs saw 1–2 × 503) | yes | see F-C |
+| Consumer transaction windows (A lock wait, B after first mutation, C inside COMMIT) × SIGTERM with barrier released in drain | 20 each | commits, acks, not requeued; exit 1.08–1.09 s | yes | PASS |
+| same × SIGKILL | 20 each | A, B: rolled back, requeued, applied once after restart; **C: COMMIT completes on the server after the client died, message requeued (ack never sent), redelivery finds the receipt: 1 effect** | – | PASS (S4, S6, S13) |
+| same × SIGTERM, barrier held | 3 each | A, B: exit 30.0 s (statement timeout); C: **35.0 s** (the wait inside COMMIT is not cancelled by `statement_timeout`; the 15.2 client deadline ends it; the commit then completes, redelivery deduplicated) | 30–35 s | PASS |
+| Outbox K (claimed, no channel yet) / L (published, confirm pending), broker answers during drain | 20 each | published before exit, 1 attempt, exit 1.0–1.1 s | yes | PASS |
+| same, broker never answers | 3 each | row pending (1 attempt), next instance publishes; exit 35.0 s (K once 5.0 s) | 35 s | PASS (S5) |
+| Outbox accounting | 46 + 23 warm | 69 events → 69 receipts → 69 cancellations, 0 pending | – | PASS |
+| Dispatcher (fake Payment holds the batch's first create): answers in drain / processes then loses the response / never answers | 20 / 20 / 3 | exit 1.05 / 1.05 / 5.04 s (the old pass keeps sending the rest of its batch while draining); new instance: every request `requested`, 1 payment each, id matching | yes | PASS |
+| Sweeper waits for a row lock: released in drain / never | 3 / 3 | exit 1.04 s, expired once / **exit 30.0 s** (drain 5 s, repeated stop 5 s, pool close waits for the statement timeout); expired once after restart | 30 s | PASS |
+| Sweeper killed inside its expiry transaction | 20 | rolled back (`created`, 0 events), expired once with 1 event after restart | – | PASS |
+| Resolver: provider call in flight at shutdown / killed during resolution | 20 / 20 | drain times out 5.0 s, the late answer cannot write (pool closed), attempt stays `unknown`; next instance: `succeeded`, 1 terminal event | – | PASS |
+| Retrier killed before bookkeeping commits / on the 10th attempt | 20 / 20 | attempts not consumed (3 → 3; 9 → 9), then monotonic (→ 5; → 10 and `retries_exhausted` once) | – | PASS (C10) |
+| Frozen PostgreSQL, statement timeout 2 s / defaults | 3 + 1 per service | 11.8–11.9 s / **Billing 28.8 s, Payment 31.9 s**: drain timeouts at 5, 10, then again at 15, 20 s (modules sequential, stop repeated), then the pool waits for the query deadline | ≤ 32 s | PASS (S7, S9) |
+| Frozen RabbitMQ (broker heartbeat 60 s / disabled) | 3 each | Billing 27.7 s both; Payment with a publish in flight 35.1 s both (confirm 5 s, then heartbeat-bounded closes) | ≤ 35 s | PASS (S10) |
+| `docker stop`, broker frozen (Billing, Payment) / keep-alive busy / sweeper on a lock | 3 each | **SIGKILL at 10.3–10.5 s (exit 137)**; after `docker start`: ready in 0.7–1.2 s, the pending outbox row published, 1 consumer, expired once | **no** | PASS (S11) |
+| Dependency down at startup (PostgreSQL; RabbitMQ; schema missing) | 1 each | stays alive, `/ready` 503, `/health` 200 (Auth: 503), becomes ready **in the same process** 30–360 ms after the dependency returns; **Billing with RabbitMQ down exits 1** (`connect ECONNREFUSED`, no `kind`); Payment starts unready and recovers | – | PASS (restart policy needed for Billing) |
+| Normal startup | 3 each | no HTTP answer before ready: connections refused until the first 200 (Billing 0.64 s, Payment 0.58 s) | – | PASS (S15 at startup) |
+| Restart cycles under traffic: 10 SIGTERM + 10 SIGKILL of Billing and Payment | 20 | every cycle: 1 queue consumer, 3 broker connections, 3 channels, sessions 2–7 (no growth); back ready in 0.68–0.77 s; ~360 requests: 1 payment each, every applied cancellation once, **1 request left open** (see F-B) | yes | **F-B** |
+| Rolling restart, Billing ×2 + Payment ×2 behind a failover proxy | 3 rounds | 140/140 cancelled once, 2 consumers throughout, no leaks; 5 client errors (connections refused by the instance being stopped) | yes | PASS (S14) |
+| Full backlog restart | 1 | 60 outbox rows, 30 unsent requests, 30 queued messages, 20 due webhooks: all drained after a full stop and start, each effect once (59 s, paced by outbox backoff) | – | PASS (S12) |
+| Repeated `stop()` on a hung pass | 1 | first 5.0 s, second **another 5.0 s**; two concurrent calls 5.0 s together | – | – |
+
+**Finding F-A (FAIL, S2 / S8 / S15): the HTTP drain has no Core-controlled bound.** Nest closes the HTTP server only after every worker
+has drained, and then only with `server.close()`, which waits for open connections forever: a keep-alive connection that is busy at that
+instant keeps serving new requests (and `/ready` keeps answering 200) for as long as its client uses it. A reverse proxy's pooled
+upstream connections (Traefik) or Billing's own `fetch` connections to Payment are such clients under steady traffic. In containers the
+10 s grace then ends it with SIGKILL, and recovery is correct, but the bound is Docker's, not Core's. Until the HTTP close, `/ready` is
+200 during the whole shutdown (workers already stopped). Reproducer: campaign `keepAlive` (6/6), `dockerStop` (3/3 SIGKILL).
+Corrective directions (not implemented):
+- from the start of shutdown, `/ready` answers 503 and every response carries `Connection: close`;
+- close the HTTP server early, with a Core deadline (for example `HTTP_DRAIN_TIMEOUT_MS`), then close all remaining connections
+  (`closeAllConnections()`).
+
+**Finding F-B (FAIL, S3): a cancellation accepted while Payment is unavailable is silently lost.** Billing's cancel endpoint stamps
+`cancelRequestedAt` and calls Payment once. It ignores the outcome (`transient` on a network error, timeout or 5xx) and answers 200
+("cancellation requested"). Nothing sends it again: the reconciler only reads Payment, which still reports a non-terminal payment. The
+producer believes the cancellation is under way; the payment stays open and payable. Found in the restart cycles: 1 of ~360 requests
+was left open in 2 of 3 runs. The diagnosed one got a 200 from Billing while Payment, restarting, never cancelled it. Deterministic
+reproducer `cancelDuringPaymentOutage`, 5/5:
+- Payment answers 503 and Billing still answers 200;
+- after 10 s and 9 reconciler reads the payment is still `pending`, and Payment received exactly 1 cancel call;
+- a client retry of the same call heals it, but the client was told it had succeeded.
+
+Corrective directions (not implemented):
+- answer 503 (retryable) when Payment's outcome is not a confirmed cancel, keeping the marker so a retry is a safe replay; and/or
+- a durable retry: a worker re-sends the cancel for requests with `cancelRequestedAt` whose payment is not terminal.
+
+**Other findings (correctness intact).**
+- **F-C (Auth):** the pool is closed in `onModuleDestroy`, before the HTTP server closes. A request that arrives or is in flight during
+  shutdown gets 503/500. Direction: close it in `onApplicationShutdown`, as the kit does.
+- **F-D:** worker drains are **sequential across modules and repeated**: every worker's `stop()` runs in both hooks, and a hung pass is
+  waited for twice (measured 5 + 5 + 5 + 5 s). Direction (option C): one drain per worker (a second `stop()` returns the first's
+  outcome), started concurrently.
+- **F-E:** the pool close waits for a stuck client up to `DB_QUERY_TIMEOUT_MS` (35 s). The broker closes take up to 3 × heartbeat
+  (Billing 27.7 s, Payment 35 s). Both are bounded, and both are above the 10 s grace.
+- **F-F:** Billing exits at startup when RabbitMQ is unreachable, while Payment and every database outage start unready and recover in
+  place. It depends on the restart policy (`unless-stopped` in the Auth deploy; nothing defined for Billing), and the crash line has no
+  `kind`.
+- **F-G (15.7):** Auth rate-limits `/auth/health` (429 when probed 4 times a second). A late write on a closed pool logs `error=Error`
+  with no `kind`.
+
+**Stop-grace conclusion (for review, not implemented).**
+- Correctness does not need a longer grace: every SIGKILL window recovered without loss, duplication or repair (S11, S12).
+- Gracefulness does. Measured graceful worst cases are 28–35 s (frozen broker, frozen database, a lock or COMMIT that never ends), plus
+  the unbounded F-A.
+- Recommendation: **option D**.
+  1. Bound the HTTP drain in Core (F-A).
+  2. Make drains single and concurrent (F-D, option C), which removes 15–20 s.
+  3. Optionally a bounded pool close at shutdown.
+  4. Then declare an explicit grace in every deployment: `docker stop -t` / `--stop-timeout`, and compose `stop_grace_period`. The
+     grace must be greater than the maximum graceful shutdown plus a margin. With today's bounds, that means at least 45 s; after 1–3,
+     about the heartbeat bound (≈ 30 s) plus a margin.
+- Reducing the heartbeat or the query deadline to fit 10 s (option A) trades false broker-loss detections and early query cancellation
+  for speed, and is not recommended from this evidence.
+
+**Answer: deploying a new version while Billing and Payment work (measured).**
+- The old container gets SIGTERM:
+  - Its workers finish their current pass or give up after 5 s each, one module after another, and do it again in the second hook.
+  - The consumer stops taking deliveries and lets in-flight ones settle.
+  - HTTP keeps serving until the drains end, and longer if a client keeps a keep-alive connection busy (F-A).
+- Docker allows 10 s, then SIGKILLs. That happens whenever the broker or database is stuck, a worker waits on a lock, or a keep-alive
+  client stays busy.
+- In every case measured, the new container recovered all durable work without manual intervention or duplicate effects:
+  - outbox rows are published;
+  - unacknowledged messages are redelivered and deduplicated by receipt;
+  - claimed payment requests are reclaimed and resent under Payment's natural key;
+  - unresolved attempts, due webhooks and expiries are resumed.
+- The exception is F-B: a cancellation accepted by Billing while Payment was down is lost unless the client retries.
+- The current Auth deploy stops the old container before starting the new one, so each deploy is also an outage.
+
+### 13.5.1 Corrective patch (15.5)
+
+Section 13.5 is kept as found (FAILED on F-A and F-B). This is the correction and its revalidation. Both preserved reproducers were
+re-run on the unchanged source first: `keepAlive` still hung 6/6; `cancelDuringPaymentOutage` still answered 200 with the payment
+payable 5/5.
+
+**F-A: the HTTP drain had no Core bound.**
+- **Root cause (from the Nest 12.0.3 and Node sources):**
+  - Nest closes the HTTP server only in `dispose()`, after every `beforeApplicationShutdown`.
+  - It closes it with `server.close()`, which closes only the connections idle at that instant and then waits for the others. It does
+    not force-close sockets unless `forceCloseConnections` is set.
+  - A keep-alive connection busy at that instant keeps being served, and `/ready` knew nothing about shutdown.
+- **Selected design** (kit `HealthModule`, `HttpDrain` + `ShutdownState` + `shutdownAdmission`). At `onModuleDestroy`, the first
+  shutdown hook:
+  1. The service is marked draining. `/ready` answers 503 (`shutting_down`, without running the checks). The first middleware refuses a
+     new request with 503 and `Connection: close`; `/health` is still answered, so liveness stays distinct from readiness.
+  2. `server.close()` and `closeIdleConnections()` run at once, in parallel with the worker drains.
+  3. After `HTTP_DRAIN_TIMEOUT_MS`, `closeAllConnections()` runs and `http_drain_timeout` is logged if anything was still open. The
+     setting defaults to 5000 ms (500–120000, validated at startup, same default as the worker drain), for all four services; Auth reads
+     it through its own config with the kit's bounds.
+  4. Nest's own `dispose()` then finds the server closed. A second `close()` resolves as soon as the last connection is gone, so it does
+     not hang (verified).
+
+  Node 22 (container) and 24 (local) both provide `closeIdleConnections` / `closeAllConnections`: no custom connection manager.
+- **Rejected alternatives:**
+  - Nest's `forceCloseConnections`: destroys every socket, in-flight requests included, only at `dispose()`, after the worker drains.
+  - Nest's `return503OnClosing`: flags only from `prepareClose`, and does not bound the drain.
+  - `Connection: close` alone: bounded only per connection; a hung request would still hold the server.
+  - A periodic `closeIdleConnections`: racy.
+- **Tests:**
+  - `libs/service-kit/test/http-drain.spec.ts`:
+    - an in-flight request completes;
+    - the next request on the same keep-alive socket gets 503 `shutting_down`, `Connection: close`;
+    - new connections are refused;
+    - liveness 200 / readiness 503 during the drain;
+    - a hung request is cut at the deadline;
+    - a continuously sending client cannot extend shutdown.
+  - Config tests for the bounds (kit and Auth).
+  - **Mutation:** removing `HttpDrain` fails 3 of the 4 drain tests; the hung request never ends.
+
+**F-C: Auth's pool closed first.**
+- Auth's `DbService` closed its pool in `onModuleDestroy`, the first hook, while HTTP still admitted requests.
+- It now closes in `onApplicationShutdown`: after the HTTP server has closed and the drain has ended, as in the kit.
+- Test: `apps/auth-service/test/shutdown-order.e2e-spec.ts` queries the database from `beforeApplicationShutdown`, the drain window.
+  - it passes, and the pool is closed after shutdown;
+  - **mutation:** the hook moved back to `onModuleDestroy` fails the test.
+
+**F-D: drains sequential and repeated.**
+- **Root cause:**
+  - Every worker service called `stop()` in `beforeApplicationShutdown` and again in `onApplicationShutdown`.
+  - `PollLoop.stop()` raced the still-running pass against a fresh 5 s timer each time.
+  - Nest runs each hook module by module.
+- **Selected design:**
+  - `PollLoop.stop()` is **idempotent**: the first call's drain is stored, and every later or concurrent call returns it. `start()`
+    resets it.
+  - Each worker service **starts** its drain in `onModuleDestroy`, which Nest runs for every module before any
+    `beforeApplicationShutdown`, and awaits the same promise in the later hooks. Billing's consumer close is handled the same way.
+- **Concurrent:** relay, dispatcher, reconciler, consumer, resolver, retrier and sweeper. None of them depends on another's drain: a pass
+  that writes an outbox row after the relay stopped leaves it pending, which is durable and published on the next start.
+- **Still ordered, after every drain:** the bus close and the pool close, in `onApplicationShutdown`.
+- **Tests:** PollLoop idempotency, one budget and one notice (**mutation:** a non-idempotent `stop()` fails it). Measured: repeated
+  `stop()` on a hung pass 5.0 s + **0 ms** (before 5.0 + 5.0 s); frozen database, Billing and Payment workers all time out at
+  **5.0 s together** (before 5, 10, 15, 20 s).
+
+**F-B: the cancellation contract.**
+- **What the endpoint promises (SDD 17.3, 21.2, endpoint 15):**
+  - a never-sent request is cancelled locally;
+  - for a sent one, "cancellation requested at Payment": Billing calls Payment's cancel synchronously with the deterministic key
+    `billing-cancel-{paymentRequestId}` (a retry is a replay), and the request's terminal state arrives by `payment.cancelled` or the
+    reconciler, never from the response;
+  - if Payment refuses because money may be in flight: `409 payment_request_in_flight`;
+  - if Payment is already terminal: no error.
+- **Ownership:** Billing owns the commercial intent; Payment executes the cancellation and emits the single terminal event.
+- **Pending state:** the only one is `cancelRequestedAt`, an informational marker that nothing ever re-sent from.
+- **Payment's side:** the cancel is idempotent by key and refused while an attempt is open. Cancel versus success serialises on the
+  payment row: the first terminal state wins (SDD 21.5 and the concurrency table).
+- **The defect:** the controller ignored Payment's outcome: transient, auth fault, not found and in-flight were all answered 200.
+- **Contracts considered:**
+  - **A, synchronous confirmation:** the designed contract. Only a confirmed outcome is a success; anything else is a retryable
+    failure.
+  - **B, durable asynchronous intent:** would need a new re-send mechanism (an outbox-driven or reconciler-driven cancel), which Core
+    does not have for commands.
+
+  **A selected.** It is what the SDD already describes, it adds no mechanism, and it keeps Billing as the commercial authority and
+  Payment as the executor.
+- **Implementation (Billing controller only):**
+  - `cancelled` / `already_terminal` → 200 (unchanged);
+  - `in_flight` → `409 payment_request_in_flight` (the SDD rule, which the code had skipped);
+  - `transient` / `auth_fault` / `not_found` → **`503 payment_unavailable`** (new code), logged `payment_cancel_unconfirmed`;
+  - a request already `cancelled` answers 200 with itself, so a retry after a lost answer is not a conflict.
+  - The success status stays 200 as implemented and tested (the SDD says 202; recorded, not changed).
+  - The marker is still stamped before the call, as before (the SDD says "nothing changed" on 409; recorded, not changed).
+- **Tests:** Billing E2E for transient-then-retry (same key, marker not re-stamped), auth fault / not found, in flight, already terminal,
+  and already cancelled. **Mutation:** ignoring the outcome again fails 3 of them.
+
+**Cancellation revalidation** (Billing live; fake Payment with Payment's cancel semantics; every answer checked against Payment's state
+at that moment: 0 answers of success while the payment was still payable):
+
+| Window | Iterations | Answers | Final | Logical cancels / applied receipts |
+|---|---|---|---|---|
+| B1 Payment unavailable, then back | 20 | 503 → 200 | cancelled / cancelled | 1 / 1 |
+| B2 Payment cancels, response lost | 20 | 503 → 200 (replay) | cancelled | 1 / 1 |
+| B3 Payment cancels, Billing SIGKILLed before answering | 20 | ECONNRESET → 200 after restart (request already cancelled via the reconciler, or replay) | cancelled | 1 / 1 |
+| B4 Billing SIGKILLed right after answering | 20 | 200 | cancelled (the event consumed by the next instance) | 1 / 1 |
+| B5 Payment's broker frozen (real Payment) | 10 | 200 (confirmation is synchronous) | event held in Payment's outbox, delivered after the thaw: cancelled | 1 / 1 |
+| Payment stopped, then started (real Payment) | 10 | 503 → 200 | cancelled | 1 / 1 |
+| B6 duplicate | 20 | 200, 200 | cancelled | 1 / 1 (2 physical calls) |
+| B7 three concurrent | 20 | 200 ×3 | cancelled | 1 / 1 (3 physical calls) |
+| B8 cancel races payment success | 20 | 200 or 409 | exactly one terminal: paid (16) or cancelled (4) | ≤ 1 / 1 |
+| B9 cancel races reconciliation | 20 | 200 | cancelled | 1 / 1 |
+| B10 cancel races SIGTERM (Payment answers inside / after the HTTP drain) | 10 + 10 | 200 / 503 → 200 on the new instance | cancelled; exit 1.0 s / 5.0 s | 1 / 1 |
+| B11 Payment refuses (open attempt) | 20 | 409 | the payment honestly left payable (nothing was accepted) | 0 |
+| B12 three transient failures, then recovery | 20 | 503 ×3 → 200 | cancelled | 1 / 1 (4 physical calls) |
+| Payment side, cancel vs successful attempt (in process) | 20 | – | cancelled (11, attempt refused) or attempt open and cancel refused (9) | ≤ 1 terminal event |
+
+- In B8, 9 races answered 200 while Payment had already succeeded. That is the documented rule ("already terminal: no error; the
+  terminal event settles the request"): the request ended `paid`, and nothing payable was left.
+- Real Payment accounting: 20 requests → 20 `payment.cancelled` → 20 receipts → 20 cancelled, 0 pending.
+
+**Shutdown revalidation** (the full 15.5 matrix on the corrected build, 21 campaigns, 53 min, 0 uncaught, all `validation-*` containers
+and networks removed; correctness identical to 13.5 in every window: 0 lost, 0 partial, 0 duplicated effects):
+
+| Scenario | Before (13.5) | After |
+|---|---|---|
+| Idle SIGTERM, Auth / Organization / Billing / Payment (median) | 21 / 22 / 26 / 18 ms | 16 / 18 / 22 / 15 ms |
+| Keep-alive busy at SIGTERM (Billing, Payment; 3 each) | **never exits** while the client continues | exits 57–78 ms: the busy connection gets one 503, then refused |
+| 10 keep-alive clients busy at SIGTERM (3 each) | – | 19–84 ms |
+| `/ready` after SIGTERM | 200 until HTTP closes (indefinitely under F-A) | 503 or refused from the first probe |
+| Hung HTTP request (row lock never released) | 30.0 s, request 500 at the statement timeout | HTTP cut at **5.08 s** (the drain deadline); the process still exits at **29.9 s** (see limitation) |
+| In-flight request released at 2 s | 2.05 s, 200 | 2.07 s, 200, invoice issued |
+| Frozen PostgreSQL, statement timeout 2 s / defaults | 11.9 s / Billing 28.8, Payment 31.9 s | **4.96 s** / 28.8, 31.9 s |
+| Worker drain timeouts under a frozen database | 5, 10, 15, 20 s | 5.0 s, once, all workers together |
+| Frozen RabbitMQ, Billing / Payment (heartbeat 60 or 0) | 27.7 / 35.1 s | 26.8 / 34.4 s |
+| Consumer window held until exit: A, B / C | 30.0 / 35.0 s | 30.0 / 35.0 s |
+| Sweeper waiting on a lock never released | 30.0 s (drain 5 + repeated 5, then statement timeout) | 30.0 s (drain 5, once, then statement timeout) |
+| Dispatcher: Payment never answers | 5.04 s | 5.03 s |
+| `docker stop`, idle | 0.36–0.40 s, exit 0 | 0.28–0.39 s, exit 0 |
+| `docker stop`, keep-alive busy | **SIGKILL at 10.4 s** | **0.39 s, exit 0** |
+| `docker stop`, broker frozen / sweeper on a lock | SIGKILL at 10.3–10.5 s | SIGKILL at 10.3–10.4 s (F-E; recovery clean) |
+| Restart cycles 10 + 10 / rolling ×3 / backlog | 1 request left open (F-B) / clean / clean | 359/359 / 138/138 / 60/60 settled once; 1 consumer (2 rolling), 3 connections, no growth |
+
+**New shutdown order and bound (defaults).**
+- **At `onModuleDestroy`, together:**
+  - readiness 503 and admission closed;
+  - the HTTP server closed (≤ `HTTP_DRAIN_TIMEOUT_MS`, 5 s);
+  - every worker drain started (≤ 5 s each, concurrently);
+  - Billing's consumer close started (≤ 3 × heartbeat per operation on a silent broker).
+- `beforeApplicationShutdown` and `dispose` then only wait for those.
+- **In `onApplicationShutdown`:** the bus close (≤ 3 × `RABBITMQ_HEARTBEAT_S` = 30 s on a silent broker, after the confirm's 5 s),
+  then the pool close (a stuck client is destroyed at its `DB_QUERY_TIMEOUT_MS` = 35 s, counted from the query's start, which usually
+  precedes the signal).
+
+| Component | Bound | Measured |
+|---|---|---|
+| HTTP drain | `HTTP_DRAIN_TIMEOUT_MS` = 5 s | 5.08 s (hung request) |
+| Worker drains | 5 s, concurrent | 5.0 s |
+| RabbitMQ cleanup | confirm 5 s + 3 × heartbeat (30 s) | 26.8 s (Billing), 34.4 s (Payment, publish in flight) |
+| Database cleanup | `DB_QUERY_TIMEOUT_MS` = 35 s from the stuck query's start | 28.8–35.0 s |
+| **Total process** | about **35 s** at the defaults (the database and broker bounds overlap in time, because their clocks start when the dependency went silent) | **max 35.0 s** |
+
+- **Remaining limitation:** closing a hung request's connection at 5 s does not cancel its SQL statement. The process still waits for
+  the statement timeout through the pool close. That wait is bounded by Core (F-E), not by any client.
+- **Stop grace:** graceful shutdown needs up to ~35 s, which would call for **45 s** (35 s + 10 s, ≈ 30 % margin). Not implemented
+  (production configuration, for review):
+  - Auth deploy: `docker run --stop-timeout 45` and `docker stop -t 45` in `provision-and-deploy.sh`;
+  - Compose: `stop_grace_period: 45s` on the four services;
+  - any future Billing / Payment / Organization deployment: declare 45 s.
+- Correctness does not depend on it: every SIGKILL window recovered.
+- **But the grace was tested in containers and does not work yet for a frozen broker** (F-H below).
+
+**Finding F-H (FAIL, S8 / S10, in containers only): after a Core-bounded shutdown, PID 1 does not exit.** `dockerStopWithGrace`
+(`docker stop -t 45`, 3 runs each):
+
+| Case | Result |
+|---|---|
+| Sweeper waiting on a lock | exits gracefully at **30.3 s, exit 0** |
+| Broker frozen, Billing | `service_shutdown_complete` logged (≈ 27 s), then **SIGKILL at 45.3 s, exit 137**, 3/3 |
+| Broker frozen, Payment | `service_shutdown_complete` logged, then **SIGKILL at 45.2–45.4 s, exit 137**, 3/3 |
+
+Diagnosis (`dockerFrozenBrokerDiag`, `docker stop -t 90`):
+- Nest completes at 26.9 s.
+- 3 s later PID 1 still holds **one socket: the AMQP connection to the frozen broker, in `FIN_WAIT2`**. amqplib closed it with a
+  graceful half-close (FIN); the paused broker never answers; the kit's bounded close abandoned the wait but not the socket.
+- The database sockets closed normally.
+- Node's event loop stays alive, and Docker SIGKILLs at 90.4 s.
+- Outside a container this is hidden: Nest re-raises the signal after its shutdown, and that terminates the process. As PID 1 (the
+  images have no init), the re-raised signal is ignored.
+- The initial 15.5 run never saw it: Docker's 10 s default SIGKILLed before the post-shutdown hang could show.
+
+Correctness is intact (every SIGKILL recovered), but shutdown is not bounded by Core in the production runtime. Reproducers:
+`dockerStopWithGrace`, `dockerFrozenBrokerDiag`. **Not corrected (stop condition).** Candidate directions, for approval:
+1. Exit explicitly once Nest's bounded shutdown has completed: Nest 12's `enableShutdownHooks(signals, { useProcessExit: true })` calls
+   `process.exit(0)` after the sequence, so no leftover handle can hold the process, as PID 1 or not.
+2. Destroy the underlying socket when the kit abandons a bounded AMQP close (the handle itself, not amqplib's pending operations, which
+   15.3 showed a destroy does not end).
+3. Run the images with an init (`--init` / tini). This is deployment-level, and it does not fix the handle.
+
+Option 1 is the smallest and covers every dependency; 2 fixes the specific leak. They are complementary.
+
+**Other dispositions.**
+- **F-E:** carried as the grace recommendation above. No timeout was shrunk.
+- **F-F:** Billing exiting at startup with RabbitMQ down is **intentional and documented** (kit README: `subscribe()` fails fast when
+  the broker is unreachable at start; an attached consumer recovers by itself). Kept, but every deployment of Billing needs a restart
+  policy (`unless-stopped` or equivalent).
+- **F-G → 15.7:**
+  - Auth rate-limits `/auth/health` (429 under frequent probing);
+  - `error=Error` with no `kind` for a late write on a closed pool;
+  - the new `payment_cancel_unconfirmed` and `http_drain_timeout` lines are one per event.
+- **Stage 20 (release management):** the Auth deploy stops the old container before starting the new one (an outage per deploy).
+- **15.8:** the four 15.4 findings are unchanged.
+
+### 13.5.2 Corrective patch 2: F-H (15.5)
+
+Sections 13.5 (initial validation: FAILED on F-A, F-B) and 13.5.1 (patch 1: F-A, F-B, F-C, F-D fixed; F-H found) are kept as found.
+This is the correction of F-H and the final revalidation.
+
+**Pre-fix reproduction (again, on the patch-1 images):** `dockerFrozenBrokerDiag` (Billing, broker paused, `docker stop -t 90`):
+`service_shutdown_complete` at 26.95 s, then one socket in PID 1 (the AMQP connection, `FIN_WAIT2`), SIGKILL at 90.3 s (exit 137).
+`dockerStopWithGrace` (`-t 45`): Billing and Payment 45.3–45.4 s, exit 137, 6/6; the sweeper control exits gracefully at 30.3 s.
+
+**Root cause (amqplib 2.0.1 source).**
+- `connect.js` passes the `net`/`tls` socket itself to `new Connection(sock)`. `Connection.stream` is that socket, and
+  `ChannelModel.connection` is the `Connection`.
+- Every end of a connection goes through `Connection.toClosed()`: close-ok received, heartbeat timeout (`Heart` `timeout`), socket
+  error.
+- `toClosed()` invalidates the connection and calls **`this.stream.end()`**, a half-close. The socket stays readable until the peer's
+  FIN. A silent broker never sends it, so the socket stays open in `FIN_WAIT2` as a referenced handle.
+- The kit's bounded close only abandoned the promise (`abandonAfter`), never the socket. Nothing ever destroyed it.
+- Outside a container, the signal Nest re-raises after shutdown kills the process and hides this. As PID 1 that signal is ignored, and
+  the handle keeps Node alive until SIGKILL.
+- **Is there a reason to keep an abandoned connection's socket?** No:
+  - the connection is invalidated and never reused (a new connection is opened on demand);
+  - nothing can be sent on it;
+  - late frames are ignored;
+  - amqplib's own open-failure path already does `end()` then `destroy()`.
+
+**Alternatives evaluated.**
+- **Destroy the transport the kit gave up on:** selected; it fixes the resource that leaks.
+- **Explicit `process.exit()` after Nest's shutdown** (Nest 12 `useProcessExit`): not adopted. It would hide any leaked handle rather
+  than dispose of it. With the leak fixed it is not needed, and nothing else was left open in any container run.
+- **An init process (`--init`, tini):** not a fix, because the handle would still leak. It is signal forwarding and zombie reaping
+  hygiene, recorded for Stage 20.
+- **Destroying on every close:** rejected. A healthy broker completes the graceful FIN itself, and a reset there would be abrupt for no
+  benefit.
+
+**Selected design (kit `RabbitMqEventBus`).**
+- **Transport disposal:**
+  - A connection closed **by an error** (heartbeat timeout, socket error, a close forced by the broker) has its transport destroyed at
+    once.
+  - A `close()` the broker does not answer within the bound (3 × heartbeat) is **abandoned and its transport destroyed**, logged
+    `rabbitmq_connection_abandoned`.
+  - A **clean close** (close-ok from a healthy broker) keeps amqplib's graceful FIN.
+- **Bounds:**
+  - `close()` uses **one deadline** for the publisher channel and the connection together (not a full bound for each).
+  - Every bounded wait in `close()` and in a consumer's stop also **ends when the connection is gone** (amqplib never settles a channel
+    operation that waited on a connection that died).
+- **The one amqplib internal:** the destroy is the kit's only use of `ChannelModel.connection.stream`, in `destroyTransport()`. It is
+  guarded (another shape degrades to a no-op), version-noted (2.0.1) and pinned by the integration test.
+- **Unchanged:** publish and consume semantics. A destroyed socket fails an unconfirmed publish, so the outbox row stays pending and is
+  sent again; an unacknowledged delivery is redelivered and deduplicated by the inbox or receipt. Nothing is marked published or acked
+  because of a destroy.
+
+**Tests.** `libs/service-kit/test/rabbitmq-transport-disposal.int-spec.ts` (real RabbitMQ behind a freezable, severable proxy):
+- **silent broker:** `close()` < 4 s (heartbeat 1 s), socket destroyed, the connection never reused;
+- **heartbeat teardown alone:** socket destroyed;
+- **no client heartbeat:** abandoned at the one bound (29–33 s, not two bounds) and destroyed, with `rabbitmq_connection_abandoned`;
+- **healthy close:** < 1 s, nothing abandoned, closed by the peer's FIN;
+- **broker vanishes during the close:** returns at once, socket destroyed.
+
+**Mutation:** without the destroy, the silent-broker, abandoned and vanish tests fail. The heartbeat-only case passes regardless through
+the proxy, whose real broker still answers the FIN; a paused broker (the container test) is where that path matters. The 15.3 silent-broker
+spec still passes.
+
+**Production-container revalidation** (images built from this source, Node as PID 1, `docker stop -t 45`, 3 runs each):
+
+| Case | Before | After |
+|---|---|---|
+| Frozen broker, Billing (broker heartbeat 60 s / disabled) | SIGKILL at 45.3 s, exit 137 | **27.1 s / 27.1 s, exit 0** |
+| Frozen broker, Payment with a publish in flight | SIGKILL at 45.3 s | **28.7 s / 28.7 s, exit 0**; the pending row is published after restart, 1 `payment.cancelled` per payment |
+| Diagnosis run (`-t 90`) | complete 27.0 s, `FIN_WAIT2` socket, SIGKILL at 90.3 s | complete 27.0 s, **exit 0 at 27.0 s**, no socket left |
+| Billing consumer with an unacked delivery blocked in its transaction, broker frozen | – | **39.8 s [39.7–39.8], exit 0**; not acked; redelivered after restart, applied once (receipt 1); 1 consumer |
+| Broker vanishes during the close | – | Billing 2.7 s, Payment 2.7 s, exit 0 |
+| 10 cycles: freeze, stop both, natural exit, restart (Billing + Payment) | – | 20/20 exit 0, stop 21.8 s [21.6–29.3]; broker connections 2, channels 2, consumers 1 every cycle; database sessions 2–3; memory 70–78 MiB, no trend; 20/20 events published once |
+| After restart, every case | – | ready in 0.7–0.9 s, exactly 1 Billing consumer, outbox drained |
+
+The 39.8 s case is the longest graceful path:
+- the consumer's statement waits its 30 s timeout, counted from before the signal;
+- the handler's failure path then tries to republish to the retry queue, which opens a connection to the frozen broker, bounded by the
+  5 s connect timeout;
+- then the bounded closes.
+
+**Final shutdown timing** (corrected build; host processes unless marked; median [range], 3 runs):
+
+| Scenario | Graceful shutdown |
+|---|---|
+| Idle Auth / Organization / Billing / Payment | 16 [13–18] / 12 [10–14] / 15 [13–40] / 18 [12–21] ms |
+| Busy keep-alive (Billing / Payment) | 53 [51–62] / 74 [72–86] ms |
+| 10 busy keep-alive clients (Billing / Payment) | 41 [32–81] / 54 [48–70] ms |
+| Hung HTTP request | HTTP cut at 5.09 s; exit 29.9 s (the statement timeout) |
+| Hung worker(s) (frozen database, 2 s statement timeout) | 4.96 s |
+| Frozen PostgreSQL, defaults (Billing / Payment) | 28.8 / 31.9 s |
+| Frozen RabbitMQ (Billing / Payment) | 26.8 / 28.3 s |
+| Frozen RabbitMQ, **container** (Billing / Payment) | 27.1 / 28.7 s, exit 0 |
+| Heartbeat-disabled RabbitMQ, **container** (Billing / Payment) | 27.1 / 28.7 s, exit 0 |
+| Consumer blocked in a transaction + frozen RabbitMQ, **container** | 39.8 s, exit 0 |
+| DB lock wait (sweeper) | 30.0 s (container with `-t 45`: 30.3 s, exit 0) |
+| Commit blocked (consumer window C held) | 35.0 s |
+| Provider call hung (dispatcher) | 5.06 s |
+| `docker stop`, idle | 0.33–0.37 s, exit 0 |
+
+**Stop grace.**
+- **Measured maximum graceful shutdown: 39.8 s** (container; host 35.0 s).
+- **Theoretical bound of the longest path:** ≈ 41 s (`DB_QUERY_TIMEOUT_MS` 35 s, counted from the stuck query's start, plus the 5 s
+  broker connect timeout plus the closes, which end when the connection is gone). The worker drain and the HTTP drain (5 s each) run
+  concurrently, inside that window.
+- The 45 s proposed in 13.5.1 would leave about 5 s of margin, so it is **revised to 60 s**: 39.8 s + 20 s (≈ 50 %), above the ≈ 41 s
+  bound.
+- Set where deployment definitions exist:
+  - Auth deploy `docker stop -t 60` and `docker run --stop-timeout 60`;
+  - Compose `stop_grace_period: 60s` on the four services.
+- Billing, Payment and Organization have no deployment yet; each one must declare ≥ 60 s.
+- Invariant: stop grace (60 s) > maximum graceful shutdown (≈ 41 s bound, 39.8 s measured) + margin.
+
+**Regression.**
+- **15.3 (full matrix, 19 campaigns): unchanged.**
+  - baseline 200/200;
+  - broker down 3 × 105/105;
+  - 5 outage cycles, 1 consumer each;
+  - confirm timeout 5.00 s;
+  - lost confirm and cut mid-publish 20 × (2 deliveries → 1 effect);
+  - consumer transient / poison / permanent → DLQ (the 2 dead-lettered events are the designed poison messages);
+  - duplicates 800 → 200;
+  - crash windows A/B/C × 20;
+  - prefetch;
+  - multi-relay;
+  - backoff 1–16 s;
+  - durability;
+  - broker restart;
+  - app flows;
+  - silent broker and heartbeat-disabled;
+  - Billing SIGTERM on a frozen broker 27.9 s.
+- **15.4 subset: unchanged.**
+  - relays 1/2/4 splits;
+  - kit duplicate race 300 → 100;
+  - relays + consumers + broker interruption (2 consumers, 4 connections);
+  - relay crash;
+  - competing consumers 90;
+  - Billing duplicate race 100;
+  - restart under competition 36/36;
+  - Payment pair 40/10.
+- **15.5 full matrix on the final build:** every row as in 13.5.1. F-A, F-B, F-C and F-D hold:
+  - busy keep-alive exits in milliseconds;
+  - `/ready` is 503 at shutdown;
+  - 0 cancellation violations across B1–B12;
+  - drains once, concurrently.
+- **Suites and images:** full build and suites green; production images smoke-tested (non-root, `/health` 200); no validation tooling
+  in the images.
+
+**Dispositions.** F-E is resolved by the explicit 60 s grace (no Core timeout was shortened). F-F: intentional fail-fast, documented.
+F-G → 15.7. Init process and start-before-stop deploy → Stage 20. The 15.4 findings → 15.8.
+
 ## 14. Experiment report template
 
 ```text
@@ -771,7 +1304,13 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | ~~I9 remediation (15.3 FAIL)~~ **resolved** by the corrective patch: a Core-owned AMQP heartbeat (`RABBITMQ_HEARTBEAT_S`) and bounded closes in the kit bus (section 13.3.1); per-operation deadlines with socket destruction assessed and rejected | – | – |
 | ~~I9 remediation (15.2 FAIL)~~ **resolved** by the corrective patch: client-side `DB_QUERY_TIMEOUT_MS` in the kit and in Auth, timed-out clients destroyed (section 13.2.1); TCP keepalive assessed and not adopted | – | – |
 | Acceptable recovery time after a dependency outage | 15.2 / 15.3 result classification | SRE / product |
-| Acceptable shutdown time and the stop grace to configure | 15.5 | SRE |
+| ~~15.5 FAIL F-A~~ **resolved** (section 13.5.1): readiness 503 and admission closed at shutdown start, HTTP drain bounded by `HTTP_DRAIN_TIMEOUT_MS` | – | – |
+| ~~15.5 FAIL F-B~~ **resolved** (section 13.5.1): success only when Payment confirmed the cancel; `503 payment_unavailable` otherwise (contract A, the SDD's own) | – | – |
+| ~~15.5 FAIL F-H~~ **resolved** (section 13.5.2): the kit bus destroys the transport of every connection it gives up on | – | – |
+| ~~Stop grace~~ **set to 60 s** (section 13.5.2) in the Auth deploy and Compose; every future deployment of a Core service must declare ≥ 60 s | – | – |
+| Init process (`--init` / tini) for signal forwarding and zombie reaping (not needed for correctness) | Stage 20 | SRE |
+| Start-before-stop / rolling deploy for Auth (every deploy is an outage today) | Stage 20 | SRE |
+| SDD endpoint 15: success is `200` in code and tests but `202` in the SDD, and the marker is stamped even when Payment refuses (SDD: "nothing changed") | Billing doc review | engineering |
 | Acceptable AttemptResolver provider-call amplification (15.4 measured: N instances → N calls per unresolved attempt per pass; state safe) | 15.8 | product (provider cost / rate limits) |
 | ExpirySweeper head-of-line blocking and dispatcher per-batch stale reclaim (15.4: correct, availability and duplicate-call cost) | 15.8 | engineering |
 | Acceptable log volume during outages | 15.7 | SRE |
