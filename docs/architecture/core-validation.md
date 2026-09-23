@@ -56,6 +56,7 @@ through the explicit runner (`nawara-migrate`, Auth's `dist/cli/migrate.js`), ne
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60000 | 1000–3600000 | all four | same (server-side) | idle session in a transaction | validate 15.2 |
 | `DB_QUERY_TIMEOUT_MS` (added in 15.2) | statement timeout + 5000 (35000) | 1000–660000, > `DB_STATEMENT_TIMEOUT_MS` | all four | same (client-side `query_timeout`) | waiting for an answer from a silent server or network | validated 15.2 |
 | `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment | service config | publisher confirm wait | validate 15.3 |
+| `RABBITMQ_HEARTBEAT_S` (added in 15.3) | 10 | 5–60 | Billing, Payment (kit bus default 10) | service config → bus | a silent broker: every channel operation and close (~3 × heartbeat) | validated 15.3 |
 | consumer retry | 3 retries, 5000 ms | 0–10, 100–300000 ms | Billing (`BILLING_PAYMENT_EVENT_RETRY_MAX/_DELAY_MS`) | billing config → bus | handler failures before DLQ | validate 15.3 |
 | consumer prefetch | 10 | constant | kit bus | `rabbitmq-event-bus.ts` | unacked deliveries per consumer | measure 15.3/15.8 |
 | consumer drain | 5000 ms | constant | kit bus | same | in-flight deliveries at close | validate 15.5 |
@@ -276,6 +277,8 @@ campaign.
 | 15.1 | 2026-09-23 | `5e72510` | Idle / light baseline, billing-service | PASS (tooling and reference established) | section 13.1 |
 | 15.2 | 2026-09-23 | `f78a2ad` | Database stress and recovery (13 campaigns) | **FAIL** on I9 (a query on an established connection has no client-side bound); every other invariant PASS | section 13.2 |
 | 15.2 | 2026-09-23 | `f78a2ad` + corrective patch | I9 correction (`DB_QUERY_TIMEOUT_MS`) and the full 15.2 matrix re-run | PASS: I9 bounded; no regression | section 13.2.1 |
+| 15.3 | 2026-09-23 | `33a0225` | RabbitMQ, outbox and consumer failure (17 campaigns, kit and live services) | **FAIL** on I9 (channel-level broker operations have no Core-configured bound); I1–I8, I10, I13 PASS; no lost event, no duplicate effect | section 13.3 |
+| 15.3 | 2026-09-23 | `33a0225` + corrective patch | I9 correction (`RABBITMQ_HEARTBEAT_S`, bounded closes) and the full 15.3 matrix re-run (19 campaigns) | PASS: I9 bounded by Core whatever the broker's heartbeat policy; no regression | section 13.3.1 |
 
 ### 13.1 Baseline (15.1)
 
@@ -449,6 +452,149 @@ for the 15.5/15.8 soak.
 **For 15.5:** with the defaults a shutdown during a frozen database now ends at about 33 s, which is still past Docker's 10 s stop grace
 (the process would be killed at 10 s; no work is lost, section 13.2). The drains remain sequential and each worker is waited for twice.
 
+### 13.3 RabbitMQ, outbox and consumer failure (15.3)
+
+**Harness:** `scripts/validation/broker-campaigns.mjs` on `scripts/validation/lib/harness.mjs`, which now also starts and removes its
+own throwaway RabbitMQ and PostgreSQL containers (names `validation-*`, fixed free loopback ports; it touches no other container) and
+reads broker state with `rabbitmqctl`. `scripts/validation/lib/crash-consumer.mjs` is a child consumer that SIGKILLs itself at a chosen
+point. Kit-layer campaigns drive the real `OutboxService` → `OutboxRelay` → `RabbitMqEventBus` → `InboxService` path with per-event-id
+accounting (business row, outbox row, publish attempts, physical deliveries, inbox accepts, business effects); app-layer campaigns drive
+live payment-service and billing-service (Payment's outbox, Billing's `billing.payment-events` consumer and `payment_event_receipt`)
+through real cancellations. Run: `node scripts/validation/broker-campaigns.mjs --out r.json [campaign ...]`. The test proxy's `freeze()`
+did not freeze connections opened during a freeze (the 15.2 limitation); `BrokerProxy` now pauses after piping (test-only code).
+
+**Setup:** `main` at `33a0225` (Stage 15.2 merged; its fix deployed with Auth); throwaway `rabbitmq:3.13-management-alpine` (heartbeat
+proposed by the broker: 60 s) and `postgres:16-alpine`; reference machine of section 4; every Stage 14/15 default (confirm 5000 ms,
+prefetch 10, retry 3 × 5000 ms, relay every 1000 ms, batch 50, backoff 1 s → 60 s). One test-only change to an unrelated setting: the
+app harness raises Billing's invoice and payment-request create rate limits (seeding ~100 requests from one producer; not under test).
+
+**Path under test (from the source).** A business transaction writes its state and an `outbox` row together; the relay claims up to 50
+due rows `FOR UPDATE SKIP LOCKED` in one transaction, publishes each (persistent, durable topic exchange `nawara.events`) and **awaits the
+publisher confirm inside that transaction**, then stamps `publishedAt` (or records `attempts`, `lastError`, `availableAt` = now + 1 s × 2ⁿ,
+capped 60 s, and stops the batch). There is no "claimed" state: a row is pending (`publishedAt` null) or published; a claim is only the
+row lock of the open transaction. The consumer acknowledges **after** the handler resolves, and the handler commits the inbox row and the
+effect in one transaction; a failure is republished (confirmed) to `<queue>.retry` (TTL 5 s) or `<queue>.dead`, then acknowledged.
+
+**Finding (FAIL, I9): channel-level broker operations are bounded only by the AMQP heartbeat, which Core does not configure.** A publish
+on an open confirm channel is bounded by `RABBITMQ_CONFIRM_TIMEOUT_MS`, a new connection by the connect timeout, readiness by its 2 s
+check. But opening a channel, declaring the exchange or queue, cancelling a consumer and closing a channel or connection are protocol
+round trips with no deadline in the kit, and the kit sets no client heartbeat, so it accepts whatever the broker proposes (amqplib:
+"no preference, accept server value"; detection after two missed intervals). Measured with the broker frozen (`docker pause`, TCP still
+accepted), after the first confirm timeout discards the channel:
+
+| With the broker's heartbeat | Relay pass needing a new channel | Consumer notices the loss | Billing SIGTERM → exit |
+|---|---|---|---|
+| 60 s (RabbitMQ default) | ends at **174.8 s** (PostgreSQL had already ended its idle transaction at 60 s; the pass fails with `db_connection_lost`) | 179.9 s (`consuming` until then, though `/ready` is 503 at 2 s from its own connect check) | **172 s** (Docker's 10 s stop grace would SIGKILL it) |
+| 0 (heartbeats disabled, a legal broker setting) | **still pending at 240 s** | never | consumer close **still pending at 240 s** |
+
+No event was lost and no effect duplicated in any of these runs (after the unpause: 4/4 events, one delivered twice, applied once). The
+failure is the wait itself: its bound is neither configured nor guaranteed by Core. Not fixed here (production change; section 16).
+
+**Results** (kit layer unless marked *app*; every accounting row: 0 lost, 0 duplicate effects):
+
+| Campaign | Fault | Runs | Observed | Result |
+|---|---|---|---|---|
+| Baseline | none | 200 events | each published, delivered and applied exactly once; occurrence → handler median 2.1 s (relay pass cadence: 50 rows per 1 s pass) | PASS |
+| *App* baseline | none | 20 cancellations | 20 `payment.cancelled` → 20 receipts → 20 requests cancelled in 704 ms; outbox → published median 364 ms | PASS |
+| Broker down before publish | broker stopped, 100 business transactions | 3 | business transactions unaffected (median 1 ms); rows pending; 1 relay failure line/s; ≤ 1 DB client held; first publish 0.2 s after the broker returns; backlog drained in 2.3–2.5 s; 105/105 exactly once | PASS |
+| *App* broker down | broker stopped, 30 real cancellations | 1 | cancel API 200; both `/ready` 503, `/health` 200; Payment outbox accumulates; drained 12.4–12.7 s after the broker returns (rows had backed off); 30/30 receipts, 30 distinct events, 30 cancelled; 1 Billing consumer | PASS |
+| Repeated outages | 5 × (stop 8 s, start), continuous traffic | 5 cycles | every cycle: 1 consumer, 2 connections, 2 channels (no multiplication); consumer re-attached ≤ 0.5 s after the broker is back; RSS 99 → 101 MB; 553/553 exactly once | PASS |
+| *App* repeated outages | 3 × stop/start with cancellations | 3 | 5/5 per cycle; Billing queue: 1 consumer, 2 connections, 2 channels | PASS |
+| Confirm timeout | broker→client stalled | 3 + 20 | fails at 5.00 s [5.00–5.01] (`broker_confirm_timeout`); a fresh channel every time; later publish ok (median 11 ms); late confirms never resolve a later publish | PASS |
+| Lost confirm (ambiguity) | message stored, confirm lost | 20 | first pass fails, row stays pending (`lastError` recorded), 1 DB client held and 1 session idle in transaction for the stall; retry → **2 physical deliveries → 1 effect** every time | PASS |
+| Connection cut mid-publish | connection severed while awaiting the confirm | 20 | pass fails ~9 ms after the cut; retried; 2 deliveries → 1 effect | PASS |
+| Broker freeze | broker process frozen | 1 + 1 (heartbeat 0) | see the finding above | **FAIL (I9)** |
+| Consumer failures | transient×2 then ok; always transient; permanent; poison ahead of good messages | 1 | transient: 3 deliveries, 1 effect (~10 s); always transient: 1 + 3 retries → dead-lettered `retries_exhausted` (15.7 s); permanent: dead-lettered at once; good messages behind the poison applied in 15–24 ms (no head-of-line block); dead letters keep message id, type, correlation id, failure, reason, retry count | PASS |
+| Duplicate delivery | same id 3× sequentially; 4× concurrently to 2 competing consumers | 5 + 20 × 10 | 815 physical deliveries of 205 events → 205 effects (inbox unique `eventId`) | PASS |
+| Crash windows | SIGKILL before the tx (A), inside it (B), after COMMIT before the ack (C) | 20 each | A, B: no effect, redelivered, applied once; C: effect committed, redelivered, inbox skips it: still 1 | PASS |
+| Prefetch | handler never finishes, 25 messages | 3 | exactly 10 unacknowledged held, 15 ready; connection dies → 25 ready again | PASS |
+| Multiple relays | 3 relays, 500 rows | 1 | split 150/150/200, 500 deliveries, 0 duplicates; while relay A holds a claimed batch, relay B publishes 50 other rows in 83 ms, 0 lock waits | PASS |
+| Backoff | every publish refused | 1 | next attempt after 1.0, 2.0, 3.9, 7.9, 16.0 s; 60.0 s at attempt 11 (cap) | PASS |
+| Durability across restart | failures recorded, relay process replaced | 1 | attempt counters continue (not reset), payloads intact, 10/10 published and consumed | PASS |
+| Broker restart | container restarted with 100 persistent messages queued; again with a consumer attached and 200 in flight | 1 + 1 | 100/100 survive and are applied once; the attached consumer reconnects by itself (6.4 s) and 300/300 applied once | PASS |
+| *App* service restart with backlog | broker down, 20 cancellations, Payment restarted, broker back | 1 | 20 pending before and after the restart; 20/20 applied once | PASS |
+
+**Accounting (logical events → effects):** baseline 200/200; broker down 3 × 105/105 (120 attempts each); outage cycles 553/553 (593
+attempts); lost confirm 20 events, 40 deliveries, 20 effects; cut mid-publish 20/40/20; duplicates 205/815/205; crash windows 60/60;
+multi-relay 500/500/500; broker restart 300/300; app 20 + 30 + 20 + 15 cancellations, every one receipted once.
+
+**Connections and channels:** one kit process = 1 publisher connection + confirm channel, 1 connection + 1 channel per consumer; Billing
+live: 2 connections, 2 channels; after every recovery the same counts and exactly 1 consumer on the queue. DB clients held by a relay:
+1 per relay, only while a pass runs; during a confirm stall that client is idle in transaction for up to `RABBITMQ_CONFIRM_TIMEOUT_MS`
+(5 s) per row. Current defaults keep `RABBITMQ_CONFIRM_TIMEOUT_MS` (5 s) < `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` (60 s) as required.
+
+**Log volume during outages:** kit relay 1 line/s; app: Payment 1.1 warn/error lines/s (`outbox_publish_failure`), Billing 0.7
+(`rabbitmq_consumer_lost`, `…reconnect_failed`); credentials in logs: 0.
+
+**Carried forward:** 15.4: relay throughput is one batch (50) per 1 s pass; a slow-but-confirming broker keeps a relay's transaction
+(and its row locks) open for batch × confirm wait (observed 150 s at 3 s per publish; up to 250 s at the 5 s bound). 15.5: shutdown
+during a broker freeze waits for the heartbeat (172 s) or forever with heartbeats off (the I9 finding). 15.6: while a broker is frozen
+Billing's `rabbitmq-consumer` readiness check reports `consuming` (the separate `rabbitmq` check makes `/ready` 503). 15.7: log rates
+above. 15.8: drain after an outage is paced by per-row backoff (12 s after a ~15 s outage); relay batch and interval; the per-probe
+broker connection of `/ready`. A connection-closed publish failure is logged as `error=Error` without a `kind`.
+
+### 13.3.1 Corrective patch for I9 (15.3)
+
+The failure above is kept as found. This is the correction and its evidence.
+
+**amqplib 2.0.1 semantics, from its source and `scripts/validation/amqp-semantics.mjs`** (a throwaway broker configured `heartbeat = 0`,
+frozen with `docker pause`, each operation on its own connection, 20 s observation, client heartbeat 2 s where requested):
+
+| Operation on a silent connection | No client heartbeat (the kit before) | Client heartbeat 2 s | Promise deadline 1.5 s + `stream.destroy()` |
+|---|---|---|---|
+| channel open; confirm channel + exchange declare; queue declare; consume; cancel | pending (20 s) | **rejected at ~5.9 s** (`Channel ended, no reply will be forthcoming`); connection `error: Heartbeat timeout`, `close` | still waited for the heartbeat (~5.9 s): destroying the socket does not end amqplib's connection or its pending operations |
+| channel close; connection close | pending | **pending even after the heartbeat tore the connection down**: amqplib never settles a close waiting for its close-ok when the connection dies | pending |
+| reuse after the broker answers again | a torn-down connection is never reusable (`Connection closed (Error: Heartbeat timeout)`) | same | same |
+| late frames after teardown | no uncaught error in any case | none | none |
+
+Negotiation (the client's request is honoured): broker at 60 s → none 60, 0 → 0, 5 → 5, 10 → 10, 120 → 60 (the smaller); broker at 0 →
+client 10 gives 10 (when either side is 0 the greater value wins; RabbitMQ documents the same rule). amqplib checks for received traffic
+every interval and fails the connection on the second consecutive miss, so detection takes 2–3 intervals.
+
+**Design (evidence-based).**
+- **A Core-owned heartbeat:** the bus requests `heartbeat` itself (option `heartbeatS`, default 10 s; `RABBITMQ_HEARTBEAT_S`, 5–60, in
+  Billing and Payment; a directly constructed bus gets the same 10 s). It bounds every request/response operation at about 3 × the
+  heartbeat on any broker, including one with heartbeats off. 10 s: RabbitMQ's guide calls 5–20 s optimal and warns that values under
+  5 s are fairly likely to cause false positives; 0 is refused by configuration (it would hand the bound back to broker policy).
+- **Bounded closes:** channel close, connection close and consumer cancel, on the shutdown path and in a failed re-attach, are awaited at
+  most 3 × the heartbeat and then abandoned. By then a silent connection has been torn down; the close would never settle; nothing is
+  reused (a new connection is opened on demand), so abandoning it cannot mix responses between operations.
+- **Rejected:** general per-operation deadlines that destroy the socket. In this amqplib, destroying the socket does not end the
+  connection's pending operations (they still wait for the heartbeat); doing it properly would drive private teardown internals; and the
+  heartbeat already bounds every such operation with a Core-configured value. The publisher confirm keeps its own, shorter bound
+  (`RABBITMQ_CONFIRM_TIMEOUT_MS`, 5 s < the ≥ 20 s heartbeat detection), unchanged.
+- `describeFailure` classifies amqplib's teardown texts as `kind=broker_connection_lost` (`Heartbeat timeout`, `Channel ended, no reply
+  will be forthcoming`, `Channel closed`, `Connection closed (…)`, and `channel closed`, which also fixes the kind-less log line of a
+  publish whose connection was cut). Texts pinned against the installed amqplib.
+
+**Tests.** `rabbitmq-silent-broker.int-spec` (kit, real RabbitMQ, frozen connection, heartbeat 1 s): negative control (no client
+heartbeat: a publish needing a new channel still pending at 4 s); the same publish fails in < 4 s while the broker is still frozen,
+`broker_connection_lost`, and the next one uses a fresh connection; a consumer is detected as lost in < 4 s, re-attaches, exactly one
+consumer remains and it processes; closing is bounded for a publisher-only bus (Payment) and a publisher + consumer bus (Billing); a
+directly constructed bus negotiates 10 s. Removing the heartbeat request fails four of them; removing the bounded close fails the close
+test. Configuration tests in Billing and Payment (default, bounds, 0 refused); classification tests.
+
+**Before / after** (the same campaigns; broker frozen after a confirm timeout discarded the channel):
+
+| Experiment | Before | After (default heartbeat 10 s) |
+|---|---|---|
+| Relay pass needing a new channel (broker heartbeat 60 s) | 174.8 s, PostgreSQL had killed its transaction | **24.8 s**, `broker_connection_lost`; the attempt is recorded in the still-open transaction |
+| Consumer detects the loss | 179.9 s | **29.8 s** |
+| Broker with heartbeats off: same publish | pending at 240 s | **25.0 s** (negotiated 10 s) |
+| Broker with heartbeats off: consumer close | pending at 240 s | **24.9 s** |
+| Billing SIGTERM with the broker frozen, 3 runs each | 172 s | **27.8 s** [27.83–27.86]; heartbeats off: **27.9 s** [27.79–27.88] |
+| Readiness during the freeze | 503 at 2.0 s | unchanged |
+
+The shutdown time is the consumer cancel waiting for the heartbeat teardown (≤ 3 heartbeats), then bounded closes. It is finite and
+Core-controlled, and still above Docker's 10 s stop grace (for 15.5).
+
+**Full 15.3 matrix re-run after the patch: no regression.** 19 campaigns, every accounting 0 lost / 0 duplicate effects: baseline 200/200;
+broker down 3 × 105/105 (drain 2.3–2.5 s); 5 outage cycles 563/563, always 1 consumer / 2 connections / 2 channels; confirm timeout
+5.00 s, fresh channel 20/20; lost confirm and cut mid-publish 20 each, 2 deliveries → 1 effect; consumer transient / poison / permanent /
+DLQ as before (good messages behind the poison in 15 ms); duplicates 815 → 205; crash windows A, B, C × 20; prefetch 10 held, 25
+back; multi-relay 150/150/200 and SKIP LOCKED 137 ms with 0 lock waits; backoff 1–16 s, cap 60 s; broker restart 100/100 and 300/300; app
+baseline, broker down (drain 7.3 s), Payment restart with backlog, 3 live outage cycles; credentials in logs 0.
+
 ## 14. Experiment report template
 
 ```text
@@ -481,6 +627,7 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | Decision | Needed by | Owner |
 |---|---|---|
 | F2: required checks / branch protection on `main` (an experimental change could merge without CI) | before 15.2 changes land | repository admin |
+| ~~I9 remediation (15.3 FAIL)~~ **resolved** by the corrective patch: a Core-owned AMQP heartbeat (`RABBITMQ_HEARTBEAT_S`) and bounded closes in the kit bus (section 13.3.1); per-operation deadlines with socket destruction assessed and rejected | – | – |
 | ~~I9 remediation (15.2 FAIL)~~ **resolved** by the corrective patch: client-side `DB_QUERY_TIMEOUT_MS` in the kit and in Auth, timed-out clients destroyed (section 13.2.1); TCP keepalive assessed and not adopted | – | – |
 | Acceptable recovery time after a dependency outage | 15.2 / 15.3 result classification | SRE / product |
 | Acceptable shutdown time and the stop grace to configure | 15.5 | SRE |

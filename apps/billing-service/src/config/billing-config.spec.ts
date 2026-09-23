@@ -62,7 +62,7 @@ describe('loadBillingConfig', () => {
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'isProduction', 'logLevel',
-      'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqUrl', 'rateLimits', 'reconcile',
+      'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
       'serviceName', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy',
     ]);
   });
@@ -191,5 +191,13 @@ describe('loadBillingConfig', () => {
     expect(loadBillingConfig(BASE).rabbitmqConfirmTimeoutMs).toBe(5000);
     expect(loadBillingConfig({ ...BASE, RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).rabbitmqConfirmTimeoutMs).toBe(2000);
     for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadBillingConfig({ ...BASE, RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
+  });
+
+  // Stage 15.3 (I9): the heartbeat this service requests; 0 (off) is refused, so a silent broker is always detected by Core's own bound.
+  it('RABBITMQ_HEARTBEAT_S defaults to 10 and is bounded (5-60); 0 is refused', () => {
+    expect(loadBillingConfig(BASE).rabbitmqHeartbeatS).toBe(10);
+    expect(loadBillingConfig({ ...BASE, RABBITMQ_HEARTBEAT_S: '5' }).rabbitmqHeartbeatS).toBe(5);
+    expect(loadBillingConfig({ ...BASE, RABBITMQ_HEARTBEAT_S: '60' }).rabbitmqHeartbeatS).toBe(60);
+    for (const bad of ['0', '4', '61', '-1', 'abc', '2.5']) expect(() => loadBillingConfig({ ...BASE, RABBITMQ_HEARTBEAT_S: bad })).toThrow(/RABBITMQ_HEARTBEAT_S must be an integer between 5 and 60/);
   });
 });

@@ -56,7 +56,7 @@ export class AppModule {
         EventsModule.forRoot({
           source: config.serviceName,
           bus: overrides.bus ?? (config.rabbitmqUrl
-            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs, onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message) })
+            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs, heartbeatS: config.rabbitmqHeartbeatS, onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message) })
             : new InMemoryEventBus()),
           // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
           // Stage 14.7: each relay message carries its own event name (`outbox_publish_failure eventId=...`, `outbox_relay_pass_failure`, ...).

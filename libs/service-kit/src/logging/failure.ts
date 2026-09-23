@@ -22,6 +22,7 @@ export type FailureKind =
   | 'db_deadlock'
   | 'db_query_timeout'
   | 'broker_confirm_timeout'
+  | 'broker_connection_lost'
   | 'network_unreachable';
 
 const TOKEN = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -80,6 +81,15 @@ const classOf = (e: Error): string => {
   return cls === 'Error' && token(e.name) && e.name !== 'error' ? e.name : cls;
 };
 
+// amqplib: a connection torn down (a missed heartbeat, a closed socket) and the channel operations it rejects. Pinned by `observability.spec.ts`.
+const BY_BROKER_MESSAGE: Array<[string, FailureKind]> = [
+  ['Heartbeat timeout', 'broker_connection_lost'],
+  ['Channel ended, no reply will be forthcoming', 'broker_connection_lost'],
+  ['Channel closed', 'broker_connection_lost'],
+  ['channel closed', 'broker_connection_lost'], // a confirm channel's pending waits, when the channel dies under a publish
+  ['Connection closed (', 'broker_connection_lost'],
+];
+
 export function failureFacts(e: unknown): FailureFacts {
   if (!(e instanceof Error)) return { error: 'unknown' }; // the workers' established classification for a non-Error throw
   // Classification: from the error as thrown (unchanged).
@@ -87,7 +97,7 @@ export function failureFacts(e: unknown): FailureFacts {
   let kind: FailureKind | undefined;
   if (ownCode) kind = BY_SQLSTATE[ownCode] ?? BY_SYSTEM_CODE[ownCode];
   else if (classOf(e) === 'PublisherConfirmTimeoutError') kind = 'broker_confirm_timeout';
-  else kind = BY_PG_MESSAGE.find(([m]) => e.message === m)?.[1];
+  else kind = BY_PG_MESSAGE.find(([m]) => e.message === m)?.[1] ?? BY_BROKER_MESSAGE.find(([m]) => e.message === m || (m.endsWith('(') && e.message.startsWith(m)))?.[1];
   // Display: the representative underlying error (itself, unless it is an aggregate of network failures).
   const shown = representativeError(e);
   const error = classOf(shown);

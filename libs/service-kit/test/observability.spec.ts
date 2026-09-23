@@ -24,6 +24,13 @@ describe('describeFailure', () => {
     expect(describeFailure(new Error('Client has encountered a connection error and is not queryable'))).toBe('error=Error kind=db_connection_lost');
     expect(describeFailure(new PublisherConfirmTimeoutError(5000))).toBe('error=PublisherConfirmTimeoutError kind=broker_confirm_timeout');
     expect(describeFailure(new Error('Query read timeout'))).toBe('error=Error kind=db_query_timeout'); // pg's client-side query_timeout (Stage 15.2)
+    // amqplib, a connection torn down (Stage 15.3): the heartbeat itself, the channel operations it rejects, and later use of the dead connection
+    expect(describeFailure(new Error('Heartbeat timeout'))).toBe('error=Error kind=broker_connection_lost');
+    expect(describeFailure(new Error('Channel ended, no reply will be forthcoming'))).toBe('error=Error kind=broker_connection_lost');
+    expect(describeFailure(Object.assign(new Error('Channel closed'), { name: 'IllegalOperationError' }))).toBe('error=IllegalOperationError kind=broker_connection_lost');
+    expect(describeFailure(new Error('Connection closed (Error: Heartbeat timeout)'))).toBe('error=Error kind=broker_connection_lost');
+    expect(describeFailure(new Error('channel closed'))).toBe('error=Error kind=broker_connection_lost'); // a publish whose connection was cut
+    expect(describeFailure(new Error('Connection closedX'))).toBe('error=Error'); // prefix only with the parenthesis
     expect(describeFailure(new TypeError('x'))).toBe('error=TypeError');
     expect(describeFailure('a string')).toBe('error=unknown');
     expect(describeFailure({ code: '57014' })).toBe('error=unknown'); // not an Error: nothing on it is trusted
@@ -65,6 +72,14 @@ describe('describeFailure', () => {
     expect(client).toContain("'Client has encountered a connection error and is not queryable'");
     expect(client).toContain("'Connection terminated unexpectedly'");
     expect(client).toContain("new Error('Query read timeout')"); // query_timeout; also what DbService.tx() recognises to destroy the client
+    const amqpDir = createRequire(import.meta.url).resolve('amqplib').replace(/channel_api\.js$/, '');
+    const amqpConnection = readFileSync(`${amqpDir}lib/connection.js`, 'utf8');
+    const amqpChannel = readFileSync(`${amqpDir}lib/channel.js`, 'utf8');
+    expect(amqpConnection).toContain("new Error('Heartbeat timeout')");
+    expect(amqpConnection).toContain("fmt('Connection closed (%s)'");
+    expect(amqpChannel).toContain("new Error('Channel ended, no reply will be forthcoming')");
+    expect(amqpChannel).toContain("invalidOp('Channel closed'");
+    expect(readFileSync(`${amqpDir}lib/channel_model.js`, 'utf8')).toContain("new Error('channel closed')");
   });
 });
 

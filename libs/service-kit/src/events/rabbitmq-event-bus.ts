@@ -29,7 +29,30 @@ export interface RabbitMqOptions {
   confirmTimeoutMs?: number;
   /** Bound on waiting, when a consumer is closed, for deliveries its handler is still processing (default 5000 ms). */
   drainTimeoutMs?: number;
+  /**
+   * Stage 15.3 (I9): the AMQP heartbeat THIS client requests, in seconds (default 10). The negotiated value is the smaller of this and the
+   * broker's proposal, or this one when the broker proposes 0 (heartbeats off), so the bound no longer depends on broker configuration.
+   * amqplib tears the connection down after two missed intervals (observed ~3 x heartbeat), rejecting every channel operation still
+   * waiting on a silent broker (channel open, declare, consume, cancel). `0` disables it: a test-only negative control; configuration
+   * (`RABBITMQ_HEARTBEAT_S`) refuses it.
+   */
+  heartbeatS?: number;
 }
+
+/** Stage 15.3: the kit's requested heartbeat and the range configuration accepts (RabbitMQ: 5-20 s is optimal; under 5 s false positives). */
+export const DEFAULT_RABBITMQ_HEARTBEAT_S = 10;
+export const RABBITMQ_HEARTBEAT_BOUNDS = { min: 5, max: 60 } as const;
+
+/** amqplib 2.0.1 never settles a channel or connection close that is waiting for its close-ok when the connection dies (Stage 15.3). */
+const abandonAfter = (p: Promise<unknown>, ms: number): Promise<void> => {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
 
 /** Thrown when the broker does not confirm a publish in time. The message may or may not have been stored by the broker. */
 export class PublisherConfirmTimeoutError extends Error {
@@ -84,14 +107,26 @@ export class RabbitMqEventBus implements EventBus {
   private connection?: ChannelModel;
   private publisher?: ConfirmChannel;
   private readonly consumers = new Set<ConsumerHandle>();
+  private readonly url: string;
+  /**
+   * How long a close/cancel may wait before it is abandoned: the heartbeat's worst-case detection (3 intervals). By then a silent
+   * connection has been torn down, and a close still pending will never settle. Abandoning is safe: the transport is closed or dead and
+   * is never reused (a new connection is opened on demand).
+   */
+  private readonly closeBoundMs: number;
 
   constructor(private readonly opts: RabbitMqOptions) {
     this.exchange = opts.exchange ?? 'nawara.events';
+    const heartbeatS = opts.heartbeatS ?? DEFAULT_RABBITMQ_HEARTBEAT_S;
+    const url = new URL(opts.url);
+    url.searchParams.set('heartbeat', String(heartbeatS)); // amqplib reads the client's requested heartbeat from the URL
+    this.url = url.toString();
+    this.closeBoundMs = 3 * (heartbeatS || DEFAULT_RABBITMQ_HEARTBEAT_S) * 1000;
   }
 
   private async connect(): Promise<ChannelModel> {
     if (this.connection) return this.connection;
-    const conn = await amqp.connect(this.opts.url, { timeout: this.opts.connectTimeoutMs ?? 5000 });
+    const conn = await amqp.connect(this.url, { timeout: this.opts.connectTimeoutMs ?? 5000 });
     const reset = () => {
       if (this.connection === conn) {
         this.connection = undefined;
@@ -213,7 +248,7 @@ export class RabbitMqEventBus implements EventBus {
       h.state = 'consuming';
       h.attempts = 0;
     } catch (e) {
-      await ch.close().catch(() => undefined);
+      await abandonAfter(ch.close(), this.closeBoundMs); // bounded: the re-attach loop must never hang on a dead connection
       throw e;
     }
   }
@@ -258,7 +293,7 @@ export class RabbitMqEventBus implements EventBus {
     h.channel = undefined;
     if (ch) {
       // 1. No new deliveries. 2. Let the ones already being handled finish and settle (bounded). 3. Close the channel.
-      if (h.consumerTag) await ch.cancel(h.consumerTag).catch(() => undefined);
+      if (h.consumerTag) await abandonAfter(ch.cancel(h.consumerTag), this.closeBoundMs);
       if (h.inFlight.size > 0) {
         const drainMs = this.opts.drainTimeoutMs ?? 5000;
         let timer: NodeJS.Timeout | undefined;
@@ -272,7 +307,7 @@ export class RabbitMqEventBus implements EventBus {
         // Unsettled deliveries are redelivered by the broker once the channel closes (at least once; consumers deduplicate).
         if (outcome === 'timeout') this.notice(`rabbitmq_consumer_drain_timeout queue=${h.sub.queue} inFlight=${h.inFlight.size}`);
       }
-      await ch.close().catch(() => undefined);
+      await abandonAfter(ch.close(), this.closeBoundMs);
     }
   }
 
@@ -419,8 +454,8 @@ export class RabbitMqEventBus implements EventBus {
 
   async close(): Promise<void> {
     for (const h of this.consumers) await this.stopConsumer(h); // safe: stopConsumer removes only the element being visited
-    await this.publisher?.close().catch(() => undefined);
-    await this.connection?.close().catch(() => undefined);
+    if (this.publisher) await abandonAfter(this.publisher.close(), this.closeBoundMs);
+    if (this.connection) await abandonAfter(this.connection.close(), this.closeBoundMs);
     this.publisher = undefined;
     this.connection = undefined;
   }

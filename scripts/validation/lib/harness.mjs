@@ -194,3 +194,99 @@ export async function environment(adminUrl) {
     os: `${os.type()} ${os.release()}`, postgres: v.version, maxConnections: Number(v.max), superuserReserved: Number(v.reserved),
   };
 }
+
+// ------------------------------------------------------------------------------------------------ throwaway containers (Stage 15.3)
+// The harness starts, pauses, stops and removes ONLY containers it created itself (name prefix `validation-`), on loopback ports.
+const CONTAINER_PREFIX = 'validation-';
+const docker = (...args) => execFileSync('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+/** A free loopback port, published explicitly: Docker re-assigns a randomly published port on `docker restart`, a fixed one survives it. */
+async function freePort() {
+  const net = await import('node:net');
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+function ownContainer(name) {
+  if (!name.startsWith(CONTAINER_PREFIX)) throw new Error(`refusing to touch container ${name}: not created by the validation harness`);
+  return name;
+}
+
+/**
+ * A throwaway RabbitMQ (same image as compose) on a free loopback port, guest/guest, default configuration. `heartbeatS` sets the
+ * broker's proposed heartbeat (a server setting, `heartbeat = N`; 0 disables heartbeats) to reproduce a broker configured that way.
+ */
+export async function throwawayRabbit({ heartbeatS } = {}) {
+  const name = `${CONTAINER_PREFIX}rabbitmq-${randomBytes(3).toString('hex')}`;
+  const port = await freePort();
+  const extra = [];
+  if (heartbeatS !== undefined) {
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const dir = mkdtempSync(`${os.tmpdir()}/validation-rabbitmq-`);
+    writeFileSync(`${dir}/90-heartbeat.conf`, `heartbeat = ${Number(heartbeatS)}\n`);
+    extra.push('-v', `${dir}/90-heartbeat.conf:/etc/rabbitmq/conf.d/90-heartbeat.conf:ro`);
+  }
+  docker('run', '-d', '--rm', '--name', name, '-p', `127.0.0.1:${port}:5672`, ...extra, 'rabbitmq:3.13-management-alpine');
+  const url = `amqp://guest:guest@127.0.0.1:${port}`;
+  const ready = async () => {
+    for (let i = 0; i < 120; i++) {
+      // Readiness by an AMQP handshake only: `docker exec`-ing the CLI while the broker boots races the entrypoint's Erlang cookie
+      // creation and makes the broker exit.
+      try {
+        const amqp = (await import('amqplib')).default;
+        const c = await amqp.connect(url);
+        await c.close();
+        return;
+      } catch {
+        await sleep(500);
+      }
+    }
+    throw new Error('throwaway RabbitMQ did not become ready');
+  };
+  await ready();
+  const ctl = (...a) => docker('exec', '-u', 'rabbitmq', ownContainer(name), 'rabbitmqctl', '-q', ...a);
+  const table = (cmd, cols) =>
+    ctl(cmd, '--no-table-headers', ...cols).split('\n').filter((l) => l.trim()).map((l) => Object.fromEntries(l.split('\t').map((v, i) => [cols[i], v])));
+  return {
+    name, port, url,
+    pause: () => docker('pause', ownContainer(name)),
+    unpause: () => docker('unpause', ownContainer(name)),
+    stop: () => docker('stop', '-t', '5', ownContainer(name)), // --rm: stopping removes it, so `stop` is only used for the final teardown
+    /** Broker process stopped and started again inside the same container: queues, messages and the port survive (a broker restart). */
+    appStop: () => ctl('stop_app'),
+    appStart: async () => {
+      ctl('start_app');
+      await ready();
+    },
+    restart: async () => {
+      docker('restart', '-t', '10', ownContainer(name));
+      await ready();
+    },
+    queues: () => table('list_queues', ['name', 'messages_ready', 'messages_unacknowledged', 'consumers']),
+    connections: () => table('list_connections', ['name', 'channels', 'state']),
+    channels: () => table('list_channels', ['connection', 'number', 'consumer_count', 'messages_unacknowledged', 'prefetch_count']),
+    consumers: () => table('list_consumers', ['queue_name', 'channel_pid', 'prefetch_count']),
+  };
+}
+
+/** A throwaway PostgreSQL 16 on a random loopback port; returns an admin URL that passes `assertThrowawayCluster`. */
+export async function throwawayPostgres() {
+  const name = `${CONTAINER_PREFIX}postgres-${randomBytes(3).toString('hex')}`;
+  const password = randomBytes(18).toString('hex');
+  const port = await freePort();
+  docker('run', '-d', '--rm', '--name', name, '-p', `127.0.0.1:${port}:5432`, '-e', `POSTGRES_PASSWORD=${password}`, 'postgres:16-alpine');
+  const adminUrl = `postgres://postgres:${password}@127.0.0.1:${port}/postgres`;
+  for (let i = 0; i < 120; i++) {
+    try {
+      await adminQuery(adminUrl, 'SELECT 1');
+      break;
+    } catch {
+      await sleep(500);
+    }
+  }
+  await assertThrowawayCluster(adminUrl);
+  return { name, port, adminUrl, stop: () => docker('stop', '-t', '5', ownContainer(name)) };
+}
