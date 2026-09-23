@@ -200,7 +200,7 @@ export async function environment(adminUrl) {
 const CONTAINER_PREFIX = 'validation-';
 const docker = (...args) => execFileSync('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
 /** A free loopback port, published explicitly: Docker re-assigns a randomly published port on `docker restart`, a fixed one survives it. */
-async function freePort() {
+export async function freePort() {
   const net = await import('node:net');
   return new Promise((resolve) => {
     const srv = net.createServer();

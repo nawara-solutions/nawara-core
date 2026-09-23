@@ -77,8 +77,11 @@ through the explicit runner (`nawara-migrate`, Auth's `dist/cli/migrate.js`), ne
 **Known relationships to test, not assumptions:** `RABBITMQ_CONFIRM_TIMEOUT_MS` should stay below
 `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` (the relay waits for the confirm inside its claim transaction); total worker drain can exceed the
 Docker stop grace (drains are sequential per module and each worker is waited for twice); `DB_POOL_MAX` × processes must stay below
-PostgreSQL `max_connections` (100 on the local server) with room for migrations and CLIs; `PAYMENT_TIMEOUT_MS` should stay below
-`BILLING_DISPATCH_STALE_SENDING_MS` (otherwise a send still in flight is reclaimed as stale).
+PostgreSQL `max_connections` (100 on the local server) with room for migrations and CLIs; the time a dispatcher instance needs to
+send its **whole claimed batch** (up to batch × `PAYMENT_TIMEOUT_MS`, because the rows are claimed together and sent one after
+another) should stay below `BILLING_DISPATCH_STALE_SENDING_MS`, otherwise the tail of the batch is reclaimed as stale while it is still
+queued or in flight. (15.1 stated this as `PAYMENT_TIMEOUT_MS` < stale; 15.4 measured that the per-call bound is not enough, section
+13.4. Payment's natural key keeps it correct either way; it costs duplicate sends.)
 
 ## 3. Concurrency and resources
 
@@ -94,7 +97,7 @@ PostgreSQL `max_connections` (100 on the local server) with room for migrations 
 | Auth events | per request | – | – | none (fire-and-forget) | – | none (F14) | none |
 
 With N instances of a service, each component runs N times; only the SKIP LOCKED claims divide work. Correctness under N > 1 is a 15.4
-question.
+question, answered in section 13.4 (current inventory and models there).
 
 | Resource | Limit | Notes |
 |---|---|---|
@@ -279,6 +282,7 @@ campaign.
 | 15.2 | 2026-09-23 | `f78a2ad` + corrective patch | I9 correction (`DB_QUERY_TIMEOUT_MS`) and the full 15.2 matrix re-run | PASS: I9 bounded; no regression | section 13.2.1 |
 | 15.3 | 2026-09-23 | `33a0225` | RabbitMQ, outbox and consumer failure (17 campaigns, kit and live services) | **FAIL** on I9 (channel-level broker operations have no Core-configured bound); I1–I8, I10, I13 PASS; no lost event, no duplicate effect | section 13.3 |
 | 15.3 | 2026-09-23 | `33a0225` + corrective patch | I9 correction (`RABBITMQ_HEARTBEAT_S`, bounded closes) and the full 15.3 matrix re-run (19 campaigns) | PASS: I9 bounded by Core whatever the broker's heartbeat policy; no regression | section 13.3.1 |
+| 15.4 | 2026-09-23 | `a760c85` | Workers and concurrency (23 campaigns: kit, Payment workers, live Billing / Payment fleets; race campaigns ≥ 20 iterations) | PASS on C1–C13: no duplicate protected effect, no lost work, no invalid state, no cross-tenant write, no lock leak; throughput / amplification findings carried to 15.8 | section 13.4 |
 
 ### 13.1 Baseline (15.1)
 
@@ -595,6 +599,143 @@ DLQ as before (good messages behind the poison in 15 ms); duplicates 815 → 205
 back; multi-relay 150/150/200 and SKIP LOCKED 137 ms with 0 lock waits; backoff 1–16 s, cap 60 s; broker restart 100/100 and 300/300; app
 baseline, broker down (drain 7.3 s), Payment restart with backlog, 3 live outage cycles; credentials in logs 0.
 
+### 13.4 Workers and concurrency (15.4)
+
+**Question.** When worker passes, processes, service instances, consumers, retries and external callbacks run concurrently, does Core
+keep one business effect per logical item, avoid unsafe ownership, make progress and recover from races? Correctness under the current
+defaults only; nothing is tuned (batch, prefetch, pool and timeouts are the Stage 14/15 defaults unless a row says otherwise).
+
+**Harness (test-only).** `scripts/validation/worker-campaigns.mjs` starts its own throwaway RabbitMQ and PostgreSQL (`validation-*`,
+loopback) and removes them at the end. Three layers:
+- **kit**: the real `OutboxService` → `OutboxRelay` → `RabbitMqEventBus` → `InboxService` path with per-event accounting
+  (`lib/kit-world.mjs`, extracted from the 15.3 script, which now imports it; its 15.3 campaigns were re-run unchanged: baseline
+  200/200, lost confirm 20 × (2 deliveries → 1 effect), crash windows A/B/C × 20); `lib/crash-relay.mjs` is a relay child that is
+  SIGKILLed while it holds its claim;
+- **Payment workers in process**: `AttemptResolver`, `WebhookRetriever`, `ExpirySweeper`, `AttemptService` and `IdempotencyService`
+  built from `dist`, one `DbService` pool per simulated instance, so every lock is decided by PostgreSQL between separate sessions; a
+  scripted provider with barriers stands in for the test provider where two resolvers must observe the same attempt;
+- **live fleets**: N billing-service processes on one database and one broker, calling `lib/fake-payment.mjs` (Payment's create /
+  get / cancel contract with its real natural-key semantics, plus hold, abort-unprocessed and process-then-drop-the-response hooks and
+  counters of physical and concurrent calls per request); `paymentEventPublisher` publishes Payment's events to Billing's queue; two
+  live payment-service processes for Payment's own workers. Only Billing's dispatch interval (300 ms), where a campaign needs it the
+  stale-`sending` window (3 s), and the seeding rate limits are changed. No real provider is ever called.
+
+Run: `node scripts/validation/worker-campaigns.mjs --out r.json [campaign ...]`; the reference run below is one full pass of all 23
+campaigns (9 min 11 s), 0 uncaught errors or unhandled rejections, containers removed.
+
+**Setup:** `main` at `a760c85` (Stage 15.3 merged: Core-owned heartbeat `RABBITMQ_HEARTBEAT_S`, bounded closes, confirm timeout 5 s,
+silent-broker tests), PostgreSQL 16.15 and RabbitMQ 3.13 throwaway containers, reference machine of section 4. F2 still open.
+
+**Invariants.** Physical attempts may exceed one; business effects may not.
+
+| Id | Invariant |
+|---|---|
+| C1 | One logical work item → exactly one intended business effect |
+| C2 | Exclusive claims where the design requires exclusivity; where it permits duplicate execution, a downstream key makes it safe |
+| C3 | No lost work: every durable item ends in an allowed terminal or retry state |
+| C4 | Business state and its bookkeeping (outbox, receipts, transitions) stay atomic; no race exposes a partial state |
+| C5 | Idempotency holds under truly simultaneous attempts with the same key |
+| C6 | One slow, locked or poisoned item does not stop unrelated work where the design claims it should not |
+| C7 | No lock leak after success, failure, timeout, exception, process death or connection destruction |
+| C8 | No worker multiplication inside a process after reconnects or recovery |
+| C9 | Two or more instances of a service stay correct (no accidental singleton assumption) |
+| C10 | Retry state is monotonic: attempts never decrease, terminal work is never resurrected or overwritten by a stale attempt |
+| C11 | No cross-tenant write |
+| C12 | A dependency timeout never lets a second worker start conflicting work while the first can still commit an incompatible effect |
+| C13 | Accounting balances: logical input, physical attempts, effects, retries, terminal failures, pending |
+
+**Worker inventory and concurrency model (current source, after 15.2 and 15.3).** Models: A exclusive DB claim (waits), B SKIP LOCKED
+work stealing, C optimistic / idempotent concurrent execution, D singleton assumption, E external-provider reconciliation.
+
+| Service | Worker | Interval / batch | Claim | Transaction | External I/O | Retry / terminal | Idempotency | Model |
+|---|---|---|---|---|---|---|---|---|
+| kit (Billing, Payment) | `OutboxRelay` | 1 s / 50 | `FOR UPDATE SKIP LOCKED`, `ORDER BY occurredAt, id` | the whole batch | **inside**: publish + confirm (≤ 5 s each) | backoff 1 s × 2ⁿ ≤ 60 s, unlimited; first failure ends the pass | consumer inbox | B |
+| kit | `PollLoop` (all workers) | – | – | – | – | next pass | – | a pass never overlaps the next (measured) |
+| Billing | `PaymentDispatcher` | 2 s / 50 | `FOR UPDATE SKIP LOCKED` on `created` or stale `sending`; row set to `sending`, `sendingSince` stamped | the claim only | **outside**: one create per row, **sequential**, after the claim commits | stale `sending` reclaimed after 60 s; `rejected` terminal | Payment's natural key `(producer, paymentRequestId)` | B + C |
+| Billing | `PaymentReconciler` | 30 s / 50, cursor | none | per request (`applyPaymentEvent`) | GET Payment, outside | next pass | deterministic event id → `payment_event_receipt` | C / E |
+| Billing | `billing.payment-events` consumer | push, prefetch 10 | – | per event: receipt + effect | none | 3 × 5 s, then DLQ | `payment_event_receipt` (unique event id) | C |
+| Billing | settlement → subscription roll (inside the consumer's transaction) | – | `FOR UPDATE` invoice → payment request, then subscription per organization | same transaction | none | – | the receipt | A |
+| Payment | `AttemptResolver` | 5 s / 100 | **none** (by design) | per attempt, after the provider call | provider fetch **before**, outside | next pass | state-machine guards under `FOR UPDATE` payment → attempt | E + C |
+| Payment | `WebhookRetriever` | 5 s / 100 | `FOR UPDATE SKIP LOCKED` + observed-`attempts` claim | per event | none (reprocessing is local) | 10 attempts, 10 s × 2ⁿ; `retries_exhausted` terminal | observed-attempt claim | B |
+| Payment | `ExpirySweeper` | 5 s / **all due, unordered** | `FOR UPDATE` per payment (**waits**) | per payment | none | next pass | status re-checked under lock; refuses while an attempt is open | A |
+| Payment | HTTP `Idempotency-Key` (create payment, start attempt) | – | unique key row | with the operation | – | replay | `idempotency_key` + natural key | C |
+
+No worker relies on a singleton assumption (model D): every one was run with 2–4 instances below.
+
+**Lock order (from source).** Billing: invoice → payment request (issue, request creation, event application); paths that lock only a
+payment request (dispatch claim, `markRequested`, `markRejected`, cancel) never lock the invoice afterwards; the subscription is locked
+last, per organization. Payment: payment → attempt (resolver apply, attempt start, webhook reprocessing); the sweeper locks the payment
+alone. No opposing order exists in production code, so the deadlock campaign is the 0 `deadlocks` counter of `pg_stat_database` sampled
+in every campaign rather than a manufactured SQL pattern.
+
+**Results** (every accounting balanced; 0 duplicate effects, 0 lost items, 0 deadlocks in every campaign):
+
+| Campaign | Setup | Iterations | Observed | Result |
+|---|---|---|---|---|
+| PollLoop overlap | pass 150 ms, interval 50 ms | 10 passes | max 1 pass at a time; next pass starts 50 ms [49–51] after the previous **ends** (serial, never overlapping) | PASS (C8) |
+| Multiple relays | 1, 2, 4 relays, 1000 rows (20 batches) | 3 | split [1000], [500, 500], [250 × 4]; drain 2272 / 1043 / 681 ms; every row `attempts` 1, published once, 0 lock-wait sessions; 1000 → 1000 effects each | PASS (C1, C2, C6) |
+| Slow-broker contention | relay A's confirms slowed (test proxy), relays B, C free, 220 rows | 1 | A holds 50 rows (1 lock, 1 session idle in transaction) for **20.4 s**; B and C publish the other 150 in 283 ms, never A's rows; unrelated business transactions 1 ms; 220 → 220 | PASS; lock duration → 15.8 |
+| Concurrent duplicate delivery (kit) | same event id released by a barrier into 3 consumers | 20 × 100 events | 300 simultaneous deliveries → 100 inbox accepts → 100 effects | PASS (C5) |
+| Relays + consumers + broker interruption | 2 relays, 2 consumers, 3 broker stop/start cycles, continuous traffic | 3 cycles | every cycle: 2 queue consumers, 4 connections, 4 channels (no multiplication); 472 events, 521 publish attempts, 472 deliveries, 472 effects | PASS (C3, C8) |
+| Relay SIGKILLed holding its claim | child relay claims 50 rows, publish never resolves, SIGKILL | 5 | row locks released 12–26 ms after the kill; another relay published them in 265–308 ms; 300 → 300 | PASS (C7) |
+| Outbox retry race | relay A's publish fails while relay B polls the same due row | 20 | B never took the row A held; attempts 1 after A's failure, 2 final; all published | PASS (C10) |
+| AttemptResolver races | 2 resolvers, same `unknown` attempt, both provider calls released by one barrier; pairs succeeded/succeeded, succeeded/failed, failed/succeeded, pending/succeeded, notFound/succeeded | 20 per pair (100) | both call the provider (by design); the first commit wins under the payment → attempt locks, the second is refused by the state machine (logged `attempt_resolver_failure`, 40 lines, left for the next pass); contradictory pairs end 11/9 and 9/11 by commit order, always a legal pair (`succeeded`/`succeeded` or `failed`/`created`); ≤ 1 `payment.succeeded` per payment, never two terminal events | PASS (C1, C4, C10) |
+| AttemptResolver amplification | 10 unresolved attempts, 1 / 2 / 4 resolvers, one pass each | 1 | provider calls per attempt per pass = number of resolvers (10 / 20 / 40) | PASS; provider load → 15.8 |
+| Webhook retrier races | 3 retriers, rows success / slow / transient / exhausting / fresh | 20 rounds | max 1 concurrent reprocess per row; 39 rows `retries_exhausted`, each once (a row made fresh in one round exhausts in a later one); attempts never above 10; 3 `payment.succeeded` per round (one per success row) | PASS (C2, C10) |
+| Expiry sweepers | 3 sweepers, 200 due payments of 20 organizations | 1 | 200 expired once, 200 events; 20/20 organizations fully expired; 486 ms | PASS (C1, C11) |
+| Sweeper head-of-line | one due payment row locked by another transaction; 3 sweepers over 30 due payments (30 organizations) | 1 | **all 3 sweepers wait on the one lock: 0 of 30 expired in 3 s**; 30/30 once the lock is released | PASS for correctness; availability → 15.8 (below) |
+| Expiry boundary | attempt start and sweep fired ±15 ms around `expiresAt` | 20 | 10 expired (start refused), 9 started (not expired: open attempt), 1 start refused before the sweep saw it due (left `created` for the next pass); never expired with an open attempt | PASS (C4) |
+| Payment idempotency | create with the same request 5 × simultaneously; attempt start with the same key 5 ×; 20 distinct keys | 20 + 20 + 20 | same key: 1 row, 1 id returned to all 5, 1 fresh; distinct keys: 20/20 ok (no false collapse) | PASS (C5) |
+| DB timeout under contention | sweeper B blocked by A's lock, `statement_timeout` 1 s (test value) | 20 | B fails `57014 db_statement_timeout` at 1008 ms [1005–1076]; 0 sessions left idle in transaction; the payment expired once by a later pass | PASS (C7, C12) |
+| *Live* Billing dispatch | 1 / 2 / 3 instances, 60 requests | 3 | split [60], [41, 19], [31, 21, 8]; 1 create per request, max 1 concurrent; payment ids match | PASS (C9) |
+| *Live* dispatcher stale race | 3 instances, stale 3 s, 20 requests; Payment holds each create 1.5 s (below stale) and 4.5 s (above) | 2 × 20 | **1–3 creates per request and up to 3 at the same time even below stale** (below); 1 payment per request, ids match, all `requested` | PASS (natural key); finding below |
+| *Live* dispatcher crash windows | 1 instance killed while its creates are at Payment, then a new instance (stale 3 s); C: Payment never processes them; D: Payment creates, the response is lost | 4 rounds × 5 each | 20/20 `requested` per window, 1 payment per request whose id matches; 1–3 creates per request | PASS (C3, C12) |
+| *Live* competing consumers | 3 Billing instances, 90 settlements, 15 organizations | 1 | applied 31 / 34 / 25; 90 receipts, 90 invoices paid, 90 transitions; 3 queue consumers; 0 cross-tenant rows | PASS (C9, C11) |
+| *Live* duplicate delivery race | each settlement event published 3 × at once to 3 instances | 20 × 5 | 100 receipts, 100 invoices paid, 0 dead letters | PASS (C5) |
+| *Live* dual-path settlement | event and reconciler settle the same payments concurrently | 20 | 20 paid once: 20 receipts `applied`, 17 `ignored`; 44 reconciler GETs | PASS (C1) |
+| *Live* same-organization subscription | 2 recurring invoices per organization paid at once | 20 organizations | 20 active subscriptions, period exactly [T + 1 month, T + 2 months], each on its own organization's product, 0 conflicts | PASS (C4, C11) |
+| *Live* restart under competition | 2 instances; SIGKILL A mid-dispatch, restart it | 3 cycles, 36 requests | 36/36 paid, 0 stuck, 36 payments; 2 instances, 2 queue consumers after each cycle | PASS (C8, C9) |
+| *Live* pool pressure | 2 instances dispatching a 150-request backlog, HTTP reads alongside | 1 | reads 4.3 ms [1.8–16.1]; at most 4 database sessions of 20 configured | PASS |
+| *Live* Payment × 2 | 2 payment-service processes, 40 expiring payments, 10 webhooks on their last attempt | 1 | 40 `payment.expired`, each published and delivered once; each webhook's 10th attempt made by one instance (`webhook_retry_unresolved` × 10), the terminal `retries_exhausted` written once by the other's next pass (× 10) | PASS (C9, C10) |
+
+**Accounting (logical → physical → effects).** Multi-relay 3 × 1000 → 1000 attempts → 1000; slow broker 220 / 220 / 220; kit duplicate
+race 100 events, 300 deliveries, 100 effects; interruption 472 events, 521 attempts, 472 deliveries, 472 effects; relay crash 300 / 300 /
+300; resolver 100 races, ≤ 1 success event each; webhooks 39 exhausted transitions = 39 rows; sweep 200 → 200 events; dispatch 60 →
+60 creates (1–3 instances); stale race 40 requests → 40 payments (more creates); crash windows 40 → 40 payments; consumers 90 → 90;
+duplicate race 300 deliveries → 100; dual path 37 receipts → 20 effects; subscriptions 40 invoices → 20 subscriptions.
+
+**Findings (correctness intact; carried).**
+- **Dispatcher: the stale window is per batch, not per call (15.8, and the section 2 relationship corrected).** An instance claims up
+  to 50 rows and stamps `sendingSince` on all of them at once, then sends them one after another outside the transaction. Rows late in
+  the batch go stale while still queued behind earlier sends, so another instance reclaims and sends them too: up to 3 concurrent
+  creates per request with a 1.5 s hold and a 3 s window. Payment's natural key returns the same payment every time (1 payment per
+  request, the recorded id always matches), so it costs duplicate calls, not money. It stays safe only while every Payment deployment
+  enforces the natural key. With defaults it needs ~60 s of sends in one batch (e.g. 50 × 1.2 s).
+- **ExpirySweeper head-of-line (15.8).** The sweeper selects every due payment, unordered and unbounded, and takes each with a
+  waiting `FOR UPDATE`, so one payment held by another transaction stops every sweeper instance, and every other organization's
+  expiries behind it, for up to `DB_STATEMENT_TIMEOUT_MS` (30 s); the timeout then fails the whole pass. The lock itself is needed:
+  it is what serialises expiry against an attempt start (boundary campaign). Production transactions on a payment are short, so this is
+  availability, not correctness. `SKIP LOCKED` or a per-row lock timeout are the options for 15.8.
+- **AttemptResolver amplification (15.8; product decision in section 16).** N instances → N provider status calls per unresolved
+  attempt per 5 s pass; both write attempts are serialised and the loser is refused, so state is safe.
+- **Relay lock duration under a slow broker (15.8).** Confirmed from 15.3: a slow but confirming broker holds a relay's 50 row locks and
+  one pool client for batch × confirm time (20 s here); other relays keep publishing other rows.
+- **Minor:** every Billing receipt records `causeType` `payment_event`, including the reconciler's, so the path is not visible in the
+  receipt (15.7); the sweeper logs no line per expired payment (only the event exists) (15.7).
+
+**Logs and correlation (15.7 input).** Worker lines carry the worker, the item (`attempt=`, `event=`, `request=`), the provider or
+failure `kind` and a per-pass correlation id; the instance is the process (one log stream each). Live runs, per instance: Billing
+competing consumers 89–114 lines, 0 warn/error; restart under competition 42–65 lines, 2 warn (`payment_dispatch_stale_recovery`, the
+killed instance's rows reclaimed); Payment pair 39 lines each, 10 warn (`webhook_retry_unresolved`) on one and 10 error
+(`webhook_retry_exhausted`) on the other. Lines containing a service token, the database password or the credentialed broker URL: **0**
+in every instance. Resource check across cycles: queue consumers and broker connections / channels return to one per instance after
+every broker cycle and restart; 0 sessions idle in transaction after every timeout; relay and resolver loops never exceed one per process.
+
+Crash window A (before the claim commits) leaves nothing durable (the request stays `created`); window B (claimed, not sent) is the
+state of every row an instance had claimed but not yet sent when it was killed; window E (`markRequested` committed) is final and never
+reclaimed (every live run). Retry state (C10): outbox attempts only increase and a row is never taken while locked; webhook attempts
+stop at 10 and `retries_exhausted` is written once; resolver writes after a terminal state are refused.
+
 ## 14. Experiment report template
 
 ```text
@@ -631,7 +772,8 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | ~~I9 remediation (15.2 FAIL)~~ **resolved** by the corrective patch: client-side `DB_QUERY_TIMEOUT_MS` in the kit and in Auth, timed-out clients destroyed (section 13.2.1); TCP keepalive assessed and not adopted | – | – |
 | Acceptable recovery time after a dependency outage | 15.2 / 15.3 result classification | SRE / product |
 | Acceptable shutdown time and the stop grace to configure | 15.5 | SRE |
-| Acceptable AttemptResolver provider-call amplification | 15.4 | product (provider cost / rate limits) |
+| Acceptable AttemptResolver provider-call amplification (15.4 measured: N instances → N calls per unresolved attempt per pass; state safe) | 15.8 | product (provider cost / rate limits) |
+| ExpirySweeper head-of-line blocking and dispatcher per-batch stale reclaim (15.4: correct, availability and duplicate-call cost) | 15.8 | engineering |
 | Acceptable log volume during outages | 15.7 | SRE |
 | Retention periods (F12) | after 15.7 | product / legal |
 | Traffic assumptions for capacity targets | 15.8 | product |

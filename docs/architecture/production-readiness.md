@@ -143,6 +143,14 @@ deadline only ends a wait on a silent server (`kind=db_query_timeout`). Raising 
 Keep `RABBITMQ_CONFIRM_TIMEOUT_MS` below `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`: the relay waits for the confirm inside its claiming
 transaction, so a longer confirm wait lets PostgreSQL end the session (the row stays pending and is published again: safe, but wasted).
 
+**Several instances per service (Stage 15.4).** Billing and Payment were validated with 2–4 instances on one database and broker:
+no worker assumes it is alone, and no duplicate business effect, lost item or cross-tenant write was found. Billing's dispatcher sends
+a claimed batch one row at a time, so keep batch × `PAYMENT_TIMEOUT_MS` below `BILLING_DISPATCH_STALE_SENDING_MS`; otherwise another
+instance re-sends the batch's tail. Re-sends are safe only because Payment enforces its natural key `(producer, paymentRequestId)`, which
+every Payment deployment must keep. Each instance also polls the provider once per unresolved attempt per pass, and one long-held
+payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOUT_MS` (tuning: Stage 15.8). Details:
+`core-validation.md` section 13.4.
+
 **Signals and tools:** the log signals (`*_pass_failure`, `readiness_check_failed|recovered`, `outbox_publish_failure`,
 `rabbitmq_confirm_timeout`, `worker_drain_timeout`, `webhook_retry_exhausted`, `service_started`, `service_shutdown_*`) and the CLIs
 (`nawara-migrate`, `nawara-check-outbox-lag`, `nawara-check-dlq`, `nawara-dlq`) are described in the
