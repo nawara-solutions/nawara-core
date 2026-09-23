@@ -21,7 +21,7 @@ export { ServiceOrUserGuard, RequestCaller, AUTH_CLIENT, type Caller, type Calle
 
 export { DbModule } from './db/db.module.js';
 export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, type DbOptions, type Queryable, type IsolationLevel } from './db/db.service.js';
-export { runMigrations, pendingMigrations, listMigrationFiles, MigrationError, MIGRATIONS_TABLE, type MigrationFile, type MigrationResult } from './db/migrations.js';
+export { runMigrations, pendingMigrations, pendingOf, listMigrationFiles, MigrationError, MIGRATIONS_TABLE, type MigrationOptions, type MigrationFile, type MigrationResult } from './db/migrations.js';
 export { kitMigrationsDir } from './db/paths.js';
 
 export { EventsModule, OutboxRelayService, EVENTS_OPTIONS, type EventsModuleOptions } from './events/events.module.js';

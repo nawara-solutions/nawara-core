@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, inject } from 'vitest';
+import { runMigrations } from '@nawara/service-kit';
 import { bootstrapOwner } from '../src/cli/owner-tools.js';
 import { generateJoinCode, hashJoinCode } from '../src/crypto/join-code.js';
 import { PasswordService } from '../src/crypto/password.js';
 import { DbService } from '../src/db/db.service.js';
+import { AUTH_MIGRATIONS_DIR, AUTH_MIGRATION_OPTIONS } from '../src/db/migrations.js';
 import { freeze, hierarchyMode, unfreeze } from '../src/hierarchy/hierarchy-authority.js';
 import { UsersService } from '../src/users/users.service.js';
 import { createTestApp, type TestCtx } from './helpers/app.js';
@@ -72,15 +72,8 @@ describe('runtime database role: auth-service runs as a non-owner, DML-only role
     } finally {
       await scoped.end();
     }
-    // Auth's own migrations, applied as the MIGRATOR (never as the runtime role), in the same order as the test template.
-    const mig = new pg.Client({ connectionString: urlFor(migrator, migPw) });
-    await mig.connect();
-    try {
-      const dir = join(import.meta.dirname, '../db/migrations');
-      for (const f of readdirSync(dir).filter((n) => /^\d{4}_.*\.sql$/.test(n)).sort()) await mig.query(readFileSync(join(dir, f), 'utf8'));
-    } finally {
-      await mig.end();
-    }
+    // Auth's own migrations, applied as the MIGRATOR (never as the runtime role) by the same runner and options production uses.
+    await runMigrations(urlFor(migrator, migPw), [AUTH_MIGRATIONS_DIR], AUTH_MIGRATION_OPTIONS);
     t = await createTestApp({ DATABASE_URL: urlFor(appRole, appPw) });
   });
 
