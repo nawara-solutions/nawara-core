@@ -58,6 +58,15 @@
   Device/network fingerprinting rationale lives in the ADD's "Design rationale: device/network
   fingerprinting" section, not a standalone ADR.
 
+> **Commercial boundary — superseded by Stage 12.1 (commit `f1901f9`) and
+> [ADR-0044](../adr/0044-subscription-entitlement-final-model.md).** Wherever this document still describes a
+> `payment-service` license/subscription check (the `PaymentServiceClient`, `POST /auth/organizations/validate`, the
+> registration-time `403`/`503` license outcomes, ADR-0004/0005/0006 mechanics), that text is **historical design**:
+> the client and every such call were removed. Today no Auth flow (registration, join, login, refresh) makes a
+> commercial call. Subscription and effective entitlement (`{ valid, expiresAt }`) are billing-service's; payment-service
+> only processes and settles payments. The join code's `requiresSubscription` is a non-authoritative onboarding hint,
+> never an access decision (ADR-0044, [ADR-0045](../adr/0045-commercial-entitlementkind-compatibility-fields.md)).
+
 ## Responsibility
 
 `auth-service` owns `User` identity, credential verification, and the full JWT
