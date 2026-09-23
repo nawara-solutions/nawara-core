@@ -57,15 +57,39 @@ const BY_PG_MESSAGE: Array<[string, FailureKind]> = [
   ['Connection terminated unexpectedly', 'db_connection_lost'],
 ];
 
+/**
+ * A host that resolves to several addresses (`localhost`: ::1 and 127.0.0.1) makes Node try each one and reject with an
+ * `AggregateError` of the per-address failures. The operator needs the network failure, not that aggregation mechanic, so the
+ * DISPLAYED class and code come from the first nested error carrying a network code this classifier already knows. Any other
+ * aggregate (no such nested error) is described as itself.
+ */
+function representativeError(e: Error): Error {
+  if (!(e instanceof AggregateError)) return e;
+  for (const nested of e.errors) {
+    const candidate = nested instanceof Error ? representativeError(nested) : undefined;
+    const code = token((candidate as { code?: unknown } | undefined)?.code);
+    if (candidate && code && BY_SYSTEM_CODE[code]) return candidate;
+  }
+  return e;
+}
+
+const classOf = (e: Error): string => {
+  const cls = token(e.constructor?.name) ?? token(e.name) ?? 'Error';
+  return cls === 'Error' && token(e.name) && e.name !== 'error' ? e.name : cls;
+};
+
 export function failureFacts(e: unknown): FailureFacts {
   if (!(e instanceof Error)) return { error: 'unknown' }; // the workers' established classification for a non-Error throw
-  const cls = token(e.constructor?.name) ?? token(e.name) ?? 'Error';
-  const error = cls === 'Error' && token(e.name) && e.name !== 'error' ? e.name : cls;
-  const code = token((e as { code?: unknown }).code);
+  // Classification: from the error as thrown (unchanged).
+  const ownCode = token((e as { code?: unknown }).code);
   let kind: FailureKind | undefined;
-  if (code) kind = BY_SQLSTATE[code] ?? BY_SYSTEM_CODE[code];
-  else if (error === 'PublisherConfirmTimeoutError') kind = 'broker_confirm_timeout';
+  if (ownCode) kind = BY_SQLSTATE[ownCode] ?? BY_SYSTEM_CODE[ownCode];
+  else if (classOf(e) === 'PublisherConfirmTimeoutError') kind = 'broker_confirm_timeout';
   else kind = BY_PG_MESSAGE.find(([m]) => e.message === m)?.[1];
+  // Display: the representative underlying error (itself, unless it is an aggregate of network failures).
+  const shown = representativeError(e);
+  const error = classOf(shown);
+  const code = token((shown as { code?: unknown }).code) ?? ownCode;
   return { error, ...(code ? { code } : {}), ...(kind ? { kind } : {}) };
 }
 

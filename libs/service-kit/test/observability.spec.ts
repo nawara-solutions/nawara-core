@@ -36,6 +36,24 @@ describe('describeFailure', () => {
     expect(failureFacts(dbError('57014', 'canceling statement: SELECT secret FROM t WHERE token = $1'))).toEqual({ error: 'DatabaseError', code: '57014', kind: 'db_statement_timeout' });
   });
 
+  it('a multi-address connect failure (AggregateError) is described by its representative network error, not the aggregation', () => {
+    // The shape Node produces for `localhost` (::1 and 127.0.0.1 both refused): the aggregate carries the code itself too.
+    const refused = (address: string) => Object.assign(new Error(`connect ECONNREFUSED ${address}:5432`), { code: 'ECONNREFUSED', address });
+    const aggregate = Object.assign(new AggregateError([refused('::1'), refused('127.0.0.1')], 'postgres://app:hunter2@localhost/app'), { code: 'ECONNREFUSED' });
+    expect(describeFailure(aggregate)).toBe('error=Error code=ECONNREFUSED kind=network_unreachable');
+    expect(failureFacts(aggregate)).toEqual({ error: 'Error', code: 'ECONNREFUSED', kind: 'network_unreachable' }); // classification unchanged
+    expect(describeFailure(aggregate)).not.toMatch(/hunter2|localhost|::1|127\.0\.0\.1/);
+
+    // No own code: the representative's code is shown; the classification stays that of the error as thrown (none here).
+    expect(describeFailure(new AggregateError([refused('::1')], 'x'))).toBe('error=Error code=ECONNREFUSED');
+    // An unrelated aggregate (no nested network failure) is described as itself, never normalized.
+    expect(describeFailure(new AggregateError([new TypeError('a'), Object.assign(new Error('b'), { code: '23505' })], 'x'))).toBe('error=AggregateError');
+    expect(describeFailure(new AggregateError([], 'x'))).toBe('error=AggregateError');
+    // Unchanged: plain errors and PostgreSQL errors.
+    expect(describeFailure(refused('10.0.0.5'))).toBe('error=Error code=ECONNREFUSED kind=network_unreachable');
+    expect(describeFailure(dbError('57014'))).toBe('error=DatabaseError code=57014 kind=db_statement_timeout');
+  });
+
   it('the pg texts it recognises exist verbatim in the INSTALLED pg / pg-pool (a pg upgrade that changes them fails here)', () => {
     const require = createRequire(import.meta.url);
     const pgDir = require.resolve('pg').replace(/lib[\\/]index\.js$/, '');
