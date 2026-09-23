@@ -91,10 +91,18 @@ describeWithEnv('required concurrency scenarios (real PostgreSQL)', ['TEST_DATAB
   });
 
   it('3. expiry vs. success race: whichever wins the row lock, the end state is consistent (never both, never neither)', async () => {
-    const soon = new Date(Date.now() + 100).toISOString();
+    // Enough margin that creating the payment and starting its attempt always happen BEFORE expiry, even on a slow CI runner
+    // (a 100 ms margin once made the attempt itself fail with 409 payment_expired).
+    const soon = new Date(Date.now() + 2000).toISOString();
     const payment = (await createPayment(soon).expect(201)).body;
     const start = (await startAttempt(payment.id, 'race-expiry-1', { scenario: 'timeout_after_accept' }).expect(201)).body; // 'unknown', open
-    await new Promise((r) => setTimeout(r, 150)); // now genuinely past expiresAt, attempt still open
+    // Then wait until the payment is genuinely past expiresAt by the DATABASE clock (the only clock, SDD section 12), attempt still open.
+    const expiredByDb = async () =>
+      (await t.app.get(DbService).query<{ due: boolean }>(`SELECT "expiresAt" <= now() AS due FROM payment WHERE id = $1`, [payment.id])).rows[0]?.due === true;
+    for (let waited = 0; !(await expiredByDb()); waited += 50) {
+      if (waited > 10_000) throw new Error('the payment never reached its expiresAt by the database clock');
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
     const sweeper = t.app.get(ExpirySweeper);
     const attempts = t.app.get(AttemptService);
