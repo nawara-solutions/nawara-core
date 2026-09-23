@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'apps/auth-service/**'
+      # The image builds and ships @nawara/service-kit (Stage 13.2 dependency): a kit change changes the Auth image.
+      - 'libs/service-kit/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/auth-service-docker-build.yml'
@@ -12,6 +14,8 @@ on:
     branches: [main]
     paths:
       - 'apps/auth-service/**'
+      # The image builds and ships @nawara/service-kit (Stage 13.2 dependency): a kit change changes the Auth image.
+      - 'libs/service-kit/**'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/auth-service-docker-build.yml'
