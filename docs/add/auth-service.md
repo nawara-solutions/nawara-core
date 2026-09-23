@@ -119,16 +119,18 @@ Explicitly out of scope:
   social login, and multi-session/device management. None of these are designed here.
 - Any API-gateway design. No gateway exists in this repo today, and this document does not
   assume one will.
-- The license/billing data model itself, and the individual-subscription freeze/resume
-  ("reservation") mechanics from ADR-0006. Per `CLAUDE.md`, licenses and subscriptions are
-  `payment-service` `Product`/`Charge` concepts; that model belongs in `payment-service`'s own
-  ADD/SDD, not here. This document only covers the shape of `auth-service`'s (per ADR-0004, **at registration only** as narrowed by
-  ADR-0026) call out to it, and how a `403` from that check is surfaced to the client. (This is distinct from the `Organization` *identity* entity — name,
+- The commercial data model itself. *Historical design:* licenses and subscriptions were to be
+  `payment-service` `Product`/`Charge` concepts, with individual-subscription freeze/resume ("reservation")
+  mechanics from ADR-0006, and this document covered `auth-service`'s registration-time call out to
+  `payment-service` (ADR-0004, narrowed by ADR-0026) and how its `403` was surfaced. *Current architecture
+  (superseded by Stage 12.1 and [ADR-0044](../adr/0044-subscription-entitlement-final-model.md)):* billing-service
+  owns Subscription (one per Organization) and effective entitlement (`{ valid, expiresAt }`); payment-service owns
+  payment processing and settlement only; there is no per-user subscription (ADR-0044 rejected it) and `auth-service`
+  makes no commercial call of any kind. (This is distinct from the `Organization` *identity* entity — name,
   tax code, address, phone, `type` — which ADR-0020 does place in `auth-service`; see below.)
-- Which roles or users ever get an individual subscription in the first place. That's a
-  consuming-app decision (e.g. `nawara-drive` choosing which of its own roles must pay
-  individually) — `auth-service` only ever observes whether `payment-service` reports a
-  subscription for a given user, never why one does or doesn't exist (per ADR-0006).
+- Which roles or users need a paid subscription. That's a consuming-app decision; `auth-service` neither observes nor
+  stores commercial state. The join code's `requiresSubscription` flag is a non-authoritative onboarding hint the app
+  may display, never a commercial access decision (ADR-0044, [ADR-0045](../adr/0045-commercial-entitlementkind-compatibility-fields.md)).
 - Any actual rate-limiting, blocking, or abuse-scoring logic built on top of captured
   `Device` records. As covered below, this document designs only how a device gets
   identified and recorded, not what happens once a pattern of abuse is detected.
@@ -179,17 +181,22 @@ Today's and near-term callers of `auth-service`:
   be assumed by anything in this document — `auth-service` must work correctly as a
   directly-called service.
 
-New in this design, and worth calling out explicitly: `auth-service` now also depends on
-**`payment-service`**, called synchronously to validate an organization's license status
-during registration (ADR-0004). This is the first synchronous, service-to-service call of
-any kind in `nawara-core` — until now, every service in this repo has been an independent,
-directly-called leaf with no outbound dependency on another service in the repo.
+> **Superseded by Stage 12.1 (commit `f1901f9`) and [ADR-0044](../adr/0044-subscription-entitlement-final-model.md).**
+> The two paragraphs below are kept as historical design context only. Today `auth-service` has **no** dependency on
+> `payment-service` or billing-service: registration, join, login and refresh make no commercial call. Commercial
+> access is Billing's effective entitlement (`GET /billing/organizations/:organizationId/entitlement` →
+> `{ valid, expiresAt }`, derived from the Organization's Subscription); Payment only settles money. Authentication ≠
+> entitlement, and `auth-service` never carries entitlement in a token.
 
-Also new in this design: that same `payment-service` dependency is no longer limited to
-registration. **As of ADR-0026 `POST /auth/login` and `POST /auth/refresh` no longer make that call** (ADR-0005
-is superseded): entitlement is enforced by each platform service against `payment-service` at the
-point of use, using the `organizationId`/`userId` from the verified token, and `auth-service` never
-carries entitlement in a token. Authentication ≠ entitlement.
+*Historical design:* `auth-service` would also depend on
+**`payment-service`**, called synchronously to validate an organization's license status
+during registration (ADR-0004). This would have been the first synchronous, service-to-service call of
+any kind in `nawara-core`.
+
+*Historical design:* that same `payment-service` dependency was not limited to
+registration at first. **As of ADR-0026 `POST /auth/login` and `POST /auth/refresh` no longer made that call** (ADR-0005
+is superseded): entitlement was to be enforced by each platform service against `payment-service` at the
+point of use, using the `organizationId`/`userId` from the verified token.
 
 Per ADR-0001, `organizationId` is required input on every self-service registration — there
 is no supported flow for an end user to register without one. The only accounts with a null
@@ -218,11 +225,10 @@ At the architecture level, `auth-service` is composed of the following logical c
   token issuance/rotation/reuse-detection per ADR-0002. Access-token verification is a pure,
   local, stateless operation (no DB call); refresh-token rotation reads and writes the
   `RefreshToken` table.
-- **`OrganizationsModule`** (organization-validation service) — implements
-  `POST /auth/organizations/validate` and the server-side re-check inside registration,
-  calling out to `payment-service` per ADR-0004. As of ADR-0026, only registration calls into
-  this component; `login` and `refresh` do not. This is the only component in `auth-service` with an outbound
-  network dependency on another service.
+- ~~**`OrganizationsModule`** (organization-validation service)~~ — **historical; removed by Stage 12.1 (ADR-0044).**
+  It was to implement `POST /auth/organizations/validate` and the server-side re-check inside registration,
+  calling out to `payment-service` per ADR-0004 (registration only after ADR-0026). No such component or outbound
+  commercial dependency exists in `auth-service` today.
 - **RBAC guards (`RolesGuard`)** — a generic Nest guard reading the `role` claim off the
   verified access token to gate `auth-service`'s own endpoints where needed (e.g. anything
   restricted to the platform's own `Admin` role, such as license generation triggers that
@@ -430,9 +436,10 @@ removed) — see the Component overview above for why.
 
 `AuthController` is the only entry point clients call for credential-based flows;
 `UsersModule` and token handling both write to `auth-service`'s own dedicated Postgres
-database (per ADR-0003), never shared with any other service. `OrgValidationService` is the
-sole component with a solid, synchronous edge leaving `auth-service` (to `payment-service`);
-that edge serves **registration only** (ADR-0026 removed the `login`/`refresh` calls ADR-0005 had added). The dashed edges to RabbitMQ
+database (per ADR-0003), never shared with any other service. *Historical:* `OrgValidationService` was the
+sole component with a solid, synchronous edge leaving `auth-service` (to `payment-service`),
+serving registration only (ADR-0026 removed the `login`/`refresh` calls ADR-0005 had added). **That component and edge
+were removed by Stage 12.1 (ADR-0044); the diagrams above and below still draw them as v1 design context only.** The dashed edges to RabbitMQ
 represent the v1 async events, described below — no longer just `user.registered`, now that
 `AdminModule` also publishes admin-security and operator-lifecycle events.
 `DevicesController` is a second, independent entry point consuming apps call directly at
@@ -784,7 +791,8 @@ The following synchronous flows matter architecturally:
    call, never derived from a JWT claim or cached. This is the generic primitive any
    downstream, platform-specific service uses (paired with `GET /auth/organizations/:id`) to
    enforce the platform boundary on its own resources.
-7. **`auth-service` ⇄ `payment-service`**: a synchronous call, `GET
+7. ~~**`auth-service` ⇄ `payment-service`**~~ — **removed by Stage 12.1 (commit `f1901f9`, ADR-0044); historical
+   design below.** Auth makes no commercial call of any kind today. *Historical:* a synchronous call, `GET
    /payment/licenses/:organizationId/status`, its contract finalized by
    `docs/add/payment-service.md`/`docs/sdd/payment-service.md` (per ADR-0004). Invoked from
    `POST /auth/organizations/validate`, from inside `POST /auth/register` itself (so
@@ -795,10 +803,11 @@ The following synchronous flows matter architecturally:
 8. ~~`auth-service` ⇄ `payment-service` subscription-status call from login/refresh~~ —
    **removed by ADR-0026.** `auth-service` no longer reads subscription status at all; platform
    services query `payment-service` (`GET /payment/subscriptions/:userId/status`, per ADR-0006) for
-   entitlement themselves.
+   entitlement themselves. *(Itself superseded: there is no per-user subscription and Payment is settlement-only;
+   commercial access is Billing's effective entitlement, ADR-0044.)*
 
-**Build-sequencing note: `OrganizationValidationService`/`PaymentServiceClient` built against
-a stub in v1.** `auth-service`'s core-flow implementation (register/login/refresh) is built
+**Build-sequencing note (historical — the `PaymentServiceClient` was deleted in Stage 12.1, ADR-0044):
+`OrganizationValidationService`/`PaymentServiceClient` built against a stub in v1.** `auth-service`'s core-flow implementation (register/login/refresh) is built
 against a **stub** `PaymentServiceClient` — implementing the same interface
 (`getLicenseStatus(organizationId): LicenseStatus`, `getSubscriptionStatus(userId):
 SubscriptionStatus`) with canned responses matching the shape `docs/add/payment-service.md`/
@@ -897,8 +906,8 @@ directly), and now also of `AdminDevice`, `AdminOperatorCode`, `PlatformNonWorki
 (per ADR-0009/ADR-0010/ADR-0011), `OperatorSchedule`/`OperatorTimeOff` (per ADR-0012),
 `Organization` (per ADR-0020), and `Company`/`Platform`/`PlatformAssignment` (per ADR-0022)
 records. `organizationId` values are opaque to `auth-service` (per ADR-0001) — it stores and
-echoes them but never validates their meaning, except for the one carve-out in ADR-0004 where
-it checks license *status* against `payment-service`, not the organization id's validity
+echoes them but never validates their meaning, except for the former ADR-0004 carve-out (removed by Stage 12.1, ADR-0044) where
+it checked license *status* against `payment-service`, not the organization id's validity
 itself. As of ADR-0020, `organizationId` now refers to a real `Organization` row `auth-service`
 itself owns, but this is unchanged in practice: `auth-service` still never validates that a
 given `User.organizationId` (or a `payment-service` record's `organizationId`) actually
@@ -964,8 +973,10 @@ The former `organizationId` in `/auth/me`, the JWT and the guard actor no longer
 ## Non-functional constraints
 
 - **Authentication ≠ entitlement (ADR-0026).** `auth-service` answers who a user is and which
-  tenant/platform boundary they may touch. Licenses, subscriptions, trials and billing are
-  `payment-service`'s; business roles and permissions are the platform services'. No entitlement
+  tenant/platform boundary they may touch. Subscription, effective entitlement and billing are
+  billing-service's (ADR-0044) and payment processing/settlement is `payment-service`'s; business roles and
+  permissions are the platform services'. The join code's `requiresSubscription` is a non-authoritative onboarding
+  hint, never a commercial access decision. No entitlement
   state is stored in, or gated by, `auth-service`.
 - **High-assurance owner operations use step-up (ADR-0025).** Granting/revoking platform access,
   rotating the secret key, factor changes and platform/operator creation require a short-lived
@@ -1001,9 +1012,9 @@ The former `organizationId` in `/auth/me`, the JWT and the guard actor no longer
   that might want to verify tokens locally — no `.env`/secrets infrastructure exists anywhere
   yet. Any service wanting to verify `auth-service`'s tokens today would need an
   out-of-band-shared key, which is not a solved problem.
-- **`payment-service` availability no longer affects login or refresh (ADR-0026).** Only new
-  registrations still make a synchronous, fail-closed call to `payment-service` (ADR-0004, request
-  timeout on the order of a few seconds). ADR-0005's wider coupling was removed.
+- **`payment-service` availability affects no Auth flow.** ADR-0026 removed the login/refresh call and Stage 12.1
+  (ADR-0044) removed the last one, the fail-closed registration-time license check (ADR-0004). Registration, join,
+  login and refresh make no commercial call of any kind.
 - **Access-token TTL bounds staleness, not entitlement.** The 15-minute access-token TTL bounds how
   long a `role`/`organizationId` change, a blocked account, or a revoked operator session stays
   effective for stateless verifiers (see Open questions). It plays no role in license enforcement:
