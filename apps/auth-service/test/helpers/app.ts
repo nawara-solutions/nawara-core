@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { ValidationPipe, type LoggerService } from '@nestjs/common';
+import { ValidationPipe, type LoggerService, type Provider } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { decodeJwt } from 'jose';
 import { generateSync } from 'otplib';
@@ -52,7 +52,7 @@ const rand = () => randomBytes(32).toString('base64');
 export type TestCtx = Awaited<ReturnType<typeof createTestApp>>;
 
 /** A fully wired app against its own database cloned from the migrated template. */
-export async function createTestApp(overrides: Record<string, string> = {}) {
+export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[] } = {}) {
   const adminUrl = inject('pgAdminUrl');
   const dbName = `t_${randomUUID().replace(/-/g, '')}`;
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -75,7 +75,7 @@ export async function createTestApp(overrides: Record<string, string> = {}) {
   const bus = new RecordingBus();
   const logger = new CapturingLogger();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule.register(cfg)] })
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule.register(cfg)], providers: extra.providers ?? [] })
     .overrideProvider(APP_CONFIG).useValue(cfg)
     .overrideProvider(CLOCK).useValue(clock)
     .overrideProvider(EVENT_BUS).useValue(bus)

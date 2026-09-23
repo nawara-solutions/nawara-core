@@ -83,4 +83,30 @@ describe('PollLoop', () => {
     expect(errors).toHaveLength(1);
     expect(passes).toBeGreaterThanOrEqual(2);
   });
+
+  it('stop() is idempotent (Stage 15.5, F-D): a hung pass gets ONE drain budget, however many times or ways stop() is called', async () => {
+    const timeouts: number[] = [];
+    const loop = new PollLoop(() => new Promise(() => undefined), () => undefined, (ms) => timeouts.push(ms));
+    loop.start(10, 0);
+    await new Promise((r) => setTimeout(r, 30));
+    let t = Date.now();
+    const [a, b] = await Promise.all([loop.stop(200), loop.stop(200)]);
+    expect([a, b]).toEqual(['timeout', 'timeout']);
+    expect(Date.now() - t).toBeLessThan(400);
+    t = Date.now();
+    expect(await loop.stop(200)).toBe('timeout'); // the same drain's outcome, at once: no second budget for the same hung pass
+    expect(Date.now() - t).toBeLessThan(50);
+    expect(timeouts).toEqual([200]); // reported once
+  });
+
+  it('a loop started again after a stop gets a fresh stop', async () => {
+    const loop = new PollLoop(async () => undefined);
+    loop.start(10, 0);
+    expect(await loop.stop()).not.toBe('timeout');
+    loop.start(10, 0);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(loop.running).toBe(true);
+    await loop.stop();
+    expect(loop.running).toBe(false);
+  });
 });

@@ -1,3 +1,4 @@
+import { DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS } from '../health/http-drain.js';
 import { ConfigError, EnvReader } from './config.js';
 
 export const NODE_ENVS = ['development', 'test', 'production'] as const;
@@ -20,6 +21,11 @@ export interface BaseConfig {
   trustProxy: boolean;
   /** Database pool and session limits (Stage 14.4), passed to `DbModule.forRoot`. Every value is bounded; none may be "infinite". */
   db: DbRuntimeConfig;
+  /**
+   * `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5): once shutdown starts, how long requests already running may finish before every remaining
+   * connection is closed (default 5000, 500-120000). Passed to `HealthModule.forRoot`.
+   */
+  httpDrainTimeoutMs: number;
 }
 
 export interface DbRuntimeConfig {
@@ -93,5 +99,6 @@ export function loadBaseConfig(serviceName: string, env: NodeJS.ProcessEnv = pro
     corsOrigins: parseCorsOrigins(reader.get('CORS_ORIGINS')),
     trustProxy: reader.bool('TRUST_PROXY', false),
     db: loadDbRuntimeConfig(reader),
+    httpDrainTimeoutMs: reader.int('HTTP_DRAIN_TIMEOUT_MS', { default: DEFAULT_HTTP_DRAIN_TIMEOUT_MS, ...HTTP_DRAIN_TIMEOUT_BOUNDS }),
   };
 }

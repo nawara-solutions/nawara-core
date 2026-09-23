@@ -153,12 +153,14 @@ PREV=""
 if exists "$APP"; then
   PREV="$APP-previous-$(date +%Y%m%d%H%M%S)"
   log "stopping current $APP and keeping it as $PREV (not deleted)"
-  docker stop "$APP" >/dev/null
+  # Stage 15.5: an explicit stop grace (not Docker's 10 s default). A Core service's graceful shutdown is bounded at about 40 s by its own
+  # settings (HTTP drain 5 s, worker drain 5 s, broker closes ~3 x RABBITMQ_HEARTBEAT_S, database DB_QUERY_TIMEOUT_MS); 60 s leaves a margin.
+  docker stop -t 60 "$APP" >/dev/null
   docker rename "$APP" "$PREV"
 fi
 
 log "starting $APP from $IMAGE"
-docker run -d --name "$APP" --restart unless-stopped --network "$NET" --env-file "$APP_ENV" \
+docker run -d --name "$APP" --restart unless-stopped --stop-timeout 60 --network "$NET" --env-file "$APP_ENV" \
   --label traefik.enable=true \
   --label "traefik.http.routers.$APP.rule=Host(\`$HOST_RULE\`) && PathPrefix(\`/auth\`)" \
   --label "traefik.http.routers.$APP.entrypoints=websecure" \

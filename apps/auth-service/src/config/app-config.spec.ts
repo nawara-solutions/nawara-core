@@ -159,3 +159,14 @@ describe('client-side query deadline, same contract as the service-kit (Stage 15
     },
   );
 });
+
+describe('HTTP drain deadline, same contract as the service-kit (Stage 15.5, F-A)', () => {
+  const drain = (env: Record<string, string>) => loadConfig({ ...good(), ...env }).httpDrainTimeoutMs;
+  it('defaults to 5 s and accepts a value inside 500-120000', () => {
+    expect(drain({})).toBe(5000);
+    expect(drain({ HTTP_DRAIN_TIMEOUT_MS: '120000' })).toBe(120000);
+  });
+  it.each(['0', '499', '120001', 'ten'])('refuses HTTP_DRAIN_TIMEOUT_MS=%s', (value) => {
+    expect(() => drain({ HTTP_DRAIN_TIMEOUT_MS: value })).toThrow(/HTTP_DRAIN_TIMEOUT_MS/);
+  });
+});

@@ -12,6 +12,7 @@ export { KitExceptionFilter, type ErrorBody } from './errors/exception.filter.js
 
 export { HealthModule } from './health/health.module.js';
 export { HealthController } from './health/health.controller.js';
+export { DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS, HttpDrain, ShutdownState, shutdownAdmission } from './health/http-drain.js';
 export { ReadinessRegistry, ReadinessCheckTimeout, type ReadinessCheck, type ReadinessResult, type ReadinessLog } from './health/readiness.registry.js';
 
 export { hashServiceToken, generateServiceToken, parseServiceTokens, MAX_TOKENS_PER_CALLER, type ServiceTokenEntry } from './service-auth/service-token.js';

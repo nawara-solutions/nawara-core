@@ -15,6 +15,8 @@ export class PollLoop {
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<void>;
   private stopped = true;
+  /** Stage 15.5 (F-D): the one drain of this stop, shared by every later or concurrent `stop()` until the loop is started again. */
+  private stopping?: Promise<DrainOutcome>;
 
   constructor(
     private readonly pass: () => Promise<unknown>,
@@ -30,6 +32,7 @@ export class PollLoop {
   start(intervalMs: number, firstDelayMs = intervalMs): void {
     if (!this.stopped) return;
     this.stopped = false;
+    this.stopping = undefined;
     this.schedule(firstDelayMs, intervalMs);
   }
 
@@ -51,8 +54,17 @@ export class PollLoop {
     this.timer.unref?.();
   }
 
-  /** Stops scheduling, then waits for the running pass, bounded. Never throws: the outcome says what happened (and a timeout is reported). */
-  async stop(drainTimeoutMs = DEFAULT_DRAIN_TIMEOUT_MS): Promise<DrainOutcome> {
+  /**
+   * Stops scheduling, then waits for the running pass, bounded. Never throws: the outcome says what happened (and a timeout is reported).
+   * Idempotent (Stage 15.5, F-D): services stop their loops at shutdown start and again in later shutdown hooks; a second or concurrent
+   * `stop()` returns the FIRST call's drain instead of granting a hung pass a new drain budget.
+   */
+  stop(drainTimeoutMs = DEFAULT_DRAIN_TIMEOUT_MS): Promise<DrainOutcome> {
+    this.stopping ??= this.drain(drainTimeoutMs);
+    return this.stopping;
+  }
+
+  private async drain(drainTimeoutMs: number): Promise<DrainOutcome> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;

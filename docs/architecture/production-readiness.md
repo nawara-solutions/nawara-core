@@ -133,7 +133,8 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment | bound on a publisher confirm; a timeout keeps the outbox row pending (at least once) |
 | `RABBITMQ_HEARTBEAT_S` (Stage 15.3) | 10 | 5–60 | Billing, Payment | the AMQP heartbeat Core requests: a silent broker is detected, and every channel operation and close ended, within about 3 × this value whatever the broker's own heartbeat setting |
 | `WEBHOOK_RETRY_MAX_ATTEMPTS` (constant) | 10 | – | Payment | stored webhook retried at 10 s × 2ⁿ after receipt, then `failed` / `retries_exhausted` |
-| worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown |
+| worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown; since Stage 15.5 one drain per worker, all started together at shutdown start |
+| `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5) | 5000 | 500–120000 | Auth, Billing, Organization, Payment | once shutdown starts, how long running requests may finish before every remaining connection is closed; `/ready` is 503 and new requests are refused from the first moment |
 
 A frozen or partitioned broker is detected within about 3 × `RABBITMQ_HEARTBEAT_S` (≈ 30 s at the default), after the shorter
 `RABBITMQ_CONFIRM_TIMEOUT_MS`; a SIGTERM while the broker is silent therefore takes up to about that long (still above Docker's 10 s stop
@@ -150,6 +151,28 @@ instance re-sends the batch's tail. Re-sends are safe only because Payment enfor
 every Payment deployment must keep. Each instance also polls the provider once per unresolved attempt per pass, and one long-held
 payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOUT_MS` (tuning: Stage 15.8). Details:
 `core-validation.md` section 13.4.
+
+**Stopping and restarting (Stage 15.5, final).**
+- **When shutdown starts** (SIGTERM, the first Nest hook), all of this happens at once:
+  - `/ready` answers 503;
+  - new requests are refused (503, `Connection: close`);
+  - the HTTP server stops accepting connections;
+  - running requests have `HTTP_DRAIN_TIMEOUT_MS` (5 s) to finish before every connection is closed, so no client can extend this;
+  - every worker starts its one bounded drain (5 s), concurrently.
+- The broker connection and the database pool close last. A broker connection that does not close cleanly has its socket destroyed, so
+  a silent broker cannot keep the process alive; this matters in a container, where Node is PID 1.
+- An idle service stops in about 0.4 s. A stuck broker, a stuck database, or a worker or request waiting on a lock is bounded by Core.
+  **Measured worst graceful shutdown: 39.8 s** (a consumer blocked in its transaction while the broker is frozen), theoretical ≈ 41 s.
+- **The stop grace is therefore 60 s:** `docker stop -t 60` and `--stop-timeout 60` in the Auth deploy, and `stop_grace_period: 60s` in
+  Compose. Every future Billing / Payment / Organization deployment must declare at least 60 s; Docker's 10 s default is not enough.
+- SIGKILL at any point was still recovered by the next start with nothing lost or duplicated: outbox rows, unacknowledged messages,
+  claimed payment requests, attempts, webhooks and expiries.
+- Billing exits at startup if RabbitMQ is unreachable, a documented fail-fast, so it needs a restart policy. Every other dependency
+  outage at startup leaves the service running but unready until the dependency returns.
+- The Auth deploy stops the old container before starting the new one (an outage per deploy; Stage 20, with an init process).
+- **Cancelling a sent payment request** answers success only when Payment confirmed it. A `503 payment_unavailable` means nothing was
+  accepted, and the caller retries the same call; the retry is a replay.
+- Details: `core-validation.md` sections 13.5 (initial failure), 13.5.1 (patch 1) and 13.5.2 (patch 2, F-H).
 
 **Signals and tools:** the log signals (`*_pass_failure`, `readiness_check_failed|recovered`, `outbox_publish_failure`,
 `rabbitmq_confirm_timeout`, `worker_drain_timeout`, `webhook_retry_exhausted`, `service_started`, `service_shutdown_*`) and the CLIs

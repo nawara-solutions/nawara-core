@@ -16,6 +16,7 @@ export type BillingErrorCode =
   | 'payment_request_not_supported'
   | 'invoice_has_active_payment_request'
   | 'payment_request_in_flight'
+  | 'payment_unavailable'
   | 'idempotency_key_required'
   | 'unsupported_currency'
   | 'price_not_available'

@@ -111,3 +111,17 @@ describe('client-side query deadline (Stage 15.2, I9)', () => {
     expect(() => db(env)).toThrow(/DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS/);
   });
 });
+
+describe('HTTP drain deadline (Stage 15.5, F-A)', () => {
+  const drain = (env: Record<string, string>) => loadBaseConfig('probe-service', { NODE_ENV: 'test', ...env }).httpDrainTimeoutMs;
+  it('defaults to 5 s, the same bound as a worker drain', () => {
+    expect(drain({})).toBe(5000);
+  });
+  it('accepts a value inside 500-120000', () => {
+    expect(drain({ HTTP_DRAIN_TIMEOUT_MS: '500' })).toBe(500);
+    expect(drain({ HTTP_DRAIN_TIMEOUT_MS: '120000' })).toBe(120000);
+  });
+  it.each(['0', '499', '120001', 'ten'])('refuses HTTP_DRAIN_TIMEOUT_MS=%s', (value) => {
+    expect(() => drain({ HTTP_DRAIN_TIMEOUT_MS: value })).toThrow(/HTTP_DRAIN_TIMEOUT_MS must be an integer between 500 and 120000/);
+  });
+});

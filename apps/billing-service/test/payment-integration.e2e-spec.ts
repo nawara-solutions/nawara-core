@@ -481,6 +481,54 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       expect((await requestRow(request.id)).cancelRequestedAt).toEqual(firstStamp);
     });
 
+    // Stage 15.5 (F-B): success is answered only when Payment confirmed the cancellation. It used to be 200 whatever Payment answered,
+    // and nothing re-sent it: a cancellation made while Payment was unavailable was silently lost and the payment stayed payable.
+    it('Payment unavailable (transient): 503 payment_unavailable, nothing claimed; once Payment is back, the same call is a replay and succeeds', async () => {
+      const { request, paymentId } = await requestedRow();
+      payment.whenCancel(paymentId, { kind: 'transient' });
+      const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(503);
+      expect(r.body.code).toBe('payment_unavailable');
+      expect((await requestRow(request.id)).status).toBe('requested');
+      const firstStamp = (await requestRow(request.id)).cancelRequestedAt;
+      payment.whenCancel(paymentId, { kind: 'cancelled' });
+      await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(200);
+      const mine = payment.cancelCalls.filter((c) => c.paymentId === paymentId);
+      expect(mine).toHaveLength(2);
+      expect(mine[0]!.idempotencyKey).toBe(mine[1]!.idempotencyKey);
+      expect((await requestRow(request.id)).cancelRequestedAt).toEqual(firstStamp);
+    });
+
+    it('a Payment answer that is not a confirmation (auth fault, unknown payment) is 503 too, never a success', async () => {
+      for (const kind of ['auth_fault', 'not_found'] as const) {
+        const { request, paymentId } = await requestedRow();
+        payment.whenCancel(paymentId, { kind });
+        const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(503);
+        expect(r.body.code).toBe('payment_unavailable');
+      }
+    });
+
+    it('Payment refuses because money may be in flight (open attempt): 409 payment_request_in_flight, as SDD 21.2 says', async () => {
+      const { request, paymentId } = await requestedRow();
+      payment.whenCancel(paymentId, { kind: 'in_flight' });
+      const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(409);
+      expect(r.body.code).toBe('payment_request_in_flight');
+    });
+
+    it('Payment already terminal: 200, no error (the terminal event or the reconciler settles the request, SDD 21.2)', async () => {
+      const { request, paymentId } = await requestedRow();
+      payment.whenCancel(paymentId, { kind: 'already_terminal' });
+      await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(200);
+    });
+
+    it('cancelling an already cancelled request answers 200 with it (a retry after a lost answer), without calling Payment', async () => {
+      const open = await openInvoice();
+      const { request } = await requests.createForInvoice(open.id, producer, ctx);
+      await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(200);
+      const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(200);
+      expect(r.body).toMatchObject({ id: request.id, status: 'cancelled' });
+      expect(payment.cancelCalls.filter((c) => c.paymentId === request.id)).toHaveLength(0);
+    });
+
     it('a request still `sending` (in flight to Payment, no answer yet) is 409 payment_request_in_flight, neither case applies', async () => {
       const open = await openInvoice();
       const { request } = await requests.createForInvoice(open.id, producer, ctx);

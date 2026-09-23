@@ -54,6 +54,33 @@ const abandonAfter = (p: Promise<unknown>, ms: number): Promise<void> => {
   ]).finally(() => clearTimeout(timer));
 };
 
+/** Like `abandonAfter`, but says whether `p` settled (true) or the bound was reached first (false). */
+const settledWithin = (p: Promise<unknown>, ms: number): Promise<boolean> => {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.then(() => true, () => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
+
+/**
+ * Stage 15.5 (F-H): destroys the TCP/TLS socket under an amqplib connection that Core has given up on. amqplib 2.0.1 ends every
+ * connection (close-ok received, heartbeat timeout, socket error) with `stream.end()`: a half-close that keeps the socket open until the
+ * PEER closes too. A silent broker never does, so the socket stays in FIN_WAIT2 as a live handle and keeps Node's event loop alive: as
+ * PID 1 in a container (which ignores the signal Nest re-raises after its shutdown) the process never exits. amqplib exposes no public
+ * way to destroy the transport; `ChannelModel.connection.stream` is the socket itself (connect.js passes the net/tls socket, a Duplex,
+ * to `new Connection`). This is the ONE place that relies on that shape, guarded so another amqplib version degrades to a no-op
+ * (and `rabbitmq-transport-disposal.int-spec` fails) instead of throwing.
+ */
+export function destroyTransport(connection: ChannelModel): boolean {
+  const stream = (connection as unknown as { connection?: { stream?: { destroy?: () => void; destroyed?: boolean } } }).connection?.stream;
+  if (!stream || typeof stream.destroy !== 'function') return false;
+  if (!stream.destroyed) stream.destroy();
+  return true;
+}
+
 /** Thrown when the broker does not confirm a publish in time. The message may or may not have been stored by the broker. */
 export class PublisherConfirmTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -114,6 +141,12 @@ export class RabbitMqEventBus implements EventBus {
    * is never reused (a new connection is opened on demand).
    */
   private readonly closeBoundMs: number;
+  /** Settles when the current connection closes, however it closes (Stage 15.5): a close/cancel waiting on a dead connection stops there. */
+  private connectionClosed?: Promise<void>;
+  /** `p`, or the moment the current connection is gone (amqplib never settles a channel operation that waited on a connection that died). */
+  private untilConnectionGone(p: Promise<unknown>): Promise<unknown> {
+    return this.connectionClosed ? Promise.race([p, this.connectionClosed]) : p;
+  }
 
   constructor(private readonly opts: RabbitMqOptions) {
     this.exchange = opts.exchange ?? 'nawara.events';
@@ -134,7 +167,14 @@ export class RabbitMqEventBus implements EventBus {
       }
     };
     conn.on('error', reset);
-    conn.on('close', reset);
+    this.connectionClosed = new Promise<void>((resolve) => conn.once('close', () => resolve()));
+    conn.on('close', (err?: unknown) => {
+      reset();
+      // Stage 15.5 (F-H): closed by an error (heartbeat timeout, socket error, a close forced by the broker): the connection is dead and
+      // is never reused, and amqplib only half-closed its socket. Destroy the transport so a silent peer cannot keep it (and the process)
+      // alive. A clean close (close-ok from a healthy broker) is left to amqplib's graceful FIN.
+      if (err) destroyTransport(conn);
+    });
     this.connection = conn;
     return conn;
   }
@@ -293,7 +333,7 @@ export class RabbitMqEventBus implements EventBus {
     h.channel = undefined;
     if (ch) {
       // 1. No new deliveries. 2. Let the ones already being handled finish and settle (bounded). 3. Close the channel.
-      if (h.consumerTag) await abandonAfter(ch.cancel(h.consumerTag), this.closeBoundMs);
+      if (h.consumerTag) await abandonAfter(this.untilConnectionGone(ch.cancel(h.consumerTag)), this.closeBoundMs);
       if (h.inFlight.size > 0) {
         const drainMs = this.opts.drainTimeoutMs ?? 5000;
         let timer: NodeJS.Timeout | undefined;
@@ -307,7 +347,7 @@ export class RabbitMqEventBus implements EventBus {
         // Unsettled deliveries are redelivered by the broker once the channel closes (at least once; consumers deduplicate).
         if (outcome === 'timeout') this.notice(`rabbitmq_consumer_drain_timeout queue=${h.sub.queue} inFlight=${h.inFlight.size}`);
       }
-      await abandonAfter(ch.close(), this.closeBoundMs);
+      await abandonAfter(this.untilConnectionGone(ch.close()), this.closeBoundMs);
     }
   }
 
@@ -454,9 +494,23 @@ export class RabbitMqEventBus implements EventBus {
 
   async close(): Promise<void> {
     for (const h of this.consumers) await this.stopConsumer(h); // safe: stopConsumer removes only the element being visited
-    if (this.publisher) await abandonAfter(this.publisher.close(), this.closeBoundMs);
-    if (this.connection) await abandonAfter(this.connection.close(), this.closeBoundMs);
+    const conn = this.connection;
+    const publisher = this.publisher;
     this.publisher = undefined;
     this.connection = undefined;
+    // One deadline for the publisher channel AND the connection (Stage 15.5): a broker that ignored the channel close will ignore the
+    // connection close too, so it must not get a second full bound.
+    const deadline = Date.now() + this.closeBoundMs;
+    const connClosed = this.connectionClosed;
+    if (publisher) await abandonAfter(connClosed ? Promise.race([publisher.close(), connClosed]) : publisher.close(), this.closeBoundMs);
+    if (conn) {
+      // Ends as soon as the connection closes, whichever way (close-ok, or the broker vanishing: amqplib then never settles `close()`).
+      const closed = connClosed ?? new Promise<void>((resolve) => conn.once('close', () => resolve()));
+      if (!(await settledWithin(Promise.race([conn.close(), closed]), Math.max(0, deadline - Date.now())))) {
+        // Stage 15.5 (F-H): the bounded close gave up: the connection is abandoned, so its transport must not outlive it.
+        destroyTransport(conn);
+        this.notice(`rabbitmq_connection_abandoned closeBoundMs=${this.closeBoundMs} — the broker did not answer the close; transport destroyed`);
+      }
+    }
   }
 }

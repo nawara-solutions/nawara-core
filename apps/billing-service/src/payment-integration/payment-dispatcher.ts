@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { runWithRequestContext, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
@@ -90,16 +90,23 @@ export class PaymentDispatcher {
 }
 
 @Injectable()
-export class PaymentDispatcherService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
+export class PaymentDispatcherService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly dispatcher: PaymentDispatcher) {}
   onApplicationBootstrap(): void {
     this.dispatcher.start();
+  }
+  /**
+   * Stage 15.5 (F-D): the drain STARTS at shutdown start (Nest runs every onModuleDestroy before any beforeApplicationShutdown), so the
+   * service's workers drain concurrently instead of one module after another; `stop()` is idempotent and the later hooks await it.
+   */
+  onModuleDestroy(): void {
+    void this.dispatcher.stop();
   }
   /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
   async beforeApplicationShutdown(): Promise<void> {
     await this.dispatcher.stop();
   }
   async onApplicationShutdown(): Promise<void> {
-    await this.dispatcher.stop(); // idempotent: already stopped when Nest drives the shutdown
+    await this.dispatcher.stop(); // idempotent: the same drain, already finished when Nest drives the shutdown
   }
 }

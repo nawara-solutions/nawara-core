@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, OutboxService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
 import type { PaymentRow } from './payment.types.js';
@@ -71,16 +71,23 @@ export class ExpirySweeper {
 }
 
 @Injectable()
-export class ExpirySweeperService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
+export class ExpirySweeperService implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly sweeper: ExpirySweeper) {}
   onApplicationBootstrap(): void {
     this.sweeper.start();
+  }
+  /**
+   * Stage 15.5 (F-D): the drain STARTS at shutdown start (Nest runs every onModuleDestroy before any beforeApplicationShutdown), so the
+   * service's workers drain concurrently instead of one module after another; `stop()` is idempotent and the later hooks await it.
+   */
+  onModuleDestroy(): void {
+    void this.sweeper.stop();
   }
   /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
   async beforeApplicationShutdown(): Promise<void> {
     await this.sweeper.stop();
   }
   async onApplicationShutdown(): Promise<void> {
-    await this.sweeper.stop(); // idempotent: already stopped when Nest drives the shutdown
+    await this.sweeper.stop(); // idempotent: the same drain, already finished when Nest drives the shutdown
   }
 }

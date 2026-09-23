@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { EVENT_BUS, PermanentEventFailure, pgCode, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
@@ -62,9 +62,10 @@ function parseFacts(event: EventEnvelope): PaymentEventFacts {
  * once, never silently dropped) — the kit's `EventBus` contract, unchanged here.
  */
 @Injectable()
-export class PaymentEventConsumer implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
+export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly logger = new Logger(PaymentEventConsumer.name);
   private subscription?: { close(): Promise<void> };
+  private closing?: Promise<void>;
 
   constructor(
     private readonly requests: PaymentRequestRepository,
@@ -84,13 +85,25 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, BeforeAppli
    * deliveries) and lets the deliveries already being handled finish and settle, bounded (see the bus's `drainTimeoutMs`).
    */
   async beforeApplicationShutdown(): Promise<void> {
-    const sub = this.subscription;
-    this.subscription = undefined;
-    await sub?.close();
+    await this.close();
+  }
+
+  /** Stage 15.5 (F-D): closing starts at shutdown start, concurrently with the workers' drains; the later hooks await the same close. */
+  onModuleDestroy(): void {
+    this.close().catch(() => undefined); // a failure surfaces in beforeApplicationShutdown, which awaits the same promise
   }
 
   async onApplicationShutdown(): Promise<void> {
-    await this.beforeApplicationShutdown(); // idempotent: already closed when Nest drives the shutdown
+    await this.close(); // idempotent: the same close, already finished when Nest drives the shutdown
+  }
+
+  private close(): Promise<void> {
+    if (!this.closing) {
+      const sub = this.subscription;
+      this.subscription = undefined;
+      this.closing = sub ? sub.close() : Promise.resolve();
+    }
+    return this.closing;
   }
 
   /**
