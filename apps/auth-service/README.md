@@ -1,8 +1,9 @@
 # auth-service
 
 Identity, authentication, sessions and tenant/platform **access scope** for Nawara Solutions apps.
-It does **not** own licenses/subscriptions/billing (payment-service) or business roles/permissions
-(platform services) — authentication is not entitlement (ADR-0026).
+It does **not** own commercial state — Subscription and effective entitlement belong to billing-service
+(ADR-0044), payment processing and settlement to payment-service — nor business roles/permissions
+(platform services): authentication is not entitlement (ADR-0026).
 
 - Design: `docs/sdd/auth-service.md`, ADR-0024…0027. Security review and route matrix:
   `docs/security/auth-service-security-review.md`.
