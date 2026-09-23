@@ -28,5 +28,7 @@ COPY --from=build /app/apps/payment-service/dist ./apps/payment-service/dist
 # Schema of record travels with the image so a deploy always applies the migrations that match this exact code.
 COPY apps/payment-service/db/migrations ./apps/payment-service/db/migrations
 WORKDIR /app/apps/payment-service
+# The service only reads its own files and opens sockets: it needs no write access and no privileges (the base image's `node` user).
+USER node
 EXPOSE 3000
 CMD ["node", "dist/main.js"]

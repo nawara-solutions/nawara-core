@@ -3,6 +3,7 @@ name: Core CI
 # Validates every Node workspace: lint, typecheck, unit tests, integration tests, build; plus the repository's static
 # safety and architecture checks. It builds and tests only: it never deploys, publishes an image or touches production.
 # Covered:      auth-service, notification-service, payment-service, billing-service, organization-service, service-kit (Node), repository checks.
+#               Production images of auth/organization/billing/payment-service are built and smoke-checked (job `images`), never pushed.
 # NOT covered:  ai-service (Python) has no CI job yet.
 on:
   pull_request:
@@ -114,6 +115,34 @@ jobs:
         run: npm run test:db -w ${{ matrix.workspace }}
       - name: build
         run: npm run build -w ${{ matrix.workspace }}
+
+  # Stage 14.2: every deployable Core service image must build from a clean context and boot. A Dockerfile, a missing
+  # workspace package (the Stage 13.2 regression: Auth imported @nawara/service-kit its image never provided), a compile
+  # error, a runtime crash, a root user or a dead /health fails this job. It builds locally and never pushes an image;
+  # publishing and deploying stay in auth-service-docker-build.yml. notification-service and ai-service are scaffolds, not
+  # deployable Core services, and are deliberately not covered.
+  images:
+    name: core image (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [auth-service, organization-service, billing-service, payment-service]
+    services:
+      # billing-service's event consumer attaches at startup in production, so the smoke needs a reachable broker.
+      # PostgreSQL is deliberately absent: /health is process liveness and must not depend on it (/ready may answer 503).
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: build the production image
+        run: docker build -f apps/${{ matrix.service }}/Dockerfile -t nawara-core/${{ matrix.service }}:ci .
+      - name: smoke-check the image (non-root, boots with production configuration, /health stays 200)
+        run: bash scripts/smoke-core-image.sh ${{ matrix.service }} nawara-core/${{ matrix.service }}:ci
 
   infra:
     name: local infrastructure (least-privilege roles)
