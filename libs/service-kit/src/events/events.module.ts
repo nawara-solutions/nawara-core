@@ -1,4 +1,4 @@
-import { DynamicModule, Global, Inject, Injectable, Module, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { DynamicModule, Global, Inject, Injectable, Module, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
 import { DbService } from '../db/db.service.js';
 import { InboxService } from './inbox.service.js';
 import { OutboxRelay } from './outbox-relay.js';
@@ -15,9 +15,13 @@ export interface EventsModuleOptions {
   onError?: (message: string) => void;
 }
 
-/** Runs the outbox relay with the service: starts on bootstrap, drains and closes the bus on graceful shutdown. */
+/**
+ * Runs the outbox relay with the service: starts on bootstrap; on graceful shutdown it DRAINS in `beforeApplicationShutdown`
+ * (which Nest runs for every module before any `onApplicationShutdown`), so the in-flight batch keeps the database pool and the
+ * broker; the bus itself closes afterwards, in `onApplicationShutdown`.
+ */
 @Injectable()
-export class OutboxRelayService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class OutboxRelayService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   readonly relay: OutboxRelay;
 
   constructor(@Inject(DbService) db: DbService, @Inject(EVENT_BUS) private readonly bus: EventBus, @Inject(EVENTS_OPTIONS) private readonly opts: EventsModuleOptions) {
@@ -28,8 +32,13 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnApplication
     if (this.opts.relay?.enabled ?? true) this.relay.start(this.opts.relay?.intervalMs ?? 1000);
   }
 
+  async beforeApplicationShutdown(): Promise<void> {
+    const outcome = await this.relay.stop();
+    if (outcome === 'timeout') this.opts.onError?.('outbox relay drain timed out at shutdown; unpublished rows are relayed again on the next start');
+  }
+
   async onApplicationShutdown(): Promise<void> {
-    await this.relay.stop();
+    await this.relay.stop(); // idempotent: already stopped by beforeApplicationShutdown when Nest drives the shutdown
     await this.bus.close();
   }
 }

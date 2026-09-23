@@ -1,5 +1,5 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { DbService } from '@nawara/service-kit';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { DbService, PollLoop, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext } from '../events/payment-events.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import { AttemptService } from './attempt.service.js';
@@ -16,7 +16,8 @@ const LONG_SUBMITTED_MS = 5 * 60 * 1000; // an attempt "stuck" in submitted this
  */
 @Injectable()
 export class AttemptResolver {
-  private timer?: NodeJS.Timeout;
+  // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
+  private readonly loop = new PollLoop(() => this.drainOnce(), (e) => this.logger.error(`attempt_resolver_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
   private running = false;
   private readonly logger = new Logger(AttemptResolver.name);
 
@@ -27,15 +28,13 @@ export class AttemptResolver {
   ) {}
 
   start(intervalMs = 5000): void {
-    if (this.timer) return;
     // A whole-pass failure (for example the scan query) must not escape as an unhandled rejection: log it and let the next tick run.
-    this.timer = setInterval(() => void this.drainOnce().catch((e) => this.logger.error(`attempt_resolver_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
-    this.timer.unref?.();
+    this.loop.start(intervalMs);
   }
 
-  async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+  /** Stops scheduling passes and waits, bounded, for the one in flight (see `PollLoop`). */
+  async stop(drainTimeoutMs?: number): Promise<DrainOutcome> {
+    return this.loop.stop(drainTimeoutMs);
   }
 
   /** One pass. Exposed directly for tests (no need to wait on a real interval). */
@@ -88,12 +87,16 @@ export class AttemptResolver {
 }
 
 @Injectable()
-export class AttemptResolverService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class AttemptResolverService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly resolver: AttemptResolver) {}
   onApplicationBootstrap(): void {
     this.resolver.start();
   }
-  async onApplicationShutdown(): Promise<void> {
+  /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
+  async beforeApplicationShutdown(): Promise<void> {
     await this.resolver.stop();
+  }
+  async onApplicationShutdown(): Promise<void> {
+    await this.resolver.stop(); // idempotent: already stopped when Nest drives the shutdown
   }
 }

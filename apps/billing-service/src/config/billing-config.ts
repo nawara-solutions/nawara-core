@@ -15,6 +15,8 @@ export interface BillingConfig extends BaseConfig {
   authTimeoutMs: number;
   /** Set means RabbitMQ; unset means the in-memory bus, which is refused in production (below). */
   rabbitmqUrl?: string;
+  /** `RABBITMQ_CONFIRM_TIMEOUT_MS` (default 5000, 100-60000): bound on a publisher confirm; past it the publish fails and the outbox retries it. */
+  rabbitmqConfirmTimeoutMs: number;
   /**
    * ISO 4217 codes this deployment accepts on an invoice or price (BI-11). NO code default: which currencies are supported is B-005, so
    * an operator must say. A code must also exist in the immutable `currency` table (BI-21), which is seeded by migration.
@@ -98,6 +100,7 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,
+    rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       // A password that protects financial API documentation must not be trivial.

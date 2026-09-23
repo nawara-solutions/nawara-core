@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
-import { DbService, isUniqueViolation } from '@nawara/service-kit';
+import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import { AttemptService } from '../attempts/attempt.service.js';
 import { webhookContext } from '../events/payment-events.js';
 import type { AttemptRow } from '../attempts/attempt.types.js';
@@ -69,45 +69,48 @@ export class WebhookService {
   }
 
   /** Used by the retrier: the signature was already verified when the row was stored, so this only re-derives the
-   * parsed shape from the stored bytes (never re-authenticates — the body cannot have changed since receipt). */
-  async reprocess(event: WebhookEventRow, provider: PaymentProvider): Promise<WebhookResult> {
+   * parsed shape from the stored bytes (never re-authenticates — the body cannot have changed since receipt). `claim` is the
+   * retrier's transaction holding this row's lock (Stage 14.6): the row's state is written through it, so no other worker can
+   * reprocess the same event meanwhile. */
+  async reprocess(event: WebhookEventRow, provider: PaymentProvider, claim?: Queryable): Promise<WebhookResult> {
     const parsed = provider.parseStoredBody(event.rawBody);
     if (parsed === null) {
-      await this.markState(event.id, 'failed', 'malformed_body');
+      await this.markState(event.id, 'failed', 'malformed_body', undefined, claim);
       return { status: 200 };
     }
-    return this.process(event.id, provider, parsed);
+    return this.process(event.id, provider, parsed, claim);
   }
 
   private async process(
     eventId: string,
     provider: PaymentProvider,
     parsed: { providerEventId: string; type: string; reference: string; amount?: number; currency?: string; data: unknown },
+    claim?: Queryable,
   ): Promise<WebhookResult> {
     const status = this.toStatus(parsed);
     if (!status) {
-      await this.markState(eventId, 'ignored', `unknown_event_type:${parsed.type}`);
+      await this.markState(eventId, 'ignored', `unknown_event_type:${parsed.type}`, undefined, claim);
       return { status: 200 };
     }
 
     const attempt = await this.findAttemptByReference(provider.id, parsed.reference);
     if (!attempt) {
-      await this.markState(eventId, 'unmatched', null);
+      await this.markState(eventId, 'unmatched', null, undefined, claim);
       return { status: 200 }; // the resolver/retrier revisits this — the record may not be visible yet
     }
 
     try {
       await this.attempts.applyStatus(attempt.id, status, provider, webhookContext(provider.id, eventId));
-      await this.markState(eventId, 'processed', null, attempt.id);
+      await this.markState(eventId, 'processed', null, attempt.id, claim);
       return { status: 200 };
     } catch (e) {
       const code = e instanceof HttpException ? (e.getResponse() as { code?: string })?.code : undefined;
       if (code && CONFLICT_CODES.has(code)) {
         this.logger.warn(`webhook conflict for attempt ${attempt.id}: ${code}`);
-        await this.markState(eventId, 'conflict', code, attempt.id);
+        await this.markState(eventId, 'conflict', code, attempt.id, claim);
         return { status: 200 }; // recorded; a human resolves it (SDD section 5.1 "late success" safety net)
       }
-      await this.markState(eventId, 'failed', 'transient_error', attempt.id);
+      await this.markState(eventId, 'failed', 'transient_error', attempt.id, claim);
       return { status: 500 }; // transient: let the provider retry
     }
   }
@@ -132,8 +135,8 @@ export class WebhookService {
     return rows[0] ?? null;
   }
 
-  private async markState(id: string, state: WebhookEventRow['state'], outcome: string | null, matchedAttemptId?: string): Promise<void> {
-    await this.db.query(
+  private async markState(id: string, state: WebhookEventRow['state'], outcome: string | null, matchedAttemptId?: string, claim?: Queryable): Promise<void> {
+    await (claim ?? this.db).query(
       `UPDATE webhook_event SET state = $2, outcome = $3, attempts = attempts + 1, "processedAt" = CASE WHEN $2 IN ('processed','ignored','conflict') THEN now() ELSE "processedAt" END, "matchedAttemptId" = COALESCE($4, "matchedAttemptId") WHERE id = $1`,
       [id, state, outcome, matchedAttemptId ?? null],
     );

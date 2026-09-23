@@ -11,7 +11,7 @@ import { WebhookRetriever } from './webhooks/webhook-retrier.js';
  */
 interface Job {
   start(intervalMs?: number): void;
-  stop(): Promise<void>;
+  stop(): Promise<unknown>;
   run(): Promise<unknown>;
 }
 

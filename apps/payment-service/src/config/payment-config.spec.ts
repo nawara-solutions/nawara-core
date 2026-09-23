@@ -134,4 +134,11 @@ describe('loadPaymentConfig', () => {
     expect(loadPaymentConfig({ ...BASE_ENV, PAYMENT_SUPPORTED_CURRENCIES: 'tnd,TND, eur' }).supportedCurrencies).toEqual(['TND', 'EUR']);
     expect(() => loadPaymentConfig({ ...BASE_ENV, PAYMENT_SUPPORTED_CURRENCIES: ' , ' })).toThrow(/PAYMENT_SUPPORTED_CURRENCIES/);
   });
+
+  // Stage 14.6: bound on a RabbitMQ publisher confirm (a timeout fails the publish; the outbox keeps the event and retries it).
+  it('RABBITMQ_CONFIRM_TIMEOUT_MS defaults to 5000 and is bounded (100-60000)', () => {
+    expect(loadPaymentConfig(BASE_ENV).rabbitmqConfirmTimeoutMs).toBe(5000);
+    expect(loadPaymentConfig({ ...BASE_ENV, RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).rabbitmqConfirmTimeoutMs).toBe(2000);
+    for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadPaymentConfig({ ...BASE_ENV, RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
+  });
 });

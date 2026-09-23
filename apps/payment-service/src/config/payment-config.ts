@@ -8,6 +8,8 @@ export interface PaymentConfig extends BaseConfig {
   authTimeoutMs: number;
   /** Unset means "use the in-memory event bus" (local/dev/test only); set means RabbitMQ. Required when `NODE_ENV=production`. */
   rabbitmqUrl?: string;
+  /** `RABBITMQ_CONFIRM_TIMEOUT_MS` (default 5000, 100-60000): bound on a publisher confirm; past it the publish fails and the outbox retries it. */
+  rabbitmqConfirmTimeoutMs: number;
   /** ISO 4217 codes accepted for `payment.currency`. No code default: configuration only (O-10). */
   supportedCurrencies: string[];
   maxAttempts: number;
@@ -56,6 +58,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,
+    rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     supportedCurrencies: [...new Set(supportedCurrencies)],
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
     idempotencyTtlHours: reader.int('IDEMPOTENCY_TTL_HOURS', { default: 24, min: 1, max: 24 * 30 }),

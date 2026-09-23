@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
 import { EVENT_BUS, PermanentEventFailure, pgCode, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
@@ -62,7 +62,7 @@ function parseFacts(event: EventEnvelope): PaymentEventFacts {
  * once, never silently dropped) — the kit's `EventBus` contract, unchanged here.
  */
 @Injectable()
-export class PaymentEventConsumer implements OnApplicationBootstrap, OnApplicationShutdown {
+export class PaymentEventConsumer implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly logger = new Logger(PaymentEventConsumer.name);
   private subscription?: { close(): Promise<void> };
 
@@ -79,8 +79,18 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnApplicati
     });
   }
 
+  /**
+   * Stage 14.6: stop consuming BEFORE any onApplicationShutdown closes the database pool. Closing cancels the consumer (no new
+   * deliveries) and lets the deliveries already being handled finish and settle, bounded (see the bus's `drainTimeoutMs`).
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    const sub = this.subscription;
+    this.subscription = undefined;
+    await sub?.close();
+  }
+
   async onApplicationShutdown(): Promise<void> {
-    await this.subscription?.close();
+    await this.beforeApplicationShutdown(); // idempotent: already closed when Nest drives the shutdown
   }
 
   /**

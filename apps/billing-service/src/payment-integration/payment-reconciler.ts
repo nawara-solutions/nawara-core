@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
-import { runWithRequestContext } from '@nawara/service-kit';
+import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown } from '@nestjs/common';
+import { runWithRequestContext, PollLoop, type DrainOutcome } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { jobTransitionContext } from '../domain/actors.js';
@@ -18,7 +18,8 @@ import type { PaymentClient } from './payment-client.js';
  */
 @Injectable()
 export class PaymentReconciler {
-  private timer?: NodeJS.Timeout;
+  // Stage 14.6: no overlapping passes, and a graceful stop that waits (bounded) for the pass in flight.
+  private readonly loop = new PollLoop(() => this.reconcileOnce(), (e) => this.logger.error(`payment_reconcile_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`));
   private running = false;
   /**
    * Where the previous full pass stopped. Requests Payment still reports as unpaid are never updated, so they stay at the head of
@@ -36,15 +37,13 @@ export class PaymentReconciler {
   ) {}
 
   start(intervalMs = this.config.reconcile.intervalMs): void {
-    if (this.timer) return;
     // A whole-pass failure (for example the scan query) must not escape as an unhandled rejection: log it and let the next tick run.
-    this.timer = setInterval(() => void this.reconcileOnce().catch((e) => this.logger.error(`payment_reconcile_pass_failure error=${e instanceof Error ? e.name : 'unknown'} — the next pass retries`)), intervalMs);
-    this.timer.unref?.();
+    this.loop.start(intervalMs);
   }
 
-  async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
+  /** Stops scheduling passes and waits, bounded, for the one in flight (see `PollLoop`). */
+  async stop(drainTimeoutMs?: number): Promise<DrainOutcome> {
+    return this.loop.stop(drainTimeoutMs);
   }
 
   /** One pass. Exposed directly for tests (no need to wait on a real interval). */
@@ -87,12 +86,16 @@ export class PaymentReconciler {
 }
 
 @Injectable()
-export class PaymentReconcilerService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class PaymentReconcilerService implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
   constructor(private readonly reconciler: PaymentReconciler) {}
   onApplicationBootstrap(): void {
     this.reconciler.start();
   }
-  async onApplicationShutdown(): Promise<void> {
+  /** Drains BEFORE any onApplicationShutdown closes the database pool or the broker (Nest runs every beforeApplicationShutdown first). */
+  async beforeApplicationShutdown(): Promise<void> {
     await this.reconciler.stop();
+  }
+  async onApplicationShutdown(): Promise<void> {
+    await this.reconciler.stop(); // idempotent: already stopped when Nest drives the shutdown
   }
 }

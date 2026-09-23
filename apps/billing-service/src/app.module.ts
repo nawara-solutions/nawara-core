@@ -55,7 +55,7 @@ export class AppModule {
         EventsModule.forRoot({
           source: config.serviceName,
           bus: overrides.bus ?? (config.rabbitmqUrl
-            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, onNotice: (message) => new Logger('RabbitMqEventBus').warn(message) })
+            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs, onNotice: (message) => new Logger('RabbitMqEventBus').warn(message) })
             : new InMemoryEventBus()),
           // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
           onError: (message) => new Logger('OutboxRelay').warn(`outbox_publish_failure ${message}`),
