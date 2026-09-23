@@ -286,6 +286,7 @@ campaign.
 | 15.5 | 2026-09-23 | `804dc72` | Shutdown and restart (17 campaigns: SIGTERM / SIGKILL / `docker stop` windows, frozen dependencies, restart cycles, rolling restart, backlog, dependency-down startup) | **FAIL** on S2/S8 (a busy keep-alive connection keeps a SIGTERMed service serving, and `/ready` 200, with no Core bound) and on S3 (a cancellation accepted while Payment is unavailable is silently lost); every crash / kill window otherwise PASS (no lost, partial or duplicated effect; no manual repair) | section 13.5 |
 | 15.5 | 2026-09-23 | `804dc72` + corrective patch | F-A (bounded HTTP drain, readiness at shutdown start), F-C (Auth pool order), F-D (one concurrent drain per worker), F-B (cancellation answered only when Payment confirmed); full 15.5 matrix re-run (21 campaigns) plus the new cancellation campaigns | F-A, F-B, F-C, F-D corrected and revalidated (no client can extend the HTTP drain; `/ready` 503 from the first moment; each worker drains once, concurrently; 0 accepted-but-lost cancellations; every crash window as before) — **FAIL on S8/S10 in containers (new finding F-H)**: with the broker frozen, Nest completes its shutdown but PID 1 never exits (an AMQP socket left half-closed keeps Node's event loop alive); SIGKILL even with a 45 s grace | section 13.5.1 |
 | 15.5 | 2026-09-23 | `804dc72` + corrective patches 1 and 2 | F-H: the kit bus destroys the transport of every connection it gives up on (error close, abandoned close); one close deadline; waits end when the connection is gone. Full 15.5 matrix + new container campaigns, full 15.3 matrix, 15.4 subset | **PASS**: frozen broker in the production image → natural exit (exit 0) at 27–29 s, 12/12 plus 20/20 cycles, with the broker's heartbeat on or off; every crash window, cancellation and accounting as before; worst graceful shutdown 39.8 s → **60 s** stop grace set in the Auth deploy and Compose | section 13.5.2 |
+| 15.6 | 2026-09-24 | `f6199dd` | Cross-service failures (20 campaigns: one service or dependency down while others run, combined failures, recovery orders, restart windows ≥ 20 iterations, event delay / replay / ordering, service authentication, tenant isolation, 10 repeated cycles, startup orders, readiness matrix, production containers) | **PASS**: no lost accepted work, no duplicate protected effect, no false success, no cross-tenant write, no manual repair; every order converges; containers exit naturally under the 60 s grace. No production change. Observations carried to 15.7 / 15.8 and one readiness decision (SRE) | section 13.6 |
 
 ### 13.1 Baseline (15.1)
 
@@ -1269,6 +1270,144 @@ The 39.8 s case is the longest graceful path:
 **Dispositions.** F-E is resolved by the explicit 60 s grace (no Core timeout was shortened). F-F: intentional fail-fast, documented.
 F-G → 15.7. Init process and start-before-stop deploy → Stage 20. The 15.4 findings → 15.8.
 
+### 13.6 Cross-service failures (15.6)
+
+**Question.** When Auth, Organization, Billing, Payment, PostgreSQL or RabbitMQ are unavailable, alone or together, and recover in
+different orders, does Core keep ownership, tenant isolation, accepted work, idempotency, truthful answers, bounded waits and automatic
+convergence?
+
+**Harness (test-only).** `scripts/validation/cross-service-campaigns.mjs` on `lib/core-stack.mjs`: real Billing and Payment processes,
+with every cross-service edge breakable on its own:
+- each service's PostgreSQL through its own TCP proxy (`down` = refused, `freeze` = hung);
+- each service's RabbitMQ link through its own proxy, plus a whole-broker stop (`stop_app`);
+- the Billing → Payment HTTP edge through a fault proxy (`refuse`, `blackhole`, `drop` = Payment processed and the answer was lost,
+  `truncate` = the answer cut after its status line);
+- a fake Auth answering `/auth/me` for payer bearers;
+- real Auth and Organization where their own behaviour is measured.
+
+The commercial flow runs through the real APIs: invoice → payment request → dispatcher → Payment; payer attempt (test provider) + sync →
+`payment.succeeded`; producer cancel → `payment.cancelled`; Billing's receipts. Production-container checks run in
+`shutdown-campaigns.mjs` (`dockerCrossServiceOutage`, `dockerFrozenBrokerFinal`, `dockerFrozenCycles`, all with `docker stop -t 60`).
+Main at `f6199dd` (15.5 merged); Node 24.18 (images: Node 22), Docker 28.5, PostgreSQL 16.15, RabbitMQ 3.13, amqplib 2.0.1. A 15.5
+smoke on this base first confirmed:
+- idle SIGTERM exits in 13–27 ms;
+- a busy keep-alive connection exits in 58–94 ms;
+- a repeated stop costs 0 ms;
+- a cancel during a Payment outage gets 503, then 200 on retry.
+
+**Invariants (C1–C12 of the stage):**
+- **C1** no lost accepted work;
+- **C2** no duplicate protected effect;
+- **C3** no false success on a synchronous contract;
+- **C4** no cross-tenant write;
+- **C5** ownership kept (no service writes another's database);
+- **C6** no accidental synchronous coupling;
+- **C7** truthful readiness;
+- **C8** no manual repair;
+- **C9** replay safe;
+- **C10** restart safe;
+- **C11** service authentication fails closed;
+- **C12** bounded failures.
+
+**Cross-service edges (from the code).**
+
+| Caller → callee | Transport | Sync | Timeout / retry | Idempotency | Failure behaviour |
+|---|---|---|---|---|---|
+| Billing → Payment: create payment | HTTP, service token | sync, but dispatched asynchronously by the dispatcher | `PAYMENT_TIMEOUT_MS` 5 s; request left `sending`, resent after `BILLING_DISPATCH_STALE_SENDING_MS` (60 s) | Payment's natural key `(producer, paymentRequestId)` | transient → retried; `rejected` → terminal |
+| Billing → Payment: cancel | HTTP, service token | sync (the caller's request) | 5 s; the caller retries | `Idempotency-Key billing-cancel-{requestId}` | confirmed → 200; open attempt → 409; anything else → 503 `payment_unavailable` (15.5) |
+| Billing → Payment: get payment (reconciler) | HTTP, service token | background | 5 s; next pass (30 s) | read-only | next pass |
+| Payment → Billing: `payment.succeeded/failed/cancelled/expired` | RabbitMQ (Payment outbox → `billing.payment-events`) | async | outbox backoff; consumer 3 × 5 s then DLQ; reconciler backstop | `payment_event_receipt` (unique event id) + state checks | pending in the outbox / queued / reconciled |
+| Billing, Payment → Auth `/auth/me`; Organization → Auth `/auth/grants`, step-up | HTTP (user bearer only) | sync | 3 s (`AUTH_TIMEOUT_MS`) | read-only | 503, fail closed |
+| Producers → Billing; Billing → Payment; callers → Organization | service tokens (digests, deny by default; Organization adds a per-caller policy) | – | – | – | 401 |
+| Auth → anything | none (`AUTH_EVENTS=off` in production; `PAYMENT_SERVICE_URL` in its deploy env is unused by the code) | – | – | – | – |
+
+- **Readiness:** every service checks only its own database and migrations; Billing and Payment also check RabbitMQ, and Billing its
+  consumer. **No service's readiness depends on another service.**
+- **Startup:** Billing refuses to start without RabbitMQ (fail-fast, documented); everything else starts unready and recovers.
+- **Database ownership:** each service owns one database (C5 holds by construction: separate databases and credentials; no campaign
+  saw a cross-database write).
+
+**Readiness matrix** (process / `/health` / `/ready`, with a relevant operation; 3 runs where timed):
+
+| Failure | Auth | Organization | Billing | Payment |
+|---|---|---|---|---|
+| RabbitMQ down | up / 200 / 200 | up / 200 / 200 | up / 200 / **503**; invoices work; its cancel still 200 (Payment confirms over HTTP) | up / 200 / **503**; API works, events wait in the outbox |
+| Billing DB down | up / 200 / 200 | up / 200 / 200 | up / 200 / 503; DB-backed reads answer **500** | up / 200 / 200; cancels and payments work |
+| Payment DB down or hung | up / 200 / 200 | up / 200 / 200 | up / 200 / 200; invoices work; cancel 503 `payment_unavailable` (12–15 ms down, 5.0 s hung) | up / 200 / 503 |
+| Billing down | up / 200 / 200 | up / 200 / 200 | – | up / 200 / 200; cancels and payments work, events queue |
+| Payment down | up / 200 / 200 | up / 200 / 200 | up / 200 / 200; invoices, requests accepted (`sending`); cancel 503 | – |
+| Auth down | – | up / 200 / 200 | up / 200 / 200; service-token routes work, payer routes **503** | up / 200 / 200; payer routes 503 |
+
+**Results.** 0 uncaught errors in every run; every accounting row: at most one Payment payment per request, one applied receipt, one
+terminal event, 0 payment-id mismatches, 0 cross-tenant rows.
+
+| Id | Failure | Operation | Observed | Recovery | Invariants | Result |
+|---|---|---|---|---|---|---|
+| A | Payment stopped / hung, Billing up (3 + 3) | Billing: invoices, a new request, cancel of a sent one, its retry | Billing alive and ready; invoices and reads 200; new request accepted and left `sending`; cancel **503 `payment_unavailable`** in 12–14 ms (stopped) / **5.0 s** (hung), never success | cancel retried → 200 → cancelled once; the new request sent after the 60 s stale window (converged 49–59 s) | C1 C3 C6 C12 | PASS |
+| B | Billing stopped, Payment up (5) | Payment: producer cancel, payer payment | both 200/201 without Billing; events queued in Billing's durable queue (2) | Billing restarted: both applied once in 0.73–0.79 s | C1 C5 C6 | PASS |
+| C | Billing → Payment cut: before Payment; Payment killed in its transaction; committed, answer lost; answer cut; create answer lost; Payment killed inside the create (20 + 20 + 20 + 20 + 20 + 10) | cancel / dispatch | first answer 503 (never success) / create left `sending` | retry 200 (replay) / resend after stale: one payment, one cancellation, ids match | C2 C3 C10 | PASS |
+| D | Billing SIGKILLed during a real Payment event: before delivery; after the receipt INSERT; inside COMMIT (5 + 20 + 20) | consumer | D2 rolled back; D3 committed on the server with no ack | redelivered: 1 receipt, 1 effect every time | C1 C2 C9 C10 | PASS |
+| E | RabbitMQ down, all four services up (3) | per service (matrix) | Billing / Payment unready in 13–20 ms; HTTP keeps working; outboxes accumulate (4 / 6) | consumer back 4.3 s [4.3–4.5], converged 5.8 s [5.7–5.9]: every event applied once | C1 C2 C6 C7 | PASS; readiness semantics → decision below |
+| F | Billing DB down; Payment DB down; Payment DB hung (3 each) | the other service's work | only the affected service unready; the other unaffected | ready again 53–65 ms after the database returns, no restart | C6 C7 C8 | PASS |
+| G | Billing DB down while a Payment event arrives: 5 s (5), 25 s (3) | consumer | not acked as done: retried (5 s), dead-lettered after the retry budget (25 s) | applied once 0.18–0.20 s after the DB returns (retry) or 0.74–0.97 s (reconciler, test window 5 s); DLQ keeps the dead copy | C1 C2 C8 | PASS (DLQ hygiene → 15.7) |
+| H | Payment DB down / hung while Billing calls Payment (3 + 3) | cancel | 503 in 12–15 ms / 5.0 s; payment untouched | retry after recovery → 200 once | C3 C12 | PASS |
+| I | Billing DB + RabbitMQ; Payment DB + RabbitMQ; both restore orders | Payment / Billing keep working | as the matrix | converged 4.2–5.7 s in every order | C1 C2 C8 | PASS |
+| J | Billing down + RabbitMQ down: Billing first (restart policy) / RabbitMQ first | a Payment cancel | Billing exits while the broker is down (6 starts) | converged 7.1 s / 5.4 s, same end state | C1 C8 | PASS |
+| K | Billing killed + its DB down: Billing first / DB first | a Payment event | Billing alive, `/ready` 503 while its DB is down | converged 6.2 s / 1.0 s, same end state | C1 C7 C8 | PASS |
+| L | Billing + Payment restarted together (SIGKILL / SIGTERM alternately) with Payment outbox pending, requests unsent, a payment in progress, webhooks due (5) | all | – | converged 2.7–2.8 s every time; 20 items once; webhooks retried (attempts 1–4); 1 consumer, 2 connections | C1 C2 C10 | PASS |
+| M | Billing + RabbitMQ down, Payment terminal: 4 recovery orders (3 items each) | – | – | 8.3 / 8.4 / 11.4 / 11.5 s, every item cancelled once | C1 C8 | PASS |
+| N | a `payment.cancelled` held while the reconciler settles the request and a second request is paid (5) | – | the old event arrives last | receipt `ignored`; invoice stays paid; nothing moves back | C9 | PASS |
+| O | identical replay of an applied event; the same fact under a new event id (20 + 20) | – | 0 extra effects; a new event id adds an `ignored` receipt | – | C2 C9 | PASS |
+| P | `payment.succeeded` before Billing learned the payment id (create answer lost, request `sending`) (10) | – | receipt `deferred` | resend (natural key) + reconciler → paid once, ids match | C2 C9 | PASS |
+| Q | missing / invalid / malformed / user-shaped / other-service-shaped credentials on Billing, Payment, Organization service routes | – | 401 everywhere, 0 writes; Auth unavailable: payer routes **503**, service routes unaffected | – | C11 | PASS |
+| R | Billing started with a wrong Payment token | dispatch, cancel | ready; Payment refuses (0 payments); cancel 503; logs `reason=auth_fault` / `outcome=auth_fault`; 0 token strings in any log | restarted with the right token: sent after the 60 s stale window (56.7 s), 1 payment; cancel 200 | C3 C11 | PASS |
+| S | organizations A and B, retries during a Payment outage, a broker outage, replays of A's events | – | 0 wrong finals, 0 organization mismatches (Payment ↔ invoice), 0 receipts pointing at another request | – | C4 | PASS |
+| T | 10 cycles: Payment down → back, broker down → back, Billing restarted, with traffic | – | every cycle 2 connections, 2 channels, 1 consumer; sessions 2–5 / 3; outboxes 0; open requests 0; RSS 147–157 / 182–183 MB | 30/30 once | C1 C2 C8 | PASS |
+| Startup | Billing before Payment; broker down; DB down | – | Billing ready without Payment (0.7 s), request `sending`; broker down: Billing exits 1 (by design), Payment unready; DB down: both unready | Payment started: request sent after the stale window (57.9 s), 1 payment; both recover in place | C6 C7 | PASS |
+| Containers | production images, `docker stop -t 60`: broker stopped; PostgreSQL paused; broker frozen (3 each), 10 frozen-broker cycles | – | broker stopped: exit 0 in 0.3–0.5 s, restarted while down Billing exits and runs again when it returns; PostgreSQL paused: Payment exit 0 at 33.0–33.2 s; frozen broker: exit 0 at 27.0 / 28.7 s | ready again; 1 consumer; outbox drained; one event | C10 C12 | PASS |
+
+**Timings** (local, 3 runs, median [range]; not production SLOs):
+
+| Path | Time |
+|---|---|
+| Payment stopped → Billing cancel answers 503 | 13.4 ms [12.0–13.6] |
+| Payment hung → Billing cancel answers 503 | 5.01 s [5.009–5.010] |
+| Payment DB down / hung → Billing cancel 503 | 12–15 ms / 5.01–5.02 s |
+| RabbitMQ outage → Billing and Payment unready | 18.8 ms [13.3–19.6] |
+| RabbitMQ back → Billing consumer restored | 4.33 s [4.28–4.51] |
+| RabbitMQ back → every delayed event applied | 5.76 s [5.70–5.94] |
+| Billing restarted with queued events → applied | 0.75 s [0.73–0.79] |
+| A service's DB back → ready again (no restart) | 53–65 ms |
+| Payment back → a request left `sending` is sent | 49–59 s (the 60 s stale window) |
+| Billing + Payment restarted together → converged | 2.8 s [2.7–2.8] |
+
+**Resources.** Steady after every campaign:
+- 1 Billing consumer, 2 broker connections and 2 channels (Billing's bus and Payment's publisher);
+- database sessions 2–5 per service;
+- 0 sessions idle in a transaction after recovery;
+- outboxes drained;
+- no process left behind.
+
+**Findings (correctness intact; no production change).**
+- **O1 (15.8):** after a failed send, a request stays `sending` until `BILLING_DISPATCH_STALE_SENDING_MS` (60 s) before it is resent,
+  so Billing → Payment recovery takes ~50–60 s after Payment returns (A, startup order, R). Correct and bounded; a tuning question
+  (retry delay after a transient failure vs the stale window).
+- **O2 (NEEDS SRE DECISION):** Billing and Payment report `/ready` 503 while RabbitMQ is down (the 15.3 `rabbitmq` check), although
+  their synchronous HTTP keeps working: Billing's cancel still gets Payment's confirmation, and Payment's API writes to its outbox. An
+  orchestrator that routes on `/ready` would take both out of service for a broker outage. Keep (readiness = "can do all of its work,
+  including async") or split (serve HTTP, alert on the broker)?
+- **O3 (observability, 15.7):**
+  - a DB-backed Billing read with its database down answers a generic 500 (never success, deterministic), not a 503;
+  - Payment's own 5xx is classified by Billing as unconfirmed (503).
+- **O4 (15.7):** a message dead-lettered during a long Billing database outage stays in `billing.payment-events.dead` after the
+  reconciler has applied its effect. Replaying it is safe (receipt), but the DLQ depth alarm stays raised: DLQ hygiene and retention.
+- **O5 (15.7):**
+  - the same fact under a new event id adds an `ignored` receipt row (growth);
+  - receipts record `causeType` `payment_event` even when the reconciler applied the effect (known since 15.4).
+- **O6 (by design, Stage 20):** Billing must run under a restart policy; it exited and was restarted 4–6 times until the broker
+  returned (J, M, containers).
+- **O7 (hygiene):** the Auth deploy writes `PAYMENT_SERVICE_URL`, which Auth's code never reads.
+
 ## 14. Experiment report template
 
 ```text
@@ -1309,6 +1448,8 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | ~~15.5 FAIL F-H~~ **resolved** (section 13.5.2): the kit bus destroys the transport of every connection it gives up on | – | – |
 | ~~Stop grace~~ **set to 60 s** (section 13.5.2) in the Auth deploy and Compose; every future deployment of a Core service must declare ≥ 60 s | – | – |
 | Init process (`--init` / tini) for signal forwarding and zombie reaping (not needed for correctness) | Stage 20 | SRE |
+| 15.6 O2: should Billing / Payment `/ready` include RabbitMQ (today: 503 during a broker outage although their HTTP still works)? | before production routing on `/ready` | SRE |
+| 15.6 O1: resend delay after a transient Payment failure (today the 60 s stale window) | 15.8 | engineering |
 | Start-before-stop / rolling deploy for Auth (every deploy is an outage today) | Stage 20 | SRE |
 | SDD endpoint 15: success is `200` in code and tests but `202` in the SDD, and the marker is stamped even when Payment refuses (SDD: "nothing changed") | Billing doc review | engineering |
 | Acceptable AttemptResolver provider-call amplification (15.4 measured: N instances → N calls per unresolved attempt per pass; state safe) | 15.8 | product (provider cost / rate limits) |
