@@ -160,6 +160,9 @@ transaction, so a longer confirm wait lets PostgreSQL end the session (the row s
 | F13 | Operational failures not identifiable in logs | fixed, 14.7 (#83) |
 | F14 | Auth events have no transactional outbox | deferred by design: Auth publishing stays fire-and-forget; a failure logs `event_publish_failure` and is **not** retried |
 
+**Stage 15** validates these mechanisms under controlled failure and load; its plan, invariants and results are in
+[core-validation.md](./core-validation.md).
+
 **Known behaviour to validate in Stage 15 (not defects):** a worker's in-flight pass is waited for in `beforeApplicationShutdown` and
 again in `onApplicationShutdown`, module by module, so with passes that hang the total drain can exceed Docker's default 10 s stop
 grace, after which the process is killed (work is not lost: transactions roll back and rows are claimed again). Only auth-service is
