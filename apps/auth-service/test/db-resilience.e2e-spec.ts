@@ -33,7 +33,8 @@ describe('database runtime limits (auth-service, real PostgreSQL)', () => {
   afterAll(() => t?.close());
 
   it('the validated configuration reaches the pool', () => {
-    expect(t.cfg.db).toEqual({ poolMax: 2, connectionTimeoutMs: 500, statementTimeoutMs: 1000, idleInTransactionTimeoutMs: 1000 });
+    // queryTimeoutMs (Stage 15.2) is derived: the statement timeout + 5 s.
+    expect(t.cfg.db).toEqual({ poolMax: 2, connectionTimeoutMs: 500, statementTimeoutMs: 1000, idleInTransactionTimeoutMs: 1000, queryTimeoutMs: 6000 });
   });
 
   it('statement timeout: PostgreSQL cancels a long statement (57014); the pool stays usable', async () => {

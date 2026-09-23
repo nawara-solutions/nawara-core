@@ -23,6 +23,7 @@ describe('describeFailure', () => {
     expect(describeFailure(new Error('timeout exceeded when trying to connect'))).toBe('error=Error kind=db_connect_timeout');
     expect(describeFailure(new Error('Client has encountered a connection error and is not queryable'))).toBe('error=Error kind=db_connection_lost');
     expect(describeFailure(new PublisherConfirmTimeoutError(5000))).toBe('error=PublisherConfirmTimeoutError kind=broker_confirm_timeout');
+    expect(describeFailure(new Error('Query read timeout'))).toBe('error=Error kind=db_query_timeout'); // pg's client-side query_timeout (Stage 15.2)
     expect(describeFailure(new TypeError('x'))).toBe('error=TypeError');
     expect(describeFailure('a string')).toBe('error=unknown');
     expect(describeFailure({ code: '57014' })).toBe('error=unknown'); // not an Error: nothing on it is trusted
@@ -63,6 +64,7 @@ describe('describeFailure', () => {
     expect(pool).toContain("'Connection terminated due to connection timeout'");
     expect(client).toContain("'Client has encountered a connection error and is not queryable'");
     expect(client).toContain("'Connection terminated unexpectedly'");
+    expect(client).toContain("new Error('Query read timeout')"); // query_timeout; also what DbService.tx() recognises to destroy the client
   });
 });
 

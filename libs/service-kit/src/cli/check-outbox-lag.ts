@@ -29,8 +29,9 @@ async function main(): Promise<void> {
   if (!url) throw new Error('--database-url (or DATABASE_URL) is required');
   if (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) throw new Error('--max-age-seconds must be a non-negative number');
 
-  // Bounded, so an unreachable database fails the check (exit 1) instead of hanging a cron or runbook step.
-  const pool = new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 10_000, statement_timeout: 30_000 });
+  // Bounded, so an unreachable or silent database fails the check (exit 1) instead of hanging a cron or runbook step (the client-side
+  // query_timeout covers a server that accepts the query and then stops answering, Stage 15.2).
+  const pool = new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 10_000, statement_timeout: 30_000, query_timeout: 35_000 });
   try {
     const { rows } = await pool.query<{ pending: string; oldest_pending_seconds: number | null; retrying: string; max_attempts: number | null }>(
       `SELECT count(*)::bigint AS pending, EXTRACT(EPOCH FROM (now() - min("occurredAt")))::int AS oldest_pending_seconds,

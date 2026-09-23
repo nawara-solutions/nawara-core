@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
+import { DB_QUERY_TIMEOUT_MARGIN_MS } from '../config/base-config.js';
 import { ReadinessRegistry } from '../health/readiness.registry.js';
 import { describeFailure } from '../logging/failure.js';
 import { pendingMigrations } from './migrations.js';
@@ -26,6 +27,12 @@ export interface DbOptions {
    * terminated by PostgreSQL (SQLSTATE 25P03), which releases its locks. `tx()` absorbs that termination (see there).
    */
   idleInTransactionTimeoutMs?: number;
+  /**
+   * Client-side deadline for one query's answer, `pg`'s `query_timeout` (default: the statement timeout + 5 s). It ends the wait when
+   * the server or the network goes silent after accepting a query (Stage 15.2, I9), which the server-side `statement_timeout` cannot.
+   * It does NOT cancel anything on the server: the connection is destroyed instead (see `tx()`), which ends the session there.
+   */
+  queryTimeoutMs?: number;
   applicationName?: string;
   /** When set, `/ready` fails while any of these migration directories has an unapplied file. */
   migrations?: { dirs: string[] };
@@ -34,6 +41,9 @@ export interface DbOptions {
 export const DB_OPTIONS = Symbol('DB_OPTIONS');
 
 export type IsolationLevel = 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
+
+/** `pg`'s client-side `query_timeout` error (no code; the text is pinned by a test against the installed `pg`). */
+export const isQueryTimeout = (e: unknown): boolean => e instanceof Error && e.message === 'Query read timeout';
 
 /**
  * PostgreSQL access for one service's OWN database. Every statement is parameterized. The schema is changed only by the
@@ -47,12 +57,15 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
     @Inject(DB_OPTIONS) private readonly options: DbOptions,
     @Optional() @Inject(ReadinessRegistry) private readonly readiness?: ReadinessRegistry,
   ) {
+    const statementTimeoutMs = options.statementTimeoutMs ?? 30_000;
     this.pool = new pg.Pool({
       connectionString: options.url,
       max: options.max ?? 10,
       connectionTimeoutMillis: options.connectionTimeoutMs ?? 5_000,
-      statement_timeout: options.statementTimeoutMs ?? 30_000,
+      statement_timeout: statementTimeoutMs,
       idle_in_transaction_session_timeout: options.idleInTransactionTimeoutMs ?? 60_000,
+      // Direct construction is bounded too: the same derived default as the configuration.
+      query_timeout: options.queryTimeoutMs ?? statementTimeoutMs + DB_QUERY_TIMEOUT_MARGIN_MS,
       application_name: options.applicationName,
     });
     // An idle client erroring (server restart, failover, terminated session) must not crash the process; the next query reconnects.
@@ -92,7 +105,16 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
       await client.query('COMMIT');
       return out;
     } catch (e) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      // A client-side query timeout leaves the connection mid-protocol: the silent statement is still in flight and a ROLLBACK would only
+      // queue behind it (and be dropped when it times out too). Such a client must NEVER return to the pool: the next borrower would run
+      // inside this still-open transaction and its COMMIT would commit this one's writes (reproduced in Stage 15.2). It is destroyed;
+      // closing the connection ends the session, and PostgreSQL rolls back the uncommitted transaction.
+      if (isQueryTimeout(e)) broken ??= e as Error;
+      else {
+        await client.query('ROLLBACK').catch((r: unknown) => {
+          if (isQueryTimeout(r)) broken ??= r as Error;
+        });
+      }
       throw e;
     } finally {
       client.removeListener('error', onError);

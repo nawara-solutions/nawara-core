@@ -54,6 +54,7 @@ through the explicit runner (`nawara-migrate`, Auth's `dist/cli/migrate.js`), ne
 | `DB_CONNECTION_TIMEOUT_MS` | 5000 | 100–60000 | all four | same | pool acquisition **and** connect | validate 15.2 |
 | `DB_STATEMENT_TIMEOUT_MS` | 30000 | 1000–600000 | all four | same (server-side) | one statement | validate 15.2, tune 15.8 |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60000 | 1000–3600000 | all four | same (server-side) | idle session in a transaction | validate 15.2 |
+| `DB_QUERY_TIMEOUT_MS` (added in 15.2) | statement timeout + 5000 (35000) | 1000–660000, > `DB_STATEMENT_TIMEOUT_MS` | all four | same (client-side `query_timeout`) | waiting for an answer from a silent server or network | validated 15.2 |
 | `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment | service config | publisher confirm wait | validate 15.3 |
 | consumer retry | 3 retries, 5000 ms | 0–10, 100–300000 ms | Billing (`BILLING_PAYMENT_EVENT_RETRY_MAX/_DELAY_MS`) | billing config → bus | handler failures before DLQ | validate 15.3 |
 | consumer prefetch | 10 | constant | kit bus | `rabbitmq-event-bus.ts` | unacked deliveries per consumer | measure 15.3/15.8 |
@@ -135,7 +136,7 @@ Stage 15 stops and investigates on any violation (section 9). Each is backed by 
 | I6 | A stored webhook is never reprocessed by two workers at once, and never beyond 10 attempts | SKIP LOCKED + observed-attempt claim; `retries_exhausted` |
 | I7 | A failed transaction leaves no partial write | `tx()` rollback |
 | I8 | Work abandoned by a stop or crash is reclaimable and is reclaimed | rollback, stale `sending`, unacked redelivery, pending outbox |
-| I9 | Every wait on a dependency is bounded by its configured limit (no hang) | Stage 14.4/14.6 limits |
+| I9 | Every wait on a dependency is bounded by its configured limit (no hang) | Stage 14.4/14.6 limits; the client-side query deadline (15.2) |
 | I10 | `/ready` is 503 while a required dependency is down and 200 after it recovers; `/health` stays 200 | readiness registry |
 | I11 | Migration history cannot drift silently; a refused migration changes nothing | checksums, strict history, lock |
 | I12 | Runtime roles cannot run DDL or create roles | `<svc>_app` grants |
@@ -273,6 +274,8 @@ campaign.
 | Stage | Date | SHA | Campaign | Result | Report |
 |---|---|---|---|---|---|
 | 15.1 | 2026-09-23 | `5e72510` | Idle / light baseline, billing-service | PASS (tooling and reference established) | section 13.1 |
+| 15.2 | 2026-09-23 | `f78a2ad` | Database stress and recovery (13 campaigns) | **FAIL** on I9 (a query on an established connection has no client-side bound); every other invariant PASS | section 13.2 |
+| 15.2 | 2026-09-23 | `f78a2ad` + corrective patch | I9 correction (`DB_QUERY_TIMEOUT_MS`) and the full 15.2 matrix re-run | PASS: I9 bounded; no regression | section 13.2.1 |
 
 ### 13.1 Baseline (15.1)
 
@@ -294,6 +297,157 @@ client (no concurrency).
 **Observation (a 15.2 question, not a defect):** `/ready` costs about 60 ms per probe because the `rabbitmq` check opens and closes a
 new AMQP connection each time (about 54 ms measured; the database check about 0.14 ms, the migrations check about 0.9 ms). Frequent
 probes across many instances would create broker connection churn.
+
+### 13.2 Database stress and recovery (15.2)
+
+**Harness:** `scripts/validation/db-campaigns.mjs` (campaigns) on `scripts/validation/lib/harness.mjs` (guards, throwaway databases, service
+launcher, session and process sampling). It refuses `NODE_ENV=production`, non-loopback hosts, and any cluster that hosts a real Core
+database, so it runs only against a throwaway PostgreSQL container; every campaign creates and drops its own databases. Run:
+`VALIDATION_DATABASE_ADMIN_URL=... [VALIDATION_PG_CONTAINER=<throwaway container>] node scripts/validation/db-campaigns.mjs --out r.json [campaign ...]`.
+
+**Setup:** `main` at `f78a2ad`; reference machine of section 4; throwaway `postgres:16-alpine` (16.15, `max_connections` 100, 3 reserved)
+on loopback; RabbitMQ 3.13.7 healthy throughout (not a variable). Services from `dist`, one instance each unless stated, **Stage 14
+defaults**. Library campaigns drive the services' own `DbService` classes (kit and Auth). Where a campaign lowers a server-side bound to
+1 s, it is only to avoid waiting 30 s / 60 s on each of 20 iterations; the defaults were read back from the server (`statement_timeout`
+30 s, `idle_in_transaction_session_timeout` 1 min) in every run. Timing caveat: an editor extension (Console Ninja) had patched
+`node_modules/@nestjs/core` on this machine and runs inside every Nest process (not present in CI or images); it does not affect
+correctness results.
+
+**Finding (FAIL, I9): a query on an already-established connection is not bounded.** When the server stops answering after it has
+accepted a query, nothing in the client ends the wait. `statement_timeout` is enforced by the server (which is not answering),
+`DB_CONNECTION_TIMEOUT_MS` covers only acquiring or opening a connection, and neither `pg` client (kit or Auth) sets a client-side
+`query_timeout` or TCP keepalive. Evidence: a one-direction network stall held a `SELECT 1` for the whole 45 s observation (3/3 runs); a
+`docker pause` of the database (the host frozen, its kernel still accepting TCP) held it for the whole 40 s freeze, and it returned
+only after the unpause (41.3 s). During that freeze billing-service's relay and dispatcher, which log a failure every 1–2 s in a
+refused-connection outage, logged **nothing**: their passes were silently stuck, each holding a pool client, while `/ready` correctly
+answered 503 (2.0 s) and `/health` 200. With a fault that never clears (a host that dies after acknowledging a query, a partition), the
+wait, the held client and the stuck worker would last until the process restarts; `pool.end()` at shutdown would wait for that client
+too. New connections, readiness and every other path are bounded (below). Not fixed here: it needs a production change (see
+section 16).
+
+| Campaign | Fault | Runs | Observed | Result |
+|---|---|---|---|---|
+| Control | none | 1 × (50 + 50 + 200 samples) | ready 679 ms after start; `/health` p50 0.7 ms; `/ready` p50 56 ms; `SELECT 1` p50 0.13 ms; 4 idle sessions; 0 warn/error | PASS (reference) |
+| A. Pool saturation curve | 1, 5, 9, 10, 11, 15, 20 callers holding 6 s | 3 per point | exactly `min(c, 10)` succeed; the `c − 10` others fail at **5.00 s** (`kind=db_connect_timeout`); server sessions never > 10; `SELECT 1` right after: ok; pool back to 10 idle / 0 waiting | PASS |
+| A. Queued callers | 11 and 20 callers holding 2 s | 1 each | all succeed; the queued ones after ~4.0 s (one hold + wait) | PASS |
+| A. Leak check | 20 × (15 slow queries + 12 rolled-back transactions) on one pool | 20 | pool 10/10/0 and 10 server sessions after every round; 0 idle-in-transaction; no growth | PASS |
+| B. Statement timeout | `pg_sleep(3)`, bound 1 s (default 30 s verified) | 20 | cancelled at 1.00 s [1.00–1.01], `57014`, `db_statement_timeout`; next query ok | PASS |
+| B. …inside a transaction | insert, then slow statement | 20 | 0 partial commits; next transaction commits | PASS |
+| C. Idle in transaction + lock | A holds a row lock and idles, bound 1 s (default 1 min verified) | 20 | A ended by the server, lock released 1.01 s [1.00–1.04] after A's last statement, B proceeds; A's write never commits (final value exactly 20 × B); no crash; broken client destroyed; pool usable | PASS |
+| Lock contention | B updates a row A holds, statement bound 1 s | 20 | B cancelled at 1.00 s (`57014`): lock waits count toward `statement_timeout` (no `lock_timeout` set); all later updates applied exactly | PASS |
+| D. Unavailable at startup | port closed at start, restored later | 3 × 4 services | every service starts and stays live (`/health` 200), `/ready` 503; recovers **without restart** 14–68 ms after the database returns | PASS |
+| E/L. Runtime outage, repeated | connection cut 10 s, restored; 5 cycles | billing 5, auth 5 | `/ready` 503 within 5–64 ms of the cut; 200 again 14–67 ms after restore, every cycle; `/health` 200; sessions back to 2; logs `readiness_check_failed` once per check, `…recovered` once; `error=Error code=ECONNREFUSED kind=network_unreachable` with `localhost` (no `AggregateError`); no credential in any line | PASS |
+| F. Mid-query disconnect | connection cut during `pg_sleep(2)` | 20 | `kind=db_connection_lost`; no crash; the next 15 queries all ok (no poisoned client) | PASS |
+| F. Mid-transaction disconnect | cut after 2 inserts, before COMMIT | 20 | 0 partial rows; fresh transaction commits | PASS |
+| G. Stall, new connection | listener accepts, never answers | 5 | fails at **5.00 s** (`db_connect_timeout`); readiness 503 at 2.0 s | PASS |
+| G. Stall, established connection | response path stalled / database frozen | 3 + 1 | **no bound**: waited the whole fault (45 s, 40 s) | **FAIL (I9)** |
+| H. Readiness under exhaustion | 10 of 10 clients held, real Nest app | 20 | `/ready` 503 at 2.01 s [2.00–2.02]; `/health` 200 (4 ms); `/ready` 200 again 8 ms after release | PASS |
+| Auth `DbService` | statement 1 s; exhaustion; refused | 10 / 10 / 1 | `57014` at 1.00 s; Auth readiness 503 at **1.50 s**; `/auth/health`'s `SELECT 1` fails at **5.0 s** (no wrapper: bounded only by the pool); refused → `ECONNREFUSED`, 8 ms | PASS |
+| Relay connection hold (DB side) | publish takes 5 s | 1 and 3 relays | each relay holds **one** client, idle in transaction, for the publish; 3 relays → 3 | PASS (≤ 1 client per relay) |
+
+**Connection accounting** (peak under 80 concurrent `/ready` per process; pg-pool closes idle clients after 10 s):
+
+| Scenario | Processes | Configured max | Peak server sessions | After burst | After 12 s idle |
+|---|---|---|---|---|---|
+| Auth + Organization + Billing + Payment | 4 | 40 | 40 (10 per database) | 40 | 4 |
+| billing × 1 | 1 | 10 | 10 | 10 | 2 |
+| billing × 2 | 2 | 20 | 20 | 20 | 4 |
+| billing × 3 | 3 | 30 | 30 | 30 | 3 |
+
+Demand is exactly `processes × DB_POOL_MAX` at peak. On a 100-connection server (97 usable) that leaves room for 9 processes at the
+default, minus migration runners and CLIs.
+
+**Timeouts observed** (median [range]):
+
+| Failure | Configured bound | Observed | Code / kind | Recovered |
+|---|---|---|---|---|
+| Pool acquisition | 5000 ms | 5001 ms [5000.5–5001.6] | `db_connect_timeout` | yes |
+| New connection, stalled server | 5000 ms | 5001 ms [5000.9–5006.1] | `db_connect_timeout` | yes |
+| Statement | 1000 ms (test) / 30 s default | 1002 ms [1000.9–1013.8] | `57014` `db_statement_timeout` | yes |
+| Idle in transaction | 1000 ms (test) / 60 s default | lock free after 1006 ms [1002–1040] | reported as `db_connection_lost` | yes |
+| Readiness, pool exhausted | 2000 ms (Auth 1500) | 2006 ms [2002–2017] (Auth 1501) | check name only | yes, 8 ms after release |
+| Query on established connection, stalled | **none** | the whole fault (40–45 s) | – | only when the fault clears |
+
+**Side measurements.** Log volume during a refused-connection outage: billing 1.4 warn/s + 0.5 error/s (`outbox_relay_pass_failure`
+every 1 s, `payment_dispatch_pass_failure` every 2 s), Auth only the four transition lines. RSS rose across outage cycles (billing
+156 → 185 MB over 5, Auth 185 → 199 MB over 5) and was still rising slowly: INCONCLUSIVE over this few cycles (heap warm-up or a
+leak); a longer soak belongs to 15.5/15.8. CPU during an outage: 5–11 % of one core.
+
+**Carried forward:** 15.3: the relay holds its transaction open during a slow publish (1 client per relay, confirmed). 15.5: a stuck
+query also blocks `pool.end()` at shutdown. 15.6: Auth rate-limits `/health` and `/ready` (probes faster than about 1 per second from one
+address are answered 429). 15.7: log volume above; an idle-in-transaction termination is logged as `db_connection_lost`, not
+`db_idle_in_transaction_timeout` (the 25P03 is captured but the thrown error is generic). 15.8 tuning candidates (no change made):
+`/auth/health` bound 5 s equals the compose healthcheck timeout (5 s); the `/ready` broker check's per-probe connection (about 54 ms);
+pool size against `max_connections` per deployment; whether a `lock_timeout` shorter than `statement_timeout` is wanted.
+
+### 13.2.1 Corrective patch for I9 (15.2)
+
+The failure above is kept as found. This is the correction and its evidence.
+
+**Root cause, confirmed in the installed `pg` 8.23.0 / `pg-pool` 3.14.0 source and by experiment.** `connectionTimeoutMillis` bounds only
+acquiring a pooled client and opening a connection. `statement_timeout` and `idle_in_transaction_session_timeout` are session settings
+enforced by PostgreSQL: a silent server enforces nothing. `query_timeout` (default off) is the only client-side bound on waiting for an
+answer, and neither `DbService` set it. `keepAlive` (default off) only asks the OS to probe an idle socket; Node exposes no interval or
+count, so detection takes the kernel's defaults (minutes), and a socket that stays up (a proxy, a frozen host whose kernel still answers)
+never fails a probe at all.
+
+**What `query_timeout` does, and does not do (experiments against a frozen server, bound 2 s).** It rejects the caller with
+`Error('Query read timeout')` (no code) at the bound. It sends nothing to the server and cancels nothing there. If the query was already
+sent, the connection stays waiting for that answer and later queries queue behind it. `pool.query` releases the client with the error, so
+pg-pool destroys it (pool back to 0 clients, the next query fine). **Inside a transaction it was unsafe with the existing `tx()`:** the
+timed-out write left the transaction open, the `ROLLBACK` queued behind the silent statement and was dropped when it timed out too, the
+client went back to the pool as idle, and the next, unrelated caller's transaction committed **its own row and both "failed" rows**
+(A, B and C all present). A client-side deadline alone would have turned a hang into a silent wrong commit.
+
+**Design (production change, narrow).**
+
+- `DB_QUERY_TIMEOUT_MS`, beside the other DB limits, in the kit's `loadDbRuntimeConfig` and in Auth's configuration: default
+  `DB_STATEMENT_TIMEOUT_MS` + 5000 (35000), bounds 1000–660000, and it must be **greater** than `DB_STATEMENT_TIMEOUT_MS` (refused at
+  startup otherwise), so a slow statement is still cancelled by the server first and the client deadline is only the backstop. The 5 s
+  margin: server cancellation reached the client 1–14 ms after the bound here, and 5 s is the repository's bound for waiting on a peer
+  (connection, broker confirm, Payment and Auth calls).
+- Both `DbService`s pass it to the pool as `query_timeout`; constructed directly without it, they derive the same default.
+- Both `tx()`s treat a client-side timeout as a broken connection: no `ROLLBACK` (it would only queue behind the silent statement), the
+  client is released with the error, so pg-pool destroys it (`pg` 8.23 force-closes a socket with a query in flight). Closing the
+  connection ends the session; PostgreSQL rolls the open transaction back. A timeout on `COMMIT` itself is ambiguous (the server may
+  have committed), exactly like a connection lost during `COMMIT`: the existing idempotency and at-least-once rules cover it.
+- `describeFailure` recognises it as `kind=db_query_timeout`, distinct from `db_statement_timeout`, `db_connect_timeout` and
+  `network_unreachable`. `nawara-check-outbox-lag` gets the same deadline (35 s). The migration runner stays unbounded on purpose (a long
+  DDL is legitimate and an operator watches it).
+- **Not adopted:** TCP keepalive. The pool closes idle clients after 10 s, before any keepalive probe; a checked-out client is bounded by
+  the query deadline; and the probe cadence is kernel-dependent. It adds nothing deterministic here.
+
+**Tests.** Configuration (kit and Auth): default, derived default, minimum, maximum, zero, negative, fractional, non-numeric, and the
+ordering rule. `failure.spec`: the classification, and the exact `'Query read timeout'` text pinned against the installed `pg`.
+`query-deadline.int-spec` (kit, real PostgreSQL, stalled connection): negative control (a 600 s deadline stays pending past 3 s and
+returns only when the fault clears); a read fails at the bound without the fault being removed, the client destroyed, the pool
+recovered; a timed-out transaction is **not** committed by the next borrower and leaves no idle-in-transaction session; shutdown is not
+held; direct construction is bounded. Reverting the `tx()` change makes the transaction test fail. `db-query-deadline.e2e-spec` (Auth's
+own `DbService`): the same read, transaction and default checks.
+
+**Before / after** (same campaigns, same machine, same throwaway server):
+
+| Experiment | Before | After |
+|---|---|---|
+| Established connection, response path stalled (3 runs) | still pending at 45 s | fails at 35.00 s [35.00–35.00], `db_query_timeout`; the connection works after the fault clears |
+| Database frozen 40 s (`docker pause`), established query | returned after the unpause, 41.2 s | fails at 35.0 s, during the freeze |
+| Billing workers during the freeze (defaults) | silent for 40 s | `outbox_relay_pass_failure` and `payment_dispatch_pass_failure` (`db_query_timeout`) at ~35 s; no warn/error once the database is back |
+| Same, test bounds (statement 1 s, deadline 3 s) | – | first worker failure at 3.8 s, 14 visible failures during the freeze, clean afterwards |
+| `/ready` / `/health` during the freeze | 503 at 2.0 s / 200 | unchanged: 503 at 2.0 s / 200 |
+| SIGTERM with the database frozen (defaults) | **still running at 60 s** (`pool.end()` held by the stuck clients) | exits at 33.4 s: four 5 s drain timeouts, then the stuck passes fail at the deadline |
+| Same, test bounds | – | exits at 1.4 s |
+
+**Full 15.2 matrix re-run after the patch: no regression.** Pool saturation (exactly 10 succeed, the rest fail at 5.00 s; leak check
+constant at 10 sessions), statement timeout outside and inside transactions (0 partial commits), idle-transaction kill and lock release
+(1.01 s), lock contention, mid-query and mid-transaction disconnect (0 partial rows, no poisoned client), new-connection stall (5.00 s),
+readiness under exhaustion (503 at 2.01 s, `/health` 200), startup with the database down (all four recover without restart),
+5 outage cycles each for Billing and Auth (`error=Error code=ECONNREFUSED kind=network_unreachable`, no `AggregateError`, no
+credential), Auth library scenarios, connection accounting (exactly processes × 10), relay hold (1 client per relay); 0 uncaught
+exceptions. The RSS creep across outage cycles was seen again (billing 148 → 189 MB, Auth 185 → 199 MB over 5): still INCONCLUSIVE,
+for the 15.5/15.8 soak.
+
+**For 15.5:** with the defaults a shutdown during a frozen database now ends at about 33 s, which is still past Docker's 10 s stop grace
+(the process would be killed at 10 s; no work is lost, section 13.2). The drains remain sequential and each worker is waited for twice.
 
 ## 14. Experiment report template
 
@@ -327,6 +481,7 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | Decision | Needed by | Owner |
 |---|---|---|
 | F2: required checks / branch protection on `main` (an experimental change could merge without CI) | before 15.2 changes land | repository admin |
+| ~~I9 remediation (15.2 FAIL)~~ **resolved** by the corrective patch: client-side `DB_QUERY_TIMEOUT_MS` in the kit and in Auth, timed-out clients destroyed (section 13.2.1); TCP keepalive assessed and not adopted | – | – |
 | Acceptable recovery time after a dependency outage | 15.2 / 15.3 result classification | SRE / product |
 | Acceptable shutdown time and the stop grace to configure | 15.5 | SRE |
 | Acceptable AttemptResolver provider-call amplification | 15.4 | product (provider cost / rate limits) |

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS } from '@nawara/service-kit';
 
 /**
  * All configuration and ALL secrets enter the service through this file, once, at startup.
@@ -71,9 +72,10 @@ export interface AppConfig {
   /**
    * Database pool and session limits (Stage 14.4). Same names, defaults and bounds as the service-kit's `loadDbRuntimeConfig`:
    * DB_POOL_MAX (10, 1-100), DB_CONNECTION_TIMEOUT_MS (5000, 100-60000), DB_STATEMENT_TIMEOUT_MS (30000, 1000-600000),
-   * DB_IDLE_IN_TRANSACTION_TIMEOUT_MS (60000, 1000-3600000). Every value is bounded; none may be "infinite".
+   * DB_IDLE_IN_TRANSACTION_TIMEOUT_MS (60000, 1000-3600000), and (Stage 15.2) DB_QUERY_TIMEOUT_MS, the client-side deadline for a query's
+   * answer (default statement timeout + 5000, 1000-660000, must exceed DB_STATEMENT_TIMEOUT_MS). Every value is bounded; none may be "infinite".
    */
-  db: { poolMax: number; connectionTimeoutMs: number; statementTimeoutMs: number; idleInTransactionTimeoutMs: number };
+  db: { poolMax: number; connectionTimeoutMs: number; statementTimeoutMs: number; idleInTransactionTimeoutMs: number; queryTimeoutMs: number };
   /**
    * Fire-and-forget event publishing (ADR-0018). `AUTH_EVENTS=off` disables it (tests, runs without a broker; the production
    * deploy sets it off today). When enabled, `rabbitmqUrl` is set: production requires an explicit `RABBITMQ_URL`; only
@@ -256,6 +258,10 @@ export function loadConfig(
     throw new ConfigError('SWAGGER_PASSWORD must be at least 16 characters');
   }
 
+  const statementTimeoutMs = int(env, 'DB_STATEMENT_TIMEOUT_MS', 30_000, 1_000, 600_000);
+  const queryTimeoutMs = int(env, 'DB_QUERY_TIMEOUT_MS', statementTimeoutMs + DB_QUERY_TIMEOUT_MARGIN_MS, DB_QUERY_TIMEOUT_BOUNDS.min, DB_QUERY_TIMEOUT_BOUNDS.max);
+  if (queryTimeoutMs <= statementTimeoutMs) throw new ConfigError('DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS');
+
   return {
     env: nodeEnv,
     port: int(env, 'PORT', 3000, 1, 65_535),
@@ -263,8 +269,9 @@ export function loadConfig(
     db: {
       poolMax: int(env, 'DB_POOL_MAX', 10, 1, 100),
       connectionTimeoutMs: int(env, 'DB_CONNECTION_TIMEOUT_MS', 5_000, 100, 60_000),
-      statementTimeoutMs: int(env, 'DB_STATEMENT_TIMEOUT_MS', 30_000, 1_000, 600_000),
+      statementTimeoutMs,
       idleInTransactionTimeoutMs: int(env, 'DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 60_000, 1_000, 3_600_000),
+      queryTimeoutMs,
     },
     events: { enabled: eventsEnabled, rabbitmqUrl },
     trustProxy: env.TRUST_PROXY === 'true',

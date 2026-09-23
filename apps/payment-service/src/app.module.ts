@@ -25,6 +25,7 @@ const config = loadPaymentConfig();
       connectionTimeoutMs: config.db.connectionTimeoutMs,
       statementTimeoutMs: config.db.statementTimeoutMs,
       idleInTransactionTimeoutMs: config.db.idleInTransactionTimeoutMs,
+      queryTimeoutMs: config.db.queryTimeoutMs, // Stage 15.2 (I9): client-side deadline for a silent server
       migrations: { dirs: [kitMigrationsDir, fileURLToPath(new URL('../db/migrations/', import.meta.url))] },
     }),
     ServiceAuthModule.forRoot(config.serviceTokens),

@@ -144,7 +144,8 @@ the CLIs below are for targeted checks. There is no metrics or tracing stack. Ea
 search for the name, never for the prose after the `—`. A failure is described by `describeFailure(e)` as
 `error=<class> [code=<SQLSTATE|errno>] [kind=<kind>]` and NEVER by its message (messages can carry hosts, SQL values, provider
 text). Kinds: `db_statement_timeout`, `db_idle_in_transaction_timeout`, `db_connect_timeout` (pool acquisition or connect past
-`DB_CONNECTION_TIMEOUT_MS`), `db_connection_lost`, `db_unavailable`, `db_auth_failed`, `db_serialization_failure`, `db_deadlock`,
+`DB_CONNECTION_TIMEOUT_MS`), `db_query_timeout` (no answer within `DB_QUERY_TIMEOUT_MS` from a silent server or network; the
+connection is destroyed), `db_connection_lost`, `db_unavailable`, `db_auth_failed`, `db_serialization_failure`, `db_deadlock`,
 `broker_confirm_timeout`, `network_unreachable`.
 
 | Signal | Level | Emitted by | Key fields |

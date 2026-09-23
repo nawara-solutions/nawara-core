@@ -123,11 +123,11 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
 
 describe('database runtime limits are validated (Stage 14.4)', () => {
   it('defaults: pool 10, connection 5 s, statement 30 s, idle in transaction 60 s', () => {
-    expect(loadConfig(good()).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000 });
+    expect(loadConfig(good()).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000, queryTimeoutMs: 35000 });
   });
   it('accepts values inside the bounds', () => {
     const c = loadConfig({ ...good(), DB_POOL_MAX: '20', DB_CONNECTION_TIMEOUT_MS: '2000', DB_STATEMENT_TIMEOUT_MS: '15000', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: '120000' });
-    expect(c.db).toEqual({ poolMax: 20, connectionTimeoutMs: 2000, statementTimeoutMs: 15000, idleInTransactionTimeoutMs: 120000 });
+    expect(c.db).toEqual({ poolMax: 20, connectionTimeoutMs: 2000, statementTimeoutMs: 15000, idleInTransactionTimeoutMs: 120000, queryTimeoutMs: 20000 });
   });
   it.each([
     ['DB_POOL_MAX', '0'], ['DB_POOL_MAX', '101'], ['DB_POOL_MAX', 'ten'],
@@ -137,4 +137,25 @@ describe('database runtime limits are validated (Stage 14.4)', () => {
   ])('refuses %s=%s (zero, negative, fractional, non-numeric or unbounded values)', (name, value) => {
     expect(() => loadConfig({ ...good(), [name]: value })).toThrow(new RegExp(name));
   });
+});
+
+describe('client-side query deadline, same contract as the service-kit (Stage 15.2, I9)', () => {
+  const db = (env: Record<string, string>) => loadConfig({ ...good(), ...env }).db;
+  it('defaults to the statement timeout + 5 s, following a changed statement timeout', () => {
+    expect(db({}).queryTimeoutMs).toBe(35000);
+    expect(db({ DB_STATEMENT_TIMEOUT_MS: '1000' }).queryTimeoutMs).toBe(6000);
+  });
+  it('accepts an explicit value above the statement timeout, up to the bound', () => {
+    expect(db({ DB_QUERY_TIMEOUT_MS: '30001' }).queryTimeoutMs).toBe(30001);
+    expect(db({ DB_STATEMENT_TIMEOUT_MS: '600000', DB_QUERY_TIMEOUT_MS: '660000' }).queryTimeoutMs).toBe(660000);
+  });
+  it.each(['0', '-1', '999', '660001', '1.5', 'ten'])('refuses DB_QUERY_TIMEOUT_MS=%s', (value) => {
+    expect(() => db({ DB_QUERY_TIMEOUT_MS: value })).toThrow(/DB_QUERY_TIMEOUT_MS must be an integer between 1000 and 660000/);
+  });
+  it.each([[{ DB_QUERY_TIMEOUT_MS: '30000' }], [{ DB_STATEMENT_TIMEOUT_MS: '60000', DB_QUERY_TIMEOUT_MS: '35000' }]])(
+    'refuses a deadline that is not above the statement timeout: %o',
+    (env) => {
+      expect(() => db(env)).toThrow(/DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS/);
+    },
+  );
 });

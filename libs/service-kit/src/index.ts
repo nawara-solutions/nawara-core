@@ -1,6 +1,6 @@
 // @nawara/service-kit: technical foundations shared by Nawara Core services. NO business logic lives here.
 export { ConfigError, EnvReader, type FileReader } from './config/config.js';
-export { loadBaseConfig, loadDbRuntimeConfig, parseCorsOrigins, NODE_ENVS, LOG_LEVELS, type BaseConfig, type DbRuntimeConfig, type NodeEnv, type LogLevel } from './config/base-config.js';
+export { loadBaseConfig, loadDbRuntimeConfig, parseCorsOrigins, NODE_ENVS, LOG_LEVELS, DB_QUERY_TIMEOUT_MARGIN_MS, DB_QUERY_TIMEOUT_BOUNDS, type BaseConfig, type DbRuntimeConfig, type NodeEnv, type LogLevel } from './config/base-config.js';
 
 export { requestContextMiddleware, getRequestContext, runWithRequestContext, correlationHeaders, REQUEST_ID_HEADER, CORRELATION_ID_HEADER, type RequestContext } from './context/request-context.js';
 
@@ -21,7 +21,7 @@ export { HttpAuthClient, type AuthClient, type AuthIdentity, type AuthMembership
 export { ServiceOrUserGuard, RequestCaller, AUTH_CLIENT, type Caller, type CallerRequest } from './service-auth/service-or-user.guard.js';
 
 export { DbModule } from './db/db.module.js';
-export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, type DbOptions, type Queryable, type IsolationLevel } from './db/db.service.js';
+export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, isQueryTimeout, type DbOptions, type Queryable, type IsolationLevel } from './db/db.service.js';
 export { runMigrations, pendingMigrations, pendingOf, listMigrationFiles, MigrationError, MIGRATIONS_TABLE, type MigrationOptions, type MigrationFile, type MigrationResult } from './db/migrations.js';
 export { kitMigrationsDir } from './db/paths.js';
 
