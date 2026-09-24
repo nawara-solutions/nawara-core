@@ -52,13 +52,13 @@ export class SecretPurgeWorker implements OnApplicationBootstrap, OnModuleDestro
   /** One batch; returns how many secrets were purged. */
   async purgeOnce(): Promise<number> {
     const { rowCount } = await this.db.query(
-      `UPDATE notification SET "secretCiphertext" = NULL, "secretKeyId" = NULL
-        WHERE id IN (
+      `WITH due AS MATERIALIZED (
           SELECT n.id FROM notification n
            WHERE n."secretCiphertext" IS NOT NULL
              AND (n."expiresAt" <= now()
                   OR NOT EXISTS (SELECT 1 FROM notification_delivery d WHERE d."notificationId" = n.id AND d.status IN ('PENDING', 'SENDING')))
-           ORDER BY n."expiresAt" NULLS LAST, n.id LIMIT $1 FOR UPDATE SKIP LOCKED)`,
+           ORDER BY n."expiresAt" NULLS LAST, n.id LIMIT $1 FOR UPDATE SKIP LOCKED)
+       UPDATE notification SET "secretCiphertext" = NULL, "secretKeyId" = NULL FROM due WHERE notification.id = due.id`,
       [this.config.delivery.batchSize],
     );
     const purged = rowCount ?? 0;

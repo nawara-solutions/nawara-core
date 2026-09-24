@@ -30,6 +30,8 @@ export const UNREACHABLE_RABBITMQ_URL = 'amqp://nobody:nothing@127.0.0.1:1';
 export const TEST_SECRET_KEYS = `t1:${randomBytes(32).toString('base64')}`;
 /** The test request-hash key (never a real secret). */
 export const TEST_REQUEST_HASH_KEY = randomBytes(32);
+/** The test destination-limiter key (Stage 16.9; never a real secret). */
+export const TEST_DESTINATION_LIMIT_KEY = randomBytes(32);
 /** Every published template, for a test caller's default policy. */
 export const ALL_TEMPLATES = [
   'identity.contact_verification_code', 'identity.operator_confirmation_code', 'identity.operator_login_code', 'identity.owner_new_device_login',
@@ -63,6 +65,7 @@ export async function createTestApp(
     NOTIFICATION_SECRET_ACTIVE_KEY_ID: 't1',
     NOTIFICATION_DEFAULT_LOCALE: 'en',
     NOTIFICATION_REQUEST_HASH_KEY: TEST_REQUEST_HASH_KEY.toString('base64'),
+    NOTIFICATION_DESTINATION_LIMIT_KEY: TEST_DESTINATION_LIMIT_KEY.toString('base64'),
     ...(opts.tokens?.length
       ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(','), NOTIFICATION_SERVICE_POLICY: opts.policy ?? openPolicy([...new Set(opts.tokens.map((t) => t.caller))]) }
       : {}),

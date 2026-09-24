@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createHash, randomBytes } from 'node:crypto';
 import { retryDelayMs } from './backoff.js';
+import { destinationIdentity } from './destination-limiter.js';
 import { boundedCode } from './provider.js';
 import { RenderError, render, type PinnedVersion } from './renderer.js';
 import { TestProvider } from './test-provider.js';
@@ -113,5 +115,22 @@ describe('bounded provider codes', () => {
   it('keeps a bounded code, replaces anything else by the fallback (never provider text)', () => {
     expect(boundedCode('test_rejected', 'f')).toBe('test_rejected');
     for (const bad of ['Invalid number +216...', '', 'A', '1abc', 'x'.repeat(65), undefined, 42, { a: 1 }]) expect(boundedCode(bad, 'fallback')).toBe('fallback');
+  });
+});
+
+describe('destination limiter identity (D21)', () => {
+  const key = randomBytes(32);
+  it('an HMAC under the dedicated key with domain separation: deterministic, per channel and exact destination, never a plain hash', () => {
+    const id = destinationIdentity(key, 'SMS', '+21698000001');
+    expect(id).toMatch(/^[0-9a-f]{64}$/);
+    expect(destinationIdentity(key, 'SMS', '+21698000001')).toBe(id);
+    expect(destinationIdentity(randomBytes(32), 'SMS', '+21698000001')).not.toBe(id);
+    expect(destinationIdentity(key, 'EMAIL', '+21698000001')).not.toBe(id);
+    for (const [a, b] of [['a.b@x.test', 'ab@x.test'], ['a@x.test', 'A@x.test'], ['a@x.test', 'a+t@x.test']]) {
+      expect(destinationIdentity(key, 'EMAIL', a)).not.toBe(destinationIdentity(key, 'EMAIL', b));
+    }
+    for (const plain of ['+21698000001', 'SMS|+21698000001', 'nawara.notification.destination-limit.v1|SMS|+21698000001']) {
+      expect(createHash('sha256').update(plain).digest('hex')).not.toBe(id);
+    }
   });
 });

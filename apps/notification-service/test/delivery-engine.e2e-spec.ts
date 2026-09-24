@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DbService, generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
@@ -28,6 +28,7 @@ const BASE_ENV = {
   NOTIFICATION_WORKER_INTERVAL_MS: '60000', NOTIFICATION_LEASE_MS: String(LEASE_MS), NOTIFICATION_PROVIDER_TIMEOUT_MS: String(TIMEOUT_MS),
   NOTIFICATION_RETRY_BASE_MS: '1000', NOTIFICATION_RETRY_CEILING_MS: '4000', NOTIFICATION_MAX_ATTEMPTS: '3', NOTIFICATION_WORKER_CONCURRENCY: '3',
   NOTIFICATION_WORKER_BATCH_SIZE: '20', DB_POOL_MAX: '10',
+  NOTIFICATION_RATE_DESTINATION_LIMIT: '100000', // these tests reuse one destination; the limiter has its own suite
 };
 const future = (ms: number) => new Date(Date.now() + ms).toISOString();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -761,7 +762,11 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
       expect(calls()).toBe(1);
       const keys = await sql<{ key: string }>(db.url, `SELECT key FROM kit_rate_limit WHERE bucket = 'notif_caller_template'`);
       expect(JSON.stringify(keys)).not.toMatch(/@|\+216/); // caller + template only: no destination-derived key (D21)
-      expect(await sql(db.url, `SELECT 1 FROM kit_rate_limit WHERE bucket = 'notif_dest'`)).toEqual([]);
+      // notif_dest (Stage 16.9) exists, keyed by an HMAC: never a plain SHA-256 of the destination (the limiter suite covers it fully)
+      const plain = [EMAIL, PHONE].flatMap((d) => [`EMAIL|${d}`, `SMS|${d}`, d]).map((d) => createHash('sha256').update(`notif_dest:${d}`).digest('hex'));
+      const dest = await sql<{ key: string }>(db.url, `SELECT key FROM kit_rate_limit WHERE bucket = 'notif_dest'`);
+      expect(dest.length).toBeGreaterThan(0);
+      expect(dest.filter((k) => plain.includes(k.key))).toEqual([]);
     });
   });
 

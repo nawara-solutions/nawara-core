@@ -14,7 +14,8 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 [Stage 16.5 record](../../docs/architecture/stage-16/stage-16-5-notification-event-intake.md),
 [Stage 16.6 record](../../docs/architecture/stage-16/stage-16-6-notification-send-api.md),
 [Stage 16.7 record](../../docs/architecture/stage-16/stage-16-7-notification-delivery-engine.md),
-[Stage 16.8 record](../../docs/architecture/stage-16/stage-16-8-email-sms-providers.md).
+[Stage 16.8 record](../../docs/architecture/stage-16/stage-16-8-email-sms-providers.md),
+[Stage 16.9 record](../../docs/architecture/stage-16/stage-16-9-security-operations.md).
 
 ## What exists (16.3)
 
@@ -111,6 +112,18 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 - **Credentials** only from the environment or `*_FILE`: validated at startup for the provider selected, never logged, never in the
   image. Plain-http provider URLs (for local stubs) are refused in production.
 
+## Security and operations (16.9)
+
+- **Destination limit (D21):** at most `NOTIFICATION_RATE_DESTINATION_LIMIT` sends per channel + destination per window, across
+  callers; the identity is an HMAC under a dedicated key, so the limiter table holds no enumerable hash. Over it → `FAILED rate_limited`.
+- **Key rotation:** request hash (current + ≤ 2 previous), limiter key (current + previous), secret ring (add, activate, retire when
+  `npm run secret-keys -w notification-service -- retire-check <id>` exits 0). Production refuses published development keys and
+  patterned keys, and any key reused across purposes.
+- **Signals:** `notification_ops_snapshot` (backlog), `notification_secret_key_missing`, provider fault lines; alert rules and
+  runbooks: [docs/runbooks/notification-service.md](../../docs/runbooks/notification-service.md).
+- **Retention:** expired rate-limit windows are deleted in bounded batches; notification history is kept (retention durations are an
+  owner / legal decision, D10).
+
 ## Configuration
 
 | Variable | Default | Bounds | Notes |
@@ -129,7 +142,13 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 | `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | 5000, 10 | 100–60000, 5–60 | the Core broker bounds |
 | `NOTIFICATION_SECRET_KEYS`, `NOTIFICATION_SECRET_ACTIVE_KEY_ID` | **required** | `id:base64(32 bytes)[,…]`, distinct; the active id must exist | secret: seals one-time codes; rotation = add, activate, retire once unused |
 | `NOTIFICATION_DEFAULT_LOCALE` | **required** | BCP 47 | a product input (D7); every mapped template must be published in it, or the intake does not start |
-| `NOTIFICATION_REQUEST_HASH_KEY` | **required** | base64, ≥ 32 bytes, differs from the secret keys | secret: the HMAC key of the API request hash; one key (rotation: 16.9) |
+| `NOTIFICATION_REQUEST_HASH_KEY` | **required** | base64, ≥ 32 bytes, distinct from every other key | secret: the HMAC key of the API request hash (new requests) |
+| `NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS` | empty | ≤ 2 base64 keys, comma-separated | secret: still accepted when comparing a retry (rotation window) |
+| `NOTIFICATION_DESTINATION_LIMIT_KEY` | required with a provider | base64, ≥ 32 bytes, distinct from every other key | secret: HMAC key of the `notif_dest` identity (D21) |
+| `NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY` | unset | one base64 key | secret: counted too during a limiter-key rotation (one window) |
+| `NOTIFICATION_RATE_DESTINATION_LIMIT`, `NOTIFICATION_RATE_DESTINATION_WINDOW_SEC` | 30, 3600 | 1–100000, 60–86400 | sends per channel + destination per window (`notif_dest`) |
+| `NOTIFICATION_OPS_REPORT_INTERVAL_MS` | 60000 | 10000–3600000 | the `notification_ops_snapshot` line |
+| `NOTIFICATION_RETENTION_INTERVAL_MS`, `NOTIFICATION_RETENTION_BATCH_SIZE` | 60000, 500 | 10000–3600000, 1–10000 | deletion of expired rate-limit windows |
 | `NOTIFICATION_SERVICE_POLICY` | empty | `{"callers": {…}}` | required once `SERVICE_TOKENS` registers a caller |
 | `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` | 2592000 | 60–31536000 | how far ahead `scheduledAt` may be |
 | `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` | 600 | 1–100000 | per caller (`429 rate_limited`) |
@@ -179,4 +198,5 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 | 16.6 ✅ | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; the keyed request hash; OpenAPI at `/notification/docs` |
 | 16.7 ✅ | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer, the test provider and the secret purge |
 | 16.8 ✅ | the Resend email and Twilio SMS adapters (direct HTTPS), per-channel provider selection, sanitized classification |
-| 16.9 / 16.10 | security, observability and operations; certification |
+| 16.9 ✅ | HMAC destination limiter (D21), key rotation, secret-key retirement check, operational snapshot, limiter retention, runbooks |
+| 16.10 | the Notification-wide focused certification |

@@ -6,7 +6,7 @@ import type { NotificationConfig } from '../config/notification-config.js';
 import { isValidDestination } from '../intake/destination.js';
 import { IntentCore, type PublishedVersion } from '../intake/intent-core.js';
 import { validateVariableValues } from '../templates/variables.js';
-import { requestHash, sameRequestHash } from './request-hash.js';
+import { matchesRequestHash, requestHash } from './request-hash.js';
 import { IDEMPOTENCY_KEY, parseSendRequest } from './send-request.js';
 
 const fail = (status: number, code: string, message: string | string[]): never => {
@@ -71,7 +71,7 @@ export class NotificationApiService {
 
     const hash = requestHash(this.config.requestHashKey, body);
     const existing = await this.findApiIntent(this.db, caller, idempotencyKey!);
-    if (existing) return this.replayOrConflict(caller, existing, hash);
+    if (existing) return this.replayOrConflict(caller, existing, body);
 
     if (new Set(req.channels.map((c) => c.channel)).size !== req.channels.length) return this.refuse(caller, 422, 'duplicate_channel', 'A channel is listed twice: one delivery per channel.');
     const now = Date.now();
@@ -121,7 +121,7 @@ export class NotificationApiService {
     if (!created) {
       const winner = await this.findApiIntent(this.db, caller, idempotencyKey!);
       if (!winner) throw new Error('idempotency key vanished after a conflicting insert'); // cannot happen: rows are never deleted by the API
-      return this.replayOrConflict(caller, winner, hash);
+      return this.replayOrConflict(caller, winner, body);
     }
     this.log.log(`notification_api_accepted caller=${caller} notificationId=${notificationId} template=${req.template} channels=${deliveries.map((d) => d.channel).join(',')} scheduled=${req.scheduledAt ? 'yes' : 'no'}`);
     return { id: notificationId, status: 'accepted', deliveries: deliveries.map((d) => ({ id: d.id, channel: d.channel, status: 'PENDING' })) };
@@ -168,8 +168,8 @@ export class NotificationApiService {
   }
 
   /** The original `202` for the same request (rebuilt from the rows: always `accepted` / PENDING, as first answered), else a conflict. */
-  private async replayOrConflict(caller: string, existing: { id: string; requestHash: string }, hash: string): Promise<AcceptedResponse> {
-    if (!sameRequestHash(existing.requestHash, hash)) {
+  private async replayOrConflict(caller: string, existing: { id: string; requestHash: string }, body: unknown): Promise<AcceptedResponse> {
+    if (!matchesRequestHash(existing.requestHash, [this.config.requestHashKey, ...this.config.requestHashPreviousKeys], body)) {
       return this.refuse(caller, 422, 'idempotency_key_reused', 'This Idempotency-Key was already used with a different request.');
     }
     const { rows } = await this.db.query<{ id: string; channel: string }>(`SELECT id, channel FROM notification_delivery WHERE "notificationId" = $1 ORDER BY channel`, [existing.id]);

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig,
   type ServiceTokenEntry,
@@ -56,6 +57,15 @@ export interface NotificationConfig extends BaseConfig {
    * request hash. An unkeyed hash would let anyone reading the database brute-force a one-time code from it. Never stored, never logged.
    */
   requestHashKey: Buffer;
+  /**
+   * `NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS` (Stage 16.9; optional, comma-separated, at most 2): retired request-hash keys still
+   * ACCEPTED when a retry is compared with a stored hash, never used to hash a new request. Kept for the callers' retry window, then removed.
+   */
+  requestHashPreviousKeys: Buffer[];
+  /** `NOTIFICATION_OPS_REPORT_INTERVAL_MS` (Stage 16.9; default 60000, 10000-3600000): the operational snapshot log (`notification_ops_snapshot`). */
+  opsReportIntervalMs: number;
+  /** Stage 16.9 retention of technical state (D10: only what is frozen): expired rate-limit windows, in bounded batches. */
+  retention: { intervalMs: number; batchSize: number };
   /** `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` (SDD §9.1; default 2592000 = 30 days, 60-31536000): how far ahead `scheduledAt` may be. */
   maxScheduleAheadSec: number;
   /** `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` (SDD §11.3 `notif_api_caller`; default 600, 1-100000): accepted API calls per caller per minute. */
@@ -77,6 +87,11 @@ export interface DeliveryConfig {
   resend?: ResendConfig;
   /** Present exactly when `smsProvider = twilio`. */
   twilio?: TwilioConfig;
+  /**
+   * Stage 16.9, D21 (`notif_dest`, SDD §11.3): at most `limit` sends per channel + destination per `windowSec`, keyed by an HMAC of the
+   * destination under a DEDICATED key, never a plain hash. Present exactly when a provider is selected (the worker runs).
+   */
+  destinationLimit?: DestinationLimitConfig;
   /** `NOTIFICATION_WORKER_INTERVAL_MS` (1000, 100-60000): the pause between two passes. */
   intervalMs: number;
   /** `NOTIFICATION_WORKER_BATCH_SIZE` (20, 1-500): deliveries claimed per pass. */
@@ -98,6 +113,17 @@ export interface DeliveryConfig {
   callerTemplateLimitPerMinute: number;
   /** The worker's drain at shutdown: the provider timeout plus 2 s, so an in-flight send can finish (SDD §8.2). */
   drainTimeoutMs: number;
+}
+
+export interface DestinationLimitConfig {
+  /** `NOTIFICATION_DESTINATION_LIMIT_KEY` (base64, >= 32 bytes; its own purpose, distinct from every other key). */
+  key: Buffer;
+  /** `NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY` (optional): during a rotation, the previous key's buckets keep counting too. */
+  previousKey?: Buffer;
+  /** `NOTIFICATION_RATE_DESTINATION_LIMIT` (30, 1-100000). */
+  limit: number;
+  /** `NOTIFICATION_RATE_DESTINATION_WINDOW_SEC` (3600, 60-86400). */
+  windowSec: number;
 }
 
 /** Stage 15.5: the container stop grace every Core service is given; SDD §8.2 bounds the provider timeout by it. */
@@ -175,8 +201,18 @@ function deliveryConfig(reader: EnvReader, base: BaseConfig): DeliveryConfig {
   } catch {
     throw new ConfigError('NOTIFICATION_TIME_ZONE must be an IANA time zone such as UTC or Africa/Tunis');
   }
+  const anyProvider = selected.emailProvider !== 'none' || selected.smsProvider !== 'none';
+  // Required while a provider is selected (the worker runs); read whenever it is set (tests inject providers directly).
+  const destinationLimit: DestinationLimitConfig | undefined = anyProvider || reader.get('NOTIFICATION_DESTINATION_LIMIT_KEY') !== undefined
+    ? {
+      key: keyMaterial(reader, base, 'NOTIFICATION_DESTINATION_LIMIT_KEY'),
+      previousKey: reader.get('NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY') === undefined ? undefined : keyMaterial(reader, base, 'NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY'),
+      limit: reader.int('NOTIFICATION_RATE_DESTINATION_LIMIT', { default: 30, min: 1, max: 100_000 }),
+      windowSec: reader.int('NOTIFICATION_RATE_DESTINATION_WINDOW_SEC', { default: 3_600, min: 60, max: 86_400 }),
+    }
+    : undefined;
   return {
-    ...selected, leaseMs, providerTimeoutMs, retryBaseMs, retryCeilingMs, concurrency, timeZone,
+    ...selected, destinationLimit, leaseMs, providerTimeoutMs, retryBaseMs, retryCeilingMs, concurrency, timeZone,
     intervalMs: reader.int('NOTIFICATION_WORKER_INTERVAL_MS', { default: 1_000, min: 100, max: 60_000 }),
     batchSize: reader.int('NOTIFICATION_WORKER_BATCH_SIZE', { default: 20, min: 1, max: 500 }),
     maxAttempts: reader.int('NOTIFICATION_MAX_ATTEMPTS', { default: 5, min: 1, max: 20 }),
@@ -185,11 +221,40 @@ function deliveryConfig(reader: EnvReader, base: BaseConfig): DeliveryConfig {
   };
 }
 
+/**
+ * SHA-256 fingerprints of key material published in this repository for development (`.env.example`, Compose): refused in production.
+ * Fingerprints, not the values, so no key literal lives in the code.
+ */
+export const KNOWN_DEVELOPMENT_KEY_FINGERPRINTS = new Set<string>([
+  '7d360ae4d70b474d51887536414d75ea6e1126ce72722e16c644d306472b860d',
+  '00dc11d97b09a19e474c41199d94ee2fd5c217bb6f5a04eb25500bb9be52e98d',
+  'debb5bcc42ea2c448ca4df51179e0458ca8a319a77b585acb851baf05e241840',
+]);
+
+/**
+ * Key material for one purpose: base64 of at least 32 bytes. In production a key published for development, or one with an obviously
+ * non-random shape (fewer than 12 distinct byte values in its first 32 bytes), is refused. Never echoed.
+ */
+function checkKey(name: string, key: Buffer, base: BaseConfig): Buffer {
+  if (key.length < 32) throw new ConfigError(`${name} must be the base64 of at least 32 random bytes`);
+  if (base.isProduction) {
+    if (KNOWN_DEVELOPMENT_KEY_FINGERPRINTS.has(createHash('sha256').update(key).digest('hex'))) {
+      throw new ConfigError(`${name} is a published development key and is refused in production`);
+    }
+    if (new Set(key.subarray(0, 32)).size < 12) throw new ConfigError(`${name} does not look random and is refused in production`);
+  }
+  return key;
+}
+
+function keyMaterial(reader: EnvReader, base: BaseConfig, name: string): Buffer {
+  return checkKey(name, Buffer.from(reader.required(name), 'base64'), base);
+}
+
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
 const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
 const KEY_ID = /^[A-Za-z0-9_-]{1,32}$/;
 
-function secretKeyRing(reader: EnvReader): { keys: Map<string, Buffer>; activeKeyId: string } {
+function secretKeyRing(reader: EnvReader, base: BaseConfig): { keys: Map<string, Buffer>; activeKeyId: string } {
   const keys = new Map<string, Buffer>();
   for (const pair of reader.required('NOTIFICATION_SECRET_KEYS').split(',')) {
     const i = pair.indexOf(':');
@@ -198,7 +263,7 @@ function secretKeyRing(reader: EnvReader): { keys: Map<string, Buffer>; activeKe
     if (i < 1 || !KEY_ID.test(id) || key.length !== 32 || keys.has(id)) {
       throw new ConfigError('NOTIFICATION_SECRET_KEYS must be "id:base64(32 bytes)[,id:base64(32 bytes)]" with distinct ids');
     }
-    keys.set(id, key);
+    keys.set(id, checkKey('NOTIFICATION_SECRET_KEYS', key, base));
   }
   if (new Set([...keys.values()].map((k) => k.toString('hex'))).size !== keys.size) {
     throw new ConfigError('NOTIFICATION_SECRET_KEYS must not repeat a key');
@@ -217,11 +282,28 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
     // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
     throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
   }
-  const ring = secretKeyRing(reader);
-  const requestHashKey = Buffer.from(reader.required('NOTIFICATION_REQUEST_HASH_KEY'), 'base64');
-  if (requestHashKey.length < 32) throw new ConfigError('NOTIFICATION_REQUEST_HASH_KEY must be the base64 of at least 32 random bytes');
-  if ([...ring.keys.values()].some((k) => k.equals(requestHashKey))) {
-    throw new ConfigError('NOTIFICATION_REQUEST_HASH_KEY must differ from every NOTIFICATION_SECRET_KEYS key (one key, one purpose)');
+  const ring = secretKeyRing(reader, base);
+  const requestHashKey = keyMaterial(reader, base, 'NOTIFICATION_REQUEST_HASH_KEY');
+  const previousRaw = reader.get('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS');
+  const requestHashPreviousKeys = previousRaw === undefined ? [] : previousRaw.split(',').map((k) => checkKey('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', Buffer.from(k.trim(), 'base64'), base));
+  if (requestHashPreviousKeys.length > 2) throw new ConfigError('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS holds at most 2 keys (a bounded retirement window)');
+  const delivery = deliveryConfig(reader, base);
+  // One key, one purpose (Stage 16.9): the secret ring, the request hash and the destination limiter never share key material.
+  const purposes: Array<[string, Buffer]> = [
+    ...[...ring.keys.values()].map((k) => ['NOTIFICATION_SECRET_KEYS', k] as [string, Buffer]),
+    ['NOTIFICATION_REQUEST_HASH_KEY', requestHashKey],
+    ...requestHashPreviousKeys.map((k) => ['NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', k] as [string, Buffer]),
+    ...(delivery.destinationLimit ? [['NOTIFICATION_DESTINATION_LIMIT_KEY', delivery.destinationLimit.key] as [string, Buffer]] : []),
+    ...(delivery.destinationLimit?.previousKey ? [['NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY', delivery.destinationLimit.previousKey] as [string, Buffer]] : []),
+  ];
+  for (let i = 0; i < purposes.length; i++) {
+    for (let j = i + 1; j < purposes.length; j++) {
+      if (purposes[i][1].equals(purposes[j][1])) {
+        throw new ConfigError(purposes[i][0] === purposes[j][0]
+          ? `${purposes[i][0]} must not repeat a key`
+          : `${purposes[j][0]} must differ from ${purposes[i][0]} (one key, one purpose)`);
+      }
+    }
   }
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   const defaultLocale = reader.required('NOTIFICATION_DEFAULT_LOCALE');
@@ -238,12 +320,18 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
     defaultLocale,
     callerPolicy: NotificationCallerPolicy.parse(reader.get('NOTIFICATION_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))]),
     requestHashKey,
+    requestHashPreviousKeys,
+    opsReportIntervalMs: reader.int('NOTIFICATION_OPS_REPORT_INTERVAL_MS', { default: 60_000, min: 10_000, max: 3_600_000 }),
+    retention: {
+      intervalMs: reader.int('NOTIFICATION_RETENTION_INTERVAL_MS', { default: 60_000, min: 10_000, max: 3_600_000 }),
+      batchSize: reader.int('NOTIFICATION_RETENTION_BATCH_SIZE', { default: 500, min: 1, max: 10_000 }),
+    },
     maxScheduleAheadSec: reader.int('NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC', { default: 2_592_000, min: 60, max: 31_536_000 }),
     apiIntakeLimitPerMinute: reader.int('NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE', { default: 600, min: 1, max: 100_000 }),
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
     },
-    delivery: deliveryConfig(reader, base),
+    delivery,
   };
 }

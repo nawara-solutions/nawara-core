@@ -158,8 +158,13 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
   stop grace − `HTTP_DRAIN_TIMEOUT_MS` (so the HTTP drain must stay below 50 s at the default 10 s timeout); the worker's shutdown
   drain is the provider timeout + 2 s; `NOTIFICATION_WORKER_CONCURRENCY` < `DB_POOL_MAX`.
 - Retry: base 30 s, ceiling 30 min, 5 attempts; `NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE` 6000. The provider timeout stays 10 s
-  (lease 60 s): the adapters add about 2 ms over a local stub; live provider latency is to be measured in the sandbox smoke. The
-  destination limit (`notif_dest`) is not built: D21 open.
+  (lease 60 s): the adapters add about 2 ms over a local stub; live provider latency is to be measured in the sandbox smoke.
+- **Stage 16.9:** `notif_dest` (30 per channel + destination per hour by default) keyed by HMAC under `NOTIFICATION_DESTINATION_LIMIT_KEY`
+  (required with a provider). Key material for the secret ring, the request hash and the limiter must be pairwise distinct; production
+  refuses development keys published in `.env.example` and patterned keys. Rotation: `NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS` (≤ 2),
+  `NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY`, and `npm run secret-keys -- retire-check <id>` before removing a secret key. The full
+  enablement checklist and the runbooks: [Stage 16.9 record §13](stage-16/stage-16-9-security-operations.md),
+  [runbooks](../runbooks/notification-service.md).
 - **Before enabling production sending:** the Resend sending domain verified (SPF, DKIM; DMARC advised); a Twilio Messaging
   Service with its senders (a Tunisian alphanumeric sender ID needs registration for domestic entities above 30 000 SMS / month) and
   the destination countries enabled in Messaging Geo Permissions; Auth storing canonical E.164 (else Auth-originated SMS fail
