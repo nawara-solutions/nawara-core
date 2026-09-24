@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Test } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { JsonLogger, ReadinessRegistry, configureApp, type ServiceTokenEntry } from '@nawara/service-kit';
@@ -19,6 +21,9 @@ export interface TestApp {
  */
 export const ALL_LOGS: Record<string, unknown>[] = [];
 
+/** The filesystem store of test applications (Stage 17.4): a throwaway directory per test process, never contacted at startup. */
+export const TEST_STORAGE_ROOT = join(tmpdir(), `file-service-test-${process.pid}`);
+
 /** A database nothing listens on: for suites that exercise only the HTTP foundation (readiness then answers 503, liveness 200). */
 export const UNREACHABLE_DATABASE_URL = 'postgres://nobody:nothing@127.0.0.1:1/none';
 
@@ -36,6 +41,8 @@ export async function createTestApp(
   const config = loadFileConfig({
     NODE_ENV: 'test',
     DATABASE_URL: opts.databaseUrl ?? UNREACHABLE_DATABASE_URL,
+    FILE_STORAGE_PROVIDER: 'filesystem',
+    FILE_STORAGE_ROOT: TEST_STORAGE_ROOT,
     ...(opts.tokens?.length
       ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(','), FILE_SERVICE_POLICY: opts.policy ?? readOnlyPolicy([...new Set(opts.tokens.map((t) => t.caller))]) }
       : {}),

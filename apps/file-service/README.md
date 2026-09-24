@@ -1,15 +1,16 @@
 # file-service
 
-> **Status: foundation + persistence (Stages 17.2, 17.3).** A production-shaped service with health, readiness, service
-> authentication, the caller policy and the `file` / `file_access_ticket` schema with its repositories. **No byte path yet:** no
-> storage, no upload, download or ticket route (17.4–17.6).
+> **Status: foundation + persistence + storage port (Stages 17.2–17.4).** A production-shaped service with health, readiness, service
+> authentication, the caller policy, the `file` / `file_access_ticket` schema with its repositories, and the `StoragePort` with its
+> filesystem and S3-compatible adapters. **No byte route yet:** no upload, download or ticket route (17.5–17.6).
 
 Generic file objects for Nawara Core: products keep the business meaning and relationships (`StudentDocument.fileId`); File Service
 owns immutable bytes, generic metadata, integrity, lifecycle, storage and controlled byte access. Design:
 [ADR-0048](../../docs/adr/0048-file-service-architecture.md), [SDD](../../docs/sdd/file-service.md),
 [Stage 17.1 decisions and roadmap](../../docs/architecture/stage-17/stage-17-1-decisions-and-roadmap.md),
 [Stage 17.2 record](../../docs/architecture/stage-17/stage-17-2-service-foundation.md),
-[Stage 17.3 record](../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md).
+[Stage 17.3 record](../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md),
+[Stage 17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md).
 
 ## What exists (17.2 foundation)
 
@@ -29,6 +30,11 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 `recordDownload`, `recordUpload`, the atomic `claimUse`, issuer-scoped `revoke`, transactional `revokeAllForFile`), the storage-key
 generator and the ticket digest. The lifecycle transitions arrive with the stages that own their storage side.
 
+**Storage (17.4):** `src/storage/`: `StoragePort` (`put` / `get` / `head` / `delete`, streams only, never overwrites, idempotent
+delete, neutral `StorageError`s), `FilesystemStorage` (development and tests; refused in production) and `S3Storage` (any
+S3-compatible provider by configuration; the production provider is not chosen yet), selected once by `FILE_STORAGE_PROVIDER`. Object
+storage is never a readiness check.
+
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency (and there
 is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 
@@ -44,6 +50,10 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `SERVICE_TOKENS` | empty | `<caller>:<sha256 hex>`, ≤ 2 per caller | empty refuses every service-token call |
 | `FILE_SERVICE_POLICY` | empty | `{"callers": {…}}` | required once `SERVICE_TOKENS` registers a caller; see below |
 | `FILE_MAX_BYTES` | 26214400 (25 MiB) | 1 – 104857600 (100 MiB) | the global ceiling; every caller's `maxBytes` must be ≤ it; enforced on uploads from 17.5 |
+| `FILE_STORAGE_PROVIDER` | **required** | `filesystem`, `s3` | no default, no fallback; `filesystem` is refused in production |
+| `FILE_STORAGE_ROOT` | – (filesystem) | absolute | the development / test directory |
+| `FILE_S3_ENDPOINT`, `FILE_S3_REGION`, `FILE_S3_BUCKET`, `FILE_S3_ACCESS_KEY_ID`, `FILE_S3_SECRET_ACCESS_KEY` (`*_FILE`), `FILE_S3_FORCE_PATH_STYLE` | – (s3) | https in production | the S3-compatible store; credentials never logged |
+| `FILE_STORAGE_KEY_PREFIX`, `FILE_STORAGE_*_TIMEOUT_MS`, `FILE_STORAGE_MIN_THROUGHPUT_BYTES_PER_SECOND`, `FILE_STORAGE_MAX_ATTEMPTS` | `files`, 2 s / 30 s / 10 s, 64 KiB/s, 3 | see the [17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md) §3 | |
 
 `FILE_SERVICE_POLICY`:
 
@@ -65,7 +75,9 @@ npm run build -w @nawara/service-kit && npm run build -w file-service
 MIGRATION_DATABASE_URL=postgres://file_migrator:…@host/file npm run migrate -w file-service   # the kit baseline + the file schema
 npm run start:prod -w file-service                                                             # or: docker compose --profile db up -d file-service
 npm test -w file-service                                                                       # unit
-TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w file-service
+docker compose --profile storage-test up -d s3-test                                             # the S3-protocol TEST server (Stage 17.4)
+TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres \
+  TEST_S3_ENDPOINT=http://127.0.0.1:9000 TEST_S3_ACCESS_KEY_ID=… TEST_S3_SECRET_ACCESS_KEY=… npm run test:e2e -w file-service
 ```
 
 The production image (`apps/file-service/Dockerfile`, repo-root context) is two stages with production dependencies only; it runs as
@@ -78,7 +90,7 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 | Stage | Adds |
 |---|---|
 | 17.3 | ✅ the `file` and `file_access_ticket` tables, constraints, triggers, repositories |
-| 17.4 | the storage port, filesystem and S3-compatible adapters |
+| 17.4 | ✅ the storage port, filesystem and S3-compatible adapters |
 | 17.5 | streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
 | 17.6 | streamed download, safe headers, download tickets (issue, redeem, revoke) |
 | 17.7 | delete, orphan cleanup, reconciliation |

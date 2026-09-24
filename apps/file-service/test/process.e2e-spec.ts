@@ -13,7 +13,10 @@ import { generateServiceToken } from '@nawara/service-kit';
 const DB_PASSWORD = 'db-password-never-logged-0072';
 const RUNTIME_DB = `postgres://file_app:${DB_PASSWORD}@127.0.0.1:1/file`;
 const POLICY = JSON.stringify({ callers: { 'some-core-service': { operations: ['upload', 'read'], organizations: 'request', mediaTypes: ['application/pdf'], maxBytes: 1_048_576 } } });
-const REQUIRED = { DATABASE_URL: RUNTIME_DB, FILE_SERVICE_POLICY: POLICY };
+/** Stage 17.4: production needs an S3-compatible store. It is never contacted at startup (an unresolvable host proves it). */
+const S3_SECRET = 's3-secret-looking-value-4567';
+const STORAGE = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.storage.invalid', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'file-process-test', FILE_S3_ACCESS_KEY_ID: 'AKIDPROCESSTEST', FILE_S3_SECRET_ACCESS_KEY: S3_SECRET };
+const REQUIRED = { DATABASE_URL: RUNTIME_DB, FILE_SERVICE_POLICY: POLICY, ...STORAGE };
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -92,7 +95,7 @@ describe('file-service as a built process (production configuration)', () => {
     expect(msgs.filter((m) => m.startsWith('service_shutdown_started'))).toHaveLength(1); // one shutdown, never twice
     expect(msgs.some((m) => m.startsWith(`service_shutdown_complete signal=${signal}`))).toBe(true);
     expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
-    for (const s of [digest, DB_PASSWORD]) expect(run.out()).not.toContain(s);
+    for (const s of [digest, DB_PASSWORD, S3_SECRET, 'AKIDPROCESSTEST', 'objects.storage.invalid']) expect(run.out()).not.toContain(s);
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|FILE_SERVICE_POLICY|some-core-service/);
   }, 30_000);
 
@@ -108,6 +111,12 @@ describe('file-service as a built process (production configuration)', () => {
     ['a registered caller without a policy', { FILE_SERVICE_POLICY: '' }, /FILE_SERVICE_POLICY/],
     ['a malformed caller policy', { FILE_SERVICE_POLICY: '{"callers": {"some-core-service": {"operations": ["*"], "organizations": "none"}}}' }, /FILE_SERVICE_POLICY/],
     ['a FILE_MAX_BYTES over the 100 MiB bound', { FILE_MAX_BYTES: '104857601' }, /FILE_MAX_BYTES/],
+    ['no storage provider (no default, no fallback)', { FILE_STORAGE_PROVIDER: '' }, /FILE_STORAGE_PROVIDER is required/],
+    ['an unknown storage provider', { FILE_STORAGE_PROVIDER: 'local' }, /FILE_STORAGE_PROVIDER must be one of/],
+    ['the filesystem store in production', { FILE_STORAGE_PROVIDER: 'filesystem', FILE_STORAGE_ROOT: '/tmp/file-process-test' }, /refused in production/],
+    ['a plain-HTTP S3 endpoint in production', { FILE_S3_ENDPOINT: 'http://objects.storage.invalid' }, /FILE_S3_ENDPOINT/],
+    ['a missing S3 bucket', { FILE_S3_BUCKET: '' }, /FILE_S3_BUCKET/],
+    ['a missing S3 secret', { FILE_S3_SECRET_ACCESS_KEY: '' }, /FILE_S3_SECRET_ACCESS_KEY/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
     const { digest } = generateServiceToken();
     const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), ...REQUIRED, SERVICE_TOKENS: `some-core-service:${digest}`, ...env });
@@ -119,6 +128,7 @@ describe('file-service as a built process (production configuration)', () => {
     expect(run.out()).toMatch(name);
     expect(run.out()).not.toContain('secret-looking-value-0123');
     expect(run.out()).not.toContain(DB_PASSWORD);
+    expect(run.out()).not.toContain(S3_SECRET);
     expect(run.out()).not.toContain('service_started');
   }, 30_000);
 });

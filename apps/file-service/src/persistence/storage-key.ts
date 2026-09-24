@@ -15,9 +15,14 @@ export const STORAGE_KEY_PREFIX_MAX = 130;
  * keeps keys unguessable and unique even if a prefix is ever shared.
  */
 export function newStorageKey(prefix: string, fileId: string): string {
-  if (!PREFIX.test(prefix) || prefix.length > STORAGE_KEY_PREFIX_MAX) throw new Error('storage key prefix is not in the key grammar');
+  if (!isStorageKeyPrefix(prefix)) throw new Error('storage key prefix is not in the key grammar');
   if (!UUID.test(fileId)) throw new Error('file id is not a lowercase UUID');
   return `${prefix}/${fileId}/${randomBytes(16).toString('hex')}`;
+}
+
+/** True for a configured key prefix (`FILE_STORAGE_KEY_PREFIX`, Stage 17.4) that leaves room for the rest of a key. */
+export function isStorageKeyPrefix(prefix: string): boolean {
+  return PREFIX.test(prefix) && prefix.length <= STORAGE_KEY_PREFIX_MAX;
 }
 
 /** True for a key this service could have generated (the adapters re-check the grammar before any storage call, 17.4). */

@@ -3,7 +3,9 @@ import { ConfigError, generateServiceToken } from '@nawara/service-kit';
 import { DEFAULT_FILE_MAX_BYTES, FILE_MAX_BYTES_BOUND, SERVICE_NAME, loadFileConfig } from './file-config.js';
 
 const DB = 'postgres://file_app:pw-not-real@db:5432/file';
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...over });
+/** Stage 17.4: a store is required; production accepts only S3 (placeholder values: nothing is contacted at load). */
+const S3 = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.example.test', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'files-test', FILE_S3_ACCESS_KEY_ID: 'AKIDEXAMPLE', FILE_S3_SECRET_ACCESS_KEY: 'not-a-real-secret-0000' };
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...S3, ...over });
 const A = generateServiceToken();
 
 describe('file-service configuration', () => {
@@ -15,7 +17,7 @@ describe('file-service configuration', () => {
     expect(c.isProduction).toBe(true);
   });
 
-  it('in production needs only the database; no default opens anything', () => {
+  it('in production needs the database and a store; no default opens anything', () => {
     const c = loadFileConfig(env({ NODE_ENV: 'production' }));
     expect(c.databaseUrl).toBe(DB);
     expect(c.port).toBe(3000);
@@ -26,9 +28,11 @@ describe('file-service configuration', () => {
     expect(c.callerPolicy.of('anyone')).toBeUndefined();
   });
 
-  it('carries only what the foundation uses: no storage, ticket, attach-window, request-hash, broker or Auth setting (later stages)', () => {
-    const keys = Object.keys(loadFileConfig(env()));
-    for (const later of ['storage', 'storageProvider', 'bucket', 'ticketTtl', 'attachTtl', 'requestHashKey', 'rabbitmqUrl', 'authServiceUrl', 'docs']) expect(keys).not.toContain(later);
+  it('carries only what is used so far: the store (17.4), no ticket, attach-window, request-hash, broker or Auth setting (later stages)', () => {
+    const c = loadFileConfig(env());
+    expect(c.storage.provider).toBe('s3');
+    const keys = Object.keys(c);
+    for (const later of ['ticketTtl', 'attachTtl', 'requestHashKey', 'rabbitmqUrl', 'authServiceUrl', 'docs']) expect(keys).not.toContain(later);
   });
 
   it('carries the kit database limits with their bounded defaults', () => {

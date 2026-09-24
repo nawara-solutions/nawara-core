@@ -280,11 +280,34 @@ services:
       SERVICE_TOKENS: ${FILE_SERVICE_TOKENS:-}
       # Every caller in SERVICE_TOKENS needs an explicit entry (deny by default); empty with no tokens is the default: nothing can call.
       FILE_SERVICE_POLICY: ${FILE_SERVICE_POLICY:-}
+      # Stage 17.4, DEVELOPMENT ONLY: the filesystem store on a named volume (refused in production, where an S3-compatible
+      # provider is configured: FILE_STORAGE_PROVIDER=s3 and FILE_S3_*; the production provider is not chosen yet, O2 / F6).
+      FILE_STORAGE_PROVIDER: filesystem
+      FILE_STORAGE_ROOT: /var/lib/file-service/storage
+    volumes:
+      - file_storage_dev:/var/lib/file-service/storage
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s
       timeout: 5s
       retries: 10
 
+  # Stage 17.4, TEST INFRASTRUCTURE ONLY: an S3-protocol server for the file-service S3 adapter tests (VersityGW, Apache-2.0).
+  # Not a production choice and not a deployment: `docker compose --profile storage-test up -d s3-test`, then run the e2e suite with
+  # TEST_S3_ENDPOINT=http://127.0.0.1:9000 TEST_S3_ACCESS_KEY_ID=$S3_TEST_ACCESS_KEY TEST_S3_SECRET_ACCESS_KEY=$S3_TEST_SECRET_KEY.
+  s3-test:
+    profiles: [storage-test]
+    image: versity/versitygw:v1.8.0
+    command: ['posix', '/data']
+    ports:
+      - '127.0.0.1:9000:7070'
+    environment:
+      ROOT_ACCESS_KEY: ${S3_TEST_ACCESS_KEY:?copy .env.example to .env}
+      ROOT_SECRET_KEY: ${S3_TEST_SECRET_KEY:?copy .env.example to .env}
+    tmpfs:
+      - /data
+
 volumes:
   nawara_pgdata:
+  # Stage 17.4: the development filesystem store of file-service (never production data).
+  file_storage_dev:

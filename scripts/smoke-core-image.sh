@@ -71,6 +71,13 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "DATABASE_URL=$(db_url file_app file)"
       echo "SERVICE_TOKENS=smoke-caller:$(hex 32)" # proves the service-token and caller-policy configuration are parsed in production
       echo 'FILE_SERVICE_POLICY={"callers":{"smoke-caller":{"operations":["upload","read"],"organizations":"request","mediaTypes":["application/pdf"],"maxBytes":1048576}}}'
+      # Stage 17.4: production accepts only an S3-compatible store; it is never contacted at startup (an unresolvable host proves it).
+      echo "FILE_STORAGE_PROVIDER=s3"
+      echo "FILE_S3_ENDPOINT=https://objects.storage.invalid"
+      echo "FILE_S3_REGION=auto"
+      echo "FILE_S3_BUCKET=smoke-files"
+      echo "FILE_S3_ACCESS_KEY_ID=smoke$(hex 8)"
+      echo "FILE_S3_SECRET_ACCESS_KEY=$(hex 32)"
       ;;
     *)
       echo "unknown service: $service" >&2
