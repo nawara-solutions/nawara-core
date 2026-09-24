@@ -79,7 +79,12 @@ export function checkCiCoverage(fileName, text) {
   return problems;
 }
 
-const PRODUCT_TERMS = /\b(student|teacher|driver|lesson|classroom|instructor|vehicle)\b/i;
+const PRODUCT_TERMS = /\b(student|teacher|driver|lesson|classroom|instructor|vehicle)s?\b/i;
+/**
+ * Identifiers split into words before matching (Stage 17.3): `instructorId`, `student_documents`, `driverPhoto` and plurals were
+ * invisible to a whole-word match, and those are exactly the shapes a schema or a DTO would use.
+ */
+const identifierWords = (text) => text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
 const DOMAIN_DECLARATION = /\b(?:class|interface|type|enum|function|const)\s+\w*(Invoice|Refund|Ledger|Journal|Wallet|Settlement|Payout|Payment|Product|Tax)\w*/;
 // The kit reads Auth's identity contract (an organization id, a membership status) but holds no organization or membership logic.
 const KIT_IDENTITY_CONTRACT_ALLOWLIST = new Set(['libs/service-kit/src/service-auth/auth-client.ts']);
@@ -88,8 +93,8 @@ const KIT_IDENTITY_CONTRACT_ALLOWLIST = new Set(['libs/service-kit/src/service-a
 export function checkSource(relPath, text) {
   const problems = [];
   const inKit = relPath.startsWith('libs/service-kit/');
-  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file)-service\/src\//.test(relPath);
-  if ((inKit || inNewCore) && PRODUCT_TERMS.test(text)) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
+  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file)-service\/(src|db\/migrations)\//.test(relPath);
+  if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {
     problems.push(`${relPath}: declares a financial-domain concept; the service-kit holds technical infrastructure only`);
   }

@@ -7,6 +7,9 @@ import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { fileMigrationsDir } from '../src/app.module.js';
+import { FileRepository } from '../src/persistence/file.repository.js';
+import { ticketDigest } from '../src/persistence/ticket-digest.js';
+import { TicketRepository } from '../src/persistence/ticket.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { failure, sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
@@ -86,5 +89,26 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
     }
     const owner = await sql<{ o: string }>(adminTo(dbName), `SELECT tableowner AS o FROM pg_tables WHERE tablename = 'outbox'`);
     expect(owner[0].o).toBe(migrator);
+  });
+
+  it('Stage 17.3: the file schema belongs to the migrator; the runtime role uses it through the repositories (DML only)', async () => {
+    const owners = await sql<{ t: string; o: string }>(adminTo(dbName), `SELECT tablename AS t, tableowner AS o FROM pg_tables WHERE tablename LIKE 'file%' ORDER BY 1`);
+    expect(owners).toEqual([{ t: 'file', o: migrator }, { t: 'file_access_ticket', o: migrator }]);
+    const f = await t.app.get(FileRepository).createUploading({
+      scope: { ownerService: 'core-drive', organizationId: null }, storage: { provider: 'filesystem', keyPrefix: 'files' }, uploadLeaseSeconds: 600, attachment: { deadlineSeconds: 3_600 },
+    });
+    const d = ticketDigest(randomBytes(32).toString('base64url'))!;
+    await t.app.get(TicketRepository).recordDownload({ scope: { ownerService: 'core-drive', organizationId: null }, fileId: f.id, tokenDigest: d, lifetimeSeconds: 60, singleUse: true, disposition: 'attachment' });
+    expect(await t.app.get(TicketRepository).claimUse(d)).toBeDefined();
+  });
+
+  it('Stage 17.3: the runtime role cannot change the file schema, bypass its triggers, truncate it, or hard-delete a file', async () => {
+    for (const ddl of ['ALTER TABLE file ADD COLUMN body bytea', 'ALTER TABLE file DISABLE TRIGGER file_no_delete', 'ALTER TABLE file_access_ticket DISABLE TRIGGER ALL',
+      'DROP TRIGGER file_set_once ON file', 'ALTER TABLE file DROP CONSTRAINT file_sha256_shape', 'DROP INDEX file_idempotency_unique', 'TRUNCATE file_access_ticket',
+      'CREATE OR REPLACE FUNCTION file_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN OLD; END $$', 'SET session_replication_role = replica']) {
+      expect((await failure(APP(), ddl)).code, ddl).toBe('42501');
+    }
+    const [row] = await sql<{ id: string }>(APP(), 'SELECT id FROM file LIMIT 1');
+    expect((await failure(APP(), 'DELETE FROM file WHERE id = $1', [row!.id])).message).toMatch(/never deleted/);
   });
 });

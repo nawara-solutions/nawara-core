@@ -31,11 +31,12 @@ try {
 
 for (const base of ['apps', 'libs']) {
   for (const file of walk(join(root, base))) {
-    if (!/\.(ts|mjs|js)$/.test(file) || file.endsWith('.d.ts')) continue;
+    const isSql = file.endsWith('.sql'); // schemas too (Stage 17.3): a product concept must not enter a Core table either
+    if ((!/\.(ts|mjs|js)$/.test(file) && !isSql) || file.endsWith('.d.ts')) continue;
     const rel = relative(root, file).split('\\').join('/');
     const text = readFileSync(file, 'utf8');
     problems.push(...checkSource(rel, text));
-    problems.push(...checkAuthErrorCoverage(rel, text));
+    if (!isSql) problems.push(...checkAuthErrorCoverage(rel, text));
   }
 }
 

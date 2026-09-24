@@ -3,7 +3,8 @@
 - **Status:** Draft (Stage 17.1 design, architecture frozen; nothing implemented). F16 decided: product-issued access tickets
   ([Stage 17.1 record](../architecture/stage-17/stage-17-1-decisions-and-roadmap.md) §3).
   Stage 17.2: the service foundation only (health, readiness, service auth, caller policy; no file domain yet):
-  [Stage 17.2 record](../architecture/stage-17/stage-17-2-service-foundation.md).
+  [Stage 17.2 record](../architecture/stage-17/stage-17-2-service-foundation.md). Stage 17.3: the schema and repositories (no
+  byte path yet): [Stage 17.3 record](../architecture/stage-17/stage-17-3-persistence-metadata.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -65,6 +66,14 @@ service), `organizationId`, `tokenDigest` (SHA-256 of a random 32-byte token; th
 `fileId` → grantee service, until a time.
 
 No business reference table exists (F4).
+
+**Implemented (Stage 17.3, `0001_file_schema.sql`); clarifications the implementation settled, no decision changed:**
+- `mediaType` is **set once when known**: NULL while `UPLOADING` (the type comes from the bytes, 17.5), required from `VERIFYING` on,
+  like `sizeBytes` and `sha256`. `originalName`, `createdBy` and `declaredMediaType` are optional.
+- The lease `uploadExpiresAt` (§5.1) and `updatedAt` are columns; digests (`sha256`, `requestHash`, `tokenDigest`) are lowercase hex.
+- The ticket carries `revokedAt` (revocation, §11.1); `usedAt` is the **first** use and `useCount` counts every use.
+- The Idempotency-Key is unique per owner among **live** files only: a `FAILED` / `REJECTED` attempt frees it for the retry of §10.
+- A file row is never deleted; ticket rows may be (retention).
 
 ## 4. Storage port (Stage 17.4)
 
