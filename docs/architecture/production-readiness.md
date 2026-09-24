@@ -192,6 +192,36 @@ payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOU
   - a message dead-lettered during a long database outage stays in the DLQ after the reconciler has applied it (replay is safe).
 - Details: `core-validation.md` section 13.6.
 
+**Data growth and log volume (Stage 15.7).**
+- **Growth.**
+  - Each invoice-to-settlement lifecycle adds about 18 KB to Billing and 11 KB to Payment. Nothing is ever deleted by Billing or
+    Payment.
+  - At 100 k lifecycles: Billing 0.6 GB, Payment 0.4 GB, of which 32 % is published outbox rows that nothing reads again.
+  - Request-path and worker-claim queries stay under 0.3 ms at that size. Payment's expiry sweep is the one scan that grows with the
+    whole table (11 ms at 100 k, every 5 s): a 15.8 item.
+- **Retention.**
+  - No duration is established anywhere except Payment's idempotency key expiry (24 h).
+  - `core-validation.md` 13.7 lists, per table, its lifecycle class and the condition under which deleting a row is safe.
+  - The durations are open decisions: published outbox; webhook rows and raw bodies (O-17); audit trails; refresh tokens;
+    Organization idempotency keys.
+  - Payment's `expiresAt` is written but never read, so an expired key still replays (D1). This is stricter than the SDD and safe.
+- **DLQ.** After a long database outage, a dead-lettered event can stay in the DLQ although the reconciler applied it. Runbook:
+  1. `nawara-dlq list`;
+  2. confirm the request is settled;
+  3. `nawara-dlq replay`. The replay is recorded as `ignored`, and it has no second effect.
+  Never purge a DLQ without inspecting it.
+- **Logs.**
+  - Healthy services log nothing per probe.
+  - An outage logs one line per worker pass (12–60 per minute per worker) plus one line per affected item per retry: the retry lines
+    grow with the backlog.
+  - Every fault and every recovery has a named line.
+  - No token, password or URL credential appears in any captured line.
+- **Open items:**
+  - Auth answers 429 to its own health probes above about 100 per minute per address, and does not log it (SRE / security);
+  - a database-unavailable request is an opaque 500 with a message rather than classified facts in the log (O3);
+  - a few failure kinds are missing from the log taxonomy.
+- Details: `core-validation.md` section 13.7.
+
 **Signals and tools:** the log signals (`*_pass_failure`, `readiness_check_failed|recovered`, `outbox_publish_failure`,
 `rabbitmq_confirm_timeout`, `worker_drain_timeout`, `webhook_retry_exhausted`, `service_started`, `service_shutdown_*`) and the CLIs
 (`nawara-migrate`, `nawara-check-outbox-lag`, `nawara-check-dlq`, `nawara-dlq`) are described in the
@@ -212,7 +242,7 @@ payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOU
 | F9 | Auth migrations without lock or checksum | fixed, 14.5 (#81); applied in production |
 | F10 | Containers ran as root | fixed, 14.2 (#78) |
 | F11 | CI built only the Auth image | fixed, 14.2 (#78) |
-| F12 | No retention for technical tables (`outbox`, `inbox`, rate-limit and throttle rows, idempotency keys, `webhook_event` raw bodies) | deferred: needs the retention / RPO / RTO decision (section 3) |
+| F12 | No retention for technical tables (`outbox`, `inbox`, rate-limit and throttle rows, idempotency keys, `webhook_event` raw bodies) | measured and classified in Stage 15.7 (`core-validation.md` 13.7: growth per operation, safe-deletion conditions per table); still deferred: the durations need the retention / RPO / RTO decision (section 3). No cleanup is built yet |
 | F13 | Operational failures not identifiable in logs | fixed, 14.7 (#83) |
 | F14 | Auth events have no transactional outbox | deferred by design: Auth publishing stays fire-and-forget; a failure logs `event_publish_failure` and is **not** retried |
 
