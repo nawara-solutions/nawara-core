@@ -1,6 +1,7 @@
 # notification-service
 
-- **Status:** Draft (Stage 16.1 design, for review; nothing implemented: the app is still the Nest starter)
+- **Status:** Draft (Stage 16.1 design). Implemented so far: the Stage 16.2 Auth envelope and the Stage 16.3 service foundation
+  ([record](../architecture/stage-16/stage-16-3-service-foundation.md)); no business behaviour yet
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -850,7 +851,8 @@ are unchanged. Removing `@golevelup/nestjs-rabbitmq` from Auth is part of 16.2 i
   `docker-compose.yml` (with `stop_grace_period: 60s`).
 - **Image:** a copy of the Billing Dockerfile (two stages, `--omit=dev`, `USER node`, Node as PID 1, migrations and template
   data in the image, no test tooling).
-- **CI:** the `notification-service` job already exists in `core-ci.yml`.
+- **CI:** the `notification-service` job already exists in `core-ci.yml`; since Stage 16.3 the service is also in the image job
+  (`scripts/smoke-core-image.sh`).
 
 ## 19. Testing and certification
 
