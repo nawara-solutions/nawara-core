@@ -637,10 +637,10 @@ clock; no transaction spans a network call. **Lock order is fixed to prevent dea
 | Webhook | **A:** insert the event (dedupe). **B:** lock, transition, outbox, mark processed |
 | Cash confirm | one: lock payment and cash row, transitions, outbox (`cash_payment.confirmed`, `payment.succeeded`) |
 | Refund request | one: lock payment, cap check, insert refund, outbox `refund.requested`; the refund attempt then runs like an attempt |
-| Expiry sweep | per payment: lock, re-check no open attempt (`initiated`, `submitted`, `unknown`), no cash submission in `submitted`, and `now() >= expiresAt`; transition; outbox |
+| Expiry sweep | per payment: lock (**skipping a payment another transaction holds**: it is re-checked on the next pass, Stage 15.8), re-check no open attempt (`initiated`, `submitted`, `unknown`), no cash submission in `submitted`, and `now() >= expiresAt`; transition; outbox |
 
 **Background work (in-process, database-clock driven) [T]:** the outbox relay (kit); an **expiry sweeper**; an **attempt resolver** that finds
-attempts stuck in `initiated`, `unknown` or long-`submitted` beyond their thresholds and settles them by asking the provider (by `merchantReference`), under the rules of section 5.2; a **stuck-payment alert** for any payment `pending` longer than a threshold; a retry pass for
+attempts stuck in `initiated`, `unknown` or long-`submitted` beyond their thresholds and settles them by asking the provider (by `merchantReference`), under the rules of section 5.2 (Stage 15.8: an instance first claims the attempt with a short lease, `resolveAfter`, so N instances make one provider call per attempt per lease, not N); a **stuck-payment alert** for any payment `pending` longer than a threshold; a retry pass for
 `unmatched` and `failed` webhook events **and a stuck-state sweep for events left in `received` or `processing` beyond a threshold** (a crash between transactions A and B); a refund retry and resolver job (section 5.4). Full periodic reconciliation of payment state against provider reports is [X].
 
 | Failure | Handling |

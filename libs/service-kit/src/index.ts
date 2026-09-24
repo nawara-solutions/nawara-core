@@ -32,7 +32,7 @@ export { OutboxRelay, type RelayOptions } from './events/outbox-relay.js';
 export { InboxService, type InboxOutcome } from './events/inbox.service.js';
 export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription } from './events/types.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
-export { RabbitMqEventBus, PublisherConfirmTimeoutError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus } from './events/rabbitmq-event-bus.js';
+export { RabbitMqEventBus, PublisherConfirmTimeoutError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, DEFAULT_PREFETCH, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus } from './events/rabbitmq-event-bus.js';
 
 export { RateLimitModule } from './rate-limit/rate-limit.module.js';
 export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';

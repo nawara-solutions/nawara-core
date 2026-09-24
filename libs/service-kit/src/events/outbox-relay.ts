@@ -4,12 +4,22 @@ import { PollLoop, type DrainOutcome } from '../workers/poll-loop.js';
 import type { Queryable } from '../db/db.service.js';
 import type { EventBus, EventEnvelope } from './types.js';
 
+/**
+ * Stage 15.8: the ceiling of one row's publish backoff (was 60 s). After a broker outage a row waits out its backoff even though the
+ * broker is back, so the ceiling IS the worst delivery delay after recovery (measured: 57.6 s with 60 s, 15.3 s with 15 s, for a
+ * 200-event backlog). It costs almost nothing during an outage: a poll stops at its first failure, so failures stay at one per poll
+ * (60 per minute) with a large backlog, and a single waiting event is retried 6 instead of 4.7 times a minute.
+ */
+export const DEFAULT_MAX_BACKOFF_MS = 15_000;
+
 export interface RelayOptions {
   /** Producing service name, stamped into the event headers. */
   source: string;
   batchSize?: number;
   baseBackoffMs?: number;
   maxBackoffMs?: number;
+  /** Stage 15.8: how long one poll may keep relaying full batches back to back (default 1000 ms). */
+  maxPassMs?: number;
 }
 
 interface OutboxRow {
@@ -38,16 +48,38 @@ export class OutboxRelay {
     private readonly onError: (message: string) => void = () => undefined,
   ) {
     this.loop = new PollLoop(
-      () => this.drainOnce(),
+      () => this.drainPass(),
       (e) => this.onError(`outbox_relay_pass_failure ${describeFailure(e)} — the next pass retries`),
       (ms) => this.onError(`worker_drain_timeout worker=outbox_relay drainTimeoutMs=${ms} — shutdown proceeds; the batch's rows stay unpublished and are relayed again (at least once)`),
     );
   }
 
+  /**
+   * Stage 15.8: one poll = batches back to back while they come back FULL (a backlog), for at most `maxPassMs`, then the normal interval.
+   * One batch per poll capped a relay at `batchSize` events per interval (about 46 events/s with the defaults), below the rate one Billing
+   * instance can create invoices, so a busy period left a growing backlog. Each batch is still its own short transaction (claim, publish
+   * with confirms, stamp); the pass stops at the first failure (a broker outage keeps its one-failure-per-poll pace) and when a batch is
+   * not full (nothing more is due), and it never runs past `maxPassMs`, which keeps a pass inside the shutdown drain budget.
+   */
+  async drainPass(): Promise<{ published: number; failed: number; batches: number }> {
+    const batch = this.opts.batchSize ?? 50;
+    const maxPassMs = this.opts.maxPassMs ?? 1000;
+    const started = Date.now();
+    let published = 0;
+    let batches = 0;
+    for (;;) {
+      const r = await this.drainOnce();
+      batches++;
+      published += r.published;
+      if (r.failed > 0) return { published, failed: r.failed, batches };
+      if (r.published < batch || Date.now() - started >= maxPassMs || !this.loop.running) return { published, failed: 0, batches };
+    }
+  }
+
   async drainOnce(): Promise<{ published: number; failed: number }> {
     const batch = this.opts.batchSize ?? 50;
     const base = this.opts.baseBackoffMs ?? 1000;
-    const max = this.opts.maxBackoffMs ?? 60_000;
+    const max = this.opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     return this.db.tx(async (q) => {
       const { rows } = await q.query<OutboxRow>(
         `SELECT id, name, payload, "correlationId", "eventVersion", "occurredAt", attempts

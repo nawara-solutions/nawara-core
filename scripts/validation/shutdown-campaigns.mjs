@@ -532,7 +532,7 @@ C.dispatcherShutdown = async () => {
   // `respondInDrain`: Payment answers 1 s later; `dropInDrain`: Payment creates the payment 1 s later and the response is lost;
   // `neverRespond`: Payment never answers the old instance (PAYMENT_TIMEOUT_MS 5000). A new instance (stale window 3 s, test value)
   // then finishes the batch: every request `requested`, one payment each, the recorded id matching Payment's.
-  const w = await core.billingWorld({ extra: { BILLING_DISPATCH_STALE_SENDING_MS: '3000' } });
+  const w = await core.billingWorld({ extra: { BILLING_DISPATCH_STALE_SENDING_MS: '3000', PAYMENT_TIMEOUT_MS: '1500' } });
   const plan = [...Array(20).fill('respondInDrain'), ...Array(20).fill('dropInDrain'), ...Array(3).fill('neverRespond')];
   const rows = [];
   try {
@@ -725,9 +725,16 @@ C.paymentWorkerWindows = async () => {
       await pass;
       const [mid] = await w.q('SELECT status FROM payment_attempt WHERE id = $1', [attempt.id]);
       const b = w.instance(`r2b-${i}`, provA);
-      await b.resolver.drainOnce();
+      // Stage 15.8: the killed instance had claimed the attempt (AttemptResolver lease, 5 s); the survivor takes it over once the lease
+      // runs out, so its passes are repeated until then (bounded at 8 s) and the delay is recorded.
+      const tb = h.now();
+      await h.waitFor(async () => {
+        await b.resolver.drainOnce();
+        return (await w.q('SELECT status FROM payment_attempt WHERE id = $1', [attempt.id]))[0].status !== 'unknown';
+      }, 8000, 250);
+      const recoveredMs = h.round(h.now() - tb);
       const [fin] = await w.q('SELECT a.status AS attempt, p.status AS payment FROM payment_attempt a JOIN payment p ON p.id = a."paymentId" WHERE a.id = $1', [attempt.id]);
-      out.R2.push({ attemptAfterKill: mid.status, final: `${fin.attempt}/${fin.payment}`, terminalEvents: await eventsFor(payment.id) });
+      out.R2.push({ attemptAfterKill: mid.status, final: `${fin.attempt}/${fin.payment}`, terminalEvents: await eventsFor(payment.id), recoveredMs });
       await a.pool.onApplicationShutdown().catch(() => undefined);
       await b.pool.onApplicationShutdown();
     }
@@ -773,7 +780,7 @@ C.paymentWorkerWindows = async () => {
   const sum = (xs, keys) => Object.fromEntries(keys.map((k) => [k, [...new Set(xs.map((x) => x[k]))]]));
   return {
     R1: { iterations: out.R1.length, ...sum(out.R1, ['attemptAfterOldInstance', 'final', 'terminalEvents']), drainMs: h.stats(out.R1.map((x) => x.drainMs)) },
-    R2: { iterations: out.R2.length, ...sum(out.R2, ['attemptAfterKill', 'final', 'terminalEvents']) },
+    R2: { iterations: out.R2.length, ...sum(out.R2, ['attemptAfterKill', 'final', 'terminalEvents']), recoveredMs: h.stats(out.R2.map((r) => r.recoveredMs)) },
     S1: { iterations: out.S1.length, ...sum(out.S1, ['afterKill', 'final']) }, S2: { iterations: out.S2.length, ...sum(out.S2, ['afterKill', 'final']) },
   };
 };

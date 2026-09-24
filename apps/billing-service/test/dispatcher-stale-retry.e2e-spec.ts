@@ -168,4 +168,39 @@ describeWithEnv('dispatcher stale-retry interval (audit L-12, real PostgreSQL)',
     expect(x.filter((id) => y.includes(id))).toEqual([]);
     expect(new Set([...x, ...y].filter((id) => created.includes(id))).size).toBe(x.length + y.length); // no request twice, none lost
   });
+
+  it('Stage 15.8: while one instance sends a batch to a slow Payment, another instance never re-claims its unsent requests: each is sent ONCE (two instances, 20 iterations)', async () => {
+    // Scaled: stale window 1 s, Payment 300 ms per call, batch 6 → the batch takes 1.8 s, longer than the stale window. Before Stage 15.8
+    // every row of the batch kept its claim-time `sendingSince`, so the second instance re-claimed and re-sent the rows still waiting.
+    const STALE = 1000;
+    const BATCH = 6;
+    const calls = new Map<string, number>();
+    const slow: PaymentClient = {
+      createPayment: async (body: PaymentCreateBody) => {
+        calls.set(body.paymentRequestId, (calls.get(body.paymentRequestId) ?? 0) + 1);
+        await new Promise((r) => setTimeout(r, 300));
+        return { kind: 'accepted', snapshot: { paymentId: crypto.randomUUID(), paymentRequestId: body.paymentRequestId, status: 'pending', amount: body.amount, currency: body.currency, sourceType: 'invoice', sourceId: body.sourceId, payer: body.payer, seller: body.seller, organizationId: body.organizationId ?? null, closedAt: null } };
+      },
+      getPayment: async () => null,
+      cancelPayment: async () => ({ kind: 'cancelled' }),
+    };
+    const cfg = { dispatch: { intervalMs: 1000, batchSize: BATCH, staleSendingMs: STALE } } as never;
+    const a = new PaymentDispatcher(requests, slow, cfg);
+    const b = new PaymentDispatcher(requests, slow, cfg);
+    await new PaymentDispatcher(requests, slow, cfg).dispatchOnce(0, 1000); // the earlier tests' leftovers out of the way
+    for (let i = 0; i < 20; i++) {
+      const ids: string[] = [];
+      for (let k = 0; k < BATCH; k++) ids.push((await newRequest()).id);
+      calls.clear();
+      const first = a.dispatchOnce(STALE, BATCH);
+      let done = false;
+      void first.then(() => (done = true));
+      while (!done) {
+        await new Promise((r) => setTimeout(r, 100));
+        await b.dispatchOnce(STALE, BATCH); // the other instance keeps looking for stale work meanwhile
+      }
+      for (const id of ids) expect(calls.get(id)).toBe(1); // before Stage 15.8: 2 for the rows sent after the stale window
+      for (const id of ids) expect((await row(id)).status).toBe('requested');
+    }
+  }, 180_000);
 });

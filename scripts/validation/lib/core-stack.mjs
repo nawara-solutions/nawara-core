@@ -35,7 +35,7 @@ export async function fakeAuth() {
 
 /**
  * HTTP fault proxy for the Billing → Payment edge. Modes: `pass`; `refuse` (the connection is dropped before anything reaches Payment);
- * `blackhole` (accepted, never answered: a hung Payment); `unavailable` (503, Payment never reached); `drop` (forwarded, Payment answers, the answer is lost); `truncate` (the status
+ * `blackhole` (accepted, never answered: a hung Payment); `unavailable` (503, Payment never reached); `slow:<ms>` (forwarded after a delay); `drop` (forwarded, Payment answers, the answer is lost); `truncate` (the status
  * and headers reach the caller, the body is cut). `onRequest(req)` may return a mode per request. Counts what each mode did.
  */
 export async function httpFaultProxy(targetPort) {
@@ -44,17 +44,25 @@ export async function httpFaultProxy(targetPort) {
   const seen = [];
   const server = http.createServer((req, res) => {
     const m = onRequest?.(req) ?? mode;
-    seen.push({ t: h.now(), method: req.method, url: req.url, mode: m });
+    const entry = { t: h.now(), method: req.method, url: req.url, mode: m };
+    seen.push(entry);
     if (m === 'refuse') return req.socket.destroy();
-    if (m === 'blackhole') return; // never answered
+    if (m === 'blackhole') { // never answered (the request body is still read, to record which request it was)
+      const body = [];
+      req.on('data', (c) => body.push(c));
+      req.on('end', () => { try { entry.paymentRequestId = JSON.parse(Buffer.concat(body).toString('utf8')).paymentRequestId; } catch { /* not a create call */ } });
+      return;
+    }
     if (m === 'unavailable') { // Payment answers 503 without being reached (Stage 15.7: a failing dependency, repeated)
       req.resume();
       res.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
       return res.end(JSON.stringify({ statusCode: 503, message: 'Service Unavailable', error: 'Service Unavailable' }));
     }
     const chunks = [];
+    const slowMs = typeof m === 'string' && m.startsWith('slow:') ? Number(m.slice(5)) : 0; // Stage 15.8: forwarded after a delay
     req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
+    req.on('end', () => setTimeout(() => {
+      try { entry.paymentRequestId = JSON.parse(Buffer.concat(chunks).toString('utf8')).paymentRequestId; } catch { /* not a create call */ }
       const up = http.request({ host: '127.0.0.1', port: targetPort, method: req.method, path: req.url, headers: req.headers, agent: false }, (r) => {
         if (m === 'drop') {
           r.resume();
@@ -73,7 +81,7 @@ export async function httpFaultProxy(targetPort) {
       });
       up.on('error', () => req.socket.destroy());
       up.end(Buffer.concat(chunks));
-    });
+    }, slowMs));
   });
   const sockets = new Set();
   server.on('connection', (s) => {
@@ -132,7 +140,7 @@ export function coreStacks({ adminUrl, rabbit, pgPort }) {
         BILLING_DISPATCH_INTERVAL_MS: '300', BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE: '100000', BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE: '100000', // seeding only
         ...billingEnv,
       }),
-      payment: () => ({ SERVICE_TOKENS: `billing-service:${b2p.digest}`, AUTH_SERVICE_URL: auth.url, ...paymentEnv }),
+      payment: () => ({ SERVICE_TOKENS: `billing-service:${b2p.digest}`, AUTH_SERVICE_URL: auth.url, PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE: '100000', ...paymentEnv }), // seeding only
     };
     const start = async (name, { waitReady = true, extra = {} } = {}) => {
       const svc = await core.start(`${name}-service`, {

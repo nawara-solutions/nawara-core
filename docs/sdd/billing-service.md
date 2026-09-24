@@ -835,7 +835,7 @@ Lessons from Payment's acceptance review that are **requirements here**: a domai
 | Failure | Handling |
 |---|---|
 | Database unavailable | `/ready` fails; requests fail; nothing is half-applied (single transactions) |
-| Payment unavailable or slow | the payment request is **already committed**; the dispatcher retries the identical request every `BILLING_DISPATCH_STALE_SENDING_MS` (default 60 s: each claim restamps `sendingSince`, so that threshold is the interval between two attempts at the same request); the API answers immediately; nothing waits on Payment inside a transaction |
+| Payment unavailable or slow | the payment request is **already committed**; the dispatcher retries the identical request every `BILLING_DISPATCH_STALE_SENDING_MS` (default 60 s: each claim restamps `sendingSince`, so that threshold is the interval between two attempts at the same request; Stage 15.8: while a pass is still sending its batch, it renews the claims it has not sent yet, so the threshold must only exceed one send, enforced as at least twice `PAYMENT_TIMEOUT_MS`); the API answers immediately; nothing waits on Payment inside a transaction |
 | Timeout during the call to Payment | the request stays `sending`; the next attempt is a byte-identical replay (safe) |
 | Crash after Payment accepted, before Billing stored `paymentId` | `sending` is retried; Payment answers `200 Idempotent-Replayed` and Billing records `paymentId`; an event that arrives first is `deferred` (21.4) and the reconciler completes it |
 | Duplicate payment event | `payment_event_receipt`; no second effect, including any Subscription effect (21.4) |

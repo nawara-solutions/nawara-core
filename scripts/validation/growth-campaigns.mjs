@@ -391,7 +391,7 @@ C.logVolume = async () => {
       fault: (s) => s.payHttp.setMode(mode), restore: (s) => s.payHttp.setMode('pass'),
       during: async (s) => { await s.seed(20, { wait: false }); },
       after: async (s) => ({ requested: (await s.bq(`SELECT status, count(*)::int AS n FROM payment_request GROUP BY 1`)), billingDispatchCalls: s.payHttp.seen.length }),
-    }, { billingEnv: { BILLING_DISPATCH_STALE_SENDING_MS: '5000' } });
+    }, { billingEnv: { BILLING_DISPATCH_STALE_SENDING_MS: '5000', PAYMENT_TIMEOUT_MS: '2500' } });
   }
   await run('providerTimeouts', {
     // 20 attempts whose provider outcome is unknown (timeout after accept): the AttemptResolver asks the provider again every pass.

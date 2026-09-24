@@ -142,6 +142,16 @@ export class PaymentRequestRepository {
     });
   }
 
+  /**
+   * Stage 15.8: renews the claim of requests this dispatcher pass claimed but has not sent yet (same status, fresh `sendingSince`), so a
+   * slow Payment never makes them look stale to another instance while this one still holds them. A row that left `sending` meanwhile
+   * is untouched.
+   */
+  async renewSending(requestIds: string[]): Promise<void> {
+    if (requestIds.length === 0) return;
+    await this.db.query(`UPDATE payment_request SET "sendingSince" = now() WHERE id = ANY($1::uuid[]) AND status = 'sending'`, [requestIds]);
+  }
+
   /** `sending -> requested`: the ONLY way `paymentId` is ever set (SDD 21.4), from Billing's own authenticated dispatch call. A concurrent resolution (e.g. the reconciler got there first) is a safe no-op. */
   async markRequested(requestId: string, paymentId: string, ctx: TransitionContext): Promise<void> {
     await this.db.tx(async (q) => {

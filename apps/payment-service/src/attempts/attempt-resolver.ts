@@ -7,6 +7,11 @@ import type { AttemptRow } from './attempt.types.js';
 
 const BATCH_SIZE = 100;
 const LONG_SUBMITTED_MS = 5 * 60 * 1000; // an attempt "stuck" in submitted this long is worth asking the provider about
+/**
+ * Stage 15.8: how long a claim on one attempt lasts (the default pass interval). Within it no other instance (and no later pass of this
+ * one) asks the provider about the same attempt, so provider calls per attempt no longer multiply with the number of instances.
+ */
+export const RESOLVE_LEASE_MS = 5000;
 
 /**
  * Settles attempts stuck in `initiated`, `unknown`, or long-`submitted` (SDD section 12), so a payment cannot stay
@@ -49,9 +54,10 @@ export class AttemptResolver {
     try {
       const { rows } = await this.db.query<AttemptRow>(
         `SELECT * FROM payment_attempt
-         WHERE status = 'unknown'
+         WHERE (status = 'unknown'
             OR status = 'initiated'
-            OR (status = 'submitted' AND "submittedAt" < now() - make_interval(secs => $1))
+            OR (status = 'submitted' AND "submittedAt" < now() - make_interval(secs => $1)))
+           AND ("resolveAfter" IS NULL OR "resolveAfter" <= now())
          ORDER BY "initiatedAt"
          LIMIT $2`,
         [LONG_SUBMITTED_MS / 1000, BATCH_SIZE],
@@ -75,6 +81,14 @@ export class AttemptResolver {
         // One attempt that cannot be settled (a conflict, an amount mismatch, a provider error) must not block the others:
         // every attempt behind it in the queue would otherwise wait on it forever.
         try {
+          // Claim first (one statement, no transaction held across the provider call): another instance that claimed this attempt
+          // within the lease, or an attempt that left its open state since the scan, is skipped.
+          const claimed = await this.db.query(
+            `UPDATE payment_attempt SET "resolveAfter" = now() + make_interval(secs => $2)
+              WHERE id = $1 AND status IN ('initiated', 'submitted', 'unknown') AND ("resolveAfter" IS NULL OR "resolveAfter" <= now())`,
+            [attempt.id, RESOLVE_LEASE_MS / 1000],
+          );
+          if (claimed.rowCount === 0) continue;
           const ref = attempt.providerTransactionId ?? attempt.merchantReference;
           const status = await provider.fetchStatus(ref);
           await this.attempts.applyStatus(attempt.id, status, provider, ctx);

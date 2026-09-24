@@ -97,7 +97,7 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     subscriptionGraceDays = n;
   }
 
-  return {
+  const config = {
     ...base,
     databaseUrl,
     supportedCurrencies: [...new Set(supportedCurrencies)],
@@ -134,4 +134,11 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
       delayMs: reader.int('BILLING_PAYMENT_EVENT_RETRY_DELAY_MS', { default: 5000, min: 100, max: 300_000 }),
     },
   };
+  // Stage 15.8: the dispatcher renews its unsent claims every quarter of the stale window, so a claim's age when its send ends is at most
+  // stale / 4 + one send (bounded by PAYMENT_TIMEOUT_MS). Twice the timeout keeps another instance from ever re-claiming a request that is
+  // being sent; a smaller stale window would make a slow send look abandoned and duplicate it.
+  if (config.dispatch.staleSendingMs < 2 * config.paymentTimeoutMs) {
+    throw new ConfigError('BILLING_DISPATCH_STALE_SENDING_MS must be at least twice PAYMENT_TIMEOUT_MS');
+  }
+  return config;
 }

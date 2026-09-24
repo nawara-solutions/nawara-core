@@ -53,7 +53,22 @@ export class PaymentDispatcher {
       const passCtx = jobTransitionContext('dispatcher', null, `dispatch-pass:${randomUUID()}`);
       const claims = await this.requests.claimForDispatch(batchSize, staleSendingMs, passCtx);
       let dispatched = 0;
-      for (const claim of claims) {
+      // Stage 15.8: the batch is sent one request after the other, but every claim was stamped `sendingSince` at claim time. With a slow
+      // or hung Payment the last rows would wait up to batch × PAYMENT_TIMEOUT_MS (250 s by default) before being sent, while another
+      // instance already treats them as stale after BILLING_DISPATCH_STALE_SENDING_MS (60 s) and sends them too. So the claims not sent
+      // yet are renewed every quarter of the stale window: `sendingSince` then means "last sign of life of the instance holding it", and
+      // the only relationship left is one send < the stale window (checked at startup). A dead instance stops renewing: its claims go
+      // stale as before.
+      let renewedAt = Date.now();
+      for (const [i, claim] of claims.entries()) {
+        if (Date.now() - renewedAt >= staleSendingMs / 4) {
+          try {
+            await this.requests.renewSending(claims.slice(i).map((c) => c.request.id));
+          } catch (e) {
+            this.logger.warn(`payment_dispatch_renewal_failure pending=${claims.length - i} ${describeFailure(e)} — the unsent claims may be re-claimed by another instance (a duplicate send is safe by the natural key)`);
+          }
+          renewedAt = Date.now();
+        }
         const ctx: TransitionContext = { actor: passCtx.actor, cause: { type: 'dispatcher', id: claim.request.id }, correlationId: claim.correlationId };
         if (claim.wasStale) {
           this.logger.warn(`payment_dispatch_stale_recovery request=${claim.request.id} correlationId=${claim.correlationId} — retrying a send that never got an answer`);

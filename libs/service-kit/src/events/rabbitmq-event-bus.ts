@@ -16,6 +16,13 @@ export interface RabbitMqOptions {
    */
   retry?: { maxRetries?: number; delayMs?: number };
   /**
+   * Stage 15.8: unacknowledged deliveries per consumer channel (default 5, 1 to 100). Every delivery is handled concurrently and a handler
+   * usually holds one database client, so the prefetch is also how many pool clients the consumer can take at once: with prefetch equal to
+   * the pool (10 / 10) a backlog took the whole pool and HTTP requests queued behind it (Billing read p50 5.9 → 37.6 ms) for no faster
+   * drain. Keep it at most half the service's `DB_POOL_MAX`.
+   */
+  prefetch?: number;
+  /**
    * Operational notices, each a complete `event_name key=value` line (consumer lost / recovered, retry / dead-letter, confirm and drain
    * timeouts, settle failed), with the level it deserves: `info` for a recovery, `error` for a terminal dead-letter, `warn` otherwise.
    * Never carries a URL, credential or payload.
@@ -42,6 +49,8 @@ export interface RabbitMqOptions {
 /** Stage 15.3: the kit's requested heartbeat and the range configuration accepts (RabbitMQ: 5-20 s is optimal; under 5 s false positives). */
 export const DEFAULT_RABBITMQ_HEARTBEAT_S = 10;
 export const RABBITMQ_HEARTBEAT_BOUNDS = { min: 5, max: 60 } as const;
+/** Stage 15.8: see `RabbitMqOptions.prefetch`. Half the default database pool (10). */
+export const DEFAULT_PREFETCH = 5;
 
 /** amqplib 2.0.1 never settles a channel or connection close that is waiting for its close-ok when the connection dies (Stage 15.3). */
 const abandonAfter = (p: Promise<unknown>, ms: number): Promise<void> => {
@@ -131,6 +140,7 @@ interface ConsumerHandle {
  */
 export class RabbitMqEventBus implements EventBus {
   private readonly exchange: string;
+  private readonly prefetch: number;
   private connection?: ChannelModel;
   private publisher?: ConfirmChannel;
   private readonly consumers = new Set<ConsumerHandle>();
@@ -150,6 +160,8 @@ export class RabbitMqEventBus implements EventBus {
 
   constructor(private readonly opts: RabbitMqOptions) {
     this.exchange = opts.exchange ?? 'nawara.events';
+    this.prefetch = opts.prefetch ?? DEFAULT_PREFETCH;
+    if (!Number.isInteger(this.prefetch) || this.prefetch < 1 || this.prefetch > 100) throw new Error('RabbitMqEventBus prefetch must be an integer between 1 and 100');
     const heartbeatS = opts.heartbeatS ?? DEFAULT_RABBITMQ_HEARTBEAT_S;
     const url = new URL(opts.url);
     url.searchParams.set('heartbeat', String(heartbeatS)); // amqplib reads the client's requested heartbeat from the URL
@@ -271,7 +283,7 @@ export class RabbitMqEventBus implements EventBus {
       // Delay queue: nothing consumes it; a message's own `expiration` dead-letters it through the default exchange back into the work queue.
       await ch.assertQueue(retryQueueName(sub.queue), { durable: true, arguments: { 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': sub.queue } });
       for (const b of sub.bindings) await ch.bindQueue(sub.queue, this.exchange, b);
-      await ch.prefetch(10);
+      await ch.prefetch(this.prefetch);
       const { consumerTag } = await ch.consume(sub.queue, (msg) => {
         // A null message is the BROKER cancelling this consumer (queue deleted, node failover): the channel is still open but
         // nothing will ever be delivered on it, so treat it as a loss and rebuild.
