@@ -88,3 +88,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0045](./0045-commercial-entitlementkind-compatibility-fields.md) | Commercial `entitlementKind` compatibility fields: kept as compatibility/event fields, never entitlement authority | Proposed |
 | [0046](./0046-notification-service-architecture.md) | Notification service architecture: Notification → Delivery → Attempt, persisted versioned templates, canonical event intake, ambiguity and secret policy | Accepted (2026-09-24, Stage 16.9 acceptance note) |
 | [0047](./0047-resend-as-the-email-provider.md) | Resend as the notification email provider (direct HTTPS, request idempotency keys) | Accepted (2026-09-24) |
+| [0048](./0048-file-service-architecture.md) | File Service architecture: generic immutable file objects, proxy streaming, storage port, caller policies and product-issued access tickets | Accepted (2026-09-24, Stage 17.1) |
