@@ -130,8 +130,16 @@ describe('loadBillingConfig', () => {
     ['a wildcard CORS origin', { CORS_ORIGINS: '*' }, 'CORS_ORIGINS'],
     ['a malformed service token entry', { SERVICE_TOKENS: 'billing-caller-without-digest' }, 'SERVICE_TOKENS'],
     ['a SWAGGER_PASSWORD that is too short', { SWAGGER_PASSWORD: 'short' }, 'SWAGGER_PASSWORD'],
+    // Stage 15.8: a stale window shorter than two Payment timeouts would let another instance re-claim a request still being sent
+    ['a stale-sending window shorter than twice the Payment timeout', { BILLING_DISPATCH_STALE_SENDING_MS: '9999', PAYMENT_TIMEOUT_MS: '5000' }, 'BILLING_DISPATCH_STALE_SENDING_MS'],
+    ['a Payment timeout longer than half the default stale-sending window', { PAYMENT_TIMEOUT_MS: '30001' }, 'PAYMENT_TIMEOUT_MS'],
   ])('refuses %s', (_label, extra, name) => {
     expect(refusal({ ...BASE, ...extra })).toContain(name);
+  });
+
+  it('accepts a stale-sending window of exactly twice the Payment timeout (Stage 15.8 relationship)', () => {
+    const cfg = loadBillingConfig({ ...BASE, BILLING_DISPATCH_STALE_SENDING_MS: '10000', PAYMENT_TIMEOUT_MS: '5000' });
+    expect(cfg.dispatch.staleSendingMs).toBe(10_000);
   });
 
   it('never echoes a value in an error message', () => {

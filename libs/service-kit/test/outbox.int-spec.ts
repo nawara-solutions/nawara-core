@@ -100,6 +100,18 @@ describeWithEnv('outbox and inbox (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
       expect(await relay.drainOnce()).toEqual({ published: 2, failed: 0 }); // the backed-off row waits, the others go
     });
 
+    it('Stage 15.8: a row that has failed many times waits at most 15 s (the backoff ceiling), so recovery after an outage is prompt', async () => {
+      await seed(1);
+      await db.query('UPDATE outbox SET attempts = 20'); // a long outage: the doubling is far past any ceiling
+      const bus = new InMemoryEventBus();
+      bus.failNextPublishes(1);
+      const relay = new OutboxRelay(db, bus, { source: 'payment-service' });
+      expect(await relay.drainOnce()).toEqual({ published: 0, failed: 1 });
+      const waitS = Number((await db.query(`SELECT extract(epoch FROM "availableAt" - now()) AS s FROM outbox`)).rows[0].s);
+      expect(waitS).toBeGreaterThan(14);
+      expect(waitS).toBeLessThanOrEqual(15); // before Stage 15.8: 60
+    });
+
     it('recovers after the backoff and eventually delivers everything', async () => {
       await seed(2);
       const bus = new InMemoryEventBus();
@@ -153,6 +165,45 @@ describeWithEnv('outbox and inbox (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
       const after = bus.published.length;
       await new Promise((r) => setTimeout(r, 50));
       expect(bus.published).toHaveLength(after); // stopped
+    });
+
+    it('Stage 15.8: a poll that finds a backlog relays full batches back to back instead of one batch per interval', async () => {
+      await seed(120);
+      const bus = new InMemoryEventBus();
+      const relay = new OutboxRelay(db, bus, { source: 's', batchSize: 50 });
+      relay.start(60_000); // the first poll runs at once; the next one would be a minute away
+      await new Promise((r) => setTimeout(r, 1500));
+      await relay.stop();
+      expect(bus.published).toHaveLength(120); // before Stage 15.8: 50 (one batch), the rest a whole interval later
+      expect(new Set(bus.published.map((e) => e.id)).size).toBe(120);
+      expect(await count(`SELECT count(*) n FROM outbox WHERE "publishedAt" IS NULL`)).toBe(0);
+    });
+
+    it('Stage 15.8: one poll is bounded in time (maxPassMs) and stops at a batch that is not full', async () => {
+      await seed(300);
+      const bus = new InMemoryEventBus();
+      const relay = new OutboxRelay(db, bus, { source: 's', batchSize: 1, maxPassMs: 50 });
+      relay.start(60_000);
+      await new Promise((r) => setTimeout(r, 600));
+      await relay.stop();
+      expect(bus.published.length).toBeGreaterThan(1); // more than one batch in the poll...
+      expect(bus.published.length).toBeLessThan(300); // ...but the poll ended at its time bound, the rest waits for the next one
+      // a direct drainPass outside the loop behaves like drainOnce: one batch
+      await seed(3);
+      const direct = new OutboxRelay(db, new InMemoryEventBus(), { source: 's', batchSize: 2 });
+      expect(await direct.drainPass()).toEqual({ published: 2, failed: 0, batches: 1 });
+    });
+
+    it('Stage 15.8: a failing publish ends the poll at once (an outage keeps its one-failure-per-poll pace)', async () => {
+      await seed(120);
+      const bus = new InMemoryEventBus();
+      bus.failNextPublishes(1_000);
+      const failures: string[] = [];
+      const relay = new OutboxRelay(db, bus, { source: 's', batchSize: 50 }, (m) => void failures.push(m));
+      relay.start(60_000);
+      await new Promise((r) => setTimeout(r, 500));
+      await relay.stop();
+      expect(failures.filter((m) => m.startsWith('outbox_publish_failure'))).toHaveLength(1);
     });
   });
 

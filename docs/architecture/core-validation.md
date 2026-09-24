@@ -288,6 +288,7 @@ campaign.
 | 15.5 | 2026-09-23 | `804dc72` + corrective patches 1 and 2 | F-H: the kit bus destroys the transport of every connection it gives up on (error close, abandoned close); one close deadline; waits end when the connection is gone. Full 15.5 matrix + new container campaigns, full 15.3 matrix, 15.4 subset | **PASS**: frozen broker in the production image → natural exit (exit 0) at 27–29 s, 12/12 plus 20/20 cycles, with the broker's heartbeat on or off; every crash window, cancellation and accounting as before; worst graceful shutdown 39.8 s → **60 s** stop grace set in the Auth deploy and Compose | section 13.5.2 |
 | 15.6 | 2026-09-24 | `f6199dd` | Cross-service failures (20 campaigns: one service or dependency down while others run, combined failures, recovery orders, restart windows ≥ 20 iterations, event delay / replay / ordering, service authentication, tenant isolation, 10 repeated cycles, startup orders, readiness matrix, production containers) | **PASS**: no lost accepted work, no duplicate protected effect, no false success, no cross-tenant write, no manual repair; every order converges; containers exit naturally under the 60 s grace. No production change. Observations carried to 15.7 / 15.8 and one readiness decision (SRE) | section 13.6 |
 | 15.7 | 2026-09-24 | `7908ab9` | Data growth and log volume (5 campaigns: per-operation growth through the real APIs, cloned volume to 100 k lifecycles with the services' own queries under EXPLAIN, outbox accumulation during a broker outage (3 runs), DLQ residue lifecycle (3 runs), log volume in 11 scenarios, Auth / Organization probes, sensitive-log scan) | **PASS**: linear growth (Billing 18.4 KB, Payment 11.0 KB per lifecycle); request-path and claim queries flat to 100 k; exact outbox drain; DLQ residue resolved by replay with no second effect; no sensitive data in logs. No production change. Retention matrix (no duration invented), D1, O3–O5 classified, 15.8 handoff | section 13.7 |
+| 15.8 | 2026-09-24 | `c2a5108` + tuning | Capacity and runtime tuning (baseline profile 3 levels × 3 runs; pool 5/10/20; pool exhaustion; ExpirySweeper scan to 500 k; dispatcher batch and stale envelope; prefetch 1/5/10/20; outbox batch, pass and backoff; backlog recovery; multi-instance; readiness cost; affected 15.3–15.7 campaigns re-run) | **PASS**: 7 retained changes, each with before/after evidence, a mutation-proven test and its historical campaigns re-run: ExpirySweeper partial index (15 ms → 0.04 ms at 100 k) and SKIP LOCKED (0 → 999 expired in 3.5 s with one row held); AttemptResolver lease (N → 1 provider call per attempt); dispatcher claim renewal + startup relationship (9 → 0 duplicate sends); prefetch 10 → 5 (no pool starvation); outbox full-batch passes (backlog 111 s → 17 s) and backoff ceiling 60 → 15 s; duplicate `billing_transition` index dropped. Request-path latency and throughput unchanged; no invariant regression | section 13.8 |
 
 ### 13.1 Baseline (15.1)
 
@@ -1667,6 +1668,528 @@ No cleanup was implemented, so there is no concurrency proof to report.
 | Cleanup-shaped scans | 7.6–25 ms sequential at 100 k | indexes only when a cleanup is built |
 | Auth probe throttling | 429 on health probes, silent | probe exemption or throttle key (SRE / security) |
 
+### 13.8 Capacity and runtime tuning (15.8)
+
+**Question.** Are the pools, worker concurrency, RabbitMQ behaviour, batch sizes, polling intervals, timeouts and recovery mechanisms set to
+safe, explainable defaults, and do they scale out without weakening correctness?
+
+**THIS MACHINE IS NOT A PRODUCTION CAPACITY MODEL.** Every number below is relative:
+- a knob before and after, or one value against another, on one laptop;
+- the laptop is 12th-gen Core i5-12450H (12 threads), 11.4 GiB RAM of which about 4 GiB is free, Docker 28.5.2 with no CPU or memory
+  limits, and PostgreSQL 16 / RabbitMQ 3.13 in throwaway containers on loopback;
+- nothing here says how many users or requests per second production supports.
+
+**Method.**
+- **Harness:**
+  - `scripts/validation/capacity-campaigns.mjs` (new);
+  - `lib/load.mjs` (new): a dependency-free load generator with fixed concurrency and duration, a 10 s warm-up, keep-alive
+    connections, p50/p95/p99 and status counts;
+  - the fault proxy in `lib/core-stack.mjs` gained a `slow:<ms>` mode and records which payment request each call carried.
+- **Runs:**
+  - each benchmark is 3 measured runs after a warm-up;
+  - median [min–max] throughout;
+  - load runs are 60 s (pool experiments 30 s);
+  - kit-level outbox and backlog campaigns 3 runs; prefetch 3 clean runs plus 1 SIGKILL run.
+- **One dimension at a time:**
+  - every "before" was measured on the unchanged build of `c2a5108`;
+  - every "after" on the final build;
+  - a candidate was kept only with its correctness proof: a focused test that fails when the change is reverted (mutation), plus the
+    historical campaigns it can affect.
+- **Regression thresholds** (set before interpreting any result): a candidate fails on any correctness regression, a new duplicate
+  effect, lost work, a cross-tenant write, an unbounded wait, a connection leak, memory growth, worker starvation, provider-call
+  amplification, an unexplained p99 regression, or worse recovery without a compensating benefit.
+
+**Runtime knob inventory** (from the code at `c2a5108`; ★ = changed by 15.8):
+
+| Knob | Default | Bounds | Used by | Why it exists | Evidence |
+|---|---|---|---|---|---|
+| `DB_POOL_MAX` | 10 | 1–100 | every service | concurrent database work per process | 15.8: 5 → 10 +19 % throughput; 20 no faster, p99 ×2 |
+| `DB_CONNECTION_TIMEOUT_MS` | 5 000 | 100–60 000 | every service | bounded wait for a pool client or a connection | 15.2, 15.8 exhaustion: waits end at 5.0 s |
+| `DB_STATEMENT_TIMEOUT_MS` / `DB_QUERY_TIMEOUT_MS` | 30 000 / +5 000 | 1 000–600 000 / must exceed statement | every service | server cancel / silent-server bound | 15.2 (I9) |
+| `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60 000 | 1 000–3 600 000 | every service | a leaked transaction cannot hold locks for ever | 15.2 |
+| `RABBITMQ_HEARTBEAT_S` | 10 | 5–60 | Billing, Payment | silent-broker detection | 15.3.1 |
+| `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5 000 | 100–60 000 | Billing, Payment | bounded publisher confirm | 15.3 |
+| bus connect timeout / consumer reconnect | 5 s / 0.5–30 s | code | kit bus | bounded reconnect | 15.3 |
+| ★ consumer prefetch | was 10 (hard-coded); now 5, Billing `min(10, max(1, DB_POOL_MAX / 2))` | 1–100 | kit bus, Billing consumer | unacknowledged deliveries = concurrent handlers = pool clients | 15.8 below |
+| event retry | 3 × 5 000 ms | 0–10, 100–300 000 | Billing consumer | transient handler failures, then DLQ | 15.3, 15.6 |
+| outbox relay interval / batch | 1 000 ms / 50 | code | kit relay (Billing, Payment) | at-least-once publication | 15.8 below |
+| ★ outbox relay pass | was one batch per poll; now full batches back to back for at most 1 000 ms (`maxPassMs`) | code | kit relay | backlog drain | 15.8 below |
+| ★ outbox backoff | 1 s × 2ⁿ per row, ceiling was 60 s, now 15 s | code | kit relay | no hot loop during an outage | 15.8 below |
+| `BILLING_DISPATCH_INTERVAL_MS` / `_BATCH_SIZE` | 2 000 / 50 | 100–300 000 / 1–1 000 | Billing dispatcher | sends committed requests to Payment | 15.8: batch 50 kept |
+| `BILLING_DISPATCH_STALE_SENDING_MS` | 60 000 | 1 000–3 600 000; ★ now also ≥ 2 × `PAYMENT_TIMEOUT_MS` | Billing dispatcher | re-send after a lost or failed send | 15.4, 15.6 O1, 15.8 |
+| `BILLING_RECONCILE_INTERVAL_MS` / `_STALE_REQUESTED_MS` / batch | 30 000 / 300 000 / 50 | 1 000–3 600 000 / 1 000–86 400 000 / code | Billing reconciler | settles lost events from Payment's API | 15.6 |
+| ExpirySweeper interval / selection | 5 000 / all due ids | code | Payment | expires payments past `expiresAt` | ★ 15.8: index + SKIP LOCKED |
+| AttemptResolver interval / batch / ★ lease | 5 000 / 100 / 5 000 ms | code | Payment | settles stuck attempts by asking the provider | ★ 15.8: lease |
+| WebhookRetrier interval / batch / stuck / attempts | 5 000 / 100 / 10 s / 10 (10 s × 2ⁿ) | code | Payment | reprocesses failed or stuck deliveries | 15.4 |
+| `PAYMENT_TIMEOUT_MS` | 5 000 | 100–60 000 | Billing → Payment | bounded internal call | 15.6, 15.8 |
+| `AUTH_TIMEOUT_MS` | 3 000 | 100–30 000 | Billing, Payment, Organization → Auth | bounded identity check | 15.6 |
+| provider timeout | per provider (`capabilities.timeoutMs`; test provider 200 ms) | adapter | Payment attempts, resolver | provider-specific | no real adapter yet |
+| readiness check timeout / broker connect | 2 000 / 2 000 ms | code | every service | bounded `/ready` | 15.8: `/ready` 55 ms |
+| `HTTP_DRAIN_TIMEOUT_MS` / worker drain | 5 000 / 5 000 | 500–120 000 / code | every service | bounded shutdown | 15.5 |
+| `BASELINE_RATE_LIMIT_PER_MINUTE` | 100 (per address) | 1–1 000 000 | Auth (every route) | brute-force brake | 15.7, 15.8 finding |
+
+**Baseline load profile.** The mix below, at light (4), moderate (16) and pressure (64) concurrent clients:
+- Billing invoice read 30 %;
+- Billing draft-invoice create 10 %;
+- Payment read (service token) 25 %;
+- Organization reference read (service token) 15 %;
+- Auth `/auth/health` 20 %, with Auth's baseline limit raised for the test.
+
+| Level | rps | p50 | p95 | p99 | errors | CPU Billing / Payment / Auth / Org | RSS max (MB) | DB sessions | PostgreSQL CPU |
+|---|---|---|---|---|---|---|---|---|---|
+| idle | – | – | – | – | – | 3.3 / 0.5 / 0.1 / 0.1 % | 193 / 159 / 185 / 156 | 8 | – |
+| light | 2 011 [1 988–2 177] | 1.37 | 7.05 | 8.67 [8.26–8.73] | 0 | 52 / 23 / 50 / 14 % | 278 / 303 / 411 / 258 | 16 | 128 % |
+| moderate | 2 807 [2 804–3 196] | 2.95 | 20.2 | 30.2 [25.1–31.3] | 0 | 78 / 37 / 89 / 21 % | 289 / 329 / 451 / 254 | 35 | 205 % |
+| pressure | 2 897 [2 882–2 906] | 8.70 | 66.7 | 139.7 [128.1–151.7] | 0 | 83 / 39 / 94 / 22 % | 302 / 329 / 445 / 246 | 40 | 219 % |
+
+- **First bottleneck:** a service's single Node event loop. At pressure, Billing uses 83–92 % of one core, with its pool fully used, and
+  Auth 94 %. PostgreSQL, at about 2.2 cores, is not the limit.
+- **Degradation is graceful:** throughput flattens between moderate and pressure, and latency grows with it; there are no errors and no
+  timeouts.
+- **Auth's CPU is the in-memory throttler, not its work:**
+  - `@nestjs/throttler` 6.7 keeps one timer per request per key, and every timer that fires filters the key's whole list: quadratic in
+    requests per key;
+  - so with the baseline limit raised, one probing address makes Auth spend 94 % of a core at 579 rps (Organization: 22 % at 434 rps)
+    and stay at 36 % for many seconds after the load ends;
+  - at the default limit (100 per minute) each key stays small;
+  - see the Auth health-probe decision below.
+
+**Database pool size** (Billing only, 75 % reads / 25 % writes; 3 × 30 s):
+
+| `DB_POOL_MAX` | c16 rps | c16 p50 / p99 | c64 rps | c64 p50 / p99 | sessions | PostgreSQL CPU |
+|---|---|---|---|---|---|---|
+| 5 | 1 464 | 10.4 / 23.5 | 1 275 | 49.2 / 74.2 | 5 | 160–198 % |
+| **10** (default) | **1 735** | 6.35 / 43.4 | 1 530 | 40.2 / 76.0 | 10 | 186–217 % |
+| 20 | 1 642 | 4.24 / 73.6 | 1 616 | 33.5 / **145.7** | 17–20 | 223–267 % |
+
+Decision: **keep 10**.
+- 20 gives no throughput (Billing is CPU-bound) and doubles the tail latency, while costing twice the database connections.
+- 5 loses 16–19 % throughput.
+
+**Pool exhaustion** (3 runs):
+- **Setup:** every Billing pool client was blocked by an `ACCESS EXCLUSIVE` lock on `invoice`, held for 15 s, while 100 concurrent reads
+  arrived.
+- **Result, each run:**
+  - 90 reads answered 500 at 5.01–5.09 s (`DB_CONNECTION_TIMEOUT_MS`);
+  - the 10 that held a client answered 200 when the lock was released (15.0–15.1 s);
+  - 0 sessions idle in a transaction afterwards, 10 sessions (the pool);
+  - the next read 200 in 2–5 ms, `/ready` 200.
+- The waits are bounded, nothing leaks, and the service recovers with no restart (the Stage 15.2 guarantees).
+- The 500, rather than a 503, is the O3 classification question (15.7), unchanged.
+
+**Database connection budget.**
+- **Formula for a deployment:** Σ over services (`DB_POOL_MAX` × processes) + one migration runner per service being deployed
+  + operator / CLI sessions (`psql`, `nawara-check-outbox-lag`, backups) + `superuser_reserved_connections` (3) ≤ `max_connections`
+  (100 on both the Compose and the throwaway PostgreSQL).
+- **Observed per process:**
+  - idle: 1–2 sessions per service;
+  - load: every process reaches its pool (4 services × 10 = 37–40 sessions at pressure);
+  - so plan with the theoretical maximum, not the idle count.
+- **With the defaults (pool 10):**
+  - 1 process per service = 40 + about 10 reserve;
+  - 2 per service = 80 + about 10: this fits under 100, but only just;
+  - more processes need a larger `max_connections` or smaller pools (pool 5 costs about 16 % per process).
+- No replica count is established by the deployment architecture yet (Stage 20).
+- Multi-instance measurement: 1 / 2 / 4 Billing processes on one database, pool 10 each, 64 clients, 3 × 30 s, 0 errors throughout:
+
+| Profile | 1 instance | 2 instances | 4 instances |
+|---|---|---|---|
+| Read only: rps / p99 | 3 776 / 27.2 ms | – | 5 197 / 47.0 ms (+38 %) |
+| Reads 75 % + writes 25 %: rps / p99 | 1 887 / 48.5 ms | 2 678 / 61.7 ms | 1 807–2 973 / 80–259 ms |
+| Billing sessions under load (theoretical n × 10) | 10 (10) | 20 (20) | 40 (40), against max_connections 100 |
+
+- **Reads scale** until this machine's 12 threads saturate: 4 instances at about 80 % each, plus PostgreSQL and the load generator.
+- **Writes of one caller serialise on its rate-limit counter.** Every create increments the same `kit_rate_limit` row, and at 4
+  instances the sessions wait on `Lock:transactionid` and WAL sync.
+  - The low 4-instance figure came after 1 and 2 instances had already written many invoices; the fresh run gave the high figure.
+  - The default limit (300 creates per minute per caller) caps one caller far below that point.
+  - It only matters where a caller's limit is raised: then run fewer, bigger instances, or partition the caller.
+- **Sessions reach exactly the theoretical pool total under load:** plan the budget with n × pool.
+
+**ExpirySweeper scan** (the sweeper's own query, 97 % closed / 2 % open with a future expiry / 1 % open without one; median of 3):
+
+| Payments | Without index | With `payment_expiry_open_idx` | Index size |
+|---|---|---|---|
+| 1 k | 0.18 ms, seq scan, 31 buffers | 0.035 ms, index scan, 1 buffer | 16 KB |
+| 10 k | 1.15 ms, 304 buffers | 0.041 ms | 16 KB |
+| 50 k | 6.20 ms, 1 516 buffers | 0.049 ms | 16 KB |
+| 100 k | 15.0 ms, 3 031 buffers | 0.036 ms | 32 KB |
+| 500 k | 31.6 ms, 15 158 buffers | 0.058 ms | 88 KB |
+
+- **Write cost:** inserting 10 k payments took 294 ms without the index and 285 ms with it (median of 3), because the index holds only
+  open payments.
+- **Kept:** migration `0007_payment_expiry_open_index.sql`. The scan's cost now follows the open payments, not the history.
+
+**ExpirySweeper head-of-line blocking.**
+- **Before:** the per-payment `SELECT … FOR UPDATE` waited on a payment another transaction held. With one expired payment locked for
+  the whole observation, **0 of 1 000 expired payments** were expired in 120 s: each pass stopped on the held row until the statement
+  timeout.
+- **After:** `FOR UPDATE SKIP LOCKED` leaves a held row for the next pass. The 999 others were expired in **3.5 s**, and the held one
+  4.9 s after its holder released it (the next pass).
+- One `payment.expired` event per payment; a Payment read's p50 was 2.1 ms (p99 15 ms) during the drain.
+- **Why it is safe:** nothing is decided about a row this pass could not lock, and the next pass re-reads it: still due and still open
+  means it is expired then. The attempt check and the state guard are unchanged.
+- **Proof:** a new E2E test runs 20 iterations of 5 expired payments with one held at a different position each time. It fails with
+  the lock-waiting query (the pass does not finish in 3 s).
+
+**Billing dispatcher: the stale-sending relationship.**
+- **The problem:**
+  - a pass claims up to `BATCH_SIZE` requests and stamps each `sendingSince` at claim time, then sends them one after the other, each
+    call bounded by `PAYMENT_TIMEOUT_MS`;
+  - the last claim can therefore wait up to BATCH_SIZE × PAYMENT_TIMEOUT_MS before it is sent: 50 × 5 s = 250 s with the defaults,
+    against a stale window of 60 s;
+  - meanwhile another instance treats those claims as abandoned and sends them too.
+- **Reproduced, scaled down 6×:**
+  - timeout 1 s, stale 10 s, batch 20, two instances, Payment hung for about 10.5 s after the claim and then healthy;
+  - **9 duplicate calls in flight** (two calls for one request within 2 s) and 21 `payment_dispatch_stale_recovery` lines per run
+    (3/3 runs identical);
+  - still 20 payments: Payment's natural key made the duplicates harmless, but they are wasted calls and misleading logs.
+- **Rejected:**
+  - a batch small enough to fit (10 × 5 s < 60 s): measured 4× slower to drain 200 requests (44.0 s instead of 11.3 s);
+  - tuning the stale window alone.
+- **Kept: claim renewal.**
+  - While a pass is still sending, it renews the `sendingSince` of the claims it has not sent yet, every quarter of the stale window
+    (`renewSending`, one UPDATE). `sendingSince` then means "last sign of life of the instance holding it"; a dead instance stops
+    renewing, and its claims go stale exactly as before.
+  - The only relationship left is that one send must fit in the stale window with margin. Enforced at startup:
+    `BILLING_DISPATCH_STALE_SENDING_MS ≥ 2 × PAYMENT_TIMEOUT_MS`. With renewal every stale / 4, a claim is at most stale / 4 + one send
+    old when its send ends.
+- **After:** the same scenario gives **0 duplicates in flight**, exactly one call per request after recovery, 20 payments (3/3 runs).
+  The 12 remaining `stale_recovery` lines are the legitimate retries of sends that timed out.
+- **Proof:** a new E2E test runs two instances with Payment at 300 ms per call, stale 1 s, batch 6, 20 iterations: every request is
+  sent exactly once. It fails with renewal disabled (2 calls). Config tests check the startup refusal.
+
+**Dispatcher batch size** (200 requests waiting, interval 2 s; Payment fast, 3 runs, or slowed to 200 ms per call, 1 run):
+
+| Batch | Fast: time to zero | Fast: left at 10 s | Slow: time to zero | Billing read p99 during the drain | Payment calls |
+|---|---|---|---|---|---|
+| 10 | 44.0 s [43.9–44.1] | 160 | 86.6 s | 19–21 ms | 200 |
+| 25 | 19.4 s [19.4–19.6] | 100 | 62.6 s | 18–19 ms | 200 |
+| **50** | **11.3 s** [11.1–11.4] | 50 | 54.2 s | 16–22 ms | 200 |
+
+- **Kept 50.** It is the fastest drain, with no cost to HTTP latency; with renewal, the batch no longer interacts with the stale window.
+- **Fairness:**
+  - order is FIFO by `createdAt`;
+  - a new request created 2 s into a 200-request backlog was sent after 11.0 s (before) and 11.2 s (after);
+  - it is delayed by the backlog, never starved.
+
+**Stuck-request resend window (O1).**
+- After a transient failure (503) a request is resent **59.6 s** after Payment returns. A normal request goes from creation to
+  `requested` in 1.8 s (the 2 s poll).
+- With renewal, the stale window's only safety bound is ≥ 2 × `PAYMENT_TIMEOUT_MS` (10 s), so it could be lowered safely.
+- It now trades recovery delay against retry pressure and log lines during a Payment outage (two lines per stuck request per window,
+  15.7).
+- **NO CHANGE:** 60 s kept. Lowering it is an SRE choice (recovery time objective), not a safety question any more.
+
+**AttemptResolver amplification** (the Stage 15.4 campaign, unchanged: N resolver instances over 10 unresolved attempts, one pass each):
+
+| Resolvers | Provider calls per attempt, before | After |
+|---|---|---|
+| 1 | 1 | 1 |
+| 2 | 2 | **1** |
+| 4 | 4 | **1** |
+
+- **Kept: a lease.** Migration `0008_attempt_resolver_lease.sql` adds `payment_attempt."resolveAfter"`.
+  - Before asking the provider, an instance claims the attempt with one conditional UPDATE: still open, and the lease is free or has
+    run out. The lease lasts 5 s, the pass interval.
+  - No transaction is held across the provider call; the state machine never reads the column.
+  - A worker that dies holding a lease blocks nothing: the lease runs out.
+- **Proof:**
+  - a new E2E test runs four instances concurrently over 20 iterations of 3 open attempts: exactly one call per attempt, none again
+    inside the lease, one again after it;
+  - it fails without the claim (2 calls);
+  - the 15.4 race campaigns pass (below).
+
+**RabbitMQ prefetch** (Billing consumer, pool 10; 300 settled payments waiting in Billing's queue; the consumer's own span, first to last
+receipt; 3 clean runs plus 1 run with a SIGKILL mid-drain):
+
+| Prefetch | Events/s | Billing sessions (peak) | Billing read p50 / p99 during the drain | SIGKILL run |
+|---|---|---|---|---|
+| 1 | not measured with the span metric (whole drain 1.6 s, 3× prefetch 5's by the same measure) | 3–4 | 2.7 / 7.8 ms | 300 paid, one effect each |
+| **5** (new) | 525 [490–546] | 6–8 | 4.3 / 10.6 ms | 300 paid, one effect each |
+| 10 (old) | 846 [750–866] | **9–10 (the whole pool)** | 7.4 / 13.9 ms | 300 paid, one effect each |
+| 20 | 824 [738–909] | 10 | 36.3 / 48.4 ms | 300 paid, one effect each |
+
+- **Changed to 5:** in the kit, `DEFAULT_PREFETCH`, validated 1–100; in Billing, `min(10, max(1, DB_POOL_MAX / 2))`.
+- **Why:**
+  - each delivery is handled concurrently and holds a database client;
+  - with prefetch equal to the pool, a backlog takes every client, so an HTTP request waits for one: up to `DB_CONNECTION_TIMEOUT_MS`,
+    then a 500 (the exhaustion case above);
+  - 525 events/s per instance is far above Payment's event rate.
+- **Trade-off:** 38 % less consumer throughput for a bounded share of the pool, a smaller unacknowledged window and fewer redeliveries
+  after a crash.
+- **After** (the built default): 572 / 543 / 611 events/s, 6–7 sessions, read p50 3.2–4.2 ms; the SIGKILL run: 300 paid, one effect
+  each.
+
+**Outbox relay batch and pass** (kit relay through the real broker, a consumer counting deliveries):
+
+| Measurement | Before | After |
+|---|---|---|
+| One batch's pass (claim + publish with confirms + stamp): 10 / 50 / 200 rows | 21 / 89 / 303 ms | unchanged |
+| Drain rate at the 1 s interval, batch 10 / 50 / 200 | 9.8 / 45.9 / 153.5 events/s | – |
+| 5 000-event backlog, time to zero (batch 50) | **111 s** [111.0–111.2] | **16.8 s** [15.3–16.9] |
+| Steady 200 events/s for 30 s: backlog when production stops | **4 650** (then 104 s to drain) | **60–160** (drained in < 1 s) |
+| 300 Payment events after a 60 s broker outage, time to zero (live services) | 58.5 s | 15.0 s |
+| Duplicates / lost | 0 / 0 | 0 / 0 |
+
+- **Batch kept at 50:** batch 200 is faster per poll, but holds its transaction and row locks about 3.4× longer (303 ms).
+- **Kept: full batches back to back.** One poll relays batches while they come back full, for at most 1 000 ms (`maxPassMs`), then
+  waits the normal interval.
+  - Each batch is still its own short transaction, and confirm-then-stamp is unchanged: a row is never stamped without its confirm.
+  - The pass stops at the first failure (an outage keeps its one-failure-per-poll pace) and at the first batch that is not full.
+  - It stays inside the 5 s shutdown drain budget.
+- **Proof:** the kit tests "back to back", "bounded in time" and "failure ends the poll". Reverted, the first fails (50 of 120
+  relayed).
+
+**Outbox backoff after an outage** (broker unreachable for 90 s, then back; 3 runs each):
+
+| Backoff ceiling | Drain after the broker returns, 1 event | Drain, 200 events | Failure lines per minute during the outage (1 / 200 events) |
+|---|---|---|---|
+| 60 s (old) | 33.7 s | 57.6 s | 4.7 / 60 |
+| **15 s** (new default) | 0.45 s | 15.2 s | 6 / 60 |
+| 5 s | 2.6 s | 5.4 s | 13.3 / 60 |
+
+- **Changed to 15 s** (`DEFAULT_MAX_BACKOFF_MS`). The ceiling is the worst delivery delay after recovery; the outage cost barely moves,
+  because a poll stops at its first failure.
+- 5 s would add little recovery gain for about 3× the retries of a lone event.
+- **Rejected:** "reset every backoff after a successful publish". A poison row (the broker rejecting that one message) would then be
+  retried on every other poll.
+- **Proof:** a kit test (≤ 15 s after 20 failures). Reverted, it fails (60 s).
+
+**Worker polling, capacity and detection** (defaults, per process):
+
+| Worker | Interval | Queries per minute, idle | Capacity per process (measured or bounded) | Detection latency | Log lines during a failure |
+|---|---|---|---|---|---|
+| Outbox relay (Billing, Payment) | 1 s | 60 (one claim transaction) | about 300 events/s (5 000 in 16.8 s; was 46/s) | ≤ 1 s | ≤ 60/min (one per poll) |
+| Billing dispatcher | 2 s | 30 | about 18 requests/s (Payment fast) | ≤ 2 s | pass: 30/min; per request: 2 per stale window |
+| Billing reconciler | 30 s | 2 | 50 per pass (1.7/s), after 300 s stale | 300 s + 30 s | 2/min |
+| Billing consumer | push | 0 | about 525 events/s (prefetch 5) | immediate | ≤ 8 per failing event (bounded by its retries) |
+| Payment ExpirySweeper | 5 s | 12 (index scan) | 999 in 3.5 s | ≤ 5 s | 12/min |
+| Payment AttemptResolver | 5 s | 12 | 100 per pass, provider-bound | ≤ 5 s (+ provider window) | 12/min, plus per attempt |
+| Payment WebhookRetrier | 5 s | 24 | 100 per pass | ≤ 10 s (stuck threshold) | 12/min |
+
+- No worker polls faster than it needs to, and none was changed.
+- Event-driven wake-ups would be a redesign, not a tuning.
+- Every worker drains a backlog faster than the matching creation path can fill it.
+- The reconciler is the slowest, deliberately: it is the fallback for lost events.
+
+**Internal HTTP and provider timeouts.**
+- **The calls:**
+  - Billing → Payment: 5 s, dispatch / cancel / reconcile;
+  - Billing, Payment, Organization → Auth: 3 s;
+  - readiness checks: 2 s;
+  - the provider: per adapter (test provider 200 ms).
+- **No call is stacked on another call's full deadline:**
+  - a Billing → Payment call does no Auth call on Payment's side (service token);
+  - the payer routes that ask Auth are not called by Billing.
+- **The caller's budget is shorter than the callee's worst case:** 5 s against Payment's 30 s statement timeout. That is safe because
+  every Billing → Payment call is idempotent (natural key, `Idempotency-Key`, read-only reconcile): a Payment commit after Billing gave
+  up is found on the next attempt.
+- **The provider timeout is a per-adapter capability.** No real adapter exists, so there is nothing to tune on localhost.
+  - With several instances, the lease now keeps a slow provider from being asked N times.
+  - The resolver's `initiated` grace is timeout + visibility lag.
+- **NO CHANGE.**
+
+**RabbitMQ readiness cost.**
+- `/ready` opens and closes one AMQP connection: p50 54.8 ms (Billing) and 56.3 ms (Payment), p99 about 70–74 ms, one connection churned
+  per probe. `/health` answers in 2.2 ms.
+- At a 10 s probe period that is 6 connections per minute per process, which RabbitMQ handles trivially.
+- Reusing the bus's own connection (heartbeat-backed) would be cheaper, but it would change what "ready" proves, and it is tied to the
+  open SRE decision O2 (15.6).
+- **NO CHANGE**, recorded as evidence for O2.
+- The 503 seen once after the pressure run did not reproduce: `readinessAfterLoad` had both services ready 0.1 s after 30 s of
+  pressure, for 40 s, before and after tuning.
+
+**Auth health-probe throttling (NEEDS SRE / SECURITY DECISION, unchanged).**
+- **The setup:** `/auth/health`, `/health` and `/ready` sit behind Auth's global `ThrottlerGuard` (100 per minute per address; 15.7:
+  429 on health probes, not logged).
+- **The new evidence:** the obvious workaround, raising the limit, costs quadratic CPU per address in the in-memory throttler (above).
+- **The options** (not chosen here):
+  1. exempt the three health routes (`@SkipThrottle`): they do one `SELECT 1`, like every other service's unthrottled `/ready`;
+  2. key the throttle on the forwarded client address (`TRUST_PROXY`) behind a trusted gateway;
+  3. a shared throttler storage.
+- Security-sensitive routes keep their own database throttle (`auth_throttle`) in every option.
+
+**`billing_transition` duplicate index.**
+- **Redundant, per the catalog:**
+  - `billing_transition_entity_idx` is a btree on `("entityType", "entityId", revision)`: not partial, same columns, order and
+    opclasses as the index behind the constraint `billing_transition_revision_unique`;
+  - no foreign key references the table;
+  - nothing names the index.
+- **Measured at 200 k rows** (median of 3):
+
+| | With the duplicate | Without |
+|---|---|---|
+| Index bytes (all indexes) | 39.2 MB | 23.9 MB (−39 %) |
+| Insert 200 k transitions | 1 512 ms | 1 206 ms (−20 %) |
+| BI-19 trigger lookup / entity history | 0.052 / 0.047 ms (non-unique index) | 0.049 / 0.047 ms (unique index), same buffers |
+
+- **Removed:** migration `0014_drop_duplicate_transition_index.sql`.
+
+**Rate-limit storage.**
+- `kit_rate_limit` and `auth_throttle` lookups are unique-index upserts: 0.08–0.26 ms at 100 k rows (15.7), flat.
+- A purely technical sweep is safe (15.7 matrix): a row whose window ended behaves like an absent one. **Not built:** no volume
+  problem, and it would be a new periodic worker.
+- The idempotency key TTL (D1, 15.7) is a policy follow-up, not a capacity knob. **Not changed.**
+
+**Before / after, whole system** (same profile, isolated runs):
+
+| Metric | Light before → after | Moderate before → after | Pressure before → after |
+|---|---|---|---|
+| Throughput (rps) | 2 011 → 2 031 | 2 807 → 2 803 | 2 897 → 2 909 |
+| p50 (ms) | 1.37 → 1.38 | 2.95 → 3.14 | 8.70 → 8.42 |
+| p95 (ms) | 7.05 → 7.00 | 20.2 → 20.5 | 66.7 → 66.5 |
+| p99 (ms) | 8.67 → 8.48 | 30.2 → 29.5 | 139.7 → 133.0 |
+| Errors | 0 → 0 | 0 → 0 | 0 → 0 |
+| CPU Billing / Payment | 52 / 23 → 52 / 24 % | 78 / 37 → 80 / 37 % | 83 / 39 → 82 / 39 % |
+| RSS max Billing / Payment (MB) | 278 / 303 → 273 / 304 | 289 / 329 → 294 / 304 | 302 / 329 → 307 / 304 |
+| DB sessions (max) | 16 → 17 | 35 → 35 | 40 → 38 |
+| Broker connections / channels / unacked after | 2 / 3 / 0 → 2 / 3 / 0 | | |
+
+- The request path is unchanged, as expected: no retained change touches it.
+- The gains are in backlog recovery, multi-instance behaviour and outage recovery (tables above).
+
+**Backlog recovery** (before → after):
+
+| Backlog | At 10 s | At 30 s | At 60 s | Time to zero |
+|---|---|---|---|---|
+| 1 000 expired payments, one of them locked | 1 000 → **0** (+ the locked one) | 1 000 → – | 1 000 → – | never in 120 s → **3.5 s** (+ 4.9 s after release) |
+| 300 Payment events after a 60 s broker outage | 6 → 4 | 1 → 0 | 0 | 58.5 s → **15.0 s** |
+| 5 000 events in one relay (kit) | 4 550 → 2 000 | 3 650 → 0 | 2 300 → 0 | 111 s → **16.8 s** |
+| 200 payment requests to dispatch | 50 → 50 | 0 | 0 | 11.3 s → 11.2 s (unchanged by design) |
+
+- **HTTP during the drains:**
+  - Billing read p99 16–22 ms during a dispatch drain;
+  - Payment read p50 2.1 ms / p99 15 ms during the expiry drain;
+  - Billing read p50 about 4 ms during a consumer drain at prefetch 5;
+  - the workers never starved HTTP.
+
+**Log volume after tuning:** the Stage 15.7 log campaign re-run on the final build (30 s windows, lines per minute):
+
+| Scenario | 15.7 | 15.8 |
+|---|---|---|
+| Healthy, idle | 0 | 0 |
+| Healthy, 20 lifecycles | Billing 78.8 | 79.5 |
+| Both databases refused | Billing 267.7, Payment 104.3 | 268, 103.2 |
+| RabbitMQ stopped / frozen | Billing 17.3 / 4, Payment 1.9 / 2 | 17.4 / 4, 1.9 / 2 |
+| Payment API 503 / refused | Billing 434.8 / 432.4 | 436.2 / 436.9 |
+| Payment API hung | Billing 11.8 | 27.8 (*) |
+| Consumer retry storm | Billing 643.8 | 647.1 |
+
+- Tuning created no log amplification: the retained changes do not add lines per outage, and the outbox's shorter ceiling costs at most
+  6 instead of 4.7 lines per minute for a single waiting event (see the backoff table).
+- (*) That scenario's stale window is 5 s, so the new startup rule forced its Payment timeout down to 2.5 s (from 5 s). Each hung call
+  now times out twice as fast; the lines per call are unchanged.
+- Sensitive-data scan: 1 207 lines, no pattern, no live credential, 0 non-JSON lines.
+
+**Memory and CPU.**
+- **RSS:**
+  - idle 147–193 MB per service;
+  - under load up to 307 (Billing) / 304 (Payment) / 420 (Auth) / 242 (Organization) MB;
+  - back to its post-warm-up plateau after load (Billing 310, Payment 304 MB);
+  - no run-to-run growth across the 3 × 3 load runs or the backlog drains.
+- **CPU:**
+  - idle 0.1–3.8 % (Billing's is its 2 s dispatcher plus the 1 s relay);
+  - an outage 0.7 % (15.7);
+  - load: see the tables above.
+- **No busy polling or retry loop was found.** Auth's post-load CPU is the throttler timers (above), a known and bounded effect of the
+  raised test limit.
+
+**Configuration bounds and relationships** (all validated at startup):
+- **Kept from before:**
+  - every interval, timeout, pool and batch has a minimum of at least 1 (or 100 ms / 1 s): zero, negative and huge values are refused;
+  - `DB_QUERY_TIMEOUT_MS > DB_STATEMENT_TIMEOUT_MS`;
+  - `RABBITMQ_HEARTBEAT_S` 5–60 (never 0).
+- **New:**
+  - `BILLING_DISPATCH_STALE_SENDING_MS ≥ 2 × PAYMENT_TIMEOUT_MS` (refused otherwise);
+  - bus prefetch 1–100 (refused otherwise);
+  - Billing's prefetch derived from `DB_POOL_MAX` (never more than half the pool, at most 10).
+- **Documented, not enforceable in one process:**
+  - Σ pools × processes + reserve ≤ `max_connections` (the budget above);
+  - the stop grace (60 s) must exceed the HTTP and worker drains (15.5).
+- The test harnesses that set a 3 s or 5 s stale window now set `PAYMENT_TIMEOUT_MS` to half of it.
+
+**Migration safety.**
+- `0007_payment_expiry_open_index` is `CREATE INDEX`, in the runner's transaction: it takes a `SHARE` lock on `payment`, so writes wait
+  for the build.
+  - Measured: the index covers only open rows, and the build reads the whole table (about 30 ms of scan at 500 k rows here). Seconds on
+    a large table, no data change.
+  - Payment is not in production yet (Auth is the only deployed service).
+  - For a large production table, Stage 20 should build it `CONCURRENTLY` outside the runner's transaction.
+- `0008_attempt_resolver_lease` is `ADD COLUMN` without a default: a catalog-only change, a brief `ACCESS EXCLUSIVE` lock.
+- `0014_drop_duplicate_transition_index` is `DROP INDEX`: a brief `ACCESS EXCLUSIVE` lock on `billing_transition`, no rewrite.
+- **Compatibility and rollback:**
+  - old code runs on the new schema: it ignores the column and does not use the dropped index;
+  - new code needs 0008 (the resolver's claim names the column), so migrate before deploying the new Payment;
+  - rollback is the reverse DDL (drop the index or column, recreate the dropped index); none is needed for correctness.
+
+**Correctness revalidation of the affected guarantees** (historical campaigns re-run on the final build): each re-run campaign's own invariants hold, with 0 uncaught errors in every harness.
+
+| Change | Guarantee at risk | Re-run (stage: campaigns) | Result |
+|---|---|---|---|
+| Relay: full batches, 15 s ceiling | at least once; confirm before stamp; no loss or duplicate effect; bounded outage behaviour | 15.3: brokerDownBeforePublish, outageCycles, confirmTimeout, lostConfirm, connectionCutDuringPublish, crashWindows, multiRelay, outboxBackoff, outboxDurabilityAcrossRestart, appFlow. 15.4: multiRelay, relaysConsumersBrokerInterruption, relayCrashHoldingLocks, outboxRetryRace. 15.5: outboxShutdown | 0 lost, 0 duplicate effects, pending 0 after recovery. Backoff ceiling 14.99 s at attempt 11 (was 60 s), same early schedule. Shutdown with a batch in flight: 20/20 exit in about 1.08 s, published at exit |
+| Prefetch 5 | redelivery bounded, one effect, no pool starvation | 15.3: prefetch, consumerFailures, duplicateDelivery. 15.4: billingCompetingConsumers, billingDuplicateDeliveryRace, billingPoolPressure. 15.5: consumerWindows. 15.6: rabbitDown, billingDbDownWhileEventArrives | 5 unacknowledged while a handler is held (was 10), all 25 back in the queue when the consumer dies; one receipt and one effect per event everywhere; 20/20 of every consumer window converged; the broker outage converged in 6.1–7.3 s |
+| Sweeper index + SKIP LOCKED | one expiry per payment; no expiry with money in flight; bounded shutdown | 15.4: expirySweeperRaces. 15.5: sweeperShutdown | 3 concurrent sweepers: 200/200 expired once. One row locked: 29/30 expired in about 77 ms passes, 0 sessions waiting on the lock (was: the pass blocked). The boundary race with an attempt start stays consistent (20/20). Shutdown no longer waits for a held row: 13–16 ms (was 1.05 s, or 30 s when the lock was never released); that payment expires once after restart |
+| Resolver lease | no duplicate transition or event; recovery after a crash | 15.4: attemptResolverRaces, attemptResolverAmplification, paymentLiveTwoInstances. 15.5: paymentWorkerWindows | every race pair ends with at most one terminal event; amplification 1 / 1 / 1. A resolver SIGKILLed holding a claim: the survivor settles the attempt after **5.16 s [5.03–5.28]** (one lease), 20/20 `succeeded`, one event. The 15.5 campaign now waits for the lease: its first version expected recovery within 0 s |
+| Dispatcher renewal + startup relationship | one payment per request; no lost request; bounded shutdown | 15.4: billingMultiInstanceDispatch, billingDispatcherStaleRace, billingDispatcherCrashWindows. 15.5: dispatcherShutdown. 15.6: paymentDownBillingUp, paymentRestartDuringBillingRequest (6 windows, 110 iterations), eventOrdering, repeatedCycles, smoke | one payment per request everywhere, 0 id mismatches, 0 cross-tenant. The 15.4 stale race (3 instances, Payment holding a create 1.5 s / 4.5 s): **1 create per request, at most 1 concurrent, 0 stale recoveries** (15.4: up to 3 creates, 2–3 concurrent, 25–30 stale recoveries) |
+
+- **The stale race needed rescaling.** It was designed for a 3 s stale window with a 5 s timeout and a 4.5 s hold: "a send outliving the
+  stale window". The new startup rule refuses that configuration, so it now runs with a 10 s window and a 5 s timeout. Harnesses that used
+  a 3 s or 5 s window with the default timeout now set the timeout to half the window.
+- **The sweeper's 15.5 shutdown scenario no longer reaches its precondition** (a pass blocked on a lock). The precondition no longer
+  exists, which is the improvement.
+
+
+**Regression and production images.**
+- **Full regression, all green:**
+  - build;
+  - unit: kit 132, Auth 102, Organization 138, Billing 321, Payment 92;
+  - kit integration 109;
+  - E2E: Auth 311, Organization 232 (on a throwaway PostgreSQL: its guard refuses the Compose cluster), Billing 251, Payment 116;
+  - real broker 9; Auth–Organization 4;
+  - `check:repo`, `test:repo`.
+  - Billing's migrations test now pins 14 service migrations (it pinned 13).
+- **All four production images rebuilt and smoked:** uid 1000, `/health` 200 and stable, `/ready` answers.
+- **Run as containers:**
+  - `dockerStop` and `dockerCrossServiceOutage` (15.5, 15.6): idle stops 0.27–0.39 s, exit 0; broker stopped / database paused
+    converge;
+  - `dockerStopWithGrace` with a frozen broker: Billing 27.2 s and Payment 28.7 s, natural exit 0 (3/3), under the 60 s grace;
+  - the 10 s Docker default still SIGKILLs that case, as in 15.5.
+- **No validation tooling in the images.**
+
+**Tuning decision register:**
+
+| Item | Baseline | Candidate(s) | Result | Decision |
+|---|---|---|---|---|
+| DB pool | 10 | 5, 20 | 5: −16–19 % rps; 20: same rps, p99 ×2, 2× connections | **NO CHANGE**, 10 justified |
+| DB pool exhaustion | – | – | bounded 5 s, no leak, recovery | NO CHANGE |
+| Rabbit prefetch | 10 | 1, 5, 20 | 10 and 20 take the whole pool (HTTP p50 ×2 to ×9); 5 gives 525 events/s and a bounded share | **CHANGED to 5** (derived: pool / 2) |
+| Outbox batch | 50 | 10, 200 | 200 holds locks 3.4× longer | NO CHANGE |
+| Outbox pass | 1 batch per poll | full batches back to back ≤ 1 s | backlog 111 s → 16.8 s; steady 4 650 → ≤ 160 | **CHANGED** |
+| Outbox backoff ceiling | 60 s | 15 s, 5 s; reset on success | 57.6 s → 15.2 s recovery; outage lines unchanged; reset rejected (poison row) | **CHANGED to 15 s** |
+| Dispatcher batch | 50 | 10, 25 | 50 fastest (11.3 s vs 44.0 s), no HTTP cost | NO CHANGE |
+| Dispatcher stale | 60 s, claim-time stamp | renewal; smaller batch; smaller stale | 9 duplicates → 0 with renewal | **CHANGED: renewal + startup relationship**; 60 s kept |
+| AttemptResolver | N calls per attempt for N instances | lease | 1 / 2 / 4 → 1 / 1 / 1 | **CHANGED: lease** |
+| ExpirySweeper query | seq scan (15 ms at 100 k) | partial index | 0.036 ms, 32 KB, no insert cost | **CHANGED: index** |
+| ExpirySweeper HOL | blocks on a held row | SKIP LOCKED | 0 in 120 s → 999 in 3.5 s | **CHANGED** |
+| Provider timeout | per adapter | – | no real adapter | NO CHANGE |
+| Internal timeouts | 5 s / 3 s | – | no stacking; idempotent retries | NO CHANGE |
+| Worker intervals | 1 / 2 / 5 / 30 s | – | capacity above creation rates | NO CHANGE |
+| Rabbit readiness | connect per probe (55 ms) | reuse the bus connection | changes what "ready" proves (O2) | NO CHANGE (SRE) |
+| Auth probe throttling | 429 on probes | exempt / trusted proxy | raising the limit is quadratic CPU | NO CHANGE (SRE / security) |
+| `billing_transition` index | duplicate | drop | −39 % index bytes, −20 % insert time, same plans | **CHANGED: dropped** |
+| Rate-limit storage | no cleanup | technical sweep | flat lookups at 100 k | NO CHANGE (documented) |
+| Idempotency TTL | stored, never read | – | policy (D1) | NO CHANGE |
+
+**Handoff to 15.9** (re-run for closure, no new optimisation work):
+- the full regression;
+- the canonical matrix (15.2–15.8) on the final build: database outages (15.2), broker and outbox (15.3), workers and races (15.4),
+  shutdown / restart including containers (15.5), cross-service (15.6), growth and log volume (15.7), and this stage's
+  `capacity-campaigns.mjs` (baseline profile, backlog recovery, dispatcher stale, prefetch, multi-instance);
+- production-image smoke;
+- the consolidation of every open decision (section 16);
+- Phase C closure.
+
 ## 14. Experiment report template
 
 ```text
@@ -1707,15 +2230,17 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | ~~15.5 FAIL F-H~~ **resolved** (section 13.5.2): the kit bus destroys the transport of every connection it gives up on | – | – |
 | ~~Stop grace~~ **set to 60 s** (section 13.5.2) in the Auth deploy and Compose; every future deployment of a Core service must declare ≥ 60 s | – | – |
 | Init process (`--init` / tini) for signal forwarding and zombie reaping (not needed for correctness) | Stage 20 | SRE |
-| 15.6 O2: should Billing / Payment `/ready` include RabbitMQ (today: 503 during a broker outage although their HTTP still works)? | before production routing on `/ready` | SRE |
-| 15.6 O1: resend delay after a transient Payment failure (today the 60 s stale window) | 15.8 | engineering |
+| 15.6 O2: should Billing / Payment `/ready` include RabbitMQ (today: 503 during a broker outage although their HTTP still works)? 15.8 evidence: the check opens one AMQP connection per probe (p50 55 ms, vs 2 ms for `/health`) | before production routing on `/ready` | SRE |
+| 15.6 O1: resend delay after a transient Payment failure (60 s stale window). 15.8: kept; with claim renewal its only safety bound is ≥ 2 × `PAYMENT_TIMEOUT_MS` (10 s), so lowering it is now a recovery-time vs retry-pressure choice | before production alerting | SRE |
 | Start-before-stop / rolling deploy for Auth (every deploy is an outage today) | Stage 20 | SRE |
 | SDD endpoint 15: success is `200` in code and tests but `202` in the SDD, and the marker is stamped even when Payment refuses (SDD: "nothing changed") | Billing doc review | engineering |
-| Acceptable AttemptResolver provider-call amplification (15.4 measured: N instances → N calls per unresolved attempt per pass; state safe) | 15.8 | product (provider cost / rate limits) |
-| ExpirySweeper head-of-line blocking and dispatcher per-batch stale reclaim (15.4: correct, availability and duplicate-call cost) | 15.8 | engineering |
+| ~~Acceptable AttemptResolver provider-call amplification~~ **resolved** (section 13.8): a 5 s lease makes it one provider call per attempt per lease whatever the number of instances | – | – |
+| ~~ExpirySweeper head-of-line blocking and dispatcher per-batch stale reclaim~~ **resolved** (section 13.8): SKIP LOCKED; claim renewal with `BILLING_DISPATCH_STALE_SENDING_MS ≥ 2 × PAYMENT_TIMEOUT_MS` enforced at startup | – | – |
 | Acceptable log volume during outages (15.7 measured: 0 lines/min idle; per-pass lines 12–60/min per worker at default intervals; per-item retry lines grow with the backlog) | before production alerting | SRE |
 | Retention periods (F12): published outbox horizon (and the inbox's, once a consumer uses it); webhook rows and raw bodies (O-17); audit trails; refresh tokens; Organization idempotency keys (no expiry column). Matrix in section 13.7 | before production data accumulates | product / legal / security / SRE |
 | 15.7 D1: honour Payment's documented key expiry (`expiresAt` is never read; an old key replays forever) by a cleanup or an expiry check | before the first cleanup | engineering |
-| 15.7: Auth health endpoints share the global throttle (429 on probes, not logged) — exempt probes or key on the forwarded address | before production routing behind a gateway | SRE / security |
+| 15.7: Auth health endpoints share the global throttle (429 on probes, not logged) — exempt probes or key on the forwarded address. 15.8: raising `BASELINE_RATE_LIMIT_PER_MINUTE` is not a fix (the in-memory throttler's cost is quadratic in requests per address) | before production routing behind a gateway | SRE / security |
 | 15.7 O3: log `describeFailure` facts in the kit exception filter; separately, whether database-unavailable should map to 503 (API contract, all services) | engineering (a); API decision (b) | engineering / API |
-| Traffic assumptions for capacity targets | 15.8 | product |
+| Traffic assumptions for capacity targets (15.8 measured only relative behaviour on one laptop; replicas per service are not established) | before capacity planning | product |
+| 15.8: build `payment_expiry_open_idx` (Payment 0007) `CONCURRENTLY` outside the migration transaction when `payment` is large in production | Stage 20 | engineering / SRE |
+| 15.8: connection budget per deployment (Σ pools × processes + migrations + operators + 3 ≤ `max_connections`; with defaults ≤ 2 processes per service on a default PostgreSQL) | Stage 20 | SRE |

@@ -17,6 +17,13 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
 export const billingMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
 
+/**
+ * Stage 15.8: every Payment event Billing consumes holds one database client while it is applied, so the consumer may take at most half
+ * of the pool (5 with the default `DB_POOL_MAX` 10, at most 10): the other half stays for HTTP requests and the workers. Measured: with
+ * prefetch 10 on a pool of 10, a 300-event backlog took all 10 clients and a Billing read went from p50 5.9 ms to 37.6 ms, for no faster drain.
+ */
+export const consumerPrefetch = (poolMax: number): number => Math.min(10, Math.max(1, Math.floor(poolMax / 2)));
+
 export interface AppModuleOverrides {
   /** Tests inject a stub; production uses the kit's `HttpAuthClient` against `AUTH_SERVICE_URL`. */
   authClient?: AuthClient;
@@ -56,7 +63,7 @@ export class AppModule {
         EventsModule.forRoot({
           source: config.serviceName,
           bus: overrides.bus ?? (config.rabbitmqUrl
-            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs, heartbeatS: config.rabbitmqHeartbeatS, onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message) })
+            ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, prefetch: consumerPrefetch(config.db.poolMax), confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs, heartbeatS: config.rabbitmqHeartbeatS, onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message) })
             : new InMemoryEventBus()),
           // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
           // Stage 14.7: each relay message carries its own event name (`outbox_publish_failure eventId=...`, `outbox_relay_pass_failure`, ...).

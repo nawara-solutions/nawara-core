@@ -78,7 +78,9 @@ bus.subscribe({ queue: 'svc.thing', bindings: ['thing.*'], handler: (e) => inbox
 ```
 
 * The relay publishes **at least once**; consumers absorb duplicates through the inbox (inbox row and effect share one transaction).
-* A broker outage only delays delivery: the relay records the error class, backs off, and business transactions are unaffected.
+* A broker outage only delays delivery: the relay records the error class, backs off (per row, doubling from 1 s up to 15 s), and business transactions are unaffected.
+* A poll relays batches (default 50) back to back while they come back full, for at most 1 s, then waits for the next interval (default 1 s); each batch is its own short transaction (Stage 15.8).
+* `RabbitMqEventBus` consumers take at most `prefetch` unacknowledged deliveries per channel (default 5): each is handled concurrently and usually holds a database client, so keep it at most half the service's `DB_POOL_MAX` (Stage 15.8).
 * Metadata (`eventId`, `occurredAt`, `correlationId`, `source`, `version`) travels in message **headers**; the payload keeps its flat shape. Payloads carry opaque ids and plain facts, never secrets.
 * A failing consumer is retried a bounded number of times, then dead-lettered (`<queue>.dead`) for an operator to inspect and replay; nothing is dropped silently or retried in a hot loop. See **Dead letters** below.
 * An event published while **no queue is bound** is dropped by the broker (normal topic-exchange behaviour): consumers must declare their queue before events matter.

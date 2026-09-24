@@ -4,7 +4,9 @@ import request from 'supertest';
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest';
 import { DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
-import { AttemptResolver } from '../src/attempts/attempt-resolver.js';
+import { AttemptResolver, RESOLVE_LEASE_MS } from '../src/attempts/attempt-resolver.js';
+import { AttemptService } from '../src/attempts/attempt.service.js';
+import { ProviderRegistry } from '../src/providers/provider-registry.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -39,8 +41,10 @@ describeWithEnv('attempt resolver (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
       tokens: [{ caller: 'billing-service', digest: billing.digest }],
       authClient,
       migrationsDirs: [kitMigrationsDir, paymentMigrationsDir],
-      env: { PAYMENT_TEST_PROVIDER: 'true' },
+      env: { PAYMENT_TEST_PROVIDER: 'true', PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE: '100000' }, // the lease test starts 60 attempts for one payer
     });
+    // Stage 15.8: the passes here are driven explicitly; the app's own timer would claim attempts (lease) under a test's feet.
+    await t.app.get(AttemptResolver).stop();
   });
   afterAll(async () => {
     await t.app.close();
@@ -129,4 +133,36 @@ describeWithEnv('attempt resolver (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
     expect(after2.body.status).toBe(after1.body.status);
     expect(after2.body.attempts[0].status).toBe(after1.body.attempts[0].status);
   });
+
+  it('Stage 15.8: four resolver instances ask the provider about each open attempt ONCE per lease, not once per instance (20 iterations)', async () => {
+    // Real database and real AttemptService; the provider's status call is counted and answers `pending`, so every attempt stays open.
+    const real = t.app.get(ProviderRegistry).get('test');
+    const calls = new Map<string, number>();
+    const counting = { ...real, capabilities: real.capabilities, fetchStatus: async (ref: string) => (calls.set(ref, (calls.get(ref) ?? 0) + 1), { kind: 'pending' as const }) };
+    const registry = { tryGet: (id: string) => (id === 'test' ? counting : undefined), get: () => counting };
+    const instances = Array.from({ length: 4 }, () => new AttemptResolver(t.app.get(DbService), registry as never, t.app.get(AttemptService)));
+    const refOf = async (paymentId: string) =>
+      (await t.app.get(DbService).query<{ ref: string }>(`SELECT coalesce("providerTransactionId", "merchantReference"::text) AS ref FROM payment_attempt WHERE "paymentId" = $1`, [paymentId])).rows[0]!.ref;
+    for (let i = 0; i < 20; i++) {
+      const refs: string[] = [];
+      for (let k = 0; k < 3; k++) {
+        const payment = await createPayment();
+        await startAttempt(payment.id, `lease-${i}-${k}-${crypto.randomUUID()}`, { scenario: 'timeout_after_accept' }).expect(201);
+        refs.push(await refOf(payment.id));
+      }
+      calls.clear();
+      await Promise.all(instances.map((r) => r.drainOnce())); // four instances, one pass each, concurrently
+      for (const ref of refs) expect(calls.get(ref)).toBe(1); // before Stage 15.8: 4 (one call per instance)
+      for (const n of calls.values()) expect(n).toBe(1); // older attempts whose lease ran out: still one call, never one per instance
+      calls.clear();
+      await Promise.all(instances.map((r) => r.drainOnce())); // inside the lease: nobody asks again
+      for (const ref of refs) expect(calls.get(ref)).toBeUndefined();
+    }
+    // A lease runs out on its own (a worker that died holding one blocks nothing): after it, exactly one instance asks again.
+    await new Promise((r) => setTimeout(r, RESOLVE_LEASE_MS + 200));
+    calls.clear();
+    await Promise.all(instances.map((r) => r.drainOnce()));
+    expect(calls.size).toBeGreaterThan(0);
+    for (const n of calls.values()) expect(n).toBe(1);
+  }, 120_000);
 });

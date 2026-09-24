@@ -54,8 +54,12 @@ export class ExpirySweeper {
   private async trySweepOne(paymentId: string, ctx: EventContext): Promise<boolean> {
     return this.db.tx(async (q) => {
       // Database time is the only clock (SDD section 12): "due" is decided by the database, not by this process's clock.
+      // Stage 15.8: SKIP LOCKED. A payment another transaction holds (an attempt being started or settled, a cancel) is left for the
+      // next pass instead of stalling this one: without it, one locked row blocked every expired payment behind it for as long as the
+      // holder kept its lock (up to the statement / idle-in-transaction timeouts). Skipping is safe: nothing is decided about a row
+      // this pass did not lock, and the next pass re-reads it (still due and still open → expired then).
       const { rows } = await q.query<PaymentRow & { due: boolean }>(
-        'SELECT *, ("expiresAt" IS NOT NULL AND "expiresAt" <= now()) AS due FROM payment WHERE id = $1 FOR UPDATE',
+        'SELECT *, ("expiresAt" IS NOT NULL AND "expiresAt" <= now()) AS due FROM payment WHERE id = $1 FOR UPDATE SKIP LOCKED',
         [paymentId],
       );
       const payment = rows[0];

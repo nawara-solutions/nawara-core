@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
@@ -98,4 +99,35 @@ describeWithEnv('expiry sweeper (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
     const rows = (await t.app.get(DbService).query(`SELECT 1 FROM outbox WHERE name = 'payment.expired' AND payload->>'paymentId' = $1`, [payment.id])).rows;
     expect(rows).toHaveLength(1);
   });
+
+  it('a payment locked by another transaction does not stall the unrelated expired payments; it is expired by a later pass (Stage 15.8, 20 iterations)', async () => {
+    const sweeper = t.app.get(ExpirySweeper);
+    const expiredEvents = async (id: string) =>
+      (await t.app.get(DbService).query(`SELECT 1 FROM outbox WHERE name = 'payment.expired' AND payload->>'paymentId' = $1`, [id])).rows.length;
+    for (let i = 0; i < 20; i++) {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      const ids: string[] = [];
+      for (let k = 0; k < 5; k++) ids.push((await createPayment(past).expect(201)).body.id);
+      const locked = ids[i % ids.length]!; // the held row sits at a different place among its peers each iteration
+      const holder = new pg.Client({ connectionString: db.url });
+      await holder.connect();
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM payment WHERE id = $1 FOR UPDATE', [locked]);
+      try {
+        const started = Date.now();
+        const pass = sweeper.sweepOnce();
+        const finished = await Promise.race([pass.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 3000))]);
+        expect(finished).toBe(true); // before Stage 15.8: blocked on the held row until its holder ended
+        expect(Date.now() - started).toBeLessThan(3000);
+        for (const id of ids) expect((await getPayment(id).expect(200)).body.status).toBe(id === locked ? 'created' : 'expired');
+        expect(await expiredEvents(locked)).toBe(0); // nothing decided about the row it could not lock
+      } finally {
+        await holder.query('COMMIT');
+        await holder.end();
+      }
+      await sweeper.sweepOnce(); // the holder is gone: the next pass expires it, once
+      expect((await getPayment(locked).expect(200)).body.status).toBe('expired');
+      for (const id of ids) expect(await expiredEvents(id)).toBe(1);
+    }
+  }, 120_000);
 });

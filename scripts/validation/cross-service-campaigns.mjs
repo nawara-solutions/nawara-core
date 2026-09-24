@@ -171,7 +171,7 @@ C.paymentRestartDuringBillingRequest = async () => {
   //   C1 before Payment (connection dropped); C2 inside Payment's transaction (its database frozen) and Payment SIGKILLed;
   //   C3 after Payment committed, the answer lost; C4 the answer cut after its status line; C5 the dispatcher's create answer lost;
   //   C6 Payment SIGKILLed inside the create (database frozen). The caller retries the same call; one payment, one cancellation.
-  const s = await stack({ billingEnv: { BILLING_DISPATCH_STALE_SENDING_MS: '3000' } });
+  const s = await stack({ billingEnv: { BILLING_DISPATCH_STALE_SENDING_MS: '3000', PAYMENT_TIMEOUT_MS: '1500' } });
   const rows = [];
   try {
     const cancelWindow = async (name, cut) => {
@@ -515,7 +515,7 @@ C.multiServiceRestart = async () => {
   // Campaign L. Billing and Payment restarted together (alternately SIGKILL and SIGTERM) with durable work outstanding: Payment events
   // unpublished (its broker link frozen), Billing requests not yet sent (Payment unreachable from Billing), a payer's payment in progress,
   // stored webhooks due for retry. 5 repetitions: every item converges once; consumers, connections and sessions as before.
-  const s = await stack({ billingEnv: { BILLING_DISPATCH_STALE_SENDING_MS: '3000' } });
+  const s = await stack({ billingEnv: { BILLING_DISPATCH_STALE_SENDING_MS: '3000', PAYMENT_TIMEOUT_MS: '1500' } });
   const reps = [];
   const all = [];
   try {
@@ -592,7 +592,7 @@ C.eventOrdering = async () => {
   //     and the same terminal fact under a NEW event id (a replayed fact): a recorded no-op, 20 times.
   //   P out of order: Payment's `payment.succeeded` reaches Billing BEFORE Billing learned the payment id (the create answer was lost, the
   //     request is still `sending`): the event is deferred, the dispatcher's resend (natural key) and the reconciler converge to paid once. 10 runs.
-  const s = await stack({ billingEnv: { BILLING_RECONCILE_INTERVAL_MS: '2000', BILLING_RECONCILE_STALE_REQUESTED_MS: '5000', BILLING_DISPATCH_STALE_SENDING_MS: '3000' } });
+  const s = await stack({ billingEnv: { BILLING_RECONCILE_INTERVAL_MS: '2000', BILLING_RECONCILE_STALE_REQUESTED_MS: '5000', BILLING_DISPATCH_STALE_SENDING_MS: '3000', PAYMENT_TIMEOUT_MS: '1500' } });
   const pub = paymentEventPublisher(rabbit.url);
   const out = { N: [], O: {}, P: [] };
   try {

@@ -222,6 +222,31 @@ payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOU
   - a few failure kinds are missing from the log taxonomy.
 - Details: `core-validation.md` section 13.7.
 
+**Capacity and runtime tuning (Stage 15.8).** Measured on one laptop: relative evidence, not a production capacity claim.
+- **Kept, with evidence:**
+  - `DB_POOL_MAX` 10: 20 is no faster and doubles p99, 5 is 16–19 % slower;
+  - dispatcher batch 50, the 60 s stale window, the outbox batch 50, every worker interval, and every internal timeout.
+- **Changed, each with before/after measurements, a mutation-proven test and the affected historical campaigns re-run:**
+  - Payment's expiry sweep uses a partial index (15 ms → 0.04 ms at 100 k payments), and skips a payment another transaction holds.
+    Before, one held payment stopped every expiry: 0 of 1 000 in 120 s; now 999 in 3.5 s.
+  - Payment's attempt resolver claims an attempt with a short lease before asking the provider: N instances now make one provider call
+    per attempt, not N.
+  - Billing's dispatcher renews the claims it has not sent yet, so a slow Payment never makes a second instance send the same request
+    again. Startup now refuses `BILLING_DISPATCH_STALE_SENDING_MS` < 2 × `PAYMENT_TIMEOUT_MS`.
+  - The Billing consumer's prefetch is 5: half the pool. With 10, a backlog took the whole pool and HTTP waited for connections.
+  - The outbox relay drains full batches back to back (a 5 000-event backlog: 111 s → 17 s), and its backoff ceiling is 15 s instead of
+    60 s: the worst delivery delay after a broker outage.
+  - The duplicate `billing_transition` index is dropped (−39 % index size, −20 % insert time, same plans).
+- **Connection budget per deployment:** Σ (`DB_POOL_MAX` × processes) + migration runners + operator sessions + 3 reserved ≤
+  `max_connections` (100 by default). With the defaults that is at most 2 processes per service on one default PostgreSQL.
+- **Migrations to apply before the new code:** Payment `0007` and `0008`, Billing `0014`. `0007` builds an index under a `SHARE` lock: on
+  a large table, build it `CONCURRENTLY` (Stage 20).
+- **Open (SRE / security):**
+  - Auth's health endpoints share its throttle. Raising the limit is not a fix: the in-memory throttler's cost grows quadratically with
+    the requests from one address.
+  - Readiness opens one broker connection per probe (about 55 ms); O2 is still open.
+- Details: `core-validation.md` section 13.8.
+
 **Signals and tools:** the log signals (`*_pass_failure`, `readiness_check_failed|recovered`, `outbox_publish_failure`,
 `rabbitmq_confirm_timeout`, `worker_drain_timeout`, `webhook_retry_exhausted`, `service_started`, `service_shutdown_*`) and the CLIs
 (`nawara-migrate`, `nawara-check-outbox-lag`, `nawara-check-dlq`, `nawara-dlq`) are described in the

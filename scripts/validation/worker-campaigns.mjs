@@ -585,7 +585,7 @@ async function billingFleet({ n = 2, stale = 60_000, reconcileMs = 3_600_000, st
   const env = async () => h.serviceEnv('billing-service', {
     databaseUrl: db.url, brokerUrl: rabbit.url, port: await h.freePort(), extra: {
       NODE_ENV: 'test', SERVICE_TOKENS: `test-producer:${producer.digest}`, PAYMENT_SERVICE_URL: pay.url, BILLING_DISPATCH_INTERVAL_MS: '300',
-      BILLING_DISPATCH_STALE_SENDING_MS: String(stale), BILLING_RECONCILE_INTERVAL_MS: String(reconcileMs), BILLING_RECONCILE_STALE_REQUESTED_MS: String(staleRequested),
+      BILLING_DISPATCH_STALE_SENDING_MS: String(stale), PAYMENT_TIMEOUT_MS: String(Math.min(5000, Math.floor(stale / 2))), BILLING_RECONCILE_INTERVAL_MS: String(reconcileMs), BILLING_RECONCILE_STALE_REQUESTED_MS: String(staleRequested),
       BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE: '100000', BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE: '100000', // seeding only
     },
   });
@@ -669,11 +669,13 @@ C.billingMultiInstanceDispatch = async () => {
 };
 
 C.billingDispatcherStaleRace = async () => {
-  // 3 instances, stale window 3 s. Payment holds each create 1.5 s (< stale: nobody else may send), then 4.5 s (> stale: another
-  // instance legitimately re-claims and sends again). Either way: ONE payment per request (the natural key), request ends `requested`.
+  // 3 instances. Payment holds each create 1.5 s, then 4.5 s. Either way: ONE payment per request (the natural key), request ends
+  // `requested`. Stage 15.8: the stale window must be at least twice PAYMENT_TIMEOUT_MS (refused at startup otherwise) and a pass renews
+  // its unsent claims, so "a send longer than the stale window" (the old 3 s window with a 4.5 s hold) is no longer a configuration
+  // Billing accepts. Rescaled to stale 10 s / timeout 5 s: neither hold may lead another instance to re-send.
   const out = {};
-  for (const [label, holdMs] of [['holdBelowStale', 1500], ['holdAboveStale', 4500]]) {
-    const f = await billingFleet({ n: 3, stale: 3000 });
+  for (const [label, holdMs] of [['holdShort', 1500], ['holdNearTimeout', 4500]]) {
+    const f = await billingFleet({ n: 3, stale: 10_000 });
     try {
       f.pay.setHook(async () => { await h.sleep(holdMs); return 'normal'; });
       const items = await f.seed(Array.from({ length: 5 }, () => randomUUID()), 4);
