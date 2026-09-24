@@ -151,13 +151,19 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
   engineering bounds.
 
 **notification-service delivery engine (Stage 16.7):**
-- `NOTIFICATION_DELIVERY_PROVIDER` is `none` in production until the real adapters (16.8): no worker runs and deliveries stay
-  `PENDING`. `test` (no network, delivers nothing) is refused at startup in production.
+- Providers per channel (Stage 16.8): `NOTIFICATION_EMAIL_PROVIDER=resend` and `NOTIFICATION_SMS_PROVIDER=twilio` in production;
+  `test` (no network, delivers nothing) is refused at startup. Each selected provider's credentials and sender are required and
+  validated at startup (never echoed), and may be supplied as `*_FILE` secrets.
 - Startup relationships (SDD §8.2): `NOTIFICATION_LEASE_MS` ≥ 2 × `NOTIFICATION_PROVIDER_TIMEOUT_MS`; the provider timeout < the 60 s
   stop grace − `HTTP_DRAIN_TIMEOUT_MS` (so the HTTP drain must stay below 50 s at the default 10 s timeout); the worker's shutdown
   drain is the provider timeout + 2 s; `NOTIFICATION_WORKER_CONCURRENCY` < `DB_POOL_MAX`.
-- Retry: base 30 s, ceiling 30 min, 5 attempts; `NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE` 6000. Engineering defaults, re-measured
-  with the real adapters in 16.8. The destination limit (`notif_dest`) is not built: D21 open.
+- Retry: base 30 s, ceiling 30 min, 5 attempts; `NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE` 6000. The provider timeout stays 10 s
+  (lease 60 s): the adapters add about 2 ms over a local stub; live provider latency is to be measured in the sandbox smoke. The
+  destination limit (`notif_dest`) is not built: D21 open.
+- **Before enabling production sending:** the Resend sending domain verified (SPF, DKIM; DMARC advised); a Twilio Messaging
+  Service with its senders (a Tunisian alphanumeric sender ID needs registration for domestic entities above 30 000 SMS / month) and
+  the destination countries enabled in Messaging Geo Permissions; Auth storing canonical E.164 (else Auth-originated SMS fail
+  `invalid_destination`); the Resend cost, MENA deliverability pilot and data-processing review (ADR-0047).
 - The secret purge loop runs whatever the provider setting. Operators watch the due backlog with the query in the service README.
 
 A frozen or partitioned broker is detected within about 3 × `RABBITMQ_HEARTBEAT_S` (≈ 30 s at the default), after the shorter

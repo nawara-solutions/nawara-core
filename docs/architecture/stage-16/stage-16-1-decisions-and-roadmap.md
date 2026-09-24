@@ -16,8 +16,8 @@ Status values:
 | # | Decision | Rationale | Alternatives considered | Status / target |
 |---|---|---|---|---|
 | D1 | **Channels:** EMAIL + SMS real; IN_APP in the model, not implemented; PUSH and others later | Auth identities are email **or** phone, and every Auth delivery event can use either | SMS only; + push | DECIDED |
-| D2 | **Email provider:** no vendor chosen. The architecture requirements are frozen (§2), and a vendor-selection ADR is required **before 16.8**. The test provider stands in until then | no repository evidence (volume, region, sender domain, budget) to pick a vendor responsibly | pick a popular vendor now | DEFERRED: owner (project owner), before 16.8 |
-| D3 | **SMS:** Twilio behind the SMS port (ADR-0019) | nothing in the repository argues against it; the port keeps a regional aggregator open | a regional aggregator now (no evaluation exists) | RECOMMEND: accept ADR-0019 (owner) |
+| D2 | **Email provider:** no vendor chosen. The architecture requirements are frozen (§2), and a vendor-selection ADR is required **before 16.8**. The test provider stands in until then | no repository evidence (volume, region, sender domain, budget) to pick a vendor responsibly | pick a popular vendor now | DEFERRED: owner (project owner), before 16.8 → **DECIDED 2026-09-24 (16.8): Resend, [ADR-0047](../../adr/0047-resend-as-the-email-provider.md)** |
+| D3 | **SMS:** Twilio behind the SMS port (ADR-0019) | nothing in the repository argues against it; the port keeps a regional aggregator open | a regional aggregator now (no evaluation exists) | RECOMMEND: accept ADR-0019 (owner) → **ACCEPTED 2026-09-24 (16.8): ADR-0019, Messaging Service SID, direct HTTPS** |
 | D4 | **Auth events:** Auth publishes the canonical kit envelope through the kit `RabbitMqEventBus.publish` (persistent, confirmed); payloads unchanged; still fire-and-forget for the caller | one canonical format; Class B | a tolerant parser in Notification (rejected: two formats, no event identity); an Auth outbox now (D19) | IMPLEMENTED in 16.2 ([record](./stage-16-2-auth-event-envelope.md)) |
 | D5 | **Secret codes at rest:** AES-256-GCM, a key ring from configuration, the key id per row, purged at terminal state or `expiresAt`; never logged; never in a rendered body | a code must be recoverable to send it, and must not outlive its use | plaintext; send inside the consumer without persisting (loses retry, backoff and the durable intent) | DECIDED |
 | D6 | **Ambiguity:** a code may be resent **once**, with the same code, never after `expiresAt`; anything else ends `UNCONFIRMED`, not resent | a duplicate code is harmless, a duplicate alert is not | resend always; never resend | DECIDED |
@@ -64,7 +64,8 @@ Each sub-stage is its own reviewed PR, following the repository workflow.
 **Progress:** 16.1 ✅ · 16.2 ✅ ([record](./stage-16-2-auth-event-envelope.md)) · 16.3 ✅ ([record](./stage-16-3-service-foundation.md)) ·
 16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5 ✅ ([record](./stage-16-5-notification-event-intake.md)) ·
 16.6 ✅ ([record](./stage-16-6-notification-send-api.md)) · 16.7 ✅ ([record](./stage-16-7-notification-delivery-engine.md); the
-destination limit `notif_dest` of D13 is deferred with D21, see its §13) · 16.8–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+destination limit `notif_dest` of D13 is deferred with D21, see its §13) · 16.8 ✅ ([record](./stage-16-8-email-sms-providers.md);
+D2 → Resend, ADR-0047; D3 → ADR-0019 accepted) · 16.9–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
 - 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
 - 16.3 → 16.5: the kit bus and the key ring;
 - 16.3 → 16.6: the caller policy (done in 16.6, with OpenAPI);

@@ -1,4 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, generateServiceToken } from '@nawara/service-kit';
 import { SERVICE_NAME, loadNotificationConfig } from './notification-config.js';
@@ -37,12 +40,10 @@ describe('notification-service configuration', () => {
     expect(() => loadNotificationConfig(env({ DB_STATEMENT_TIMEOUT_MS: '30000', DB_QUERY_TIMEOUT_MS: '30000' }))).toThrow(/DB_QUERY_TIMEOUT_MS/);
   });
 
-  it('carries only what the service uses: no real provider configuration or credential yet (16.8)', () => {
-    const c = loadNotificationConfig(env());
-    for (const later of ['twilio', 'smtp', 'emailFrom', 'providerApiKey']) {
-      expect(Object.keys(c)).not.toContain(later);
-      expect(Object.keys(c.delivery)).not.toContain(later);
-    }
+  it('carries no provider credential unless that provider is selected (16.8)', () => {
+    const d = loadNotificationConfig(env()).delivery;
+    expect([d.resend, d.twilio]).toEqual([undefined, undefined]);
+    for (const k of ['smtp', 'emailFrom', 'apiKey']) expect(Object.keys(loadNotificationConfig(env()))).not.toContain(k);
   });
 
   it.each(['RABBITMQ_URL', 'NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_SECRET_ACTIVE_KEY_ID', 'NOTIFICATION_DEFAULT_LOCALE', 'NOTIFICATION_REQUEST_HASH_KEY'])('refuses to start without %s (no default)', (name) => {
@@ -152,17 +153,86 @@ describe('notification-service configuration', () => {
   describe('delivery engine (Stage 16.7)', () => {
     it('defaults: no provider (no worker), and the bounded engine values', () => {
       expect(loadNotificationConfig(env()).delivery).toEqual({
-        provider: 'none', intervalMs: 1000, batchSize: 20, concurrency: 4, leaseMs: 60_000, providerTimeoutMs: 10_000, retryBaseMs: 30_000,
+        emailProvider: 'none', smsProvider: 'none', resend: undefined, twilio: undefined, intervalMs: 1000, batchSize: 20, concurrency: 4, leaseMs: 60_000, providerTimeoutMs: 10_000, retryBaseMs: 30_000,
         retryCeilingMs: 1_800_000, maxAttempts: 5, timeZone: 'UTC', callerTemplateLimitPerMinute: 6000, drainTimeoutMs: 12_000,
       });
     });
 
-    it('the test provider is accepted outside production and refused in production (it delivers nothing)', () => {
-      expect(loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_DELIVERY_PROVIDER: 'test' })).delivery.provider).toBe('test');
-      expect(loadNotificationConfig(env({ NODE_ENV: 'test', NOTIFICATION_DELIVERY_PROVIDER: 'test' })).delivery.provider).toBe('test');
-      expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', NOTIFICATION_DELIVERY_PROVIDER: 'test' }))).toThrow(/refused in production/);
-      expect(() => loadNotificationConfig(env({ NOTIFICATION_DELIVERY_PROVIDER: 'test' }))).toThrow(/refused in production/); // production is the default
-      expect(() => loadNotificationConfig(env({ NOTIFICATION_DELIVERY_PROVIDER: 'twilio' }))).toThrow(ConfigError);
+    it('the test provider is accepted outside production and refused in production, on either channel (it delivers nothing)', () => {
+      const dev = loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_EMAIL_PROVIDER: 'test', NOTIFICATION_SMS_PROVIDER: 'test' })).delivery;
+      expect([dev.emailProvider, dev.smsProvider]).toEqual(['test', 'test']);
+      expect(loadNotificationConfig(env({ NODE_ENV: 'test', NOTIFICATION_SMS_PROVIDER: 'test' })).delivery.smsProvider).toBe('test');
+      for (const k of ['NOTIFICATION_EMAIL_PROVIDER', 'NOTIFICATION_SMS_PROVIDER']) {
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', [k]: 'test' }))).toThrow(/refused in production/);
+        expect(() => loadNotificationConfig(env({ [k]: 'test' }))).toThrow(/refused in production/); // production is the default
+      }
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_EMAIL_PROVIDER: 'twilio' }))).toThrow(ConfigError);
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_SMS_PROVIDER: 'resend' }))).toThrow(ConfigError);
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_DELIVERY_PROVIDER: 'test' }))).toThrow(/replaced by NOTIFICATION_EMAIL_PROVIDER/);
+    });
+
+    describe('real providers (Stage 16.8)', () => {
+      const RESEND = { NOTIFICATION_EMAIL_PROVIDER: 'resend', NOTIFICATION_RESEND_API_KEY: 're_Sentinel_Resend_Key_0123456789', NOTIFICATION_EMAIL_FROM: 'Nawara <no-reply@notify.example.com>' };
+      const TWILIO = {
+        NOTIFICATION_SMS_PROVIDER: 'twilio', NOTIFICATION_TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, NOTIFICATION_TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
+        NOTIFICATION_TWILIO_API_KEY_SECRET: 'SentinelTwilioSecret0123456789ab', NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID: `MG${'c'.repeat(32)}`,
+      };
+
+      it('valid production configuration: Resend and Twilio selected, https defaults, senders from configuration', () => {
+        const d = loadNotificationConfig(env({ NODE_ENV: 'production', ...RESEND, ...TWILIO })).delivery;
+        expect(d.resend).toEqual({ apiKey: RESEND.NOTIFICATION_RESEND_API_KEY, from: 'Nawara <no-reply@notify.example.com>', baseUrl: 'https://api.resend.com' });
+        expect(d.twilio).toMatchObject({ messagingServiceSid: TWILIO.NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID, baseUrl: 'https://api.twilio.com' });
+        expect(loadNotificationConfig(env({ ...RESEND, NOTIFICATION_EMAIL_FROM: 'no-reply@notify.example.com' })).delivery.resend!.from).toBe('no-reply@notify.example.com');
+      });
+
+      it('credentials are read only for the provider selected; nothing is required with none', () => {
+        expect(loadNotificationConfig(env({ NOTIFICATION_SMS_PROVIDER: 'none' })).delivery.twilio).toBeUndefined();
+        expect(loadNotificationConfig(env({ ...TWILIO })).delivery.resend).toBeUndefined();
+      });
+
+      it.each([
+        ...Object.keys(RESEND).filter((k) => k !== 'NOTIFICATION_EMAIL_PROVIDER').map((k) => [k, RESEND, undefined] as const),
+        ...Object.keys(TWILIO).filter((k) => k !== 'NOTIFICATION_SMS_PROVIDER').map((k) => [k, TWILIO, undefined] as const),
+      ])('refuses to start without %s when its provider is selected', (name, set) => {
+        const e = env({ ...set });
+        delete e[name];
+        expect(() => loadNotificationConfig(e)).toThrow(new RegExp(name));
+      });
+
+      it.each([
+        ['NOTIFICATION_RESEND_API_KEY', ['sk_live_x', 're_short', 're_has space in it 0123456789'], RESEND],
+        ['NOTIFICATION_EMAIL_FROM', ['Nawara <no-reply@notify>', 'Evil\r\nBcc: x@evil.test <a@b.example>', '"Quoted" <a@b.example>', 'a, b <a@b.example>', 'x'.repeat(65) + ' <a@b.example>', ' Lead <a@b.example>', 'not-an-address'], RESEND],
+        ['NOTIFICATION_RESEND_BASE_URL', ['ftp://api.resend.com', 'not a url'], RESEND],
+        ['NOTIFICATION_TWILIO_ACCOUNT_SID', ['AC123', `SK${'a'.repeat(32)}`, `AC${'A'.repeat(32)}`], TWILIO],
+        ['NOTIFICATION_TWILIO_API_KEY_SID', [`AC${'a'.repeat(32)}`], TWILIO],
+        ['NOTIFICATION_TWILIO_API_KEY_SECRET', ['short', `${'a'.repeat(31)}!`], TWILIO],
+        ['NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID', ['+21620000000', 'AlphaSender', `MG${'z'.repeat(32)}`], TWILIO],
+      ] as const)('refuses a malformed %s, never echoing it', (name, values, set) => {
+        for (const v of values) {
+          try {
+            loadNotificationConfig(env({ ...set, [name]: v }));
+            throw new Error(`accepted ${name}`);
+          } catch (e) {
+            expect((e as Error)).toBeInstanceOf(ConfigError);
+            expect((e as Error).message).toContain(name);
+            if (v.length > 6) expect((e as Error).message).not.toContain(v);
+          }
+        }
+      });
+
+      it('plain-http provider URLs (local stubs) are refused in production', () => {
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', ...RESEND, NOTIFICATION_RESEND_BASE_URL: 'http://127.0.0.1:9' }))).toThrow(/NOTIFICATION_RESEND_BASE_URL/);
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', ...TWILIO, NOTIFICATION_TWILIO_BASE_URL: 'http://127.0.0.1:9' }))).toThrow(/NOTIFICATION_TWILIO_BASE_URL/);
+        expect(loadNotificationConfig(env({ NODE_ENV: 'development', ...TWILIO, NOTIFICATION_TWILIO_BASE_URL: 'http://127.0.0.1:9' })).delivery.twilio!.baseUrl).toBe('http://127.0.0.1:9');
+      });
+
+      it('secrets can come from *_FILE (Docker / Kubernetes secrets)', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'notif-secret-'));
+        writeFileSync(join(dir, 'k'), `${RESEND.NOTIFICATION_RESEND_API_KEY}\n`);
+        const e = env({ ...RESEND, NOTIFICATION_RESEND_API_KEY_FILE: join(dir, 'k') });
+        delete e.NOTIFICATION_RESEND_API_KEY;
+        expect(loadNotificationConfig(e).delivery.resend!.apiKey).toBe(RESEND.NOTIFICATION_RESEND_API_KEY);
+      });
     });
 
     it('enforces the SDD §8.2 relationships at startup', () => {

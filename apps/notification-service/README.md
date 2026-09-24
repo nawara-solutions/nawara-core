@@ -1,9 +1,10 @@
 # notification-service
 
 > **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5), internal send API (16.6), delivery engine
-> (16.7).** Intents arrive from Auth's events and from trusted Core services over the API; the delivery engine claims their
-> deliveries, renders the pinned template and calls a provider through the `ChannelProvider` port. **Only the no-network test
-> provider exists** (development and tests; refused in production), so production still sends nothing until the real adapters (16.8).
+> (16.7), email and SMS providers (16.8).** Intents arrive from Auth's events and from trusted Core services over the API; the delivery
+> engine claims their deliveries, renders the pinned template and calls a provider through the `ChannelProvider` port: **Resend**
+> for email and **Twilio** for SMS (direct HTTPS, no SDK), or the no-network test provider outside production. Production SMS for
+> Auth users additionally needs Auth to store canonical E.164 numbers (a separate Auth change).
 
 Generic, product-agnostic delivery of notifications (email and SMS first) for Nawara Core. Producers decide *why* and *when*; this
 service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notification-service-architecture.md),
@@ -12,7 +13,8 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 [Stage 16.4 record](../../docs/architecture/stage-16/stage-16-4-persistence-and-templates.md),
 [Stage 16.5 record](../../docs/architecture/stage-16/stage-16-5-notification-event-intake.md),
 [Stage 16.6 record](../../docs/architecture/stage-16/stage-16-6-notification-send-api.md),
-[Stage 16.7 record](../../docs/architecture/stage-16/stage-16-7-notification-delivery-engine.md).
+[Stage 16.7 record](../../docs/architecture/stage-16/stage-16-7-notification-delivery-engine.md),
+[Stage 16.8 record](../../docs/architecture/stage-16/stage-16-8-email-sms-providers.md).
 
 ## What exists (16.3)
 
@@ -77,8 +79,8 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 
 ## Delivery engine (16.7)
 
-- **Runs** only when `NOTIFICATION_DELIVERY_PROVIDER` names a provider (`test` today, refused in production). With `none` (the
-  default) there is no worker and deliveries stay `PENDING`. The secret purge runs in every case.
+- **Runs** when `NOTIFICATION_EMAIL_PROVIDER` or `NOTIFICATION_SMS_PROVIDER` names a provider. A channel set to `none` (the default)
+  keeps its deliveries `PENDING`; with `none` on both there is no worker. The secret purge runs in every case.
 - **One pass:** recover expired leases from the attempt evidence → claim due `PENDING` rows (`FOR UPDATE SKIP LOCKED`, oldest due
   first) as `SENDING` under a lease → per delivery, with at most `NOTIFICATION_WORKER_CONCURRENCY` in flight: re-check cancel and
   expiry, the caller+template limit, decrypt and render the **pinned** version, commit the attempt `STARTED`, call the provider
@@ -91,6 +93,23 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
   `+ambiguous`, `+hang` in an email local part; SMS numbers ending `0001`, `0429`, `0002`, `0003`, `0004`); anything else is accepted.
 - **Operator query** (the due backlog, no metrics platform yet):
   `SELECT channel, count(*), min("nextAttemptAt") FROM notification_delivery WHERE status = 'PENDING' AND "nextAttemptAt" <= now() GROUP BY channel;`
+
+## Email and SMS providers (16.8)
+
+| Channel | Provider | Call | Sender (server-owned) | Idempotency |
+|---|---|---|---|---|
+| EMAIL | Resend ([ADR-0047](../../docs/adr/0047-resend-as-the-email-provider.md)) | `POST https://api.resend.com/emails`, bearer key | `NOTIFICATION_EMAIL_FROM` on a Resend-verified domain (SPF / DKIM; DMARC advised) | `Idempotency-Key: nawara-notification/<deliveryId>/<n>` (Resend keeps it 24 h) |
+| SMS | Twilio ([ADR-0019](../../docs/adr/0019-twilio-as-sms-gateway-provider.md)) | `POST https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json`, API key (basic auth) | `NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID` (its senders, alphanumeric IDs and country rules are managed in Twilio) | none (SDD §8.5 alone) |
+
+- **Classification:** refused before sending (DNS, connection refused, TLS) → retryable; 429 / 5xx → retryable with a bounded
+  `Retry-After`; 502 / 504, a timeout, a reset or an unreadable success → ambiguous (SDD §8.5); 401 / 403 → `provider_auth_fault`, a
+  wrong SID or path → `provider_config_fault` (both retryable and logged as errors); a documented rejection → terminal
+  (`destination_rejected`, `content_too_long`, `provider_rejected`).
+- **Nothing of a provider response is kept or logged** except the message id, a bounded failure code, the HTTP status and the
+  provider's error token (`httpStatus=… providerCode=…`).
+- **Destinations** go out exactly as stored: E.164 for SMS, never normalized, no country ever added.
+- **Credentials** only from the environment or `*_FILE`: validated at startup for the provider selected, never logged, never in the
+  image. Plain-http provider URLs (for local stubs) are refused in production.
 
 ## Configuration
 
@@ -115,7 +134,15 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 | `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` | 2592000 | 60–31536000 | how far ahead `scheduledAt` may be |
 | `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` | 600 | 1–100000 | per caller (`429 rate_limited`) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI mounted only with a password |
-| `NOTIFICATION_DELIVERY_PROVIDER` | `none` | `none`, `test` | `test` (no network, delivers nothing) is refused in production; `none` runs no worker |
+| `NOTIFICATION_EMAIL_PROVIDER` | `none` | `none`, `test`, `resend` | `test` (no network, delivers nothing) is refused in production |
+| `NOTIFICATION_SMS_PROVIDER` | `none` | `none`, `test`, `twilio` | as above; `NOTIFICATION_DELIVERY_PROVIDER` (16.7) is refused with a message naming the new variables |
+| `NOTIFICATION_RESEND_API_KEY` | required with `resend` | `re_…` | secret |
+| `NOTIFICATION_EMAIL_FROM` | required with `resend` | `Name <address>` or `address` | name ≤ 64, no quotes or `<>,;:\@`; the domain verified in Resend |
+| `NOTIFICATION_RESEND_BASE_URL` | `https://api.resend.com` | https (http outside production only) | for local stubs |
+| `NOTIFICATION_TWILIO_ACCOUNT_SID`, `NOTIFICATION_TWILIO_API_KEY_SID` | required with `twilio` | `AC…`, `SK…` (+ 32 hex) | |
+| `NOTIFICATION_TWILIO_API_KEY_SECRET` | required with `twilio` | 32 letters or digits | secret |
+| `NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID` | required with `twilio` | `MG…` (+ 32 hex) | the sender |
+| `NOTIFICATION_TWILIO_BASE_URL` | `https://api.twilio.com` | https (http outside production only) | for local stubs |
 | `NOTIFICATION_WORKER_INTERVAL_MS` | 1000 | 100–60000 | pause between two passes (delivery and purge loops) |
 | `NOTIFICATION_WORKER_BATCH_SIZE` | 20 | 1–500 | deliveries claimed (and secrets purged) per pass |
 | `NOTIFICATION_WORKER_CONCURRENCY` | 4 | 1–50, < `DB_POOL_MAX` | provider calls in flight per instance |
@@ -151,5 +178,5 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 | 16.5 ✅ | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`); variable-value validation; locale resolution (`NOTIFICATION_DEFAULT_LOCALE`); E.164 enforcement |
 | 16.6 ✅ | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; the keyed request hash; OpenAPI at `/notification/docs` |
 | 16.7 ✅ | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer, the test provider and the secret purge |
-| 16.8 | the email and SMS providers |
+| 16.8 ✅ | the Resend email and Twilio SMS adapters (direct HTTPS), per-channel provider selection, sanitized classification |
 | 16.9 / 16.10 | security, observability and operations; certification |

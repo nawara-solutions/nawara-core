@@ -5,8 +5,8 @@
   ([record](../architecture/stage-16/stage-16-4-persistence-and-templates.md)) and the Stage 16.5 event intake
   ([record](../architecture/stage-16/stage-16-5-notification-event-intake.md)) and the Stage 16.6 send API
   ([record](../architecture/stage-16/stage-16-6-notification-send-api.md)) and the Stage 16.7 delivery engine
-  ([record](../architecture/stage-16/stage-16-7-notification-delivery-engine.md)); only the no-network test provider exists, so
-  production sends nothing yet
+  ([record](../architecture/stage-16/stage-16-7-notification-delivery-engine.md)) and the Stage 16.8 Resend / Twilio adapters
+  ([record](../architecture/stage-16/stage-16-8-email-sms-providers.md))
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -279,7 +279,7 @@ extension table (`notification_inbox_item`: presentation payload, `readAt`, `arc
 | Logical notification (API) | `(sourceService, idempotencyKey)` + `requestHash` | the same key and hash replays the original answer; the same key with a different hash is `422 idempotency_key_reused` |
 | Delivery | `(notificationId, channel)` | created in the same transaction as the notification; never re-created |
 | Attempt | `(deliveryId, attemptNumber)` | one row per provider call; `STARTED` is committed before the call |
-| Provider reference | `delivery.id` | sent as the provider idempotency key / client reference **where the provider supports one**, so a resend of the same delivery can be deduplicated by the provider. Twilio's Messages API has no idempotency key |
+| Provider reference | `delivery.id` | sent as the provider idempotency key / client reference **where the provider supports one**, so a resend of the same delivery can be deduplicated by the provider. Twilio's Messages API has no idempotency key. **As implemented (16.8, ADR-0047):** the Resend `Idempotency-Key` is `nawara-notification/<deliveryId>/<n>`, `n` = the delivery's definite retryable answers so far: unchanged across a §8.5 resend after a lost answer, changed after a definite answer (Resend does not document reuse of a failed request's key) |
 
 **The contract:** exactly-once internal intent, at-least-once processing, best-effort external deduplication. Exactly-once
 network delivery to a provider is **not** claimed.
@@ -604,6 +604,12 @@ interface ChannelProvider {
 }
 ```
 
+- **As implemented (Stage 16.8, [record](../architecture/stage-16/stage-16-8-email-sms-providers.md)):** Resend for EMAIL
+  ([ADR-0047](../adr/0047-resend-as-the-email-provider.md)) and Twilio for SMS ([ADR-0019](../adr/0019-twilio-as-sms-gateway-provider.md),
+  accepted), both over direct HTTPS with Node's `fetch` (no SDK). One timeout (`NOTIFICATION_PROVIDER_TIMEOUT_MS`) is enforced by the
+  engine, which also aborts the adapter's request (`ctx.signal`); `capabilities.timeoutMs` is therefore not used. The call context adds
+  `idempotencyKey` and `signal`; a result may carry a bounded `diagnostic` (HTTP status, provider error token) for the log line. Provider
+  selection is per channel (`NOTIFICATION_EMAIL_PROVIDER`, `NOTIFICATION_SMS_PROVIDER`); `test` is refused in production.
 - The domain depends only on this port. A `TestProvider` with scenarios (accept, retryable, terminal, timeout-after-accept, hang,
   429 with `Retry-After`) runs in every non-production run, like Payment's test provider.
 - The real adapters (Twilio SMS; the email vendor per D2) live behind flags, and production refuses to start with the test
@@ -917,7 +923,9 @@ The certification (16.10) uses the §17.3 contract rows that apply, plus the Not
 ## 20. Open questions
 
 See the [Stage 16.1 decision register](../architecture/stage-16/stage-16-1-decisions-and-roadmap.md). Deferred with owners:
-- D2: the email vendor ADR, before 16.8;
+- D2: decided in 16.8 (Resend, ADR-0047); open before production: cost at volume, a Tunisia / MENA deliverability pilot, the
+  data-processing agreement;
+- D3: decided in 16.8 (ADR-0019 accepted: Twilio, Messaging Service SID);
 - D8: Billing / Payment recipient resolution;
 - D9: preferences;
 - D10: retention durations;
@@ -925,6 +933,7 @@ See the [Stage 16.1 decision register](../architecture/stage-16/stage-16-1-decis
 - D17: priority;
 - D18: stored content;
 - D19: Auth outbox;
-- D20: E.164 at the producer;
+- D20: E.164 at the producer (Auth still accepts `+?[0-9]{8,15}`; a separate Auth correction is required before production SMS for
+  Auth-originated notifications);
 - D21: a peppered rate-limit key;
 - D22: recipient time zone.

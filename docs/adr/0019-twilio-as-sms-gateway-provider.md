@@ -1,6 +1,6 @@
 # 0019. Twilio as the SMS gateway provider
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-24, Stage 16.8; see the acceptance note)
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 - **GitHub issue:** https://github.com/nawara-solutions/nawara-core/issues/18
@@ -103,3 +103,18 @@ here should be read as freezing that future design's options.
   ADR for *why* Twilio specifically, rather than re-litigating the provider choice — but should
   feel free to revisit it later (e.g. via a superseding ADR) once real volume/cost data makes a
   regional aggregator (Option 1) a genuinely comparable choice.
+
+## Acceptance note (2026-09-24, Stage 16.8)
+
+The project owner accepted this ADR (roadmap decision D3) when Stage 16.8 integrated the real providers. The decision itself (Twilio
+as the SMS provider) is unchanged. How it is applied, recorded here rather than edited into the text above:
+- **Transport:** Twilio Programmable Messaging over direct HTTPS (`POST /2010-04-01/Accounts/{AccountSid}/Messages.json`), with **no
+  Twilio SDK** and no new dependency, so every call is bounded and cancellable by the delivery engine.
+- **Interface:** the `SmsGateway` sketch above is superseded by the notification-service `ChannelProvider` port (SDD §8.4).
+- **Sender:** a Twilio **Messaging Service SID** (server configuration, never caller-controlled); alphanumeric sender IDs and numbers are
+  managed inside that Messaging Service.
+- **Credentials:** a Twilio API key (SID + secret), not the account auth token, from the runtime environment only.
+- **Destinations:** canonical E.164 only; Notification never adds or infers a country code.
+- **Idempotency:** the Messages API has no request idempotency key, so an ambiguous send relies on the SDD §8.5 policy alone.
+
+Detail: [Stage 16.8 record](../architecture/stage-16/stage-16-8-email-sms-providers.md).

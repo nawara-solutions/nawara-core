@@ -3,6 +3,9 @@ import {
   type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { NotificationCallerPolicy } from '../api/caller-policy.js';
+import type { ResendConfig } from '../delivery/providers/resend.js';
+import type { TwilioConfig } from '../delivery/providers/twilio.js';
+import { isValidEmail } from '../intake/destination.js';
 
 /** The one identity of this service: logs, the database `application_name`, Docker, documentation. */
 export const SERVICE_NAME = 'notification-service';
@@ -16,10 +19,10 @@ export const LOCALE_SHAPE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
  * - the database (Stage 16.4: `DATABASE_URL` plus the kit's bounded `DB_*` limits in `BaseConfig.db`);
  * - Stage 16.5, event intake: the broker, the secret key ring and the platform default locale;
  * - Stage 16.6, the send API: the caller policy, the request-hash key, the schedule bound, the per-caller intake limit, the API docs;
- * - Stage 16.7, the delivery engine: the provider choice (the test provider only, never in production), the worker's pace, lease,
- *   timeout, retry, time zone and the caller+template limit, with the SDD §8.2 relationships enforced at startup.
- *
- * Deliberately absent until the stage that uses it: real provider settings and credentials (16.8).
+ * - Stage 16.7, the delivery engine: the worker's pace, lease, timeout, retry, time zone and the caller+template limit, with the
+ *   SDD §8.2 relationships enforced at startup;
+ * - Stage 16.8, the providers: one per channel (`test` never in production), the Resend and Twilio credentials and the server-owned
+ *   senders, validated at startup only for the provider selected.
  */
 export interface NotificationConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `notification_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -59,13 +62,21 @@ export interface NotificationConfig extends BaseConfig {
   apiIntakeLimitPerMinute: number;
   /** OpenAPI at `/notification/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
   docs: { username: string; password?: string };
-  /** Stage 16.7: the delivery engine. `provider: 'none'` (the default) runs no worker: deliveries stay PENDING. */
+  /** Stage 16.7 / 16.8: the delivery engine and its providers. No provider on either channel (the default) runs no worker. */
   delivery: DeliveryConfig;
 }
 
 export interface DeliveryConfig {
-  /** `NOTIFICATION_DELIVERY_PROVIDER`: `none` (no worker) or `test` (the no-network test provider; refused in production). */
-  provider: 'none' | 'test';
+  /**
+   * `NOTIFICATION_EMAIL_PROVIDER` (`none`, `test`, `resend`) and `NOTIFICATION_SMS_PROVIDER` (`none`, `test`, `twilio`). `none` leaves
+   * that channel's deliveries PENDING; `test` (no network, delivers nothing) is refused in production.
+   */
+  emailProvider: 'none' | 'test' | 'resend';
+  smsProvider: 'none' | 'test' | 'twilio';
+  /** Present exactly when `emailProvider = resend`. */
+  resend?: ResendConfig;
+  /** Present exactly when `smsProvider = twilio`. */
+  twilio?: TwilioConfig;
   /** `NOTIFICATION_WORKER_INTERVAL_MS` (1000, 100-60000): the pause between two passes. */
   intervalMs: number;
   /** `NOTIFICATION_WORKER_BATCH_SIZE` (20, 1-500): deliveries claimed per pass. */
@@ -92,9 +103,63 @@ export interface DeliveryConfig {
 /** Stage 15.5: the container stop grace every Core service is given; SDD §8.2 bounds the provider timeout by it. */
 export const STOP_GRACE_MS = 60_000;
 
+const displayNameOk = (n: string) => n.length >= 1 && n.length <= 64 && n === n.trim() && !/\p{Cc}/u.test(n) && !/["<>,;:\\@]/.test(n);
+
+/** `Name <address>` or `address`: a bounded display name with no quoting, header or address syntax, and a valid address. */
+export function parseSender(raw: string): string | undefined {
+  const m = /^(.*) <([^<>]*)>$/.exec(raw);
+  const name = m ? m[1] : undefined;
+  const address = m ? m[2] : raw;
+  if (name !== undefined && !displayNameOk(name)) return undefined;
+  if (!isValidEmail(address)) return undefined;
+  return name === undefined ? address : `${name} <${address}>`;
+}
+
+function providerUrl(reader: EnvReader, base: BaseConfig, name: string, dflt: string): string {
+  if (reader.get(name) === undefined) return dflt;
+  return reader.url(name, base.isProduction ? ['https:'] : ['https:', 'http:']); // plain http only for local stubs, never in production
+}
+
+function matching(reader: EnvReader, name: string, shape: RegExp, what: string): string {
+  const v = reader.required(name);
+  if (!shape.test(v)) throw new ConfigError(`${name} must be ${what}`);
+  return v;
+}
+
+function providers(reader: EnvReader, base: BaseConfig): Pick<DeliveryConfig, 'emailProvider' | 'smsProvider' | 'resend' | 'twilio'> {
+  if (reader.get('NOTIFICATION_DELIVERY_PROVIDER') !== undefined) {
+    throw new ConfigError('NOTIFICATION_DELIVERY_PROVIDER was replaced by NOTIFICATION_EMAIL_PROVIDER and NOTIFICATION_SMS_PROVIDER (Stage 16.8)');
+  }
+  const emailProvider = reader.oneOf('NOTIFICATION_EMAIL_PROVIDER', ['none', 'test', 'resend'] as const, 'none');
+  const smsProvider = reader.oneOf('NOTIFICATION_SMS_PROVIDER', ['none', 'test', 'twilio'] as const, 'none');
+  if (base.isProduction && (emailProvider === 'test' || smsProvider === 'test')) {
+    throw new ConfigError('the test provider (NOTIFICATION_EMAIL_PROVIDER / NOTIFICATION_SMS_PROVIDER = test) is refused in production: it delivers nothing');
+  }
+  let resend: ResendConfig | undefined;
+  if (emailProvider === 'resend') {
+    const from = parseSender(reader.required('NOTIFICATION_EMAIL_FROM'));
+    if (!from) throw new ConfigError('NOTIFICATION_EMAIL_FROM must be "Display Name <address>" or "address" (a name of at most 64 characters, no quotes or <>,;:\\@)');
+    resend = {
+      apiKey: matching(reader, 'NOTIFICATION_RESEND_API_KEY', /^re_[A-Za-z0-9_]{16,200}$/, 'a Resend API key (re_…)'),
+      from,
+      baseUrl: providerUrl(reader, base, 'NOTIFICATION_RESEND_BASE_URL', 'https://api.resend.com'),
+    };
+  }
+  let twilio: TwilioConfig | undefined;
+  if (smsProvider === 'twilio') {
+    twilio = {
+      accountSid: matching(reader, 'NOTIFICATION_TWILIO_ACCOUNT_SID', /^AC[0-9a-f]{32}$/, 'a Twilio account SID (AC + 32 hex)'),
+      apiKeySid: matching(reader, 'NOTIFICATION_TWILIO_API_KEY_SID', /^SK[0-9a-f]{32}$/, 'a Twilio API key SID (SK + 32 hex)'),
+      apiKeySecret: matching(reader, 'NOTIFICATION_TWILIO_API_KEY_SECRET', /^[A-Za-z0-9]{32}$/, 'a Twilio API key secret (32 letters or digits)'),
+      messagingServiceSid: matching(reader, 'NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID', /^MG[0-9a-f]{32}$/, 'a Twilio Messaging Service SID (MG + 32 hex)'),
+      baseUrl: providerUrl(reader, base, 'NOTIFICATION_TWILIO_BASE_URL', 'https://api.twilio.com'),
+    };
+  }
+  return { emailProvider, smsProvider, resend, twilio };
+}
+
 function deliveryConfig(reader: EnvReader, base: BaseConfig): DeliveryConfig {
-  const provider = reader.oneOf('NOTIFICATION_DELIVERY_PROVIDER', ['none', 'test'] as const, 'none');
-  if (provider === 'test' && base.isProduction) throw new ConfigError('NOTIFICATION_DELIVERY_PROVIDER=test is refused in production (it delivers nothing)');
+  const selected = providers(reader, base);
   const leaseMs = reader.int('NOTIFICATION_LEASE_MS', { default: 60_000, min: 5_000, max: 3_600_000 });
   const providerTimeoutMs = reader.int('NOTIFICATION_PROVIDER_TIMEOUT_MS', { default: 10_000, min: 100, max: 30_000 });
   if (leaseMs < 2 * providerTimeoutMs) throw new ConfigError('NOTIFICATION_LEASE_MS must be at least 2 x NOTIFICATION_PROVIDER_TIMEOUT_MS');
@@ -111,7 +176,7 @@ function deliveryConfig(reader: EnvReader, base: BaseConfig): DeliveryConfig {
     throw new ConfigError('NOTIFICATION_TIME_ZONE must be an IANA time zone such as UTC or Africa/Tunis');
   }
   return {
-    provider, leaseMs, providerTimeoutMs, retryBaseMs, retryCeilingMs, concurrency, timeZone,
+    ...selected, leaseMs, providerTimeoutMs, retryBaseMs, retryCeilingMs, concurrency, timeZone,
     intervalMs: reader.int('NOTIFICATION_WORKER_INTERVAL_MS', { default: 1_000, min: 100, max: 60_000 }),
     batchSize: reader.int('NOTIFICATION_WORKER_BATCH_SIZE', { default: 20, min: 1, max: 500 }),
     maxAttempts: reader.int('NOTIFICATION_MAX_ATTEMPTS', { default: 5, min: 1, max: 20 }),

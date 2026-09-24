@@ -89,7 +89,7 @@ describe('retry backoff (SDD §8.3)', () => {
 });
 
 describe('the test provider (SDD §8.4)', () => {
-  const send = (channel: 'EMAIL' | 'SMS', destination: string) => new TestProvider(channel).send({ channel, destination, text: 't' }, { reference: 'd', attemptId: 'a1' });
+  const send = (channel: 'EMAIL' | 'SMS', destination: string) => new TestProvider(channel).send({ channel, destination, text: 't' }, { reference: 'd', attemptId: 'a1', idempotencyKey: 'k', signal: new AbortController().signal });
   it('the scenario is chosen by the destination only', async () => {
     expect(await send('EMAIL', 'user@example.test')).toEqual({ kind: 'accepted', providerMessageId: 'test-a1' });
     expect(await send('EMAIL', 'user+retry@example.test')).toMatchObject({ kind: 'rejected', failureClass: 'retryable', code: 'test_unavailable' });

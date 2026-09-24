@@ -59,7 +59,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0016](./0016-first-owner-bootstrap-command.md) | One-time bootstrap command for a platform's first owner account | Accepted |
 | [0017](./0017-single-owner-with-secret-key-force-reset.md) | Single owner per Company, permanently, with a CLI secret-key force-reset tool | Proposed |
 | [0018](./0018-rabbitmq-as-async-message-broker.md) | RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq` | Proposed |
-| [0019](./0019-twilio-as-sms-gateway-provider.md) | Twilio as the SMS gateway provider | Proposed |
+| [0019](./0019-twilio-as-sms-gateway-provider.md) | Twilio as the SMS gateway provider | Accepted (2026-09-24, Stage 16.8 acceptance note) |
 | [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Proposed |
 | [0021](./0021-payment-service-platform-scoped-authorization.md) | Synchronous, fail-closed platform-scope check for payment-service's organization-scoped admin actions | Proposed |
 | [0022](./0022-company-and-platform-entities-with-operator-assignment.md) | Company and Platform entities, with many-to-many operator↔platform assignment | Proposed |
@@ -87,3 +87,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0044](./0044-subscription-entitlement-final-model.md) | Subscription and Entitlement final model: one organization-scoped Subscription, no License/UserSubscription split | Proposed (records already-merged Stage 12.1-12.7) |
 | [0045](./0045-commercial-entitlementkind-compatibility-fields.md) | Commercial `entitlementKind` compatibility fields: kept as compatibility/event fields, never entitlement authority | Proposed |
 | [0046](./0046-notification-service-architecture.md) | Notification service architecture: Notification → Delivery → Attempt, persisted versioned templates, canonical event intake, ambiguity and secret policy | Proposed |
+| [0047](./0047-resend-as-the-email-provider.md) | Resend as the notification email provider (direct HTTPS, request idempotency keys) | Accepted (2026-09-24) |
