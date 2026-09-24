@@ -57,6 +57,11 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "DATABASE_URL=$(db_url organization_app organization)"
       echo "AUTH_SERVICE_URL=http://127.0.0.1:9"
       ;;
+    notification-service)
+      # Stage 16.3: the foundation has no required setting (no database, broker or provider yet). A registered caller proves the
+      # service-token configuration is parsed in production.
+      echo "SERVICE_TOKENS=smoke-caller:$(hex 32)"
+      ;;
     *)
       echo "unknown service: $service" >&2
       exit 2

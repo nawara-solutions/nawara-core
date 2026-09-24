@@ -119,15 +119,15 @@ jobs:
   # Stage 14.2: every deployable Core service image must build from a clean context and boot. A Dockerfile, a missing
   # workspace package (the Stage 13.2 regression: Auth imported @nawara/service-kit its image never provided), a compile
   # error, a runtime crash, a root user or a dead /health fails this job. It builds locally and never pushes an image;
-  # publishing and deploying stay in auth-service-docker-build.yml. notification-service and ai-service are scaffolds, not
-  # deployable Core services, and are deliberately not covered.
+  # publishing and deploying stay in auth-service-docker-build.yml. notification-service is covered since its Stage 16.3 foundation;
+  # ai-service is a scaffold, not a deployable Core service, and is deliberately not covered.
   images:
     name: core image (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service: [auth-service, organization-service, billing-service, payment-service]
+        service: [auth-service, organization-service, billing-service, payment-service, notification-service]
     services:
       # billing-service's event consumer attaches at startup in production, so the smoke needs a reachable broker.
       # PostgreSQL is deliberately absent: /health is process liveness and must not depend on it (/ready may answer 503).

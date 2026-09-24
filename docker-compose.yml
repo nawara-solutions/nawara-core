@@ -8,7 +8,7 @@
 #   docker compose --profile db run --rm payment-service npm run migrate  # container startup (see
 #                                                                          # docs/architecture/production-readiness.md)
 #   docker compose --profile db run --rm organization-service npm run migrate
-#   docker compose --profile db up -d auth-service billing-service payment-service organization-service
+#   docker compose --profile db up -d auth-service billing-service payment-service organization-service notification-service
 #
 # `--profile db` is required on every invocation that touches postgres or an app service (billing/payment/auth all
 # `depends_on` it) — profile activation is per-invocation, not persistent. Every service runs alone with only the
@@ -194,6 +194,27 @@ services:
       SERVICE_POLICY: ${ORGANIZATION_SERVICE_POLICY:-}
       # ADR-0042 decision 6: used ONLY by the human-admin module, to forward a caller's own bearer to Auth (/auth/grants, /auth/step-up/verify).
       AUTH_SERVICE_URL: http://auth-service:3000
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Stage 16.3: the foundation only (ADR-0046). It needs no database (Stage 16.4), no broker (16.5) and no provider (16.8) yet, so it
+  # depends on nothing; /ready is 200 as soon as it listens. It shares the app services' profile. SERVICE_TOKENS is empty by default
+  # (every service-token call refused); no route uses it until the send API (16.6).
+  notification-service:
+    profiles: [db]
+    # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded by HTTP_DRAIN_TIMEOUT_MS.
+    stop_grace_period: 60s
+    build:
+      context: .
+      dockerfile: apps/notification-service/Dockerfile
+    ports:
+      - '127.0.0.1:3004:3000'
+    environment:
+      NODE_ENV: development
+      SERVICE_TOKENS: ${NOTIFICATION_SERVICE_TOKENS:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

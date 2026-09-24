@@ -60,6 +60,12 @@ The adapter implements the §8.4 port. Nothing in Notification depends on the ve
 
 Each sub-stage is its own reviewed PR, following the repository workflow.
 
+**Progress:** 16.1 ✅ · 16.2 ✅ ([record](./stage-16-2-auth-event-envelope.md)) · 16.3 ✅ ([record](./stage-16-3-service-foundation.md)) ·
+16.4–16.10 ⏳. Stage 16.3 moved part of its row forward (owner-directed; the record §3):
+- `DbModule` and database provisioning → 16.4;
+- the kit bus and the key ring → 16.5;
+- the caller policy → 16.6.
+
 | Sub-stage | Objective | Scope | Depends on | Production files likely affected | Tests | Exit criteria | Non-goals |
 |---|---|---|---|---|---|---|---|
 | **16.2 Auth event envelope** | Auth events consumable by the kit consumer | Auth `EventsPublisherService` publishes through the kit `RabbitMqEventBus.publish` (the envelope, persistent, confirm); remove `@golevelup/nestjs-rabbitmq` from Auth if unused; payloads unchanged | D4 | `apps/auth-service/src/events/*`, `app.module.ts`, `package.json` | Auth unit / E2E; a new `test/e2e-real-broker` case: a kit consumer receives Auth events with `eventId` / `source` / `version`; Auth–Organization E2E | the kit consumer accepts every Auth delivery event; Auth regression green | an Auth outbox (D19); changing `AUTH_EVENTS` in production |
