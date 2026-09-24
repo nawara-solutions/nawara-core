@@ -35,7 +35,7 @@ export async function fakeAuth() {
 
 /**
  * HTTP fault proxy for the Billing → Payment edge. Modes: `pass`; `refuse` (the connection is dropped before anything reaches Payment);
- * `blackhole` (accepted, never answered: a hung Payment); `drop` (forwarded, Payment answers, the answer is lost); `truncate` (the status
+ * `blackhole` (accepted, never answered: a hung Payment); `unavailable` (503, Payment never reached); `drop` (forwarded, Payment answers, the answer is lost); `truncate` (the status
  * and headers reach the caller, the body is cut). `onRequest(req)` may return a mode per request. Counts what each mode did.
  */
 export async function httpFaultProxy(targetPort) {
@@ -47,6 +47,11 @@ export async function httpFaultProxy(targetPort) {
     seen.push({ t: h.now(), method: req.method, url: req.url, mode: m });
     if (m === 'refuse') return req.socket.destroy();
     if (m === 'blackhole') return; // never answered
+    if (m === 'unavailable') { // Payment answers 503 without being reached (Stage 15.7: a failing dependency, repeated)
+      req.resume();
+      res.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
+      return res.end(JSON.stringify({ statusCode: 503, message: 'Service Unavailable', error: 'Service Unavailable' }));
+    }
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {

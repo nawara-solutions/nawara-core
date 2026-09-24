@@ -287,6 +287,7 @@ campaign.
 | 15.5 | 2026-09-23 | `804dc72` + corrective patch | F-A (bounded HTTP drain, readiness at shutdown start), F-C (Auth pool order), F-D (one concurrent drain per worker), F-B (cancellation answered only when Payment confirmed); full 15.5 matrix re-run (21 campaigns) plus the new cancellation campaigns | F-A, F-B, F-C, F-D corrected and revalidated (no client can extend the HTTP drain; `/ready` 503 from the first moment; each worker drains once, concurrently; 0 accepted-but-lost cancellations; every crash window as before) — **FAIL on S8/S10 in containers (new finding F-H)**: with the broker frozen, Nest completes its shutdown but PID 1 never exits (an AMQP socket left half-closed keeps Node's event loop alive); SIGKILL even with a 45 s grace | section 13.5.1 |
 | 15.5 | 2026-09-23 | `804dc72` + corrective patches 1 and 2 | F-H: the kit bus destroys the transport of every connection it gives up on (error close, abandoned close); one close deadline; waits end when the connection is gone. Full 15.5 matrix + new container campaigns, full 15.3 matrix, 15.4 subset | **PASS**: frozen broker in the production image → natural exit (exit 0) at 27–29 s, 12/12 plus 20/20 cycles, with the broker's heartbeat on or off; every crash window, cancellation and accounting as before; worst graceful shutdown 39.8 s → **60 s** stop grace set in the Auth deploy and Compose | section 13.5.2 |
 | 15.6 | 2026-09-24 | `f6199dd` | Cross-service failures (20 campaigns: one service or dependency down while others run, combined failures, recovery orders, restart windows ≥ 20 iterations, event delay / replay / ordering, service authentication, tenant isolation, 10 repeated cycles, startup orders, readiness matrix, production containers) | **PASS**: no lost accepted work, no duplicate protected effect, no false success, no cross-tenant write, no manual repair; every order converges; containers exit naturally under the 60 s grace. No production change. Observations carried to 15.7 / 15.8 and one readiness decision (SRE) | section 13.6 |
+| 15.7 | 2026-09-24 | `7908ab9` | Data growth and log volume (5 campaigns: per-operation growth through the real APIs, cloned volume to 100 k lifecycles with the services' own queries under EXPLAIN, outbox accumulation during a broker outage (3 runs), DLQ residue lifecycle (3 runs), log volume in 11 scenarios, Auth / Organization probes, sensitive-log scan) | **PASS**: linear growth (Billing 18.4 KB, Payment 11.0 KB per lifecycle); request-path and claim queries flat to 100 k; exact outbox drain; DLQ residue resolved by replay with no second effect; no sensitive data in logs. No production change. Retention matrix (no duration invented), D1, O3–O5 classified, 15.8 handoff | section 13.7 |
 
 ### 13.1 Baseline (15.1)
 
@@ -1408,6 +1409,264 @@ terminal event, 0 payment-id mismatches, 0 cross-tenant rows.
   returned (J, M, containers).
 - **O7 (hygiene):** the Auth deploy writes `PAYMENT_SERVICE_URL`, which Auth's code never reads.
 
+### 13.7 Data growth and log volume (15.7)
+
+**Question.**
+- Which Core tables grow, how fast, and do the services' own queries degrade as they grow?
+- Which data needs retention or cleanup, and under which safety conditions?
+- How much do the services log when healthy and during outages, and are those logs useful and free of sensitive data?
+- Which decisions belong to product, security, SRE or legal rather than to engineering?
+
+**Harness.** `scripts/validation/growth-campaigns.mjs` (campaigns `growth`, `outboxOutage`, `logVolume`, `dlqLifecycle`,
+`edgeProbes`), on its own throwaway RabbitMQ and PostgreSQL containers, with real Billing and Payment processes
+(`lib/core-stack.mjs`, which gains an `unavailable` 503 mode on the Billing → Payment fault proxy) and real Auth and Organization for
+their probes.
+- **Volume.** Synthetic volume is made by cloning the rows the real flow wrote (45 paid, 4 cancelled and 1 open lifecycle):
+  - the status mix, row sizes and cross-table references are the services' own;
+  - uuid keys are remapped consistently across tables, so references still meet;
+  - times are spread back one second per copy;
+  - it is loaded with the services stopped, triggers and foreign keys off for the loader session only; CHECK constraints stay on.
+- **Synthetic rows.** Auth, Organization and `webhook_event` have no flow here: their rows are synthetic, one row per lifecycle, as a
+  scale proxy. The webhook bodies are about 400 B of generated JSON with no real data.
+- **Queries.** Each query is the service's own SQL, run under `EXPLAIN (ANALYZE, BUFFERS)` 3 times after `VACUUM ANALYZE`; writes are
+  rolled back.
+- **Logs.** Log lines are counted and templated, never copied.
+- **Baseline.** `7908ab9`, Node 24.18, PostgreSQL 16, RabbitMQ 3.13.
+
+**Growth per business operation** (measured through the real APIs; rows per operation):
+
+| Operation | Billing | Payment |
+|---|---|---|
+| Create an invoice and its payment request (issue, dispatch) | `billing_transition` 5, `invoice` 1, `invoice_line` 1, `payment_request` 1, `outbox` 1 | `payment` 1, `outbox` 1 |
+| Pay (attempt, sync) → paid | `billing_transition` 2, `payment_event_receipt` 1 | `payment_attempt` 1, `idempotency_key` 1, `outbox` 1, `kit_rate_limit` 1 per new payer |
+| Cancel → cancelled | `billing_transition` 1, `payment_event_receipt` 1 | `idempotency_key` 1, `outbox` 1 |
+| Bytes per lifecycle (this mix, heap + indexes) | 18.4 KB | 11.0 KB |
+
+- No service writes the kit `inbox` today: Billing's consumer de-duplicates on its receipt; nothing else consumes.
+- Neither Payment nor Billing ever deletes a row. The only DELETEs in Core are Auth's `auth_throttle` and the kit's `kit_rate_limit`
+  reset of one key after a success, and an unconfirmed TOTP factor.
+
+**Storage at volume** (total including indexes and TOAST):
+
+| Lifecycles | Billing | Payment | Auth (proxy) | Organization (proxy) |
+|---|---|---|---|---|
+| 1 k | 7.2 MB | 4.8 MB | 1.7 MB | 0.8 MB |
+| 10 k | 59.5 MB | 41.7 MB | 8.5 MB | 4.8 MB |
+| 50 k | 298 MB | 211 MB | 37.9 MB | 22.2 MB |
+| 100 k | 597 MB | 421 MB | 74.4 MB | 43.9 MB |
+
+Growth is linear. The largest tables at 100 k lifecycles:
+- `billing_transition` 262 MB: 688 k rows, heap 140 MB, indexes 122 MB;
+- Payment `outbox` 188 MB (198 k rows) and Billing `outbox` 134 MB (100 k rows): **32 % of both databases is published outbox rows
+  that nothing reads again**;
+- `invoice` 99 MB, `webhook_event` 58 MB, `payment_attempt` 53 MB, Payment `idempotency_key` 50 MB;
+- Payment `kit_rate_limit` 29 MB: 92 k rows, one per distinct payer, never removed.
+
+After the load, both services start against the 100 k databases and are ready in 1.3 s. A new lifecycle completes normally: paid,
+one receipt, one terminal event.
+
+**Query time at volume** (median ms of 3 [range]; the scan at 100 k):
+
+| Query (service) | 1 k | 10 k | 50 k | 100 k | Plan at 100 k |
+|---|---|---|---|---|---|
+| Outbox claim (both) | 0.06–0.08 | 0.05–0.09 | 0.10–0.12 | 0.14–0.15 | partial index on unpublished rows, 1 buffer |
+| Dispatcher claim (Billing) | 0.07 | 0.09 | 0.08 | 0.14 | partial index `payment_request_dispatch_idx` |
+| Reconciler scan (Billing) | 0.05 | 0.41 | 2.39 | 3.36 [3.29–14.97] | bitmap on two partial indexes (2 000 open requests at 100 k) |
+| **ExpirySweeper scan (Payment)** | 0.11 | 1.81 | 4.84 | **11.27 [11.16–13.87]** | **sequential scan of `payment`** (4 132 buffers) |
+| AttemptResolver scan (Payment) | 0.06 | 0.03 | 0.03 | 0.04 | partial unique index on open attempts |
+| Webhook retrier scan (Payment) | 0.07 | 0.08 | 0.13 | 0.10 | partial `webhook_event_retry_idx` |
+| Receipt by event id, receipts by request, invoice list of a payer, history of an entity (Billing) | ≤ 0.06 | ≤ 0.05 | ≤ 0.05 | ≤ 0.06 | index scans |
+| Idempotency lookup, webhook dedupe, payment by id / by request (Payment) | ≤ 0.18 | ≤ 0.11 | ≤ 0.06 | ≤ 0.09 | index scans |
+| Rate-limit / throttle upsert (Billing, Auth), inbox dedupe insert | ≤ 0.12 | ≤ 0.11 | ≤ 0.22 | ≤ 0.26 | unique index |
+| Refresh token by hash, audit of an actor, Organization idempotency lookup | ≤ 0.08 | ≤ 0.10 | ≤ 0.06 | ≤ 0.07 | index scans |
+
+- Every request-path query stays flat under 0.3 ms. The hot worker claims use partial indexes, so published or terminal rows cost them
+  nothing.
+- **The ExpirySweeper scan is the one query that grows with the whole table:** 5 s interval, linear, about 110 ms per pass at 1 M
+  payments by extrapolation. It is handed to 15.8 (a partial index on open payments); nothing was changed.
+- The reconciler scan grows with the number of *open* requests, which is expected.
+- Cleanup-shaped queries have no supporting index and scan sequentially (7.6–25 ms at 100 k): published outbox rows older than X,
+  expired throttle windows, expired or revoked refresh tokens, expired kit rate-limit windows. They matter only if a cleanup is built.
+- **Index finding:** `billing_transition` has a unique and a non-unique index on the same `(entityType, entityId, revision)`. The
+  planner uses the non-unique one, and the duplicate costs roughly 50 MB per 100 k lifecycles. For 15.8 or a schema cleanup; not
+  changed here.
+
+**Outbox accumulation while RabbitMQ is unreachable** (Payment's broker edge refused, 100 payments paid, 3 runs):
+
+| Measure | Result |
+|---|---|
+| Payments still succeed while the broker is gone | 100/100 (3.4–4.0 s for 100 pays) |
+| Pending events (100 settlements plus earlier creation events) | 123–124 rows, 328–336 KB of table |
+| Relay attempts per row after about 10 s | 4 (the backoff doubles; 60 s ceiling) |
+| Payment log lines during the outage | 8–9 (`outbox_relay_pass_failure`, one per pass, not one per row) |
+| Drain after the broker returns | **7.6 s [7.3–8.0]**, all applied in Billing 7.6 s [7.3–8.1] |
+| Accounting | 100 paid, one payment, one applied receipt and one terminal event each, 0 cross-tenant |
+
+The drain waits for the relay's next backoff slot, not for throughput. After a long outage (60 s ceiling) the first publish can be up
+to 60 s after the broker returns; that belongs to the 15.8 handoff (outbox retry and backoff).
+
+**DLQ residue after reconciliation (O4) and cause attribution (O5)** (3 runs):
+1. A cancellation event is dead-lettered while Billing's database is down (`retries_exhausted`).
+2. The reconciler settles the request from Payment's API: `billing_transition` records `causeType = reconciliation`, correctly.
+3. The DLQ still holds 1 message, so `nawara-check-dlq` keeps alarming.
+4. `nawara-dlq` inspect, then replay → `consumed`: Billing acknowledges it as `ignored / already_applied` under its own event id. That
+   adds one receipt row and makes no second effect (one applied receipt, request `cancelled`, one payment).
+5. DLQ depth 0; a second replay → `not_found`.
+- **Lifecycle (O4):** the residue is expected and the existing tooling already resolves it safely. The runbook is: inspect, confirm
+  the request is settled, **replay** (never purge). The replay is idempotent and leaves an auditable receipt. Purging would lose
+  that record. An automatic TTL or purge is not adopted: it would silently drop a message whose effect might *not* have been
+  reconciled (for example an event about a request that has no `paymentId`).
+- **Growth (O5):**
+  - replaying the same fact under a new event id adds one `ignored` receipt row (about 150 B). There is at most one extra row per
+    replay and per reconciler-applied fact (the reconciler's synthetic id is deterministic, so repeated passes do not add rows);
+  - receipts are append-only and are billing evidence (below): no cleanup.
+- **Attribution (O5):** receipts written by the reconciler say `causeType = payment_event`.
+  - The schema reserves `reconciliation` for receipts **without** an event id (constraint `payment_event_receipt_event_iff_event`).
+    The reconciler needs a deterministic synthetic id to stay idempotent: without it, a reconciliation that ends `deferred` or
+    `conflict` would add one receipt on every pass.
+  - The authoritative history (`billing_transition`) already attributes the effect to `reconciliation`, and the synthetic id is
+    reproducible (uuid v5 of `paymentId:status:reconciliation`).
+  - So the receipt field is **ambiguous but not misleading about what happened**. Correcting it needs a migration that relaxes that
+    CHECK, on an append-only table. **Not changed:** the benefit is cosmetic and the table is evidence (engineering decision, low
+    priority).
+
+**Billing's 500 when its database is gone (O3).**
+- **Reproduced:** `GET /billing/invoices/{id}` and `GET /billing/payment-requests/{id}` answer `500 {"message":"Internal server error",
+  requestId}` and log `unhandled error error=Error detail="connect ECONNREFUSED <host>:<port>"` with a request id and correlation id.
+- **Contract:** this is the kit filter's documented behaviour for every Core service: anything that is not an `HttpException` is an
+  opaque 500. The Billing and Payment SDDs say only "database unavailable: `/ready` fails; requests fail; nothing is half-applied",
+  and `/ready` does answer 503. So it is **not a contract defect**, and it is not Billing-specific.
+- **Observability and classification gap:**
+  - the filter logs the raw message rather than the Stage 14.7 facts (`describeFailure`: class, code, kind);
+  - so an unavailable database cannot be told from a bug by the log's fields, and a host:port reaches the log.
+- **Options:**
+  - (a) log `describeFailure` facts in the filter: logs only, no contract change;
+  - (b) map classified database-unavailable kinds to 503: an API contract change for all four services and their clients' retry
+    semantics.
+  - Neither was made here: (a) is an engineering follow-up; (b) needs an API decision.
+
+**Log volume** (Billing + Payment, 30 s fault windows with `/ready` and `/health` probed every second on both; per minute):
+
+| Scenario | Billing | Payment | Useful? |
+|---|---|---|---|
+| Healthy, idle (108 probes) | 0 | 0 | probes are not logged |
+| Healthy, 20 lifecycles | 79 lines / 23 KB (info, 2 templates) | 0 | one line per dispatch and per applied event, with correlation id |
+| Both databases refused | 268 lines / 60 KB | 104 / 23 KB | one line per worker **pass** with `code=ECONNREFUSED kind=network_unreachable`; readiness failed / recovered once each |
+| RabbitMQ stopped | 17 / 3.7 KB | 2 / 0.6 KB | `rabbitmq_consumer_lost` once, `reconnect_failed` per backoff attempt, readiness once |
+| RabbitMQ frozen | 4 / 1 KB | 2 / 0.6 KB | readiness `ReadinessCheckTimeout`, consumer lost at the heartbeat, consumer recovered |
+| Payment API hung (blackhole) | 12 / 3.5 KB | – | one `payment_dispatch_failure reason=transient` per request per timeout |
+| Payment API 503 / refused, 20 requests | 435 / 127 KB | – | `payment_dispatch_failure` plus `stale_recovery` per request per retry: **grows with the backlog** |
+| Consumer retry storm (Billing DB down, 20 events) | 644 / 181 KB | – | per event: 4 failures, 3 `event_retry_scheduled`, `retry_exhausted`, `dead_lettered` (bounded by the retry budget) |
+
+- **Intervals.** These campaigns use test intervals (dispatch every 300 ms, stale send 5 s). With the defaults (2 s, 60 s):
+  - per-pass lines fall to 60 per minute for the outbox relay (1 s), 30 for the dispatcher (2 s) and 12 for the 5 s workers;
+  - per-request retry lines fall to 1–2 per request per minute.
+- **Scaling.** Pass-level lines are independent of the backlog; per-item lines scale with it (10 k stuck requests → about 20 k lines
+  per minute at the defaults).
+- **Every fault announces itself, and every recovery announces itself:**
+  - `readiness_check_recovered`, `rabbitmq_consumer_recovered`, `payment_dispatch_success`, `payment_reconcile_success`;
+  - per-item lines carry `correlationId`;
+  - pass-level lines deliberately do not.
+- **Resources** (default dispatch interval, 20 s phases):
+  - CPU 0.6–1.4 % per service in every phase (idle, both databases down, 50 requests retrying against a 503);
+  - RSS 133–171 MB;
+  - database sessions 0 during the outage, 1–4 after it;
+  - 0 idle in transaction; 2 broker connections, 3 channels.
+- **Sensitive data** (1 199 captured lines, plus the O3 lines):
+  - no bearer token, password, secret, authorization header, URL credential, `token=`, cookie, or either live service credential;
+  - 0 non-JSON lines;
+  - the only data beyond ids is a database host:port in the O3 `unhandled error` detail.
+
+**Carried log gaps, resolved or classified:**
+- **Failure taxonomy gaps** (engineering, logs only):
+  - `readiness_check_failed check=rabbitmq error=Error` carries no code or kind;
+  - the late write after pool close (15.5) logs `error=Error` with no kind: pg-pool's "Cannot use a pool after calling end" is not in
+    `BY_PG_MESSAGE`;
+  - an idle-in-transaction termination is logged as `db_connection_lost` (15.2);
+  - the 500 filter logs a message instead of facts (O3).
+  - Recommended: add `db_pool_closed` and broker-refused kinds, and facts in the filter. **Not changed** (observability only;
+    correctness intact).
+- **Level inconsistency:** a pass failure is `warn` in the outbox relay but `error` in the dispatcher, reconciler, ExpirySweeper,
+  AttemptResolver and webhook retrier. An SRE paging rule should key on the event name, not on the level.
+- **ExpirySweeper visibility:** it logs only pass failures. An expired payment produces no log line, only its `payment.expired` event.
+  A payment skipped because an attempt is open (head-of-line, 15.4) is silent. Its scan is the one query that grows (above).
+- **Reconciler versus event attribution:** in logs it is clear (`payment_reconcile_success` versus `payment_event_applied`), and in
+  `billing_transition` too. It is ambiguous only in the receipt (O5).
+- **Worker and retry signals:** present and bounded (above).
+- **Auth health rate limit (15.5 / 15.6):**
+  - `/auth/health`, `/health` and `/ready` share Auth's global throttle (`BASELINE_RATE_LIMIT_PER_MINUTE` = 100 per address);
+  - probed 6 times per second from one address, Auth answered **429 on 77/127 `/auth/health` and 78/127 `/health` probes**, from
+    25 s;
+  - Auth logged **nothing** about it;
+  - Organization (kit health) never limited its probes (254 × 200);
+  - behind a gateway, where every client shares one address, ordinary traffic can starve the healthcheck.
+  - **NEEDS SRE / SECURITY DECISION:** exempt the probes from the throttle, or key the throttle on the forwarded client address.
+- **Shutdown log volume (15.5):** a bounded, constant number of lifecycle lines per shutdown (13.5.x). No change.
+
+**Retention decision matrix.** No duration is invented: the repository establishes only Payment's `IDEMPOTENCY_TTL_HOURS` (24,
+configured) and nothing else.
+
+Lifecycle classes: A permanent business, B long-lived history, C temporary operational, D idempotency, E retry / recovery, F security /
+rate limit, G raw provider payload, H unknown.
+
+| Dataset | Class | Growth | Cleanup today | Safe to delete when | Decision |
+|---|---|---|---|---|---|
+| `invoice`, `invoice_line`, `payment_request`, `payment`, `payment_attempt`, products, prices, subscriptions | A | 1 per lifecycle (transitions 6.9) | none | never by a technical job (financial records) | legal / product (B-032, O-17) |
+| `billing_transition`, `payment_event_receipt` | B (evidence) | 6.9 and 1–2 per lifecycle | none, append-only triggers | only under a legal retention period, by an archival process | legal |
+| `auth_audit_event`, Organization `admin_actor_event`, `ownership_event`, `hierarchy_authority_event` | B (security / audit) | per security event | none, append-only | after the audit retention period; Audit service later | security / legal |
+| `outbox` (Organization, Billing, Payment), published rows | C | 1–2 per lifecycle, 32 % of storage | none | `publishedAt` is set **and** older than the replay / forensics horizon (the relay reads only unpublished rows) | SRE (horizon), NEEDS DECISION |
+| `outbox`, unpublished rows | E | during broker outages | – | **never** (undelivered events) | – |
+| `inbox` (kit, in Organization, Billing and Payment) | D | **0: no service consumes through the kit inbox today** (Billing's receipt is its dedupe) | none | when a consumer adopts it: only after the broker can no longer redeliver that event id (redelivery and DLQ replay horizon) | SRE, when first used |
+| Payment `idempotency_key` | D | 1 per attempt or cancel | none (`expiresAt` written, **never read**) | `expiresAt < now()`: the SDD defines expiry (≥ 24 h, configured) and says an expired key is treated as new, safe because every money-moving creation also has a permanent natural key | engineering; the horizon is established. See D1 |
+| Organization `idempotency_key` | D | 1 per create | none, **no expiry column** | undefined: no retry horizon exists | product / API, NEEDS DECISION |
+| `webhook_event`, rows | E, then B | 1 per verified delivery | none | the state is terminal (`processed`, `ignored`, `failed` with exhausted or malformed) **and** the dispute / audit period has passed | legal / product (O-17) |
+| `webhook_event.rawBody` | G | the provider's body size | none; immutable (`forbid_column_change`) | the retrier needs it while the state is retryable (`parseStoredBody`). After that it is dispute evidence only | **NEEDS PRODUCT / SECURITY / LEGAL DECISION** (O-17); may contain payer personal data from real providers |
+| `kit_rate_limit`, `auth_throttle` | F | 1 per distinct identifier (Payment: 1 per payer) | per-key reset after a success | `windowStart` older than the bucket's longest window (such a row is equivalent to an absent one: the upsert restarts it) | engineering (technical, no policy needed); the kit needs the buckets' maximum window |
+| `refresh_token` | F | 1 per login or refresh | none (ADD: "a known operational need") | the family is dead (all revoked or expired). A rotated-out token is the reuse detector: deleting it turns a late theft signal (`session.refresh_reuse_detected`, audited) into "unknown token"; non-operator families have no ceiling | security, NEEDS DECISION |
+| Expiring Auth challenges (`owner_auth_challenge`, `owner_step_up`, `admin_operator_code`, `member_contact_verification`, `owner_recovery_request`), `device` | C / F | per flow | none | after expiry plus the audit need; `device` has an open privacy question (ADD) | security / privacy |
+| DLQ messages | E | per exhausted event | operator replay | after replay (`consumed` or `not_found`); **never purged unseen** | SRE runbook |
+| `schema_migrations`, `ownership_import_run`, `hierarchy_id_ledger` | A | constant | – | never | – |
+
+**D1 (documentation versus code, not a correctness defect):**
+- Payment's SDD says keys expire after the configured retention and an expired key is treated as new. The code writes `expiresAt`
+  and never reads it, so an old key replays forever, which is the stricter behaviour (no double effect is possible).
+- Honouring the SDD needs either a cleanup of expired keys or an expiry check in `reserve`. Both change what a client sees on a
+  retry after 24 h: re-execution instead of a replay. Both are safe by the SDD's argument.
+- Recommended as the first cleanup to build; not built in 15.7 (API behaviour change).
+
+**Cleanup design (not implemented).** Every candidate deletion is either:
+- blocked on a duration that no document establishes (outbox, inbox, webhook bodies, audit, refresh tokens, Organization keys), or
+- purely technical but not needed at the measured volume, while it would add a new periodic worker to Core: expired rate-limit
+  windows (Payment's 92 k rows at 100 k payers = 29 MB) and expired Payment idempotency keys (D1).
+
+When built, each cleanup should:
+- be a kit `PollLoop` worker deleting in bounded batches (`DELETE … WHERE ctid IN (SELECT … LIMIT n)`) on an index that exists for it:
+  - `outbox ("publishedAt") WHERE "publishedAt" IS NOT NULL`;
+  - `kit_rate_limit ("windowStart")`;
+- never touch unpublished outbox rows, retryable webhooks, or append-only evidence;
+- be proven with the ≥ 20-iteration concurrency campaign against the live writer, for example a rate-limit sweep racing `hit`: the
+  sweep re-evaluates `windowStart` on the locked row, so a row restarted by `hit` is kept.
+
+No cleanup was implemented, so there is no concurrency proof to report.
+
+**Results.**
+- **PASS:** growth measured and linear; every request-path and claim query stays flat to 100 k; the services start and work at size.
+- Outbox accumulation and drain are exact (3/3).
+- The DLQ residue is resolved by the existing replay with no second effect (3/3).
+- No sensitive data in any captured log line.
+- No production code changed. The findings are handed off below and in section 16.
+
+**Handoff to 15.8 (no value changed in 15.7):**
+
+| Item | Evidence | 15.8 question |
+|---|---|---|
+| ExpirySweeper full scan | 11.3 ms at 100 k payments, linear, every 5 s | partial index on open payments with `expiresAt`, and the interval |
+| Outbox backoff after an outage | drain waits for the next backoff slot (7.6 s after a 10 s outage, up to 60 s) | reset or shorten the backoff when the broker returns |
+| Per-request dispatch retry logging | about 2 lines per stuck request per stale cycle | aggregate per pass, or accept; tied to the 60 s stale window (O1) |
+| Duplicate `billing_transition` index | about 50 MB per 100 k lifecycles | drop the non-unique twin (a migration) |
+| Cleanup-shaped scans | 7.6–25 ms sequential at 100 k | indexes only when a cleanup is built |
+| Auth probe throttling | 429 on health probes, silent | probe exemption or throttle key (SRE / security) |
+
 ## 14. Experiment report template
 
 ```text
@@ -1454,6 +1713,9 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | SDD endpoint 15: success is `200` in code and tests but `202` in the SDD, and the marker is stamped even when Payment refuses (SDD: "nothing changed") | Billing doc review | engineering |
 | Acceptable AttemptResolver provider-call amplification (15.4 measured: N instances → N calls per unresolved attempt per pass; state safe) | 15.8 | product (provider cost / rate limits) |
 | ExpirySweeper head-of-line blocking and dispatcher per-batch stale reclaim (15.4: correct, availability and duplicate-call cost) | 15.8 | engineering |
-| Acceptable log volume during outages | 15.7 | SRE |
-| Retention periods (F12) | after 15.7 | product / legal |
+| Acceptable log volume during outages (15.7 measured: 0 lines/min idle; per-pass lines 12–60/min per worker at default intervals; per-item retry lines grow with the backlog) | before production alerting | SRE |
+| Retention periods (F12): published outbox horizon (and the inbox's, once a consumer uses it); webhook rows and raw bodies (O-17); audit trails; refresh tokens; Organization idempotency keys (no expiry column). Matrix in section 13.7 | before production data accumulates | product / legal / security / SRE |
+| 15.7 D1: honour Payment's documented key expiry (`expiresAt` is never read; an old key replays forever) by a cleanup or an expiry check | before the first cleanup | engineering |
+| 15.7: Auth health endpoints share the global throttle (429 on probes, not logged) — exempt probes or key on the forwarded address | before production routing behind a gateway | SRE / security |
+| 15.7 O3: log `describeFailure` facts in the kit exception filter; separately, whether database-unavailable should map to 503 (API contract, all services) | engineering (a); API decision (b) | engineering / API |
 | Traffic assumptions for capacity targets | 15.8 | product |
