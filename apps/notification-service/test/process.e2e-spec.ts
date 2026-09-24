@@ -15,7 +15,12 @@ const RUNTIME_DB = `postgres://notification_app:${DB_PASSWORD}@127.0.0.1:1/notif
 const BROKER_PASSWORD = 'broker-password-never-logged-0043';
 const SECRET_KEY = Buffer.alloc(32, 7).toString('base64');
 /** Production-shaped: every required setting present; the database and the broker are unreachable on purpose. */
-const REQUIRED = { DATABASE_URL: RUNTIME_DB, RABBITMQ_URL: `amqp://notify:${BROKER_PASSWORD}@127.0.0.1:1`, NOTIFICATION_SECRET_KEYS: `k1:${SECRET_KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en' };
+const HASH_KEY = Buffer.alloc(32, 9).toString('base64');
+const REQUIRED = {
+  DATABASE_URL: RUNTIME_DB, RABBITMQ_URL: `amqp://notify:${BROKER_PASSWORD}@127.0.0.1:1`, NOTIFICATION_SECRET_KEYS: `k1:${SECRET_KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1',
+  NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: HASH_KEY,
+  NOTIFICATION_SERVICE_POLICY: JSON.stringify({ callers: { 'some-core-service': { templates: ['membership.approved'], channels: ['EMAIL'], organizations: 'none' } } }),
+};
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -98,6 +103,7 @@ describe('notification-service as a built process (production configuration)', (
     expect(run.out()).not.toContain(DB_PASSWORD);
     expect(run.out()).not.toContain(BROKER_PASSWORD);
     expect(run.out()).not.toContain(SECRET_KEY);
+    expect(run.out()).not.toContain(HASH_KEY);
     expect(msgs.some((m) => m.startsWith('event_intake_waiting reason=database_unavailable'))).toBe(true);
     expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|some-core-service/);

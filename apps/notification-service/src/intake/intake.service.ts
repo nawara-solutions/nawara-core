@@ -1,27 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DbService, PermanentEventFailure, type EventEnvelope, type Queryable } from '@nawara/service-kit';
-import { NOTIFICATION_CONFIG } from '../config/notification-config.token.js';
-import type { NotificationConfig } from '../config/notification-config.js';
-import { NotificationSecretCipher } from '../secrets/secret-cipher.js';
-import { validateVariableValues, type VariableSchema } from '../templates/variables.js';
+import { validateVariableValues } from '../templates/variables.js';
 import { isValidDestination, type DeliveryChannel } from './destination.js';
 import { mappingFor, payloadProblems, type EventMapping } from './event-map.js';
-import { resolveLocale } from './locale.js';
+import { IntentCore, type PublishedVersion } from './intent-core.js';
 
 /** What the intake did with one event: a new intent, or a duplicate of one already recorded (nothing written). */
 export type IntakeOutcome = { kind: 'accepted'; notificationId: string; deliveryId: string; invalidDestination: boolean } | { kind: 'duplicate' };
 
 const CORRELATION = /^[A-Za-z0-9._:-]{1,128}$/;
-
-interface PublishedVersion {
-  templateId: string;
-  category: string;
-  versionId: string;
-  locale: string;
-  version: number;
-  variables: VariableSchema;
-}
 
 /**
  * Event intake (SDD §7.1, Stage 16.5): a canonical event becomes a durable notification intent and its delivery, in ONE transaction,
@@ -41,14 +29,11 @@ interface PublishedVersion {
 @Injectable()
 export class IntakeService {
   private readonly log = new Logger('EventIntake');
-  private readonly cipher: NotificationSecretCipher;
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
-    @Inject(NOTIFICATION_CONFIG) private readonly config: NotificationConfig,
-  ) {
-    this.cipher = new NotificationSecretCipher(config.secretKeys, config.secretActiveKeyId);
-  }
+    @Inject(IntentCore) private readonly core: IntentCore,
+  ) {}
 
   async handle(event: EventEnvelope): Promise<IntakeOutcome> {
     const who = `eventId=${event.id} name=${event.name} source=${event.headers.source} correlationId=${event.headers.correlationId ?? '-'}`;
@@ -75,19 +60,13 @@ export class IntakeService {
     const invalid = validateVariableValues(version.variables, values);
     if (invalid.length > 0) return reject('invalid_template_data', ` variables=${invalid.map((e) => e.split(':')[0]).join(',')}`);
 
-    const secrets: Record<string, string> = {};
-    const data: Record<string, unknown> = {};
-    for (const [name, v] of Object.entries(values)) {
-      if (v === undefined || v === null) continue;
-      if (version.variables[name].secret) secrets[name] = String(v);
-      else data[name] = v;
-    }
+    const { data, secrets } = this.core.split(version.variables, values);
 
     const deliverable = isValidDestination(channel, destination);
     const notificationId = randomUUID();
     const deliveryId = randomUUID();
     // Seal only what may still be sent: an undeliverable intent keeps no secret at all.
-    const sealed = deliverable && Object.keys(secrets).length > 0 ? this.cipher.seal(secrets, notificationId) : undefined;
+    const sealed = deliverable ? this.core.seal(secrets, notificationId) : undefined;
     const correlationId = event.headers.correlationId && CORRELATION.test(event.headers.correlationId) ? event.headers.correlationId : null;
 
     const created = await this.db.tx(async (q) => {
@@ -121,10 +100,7 @@ export class IntakeService {
    * other process can ever see or claim it. No attempt row is written: no provider is called.
    */
   private async insertDelivery(q: Queryable, id: string, notificationId: string, channel: DeliveryChannel, destination: string, v: PublishedVersion, deliverable: boolean) {
-    await q.query(
-      `INSERT INTO notification_delivery (id, "notificationId", channel, destination, "templateVersionId", locale, "nextAttemptAt") VALUES ($1, $2, $3, $4, $5, $6, now())`,
-      [id, notificationId, channel, destination, v.versionId, v.locale],
-    );
+    await this.core.insertDelivery(q, { id, notificationId, channel, destination, version: v, dueAt: null });
     if (!deliverable) {
       await q.query(`UPDATE notification_delivery SET status = 'SENDING', "nextAttemptAt" = NULL, "leaseUntil" = now() WHERE id = $1`, [id]);
       await q.query(
@@ -135,18 +111,9 @@ export class IntakeService {
     }
   }
 
-  /** The active (highest) published version of the mapping's template for the channel, in the resolved locale (SDD §3.4, §6.4). */
+  /** The active published version of the mapping's template (the shared resolution), refused when its category disagrees with the mapping. */
   async publishedVersion(m: EventMapping, channel: DeliveryChannel, requestedLocale: string | null): Promise<PublishedVersion | undefined> {
-    const { rows } = await this.db.query<{ templateId: string; category: string; versionId: string; locale: string; version: number; variables: VariableSchema }>(
-      `SELECT t.id AS "templateId", t.category, v.id AS "versionId", v.locale, v.version, v.variables
-         FROM notification_template t JOIN notification_template_version v ON v."templateId" = t.id
-        WHERE t.key = $1 AND t."organizationId" IS NULL AND v.channel = $2
-        ORDER BY v.version DESC`,
-      [m.template, channel],
-    );
-    const locale = resolveLocale(requestedLocale, new Set(rows.map((r) => r.locale)), this.config.defaultLocale);
-    const row = rows.find((r) => r.locale === locale); // rows are newest first: the first match is the active version
-    if (!row || row.category !== m.category) return undefined;
-    return row;
+    const row = await this.core.activeVersion(m.template, channel, requestedLocale);
+    return row && row.category === m.category ? row : undefined;
   }
 }

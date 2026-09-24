@@ -5,7 +5,11 @@ import { SERVICE_NAME, loadNotificationConfig } from './notification-config.js';
 
 const DB = 'postgres://notification_app:pw-not-real@db:5432/notification';
 const KEY = randomBytes(32).toString('base64');
-const REQUIRED = { DATABASE_URL: DB, RABBITMQ_URL: 'amqp://notify:pw-not-real@broker:5672', NOTIFICATION_SECRET_KEYS: `k1:${KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en' };
+const HASH_KEY = randomBytes(32).toString('base64');
+const REQUIRED = {
+  DATABASE_URL: DB, RABBITMQ_URL: 'amqp://notify:pw-not-real@broker:5672', NOTIFICATION_SECRET_KEYS: `k1:${KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1',
+  NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: HASH_KEY,
+};
 const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ ...REQUIRED, ...over });
 
 describe('notification-service configuration', () => {
@@ -33,12 +37,12 @@ describe('notification-service configuration', () => {
     expect(() => loadNotificationConfig(env({ DB_STATEMENT_TIMEOUT_MS: '30000', DB_QUERY_TIMEOUT_MS: '30000' }))).toThrow(/DB_QUERY_TIMEOUT_MS/);
   });
 
-  it('carries only what the service uses: no caller policy, docs, worker or provider configuration yet (16.6-16.8)', () => {
+  it('carries only what the service uses: no worker or provider configuration yet (16.7 / 16.8)', () => {
     const keys = Object.keys(loadNotificationConfig(env()));
-    for (const later of ['servicePolicy', 'docs', 'leaseMs', 'providerTimeoutMs', 'twilio', 'smtp']) expect(keys).not.toContain(later);
+    for (const later of ['leaseMs', 'providerTimeoutMs', 'twilio', 'smtp', 'emailFrom']) expect(keys).not.toContain(later);
   });
 
-  it.each(['RABBITMQ_URL', 'NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_SECRET_ACTIVE_KEY_ID', 'NOTIFICATION_DEFAULT_LOCALE'])('refuses to start without %s (no default)', (name) => {
+  it.each(['RABBITMQ_URL', 'NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_SECRET_ACTIVE_KEY_ID', 'NOTIFICATION_DEFAULT_LOCALE', 'NOTIFICATION_REQUEST_HASH_KEY'])('refuses to start without %s (no default)', (name) => {
     const e = env();
     delete e[name];
     expect(() => loadNotificationConfig(e)).toThrow(ConfigError);
@@ -107,7 +111,8 @@ describe('notification-service configuration', () => {
 
   it('accepts registered service callers, and refuses malformed SERVICE_TOKENS without echoing them', () => {
     const { digest } = generateServiceToken();
-    expect(loadNotificationConfig(env({ SERVICE_TOKENS: `some-core-service:${digest}` })).serviceTokens).toEqual([{ caller: 'some-core-service', digest }]);
+    const policy = JSON.stringify({ callers: { 'some-core-service': { templates: ['membership.approved'], channels: ['EMAIL'], organizations: 'none' } } });
+    expect(loadNotificationConfig(env({ SERVICE_TOKENS: `some-core-service:${digest}`, NOTIFICATION_SERVICE_POLICY: policy })).serviceTokens).toEqual([{ caller: 'some-core-service', digest }]);
     for (const bad of ['no-colon', 'caller:not-a-digest', `a:${digest},b:${digest}`]) {
       try {
         loadNotificationConfig(env({ SERVICE_TOKENS: bad }));

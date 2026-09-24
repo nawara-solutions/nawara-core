@@ -3,7 +3,8 @@
 - **Status:** Draft (Stage 16.1 design). Implemented so far: the Stage 16.2 Auth envelope, the Stage 16.3 service foundation
   ([record](../architecture/stage-16/stage-16-3-service-foundation.md)) and the Stage 16.4 persistence and template catalog
   ([record](../architecture/stage-16/stage-16-4-persistence-and-templates.md)) and the Stage 16.5 event intake
-  ([record](../architecture/stage-16/stage-16-5-notification-event-intake.md)); nothing is sent yet
+  ([record](../architecture/stage-16/stage-16-5-notification-event-intake.md)) and the Stage 16.6 send API
+  ([record](../architecture/stage-16/stage-16-6-notification-send-api.md)); nothing is sent yet
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -123,7 +124,7 @@ and `kit_rate_limit` tables are present; the outbox and inbox stay unused in V1 
 | `sourceKind` text | `event` or `api` |
 | `sourceService` text | `event`: the envelope's `source` header (for example `auth-service`); `api`: the calling service's name |
 | `sourceEventId` uuid NULL | `event` only: the kit `eventId` |
-| `idempotencyKey` text NULL, `requestHash` text NULL | `api` only: the `Idempotency-Key` header and the SHA-256 of the canonical request (the Payment pattern) |
+| `idempotencyKey` text NULL, `requestHash` text NULL | `api` only: the `Idempotency-Key` header and the **HMAC-SHA-256** of the canonical request under `NOTIFICATION_REQUEST_HASH_KEY` (D25, Stage 16.6; it replaces the unkeyed SHA-256 of the Payment pattern, which would let a database reader brute-force a one-time code) |
 | `templateId` uuid FK → `notification_template` | the logical template |
 | `category` text | copied from the template (`SECURITY`, `TRANSACTIONAL` or `OPTIONAL`) for queries without a join |
 | `organizationId` uuid NULL | NULL = platform-scoped |
@@ -496,6 +497,21 @@ Notes on this mapping:
 - **The request hash** covers the whole body except whitespace, including the destinations and data. It is stored as a hash
   only.
 - Secret variables are sealed (§12.1) and the hash is computed before sealing, so the plaintext never persists.
+- **Superseded in Stage 16.6 (D25):** the hash is **keyed**: `HMAC-SHA-256(NOTIFICATION_REQUEST_HASH_KEY, "nawara.notification.api.v1|"
+  + canonicalJson(body))`.
+  - An unkeyed SHA-256 of a body holding a low-entropy one-time code, with every other field stored in clear beside it, would let a
+    database reader recover a live code in about a second.
+  - Secret variables stay inside the hash: a changed code under the same key is `422 idempotency_key_reused`.
+  - Payment keeps its unkeyed hash, since its bodies hold no such secret.
+  - Key rotation and versioning is a Stage 16.9 item. See the
+    [Stage 16.6 record](../architecture/stage-16/stage-16-6-notification-send-api.md) §5.
+
+> **Implemented in Stage 16.6** as specified above, with these refinements (the Stage 16.6 record):
+> - the schedule bound is `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` (the unit named);
+> - `expiresAt` must also be in the future and after `scheduledAt` (`schedule_out_of_range`);
+> - the `409 delivery_in_progress` states the cancelled / in-flight counts in its message, because the kit error envelope carries no
+>   list;
+> - an invalid destination on the API is `422` with nothing written; the event intake keeps its durable `FAILED` delivery.
 
 **`GET /notification/notifications/:id`** (a service token; only the **creating caller**)
 

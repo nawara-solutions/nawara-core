@@ -140,6 +140,16 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | outbox relay pass / backoff (Stage 15.8, constants) | full batches of 50 back to back for ≤ 1 s per 1 s poll; per-row backoff 1 s × 2ⁿ up to 15 s | – | kit relay (Billing, Payment) | backlog drain; worst delivery delay after a broker outage |
 | AttemptResolver lease (Stage 15.8, constant) | 5000 ms | – | Payment | one provider call per open attempt per lease whatever the number of instances; a dead holder's lease runs out |
 
+**notification-service secrets and API bounds (Stage 16.5 / 16.6):**
+- `NOTIFICATION_SECRET_KEYS` + `NOTIFICATION_SECRET_ACTIVE_KEY_ID`: the AES-256-GCM ring that seals one-time codes.
+- `NOTIFICATION_REQUEST_HASH_KEY`: the HMAC key of the API request hash (D25). A single key; rotating it turns in-flight retries into
+  `422 idempotency_key_reused`, and versioning is a 16.9 item.
+
+  Both are required, generated on the server, and never in Git, a log or the database.
+- `NOTIFICATION_SERVICE_POLICY`: the explicit per-caller templates / channels / organizations; deny by default.
+- `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` (30 days, 60–31536000) and `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` (600, 1–100000):
+  engineering bounds.
+
 A frozen or partitioned broker is detected within about 3 × `RABBITMQ_HEARTBEAT_S` (≈ 30 s at the default), after the shorter
 `RABBITMQ_CONFIRM_TIMEOUT_MS`; a SIGTERM while the broker is silent therefore takes up to about that long (still above Docker's 10 s stop
 grace: Stage 15.5).

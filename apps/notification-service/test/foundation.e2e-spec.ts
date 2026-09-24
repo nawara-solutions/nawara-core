@@ -35,15 +35,15 @@ describe('notification-service foundation', () => {
     expect(JSON.stringify(r.body)).not.toMatch(/nobody|nothing|127\.0\.0\.1|ECONNREFUSED/); // no host, credential or error text
   });
 
-  it('exposes no business route and no starter route: the send API is Stage 16.6', async () => {
+  it('exposes the internal send API only behind a service token (401 without one), no starter route, and no docs without a password', async () => {
     const app = await createTestApp({ probes: false });
     try {
       await request(app.app.getHttpServer()).get('/').expect(404);
-      for (const path of ['/notification/notifications', '/notification/notifications/x', '/notification/docs']) {
-        await request(app.app.getHttpServer()).get(path).expect(404);
-      }
-      await request(app.app.getHttpServer()).post('/notification/notifications').send({}).expect(404);
-      await request(app.app.getHttpServer()).post('/notification/notifications/x/cancel').send({}).expect(404);
+      await request(app.app.getHttpServer()).get('/notification/docs').expect(404);
+      await request(app.app.getHttpServer()).post('/notification/notifications').send({}).expect(401);
+      await request(app.app.getHttpServer()).get('/notification/notifications/x').expect(401);
+      await request(app.app.getHttpServer()).post('/notification/notifications/x/cancel').send({}).expect(401);
+      await request(app.app.getHttpServer()).get('/notification/notifications').expect(404); // no list API (SDD §7.2)
     } finally {
       await app.app.close();
     }
@@ -139,6 +139,18 @@ describe('notification-service foundation', () => {
       expect(all, `log leaked ${secret.slice(0, 8)}…`).not.toContain(secret);
     }
     expect(t.logs.every((l) => l.service === 'notification-service' && typeof l.level === 'string')).toBe(true);
+  });
+
+  it('mounts OpenAPI at /notification/docs only with a password, behind basic auth', async () => {
+    const docs = await createTestApp({ env: { SWAGGER_PASSWORD: 'a-long-enough-docs-password' }, probes: false });
+    try {
+      await request(docs.app.getHttpServer()).get('/notification/docs-json').expect(401);
+      await request(docs.app.getHttpServer()).get('/notification/docs-json').auth('docs', 'wrong-password-value').expect(401);
+      const r = await request(docs.app.getHttpServer()).get('/notification/docs-json').auth('docs', 'a-long-enough-docs-password').expect(200);
+      expect(Object.keys(r.body.paths)).toContain('/notification/notifications');
+    } finally {
+      await docs.app.close();
+    }
   });
 
   it('sets secure headers, no framework banner, CORS off by default', async () => {

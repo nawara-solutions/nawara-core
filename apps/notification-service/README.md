@@ -1,15 +1,16 @@
 # notification-service
 
-> **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5).** Auth's nine notification events are
-> consumed from `notification.events` and recorded as durable intents with `PENDING` deliveries (codes sealed, E.164 enforced).
-> **It sends nothing yet:** no send API (16.6), no worker (16.7), no provider (16.8).
+> **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5), internal send API (16.6).** Intents
+> arrive from Auth's events and from trusted Core services over the API; each is a durable intent with `PENDING` deliveries (codes
+> sealed, E.164 enforced). **It sends nothing yet:** no worker (16.7), no provider (16.8).
 
 Generic, product-agnostic delivery of notifications (email and SMS first) for Nawara Core. Producers decide *why* and *when*; this
 service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notification-service-architecture.md),
 [SDD](../../docs/sdd/notification-service.md), [Stage 16 roadmap](../../docs/architecture/stage-16/stage-16-1-decisions-and-roadmap.md),
 [Stage 16.3 record](../../docs/architecture/stage-16/stage-16-3-service-foundation.md),
 [Stage 16.4 record](../../docs/architecture/stage-16/stage-16-4-persistence-and-templates.md),
-[Stage 16.5 record](../../docs/architecture/stage-16/stage-16-5-notification-event-intake.md).
+[Stage 16.5 record](../../docs/architecture/stage-16/stage-16-5-notification-event-intake.md),
+[Stage 16.6 record](../../docs/architecture/stage-16/stage-16-6-notification-send-api.md).
 
 ## What exists (16.3)
 
@@ -58,6 +59,20 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
   volume). Add the `NOTIFICATION_*` passwords from `.env.example` to `.env`, then recreate the volume or provision it by hand as
   `infra/postgres/init/01-service-databases.sh` does.
 
+## Send API (16.6, internal)
+
+Every route needs a Core service token (`ServiceTokenGuard`). The caller is the token's service, and its rights come from
+`NOTIFICATION_SERVICE_POLICY` (explicit templates, channels and organization mode; deny by default).
+
+| Route | Result |
+|---|---|
+| `POST /notification/notifications` (`Idempotency-Key` required) | `202 { id, status: "accepted", deliveries }` once committed; the same key and body replays it; a changed body (even only the code) is `422 idempotency_key_reused` |
+| `GET /notification/notifications/:id` | the creating caller only; derived status, destination hints only |
+| `POST /notification/notifications/:id/cancel` | the creating caller only; PENDING → CANCELLED; `409 delivery_in_progress` if one is SENDING |
+
+The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25), never an unkeyed digest. OpenAPI is at
+`/notification/docs` behind basic auth when `SWAGGER_PASSWORD` is set.
+
 ## Configuration
 
 | Variable | Default | Bounds | Notes |
@@ -76,9 +91,14 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 | `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | 5000, 10 | 100–60000, 5–60 | the Core broker bounds |
 | `NOTIFICATION_SECRET_KEYS`, `NOTIFICATION_SECRET_ACTIVE_KEY_ID` | **required** | `id:base64(32 bytes)[,…]`, distinct; the active id must exist | secret: seals one-time codes; rotation = add, activate, retire once unused |
 | `NOTIFICATION_DEFAULT_LOCALE` | **required** | BCP 47 | a product input (D7); every mapped template must be published in it, or the intake does not start |
+| `NOTIFICATION_REQUEST_HASH_KEY` | **required** | base64, ≥ 32 bytes, differs from the secret keys | secret: the HMAC key of the API request hash; one key (rotation: 16.9) |
+| `NOTIFICATION_SERVICE_POLICY` | empty | `{"callers": {…}}` | required once `SERVICE_TOKENS` registers a caller |
+| `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` | 2592000 | 60–31536000 | how far ahead `scheduledAt` may be |
+| `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` | 600 | 1–100000 | per caller (`429 rate_limited`) |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI mounted only with a password |
 | `SERVICE_TOKENS` | empty | `<caller>:<sha256 hex>`, comma-separated, ≤ 2 per caller | secret-derived (digests only); empty refuses every service-token call |
 
-`DATABASE_URL`, `RABBITMQ_URL`, the key ring and the default locale are mandatory. An invalid value stops the process at startup with a `ConfigError` naming the variable, never
+`DATABASE_URL`, `RABBITMQ_URL`, the secret key ring, the request-hash key and the default locale are mandatory. An invalid value stops the process at startup with a `ConfigError` naming the variable, never
 its value.
 
 ## Run
@@ -100,7 +120,7 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 |---|---|
 | 16.4 ✅ | the database (`DbModule`, provisioning, the migrator / app roles), the five tables, the template catalog and publication |
 | 16.5 ✅ | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`); variable-value validation; locale resolution (`NOTIFICATION_DEFAULT_LOCALE`); E.164 enforcement |
-| 16.6 | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; OpenAPI at `/notification/docs` |
+| 16.6 ✅ | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; the keyed request hash; OpenAPI at `/notification/docs` |
 | 16.7 | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer and the test provider |
 | 16.8 | the email and SMS providers |
 | 16.9 / 16.10 | security, observability and operations; certification |

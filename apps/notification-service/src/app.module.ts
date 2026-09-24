@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { Global, Logger, Module, type DynamicModule } from '@nestjs/common';
 import { DbModule, HealthModule, RabbitMqEventBus, ServiceAuthModule, kitMigrationsDir, type EventBus } from '@nawara/service-kit';
+import { ApiModule } from './api/api.module.js';
 import type { NotificationConfig } from './config/notification-config.js';
 import { NOTIFICATION_CONFIG } from './config/notification-config.token.js';
 import { INTAKE_EVENT_BUS } from './intake/event-consumer.js';
@@ -41,7 +42,8 @@ class ConfigModule {
  * - Stage 16.3: the kit's health / readiness / bounded HTTP drain and service authentication.
  * - Stage 16.4: the kit database (bounded pool and deadlines; readiness `database` + `migrations`; the pool closes last).
  * - Stage 16.5: the event intake on the kit RabbitMQ bus (queue `notification.events`; readiness `rabbitmq` + `event-intake`).
- * There is still no business route (16.6), no worker (16.7) and no provider (16.8).
+ * - Stage 16.6: the internal send API (`/notification/notifications`: send, status, cancel), sharing the intake core.
+ * There is still no worker (16.7) and no provider (16.8): nothing is sent.
  */
 @Module({})
 export class AppModule {
@@ -73,6 +75,7 @@ export class AppModule {
         ServiceAuthModule.forRoot(config.serviceTokens),
         ConfigModule.forRoot(config, bus),
         IntakeModule,
+        ApiModule,
       ],
     };
   }
