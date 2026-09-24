@@ -83,7 +83,7 @@ export class AppModule {
         // route production deploy tooling and Compose already poll (Stage 13.2: additive, not a replacement).
         KitHealthModule.forRoot({ checkTimeoutMs: 1500, httpDrainTimeoutMs: cfg.httpDrainTimeoutMs }), // Stage 15.5: bounded HTTP drain
         // Broker wiring is switched off with AUTH_EVENTS=off (tests, runs without RabbitMQ).
-        ...(cfg.events.enabled && cfg.events.rabbitmqUrl ? [EventsModule.register(cfg.events.rabbitmqUrl)] : []),
+        ...(cfg.events.enabled && cfg.events.rabbitmqUrl && cfg.events.confirmTimeoutMs ? [EventsModule.register({ rabbitmqUrl: cfg.events.rabbitmqUrl, confirmTimeoutMs: cfg.events.confirmTimeoutMs })] : []),
       ],
       providers: [{ provide: APP_CONFIG, useValue: cfg }],
     };

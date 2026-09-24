@@ -894,7 +894,10 @@ They're noted here so a future user-management design doesn't have to rediscover
 the broker, exchange, routing-key convention, and client library are now decided — a single
 shared `nawara.events` topic exchange, routing key = event name verbatim (as already used
 above), plain JSON message bodies with no added envelope, and `@golevelup/nestjs-rabbitmq` as
-the NestJS client library. This is **local-dev-only for now, by deliberate choice** — ADR-0018
+the NestJS client library. *(Superseded in Stage 16.2: Auth now publishes through the service-kit `RabbitMqEventBus` with the
+canonical header envelope (`eventId`, `occurredAt`, `source`, `version`, `correlationId`; persistent, confirmed). Payloads,
+exchange and routing keys are unchanged; see
+[the Stage 16.2 record](../architecture/stage-16/stage-16-2-auth-event-envelope.md).)* This is **local-dev-only for now, by deliberate choice** — ADR-0018
 explicitly defers production deployment of the broker to a later step, once `notification-service`
 has a real consumer to justify it. Every event above still has nowhere real to be delivered in
 production today; what's resolved is the wire format each will use once a broker and a consumer
@@ -1078,7 +1081,8 @@ The former `organizationId` in `/auth/me`, the JWT and the guard actor no longer
   `admin.*` events can actually ship.~~ **Resolved by
   [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md):** a single shared `nawara.events`
   topic exchange, routing key = event name verbatim, plain JSON payloads with no added envelope,
-  and `@golevelup/nestjs-rabbitmq` as the client library. **Not fully closed as a deployment
+  and `@golevelup/nestjs-rabbitmq` as the client library (Stage 16.2 replaced the envelope-less `@golevelup` publisher with the
+  service-kit bus and its header envelope; payloads unchanged). **Not fully closed as a deployment
   matter** — per ADR-0018, this is a local-dev-only decision for now; production deployment of
   the broker is explicitly deferred to a separate future step, once `notification-service` has a
   real consumer to justify standing it up.

@@ -100,10 +100,15 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
   });
   it('production with events enabled requires an explicit RABBITMQ_URL: no silent default broker or default credentials', () => {
     expect(() => loadConfig(prod({ AUTH_EVENTS: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
-    expect(loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: true, rabbitmqUrl: 'amqps://u:p@broker:5671' });
+    expect(loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: true, rabbitmqUrl: 'amqps://u:p@broker:5671', confirmTimeoutMs: 5000 });
   });
   it('outside production, events enabled without RABBITMQ_URL keep the local development broker', () => {
-    expect(loadConfig(good()).events).toEqual({ enabled: true, rabbitmqUrl: 'amqp://guest:guest@localhost:5672' });
+    expect(loadConfig(good()).events).toEqual({ enabled: true, rabbitmqUrl: 'amqp://guest:guest@localhost:5672', confirmTimeoutMs: 5000 });
+  });
+  it('RABBITMQ_CONFIRM_TIMEOUT_MS (Stage 16.2) defaults to 5000 and is bounded (100-60000), like Billing and Payment', () => {
+    expect(loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).events.confirmTimeoutMs).toBe(2000);
+    for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: 'not validated when off' }).events.confirmTimeoutMs).toBeUndefined();
   });
   it.each(['http://broker:5672', 'broker:5672'])('refuses a RABBITMQ_URL that is not amqp:// or amqps://: %s', (url) => {
     expect(() => loadConfig({ ...good(), RABBITMQ_URL: url })).toThrow(/RABBITMQ_URL must be/);

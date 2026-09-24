@@ -167,9 +167,10 @@ Decision D3 ([ADR-0033](../adr/0033-service-to-service-authentication-and-user-i
   [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md) and Auth's publisher already assume (O1: still Proposed).
 - **Envelope:** the payload stays the flat, documented shape each service already uses. For **new** publishers, metadata
   (`eventId`, `occurredAt`, `correlationId`, producing service) travels in **message headers**, so payloads stay
-  compatible. Auth's current publisher sends the payload only, with no headers, so Auth's events have no `eventId`
-  until it adds one (a small Auth change, not made here); consumers must treat missing metadata as "cannot dedupe".
-  *(Stage 16.1: [ADR-0046](../adr/0046-notification-service-architecture.md) (D4) plans that change for Stage 16.2: Auth publishes the canonical kit envelope through the kit bus. The kit consumer dead-letters an envelope-less message as `malformed_envelope`.)*
+  compatible. Since Stage 16.2 Auth publishes the same canonical kit envelope through the kit bus (`eventId`, `occurredAt`,
+  `source: auth-service`, `version: 1`, `correlationId`; persistent; confirmed), still fire-and-forget and without an outbox
+  ([ADR-0046](../adr/0046-notification-service-architecture.md) D4, [Stage 16.2 record](./stage-16/stage-16-2-auth-event-envelope.md)).
+  Before that Auth sent the payload only, and the kit consumer dead-lettered such a message as `malformed_envelope`.
 - **Delivery today:** RabbitMQ runs only in the local `docker-compose.yml`, not in production, and events are fire-and-forget, so **no event is reliably delivered yet**.
   A transactional outbox is the recommended fix and is out of scope here (O10).
 - **Rules:** a producer never blocks on the broker; a payload never contains a secret or a token; the only exception is

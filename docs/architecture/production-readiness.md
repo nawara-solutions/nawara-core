@@ -130,7 +130,7 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | `DB_STATEMENT_TIMEOUT_MS` | 30000 | 1000–600000 | same | PostgreSQL cancels a longer statement (57014) |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60000 | 1000–3600000 | same | PostgreSQL ends a session idle inside a transaction (25P03) |
 | `DB_QUERY_TIMEOUT_MS` (Stage 15.2) | statement timeout + 5000 | 1000–660000, must exceed `DB_STATEMENT_TIMEOUT_MS` | same | client-side deadline for a query's answer when the server or network goes silent; the connection is destroyed, never reused |
-| `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment | bound on a publisher confirm; a timeout keeps the outbox row pending (at least once) |
+| `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment, Auth (Stage 16.2, while `AUTH_EVENTS` is on) | bound on a publisher confirm; a timeout keeps the outbox row pending (at least once). Auth has no outbox (D19): the event is logged `event_publish_failure` and not retried |
 | `RABBITMQ_HEARTBEAT_S` (Stage 15.3) | 10 | 5–60 | Billing, Payment | the AMQP heartbeat Core requests: a silent broker is detected, and every channel operation and close ended, within about 3 × this value whatever the broker's own heartbeat setting |
 | `WEBHOOK_RETRY_MAX_ATTEMPTS` (constant) | 10 | – | Payment | stored webhook retried at 10 s × 2ⁿ after receipt, then `failed` / `retries_exhausted` |
 | worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown; since Stage 15.5 one drain per worker, all started together at shutdown start |

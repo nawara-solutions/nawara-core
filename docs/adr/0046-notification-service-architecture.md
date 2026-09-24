@@ -170,7 +170,7 @@ producers' throttles (Auth's code throttles) stay primary.
 - attachments: future references to File Service ids;
 - In-App and Push delivery.
 
-**17. Auth prerequisite (Stage 16.2).**
+**17. Auth prerequisite (Stage 16.2; implemented, see [the Stage 16.2 record](../architecture/stage-16/stage-16-2-auth-event-envelope.md)).**
 - Auth's publisher emits the canonical kit envelope by delegating to the kit's `RabbitMqEventBus.publish`:
   - `messageId` = `eventId`, `type` = the event name;
   - `persistent`;
@@ -207,7 +207,7 @@ producers' throttles (Auth's code throttles) stay primary.
 - The kit rate limiter stores an unpeppered hash of the destination.
 
 **Follow-up**
-- Stage 16.2: the Auth envelope.
+- Stage 16.2: the Auth envelope (implemented and validated; [record](../architecture/stage-16/stage-16-2-auth-event-envelope.md)).
 - ADR-0019 to be accepted (Twilio behind the SMS port).
 - **A separate email-provider ADR before Stage 16.8.** No vendor is chosen here, and the test provider stands in until then.
 - D20: phone numbers in E.164 at the producer before SMS is enabled in production.
