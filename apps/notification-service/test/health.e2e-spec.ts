@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { notificationMigrationsDir } from '../src/app.module.js';
@@ -8,7 +8,11 @@ import { sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
 
 /** Stage 16.4: readiness now depends on the database and its migrations (the kit checks); liveness never does; the pool closes at shutdown. */
-describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
+/** `/ready` becomes 200 once the event intake has started (it starts only after the database and migrations are ready). */
+const eventuallyReady = (server: Parameters<typeof request>[0]) =>
+  vi.waitFor(async () => expect((await request(server).get('/ready')).status).toBe(200), { timeout: 15_000, interval: 100 });
+
+describeWithEnv('health, readiness and database shutdown (real PostgreSQL, real RabbitMQ)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
   let db: TestDatabase;
   beforeAll(async () => {
     db = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'notifhealth');
@@ -20,9 +24,12 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
     try {
       await request(t.app.getHttpServer()).get('/health').expect(200, { status: 'ok' });
       const pending = await request(t.app.getHttpServer()).get('/ready').expect(503);
-      expect(pending.body).toEqual({ status: 'unavailable', failed: ['migrations'] });
+      expect(pending.body).toEqual({ status: 'unavailable', failed: ['event-intake', 'migrations'] }); // the intake waits for the migrations
+      expect(t.consumer.started).toBe(false);
       await runMigrations(db.url, [kitMigrationsDir, notificationMigrationsDir]);
+      await eventuallyReady(t.app.getHttpServer());
       await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
+      expect(t.logs.some((l) => String(l.msg).startsWith('event_intake_waiting reason=migrations_pending'))).toBe(true);
     } finally {
       await t.app.close();
     }
@@ -31,7 +38,7 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
   it('/ready fails closed when the database goes away after startup, then recovers; /health never depends on it', async () => {
     const t = await createTestApp({ databaseUrl: db.url });
     try {
-      await request(t.app.getHttpServer()).get('/ready').expect(200);
+      await eventuallyReady(t.app.getHttpServer());
       // Take the database away from this service only: forbid new connections and end the pool's sessions.
       await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${new URL(db.url).pathname.slice(1)}" WITH ALLOW_CONNECTIONS false`);
       await sql(env.TEST_DATABASE_ADMIN_URL, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'notification-service' AND datname = $1`, [new URL(db.url).pathname.slice(1)]);
@@ -51,7 +58,7 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
 
   it('identifies its sessions as `notification-service`, and closing the application ends every one of them (the pool closes last)', async () => {
     const t = await createTestApp({ databaseUrl: db.url });
-    await request(t.app.getHttpServer()).get('/ready').expect(200);
+    await eventuallyReady(t.app.getHttpServer());
     const name = new URL(db.url).pathname.slice(1);
     const open = await sql<{ n: number }>(env.TEST_DATABASE_ADMIN_URL, `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND application_name = 'notification-service'`, [name]);
     expect(open[0].n).toBeGreaterThan(0);

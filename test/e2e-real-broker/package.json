@@ -1,7 +1,7 @@
 {
   "name": "@nawara/e2e-real-broker",
   "private": true,
-  "description": "Stage 5 hardening: the Billing/Payment Stage 4 loop over a REAL RabbitMQ broker and real HTTP between two live processes — never one process's TypeScript imported by the other (services talk over APIs and events only; see scripts/lib/checks.mjs). Needs both services already built (npm run build -w billing-service -w payment-service -w @nawara/service-kit).",
+  "description": "Real-broker loops between live processes: Stage 5 hardening (the Billing/Payment Stage 4 loop) and Stage 16.5 (real Auth -> RabbitMQ -> notification-service intake), over a REAL RabbitMQ broker and real HTTP between two live processes — never one process's TypeScript imported by the other (services talk over APIs and events only; see scripts/lib/checks.mjs). Needs the services already built (npm run build -w @nawara/service-kit -w billing-service -w payment-service -w auth-service -w notification-service).",
   "type": "module",
   "scripts": {
     "test:e2e": "vitest run --config ./vitest.config.ts"

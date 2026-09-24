@@ -1,14 +1,15 @@
 # notification-service
 
-> **Status: foundation (Stage 16.3) + persistence and templates (Stage 16.4).** The service boots on `@nawara/service-kit` with its
-> own database: the five tables with database-enforced invariants and the published V1 template catalog. **It sends nothing yet:**
-> no business route, no event consumer, no worker, no provider. Nothing in any Core flow calls it today.
+> **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5).** Auth's nine notification events are
+> consumed from `notification.events` and recorded as durable intents with `PENDING` deliveries (codes sealed, E.164 enforced).
+> **It sends nothing yet:** no send API (16.6), no worker (16.7), no provider (16.8).
 
 Generic, product-agnostic delivery of notifications (email and SMS first) for Nawara Core. Producers decide *why* and *when*; this
 service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notification-service-architecture.md),
 [SDD](../../docs/sdd/notification-service.md), [Stage 16 roadmap](../../docs/architecture/stage-16/stage-16-1-decisions-and-roadmap.md),
 [Stage 16.3 record](../../docs/architecture/stage-16/stage-16-3-service-foundation.md),
-[Stage 16.4 record](../../docs/architecture/stage-16/stage-16-4-persistence-and-templates.md).
+[Stage 16.4 record](../../docs/architecture/stage-16/stage-16-4-persistence-and-templates.md),
+[Stage 16.5 record](../../docs/architecture/stage-16/stage-16-5-notification-event-intake.md).
 
 ## What exists (16.3)
 
@@ -24,8 +25,20 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 
 | Database: bounded pool and deadlines, `application_name = notification-service`, readiness `database` + `migrations`, pool closed last at shutdown | `DbModule` (16.4) |
 
-`/ready` = the database and its migrations. The RabbitMQ consumer (16.5) adds its check when it arrives. Email and SMS providers are
-never readiness dependencies.
+`/ready` = `database` + `migrations` + `rabbitmq` + `event-intake`. Email and SMS providers are never readiness dependencies.
+
+## Event intake (16.5)
+
+- **Consumption:** the kit consumer on the durable queue `notification.events`, bound only to the nine mapped Auth events
+  (`src/intake/event-map.ts`).
+- **One transaction per event:** the intent plus its delivery, `ON CONFLICT (sourceService, sourceEventId) DO NOTHING`. The message
+  is acknowledged only after the commit, and a redelivery or replay is a duplicate.
+- **Refused (dead-lettered once, nothing written):** a malformed envelope or payload, an unsupported version, an unmapped event, no
+  destination, invalid template data, or an unknown template.
+- **Invalid destination** (SMS must be E.164; no country is ever guessed): a durable `FAILED invalid_destination` delivery.
+- **Codes:** sealed with AES-256-GCM (`NOTIFICATION_SECRET_KEYS`), never in `data` or a log.
+- **Start order:** the consumer starts only after the database, the migrations and the default-locale coverage are verified.
+  Until then the process stays up and not ready.
 
 ## Persistence and templates (16.4)
 
@@ -59,9 +72,13 @@ never readiness dependencies.
 | `DATABASE_URL` | **required** | `postgres:` / `postgresql:` | the runtime role `notification_app`; production refuses `postgres`, `root` and `*_migrator` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | 10, 5000, 30000, 60000, statement + 5000 | the kit bounds | |
 | `MIGRATION_DATABASE_URL` | – | | the migrator, read only by `npm run migrate` |
+| `RABBITMQ_URL` | **required** | `amqp:` / `amqps:` | the broker of the event intake; never logged |
+| `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | 5000, 10 | 100–60000, 5–60 | the Core broker bounds |
+| `NOTIFICATION_SECRET_KEYS`, `NOTIFICATION_SECRET_ACTIVE_KEY_ID` | **required** | `id:base64(32 bytes)[,…]`, distinct; the active id must exist | secret: seals one-time codes; rotation = add, activate, retire once unused |
+| `NOTIFICATION_DEFAULT_LOCALE` | **required** | BCP 47 | a product input (D7); every mapped template must be published in it, or the intake does not start |
 | `SERVICE_TOKENS` | empty | `<caller>:<sha256 hex>`, comma-separated, ≤ 2 per caller | secret-derived (digests only); empty refuses every service-token call |
 
-Only `DATABASE_URL` is mandatory. An invalid value stops the process at startup with a `ConfigError` naming the variable, never
+`DATABASE_URL`, `RABBITMQ_URL`, the key ring and the default locale are mandatory. An invalid value stops the process at startup with a `ConfigError` naming the variable, never
 its value.
 
 ## Run
@@ -82,7 +99,7 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 | Stage | Adds |
 |---|---|
 | 16.4 ✅ | the database (`DbModule`, provisioning, the migrator / app roles), the five tables, the template catalog and publication |
-| 16.5 | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`); variable-value validation; locale resolution (`NOTIFICATION_DEFAULT_LOCALE`) |
+| 16.5 ✅ | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`); variable-value validation; locale resolution (`NOTIFICATION_DEFAULT_LOCALE`); E.164 enforcement |
 | 16.6 | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; OpenAPI at `/notification/docs` |
 | 16.7 | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer and the test provider |
 | 16.8 | the email and SMS providers |

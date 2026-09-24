@@ -55,3 +55,57 @@ export function validateVariableSchema(raw: unknown): string[] {
   }
   return errors;
 }
+
+/** ISO 8601 in UTC, as producers write it (`Date.prototype.toISOString`): `2026-09-24T10:05:00Z` or with milliseconds. */
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const CODE_VALUE = /^[A-Za-z0-9]+$/;
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
+function valueProblem(spec: VariableSpec, v: unknown): string | undefined {
+  switch (spec.type) {
+    case 'string':
+      if (typeof v !== 'string') return 'must be a string';
+      if (v.length < 1 || v.length > (spec.maxLength ?? 0)) return `must be 1-${spec.maxLength} characters`;
+      if (CONTROL.test(v)) return 'must not contain control characters';
+      return undefined;
+    case 'code':
+      if (typeof v !== 'string') return 'must be a string';
+      if (v.length > (spec.maxLength ?? 0) || !CODE_VALUE.test(v)) return `must be 1-${spec.maxLength} letters or digits`;
+      return undefined;
+    case 'integer':
+      return Number.isSafeInteger(v) ? undefined : 'must be an integer';
+    case 'datetime':
+      return typeof v === 'string' && ISO_UTC.test(v) && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 19) === v.slice(0, 19)
+        ? undefined
+        : 'must be an ISO 8601 UTC date-time';
+    case 'url': {
+      if (typeof v !== 'string' || v.length > (spec.maxLength ?? 0)) return `must be a URL of at most ${spec.maxLength} characters`;
+      try {
+        return new URL(v).protocol === 'https:' && !CONTROL.test(v) ? undefined : 'must be an https URL';
+      } catch {
+        return 'must be an https URL';
+      }
+    }
+  }
+}
+
+/**
+ * Validates template variable VALUES against a version's schema (SDD §6.2), at intake, before anything is stored: a missing required
+ * variable, an unknown variable, a wrong type, an over-length value, an invalid date-time or a non-https URL is refused. Nothing is
+ * coerced. Problems name the variable only, never its value (a value can be a one-time code).
+ */
+export function validateVariableValues(schema: VariableSchema, values: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  for (const [name, spec] of Object.entries(schema)) {
+    const v = values[name];
+    if (v === undefined || v === null) {
+      if (spec.required) errors.push(`${name}: is required`);
+      continue;
+    }
+    const problem = valueProblem(spec, v);
+    if (problem) errors.push(`${name}: ${problem}`);
+  }
+  for (const name of Object.keys(values)) if (!(name in schema)) errors.push(`${name}: is not a variable of this template`);
+  return errors;
+}

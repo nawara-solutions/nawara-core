@@ -34,7 +34,7 @@ Status values:
 | D17 | **Priority:** not in V1; added later as ordering with aging only, never bypassing security, limits or idempotency | a field with no observable effect is noise | a 4-level priority now | DEFERRED: until a bulk producer exists |
 | D18 | **Rendered content:** never stored; the pinned version + non-secret data + purged secrets reconstruct the message | personal data and secrets minimised | store bodies; store snapshots | DECIDED (reopened only by a legal requirement) |
 | D19 | **Auth transactional outbox:** not required for V1; a follow-up | a code loss is recoverable (re-request); Class C for certified Auth | an outbox now | DEFERRED: engineering, before production enablement of Auth delivery if the risk is not accepted |
-| D20 | **Phone format:** Notification requires E.164 and fails a non-E.164 SMS destination `invalid_destination`; the producer (Auth: `+?[0-9]{8,15}`) must normalize | guessing a country code is unsafe | a default country code in Notification | DEFERRED: Auth / product, **before SMS production enablement** |
+| D20 | **Phone format:** Notification requires E.164 and fails a non-E.164 SMS destination `invalid_destination`; the producer (Auth: `+?[0-9]{8,15}`) must normalize | guessing a country code is unsafe | a default country code in Notification | **RESOLVED for Notification intake (16.5)**: E.164 enforced, invalid → `FAILED invalid_destination`, no default country. Auth-side normalization: DEFERRED, Auth / product, **before SMS production enablement** |
 | D21 | **Rate-limit key privacy:** kit keys are an unpeppered SHA-256; phone keys are enumerable | classified as personal data now | peppered keys | DEFERRED: kit follow-up (Class B) |
 | D22 | **Recipient time zone** for datetime variables: the platform time zone in V1 | no recipient time zone exists anywhere | per recipient | DEFERRED: product |
 | D23 | **Outbound `notification.*` events:** not in V1; kit outbox only when a consumer exists (Audit, Stage 18) | no consumer; no fire-and-forget publishing | publish now | DEFERRED: Stage 18 |
@@ -61,11 +61,13 @@ The adapter implements the §8.4 port. Nothing in Notification depends on the ve
 Each sub-stage is its own reviewed PR, following the repository workflow.
 
 **Progress:** 16.1 ✅ · 16.2 ✅ ([record](./stage-16-2-auth-event-envelope.md)) · 16.3 ✅ ([record](./stage-16-3-service-foundation.md)) ·
-16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5 ✅ ([record](./stage-16-5-notification-event-intake.md)) ·
+16.6–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
 - 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
 - 16.3 → 16.5: the kit bus and the key ring;
 - 16.3 → 16.6: the caller policy;
-- 16.4 → 16.5: variable **value** validation, locale resolution and `NOTIFICATION_DEFAULT_LOCALE`;
+- 16.4 → 16.5: variable **value** validation, locale resolution and `NOTIFICATION_DEFAULT_LOCALE` (done in 16.5, with the kit bus
+  and the key ring);
 - 16.4 → 16.7: the renderer.
 
 | Sub-stage | Objective | Scope | Depends on | Production files likely affected | Tests | Exit criteria | Non-goals |

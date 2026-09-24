@@ -28,10 +28,10 @@ describe('notification-service foundation', () => {
     await request(server()).get('/health').expect(200, { status: 'ok' });
   });
 
-  it('/ready depends on the database (Stage 16.4): with none reachable it is 503 naming only its checks, while /health stays 200', async () => {
+  it('/ready depends on the database (16.4) and the event intake (16.5): with no database it is 503 naming only its checks, /health 200', async () => {
     await request(server()).get('/health').expect(200);
     const r = await request(server()).get('/ready').expect(503);
-    expect(r.body).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
+    expect(r.body.failed).toEqual(expect.arrayContaining(['database', 'event-intake', 'migrations'])); // + `rabbitmq` when no broker is reachable
     expect(JSON.stringify(r.body)).not.toMatch(/nobody|nothing|127\.0\.0\.1|ECONNREFUSED/); // no host, credential or error text
   });
 
