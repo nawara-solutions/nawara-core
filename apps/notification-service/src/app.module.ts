@@ -4,6 +4,8 @@ import { DbModule, HealthModule, RabbitMqEventBus, ServiceAuthModule, kitMigrati
 import { ApiModule } from './api/api.module.js';
 import type { NotificationConfig } from './config/notification-config.js';
 import { NOTIFICATION_CONFIG } from './config/notification-config.token.js';
+import { DeliveryModule, configuredProviders } from './delivery/delivery.module.js';
+import type { ProviderRegistry } from './delivery/provider.js';
 import { INTAKE_EVENT_BUS } from './intake/event-consumer.js';
 import { IntakeModule } from './intake/intake.module.js';
 
@@ -21,6 +23,8 @@ export interface AppModuleOverrides {
   migrationsDirs?: string[];
   /** Tests may inject a bus (the in-memory one, or a RabbitMQ bus with test options); production builds the kit RabbitMQ bus. */
   bus?: EventBus;
+  /** Tests may inject providers (fakes with controlled outcomes); production uses what configuration selects. */
+  providers?: ProviderRegistry;
 }
 
 @Global()
@@ -43,7 +47,8 @@ class ConfigModule {
  * - Stage 16.4: the kit database (bounded pool and deadlines; readiness `database` + `migrations`; the pool closes last).
  * - Stage 16.5: the event intake on the kit RabbitMQ bus (queue `notification.events`; readiness `rabbitmq` + `event-intake`).
  * - Stage 16.6: the internal send API (`/notification/notifications`: send, status, cancel), sharing the intake core.
- * There is still no worker (16.7) and no provider (16.8): nothing is sent.
+ * - Stage 16.7: the delivery engine and the secret purge. The only provider is the no-network test provider (refused in production);
+ *   the real adapters are Stage 16.8, so a production deployment still sends nothing.
  */
 @Module({})
 export class AppModule {
@@ -76,6 +81,7 @@ export class AppModule {
         ConfigModule.forRoot(config, bus),
         IntakeModule,
         ApiModule,
+        DeliveryModule.register(overrides.providers ?? configuredProviders(config)),
       ],
     };
   }

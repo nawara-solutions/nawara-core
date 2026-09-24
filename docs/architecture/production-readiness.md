@@ -150,6 +150,16 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 - `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` (30 days, 60–31536000) and `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` (600, 1–100000):
   engineering bounds.
 
+**notification-service delivery engine (Stage 16.7):**
+- `NOTIFICATION_DELIVERY_PROVIDER` is `none` in production until the real adapters (16.8): no worker runs and deliveries stay
+  `PENDING`. `test` (no network, delivers nothing) is refused at startup in production.
+- Startup relationships (SDD §8.2): `NOTIFICATION_LEASE_MS` ≥ 2 × `NOTIFICATION_PROVIDER_TIMEOUT_MS`; the provider timeout < the 60 s
+  stop grace − `HTTP_DRAIN_TIMEOUT_MS` (so the HTTP drain must stay below 50 s at the default 10 s timeout); the worker's shutdown
+  drain is the provider timeout + 2 s; `NOTIFICATION_WORKER_CONCURRENCY` < `DB_POOL_MAX`.
+- Retry: base 30 s, ceiling 30 min, 5 attempts; `NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE` 6000. Engineering defaults, re-measured
+  with the real adapters in 16.8. The destination limit (`notif_dest`) is not built: D21 open.
+- The secret purge loop runs whatever the provider setting. Operators watch the due backlog with the query in the service README.
+
 A frozen or partitioned broker is detected within about 3 × `RABBITMQ_HEARTBEAT_S` (≈ 30 s at the default), after the shorter
 `RABBITMQ_CONFIRM_TIMEOUT_MS`; a SIGTERM while the broker is silent therefore takes up to about that long (still above Docker's 10 s stop
 grace: Stage 15.5).

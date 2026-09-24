@@ -4,7 +4,9 @@
   ([record](../architecture/stage-16/stage-16-3-service-foundation.md)) and the Stage 16.4 persistence and template catalog
   ([record](../architecture/stage-16/stage-16-4-persistence-and-templates.md)) and the Stage 16.5 event intake
   ([record](../architecture/stage-16/stage-16-5-notification-event-intake.md)) and the Stage 16.6 send API
-  ([record](../architecture/stage-16/stage-16-6-notification-send-api.md)); nothing is sent yet
+  ([record](../architecture/stage-16/stage-16-6-notification-send-api.md)) and the Stage 16.7 delivery engine
+  ([record](../architecture/stage-16/stage-16-7-notification-delivery-engine.md)); only the no-network test provider exists, so
+  production sends nothing yet
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -558,6 +560,12 @@ SELECT … FROM notification_delivery
 An expired lease (`status = 'SENDING' AND leaseUntil < now()`, a crashed or partitioned worker) is reclaimed by the next pass
 through §8.5.
 
+> **As implemented (Stage 16.7, [record](../architecture/stage-16/stage-16-7-notification-delivery-engine.md) §13):** `attempts`
+> increments when the attempt is inserted, not at the claim; rendering happens before the attempt insert (a render failure makes no
+> call and records no attempt); a claim found cancelled goes `SENDING → PENDING → CANCELLED` in one transaction; the claim takes only
+> channels that have a provider; the lease token (`leaseUntil`) plus `outcome = 'STARTED'` refuse a late result; a lease expired with
+> **no** attempt goes back to `PENDING` (no call can have been made: the attempt is committed before every call).
+
 ### 8.2 Startup relationships (refused when violated)
 
 - lease ≥ 2 × the largest provider `timeoutMs` (Stage 15.8);
@@ -696,6 +704,8 @@ The kit `RateLimitService` applies at claim time, before the provider call.
 - Auth's code throttles stay the primary control.
 - **Known residual:** `kit_rate_limit` keys are an unpeppered SHA-256 of `bucket:identifier`. A phone-number key is
   brute-forceable, so it is classified as personal data, and a peppered key is a kit follow-up (D21).
+- **As implemented (Stage 16.7):** `notif_caller_template` only. `notif_dest` is deferred until D21 is decided (owner decision; see the
+  Stage 16.7 record §13).
 
 ### 11.4 Secrets and personal data
 

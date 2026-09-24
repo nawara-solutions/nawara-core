@@ -1,8 +1,9 @@
 # notification-service
 
-> **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5), internal send API (16.6).** Intents
-> arrive from Auth's events and from trusted Core services over the API; each is a durable intent with `PENDING` deliveries (codes
-> sealed, E.164 enforced). **It sends nothing yet:** no worker (16.7), no provider (16.8).
+> **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5), internal send API (16.6), delivery engine
+> (16.7).** Intents arrive from Auth's events and from trusted Core services over the API; the delivery engine claims their
+> deliveries, renders the pinned template and calls a provider through the `ChannelProvider` port. **Only the no-network test
+> provider exists** (development and tests; refused in production), so production still sends nothing until the real adapters (16.8).
 
 Generic, product-agnostic delivery of notifications (email and SMS first) for Nawara Core. Producers decide *why* and *when*; this
 service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notification-service-architecture.md),
@@ -10,7 +11,8 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 [Stage 16.3 record](../../docs/architecture/stage-16/stage-16-3-service-foundation.md),
 [Stage 16.4 record](../../docs/architecture/stage-16/stage-16-4-persistence-and-templates.md),
 [Stage 16.5 record](../../docs/architecture/stage-16/stage-16-5-notification-event-intake.md),
-[Stage 16.6 record](../../docs/architecture/stage-16/stage-16-6-notification-send-api.md).
+[Stage 16.6 record](../../docs/architecture/stage-16/stage-16-6-notification-send-api.md),
+[Stage 16.7 record](../../docs/architecture/stage-16/stage-16-7-notification-delivery-engine.md).
 
 ## What exists (16.3)
 
@@ -73,6 +75,23 @@ Every route needs a Core service token (`ServiceTokenGuard`). The caller is the 
 The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25), never an unkeyed digest. OpenAPI is at
 `/notification/docs` behind basic auth when `SWAGGER_PASSWORD` is set.
 
+## Delivery engine (16.7)
+
+- **Runs** only when `NOTIFICATION_DELIVERY_PROVIDER` names a provider (`test` today, refused in production). With `none` (the
+  default) there is no worker and deliveries stay `PENDING`. The secret purge runs in every case.
+- **One pass:** recover expired leases from the attempt evidence → claim due `PENDING` rows (`FOR UPDATE SKIP LOCKED`, oldest due
+  first) as `SENDING` under a lease → per delivery, with at most `NOTIFICATION_WORKER_CONCURRENCY` in flight: re-check cancel and
+  expiry, the caller+template limit, decrypt and render the **pinned** version, commit the attempt `STARTED`, call the provider
+  outside any transaction (bounded by `NOTIFICATION_PROVIDER_TIMEOUT_MS`), record the outcome and the transition in one transaction.
+- **Outcomes:** accepted → `SENT`; retryable → `PENDING` with backoff (or `FAILED retries_exhausted`, or `EXPIRED` past
+  `expiresAt`); terminal → `FAILED`; ambiguous (a timeout, a thrown error, a lost worker) → one resend of a one-time code, otherwise
+  `UNCONFIRMED` (SDD §8.5).
+- **Secret purge:** in the transaction that ends the last delivery, and a `SecretPurge` loop for intents past `expiresAt`.
+- **Test provider** (`src/delivery/test-provider.ts`): the destination picks the scenario (`+retry`, `+429`, `+reject`,
+  `+ambiguous`, `+hang` in an email local part; SMS numbers ending `0001`, `0429`, `0002`, `0003`, `0004`); anything else is accepted.
+- **Operator query** (the due backlog, no metrics platform yet):
+  `SELECT channel, count(*), min("nextAttemptAt") FROM notification_delivery WHERE status = 'PENDING' AND "nextAttemptAt" <= now() GROUP BY channel;`
+
 ## Configuration
 
 | Variable | Default | Bounds | Notes |
@@ -83,7 +102,7 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 | `BODY_LIMIT_KB` | 100 | 1–10240 | |
 | `CORS_ORIGINS` | empty (off) | exact http(s) origins | no wildcard |
 | `TRUST_PROXY` | `false` | `true` / `false` | |
-| `HTTP_DRAIN_TIMEOUT_MS` | 5000 | 500–120000 | bound on the HTTP drain at shutdown |
+| `HTTP_DRAIN_TIMEOUT_MS` | 5000 | 500–120000 | bound on the HTTP drain at shutdown; also `NOTIFICATION_PROVIDER_TIMEOUT_MS` < 60 s − this (SDD §8.2) |
 | `DATABASE_URL` | **required** | `postgres:` / `postgresql:` | the runtime role `notification_app`; production refuses `postgres`, `root` and `*_migrator` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | 10, 5000, 30000, 60000, statement + 5000 | the kit bounds | |
 | `MIGRATION_DATABASE_URL` | – | | the migrator, read only by `npm run migrate` |
@@ -96,6 +115,16 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 | `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` | 2592000 | 60–31536000 | how far ahead `scheduledAt` may be |
 | `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` | 600 | 1–100000 | per caller (`429 rate_limited`) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI mounted only with a password |
+| `NOTIFICATION_DELIVERY_PROVIDER` | `none` | `none`, `test` | `test` (no network, delivers nothing) is refused in production; `none` runs no worker |
+| `NOTIFICATION_WORKER_INTERVAL_MS` | 1000 | 100–60000 | pause between two passes (delivery and purge loops) |
+| `NOTIFICATION_WORKER_BATCH_SIZE` | 20 | 1–500 | deliveries claimed (and secrets purged) per pass |
+| `NOTIFICATION_WORKER_CONCURRENCY` | 4 | 1–50, < `DB_POOL_MAX` | provider calls in flight per instance |
+| `NOTIFICATION_LEASE_MS` | 60000 | 5000–3600000, ≥ 2 × the provider timeout | a claim's lease; queued claims are renewed every lease / 4 |
+| `NOTIFICATION_PROVIDER_TIMEOUT_MS` | 10000 | 100–30000 | bound on one provider call (then ambiguous); the worker's shutdown drain is this + 2 s |
+| `NOTIFICATION_RETRY_BASE_MS`, `NOTIFICATION_RETRY_CEILING_MS` | 30000, 1800000 | 1000–3600000; ≥ base, ≤ 86400000 | backoff base × 2ⁿ⁻¹ ± 20 %, capped; `Retry-After` honoured |
+| `NOTIFICATION_MAX_ATTEMPTS` | 5 | 1–20 | provider calls before `FAILED retries_exhausted` |
+| `NOTIFICATION_TIME_ZONE` | `UTC` | an IANA zone | the platform zone datetimes are rendered in (D22) |
+| `NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE` | 6000 | 1–1000000 | sends per source + template per minute (`notif_caller_template`); over it → `FAILED rate_limited` |
 | `SERVICE_TOKENS` | empty | `<caller>:<sha256 hex>`, comma-separated, ≤ 2 per caller | secret-derived (digests only); empty refuses every service-token call |
 
 `DATABASE_URL`, `RABBITMQ_URL`, the secret key ring, the request-hash key and the default locale are mandatory. An invalid value stops the process at startup with a `ConfigError` naming the variable, never
@@ -121,6 +150,6 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 | 16.4 ✅ | the database (`DbModule`, provisioning, the migrator / app roles), the five tables, the template catalog and publication |
 | 16.5 ✅ | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`); variable-value validation; locale resolution (`NOTIFICATION_DEFAULT_LOCALE`); E.164 enforcement |
 | 16.6 ✅ | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; the keyed request hash; OpenAPI at `/notification/docs` |
-| 16.7 | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer and the test provider |
+| 16.7 ✅ | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer, the test provider and the secret purge |
 | 16.8 | the email and SMS providers |
 | 16.9 / 16.10 | security, observability and operations; certification |

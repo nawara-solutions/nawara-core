@@ -205,7 +205,8 @@ services:
 
   # ADR-0046. Its own database (Stage 16.4) and the Auth event intake on RabbitMQ (Stage 16.5, queue notification.events; /ready =
   # database + migrations + rabbitmq + event-intake) and the internal send API (Stage 16.6, service tokens + NOTIFICATION_SERVICE_POLICY).
-  # No provider yet (16.8): nothing is sent. SERVICE_TOKENS is empty by default (every API call refused).
+  # Stage 16.7: the delivery engine runs with the no-network TEST provider in this development stack (it delivers nothing; production
+  # refuses it and, until the real adapters of 16.8, runs no worker). SERVICE_TOKENS is empty by default (every API call refused).
   notification-service:
     profiles: [db]
     # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded by HTTP_DRAIN_TIMEOUT_MS.
@@ -234,6 +235,8 @@ services:
       NOTIFICATION_REQUEST_HASH_KEY: ${NOTIFICATION_REQUEST_HASH_KEY:?copy .env.example to .env}
       # Every caller in SERVICE_TOKENS needs an explicit entry (deny by default); empty with no tokens is the default: nothing can call.
       NOTIFICATION_SERVICE_POLICY: ${NOTIFICATION_SERVICE_POLICY:-}
+      # `test`: the delivery engine runs against the no-network test provider (SDD §8.4); `none`: no worker, deliveries stay PENDING.
+      NOTIFICATION_DELIVERY_PROVIDER: ${NOTIFICATION_DELIVERY_PROVIDER:-test}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s
