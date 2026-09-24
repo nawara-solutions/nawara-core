@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -9,10 +9,13 @@ import { SERVICE_NAME, loadNotificationConfig } from './notification-config.js';
 const DB = 'postgres://notification_app:pw-not-real@db:5432/notification';
 const KEY = randomBytes(32).toString('base64');
 const HASH_KEY = randomBytes(32).toString('base64');
+const DEST_KEY = randomBytes(32).toString('base64');
 const REQUIRED = {
   DATABASE_URL: DB, RABBITMQ_URL: 'amqp://notify:pw-not-real@broker:5672', NOTIFICATION_SECRET_KEYS: `k1:${KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1',
   NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: HASH_KEY,
 };
+/** A provider selected needs the destination-limiter key (Stage 16.9). */
+const WITH_LIMIT = { NOTIFICATION_DESTINATION_LIMIT_KEY: DEST_KEY };
 const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ ...REQUIRED, ...over });
 
 describe('notification-service configuration', () => {
@@ -159,9 +162,9 @@ describe('notification-service configuration', () => {
     });
 
     it('the test provider is accepted outside production and refused in production, on either channel (it delivers nothing)', () => {
-      const dev = loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_EMAIL_PROVIDER: 'test', NOTIFICATION_SMS_PROVIDER: 'test' })).delivery;
+      const dev = loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_EMAIL_PROVIDER: 'test', NOTIFICATION_SMS_PROVIDER: 'test', ...WITH_LIMIT })).delivery;
       expect([dev.emailProvider, dev.smsProvider]).toEqual(['test', 'test']);
-      expect(loadNotificationConfig(env({ NODE_ENV: 'test', NOTIFICATION_SMS_PROVIDER: 'test' })).delivery.smsProvider).toBe('test');
+      expect(loadNotificationConfig(env({ NODE_ENV: 'test', NOTIFICATION_SMS_PROVIDER: 'test', ...WITH_LIMIT })).delivery.smsProvider).toBe('test');
       for (const k of ['NOTIFICATION_EMAIL_PROVIDER', 'NOTIFICATION_SMS_PROVIDER']) {
         expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', [k]: 'test' }))).toThrow(/refused in production/);
         expect(() => loadNotificationConfig(env({ [k]: 'test' }))).toThrow(/refused in production/); // production is the default
@@ -172,9 +175,9 @@ describe('notification-service configuration', () => {
     });
 
     describe('real providers (Stage 16.8)', () => {
-      const RESEND = { NOTIFICATION_EMAIL_PROVIDER: 'resend', NOTIFICATION_RESEND_API_KEY: 're_Sentinel_Resend_Key_0123456789', NOTIFICATION_EMAIL_FROM: 'Nawara <no-reply@notify.example.com>' };
+      const RESEND = { ...WITH_LIMIT, NOTIFICATION_EMAIL_PROVIDER: 'resend', NOTIFICATION_RESEND_API_KEY: 're_Sentinel_Resend_Key_0123456789', NOTIFICATION_EMAIL_FROM: 'Nawara <no-reply@notify.example.com>' };
       const TWILIO = {
-        NOTIFICATION_SMS_PROVIDER: 'twilio', NOTIFICATION_TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, NOTIFICATION_TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
+        ...WITH_LIMIT, NOTIFICATION_SMS_PROVIDER: 'twilio', NOTIFICATION_TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, NOTIFICATION_TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
         NOTIFICATION_TWILIO_API_KEY_SECRET: 'SentinelTwilioSecret0123456789ab', NOTIFICATION_TWILIO_MESSAGING_SERVICE_SID: `MG${'c'.repeat(32)}`,
       };
 
@@ -261,6 +264,78 @@ describe('notification-service configuration', () => {
 
     it('accepts an IANA time zone', () => {
       expect(loadNotificationConfig(env({ NOTIFICATION_TIME_ZONE: 'Africa/Tunis' })).delivery.timeZone).toBe('Africa/Tunis');
+    });
+  });
+
+  describe('Stage 16.9 key material, key rotation and operations', () => {
+    const k = () => randomBytes(32).toString('base64');
+    const readExample = () => readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8');
+    const exampleValue = (name: string) => new RegExp(`^${name}=(\\S+)$`, 'm').exec(readExample())![1];
+
+    it('the destination-limiter key is required while a provider is selected, and only then', () => {
+      expect(() => loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_EMAIL_PROVIDER: 'test' }))).toThrow(/NOTIFICATION_DESTINATION_LIMIT_KEY/);
+      expect(loadNotificationConfig(env()).delivery.destinationLimit).toBeUndefined();
+      const d = loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_EMAIL_PROVIDER: 'test', ...WITH_LIMIT })).delivery.destinationLimit!;
+      expect(d).toMatchObject({ limit: 30, windowSec: 3600, previousKey: undefined });
+      expect(d.key.equals(Buffer.from(DEST_KEY, 'base64'))).toBe(true);
+    });
+
+    it.each([
+      ['NOTIFICATION_RATE_DESTINATION_LIMIT', ['0', '100001']],
+      ['NOTIFICATION_RATE_DESTINATION_WINDOW_SEC', ['59', '86401']],
+      ['NOTIFICATION_OPS_REPORT_INTERVAL_MS', ['9999', '3600001']],
+      ['NOTIFICATION_RETENTION_INTERVAL_MS', ['9999', '3600001']],
+      ['NOTIFICATION_RETENTION_BATCH_SIZE', ['0', '10001']],
+    ])('refuses an out-of-bounds %s', (name, values) => {
+      for (const v of values) expect(() => loadNotificationConfig(env({ NOTIFICATION_EMAIL_PROVIDER: 'none', ...WITH_LIMIT, [name]: v })), `${name}=${v}`).toThrow(ConfigError);
+    });
+
+    it('one key, one purpose: every pair of secret, request-hash (current, previous) and destination-limiter (current, previous) keys must differ', () => {
+      const secret = KEY;
+      const cases: Array<[Record<string, string>, RegExp]> = [
+        [{ NOTIFICATION_REQUEST_HASH_KEY: secret }, /NOTIFICATION_REQUEST_HASH_KEY must differ from NOTIFICATION_SECRET_KEYS/],
+        [{ NOTIFICATION_DESTINATION_LIMIT_KEY: HASH_KEY }, /NOTIFICATION_DESTINATION_LIMIT_KEY must differ from NOTIFICATION_REQUEST_HASH_KEY/],
+        [{ NOTIFICATION_DESTINATION_LIMIT_KEY: secret }, /NOTIFICATION_DESTINATION_LIMIT_KEY must differ from NOTIFICATION_SECRET_KEYS/],
+        [{ NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS: HASH_KEY }, /NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS must differ from NOTIFICATION_REQUEST_HASH_KEY/],
+        [{ ...WITH_LIMIT, NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY: DEST_KEY }, /NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY must differ from NOTIFICATION_DESTINATION_LIMIT_KEY/],
+        [{ ...WITH_LIMIT, NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY: HASH_KEY }, /must differ/],
+        [{ NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS: `${DEST_KEY}`, ...WITH_LIMIT }, /must differ/],
+      ];
+      for (const [over, message] of cases) {
+        try {
+          loadNotificationConfig(env(over));
+          throw new Error(`accepted ${JSON.stringify(Object.keys(over))}`);
+        } catch (e) {
+          expect((e as Error).message).toMatch(message);
+          for (const v of Object.values(over)) expect((e as Error).message).not.toContain(v);
+        }
+      }
+    });
+
+    it('request-hash previous keys: at most 2, each at least 32 bytes', () => {
+      expect(loadNotificationConfig(env({ NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS: `${k()},${k()}` })).requestHashPreviousKeys).toHaveLength(2);
+      expect(loadNotificationConfig(env()).requestHashPreviousKeys).toEqual([]);
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS: `${k()},${k()},${k()}` }))).toThrow(/at most 2/);
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS: 'c2hvcnQ=' }))).toThrow(/NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS/);
+    });
+
+    it.each(['NOTIFICATION_REQUEST_HASH_KEY', 'NOTIFICATION_DESTINATION_LIMIT_KEY', 'NOTIFICATION_SECRET_KEYS'])(
+      'the development %s published in .env.example is refused in production, accepted in development', (name) => {
+        const published = exampleValue(name);
+        const value = name === 'NOTIFICATION_SECRET_KEYS' ? published : published;
+        const over = name === 'NOTIFICATION_SECRET_KEYS' ? { NOTIFICATION_SECRET_KEYS: value, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'dev1' } : { [name]: value };
+        const withProvider = name === 'NOTIFICATION_DESTINATION_LIMIT_KEY' ? { NOTIFICATION_EMAIL_PROVIDER: 'none' } : {};
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', ...withProvider, ...over }))).toThrow(new RegExp(`${name}.*published development key`));
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'development', ...withProvider, ...over }))).not.toThrow();
+      },
+    );
+
+    it('a patterned (non-random) key is refused in production for every purpose', () => {
+      const weak = Buffer.from('ab'.repeat(16)).toString('base64');
+      for (const over of [{ NOTIFICATION_REQUEST_HASH_KEY: weak }, { NOTIFICATION_SECRET_KEYS: `k1:${Buffer.alloc(32, 7).toString('base64')}` }, { ...WITH_LIMIT, NOTIFICATION_DESTINATION_LIMIT_KEY: weak }]) {
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', ...over }))).toThrow(/does not look random/);
+        expect(() => loadNotificationConfig(env({ NODE_ENV: 'development', ...over }))).not.toThrow();
+      }
     });
   });
 });

@@ -234,6 +234,8 @@ services:
       # The copy and this value are product inputs before production (D7); `en` is the only published locale today.
       NOTIFICATION_DEFAULT_LOCALE: en
       NOTIFICATION_REQUEST_HASH_KEY: ${NOTIFICATION_REQUEST_HASH_KEY:?copy .env.example to .env}
+      # Stage 16.9 (D21): the destination limiter's own HMAC key, required while a provider is selected (both default to `test` here).
+      NOTIFICATION_DESTINATION_LIMIT_KEY: ${NOTIFICATION_DESTINATION_LIMIT_KEY:?copy .env.example to .env}
       # Every caller in SERVICE_TOKENS needs an explicit entry (deny by default); empty with no tokens is the default: nothing can call.
       NOTIFICATION_SERVICE_POLICY: ${NOTIFICATION_SERVICE_POLICY:-}
       # Per channel (Stage 16.8): `test` = the no-network test provider (SDD §8.4); `resend` / `twilio` = the real APIs, which also need

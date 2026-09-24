@@ -6,7 +6,8 @@
   ([record](../architecture/stage-16/stage-16-5-notification-event-intake.md)) and the Stage 16.6 send API
   ([record](../architecture/stage-16/stage-16-6-notification-send-api.md)) and the Stage 16.7 delivery engine
   ([record](../architecture/stage-16/stage-16-7-notification-delivery-engine.md)) and the Stage 16.8 Resend / Twilio adapters
-  ([record](../architecture/stage-16/stage-16-8-email-sms-providers.md))
+  ([record](../architecture/stage-16/stage-16-8-email-sms-providers.md)) and the Stage 16.9 security and operations
+  ([record](../architecture/stage-16/stage-16-9-security-operations.md), [runbooks](../runbooks/notification-service.md))
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -710,8 +711,10 @@ The kit `RateLimitService` applies at claim time, before the provider call.
 - Auth's code throttles stay the primary control.
 - **Known residual:** `kit_rate_limit` keys are an unpeppered SHA-256 of `bucket:identifier`. A phone-number key is
   brute-forceable, so it is classified as personal data, and a peppered key is a kit follow-up (D21).
-- **As implemented (Stage 16.7):** `notif_caller_template` only. `notif_dest` is deferred until D21 is decided (owner decision; see the
-  Stage 16.7 record §13).
+- **As implemented:** `notif_caller_template` (16.7) and, since Stage 16.9, `notif_dest`: per channel + destination per window
+  (`NOTIFICATION_RATE_DESTINATION_LIMIT` / `_WINDOW_SEC`, default 30 per hour), keyed by
+  `HMAC-SHA-256(NOTIFICATION_DESTINATION_LIMIT_KEY, "nawara.notification.destination-limit.v1|" + channel + "|" + destination)` —
+  a dedicated key, so the stored kit key is no longer an enumerable hash (D21 resolved). A limiter failure fails closed.
 
 ### 11.4 Secrets and personal data
 
@@ -878,7 +881,9 @@ are unchanged. Removing `@golevelup/nestjs-rabbitmq` from Auth is part of 16.2 i
 - **Log fields:** ids, channel, template key / version, provider, failure class / code, latency, `correlationId`, and
   `organizationId` (an opaque id).
 - **Metrics:** there is no metrics platform in Core. The backlog is observed through logs and `nawara-check-dlq`, and a
-  due-backlog query is documented for operators.
+  due-backlog query is documented for operators. **As implemented (16.9):** `notification_ops_snapshot` (due, oldest due age,
+  retrying, scheduled, sending, stale leases, live secrets) every `NOTIFICATION_OPS_REPORT_INTERVAL_MS`, and
+  `notification_secret_key_missing`; the alert rules and runbooks are in [docs/runbooks](../runbooks/notification-service.md).
 
 ## 17. Retention (added to core-validation §17.1; no duration invented)
 
@@ -891,7 +896,7 @@ are unchanged. Removing `@golevelup/nestjs-rabbitmq` from Auth is part of 16.2 i
 | API idempotency identity (on `notification`) | technical | follows the notification row; a retry horizon (the Payment D1 analogue) is a later decision |
 | Template versions | configuration | kept (explains past deliveries) |
 | Code-bearing DLQ messages | secret in transit | SRE runbook; never purged unseen; an expired replay is never sent |
-| `kit_rate_limit` rows | technical | the Phase C rule (expired windows are safe to delete); policy open |
+| `kit_rate_limit` rows | technical | the Phase C rule (expired windows are safe to delete): **implemented in 16.9** (`RetentionWorker`, bounded batches, own buckets only) |
 
 ## 18. Migrations, image, CI
 
@@ -928,12 +933,12 @@ See the [Stage 16.1 decision register](../architecture/stage-16/stage-16-1-decis
 - D3: decided in 16.8 (ADR-0019 accepted: Twilio, Messaging Service SID);
 - D8: Billing / Payment recipient resolution;
 - D9: preferences;
-- D10: retention durations;
+- D10: retention durations for notification history (limiter state and secrets are handled; history stays owner / legal);
 - D14: tenant senders;
 - D17: priority;
 - D18: stored content;
 - D19: Auth outbox;
 - D20: E.164 at the producer (Auth still accepts `+?[0-9]{8,15}`; a separate Auth correction is required before production SMS for
   Auth-originated notifications);
-- D21: a peppered rate-limit key;
+- D21: resolved in 16.9 (HMAC-keyed `notif_dest`);
 - D22: recipient time zone.

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, canonicalJson } from '@nawara/service-kit';
 import { NotificationCallerPolicy } from './caller-policy.js';
-import { requestHash, sameRequestHash } from './request-hash.js';
+import { matchesRequestHash, requestHash, sameRequestHash } from './request-hash.js';
 import { IDEMPOTENCY_KEY, parseSendRequest } from './send-request.js';
 
 const entry = (over: Record<string, unknown> = {}) => ({ templates: ['membership.approved'], channels: ['EMAIL'], organizations: 'none', ...over });
@@ -88,5 +88,17 @@ describe('the request hash: HMAC-SHA-256 over the canonical request (Stage 16.6 
     expect(sameRequestHash(h, requestHash(key, { ...body, template: 'x.y' }))).toBe(false);
     expect(sameRequestHash(h, h.slice(0, 62))).toBe(false);
     expect(sameRequestHash('', '')).toBe(false);
+  });
+});
+
+describe('request-hash key rotation (Stage 16.9)', () => {
+  it('a stored hash matches under the current key or a previous one; a changed body or an unconfigured key never matches', () => {
+    const [current, previous, retired] = [randomBytes(32), randomBytes(32), randomBytes(32)];
+    const body = { template: 'membership.approved', channels: [{ channel: 'EMAIL', destination: 'a@example.test' }] };
+    expect(matchesRequestHash(requestHash(current, body), [current, previous], body)).toBe(true);
+    expect(matchesRequestHash(requestHash(previous, body), [current, previous], body)).toBe(true);
+    expect(matchesRequestHash(requestHash(previous, body), [current, previous], { ...body, template: 'x.y' })).toBe(false);
+    expect(matchesRequestHash(requestHash(retired, body), [current, previous], body)).toBe(false);
+    expect(matchesRequestHash('not-hex', [current], body)).toBe(false);
   });
 });

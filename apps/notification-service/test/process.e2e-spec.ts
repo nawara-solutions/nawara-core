@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -13,9 +14,10 @@ import { generateServiceToken } from '@nawara/service-kit';
 const DB_PASSWORD = 'db-password-never-logged-0042';
 const RUNTIME_DB = `postgres://notification_app:${DB_PASSWORD}@127.0.0.1:1/notification`;
 const BROKER_PASSWORD = 'broker-password-never-logged-0043';
-const SECRET_KEY = Buffer.alloc(32, 7).toString('base64');
+// Fixed (so the log scan can look for them) but random-looking: production refuses a patterned key (Stage 16.9).
+const SECRET_KEY = createHash('sha256').update('process-spec-secret-key').digest().toString('base64');
 /** Production-shaped: every required setting present; the database and the broker are unreachable on purpose. */
-const HASH_KEY = Buffer.alloc(32, 9).toString('base64');
+const HASH_KEY = createHash('sha256').update('process-spec-request-hash-key').digest().toString('base64');
 const REQUIRED = {
   DATABASE_URL: RUNTIME_DB, RABBITMQ_URL: `amqp://notify:${BROKER_PASSWORD}@127.0.0.1:1`, NOTIFICATION_SECRET_KEYS: `k1:${SECRET_KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1',
   NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: HASH_KEY,

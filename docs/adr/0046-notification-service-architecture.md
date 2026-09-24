@@ -1,6 +1,6 @@
 # 0046. Notification service architecture
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-24, Stage 16.9; see the acceptance note)
 - **Date:** 2026-09-24
 - **Deciders:** Anwar (project owner)
 - **Related:** [ADR-0018](./0018-rabbitmq-as-async-message-broker.md) (broker), [ADR-0019](./0019-twilio-as-sms-gateway-provider.md)
@@ -214,3 +214,22 @@ producers' throttles (Auth's code throttles) stay primary.
 - Retention durations go to the Phase C register.
 - The Billing / Payment recipient-resolution decision.
 - Production RabbitMQ and `AUTH_EVENTS=on` (Stage 20 / 22).
+
+## Acceptance note (2026-09-24, Stage 16.9)
+
+Accepted as documentation closure: Stages 16.2–16.9 implemented this decision and nothing in the implementation contradicts it. The
+refinements made during implementation, recorded here rather than edited into the text above:
+- **§9 provider reference:** the delivery id is the provider reference; for Resend the request idempotency key is
+  `nawara-notification/<deliveryId>/<n>` (ADR-0047), stable across an ambiguous resend and changed after a definite answer.
+- **§10 attempts:** `attempts` counts provider calls (incremented when the attempt row is inserted) and rendering happens before the
+  attempt insert, so a render failure records no attempt (Stage 16.7 record §13). The engine also aborts a timed-out provider call.
+- **§14 abuse:** `notif_dest` is keyed by an HMAC-SHA-256 of the channel and destination under a dedicated key
+  (`NOTIFICATION_DESTINATION_LIMIT_KEY`, Stage 16.9), so the accepted risk "the kit rate limiter stores an unpeppered hash of the
+  destination" no longer applies.
+- **Providers:** Twilio (ADR-0019, accepted) and Resend (ADR-0047) over direct HTTPS, selected per channel.
+- **Follow-ups still open:** D20 (Auth stores canonical E.164, before production SMS for Auth users), D19 (Auth outbox), D10 history
+  retention (owner / legal), Billing / Payment recipient resolution.
+
+Detail: [Stage 16.7](../architecture/stage-16/stage-16-7-notification-delivery-engine.md),
+[16.8](../architecture/stage-16/stage-16-8-email-sms-providers.md) and
+[16.9](../architecture/stage-16/stage-16-9-security-operations.md) records.

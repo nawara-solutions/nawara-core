@@ -6,6 +6,7 @@ import type { NotificationConfig } from '../config/notification-config.js';
 import { NotificationSecretCipher } from '../secrets/secret-cipher.js';
 import type { VariableSchema } from '../templates/variables.js';
 import { retryDelayMs } from './backoff.js';
+import { DestinationLimiter } from './destination-limiter.js';
 import { DELIVERY_PROVIDERS, boundedCode, boundedDiagnostic, type ChannelProvider, type ProviderCallContext, type ProviderDiagnostic, type ProviderRegistry, type ProviderResult } from './provider.js';
 import { RenderError, render, type RenderedMessage } from './renderer.js';
 
@@ -102,6 +103,7 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     @Inject(NOTIFICATION_CONFIG) private readonly config: NotificationConfig,
     @Inject(DELIVERY_PROVIDERS) private readonly providers: ProviderRegistry,
     @Inject(RateLimitService) private readonly limits: RateLimitService,
+    @Inject(DestinationLimiter) private readonly destinations: DestinationLimiter,
   ) {
     this.cipher = new NotificationSecretCipher(config.secretKeys, config.secretActiveKeyId);
     this.loop = new PollLoop(
@@ -113,6 +115,9 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
   /** The worker runs only when a provider is configured (NOTIFICATION_EMAIL_PROVIDER / NOTIFICATION_SMS_PROVIDER); otherwise deliveries stay PENDING. */
   onApplicationBootstrap(): void {
+    if (Object.keys(this.providers).length > 0 && !this.destinations.configured) {
+      throw new Error('a provider is configured but the destination limiter is not (NOTIFICATION_DESTINATION_LIMIT_KEY)'); // cannot happen via configuration
+    }
     if (Object.keys(this.providers).length > 0 && this.config.delivery.intervalMs > 0) this.loop.start(this.config.delivery.intervalMs);
   }
 
@@ -292,7 +297,10 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
         return;
       }
       const limit = await this.limits.hit('notif_caller_template', `${ctx.sourceService}:${ctx.templateKey}`, { limit: this.config.delivery.callerTemplateLimitPerMinute, windowSec: 60 });
-      if (!limit.allowed) return this.fail(c, ctx, 'terminal', 'rate_limited', r, who);
+      if (!limit.allowed) return this.fail(c, ctx, 'terminal', 'rate_limited', r, `${who} bucket=notif_caller_template`);
+      // D21 (Stage 16.9): per channel + destination, keyed by an HMAC under the dedicated limiter key. A failure here throws: nothing is
+      // sent, and the claim (no attempt yet) is recovered as PENDING once its lease expires.
+      if (!(await this.destinations.allow(ctx.channel, ctx.destination))) return this.fail(c, ctx, 'terminal', 'rate_limited', r, `${who} bucket=notif_dest`);
 
       const provider = this.providers[ctx.channel];
       if (!provider) throw new Error('no provider for this channel'); // cannot happen: the claim takes only channels with a provider

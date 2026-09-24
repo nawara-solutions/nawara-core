@@ -2,6 +2,9 @@ import { Module, type DynamicModule } from '@nestjs/common';
 import { RateLimitModule } from '@nawara/service-kit';
 import type { NotificationConfig } from '../config/notification-config.js';
 import { DeliveryWorker } from './delivery-worker.js';
+import { DestinationLimiter } from './destination-limiter.js';
+import { OpsReporter } from './ops-reporter.js';
+import { RetentionWorker } from './retention.worker.js';
 import { DELIVERY_PROVIDERS, type ProviderRegistry } from './provider.js';
 import { SecretPurgeWorker } from './secret-purge.worker.js';
 import { ResendEmailProvider } from './providers/resend.js';
@@ -29,8 +32,8 @@ export class DeliveryModule {
     return {
       module: DeliveryModule,
       imports: [RateLimitModule],
-      providers: [{ provide: DELIVERY_PROVIDERS, useValue: providers }, DeliveryWorker, SecretPurgeWorker],
-      exports: [DeliveryWorker, SecretPurgeWorker],
+      providers: [{ provide: DELIVERY_PROVIDERS, useValue: providers }, DestinationLimiter, DeliveryWorker, SecretPurgeWorker, OpsReporter, RetentionWorker],
+      exports: [DeliveryWorker, SecretPurgeWorker, DestinationLimiter, OpsReporter, RetentionWorker],
     };
   }
 }

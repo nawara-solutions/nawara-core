@@ -35,7 +35,7 @@ Status values:
 | D18 | **Rendered content:** never stored; the pinned version + non-secret data + purged secrets reconstruct the message | personal data and secrets minimised | store bodies; store snapshots | DECIDED (reopened only by a legal requirement) |
 | D19 | **Auth transactional outbox:** not required for V1; a follow-up | a code loss is recoverable (re-request); Class C for certified Auth | an outbox now | DEFERRED: engineering, before production enablement of Auth delivery if the risk is not accepted |
 | D20 | **Phone format:** Notification requires E.164 and fails a non-E.164 SMS destination `invalid_destination`; the producer (Auth: `+?[0-9]{8,15}`) must normalize | guessing a country code is unsafe | a default country code in Notification | **RESOLVED for Notification intake (16.5)**: E.164 enforced, invalid → `FAILED invalid_destination`, no default country. Auth-side normalization: DEFERRED, Auth / product, **before SMS production enablement** |
-| D21 | **Rate-limit key privacy:** kit keys are an unpeppered SHA-256; phone keys are enumerable | classified as personal data now | peppered keys | DEFERRED: kit follow-up (Class B) |
+| D21 | **Rate-limit key privacy:** kit keys are an unpeppered SHA-256; phone keys are enumerable | classified as personal data now | peppered keys | DEFERRED: kit follow-up (Class B) → **RESOLVED 2026-09-24 (16.9): HMAC-SHA-256 under a dedicated key (`NOTIFICATION_DESTINATION_LIMIT_KEY`)** |
 | D22 | **Recipient time zone** for datetime variables: the platform time zone in V1 | no recipient time zone exists anywhere | per recipient | DEFERRED: product |
 | D23 | **Outbound `notification.*` events:** not in V1; kit outbox only when a consumer exists (Audit, Stage 18) | no consumer; no fire-and-forget publishing | publish now | DEFERRED: Stage 18 |
 | D24 | **Push device identity:** owned by Auth (the devices design); Notification never owns devices | the ownership rule (Auth owns user and device identity) | a device table in Notification | DECIDED (Push itself deferred) |
@@ -65,7 +65,8 @@ Each sub-stage is its own reviewed PR, following the repository workflow.
 16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5 ✅ ([record](./stage-16-5-notification-event-intake.md)) ·
 16.6 ✅ ([record](./stage-16-6-notification-send-api.md)) · 16.7 ✅ ([record](./stage-16-7-notification-delivery-engine.md); the
 destination limit `notif_dest` of D13 is deferred with D21, see its §13) · 16.8 ✅ ([record](./stage-16-8-email-sms-providers.md);
-D2 → Resend, ADR-0047; D3 → ADR-0019 accepted) · 16.9–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+D2 → Resend, ADR-0047; D3 → ADR-0019 accepted) · 16.9 ✅ ([record](./stage-16-9-security-operations.md); D21 resolved:
+HMAC-keyed `notif_dest`; ADR-0046 accepted) · 16.10 ⏳. Items moved between rows (owner-directed, each record says why):
 - 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
 - 16.3 → 16.5: the kit bus and the key ring;
 - 16.3 → 16.6: the caller policy (done in 16.6, with OpenAPI);
