@@ -6,7 +6,7 @@ import type { NotificationConfig } from '../config/notification-config.js';
 import { NotificationSecretCipher } from '../secrets/secret-cipher.js';
 import type { VariableSchema } from '../templates/variables.js';
 import { retryDelayMs } from './backoff.js';
-import { DELIVERY_PROVIDERS, boundedCode, type ChannelProvider, type ProviderRegistry, type ProviderResult } from './provider.js';
+import { DELIVERY_PROVIDERS, boundedCode, boundedDiagnostic, type ChannelProvider, type ProviderCallContext, type ProviderDiagnostic, type ProviderRegistry, type ProviderResult } from './provider.js';
 import { RenderError, render, type RenderedMessage } from './renderer.js';
 
 /** One claim held by this instance: the delivery and its lease token (the exact `leaseUntil` this instance wrote). */
@@ -111,7 +111,7 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     );
   }
 
-  /** The worker runs only when a provider is configured (NOTIFICATION_DELIVERY_PROVIDER); otherwise deliveries stay PENDING. */
+  /** The worker runs only when a provider is configured (NOTIFICATION_EMAIL_PROVIDER / NOTIFICATION_SMS_PROVIDER); otherwise deliveries stay PENDING. */
   onApplicationBootstrap(): void {
     if (Object.keys(this.providers).length > 0 && this.config.delivery.intervalMs > 0) this.loop.start(this.config.delivery.intervalMs);
   }
@@ -308,15 +308,20 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
       const attempt = await this.startAttempt(c, provider);
       const t0 = Date.now();
-      const result = await this.callProvider(provider, message, { reference: ctx.id, attemptId: attempt.id });
+      const result = await this.callProvider(provider, message, { reference: ctx.id, attemptId: attempt.id, idempotencyKey: attempt.idempotencyKey });
       message = undefined; // release the rendered content (and the code in it) as early as possible
       const latencyMs = Date.now() - t0;
       await this.finish(c, ctx, attempt, provider, result, latencyMs, r, who);
     });
   }
 
-  /** Attempt STARTED, committed BEFORE the provider call (the evidence recovery relies on), and a fresh lease for this call. */
-  async startAttempt(c: Claim, provider: ChannelProvider): Promise<{ id: string; number: number }> {
+  /**
+   * Attempt STARTED, committed BEFORE the provider call (the evidence recovery relies on), and a fresh lease for this call. The provider
+   * idempotency key counts the definite (RETRYABLE_FAILURE) answers so far: it is unchanged by an ambiguous attempt, so a §8.5 resend
+   * carries the key of the attempt whose answer was lost; it changes after the provider definitely answered (a provider may keep a
+   * failed request's answer under its key, and must not replay it to a real retry).
+   */
+  async startAttempt(c: Claim, provider: ChannelProvider): Promise<{ id: string; number: number; idempotencyKey: string }> {
     return this.db.tx(async (q) => {
       const { rows } = await q.query<{ attempts: number; leaseUntil: Date }>(
         `UPDATE notification_delivery SET attempts = attempts + 1, provider = $3, "leaseUntil" = ${LEASE.replace('$LEASE', '$4')}
@@ -327,18 +332,30 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       const id = randomUUID();
       await q.query(`INSERT INTO notification_delivery_attempt (id, "deliveryId", "attemptNumber", provider) VALUES ($1, $2, $3, $4)`, [id, c.id, rows[0].attempts, provider.id]);
       c.token = rows[0].leaseUntil;
-      return { id, number: rows[0].attempts };
+      const definite = await q.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM notification_delivery_attempt WHERE "deliveryId" = $1 AND outcome = 'RETRYABLE_FAILURE'`,
+        [c.id],
+      );
+      return { id, number: rows[0].attempts, idempotencyKey: `nawara-notification/${c.id}/${definite.rows[0].n}` };
     });
   }
 
-  /** The provider call, bounded. An exception or a timeout is AMBIGUOUS: nothing proves the provider did not accept the message. */
-  async callProvider(provider: ChannelProvider, message: RenderedMessage, ctx: { reference: string; attemptId: string }): Promise<ProviderResult> {
+  /**
+   * The provider call, bounded twice: the engine's timer decides the outcome at NOTIFICATION_PROVIDER_TIMEOUT_MS whatever the adapter
+   * does, and the same moment aborts the adapter's signal so its socket is released too. An exception or a timeout is AMBIGUOUS:
+   * nothing proves the provider did not accept the message.
+   */
+  async callProvider(provider: ChannelProvider, message: RenderedMessage, call: Omit<ProviderCallContext, 'signal'>): Promise<ProviderResult> {
     let timer: NodeJS.Timeout | undefined;
+    const abort = new AbortController();
     try {
       return await Promise.race([
-        Promise.resolve().then(() => provider.send(message, ctx)).then((r) => this.checked(r)),
+        Promise.resolve().then(() => provider.send(message, { ...call, signal: abort.signal })).then((r) => this.checked(r)),
         new Promise<ProviderResult>((resolve) => {
-          timer = setTimeout(() => resolve({ kind: 'ambiguous', code: 'provider_timeout' }), this.config.delivery.providerTimeoutMs);
+          timer = setTimeout(() => {
+            abort.abort();
+            resolve({ kind: 'ambiguous', code: 'provider_timeout' });
+          }, this.config.delivery.providerTimeoutMs);
         }),
       ]);
     } catch (e) {
@@ -352,7 +369,12 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   /** A result outside the port contract is AMBIGUOUS: nothing proves what the provider did with the message. */
   private checked(r: unknown): ProviderResult {
     const x = r as Partial<ProviderResult> & { failureClass?: unknown; providerMessageId?: unknown };
-    if (x?.kind === 'accepted' && typeof x.providerMessageId === 'string') return x as ProviderResult;
+    if (x?.kind === 'accepted' && typeof x.providerMessageId === 'string' && /^[\x21-\x7e]{1,256}$/.test(x.providerMessageId)) return x as ProviderResult;
+    if (x?.kind === 'accepted') {
+      // Accepted, but with no usable reference: the send happened; the result is recorded without the id rather than risk a resend.
+      this.log.warn(`notification_provider_failure class=accepted code=provider_reference_invalid — the accepted result's message id is missing or unbounded`);
+      return { kind: 'accepted', providerMessageId: '', diagnostic: (x as { diagnostic?: ProviderDiagnostic }).diagnostic };
+    }
     if (x?.kind === 'rejected' && (x.failureClass === 'retryable' || x.failureClass === 'terminal')) return x as ProviderResult;
     if (x?.kind === 'ambiguous') return x as ProviderResult;
     this.log.error(`notification_provider_failure class=ambiguous code=provider_invalid_result — the provider returned a result outside the port contract`);
@@ -363,10 +385,11 @@ export class DeliveryWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   private async finish(c: Claim, ctx: DeliveryContext, attempt: { id: string; number: number }, provider: ChannelProvider, result: ProviderResult, latencyMs: number, r: PassResult, who: string): Promise<void> {
     const outcome = result.kind === 'accepted' ? 'ACCEPTED' : result.kind === 'ambiguous' ? 'AMBIGUOUS' : result.failureClass === 'retryable' ? 'RETRYABLE_FAILURE' : 'TERMINAL_FAILURE';
     const code = result.kind === 'accepted' ? null : boundedCode(result.code, result.kind === 'ambiguous' ? 'provider_ambiguous' : 'provider_rejected');
-    const messageId = result.kind === 'accepted' && typeof result.providerMessageId === 'string' && result.providerMessageId.length <= 256 ? result.providerMessageId : null;
-    const line = `${who} attempt=${attempt.number} provider=${provider.id} latencyMs=${latencyMs}`;
-    // SDD §8.3: our credentials refused (an adapter maps 401 / 403 to this code): retryable, but a configuration fault that must alert.
-    if (code === 'provider_auth_fault') this.log.error(`provider_auth_fault ${line}`);
+    const messageId = result.kind === 'accepted' && result.providerMessageId !== '' ? result.providerMessageId : null;
+    const diag = boundedDiagnostic(result.diagnostic);
+    const line = `${who} attempt=${attempt.number} provider=${provider.id} latencyMs=${latencyMs}${diag?.httpStatus ? ` httpStatus=${diag.httpStatus}` : ''}${diag?.providerCode ? ` providerCode=${diag.providerCode}` : ''}`;
+    // SDD §8.3: our credentials or sender configuration refused: retryable (bounded by the attempt budget), but a fault that must alert.
+    if (code === 'provider_auth_fault' || code === 'provider_config_fault') this.log.error(`${code} ${line}`);
     await this.db.tx(async (q) => {
       const done = await q.query(
         `UPDATE notification_delivery_attempt SET outcome = $2, "completedAt" = now(), "providerMessageId" = $3, "failureCode" = $4, "latencyMs" = $5

@@ -1,4 +1,4 @@
-import type { ChannelProvider, ProviderResult } from './provider.js';
+import type { ChannelProvider, ProviderCallContext, ProviderResult } from './provider.js';
 import type { RenderedMessage } from './renderer.js';
 
 /**
@@ -23,7 +23,7 @@ export class TestProvider implements ChannelProvider {
 
   constructor(readonly channel: 'EMAIL' | 'SMS') {}
 
-  send(message: RenderedMessage, ctx: { reference: string; attemptId: string }): Promise<ProviderResult> {
+  send(message: RenderedMessage, ctx: ProviderCallContext): Promise<ProviderResult> {
     const d = message.destination;
     const is = (email: string, sms: string) => (this.channel === 'EMAIL' ? d.split('@')[0].includes(email) : d.endsWith(sms));
     if (is('+hang', '0004')) return new Promise<ProviderResult>(() => undefined);
