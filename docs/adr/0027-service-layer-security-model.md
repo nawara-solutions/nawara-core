@@ -4,6 +4,11 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-09-24):** [ADR-0046](./0046-notification-service-architecture.md) (Proposed) designs the notification
+> service that consumes the code-carrying events below. It does not adopt a RabbitMQ message TTL: a TTL would move expired codes
+> into the dead-letter queue, or purge unseen messages. Instead Notification enforces each code's `expiresAt`: an expired code is
+> never sent, even when replayed from the DLQ, and it never logs payloads.
+
 > **Amends [ADR-0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md)** on two points:
 > owner recovery is no longer an immediate "password + secret key ⇒ factors replaced" action, and
 > password-only enrollment is restricted to a never-enrolled owner. Implements the parts of
