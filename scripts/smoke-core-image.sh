@@ -59,7 +59,9 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       ;;
     notification-service)
       echo "DATABASE_URL=$(db_url notification_app notification)"
-      echo "SERVICE_TOKENS=smoke-caller:$(hex 32)" # proves the service-token configuration is parsed in production
+      echo "SERVICE_TOKENS=smoke-caller:$(hex 32)" # proves the service-token and policy configuration are parsed in production
+      echo 'NOTIFICATION_SERVICE_POLICY={"callers":{"smoke-caller":{"templates":["membership.approved"],"channels":["EMAIL"],"organizations":"none"}}}'
+      echo "NOTIFICATION_REQUEST_HASH_KEY=$(b64 32)"
       echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672"
       echo "NOTIFICATION_SECRET_KEYS=k1:$(b64 32)"
       echo "NOTIFICATION_SECRET_ACTIVE_KEY_ID=k1"

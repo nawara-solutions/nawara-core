@@ -122,6 +122,7 @@ describeWithEnv('Stage 16.5: real Auth → real RabbitMQ → real Notification i
     notification = spawnService('notification', NOTIFICATION_DIR, {
       NODE_ENV: 'test', PORT: String(NOTIFICATION_PORT), DATABASE_URL: notificationDb.url, RABBITMQ_URL: env.TEST_RABBITMQ_URL,
       NOTIFICATION_SECRET_KEYS: `k1:${SECRET_KEY.toString('base64')}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en',
+      NOTIFICATION_REQUEST_HASH_KEY: randomBytes(32).toString('base64'),
     });
     auth = spawnService('auth', AUTH_DIR, {
       NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, AUTH_EVENTS: 'on', RABBITMQ_URL: env.TEST_RABBITMQ_URL,

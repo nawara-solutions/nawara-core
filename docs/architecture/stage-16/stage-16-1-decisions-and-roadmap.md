@@ -39,6 +39,7 @@ Status values:
 | D22 | **Recipient time zone** for datetime variables: the platform time zone in V1 | no recipient time zone exists anywhere | per recipient | DEFERRED: product |
 | D23 | **Outbound `notification.*` events:** not in V1; kit outbox only when a consumer exists (Audit, Stage 18) | no consumer; no fire-and-forget publishing | publish now | DEFERRED: Stage 18 |
 | D24 | **Push device identity:** owned by Auth (the devices design); Notification never owns devices | the ownership rule (Auth owns user and device identity) | a device table in Notification | DECIDED (Push itself deferred) |
+| D25 | **API request hash is keyed:** `HMAC-SHA-256(NOTIFICATION_REQUEST_HASH_KEY, canonical body)`, secrets included; replaces the unkeyed SHA-256 of the Payment pattern for Notification only | a body can hold a low-entropy code beside fields stored in clear: an unkeyed digest would let a database reader recover a live code | unkeyed SHA-256 (rejected, unsafe); excluding secrets from the hash (rejected, weakens idempotency) | DECIDED (owner, 2026-09-24), IMPLEMENTED in 16.6. Key rotation / versioning: 16.9 |
 
 ## 2. Email-provider requirements (D2)
 
@@ -62,10 +63,10 @@ Each sub-stage is its own reviewed PR, following the repository workflow.
 
 **Progress:** 16.1 ✅ · 16.2 ✅ ([record](./stage-16-2-auth-event-envelope.md)) · 16.3 ✅ ([record](./stage-16-3-service-foundation.md)) ·
 16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5 ✅ ([record](./stage-16-5-notification-event-intake.md)) ·
-16.6–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+16.6 ✅ ([record](./stage-16-6-notification-send-api.md)) · 16.7–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
 - 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
 - 16.3 → 16.5: the kit bus and the key ring;
-- 16.3 → 16.6: the caller policy;
+- 16.3 → 16.6: the caller policy (done in 16.6, with OpenAPI);
 - 16.4 → 16.5: variable **value** validation, locale resolution and `NOTIFICATION_DEFAULT_LOCALE` (done in 16.5, with the kit bus
   and the key ring);
 - 16.4 → 16.7: the renderer.

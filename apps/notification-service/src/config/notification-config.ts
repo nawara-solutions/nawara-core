@@ -2,6 +2,7 @@ import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig,
   type ServiceTokenEntry,
 } from '@nawara/service-kit';
+import { NotificationCallerPolicy } from '../api/caller-policy.js';
 
 /** The one identity of this service: logs, the database `application_name`, Docker, documentation. */
 export const SERVICE_NAME = 'notification-service';
@@ -13,10 +14,10 @@ export const LOCALE_SHAPE = /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
  * notification-service configuration, layered on the kit's shared `BaseConfig`. It carries ONLY what the service uses today:
  * - the HTTP baseline (Stage 16.3) and the accepted service callers;
  * - the database (Stage 16.4: `DATABASE_URL` plus the kit's bounded `DB_*` limits in `BaseConfig.db`);
- * - Stage 16.5, event intake: the broker, the secret key ring and the platform default locale.
+ * - Stage 16.5, event intake: the broker, the secret key ring and the platform default locale;
+ * - Stage 16.6, the send API: the caller policy, the request-hash key, the schedule bound, the per-caller intake limit, the API docs.
  *
- * Deliberately absent until the stage that uses it: `NOTIFICATION_SERVICE_POLICY` and API docs (16.6, the send API), worker and
- * provider settings (16.7 / 16.8).
+ * Deliberately absent until the stage that uses it: worker and provider settings (16.7 / 16.8).
  */
 export interface NotificationConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `notification_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -43,6 +44,19 @@ export interface NotificationConfig extends BaseConfig {
    * product inputs (D7). The event intake refuses to start while a mapped template lacks a published version in it.
    */
   defaultLocale: string;
+  /** `NOTIFICATION_SERVICE_POLICY` (SDD §11.2): what each authenticated caller may request. Deny by default. */
+  callerPolicy: NotificationCallerPolicy;
+  /**
+   * `NOTIFICATION_REQUEST_HASH_KEY` (required; base64 of at least 32 random bytes; Stage 16.6 decision): the HMAC-SHA-256 key of the API
+   * request hash. An unkeyed hash would let anyone reading the database brute-force a one-time code from it. Never stored, never logged.
+   */
+  requestHashKey: Buffer;
+  /** `NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC` (SDD §9.1; default 2592000 = 30 days, 60-31536000): how far ahead `scheduledAt` may be. */
+  maxScheduleAheadSec: number;
+  /** `NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE` (SDD §11.3 `notif_api_caller`; default 600, 1-100000): accepted API calls per caller per minute. */
+  apiIntakeLimitPerMinute: number;
+  /** OpenAPI at `/notification/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
+  docs: { username: string; password?: string };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -78,17 +92,31 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
     throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
   }
   const ring = secretKeyRing(reader);
+  const requestHashKey = Buffer.from(reader.required('NOTIFICATION_REQUEST_HASH_KEY'), 'base64');
+  if (requestHashKey.length < 32) throw new ConfigError('NOTIFICATION_REQUEST_HASH_KEY must be the base64 of at least 32 random bytes');
+  if ([...ring.keys.values()].some((k) => k.equals(requestHashKey))) {
+    throw new ConfigError('NOTIFICATION_REQUEST_HASH_KEY must differ from every NOTIFICATION_SECRET_KEYS key (one key, one purpose)');
+  }
+  const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   const defaultLocale = reader.required('NOTIFICATION_DEFAULT_LOCALE');
   if (!LOCALE_SHAPE.test(defaultLocale) || defaultLocale.length > 35) throw new ConfigError('NOTIFICATION_DEFAULT_LOCALE must be a BCP 47 locale such as en or fr');
   return {
     ...base,
     databaseUrl,
-    serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
+    serviceTokens,
     rabbitmqUrl: reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']),
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     secretKeys: ring.keys,
     secretActiveKeyId: ring.activeKeyId,
     defaultLocale,
+    callerPolicy: NotificationCallerPolicy.parse(reader.get('NOTIFICATION_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))]),
+    requestHashKey,
+    maxScheduleAheadSec: reader.int('NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC', { default: 2_592_000, min: 60, max: 31_536_000 }),
+    apiIntakeLimitPerMinute: reader.int('NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE', { default: 600, min: 1, max: 100_000 }),
+    docs: {
+      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
+      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
+    },
   };
 }
