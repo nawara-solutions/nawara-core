@@ -1,0 +1,16 @@
+{
+  "variables": {
+    "code": {
+      "type": "code",
+      "required": true,
+      "secret": true,
+      "maxLength": 12
+    },
+    "expiresAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "subject": "Your confirmation code",
+  "bodyText": "Your confirmation code is {{code}}.\n\nIt is valid until {{expiresAt}}. Never share this code with anyone."
+}

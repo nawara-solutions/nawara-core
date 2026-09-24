@@ -2,8 +2,9 @@
 #
 # Built with repo-root context (npm workspaces monorepo: notification-service has no lockfile of its own; the workspace root's
 # package.json/package-lock.json is required to resolve its dependencies, including the shared @nawara/service-kit package).
-# The Organization / Billing image pattern (SDD notification-service §18). Stage 16.3 has no database yet: the migrations directory
-# (the service's own and the kit's) joins the runtime stage with persistence in Stage 16.4.
+# The Organization / Billing image pattern (SDD notification-service §18). The migrations (the kit's and the service's own, which
+# include the published templates) travel with the image; they are applied by the explicit `npm run migrate` step as the migrator
+# role, never at startup and never with the runtime credentials.
 
 FROM node:22-alpine AS build
 WORKDIR /app
@@ -25,7 +26,10 @@ COPY libs/service-kit/package.json libs/service-kit/package.json
 COPY apps/notification-service/package.json apps/notification-service/package.json
 RUN npm ci --workspace=notification-service --workspace=@nawara/service-kit --omit=dev --include-workspace-root --ignore-scripts
 COPY --from=build /app/libs/service-kit/dist ./libs/service-kit/dist
+COPY libs/service-kit/migrations ./libs/service-kit/migrations
 COPY --from=build /app/apps/notification-service/dist ./apps/notification-service/dist
+# Schema of record (and the published templates) travel with the image so a deploy always applies the migrations that match this code.
+COPY apps/notification-service/db/migrations ./apps/notification-service/db/migrations
 WORKDIR /app/apps/notification-service
 # The service only reads its own files and opens sockets: it needs no write access and no privileges (the base image's `node` user).
 USER node

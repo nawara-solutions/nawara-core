@@ -1,13 +1,14 @@
 # notification-service
 
-> **Status: service foundation (Stage 16.3).** The service builds, boots, answers `/health` and `/ready`, and shuts down
-> gracefully on `@nawara/service-kit`. **It sends nothing yet:** it has no business route, no database, no event consumer and no
-> provider. Those arrive in the Stage 16 sub-stages below. Nothing in any Core flow calls it today.
+> **Status: foundation (Stage 16.3) + persistence and templates (Stage 16.4).** The service boots on `@nawara/service-kit` with its
+> own database: the five tables with database-enforced invariants and the published V1 template catalog. **It sends nothing yet:**
+> no business route, no event consumer, no worker, no provider. Nothing in any Core flow calls it today.
 
 Generic, product-agnostic delivery of notifications (email and SMS first) for Nawara Core. Producers decide *why* and *when*; this
 service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notification-service-architecture.md),
 [SDD](../../docs/sdd/notification-service.md), [Stage 16 roadmap](../../docs/architecture/stage-16/stage-16-1-decisions-and-roadmap.md),
-[Stage 16.3 record](../../docs/architecture/stage-16/stage-16-3-service-foundation.md).
+[Stage 16.3 record](../../docs/architecture/stage-16/stage-16-3-service-foundation.md),
+[Stage 16.4 record](../../docs/architecture/stage-16/stage-16-4-persistence-and-templates.md).
 
 ## What exists (16.3)
 
@@ -21,8 +22,28 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 | SIGTERM: `/ready` 503 and new requests refused, running requests drained within `HTTP_DRAIN_TIMEOUT_MS`, exit | `HttpDrain` (Stage 15.5) |
 | Service-token authentication, ready for the send API (no route uses it yet) | `ServiceAuthModule` |
 
-`/ready` has no dependency check because the service has no dependency yet. The database (16.4) and the RabbitMQ consumer (16.5)
-each register their check when they arrive. Email and SMS providers are never readiness dependencies.
+| Database: bounded pool and deadlines, `application_name = notification-service`, readiness `database` + `migrations`, pool closed last at shutdown | `DbModule` (16.4) |
+
+`/ready` = the database and its migrations. The RabbitMQ consumer (16.5) adds its check when it arrives. Email and SMS providers are
+never readiness dependencies.
+
+## Persistence and templates (16.4)
+
+- **Schema:** `db/migrations/0001_notification_schema.sql`:
+  - `notification` (the immutable intent: one recipient, no stored status);
+  - `notification_delivery` (one per channel; destination snapshot; pinned version; DB-guarded transitions);
+  - `notification_delivery_attempt` (STARTED → one final outcome);
+  - `notification_template` and `notification_template_version` (immutable, never deleted).
+- **Templates:** `templates/<key>/<CHANNEL>.<locale>.v<N>.json`, with the **provisional** V1 copy for the nine Auth events (D7).
+  - A change is a new version file, then `npm run build -w notification-service && npm run templates:migration -w
+    notification-service -- <name>`, which runs the publish check and writes the next `NNNN_publish_templates_<name>.sql`.
+  - A unit test fails if the committed migrations and the catalog ever drift apart.
+- **Migrate** (explicit, as the migrator, never at startup):
+  `MIGRATION_DATABASE_URL=postgres://notification_migrator:…@host/notification npm run migrate -w notification-service`, or
+  `docker compose --profile db run --rm notification-service npm run migrate`.
+- **Local volume:** an existing local PostgreSQL volume predates the `notification` database (the init script runs only on an empty
+  volume). Add the `NOTIFICATION_*` passwords from `.env.example` to `.env`, then recreate the volume or provision it by hand as
+  `infra/postgres/init/01-service-databases.sh` does.
 
 ## Configuration
 
@@ -35,10 +56,13 @@ each register their check when they arrive. Email and SMS providers are never re
 | `CORS_ORIGINS` | empty (off) | exact http(s) origins | no wildcard |
 | `TRUST_PROXY` | `false` | `true` / `false` | |
 | `HTTP_DRAIN_TIMEOUT_MS` | 5000 | 500–120000 | bound on the HTTP drain at shutdown |
+| `DATABASE_URL` | **required** | `postgres:` / `postgresql:` | the runtime role `notification_app`; production refuses `postgres`, `root` and `*_migrator` |
+| `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | 10, 5000, 30000, 60000, statement + 5000 | the kit bounds | |
+| `MIGRATION_DATABASE_URL` | – | | the migrator, read only by `npm run migrate` |
 | `SERVICE_TOKENS` | empty | `<caller>:<sha256 hex>`, comma-separated, ≤ 2 per caller | secret-derived (digests only); empty refuses every service-token call |
 
-Nothing is mandatory yet. An invalid value stops the process at startup with a `ConfigError` naming the variable, never its value.
-The kit's `DB_*` limits are parsed with their bounded defaults and unused until 16.4.
+Only `DATABASE_URL` is mandatory. An invalid value stops the process at startup with a `ConfigError` naming the variable, never
+its value.
 
 ## Run
 
@@ -46,7 +70,8 @@ The kit's `DB_*` limits are parsed with their bounded defaults and unused until 
 npm run build -w @nawara/service-kit && npm run build -w notification-service
 npm run start:prod -w notification-service                      # or: docker compose --profile db up -d notification-service
 npm test -w notification-service                                # unit
-npm run test:e2e -w notification-service                        # foundation + built-process E2E (no database or broker needed)
+TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w notification-service
+                                                                # foundation, built process, and the real-PostgreSQL suites
 ```
 
 The production image (`apps/notification-service/Dockerfile`, repo-root context) is two stages with production dependencies only.
@@ -56,9 +81,9 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 
 | Stage | Adds |
 |---|---|
-| 16.4 | the database (`DbModule`, provisioning, the migrator / app roles), the five tables, templates |
-| 16.5 | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`) |
+| 16.4 ✅ | the database (`DbModule`, provisioning, the migrator / app roles), the five tables, the template catalog and publication |
+| 16.5 | Auth event intake on the kit RabbitMQ consumer; sealed one-time codes (`NOTIFICATION_SECRET_KEYS`); variable-value validation; locale resolution (`NOTIFICATION_DEFAULT_LOCALE`) |
 | 16.6 | `POST /notification/notifications`, status, cancel; `NOTIFICATION_SERVICE_POLICY`; OpenAPI at `/notification/docs` |
-| 16.7 | the delivery engine (claim, lease, attempts, retry, ambiguity) and the test provider |
+| 16.7 | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer and the test provider |
 | 16.8 | the email and SMS providers |
 | 16.9 / 16.10 | security, observability and operations; certification |

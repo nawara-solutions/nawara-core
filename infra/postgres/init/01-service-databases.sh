@@ -34,3 +34,4 @@ create_service billing    "${BILLING_MIGRATOR_PASSWORD:-}"    "${BILLING_APP_PAS
 create_service payment    "${PAYMENT_MIGRATOR_PASSWORD:-}"    "${PAYMENT_APP_PASSWORD:-}"
 create_service accounting "${ACCOUNTING_MIGRATOR_PASSWORD:-}" "${ACCOUNTING_APP_PASSWORD:-}"
 create_service organization "${ORGANIZATION_MIGRATOR_PASSWORD:-}" "${ORGANIZATION_APP_PASSWORD:-}"
+create_service notification "${NOTIFICATION_MIGRATOR_PASSWORD:-}" "${NOTIFICATION_APP_PASSWORD:-}"
