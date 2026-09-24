@@ -1,7 +1,7 @@
 # notification-service
 
-> **Status: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5), internal send API (16.6), delivery engine
-> (16.7), email and SMS providers (16.8).** Intents arrive from Auth's events and from trusted Core services over the API; the delivery
+> **Status: Notification V1, certified (Stage 16.10)**: foundation (16.3), persistence and templates (16.4), Auth event intake (16.5),
+> internal send API (16.6), delivery engine (16.7), email and SMS providers (16.8), security and operations (16.9). Intents arrive from Auth's events and from trusted Core services over the API; the delivery
 > engine claims their deliveries, renders the pinned template and calls a provider through the `ChannelProvider` port: **Resend**
 > for email and **Twilio** for SMS (direct HTTPS, no SDK), or the no-network test provider outside production. Production SMS for
 > Auth users additionally needs Auth to store canonical E.164 numbers (a separate Auth change).
@@ -15,7 +15,8 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
 [Stage 16.6 record](../../docs/architecture/stage-16/stage-16-6-notification-send-api.md),
 [Stage 16.7 record](../../docs/architecture/stage-16/stage-16-7-notification-delivery-engine.md),
 [Stage 16.8 record](../../docs/architecture/stage-16/stage-16-8-email-sms-providers.md),
-[Stage 16.9 record](../../docs/architecture/stage-16/stage-16-9-security-operations.md).
+[Stage 16.9 record](../../docs/architecture/stage-16/stage-16-9-security-operations.md),
+[Stage 16.10 certification](../../docs/architecture/stage-16/stage-16-10-focused-certification.md).
 
 ## What exists (16.3)
 
@@ -199,4 +200,4 @@ It runs as the non-root `node` user with Node as PID 1; Compose gives it a 60 s 
 | 16.7 ✅ | the delivery engine (claim, lease, attempts, retry, ambiguity), the renderer, the test provider and the secret purge |
 | 16.8 ✅ | the Resend email and Twilio SMS adapters (direct HTTPS), per-channel provider selection, sanitized classification |
 | 16.9 ✅ | HMAC destination limiter (D21), key rotation, secret-key retirement check, operational snapshot, limiter retention, runbooks |
-| 16.10 | the Notification-wide focused certification |
+| 16.10 ✅ | the Notification-wide focused certification: [record](../../docs/architecture/stage-16/stage-16-10-focused-certification.md); Stage 16 closed |

@@ -12,7 +12,7 @@ App-specific logic (driving lessons, exam rules, course content — anything uni
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | **auth-service**         | Registration, login, JWT/refresh tokens, role management. No commercial dependency: never checks subscription, license or entitlement state.   | Any app needing user identity        |
 | **organization-service** | Company/Platform/Organization ownership. Implemented but not yet authoritative — auth-service still owns these entities.                        | Any app needing organization identity |
-| **notification-service** | Generic push (FCM), SMS, email dispatch, triggered by events from any service/app                                                               | Any app needing to notify users      |
+| **notification-service** | Generic email (Resend) and SMS (Twilio) delivery from events or a service-token API; templates, retries, ambiguity policy. Push is a later channel | Any app needing to notify users      |
 | **billing-service**      | What is owed: Product, Price, Invoice, PaymentRequest, and the Subscription/Entitlement model (one Subscription per Organization; see [ADR-0044](docs/adr/0044-subscription-entitlement-final-model.md)) | Any app needing to bill or check commercial access |
 | **payment-service**      | How money was paid and the payment state only — payments, attempts, gateway adapters, transactional outbox to RabbitMQ. Not the billing or accounting system. | Billing, or any app needing to charge users |
 | **ai-service**           | Generic LLM-backed service (chat, Q&A, content generation) — configurable knowledge base/prompt per calling app                                 | Any app needing AI features          |
@@ -39,7 +39,7 @@ nawara-core/
 │   ├── organization-service/   # implemented, not yet authoritative (auth-service still owns Company/Platform/Organization)
 │   ├── billing-service/        # implemented through Stage 12.7: catalog, invoices, Subscription/Entitlement
 │   ├── payment-service/        # implemented through Stage 12.7: settlement, attempts, outbox, real-broker publishing
-│   ├── notification-service/   # NestJS starter only
+│   ├── notification-service/   # NestJS, Notification V1 (Stage 16, certified in 16.10)
 │   └── ai-service/             # FastAPI starter (/health only)
 ├── libs/
 │   └── service-kit/            # technical foundations for new services (no business logic); see its README
@@ -85,6 +85,7 @@ POST https://api.nawara-solutions.com/ai/chat
 auth-service is implemented and deployed. billing-service and payment-service are implemented through Stage 12.7
 (catalog, invoicing, settlement, Subscription/Entitlement, and a real-broker Payment→Billing integration — none of
 this is production-deployed yet). organization-service is implemented but not yet authoritative. notification-service
-and ai-service remain starters. See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md)
+is implemented and certified for V1 (Stage 16; production enablement has documented external prerequisites). ai-service
+remains a starter. See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md)
 for the detailed implemented/designed/deferred breakdown (dated; re-verify against `docs/sdd/*` for the current state
 of any one service).
