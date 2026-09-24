@@ -66,7 +66,10 @@ Each sub-stage is its own reviewed PR, following the repository workflow.
 16.6 ✅ ([record](./stage-16-6-notification-send-api.md)) · 16.7 ✅ ([record](./stage-16-7-notification-delivery-engine.md); the
 destination limit `notif_dest` of D13 is deferred with D21, see its §13) · 16.8 ✅ ([record](./stage-16-8-email-sms-providers.md);
 D2 → Resend, ADR-0047; D3 → ADR-0019 accepted) · 16.9 ✅ ([record](./stage-16-9-security-operations.md); D21 resolved:
-HMAC-keyed `notif_dest`; ADR-0046 accepted) · 16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+HMAC-keyed `notif_dest`; ADR-0046 accepted) · 16.10 ✅ ([certification](./stage-16-10-focused-certification.md)).
+**Stage 16 — Notification Service: CLOSED.** Notification V1 implementation and focused Core certification complete; production
+enablement remains subject to the documented external / owner prerequisites (16.10 record §7). Stage 22 remains the final Core
+production validation. Items moved between rows (owner-directed, each record says why):
 - 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
 - 16.3 → 16.5: the kit bus and the key ring;
 - 16.3 → 16.6: the caller policy (done in 16.6, with OpenAPI);

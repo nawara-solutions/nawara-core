@@ -159,6 +159,8 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
   drain is the provider timeout + 2 s; `NOTIFICATION_WORKER_CONCURRENCY` < `DB_POOL_MAX`.
 - Retry: base 30 s, ceiling 30 min, 5 attempts; `NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE` 6000. The provider timeout stays 10 s
   (lease 60 s): the adapters add about 2 ms over a local stub; live provider latency is to be measured in the sandbox smoke.
+- **Stage 16.10:** Notification V1 certified ([record](stage-16/stage-16-10-focused-certification.md)); production enablement waits on
+  the external / owner prerequisites of its §7 (provider accounts and sandbox smoke, Auth E.164, Resend owner items, alert routing).
 - **Stage 16.9:** `notif_dest` (30 per channel + destination per hour by default) keyed by HMAC under `NOTIFICATION_DESTINATION_LIMIT_KEY`
   (required with a provider). Key material for the secret ring, the request hash and the limiter must be pairwise distinct; production
   refuses development keys published in `.env.example` and patterned keys. Rotation: `NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS` (≤ 2),

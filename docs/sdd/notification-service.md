@@ -7,7 +7,8 @@
   ([record](../architecture/stage-16/stage-16-6-notification-send-api.md)) and the Stage 16.7 delivery engine
   ([record](../architecture/stage-16/stage-16-7-notification-delivery-engine.md)) and the Stage 16.8 Resend / Twilio adapters
   ([record](../architecture/stage-16/stage-16-8-email-sms-providers.md)) and the Stage 16.9 security and operations
-  ([record](../architecture/stage-16/stage-16-9-security-operations.md), [runbooks](../runbooks/notification-service.md))
+  ([record](../architecture/stage-16/stage-16-9-security-operations.md), [runbooks](../runbooks/notification-service.md)); V1 certified
+  and Stage 16 closed in 16.10 ([certification](../architecture/stage-16/stage-16-10-focused-certification.md))
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -924,6 +925,8 @@ are unchanged. Removing `@golevelup/nestjs-rabbitmq` from Auth is part of 16.2 i
 | Production container | smoke; SIGTERM with a hung provider inside the 60 s grace |
 
 The certification (16.10) uses the §17.3 contract rows that apply, plus the Notification-specific ones. It is not a new 15.9.
+**As certified (16.10):** see the [certification matrix](../architecture/stage-16/stage-16-10-focused-certification.md) (existing suites reused, plus an
+integrated suite over the real broker and the real adapters); the full Core validation remains Stage 22.
 
 ## 20. Open questions
 
