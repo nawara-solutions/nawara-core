@@ -9,8 +9,8 @@ import { describeWithEnv } from './support/env.js';
 
 /**
  * Stage 17.2: readiness depends on the database and its migrations only (the kit checks; ADR-0048 §8: object storage is not a
- * readiness dependency); liveness never depends on them; the pool closes at shutdown. The migration baseline is the service-kit's
- * (`fileMigrationsDir` holds no migration until Stage 17.3).
+ * readiness dependency); liveness never depends on them; the pool closes at shutdown. Stage 17.3: the baseline is the kit's migrations
+ * plus the file schema (`0001_file_schema.sql`); a database missing the file schema is not ready.
  */
 describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
   let db: TestDatabase;
@@ -20,18 +20,23 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
   afterAll(() => db.drop());
   const name = () => new URL(db.url).pathname.slice(1);
 
-  it('/ready is 503 naming only `migrations` while they are pending, and 200 once the baseline is applied; /health stays 200', async () => {
+  it('/ready is 503 naming only `migrations` while any is pending (the kit baseline alone is not enough), 200 once the file schema is applied; /health stays 200', async () => {
     const t = await createTestApp({ databaseUrl: db.url });
     try {
       await request(t.app.getHttpServer()).get('/health').expect(200, { status: 'ok' });
       const pending = await request(t.app.getHttpServer()).get('/ready').expect(503);
       expect(pending.body).toEqual({ status: 'unavailable', failed: ['migrations'] });
+      const kitOnly = await runMigrations(db.url, [kitMigrationsDir]);
+      expect(kitOnly.applied.every((n) => n.startsWith('kit_'))).toBe(true);
+      expect((await request(t.app.getHttpServer()).get('/ready').expect(503)).body.failed).toEqual(['migrations']); // the file schema is missing
+      await request(t.app.getHttpServer()).get('/health').expect(200);
       const applied = await runMigrations(db.url, [kitMigrationsDir, fileMigrationsDir]);
-      expect(applied.applied.every((n) => n.startsWith('kit_'))).toBe(true); // the service has no migration of its own yet
+      expect(applied.applied).toEqual(['0001_file_schema.sql']);
       await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
       const again = await runMigrations(db.url, [kitMigrationsDir, fileMigrationsDir]);
       expect(again.applied).toEqual([]); // a re-run is a no-op
-      expect(await sql(db.url, `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'file%'`)).toEqual([]); // no file domain table
+      const tables = await sql<{ t: string }>(db.url, `SELECT table_name AS t FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'file%' ORDER BY 1`);
+      expect(tables.map((r) => r.t)).toEqual(['file', 'file_access_ticket']);
     } finally {
       await t.app.close();
     }

@@ -3,6 +3,11 @@ import { IsString, MaxLength } from 'class-validator';
 import { CallerService, ServiceTokenGuard } from '@nawara/service-kit';
 import type { FileConfig } from '../../src/config/file-config.js';
 import { FILE_CONFIG } from '../../src/config/file-config.token.js';
+import { FileRepository } from '../../src/persistence/file.repository.js';
+import { PersistenceModule } from '../../src/persistence/persistence.module.js';
+
+/** A marker the refused row carries (as a filename): it must reach neither the response nor any log line. */
+export const REFUSED_ROW_MARKER = 'passport-of-refused-row';
 
 class EchoDto {
   @IsString()
@@ -17,7 +22,19 @@ class EchoDto {
  */
 @Controller('probe')
 class ProbeController {
-  constructor(@Inject(FILE_CONFIG) private readonly config: FileConfig) {}
+  constructor(@Inject(FILE_CONFIG) private readonly config: FileConfig, private readonly files: FileRepository) {}
+
+  /** A write the schema refuses (a bidi override in the name): the raw PostgreSQL error must surface as the opaque 500 only. */
+  @Get('persistence/refused')
+  async refused() {
+    return this.files.createUploading({
+      scope: { ownerService: 'core-probe', organizationId: null },
+      originalName: `${REFUSED_ROW_MARKER}\u202Efdp.exe`,
+      storage: { provider: 'filesystem', keyPrefix: 'files' },
+      uploadLeaseSeconds: 3_600,
+      attachment: { deadlineSeconds: 86_400 },
+    });
+  }
 
   @Get('service')
   @UseGuards(ServiceTokenGuard)
@@ -61,5 +78,5 @@ class ProbeController {
   }
 }
 
-@Module({ controllers: [ProbeController] })
+@Module({ imports: [PersistenceModule], controllers: [ProbeController] })
 export class ProbeModule {}

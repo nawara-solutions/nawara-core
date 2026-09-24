@@ -28,7 +28,7 @@ RUN npm ci --workspace=file-service --workspace=@nawara/service-kit --omit=dev -
 COPY --from=build /app/libs/service-kit/dist ./libs/service-kit/dist
 COPY libs/service-kit/migrations ./libs/service-kit/migrations
 COPY --from=build /app/apps/file-service/dist ./apps/file-service/dist
-# Schema of record travels with the image so a deploy always applies the migrations that match this code (none of its own before 17.3).
+# Schema of record travels with the image so a deploy always applies the migrations that match this code (Stage 17.3: the file schema).
 COPY apps/file-service/db/migrations ./apps/file-service/db/migrations
 WORKDIR /app/apps/file-service
 # The service only reads its own files and opens sockets: it needs no write access and no privileges (the base image's `node` user).

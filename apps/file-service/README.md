@@ -1,15 +1,17 @@
 # file-service
 
-> **Status: foundation (Stage 17.2).** A production-shaped service with health, readiness, service authentication and the caller
-> policy, and **no file domain yet**: no table, no storage, no upload, download or ticket route. The domain starts in Stage 17.3.
+> **Status: foundation + persistence (Stages 17.2, 17.3).** A production-shaped service with health, readiness, service
+> authentication, the caller policy and the `file` / `file_access_ticket` schema with its repositories. **No byte path yet:** no
+> storage, no upload, download or ticket route (17.4–17.6).
 
 Generic file objects for Nawara Core: products keep the business meaning and relationships (`StudentDocument.fileId`); File Service
 owns immutable bytes, generic metadata, integrity, lifecycle, storage and controlled byte access. Design:
 [ADR-0048](../../docs/adr/0048-file-service-architecture.md), [SDD](../../docs/sdd/file-service.md),
 [Stage 17.1 decisions and roadmap](../../docs/architecture/stage-17/stage-17-1-decisions-and-roadmap.md),
-[Stage 17.2 record](../../docs/architecture/stage-17/stage-17-2-service-foundation.md).
+[Stage 17.2 record](../../docs/architecture/stage-17/stage-17-2-service-foundation.md),
+[Stage 17.3 record](../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md).
 
-## What exists (17.2)
+## What exists (17.2 foundation)
 
 | Capability | From the kit |
 |---|---|
@@ -21,6 +23,11 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 | SIGTERM / SIGINT: `/ready` 503 and new requests refused, running requests drained within `HTTP_DRAIN_TIMEOUT_MS`, the pool closed last, exit | `HttpDrain` (Stage 15.5) |
 | Service-token authentication (`SERVICE_TOKENS`); the caller is always the token's service | `ServiceAuthModule` |
 | `FILE_SERVICE_POLICY`: per-caller operations, organization mode, media types and size ceiling, deny by default, validated at startup | this service |
+
+**Persistence (17.3):** `db/migrations/0001_file_schema.sql` (metadata only, never bytes) and `src/persistence/`: `FileRepository`
+(`createUploading`, the owner- and organization-scoped `findOwned`; no unscoped lookup), `TicketRepository` (digest-only tickets:
+`recordDownload`, `recordUpload`, the atomic `claimUse`, issuer-scoped `revoke`, transactional `revokeAllForFile`), the storage-key
+generator and the ticket digest. The lifecycle transitions arrive with the stages that own their storage side.
 
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency (and there
 is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
@@ -55,7 +62,7 @@ Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`. `mediaTypes` (
 
 ```bash
 npm run build -w @nawara/service-kit && npm run build -w file-service
-MIGRATION_DATABASE_URL=postgres://file_migrator:…@host/file npm run migrate -w file-service   # the kit baseline (no file migrations before 17.3)
+MIGRATION_DATABASE_URL=postgres://file_migrator:…@host/file npm run migrate -w file-service   # the kit baseline + the file schema
 npm run start:prod -w file-service                                                             # or: docker compose --profile db up -d file-service
 npm test -w file-service                                                                       # unit
 TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w file-service
@@ -70,7 +77,7 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 
 | Stage | Adds |
 |---|---|
-| 17.3 | the `file` and `file_access_ticket` tables, constraints, triggers |
+| 17.3 | ✅ the `file` and `file_access_ticket` tables, constraints, triggers, repositories |
 | 17.4 | the storage port, filesystem and S3-compatible adapters |
 | 17.5 | streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
 | 17.6 | streamed download, safe headers, download tickets (issue, redeem, revoke) |

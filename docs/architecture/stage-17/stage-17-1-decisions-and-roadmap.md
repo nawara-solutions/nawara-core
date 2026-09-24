@@ -108,7 +108,7 @@ Browser / mobile ── redeems the ticket on File Service ── File validates
 |---|---|---|
 | 17.1 | architecture and decisions | this record |
 | 17.2 | service foundation: NestJS skeleton on the kit, config (limits, policy parse, keys), health / ready, service auth, DB provisioning (`file_migrator` / `file_app`), Dockerfile, Compose, CI | as planned; **done**: [17.2 record](./stage-17-2-service-foundation.md) (the ticket and attach keys move to their stages, 17.5 / 17.6) |
-| 17.3 | persistence and metadata: `file` and `file_access_ticket` tables, state and attach constraints, triggers (immutability, transitions), indexes for the sweeps | delegation table with Notification attachments |
+| 17.3 | persistence and metadata: `file` and `file_access_ticket` tables, state and attach constraints, triggers (immutability, transitions), indexes for the sweeps | delegation table with Notification attachments; **done**: [17.3 record](./stage-17-3-persistence-metadata.md) |
 | 17.4 | storage port: filesystem and S3-compatible adapters, bounded timeouts, normalized errors, MinIO adapter tests | before any upload |
 | 17.5 | upload lifecycle: service streamed upload, size cut-off, magic-byte type check, SHA-256, idempotency, attach, lease sweep; **upload tickets** (issue, single-use redemption) | **moved here:** content validation and checksum belong to upload correctness, not to 17.8 |
 | 17.6 | download and authorization: streamed download, safe headers, owner / organization checks, **download tickets** (issue, redeem, revoke, TTL default, redemption rate limits, log redaction) | |
@@ -147,7 +147,7 @@ ADR before production enablement (17.9 / 17.10 enablement checklist). Implementa
 | Oversized upload | `Content-Length` required; stream cut at the limit | per-organization quotas | — |
 | Zip / archive bomb | archives refused | if archives are allowed later: bounded expansion | — |
 | Storage credential leak | env / `*_FILE` only, never logged or stored; least-privilege bucket policy | rotation runbook (17.9) | a compromised host |
-| Signed URL / ticket leak | short TTL, one file, one operation, token stored as HMAC, never logged; single-use uploads | revocation list | reuse within TTL (downloads) |
+| Signed URL / ticket leak | short TTL, one file, one operation, only the token's SHA-256 digest stored (F35; corrected in 17.3, was "HMAC"), never logged; single-use uploads | revocation list | reuse within TTL (downloads) |
 | Signed URL replay | TTL; upload tickets single-use | — | download replay within TTL |
 | Checksum spoofing | File computes its own; client digest only compared | — | — |
 | Orphan storage abuse | attach deadline, cleanup, per-caller rate limits and size ceilings | quotas | — |
