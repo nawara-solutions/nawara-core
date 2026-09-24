@@ -135,6 +135,10 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | `WEBHOOK_RETRY_MAX_ATTEMPTS` (constant) | 10 | – | Payment | stored webhook retried at 10 s × 2ⁿ after receipt, then `failed` / `retries_exhausted` |
 | worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown; since Stage 15.5 one drain per worker, all started together at shutdown start |
 | `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5) | 5000 | 500–120000 | Auth, Billing, Organization, Payment | once shutdown starts, how long running requests may finish before every remaining connection is closed; `/ready` is 503 and new requests are refused from the first moment |
+| `BILLING_DISPATCH_STALE_SENDING_MS` (Stage 15.8 relationship) | 60000 | 1000–3600000 and **≥ 2 × `PAYMENT_TIMEOUT_MS`** | Billing | re-send after a lost or failed send; the dispatcher renews its unsent claims every quarter of it |
+| consumer prefetch (Stage 15.8) | kit 5; Billing `min(10, max(1, DB_POOL_MAX / 2))` | 1–100 | Billing consumer | unacknowledged deliveries = concurrent handlers = pool clients: at most half the pool |
+| outbox relay pass / backoff (Stage 15.8, constants) | full batches of 50 back to back for ≤ 1 s per 1 s poll; per-row backoff 1 s × 2ⁿ up to 15 s | – | kit relay (Billing, Payment) | backlog drain; worst delivery delay after a broker outage |
+| AttemptResolver lease (Stage 15.8, constant) | 5000 ms | – | Payment | one provider call per open attempt per lease whatever the number of instances; a dead holder's lease runs out |
 
 A frozen or partitioned broker is detected within about 3 × `RABBITMQ_HEARTBEAT_S` (≈ 30 s at the default), after the shorter
 `RABBITMQ_CONFIRM_TIMEOUT_MS`; a SIGTERM while the broker is silent therefore takes up to about that long (still above Docker's 10 s stop
@@ -145,12 +149,11 @@ Keep `RABBITMQ_CONFIRM_TIMEOUT_MS` below `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`: th
 transaction, so a longer confirm wait lets PostgreSQL end the session (the row stays pending and is published again: safe, but wasted).
 
 **Several instances per service (Stage 15.4).** Billing and Payment were validated with 2–4 instances on one database and broker:
-no worker assumes it is alone, and no duplicate business effect, lost item or cross-tenant write was found. Billing's dispatcher sends
-a claimed batch one row at a time, so keep batch × `PAYMENT_TIMEOUT_MS` below `BILLING_DISPATCH_STALE_SENDING_MS`; otherwise another
-instance re-sends the batch's tail. Re-sends are safe only because Payment enforces its natural key `(producer, paymentRequestId)`, which
-every Payment deployment must keep. Each instance also polls the provider once per unresolved attempt per pass, and one long-held
-payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOUT_MS` (tuning: Stage 15.8). Details:
-`core-validation.md` section 13.4.
+no worker assumes it is alone, and no duplicate business effect, lost item or cross-tenant write was found. Re-sends are safe only
+because Payment enforces its natural key `(producer, paymentRequestId)`, which every Payment deployment must keep. *(Superseded by Stage
+15.8: the batch-tail re-send, the per-instance provider polling and the expiry-sweep stall that 15.4 measured are fixed: claim renewal
+with `BILLING_DISPATCH_STALE_SENDING_MS ≥ 2 × PAYMENT_TIMEOUT_MS` enforced at startup, a 5 s AttemptResolver lease, and `SKIP LOCKED`
+in the sweep.)* Details: `core-validation.md` sections 13.4 and 13.8.
 
 **Stopping and restarting (Stage 15.5, final).**
 - **When shutdown starts** (SIGTERM, the first Nest hook), all of this happens at once:
@@ -197,8 +200,8 @@ payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOU
   - Each invoice-to-settlement lifecycle adds about 18 KB to Billing and 11 KB to Payment. Nothing is ever deleted by Billing or
     Payment.
   - At 100 k lifecycles: Billing 0.6 GB, Payment 0.4 GB, of which 32 % is published outbox rows that nothing reads again.
-  - Request-path and worker-claim queries stay under 0.3 ms at that size. Payment's expiry sweep is the one scan that grows with the
-    whole table (11 ms at 100 k, every 5 s): a 15.8 item.
+  - Request-path and worker-claim queries stay under 0.3 ms at that size. Payment's expiry sweep was the one scan that grew with the
+    whole table (11 ms at 100 k); since Stage 15.8 a partial index keeps it at about 0.04 ms.
 - **Retention.**
   - No duration is established anywhere except Payment's idempotency key expiry (24 h).
   - `core-validation.md` 13.7 lists, per table, its lifecycle class and the condition under which deleting a row is safe.
@@ -246,6 +249,23 @@ payment lock stalls every instance's expiry sweep for up to `DB_STATEMENT_TIMEOU
     the requests from one address.
   - Readiness opens one broker connection per probe (about 55 ms); O2 is still open.
 - Details: `core-validation.md` section 13.8.
+
+**Phase C closure (Stage 15.9).**
+- The final `main` (`aab849f`) was re-certified end to end:
+  - the canonical reliability matrix of Stages 15.2–15.8;
+  - the migration chain, clean and as an upgrade;
+  - the four production images (non-root, Node as PID 1, no validation tooling, natural exit under the 60 s grace);
+  - the full regression.
+- Invariants I1–I18 hold: authentication, security, authorization and commercial boundaries, tenant isolation, idempotency, durable
+  async work, outbox and consumer correctness, bounded database failures, worker concurrency, shutdown, recovery, the V1 commercial
+  lifecycle, Payment as settlement authority, failure truthfulness, and bounded resources.
+- Every remaining item is a policy or Stage 20 decision with an owner, a target and a risk: `core-validation.md` section 17.
+- **Still blocking production (Stage 20, not Phase C):**
+  - the backup job and a restore drill on the real volume;
+  - RPO / RTO and retention durations;
+  - branch protection (F2);
+  - the deployment items (restart policy, rolling deploy, the connection budget, `CONCURRENTLY` for large index builds).
+- Details: `core-validation.md` sections 13.9 and 17.
 
 **Signals and tools:** the log signals (`*_pass_failure`, `readiness_check_failed|recovered`, `outbox_publish_failure`,
 `rabbitmq_confirm_timeout`, `worker_drain_timeout`, `webhook_retry_exhausted`, `service_started`, `service_shutdown_*`) and the CLIs

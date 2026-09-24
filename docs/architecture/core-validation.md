@@ -289,6 +289,7 @@ campaign.
 | 15.6 | 2026-09-24 | `f6199dd` | Cross-service failures (20 campaigns: one service or dependency down while others run, combined failures, recovery orders, restart windows ≥ 20 iterations, event delay / replay / ordering, service authentication, tenant isolation, 10 repeated cycles, startup orders, readiness matrix, production containers) | **PASS**: no lost accepted work, no duplicate protected effect, no false success, no cross-tenant write, no manual repair; every order converges; containers exit naturally under the 60 s grace. No production change. Observations carried to 15.7 / 15.8 and one readiness decision (SRE) | section 13.6 |
 | 15.7 | 2026-09-24 | `7908ab9` | Data growth and log volume (5 campaigns: per-operation growth through the real APIs, cloned volume to 100 k lifecycles with the services' own queries under EXPLAIN, outbox accumulation during a broker outage (3 runs), DLQ residue lifecycle (3 runs), log volume in 11 scenarios, Auth / Organization probes, sensitive-log scan) | **PASS**: linear growth (Billing 18.4 KB, Payment 11.0 KB per lifecycle); request-path and claim queries flat to 100 k; exact outbox drain; DLQ residue resolved by replay with no second effect; no sensitive data in logs. No production change. Retention matrix (no duration invented), D1, O3–O5 classified, 15.8 handoff | section 13.7 |
 | 15.8 | 2026-09-24 | `c2a5108` + tuning | Capacity and runtime tuning (baseline profile 3 levels × 3 runs; pool 5/10/20; pool exhaustion; ExpirySweeper scan to 500 k; dispatcher batch and stale envelope; prefetch 1/5/10/20; outbox batch, pass and backoff; backlog recovery; multi-instance; readiness cost; affected 15.3–15.7 campaigns re-run) | **PASS**: 7 retained changes, each with before/after evidence, a mutation-proven test and its historical campaigns re-run: ExpirySweeper partial index (15 ms → 0.04 ms at 100 k) and SKIP LOCKED (0 → 999 expired in 3.5 s with one row held); AttemptResolver lease (N → 1 provider call per attempt); dispatcher claim renewal + startup relationship (9 → 0 duplicate sends); prefetch 10 → 5 (no pool starvation); outbox full-batch passes (backlog 111 s → 17 s) and backoff ceiling 60 → 15 s; duplicate `billing_transition` index dropped. Request-path latency and throughput unchanged; no invariant regression | section 13.8 |
+| 15.9 | 2026-09-24 | `aab849f` | Final validation and Phase C closure: canonical matrix re-run on the merged build (15.2 DB 12, 15.3 broker 15, 15.4 workers 17, 15.5 shutdown / production containers 18, 15.6 cross-service 18, 15.7 growth / DLQ / logs 4, 15.8 capacity 7 campaigns), migration chain (clean + upgrade from `c2a5108`), production images, full regression | **PASS**: invariants I1–I18 hold; no correctness defect; no production change; open items all owned (section 17) | sections 13.9, 17 |
 
 ### 13.1 Baseline (15.1)
 
@@ -2190,6 +2191,249 @@ receipt; 3 clean runs plus 1 run with a SIGKILL mid-drain):
 - the consolidation of every open decision (section 16);
 - Phase C closure.
 
+### 13.9 Final validation and Phase C closure (15.9)
+
+**Question.** Does the final integrated Core (`main` at `aab849f`, after every Stage 13–15.8 change) keep its guarantees strongly enough to
+close Phase C and serve as the foundation for Stage 16?
+
+**Method.**
+- **No tuning, no features.** Nothing was optimised or added.
+- **Configuration:** every campaign ran on the merged build with the Stage 15.8 defaults.
+- **Canonical subset:** each stage's campaigns that prove a final guarantee. Exploratory and diagnostic campaigns were not repeated.
+- **Streams:** five parallel streams, each on its own throwaway PostgreSQL / RabbitMQ containers. The 15.8 load profile ran alone
+  afterwards.
+- **Containers:** they ran the production images built from `aab849f`. Those images are byte-identical to the 15.8 build (same image
+  ids), tagged as the Docker campaigns expect.
+
+**Final invariant register** (evidence from this run unless stated):
+
+| # | Invariant | Evidence | Result |
+|---|---|---|---|
+| I1 | Authentication answers only "who are you"; no commercial dependency | no HTTP client and no Billing / Payment / entitlement reference in Auth's code; `requiresSubscription` is stored and returned by onboarding and never read for a decision (ADR-0044); Auth E2E (final regression) | PASS |
+| I2 | Security state (active / blocked identity, suspension, session ceiling) is separate from commercial state | Auth E2E (blocking, recovery, session ceiling, reuse detection); the Billing entitlement route refuses even a valid active user bearer (entitlement E2E) | PASS |
+| I3 | Authorization is not an entitlement check | role / capability guards (Auth grants, Organization `SERVICE_POLICY`, Billing / Payment service tokens) read no subscription state; `serviceAuth` campaign | PASS |
+| I4 | Billing owns commercial state; entitlement derives from the Subscription, never directly from a settlement | `deriveEntitlement` reads Subscription timestamps only; the Payment→Subscription integration suite (cases 1–15) applies settlements through Billing's receipt; `entitlementKind` is a compatibility field only (ADR-0045: no branch on it anywhere) | PASS |
+| I5 | Tenant isolation | `tenantIsolation`, `billingCompetingConsumers` (0 cross-tenant rows), entitlement / subscription tenant E2E cases, account checks in every live campaign (`crossTenant` 0) | PASS |
+| I6 | Idempotency: no duplicate protected effect on retry or replay | `paymentIdempotencyRaces`, `billingDuplicateDeliveryRace`, `duplicateDelivery`, `eventOrdering`, the Payment natural key in every dispatcher campaign, `dlqLifecycle` | PASS |
+| I7 | Durable async work survives broker, service, database, consumer and worker failure | `brokerDownBeforePublish`, `outageCycles`, `crashWindows`, `consumerWindows`, `backlogRestart`, `rabbitDown`, `billingDbDownWhileEventArrives`, `dbAndRabbitDown` | PASS |
+| I8 | Outbox: business transaction → row → publish → confirm → stamp | `confirmTimeout`, `lostConfirm`, `connectionCutDuringPublish`, `outboxDurabilityAcrossRestart`, `outboxShutdown`, relay kit tests (a row is never stamped without its confirm) | PASS |
+| I9 | A redelivered event has one effect | `duplicateDelivery`, `billingDuplicateDeliveryRace`, receipt-per-event checks everywhere, `dlqLifecycle` replay → `ignored` | PASS |
+| I10 | A silent or unavailable database bounds every wait; timed-out clients are destroyed | 15.2 canonical DB campaigns; startup refuses `DB_QUERY_TIMEOUT_MS ≤ DB_STATEMENT_TIMEOUT_MS` | PASS |
+| I11 | A connection with an ambiguous transaction is never reused | `midQueryDisconnect`, `serverFrozen`, `idleTransaction`, `connectionAccounting` (0 idle in transaction afterwards) | PASS |
+| I12 | Several instances never multiply protected work | `multiRelay`, `attemptResolverAmplification` (1 call per attempt for 1 / 2 / 4 instances), `expirySweeperRaces`, `billingMultiInstanceDispatch`, `billingDispatcherStaleRace`, `webhookRetrierRaces`, `billingCompetingConsumers`, `paymentLiveTwoInstances` | PASS |
+| I13 | Shutdown: `/ready` false at once, new work refused, workers drained, resources closed, natural exit | `httpInFlight`, `keepAlive`, `consumerWindows`, `outboxShutdown`, `dispatcherShutdown`, `sweeperShutdown`, `frozenPostgres`, `frozenRabbit`, and the production-container campaigns (Node = PID 1, 60 s grace) | PASS |
+| I14 | Recovery with no manual repair | `recoveryOrders`, `serviceAndDependencyDown`, `multiServiceRestart`, `startupOrder`, `repeatedCycles`, `restartCycles`, `backlogRestart`, DB `runtimeOutage` | PASS |
+| I15 | Commercial lifecycle V1 (pending / active / grace / expired; UTC half-open periods; early renewal from max(now, end); late renewal from the settlement instant; cancel-at-period-end keeps access; termination may shorten it) | Billing E2E: subscriptions 1–16, hardening A–K, Payment→Subscription 1–15, entitlement 1–10 | PASS |
+| I16 | Payment is settlement authority only | Payment's code has no subscription or entitlement concept; it emits `payment.*` facts, Billing decides (receipts, conflict on mismatch) | PASS |
+| I17 | No false success | cancel contract (`cancellationContract`, `paymentDownBillingUp`: `503 payment_unavailable`, never 200 unconfirmed); dispatcher `transient` keeps `sending`; readiness truthful | PASS |
+| I18 | Bounded resources | the resource snapshots of every campaign (sessions, idle in transaction, broker connections / channels / consumers, RSS); log volume per outage bounded (`logVolume`); retry budgets and backoff ceilings | PASS |
+
+**Canonical validation matrix** (the reusable certification suite; re-run on this build):
+
+| Campaign(s) | Stage | Invariants | Result on the final build |
+|---|---|---|---|
+| `control`, `poolSaturation`, `connectionAccounting` | 15.2 | I10, I18 | pool waits bounded; sessions = pool total (4 × 10 = 40 at the burst), back to the idle baseline; 0 idle in transaction — PASS |
+| `statementTimeout`, `idleTransaction`, `midQueryDisconnect` | 15.2 | I10, I11 | statement cancelled at its bound, 0 partial commits; a lost connection mid-query / mid-transaction: 20 + 20 runs, 0 partial rows, the pool usable, no crash — PASS |
+| `connectionStall`, `serverFrozen` (database container paused) | 15.2 | I10 | new connection fails at 5.0 s (`db_connect_timeout`); an established query ends at 35.0 s (`db_query_timeout`); `/ready` 503 within one probe (2.0 s), `/health` 200; ready 56 ms after the database returns — PASS |
+| `runtimeOutage`, `authOutage`, `relayConnectionHold` | 15.2 | I10, I14, I18 | 5 outage cycles each for Billing and Auth: no crash, recovery without restart, 0 credential lines in logs — PASS |
+| `frozenShutdown` | 15.2 | I13 | SIGTERM with the database frozen: exit 33.4 s, within the 60 s grace — PASS |
+| `brokerDownBeforePublish`, `outageCycles`, `brokerRestartPersistence` | 15.3 | I7, I8 | 0 lost, 0 duplicate effects; backlog converges after every cycle — PASS |
+| `confirmTimeout`, `lostConfirm`, `connectionCutDuringPublish`, `brokerFreeze`, `outboxDurabilityAcrossRestart` | 15.3 | I8, I10 | a publish fails at the confirm bound (5.0 s) and the row stays pending; never stamped without a confirm; 0 lost / 0 duplicate — PASS |
+| `consumerFailures`, `duplicateDelivery`, `crashWindows`, `prefetch` | 15.3 | I7, I9 | transient → retried then applied once; poison / permanent → DLQ (the only 2 "not applied", by design); consumer killed in each window 20×: redelivered, one effect; 5 unacknowledged at most (prefetch 5) — PASS |
+| `multiRelay`, `outboxBackoff`, `appFlow` | 15.3 | I8, I12 | several relays: 0 duplicate / lost; backoff ceiling 15 s; the live flow's accounting exact — PASS |
+| `multiRelay`, `relayCrashHoldingLocks`, `outboxRetryRace` | 15.4 | I8, I12 | 0 duplicate / lost; a crashed relay's rows reclaimed; no double publish of a held row — PASS |
+| `attemptResolverRaces`, `attemptResolverAmplification`, `paymentLiveTwoInstances` | 15.4 | I6, I12 | every race pair: at most one success event, never two terminal events; provider calls per attempt 1 / 1 / 1 for 1 / 2 / 4 resolvers — PASS |
+| `webhookRetrierRaces`, `expirySweeperRaces`, `paymentIdempotencyRaces` | 15.4 | I6, I12 | one reprocess of a row at a time; 3 sweepers: 200/200 expired once; one row locked: 29/30 expired, 0 sessions waiting; 0 expirations with an open attempt; one row and one result per idempotency key (20 iterations) — PASS |
+| `billingMultiInstanceDispatch`, `billingDispatcherStaleRace`, `billingDispatcherCrashWindows` | 15.4 | I6, I12 | at most 1 concurrent create per request; stale race: 1 create per request, 0 stale recoveries; crash windows C / D: every request requested with one matching payment — PASS |
+| `billingCompetingConsumers`, `billingDuplicateDeliveryRace`, `billingDualPathSettlement`, `billingSameOrganizationSubscription`, `billingRestartUnderCompetition` | 15.4 | I5, I6, I9 | 0 cross-tenant rows, 0 deadlocks, one receipt per event, dual path (event + reconciler) applied once — PASS |
+| `idleBaseline`, `httpInFlight`, `keepAlive` | 15.5 | I13, I17 | readiness drops at once, in-flight request completes, new requests refused, keep-alive clients cannot extend the drain — PASS |
+| `consumerWindows`, `outboxShutdown`, `dispatcherShutdown`, `sweeperShutdown`, `paymentWorkerWindows` | 15.5 | I7, I13, I14 | every window 20×: exited, 0 partial states, 0 idle in transaction after death, converged; a SIGKILLed resolver's attempt settled by the survivor after 5.14 s [5.05–5.23] (one lease), one event — PASS |
+| `frozenPostgres`, `frozenRabbit`, `restartCycles`, `backlogRestart`, `cancellationContract` | 15.5 | I7, I13, I14, I17 | 0 not exited; 20 graceful / forced cycles under traffic: one payment per request, 0 idle in transaction at the end; backlog restart settled; cancel answers success only when confirmed — PASS |
+| `dockerStopWithGrace`, `dockerFrozenBrokerFinal`, `dockerConsumerInFlightFrozen`, `dockerBrokerVanishes`, `dockerCrossServiceOutage` (production images, Node = PID 1, 60 s grace) | 15.5 | I13 | every stop exit 0, no SIGKILL: idle 0.29–0.32 s; frozen broker 27.1–28.7 s; consumer in flight with the broker frozen 39.8 s (the worst case); broker vanishes 2.7 s; cross-service outage converged — PASS |
+| `smoke`, `paymentDownBillingUp`, `billingDownPaymentUp`, `paymentRestartDuringBillingRequest`, `billingRestartDuringPaymentEvent` | 15.6 | I7, I14, I17 | one payment, one applied receipt, one terminal event per request; 0 id mismatches — PASS |
+| `rabbitDown`, `perServiceDbDown`, `billingDbDownWhileEventArrives`, `dbAndRabbitDown`, `serviceAndDependencyDown` | 15.6 | I7, I14 | converged in every order; 0 cross-tenant; one idle-in-transaction sample right after convergence re-examined: 0 in 213 samples over the next 15 s (3 re-runs) — a transaction caught between statements — PASS |
+| `multiServiceRestart`, `recoveryOrders`, `eventOrdering`, `repeatedCycles`, `startupOrder`, `readinessMatrix` | 15.6 | I7, I9, I14 | every recovery order converges with no manual repair; out-of-order / replayed events one effect — PASS |
+| `serviceAuth` | 15.6 | I3, I5 | missing / invalid / malformed / user-shaped / other-service tokens: 401 on every protected route, 0 protected writes; Auth unavailable → payer routes 503, service routes work; 0 token leaks in logs — PASS |
+| `tenantIsolation` | 15.6 | I5 | two organizations: 0 organization mismatches, 0 receipts pointing elsewhere, 0 cross-tenant — PASS |
+| `growth` (to 100 k lifecycles) | 15.7 | I18 | request-path and claim queries ≤ 0.11 ms (index scans), ExpirySweeper 0.03 ms; services ready at size in 1.4 s; a new lifecycle completes — PASS |
+| `dlqLifecycle` | 15.7 | I6, I9 | 3/3: DLQ 1 → replay `consumed` → receipt `ignored` → DLQ 0, one applied effect, a second replay `not_found` — PASS |
+| `logVolume`, `edgeProbes`, sensitive scan | 15.7 | I18 | per-outage lines bounded and equal to 15.8; recovery lines present; 1 213 lines scanned, no secret; Auth health probes still 429 at 6/s (documented, open) — PASS |
+| `poolExhaustion` | 15.8 | I10, I18 | every pool client blocked 15 s, 100 reads: 90 answer 500 at 5.01–5.12 s (`DB_CONNECTION_TIMEOUT_MS`), 10 finish at release; 0 idle in transaction; next read 200 — PASS |
+| `dispatcherStale` (2 Billing instances, batch 20 × 1 s vs a 10 s window, Payment hung then back) | 15.8 | I6, I12 | 3/3 runs: 0 duplicate calls in flight, one call per request after recovery, 20 payments — PASS |
+| `backlogRecovery` | 15.8 | I12, I14 | 1 000 expired payments with one held: 999 expired in 3.5 s, the held one 4.8 s after release, 1 000 distinct `payment.expired` events; 300 outbox events after a 60 s broker outage: zero in 13.6 s, one applied receipt each; a new request behind a 200-request backlog sent after 11.5 s (FIFO, no starvation) — PASS |
+| `prefetch` (the built default) | 15.8 | I9, I18 | 581–594 events/s, 6–7 Billing sessions (of 10), Billing read p50 3.9–4.2 ms during the drain; SIGKILL mid-drain: 300 paid, one effect each — PASS |
+| `multiInstance` (1 / 2 / 4 Billing) | 15.8 | I12, I18 | 2 138 / 2 623 / 2 759 rps, 0 errors; sessions exactly 10 / 20 / 40 (= n × pool, ≤ 100) — PASS |
+| `readinessCost`, `baselineLoad` | 15.8 | I18 | see the load smoke below — PASS |
+
+**Service-specific certifications.**
+- **Database (15.2):**
+  - refused, stalled and frozen databases, statement and idle-in-transaction timeouts, a mid-query disconnect, pool saturation and
+    exhaustion, and a frozen-database shutdown are all bounded;
+  - a timed-out client is destroyed, never reused;
+  - recovery needs no restart;
+  - startup still refuses `DB_QUERY_TIMEOUT_MS ≤ DB_STATEMENT_TIMEOUT_MS` (kit config tests).
+- **RabbitMQ (15.3):**
+  - stopped, frozen, severed and restarted brokers, lost confirms and cut connections: no lost durable work, no duplicate effect;
+  - the consumer comes back by itself;
+  - `RABBITMQ_HEARTBEAT_S` 0 is still refused: the bounds are 5–60 (config tests);
+  - containers exit naturally with the broker frozen (27–29 s) or gone (2.7 s).
+- **Outbox (15.3 / 15.8):**
+  - a row is stamped only after its confirm, and a restart mid-publish republishes it (at least once, absorbed downstream);
+  - a large backlog converges, with full batches back to back;
+  - the backoff ceiling is 15 s;
+  - HTTP stays responsive during the drains.
+- **Billing dispatcher:**
+  - claim renewal holds with 2 instances, large batches and a slow or hung Payment: 0 in-flight duplicates, 1 create per request in the
+    15.4 stale race;
+  - startup enforces `BILLING_DISPATCH_STALE_SENDING_MS ≥ 2 × PAYMENT_TIMEOUT_MS` (Billing config tests).
+- **AttemptResolver:**
+  - 1 provider call per open attempt with 1, 2 and 4 resolvers;
+  - a SIGKILLed lease holder's attempt is settled by the survivor after one lease: 5.14 s [5.05–5.23], 20/20, one event, no manual
+    step.
+- **ExpirySweeper:**
+  - index scan at 100 k payments: 0.03 ms;
+  - with one expired payment held and 999 others: the 999 expire in 3.5 s; the held one stays `created` while held and expires once
+    after release;
+  - 3 concurrent sweepers: 200/200 expired once;
+  - no expiry while an attempt is open (20/20 boundary races).
+- **Worker concurrency:**
+  - relays, dispatcher, resolver, sweeper, webhook retrier and competing consumers, at 2–4 instances: no duplicate effect, no
+    amplification, no stranded work, 0 deadlocks;
+  - FIFO fairness;
+  - recovery after an instance's death: SIGKILL windows in 15.4 / 15.5.
+- **Service authentication and tenant isolation:** see the matrix (`serviceAuth`, `tenantIsolation`). Plus the Billing entitlement and
+  subscription E2E tenant cases and `billingCompetingConsumers` (0 cross-tenant rows).
+- **Commercial lifecycle and effective access** (Billing E2E, run in the final regression):
+  - entitlement cases 1–10: none / pending / active / exact end (exclusive) / grace / elapsed grace / termination /
+    cancel-at-period-end / status independence;
+  - `GET /billing/organizations/{id}/entitlement`: service token only (a valid active user bearer is refused), organization-scoped,
+    answers exactly `{valid, expiresAt}`, read-only;
+  - subscriptions 1–16: first activation, early / exact-boundary / late / grace renewal anchors, cancellation and reversal, termination,
+    concurrency;
+  - hardening A–K (races, cross-tenant);
+  - Payment → Subscription 1–15: initial activation from a settlement, renewal, duplicate / concurrent delivery, mismatches → no effect,
+    failure events never activate, atomicity, the reconciliation path converging on the same anchor;
+  - Payment grants nothing: it emits `payment.*` facts, and only Billing's receipt path changes commercial state.
+
+**Migration chain.**
+- Clean chain on an empty database for each service:
+  - Auth 9 files, Organization 5, Billing 14, Payment 8, plus the kit's 3 where used;
+  - no duplicate number, no gap, applied in order;
+  - the final objects are present: `payment_expiry_open_idx`, `payment_attempt."resolveAfter"`, and `billing_transition` with only its
+    primary key and unique index.
+- Upgrade from the pre-15.8 schema (the migration folders at `c2a5108`):
+  - `main` applies exactly Billing `0014_drop_duplicate_transition_index` and Payment `0007_payment_expiry_open_index` and
+    `0008_attempt_resolver_lease`;
+  - the older files' checksums still match;
+  - a rerun applies nothing.
+  - Organization has no change.
+- Billing's and Payment's migration E2E suites pin the exact files.
+
+**Migration deployment risks (Stage 20).**
+- Payment `0007` builds its index inside the runner's transaction (a `SHARE` lock: writes to `payment` wait while it builds). On a large
+  production table, build it `CONCURRENTLY` outside the runner, or use an equivalent safe strategy.
+- Payment `0008` must be applied before the Payment version whose resolver writes `resolveAfter`. Older code runs fine on the new
+  schema.
+- Billing `0014` is a brief `DROP INDEX` lock.
+
+**Production images.**
+- The four images were rebuilt from `aab849f`.
+- Each one:
+  - runs as uid 1000 on Node 22.23;
+  - is `docker-entrypoint.sh` → `node dist/main.js`, and Node is PID 1 (checked in a running container);
+  - answers `/health` 200 (stable) and `/ready` truthfully (503 without dependencies).
+- Their content: `apps`, `libs`, the production `node_modules` and package manifests only. No validation script, harness, spec, vitest,
+  typescript or supertest is present; the only matches are third-party packages' own internal files.
+
+**Final load smoke** (the 15.8 profile, 3 × 60 s per level after a 10 s warm-up; the same build as the 15.8 final):
+
+| Level | 15.8 final | 15.9 | Errors | CPU Billing / Payment | RSS max (MB) Billing / Payment / Auth / Organization | DB sessions |
+|---|---|---|---|---|---|---|
+| light | 2 031 rps, p50 1.38, p95 7.0, p99 8.5 ms | 1 879 [1 580–2 094] rps, p50 1.44, p95 7.4, p99 10.0 ms | 0 | 55 / 24 % | 272 / 304 / 363 / 253 | 17 |
+| moderate | 2 803 rps, p99 29.5 ms | 2 861 [2 742–3 128] rps, p50 3.09, p95 19.7, p99 29.8 ms | 0 | 81 / 38 % | 292 / 255 / 404 / 189 | 34 |
+| pressure | 2 909 rps, p99 133 ms | 2 810 [2 788–2 819] rps, p50 8.94, p95 71.4, p99 139.9 ms | 0 | 82 / 38 % | 304 / 255 / 415 / 240 | 39 |
+
+- **No meaningful regression.** The code is byte-identical to the 15.8 final build. The light-level spread (1 580–2 094 rps) is machine
+  variance: desktop applications used about 40 % of a core during this run.
+- **After the load:** broker connections 2 / channels 3 / unacknowledged 0; 0 idle in transaction; Billing and Payment ready.
+- **`/ready`:** 54–56 ms (one AMQP connection per probe), against 1.6–2.5 ms for `/health`, as in 15.8.
+- **Harness observation:** one repeat of the light level failed while seeding (the invoice create answered 404, before any measurement).
+  - It did not reproduce: 600 product → price → invoice → issue sequences across 4 fresh stacks gave 0 failures, and the next run
+    passed.
+  - The likely cause is the harness itself: `freePort()` releases a port that a proxy bound to port 0 may receive before the service
+    listens. Not proven.
+  - OBSERVATION (test harness), not a Core defect.
+
+**Connection budget.**
+- Σ (`DB_POOL_MAX` × processes) + one migration runner per service being deployed + operator / CLI sessions + 3 reserved ≤
+  `max_connections` (100 by default).
+- With the defaults (pool 10, 4 services), one process per service = 40 + reserve; two = 80 + reserve.
+- No replica count is fixed until Stage 20.
+- Observed: under load every process reaches exactly its pool (1 / 2 / 4 Billing instances = 10 / 20 / 40 sessions; four services = 40 at the burst in `connectionAccounting`), never more; idle 1–2 per process. Both PostgreSQL clusters here: `max_connections` 100, 3 reserved.
+
+**Logging and sensitive data.** - The 15.7 log campaign on this build gives the same lines per minute as 15.8 in every scenario (healthy 0 per probe; both databases
+  refused 269 / 105; broker stopped 17 / 2; Payment 503 or refused 438; consumer retry storm 647, bounded by the retry budget).
+- Every fault and every recovery has a named line; per-item lines carry `correlationId`.
+- **Sensitive-data scan:**
+  - 1 213 lines from the growth / log campaigns: no bearer token, password, secret, authorization header, URL credential, cookie or
+    live service credential;
+  - 0 non-JSON lines;
+  - `serviceAuth`: 0 token leaks in the logs of all services;
+  - the database outage cycles: 0 credential lines;
+  - raw webhook bodies are never logged (15.7 review).
+
+**Resource stability.** - Every campaign snapshots its resources after recovery: database sessions (back to the idle baseline, 1–2 per process), 0 idle in
+  transaction, broker connections / channels (2 / 3), 1 consumer per consumer instance, outboxes drained, no process left.
+- A handful of samples taken mid-traffic show 1–3 sessions idle in a transaction, the same pattern as every earlier run:
+  - `restartCycles` cycles, 0 at the end;
+  - one `dbAndRabbitDown` sample, re-examined: 0 in 213 samples over 15 s.
+  These are live transactions between statements, never a leak.
+- RSS: idle 148–188 MB, under load up to 304 (Billing) / 255 (Payment) / 415 (Auth) / 253 (Organization) MB, with no run-to-run growth.
+- CPU at idle 0.1–2.6 %.
+
+**DLQ and reconciliation (operational decision, recorded).**
+- A message dead-lettered during a long Billing database outage stays in `billing.payment-events.dead` after the reconciler has
+  settled the request from Payment.
+- The runbook is: `nawara-dlq list` → confirm the request's state → `nawara-dlq replay`. The replay is acknowledged as
+  `ignored / already_applied`, with one more receipt and no second effect.
+- **No automatic or unseen purge:** a purged message could be one whose effect was never reconciled.
+- This run (`dlqLifecycle`, 3/3): DLQ 1 → replay `consumed` → DLQ 0; receipts `applied` + `ignored`, 1 applied effect; a second replay `not_found`.
+
+**Documentation consolidation.**
+- `production-readiness.md`:
+  - the Stage 15.4 multi-instance paragraph and the 15.7 growth note, which described behaviour since fixed, are marked superseded by
+    15.8 and now state the current behaviour;
+  - the runtime-limits table gains the 15.8 knobs (stale relationship, prefetch, relay pass / backoff, resolver lease);
+  - a Phase C closure section is added.
+- `core-validation.md`: section 17 is the consolidated, current register of open decisions and deferred items; section 16 stays as
+  the historical Stage 15 log.
+- The SDDs and READMEs were updated with each stage (the last in 15.8) and describe the implementation as merged.
+
+**ADR consistency.**
+- ADR-0044 (one organization-scoped Subscription; Billing is the commercial authority; Payment is settlement-only; `requiresSubscription`
+  is a non-authoritative hint) matches the code.
+- ADR-0045 (`entitlementKind`: validated on product create, part of the product's replay identity, copied into invoice lines and the
+  `invoice.created` payload, never read for a decision) matches the code.
+- ADR-0028's open question 4 (should `requiresSubscription` come from Payment) is answered by ADR-0044.
+- ADRs 0035, 0038, 0044 and 0045 are still marked *Proposed* although 0044 and 0045 record decisions already implemented and merged.
+  Accepting them is the project owner's decision (register below). No contradiction between an ADR and the implementation was found.
+
+**Commercial V2 boundary.**
+- None of these concepts exists in Core: organization seats, user entitlement, payer ≠ beneficiary, sponsorship, prepaid grants,
+  commercial redemption, capability grants, transfers / revocations, quantity pricing changes, or a V2 lifecycle.
+- A code and migration scan finds only Auth's join-code and operator-code "redeem" (security flows).
+
+**Phase D readiness (Stage 16, Notification).** The foundation Stage 16 needs exists and is certified:
+- the service-kit (configuration, logging, request / correlation ids, errors, health / readiness, service tokens, database with bounded
+  timeouts and migrations, outbox / inbox, RabbitMQ bus with confirms, retries, DLQ and tools, `PollLoop` workers with bounded drains,
+  HTTP drain);
+- service authentication; tenant context (organization scope from Auth / Organization);
+- the idempotency patterns (natural key, `Idempotency-Key`, receipts / inbox);
+- shutdown / restart; the production image pattern (non-root, Node PID 1, 60 s grace);
+- the validation suite below.
+
+No mandatory blocker. The open items are policy or Stage 20 decisions that do not block building a service.
+
 ## 14. Experiment report template
 
 ```text
@@ -2219,6 +2463,8 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 
 ## 16. Open decisions carried by Stage 15
 
+*Historical Stage 15 log. The current, consolidated register at the close of Phase C is section 17.*
+
 | Decision | Needed by | Owner |
 |---|---|---|
 | F2: required checks / branch protection on `main` (an experimental change could merge without CI) | before 15.2 changes land | repository admin |
@@ -2244,3 +2490,75 @@ container CPU/memory limits (none are set today). Stage 15 separates **correctne
 | Traffic assumptions for capacity targets (15.8 measured only relative behaviour on one laptop; replicas per service are not established) | before capacity planning | product |
 | 15.8: build `payment_expiry_open_idx` (Payment 0007) `CONCURRENTLY` outside the migration transaction when `payment` is large in production | Stage 20 | engineering / SRE |
 | 15.8: connection budget per deployment (Σ pools × processes + migrations + operators + 3 ≤ `max_connections`; with defaults ≤ 2 processes per service on a default PostgreSQL) | Stage 20 | SRE |
+
+## 17. Phase C closure: consolidated registers (Stage 15.9)
+
+This section is the **current** register at the close of Phase C.
+- Section 16 stays as the historical Stage 15 log: its struck-through rows are resolved.
+- Every open row here has an owner, a target and the risk of ignoring it.
+- None is a correctness defect of the current implementation: the current behaviour is safe and documented in each case.
+
+### 17.1 Retention register (from 15.7; no duration invented)
+
+| Data | Status | Safe-deletion condition (when a duration exists) | Owner |
+|---|---|---|---|
+| Published outbox rows | TECHNICALLY SAFE BUT POLICY OPEN | `publishedAt` set and older than the replay / forensics horizon (the relay reads unpublished rows only) | SRE |
+| Unpublished outbox rows | DECIDED: never deleted | – | – |
+| Kit `inbox` | DECIDED: not used by any consumer today; a horizon is needed only when one adopts it | after the broker can no longer redeliver that id | SRE |
+| `payment_event_receipt`, `billing_transition` (commercial evidence) | LEGAL DECISION | a legal retention period, then archival; append-only today | legal |
+| Invoices, payment requests, payments, attempts, subscriptions | LEGAL DECISION (B-032, O-17) | never by a technical job | legal / product |
+| Payment `idempotency_key` | TECHNICALLY SAFE BUT POLICY OPEN (D1) | `expiresAt < now()` (24 h configured). Today `expiresAt` is written, never read: an old key replays (stricter than the SDD, safe) | engineering |
+| Organization `idempotency_key` | PRODUCT DECISION | no expiry column and no retry horizon yet | product / API |
+| `kit_rate_limit`, `auth_throttle` | TECHNICALLY SAFE BUT POLICY OPEN | window older than the bucket's longest window (such a row behaves like an absent one) | engineering |
+| `refresh_token` | SECURITY DECISION | the family is dead: rotated tokens are the reuse detector | security |
+| `webhook_event` rows and `rawBody` | PRODUCT / SECURITY / LEGAL DECISION (O-17) | terminal state and past the dispute period; `rawBody` is immutable and may carry payer personal data | product / security / legal |
+| Auth / Organization audit trails | FUTURE AUDIT (audit-service) + LEGAL | after the audit retention period | security / legal |
+| DLQ messages | DECIDED (runbook) | after inspection and replay; never purged unseen | SRE |
+
+### 17.2 Open decisions and deferred items
+
+| Item | Class | Why deferred | Owner | Target | Risk if ignored |
+|---|---|---|---|---|---|
+| F2: required CI checks / branch protection on `main` | SRE DECISION (repository setting) | outside the code | repository admin | before Phase D merges | a change can merge without CI |
+| Backup job, off-host copy, restore drill on the real volume, RPO / RTO | STAGE 20 (a production blocker, not a Phase C one) | needs production infrastructure and a policy | SRE / product | Stage 20 | data loss without a tested restore |
+| F12 retention durations (17.1) | PRODUCT / LEGAL / SECURITY / SRE | no duration is established | the owners in 17.1 | before production data accumulates | unbounded growth (about 30 KB per lifecycle; 32 % is published outbox) |
+| O2: should Billing / Payment `/ready` include RabbitMQ? | SRE DECISION | orchestration policy; `/ready` costs one AMQP connection per probe (55 ms) | SRE | Stage 20 | a broker outage takes both services out of routing although HTTP works |
+| Auth health probes share the global throttle (429 on probes, not logged); raising the limit costs quadratic CPU | SRE / SECURITY DECISION | exemption vs forwarded-address key vs shared storage | SRE / security | before routing Auth behind a gateway | healthchecks fail under ordinary traffic from one address |
+| O3: a database-unavailable request is an opaque 500; the filter logs a message, not facts | FOLLOW-UP (a: engineering) / API DECISION (b: 503 mapping) | (b) changes the contract of all services | engineering / API | Stage 16 or later | alerting cannot tell a database outage from a bug |
+| Log taxonomy gaps (broker readiness `error=Error`, closed pool, idle-in-transaction as `db_connection_lost`) | FOLLOW-UP | observability only | engineering | any later stage | weaker classification in logs |
+| D1: honour Payment's documented idempotency expiry | FOLLOW-UP | changes what a client sees on a retry after 24 h | engineering | before the first cleanup job | none today (stricter than documented) |
+| Organization idempotency expiry model | PRODUCT DECISION | no retry horizon defined | product / API | before retention work | key table grows without bound |
+| O1: 60 s stale-resend window | SRE DECISION | since 15.8 only a recovery-time vs retry-pressure trade-off | SRE | Stage 20 | up to 60 s before a request is re-sent after a transient Payment failure |
+| Acceptable outage log volume and alerting thresholds | SRE DECISION | per-item retry lines grow with the backlog | SRE | Stage 20 | noisy logs during long outages |
+| Payment `0007` index built without `CONCURRENTLY` | STAGE 20 | release mechanics | engineering / SRE | Stage 20 | writes to `payment` wait during the build on a large table |
+| Migrate before deploying (Payment `0008` before the lease code) | STAGE 20 | release ordering | SRE | Stage 20 | the new resolver would fail its claim on an old schema |
+| Connection budget per deployment (Σ pools × processes + reserve ≤ `max_connections`) | STAGE 20 | replicas not established | SRE | Stage 20 | pool exhaustion at the database |
+| Restart policy (Billing exits at startup without RabbitMQ), rolling deploy (Auth stops before start), init process (tini) | STAGE 20 | deployment design | SRE | Stage 20 | an outage per deploy; Billing down until restarted |
+| O7: Auth deploy writes `PAYMENT_SERVICE_URL`, which Auth never reads | FOLLOW-UP (hygiene; verified still present in `apps/auth-service/deploy/provision-and-deploy.sh`) | harmless | engineering | Stage 20 | confusion only |
+| SDD endpoint 15: cancel answers `200` in code, `202` in the SDD | FOLLOW-UP (documentation) | doc review | engineering | Billing doc review | reader confusion |
+| Organization service authority activation (built, not authoritative; gated operation never performed) | PRODUCT DECISION | a deliberate, explicit activation | project owner | before Organization is the source of truth | Auth stays the owner of Company / Platform / Organization |
+| ADR-0035, 0038, 0044 and 0045 still *Proposed* though 0044 / 0045 record merged decisions | PRODUCT DECISION (governance) | acceptance is the owner's act | project owner | before Phase D | ambiguity about which decisions are binding |
+| F14: Auth events have no transactional outbox (fire-and-forget by design) | OBSERVATION (decided) | Auth publishes nothing that another service must act on | – | – | a lost Auth event (none is relied on) |
+| Traffic assumptions and production capacity | PRODUCT DECISION | 15.8 measured relative behaviour on one laptop only | product | before capacity planning | wrong sizing |
+| Commercial V2 (seats, user entitlement, payer ≠ beneficiary, sponsorship, prepaid grants, capability grants, transfers) | FUTURE CAPABILITY | out of Core V1 by design | product | after Core V1 | – |
+
+### 17.3 Reusable reliability certification (for every future Core service)
+
+A new service (Notification, File, Audit, Security / Admin) is certified by running, against its own throwaway containers and its
+production image, the applicable rows of the canonical matrix (section 13.9) with the same pass criteria:
+
+| Area | Proven with (existing harness to copy or extend) | Pass criterion |
+|---|---|---|
+| Database failure | `db-campaigns.mjs`: refused, silent / frozen, statement timeout, idle transaction, mid-query disconnect, pool saturation, frozen shutdown | every wait bounded; timed-out clients destroyed; 0 idle in transaction; recovery without restart |
+| Broker failure (if it publishes or consumes) | `broker-campaigns.mjs`: broker down / frozen, lost confirm, connection cut, crash windows, outage cycles | no loss, no duplicate effect, bounded teardown |
+| Outbox durability | `broker-campaigns.mjs` + kit relay tests | a row is stamped only after its confirm; backlog converges |
+| Consumer idempotency | `duplicateDelivery`, `billingDuplicateDeliveryRace` pattern | one effect per event id under redelivery and concurrency |
+| Worker concurrency | `worker-campaigns.mjs` race pattern (≥ 20 iterations, 2–4 instances) | no duplicate effect, no amplification, no stranded work |
+| Shutdown / restart | `shutdown-campaigns.mjs`: in-flight HTTP, keep-alive, worker windows, frozen dependencies, production container with Node = PID 1 and a 60 s grace | `/ready` 503 at once; natural exit; no SIGKILL; recoverable work |
+| Cross-service failure | `cross-service-campaigns.mjs` / `lib/core-stack.mjs` | truthful bounded answers; convergence in any recovery order |
+| Service authentication | `serviceAuth` pattern | missing / invalid / malformed / wrong identity → 401 / 403, 0 protected writes |
+| Tenant isolation | `tenantIsolation` pattern (≥ 2 organizations) | 0 cross-tenant mutations |
+| Growth and logs | `growth-campaigns.mjs` (queries at volume, log volume, sensitive scan) | flat request-path queries; bounded logs; no secret in logs |
+| Capacity smoke | `capacity-campaigns.mjs` baseline profile | no unexplained regression; sessions ≤ pool total |
+| Resource cleanup | every harness's resource snapshots and teardown | sessions, broker connections / consumers and processes back to steady state |
+| Production image | `scripts/smoke-core-image.sh` + an image content check | non-root, Node PID 1, health / ready, no validation tooling |
