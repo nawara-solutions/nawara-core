@@ -28,9 +28,10 @@ class ShutdownProbe implements BeforeApplicationShutdown {
 describe('Auth shutdown order (Stage 15.5, F-C)', () => {
   it('the database pool is still usable while shutdown drains, and closed once it has completed', async () => {
     const t = await createTestApp({}, { providers: [ShutdownProbe] });
-    db = t.app.get(DbService);
+    const pool = t.app.get(DbService);
+    db = pool; // for the probe, which runs during shutdown
     await t.close();
     expect(seen).toEqual(['ok']);
-    await expect(db.query('SELECT 1')).rejects.toThrow(); // closed by onApplicationShutdown
+    await expect(pool.query('SELECT 1')).rejects.toThrow(); // closed by onApplicationShutdown
   });
 });
