@@ -4,6 +4,7 @@ import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir } from '@na
 import type { FileConfig } from './config/file-config.js';
 import { FILE_CONFIG } from './config/file-config.token.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
+import { StorageModule } from './storage/storage.module.js';
 
 /** The service's own migrations (Stage 17.3: the `file` and `file_access_ticket` schema), applied by the explicit `npm run migrate` step and never at startup. */
 export const fileMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -27,8 +28,9 @@ class ConfigModule {
  *
  * Stage 17.2 (the foundation): the kit's health / readiness / bounded HTTP drain, the kit database (bounded pool and deadlines;
  * readiness `database` + `migrations`; the pool closes last) and service authentication, plus the validated configuration (with the
- * caller policy). Stage 17.3 adds the persistence layer (the `file` and `file_access_ticket` repositories): still no storage and no
- * route besides health and readiness; the byte and ticket routes are 17.5 / 17.6.
+ * caller policy). Stage 17.3 adds the persistence layer (the `file` and `file_access_ticket` repositories); Stage 17.4 the object
+ * store (`STORAGE_PORT`: the configured filesystem or S3-compatible adapter, never a readiness check). Still no route besides health
+ * and readiness; the byte and ticket routes are 17.5 / 17.6.
  *
  * Deliberately NOT here (ADR-0048): object storage is not a readiness dependency; there is no RabbitMQ (events come with Stage 18 /
  * 17.9 through the kit outbox) and no call to Auth or to any product service, for any purpose.
@@ -53,6 +55,7 @@ export class AppModule {
         ServiceAuthModule.forRoot(config.serviceTokens),
         ConfigModule.forRoot(config),
         PersistenceModule,
+        StorageModule.forRoot(config.storage),
       ],
     };
   }

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { fileMigrationsDir } from '../src/app.module.js';
+import { STORAGE_PORT, type StoragePort } from '../src/storage/storage.port.js';
 import { createTestApp } from './support/app.js';
 import { sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
@@ -73,6 +74,27 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
     const left = await sql<{ n: number }>(env.TEST_DATABASE_ADMIN_URL, `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND application_name = 'file-service'`, [name()]);
     expect(left[0].n).toBe(0);
     expect(t.logs.map((l) => String(l.msg)).some((m) => m.startsWith('service_shutdown_complete'))).toBe(true);
+  });
+
+  it('Stage 17.4: object storage is NOT readiness — with the store unreachable, /ready is 200 and /health 200 (ADR-0048 §8)', async () => {
+    const t = await createTestApp({
+      databaseUrl: db.url,
+      env: { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'http://127.0.0.1:1', FILE_S3_REGION: 'us-east-1', FILE_S3_BUCKET: 'unreachable-bucket',
+        FILE_S3_ACCESS_KEY_ID: 'AKIDREADY', FILE_S3_SECRET_ACCESS_KEY: 'ready-secret-not-real-000' },
+    });
+    try {
+      await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
+      await request(t.app.getHttpServer()).get('/health').expect(200);
+      const storage = t.app.get<StoragePort>(STORAGE_PORT);
+      expect(storage.provider).toBe('s3');
+      const e = await storage.head('files/2b1f1c2e-6d7a-4a39-9c43-2c8f1f7d9a10/0123456789abcdef0123456789abcdef', { signal: new AbortController().signal }).catch((x: unknown) => x);
+      expect((e as { code?: string }).code).toBe('storage_unavailable'); // the outage is per operation
+      await request(t.app.getHttpServer()).get('/ready').expect(200); // … and still not a readiness failure
+      expect(t.logs.some((l) => String(l.msg).startsWith('storage_op op=head provider=s3 outcome=storage_unavailable'))).toBe(true);
+      expect(JSON.stringify(t.logs)).not.toMatch(/ready-secret|AKIDREADY|unreachable-bucket|2b1f1c2e/);
+    } finally {
+      await t.app.close();
+    }
   });
 
   it('shutdown with the database unreachable is prompt (nothing waits on a dead pool)', async () => {

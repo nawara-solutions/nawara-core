@@ -4,7 +4,8 @@
   ([Stage 17.1 record](../architecture/stage-17/stage-17-1-decisions-and-roadmap.md) §3).
   Stage 17.2: the service foundation only (health, readiness, service auth, caller policy; no file domain yet):
   [Stage 17.2 record](../architecture/stage-17/stage-17-2-service-foundation.md). Stage 17.3: the schema and repositories (no
-  byte path yet): [Stage 17.3 record](../architecture/stage-17/stage-17-3-persistence-metadata.md).
+  byte path yet): [Stage 17.3 record](../architecture/stage-17/stage-17-3-persistence-metadata.md). Stage 17.4: the storage port and
+  its filesystem and S3-compatible adapters (no route uses them yet): [Stage 17.4 record](../architecture/stage-17/stage-17-4-storage-abstraction.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -91,6 +92,13 @@ Errors are normalized to `storage_unavailable` (retryable), `storage_timeout` (o
 the SDK or a signed-HTTP client is chosen in 17.4 under the same no-unbounded-timeout rule as 16.8) and `FilesystemStorage`
 (development and tests: a configured root, keys validated against the key grammar, no path from user input, refused in production).
 Adapter tests run against MinIO in a container.
+
+**Implemented (Stage 17.4); clarifications, no decision changed:** the adapters are `FilesystemStorage` and `S3Storage` (provider
+names `filesystem` / `s3`, recorded in `file.storageProvider`); `get` returns `{ body, sizeBytes }`; `put` never replaces an object
+(`If-None-Match: *` / `link`) and enforces `sizeBytes` and an optional `sha256` before publishing; the error set adds
+`storage_already_exists`, `storage_invalid_key`, `storage_length_mismatch`, `storage_checksum_mismatch`. The S3 adapter tests run
+against an S3-protocol test server (VersityGW in CI and the `storage-test` Compose profile), because MinIO no longer publishes public
+container images; the test server is infrastructure, never a provider choice. The S3 compatibility checklist is in the 17.4 record §12.
 
 ## 5. Lifecycle
 

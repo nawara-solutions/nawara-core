@@ -31,7 +31,11 @@ COPY --from=build /app/apps/file-service/dist ./apps/file-service/dist
 # Schema of record travels with the image so a deploy always applies the migrations that match this code (Stage 17.3: the file schema).
 COPY apps/file-service/db/migrations ./apps/file-service/db/migrations
 WORKDIR /app/apps/file-service
-# The service only reads its own files and opens sockets: it needs no write access and no privileges (the base image's `node` user).
+# Stage 17.4: an EMPTY mount point for the development filesystem store (a named volume inherits its owner and mode); it holds nothing
+# in the image, and production refuses the filesystem store (bytes go to the S3-compatible provider).
+RUN mkdir -p /var/lib/file-service/storage && chown node:node /var/lib/file-service/storage && chmod 700 /var/lib/file-service/storage
+# The service reads its own files and opens sockets; the only writable place is that (development) mount point. No privileges: the
+# base image's `node` user.
 USER node
 EXPOSE 3000
 CMD ["node", "dist/main.js"]

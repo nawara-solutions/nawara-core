@@ -238,7 +238,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | # | Open decision (nothing pulled in until decided) | Foundation ships |
 |---|---|---|
 | ~~O1~~ | ~~Accept RabbitMQ~~ **accepted for the financial services with outbox/inbox** (ADR-0037); deployment of RabbitMQ still needs its own approval | event publisher port |
-| O2 | Object storage provider for files (S3-compatible service, self-hosted, or a cloud provider) | storage port + filesystem adapter (Stage 17.1: S3-compatible port; a vendor ADR before production enablement, [ADR-0048](../adr/0048-file-service-architecture.md) F6) |
+| O2 | Object storage provider for files (S3-compatible service, self-hosted, or a cloud provider) | storage port + filesystem adapter (Stage 17.1: S3-compatible port; a vendor ADR before production enablement, [ADR-0048](../adr/0048-file-service-architecture.md) F6; Stage 17.4: port and adapters built, provider **still open**, compatibility checklist in the [17.4 record](./stage-17/stage-17-4-storage-abstraction.md) §12) |
 | O3 | Search engine (PostgreSQL full text, or a dedicated engine) | search port + in-memory adapter |
 | O4 | Analytics store | ingestion port only |
 | O5 | Geocoding provider | provider port |

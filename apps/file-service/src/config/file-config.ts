@@ -1,5 +1,6 @@
 import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
 import { FileCallerPolicy } from '../policy/caller-policy.js';
+import { loadStorageConfig, type StorageConfig } from '../storage/storage-config.js';
 
 /** The one identity of this service: logs, the database `application_name`, Docker, documentation. */
 export const SERVICE_NAME = 'file-service';
@@ -15,10 +16,11 @@ export const FILE_MAX_BYTES_BOUND = 100 * 1024 * 1024;
  * - the HTTP baseline (port, drain, body limit, CORS, proxy trust, log level) from the kit;
  * - the database (the least-privilege runtime role; readiness = database + migrations, ADR-0048 §8);
  * - the accepted service callers (`SERVICE_TOKENS`) and their policy (`FILE_SERVICE_POLICY`, validated against FILE_MAX_BYTES);
- * - FILE_MAX_BYTES (the global ceiling every caller's `maxBytes` must respect).
+ * - FILE_MAX_BYTES (the global ceiling every caller's `maxBytes` must respect);
+ * - Stage 17.4: the object store (`FILE_STORAGE_PROVIDER` and its settings; required, fail closed, filesystem refused in production).
  *
- * Deliberately absent until the stage that uses it: the attach window and the request-hash key (17.5), the ticket TTL (17.6),
- * storage settings and credentials (17.4). Tickets need no secret (opaque random values, ADR-0048 F35).
+ * Deliberately absent until the stage that uses it: the attach window and the request-hash key (17.5), the ticket TTL (17.6).
+ * Tickets need no secret (opaque random values, ADR-0048 F35).
  */
 export interface FileConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `file_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -29,6 +31,8 @@ export interface FileConfig extends BaseConfig {
   callerPolicy: FileCallerPolicy;
   /** `FILE_MAX_BYTES` (default 25 MiB, 1 byte to 100 MiB): the global ceiling for one file; enforced on uploads from Stage 17.5. */
   maxBytes: number;
+  /** The object store (Stage 17.4). Validated here; never contacted at startup, never a readiness dependency. */
+  storage: StorageConfig;
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -51,5 +55,6 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
     serviceTokens,
     callerPolicy: FileCallerPolicy.parse(reader.get('FILE_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))], maxBytes),
     maxBytes,
+    storage: loadStorageConfig(reader, base.isProduction),
   };
 }
