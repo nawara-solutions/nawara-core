@@ -1,9 +1,12 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, generateServiceToken } from '@nawara/service-kit';
 import { SERVICE_NAME, loadNotificationConfig } from './notification-config.js';
 
 const DB = 'postgres://notification_app:pw-not-real@db:5432/notification';
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...over });
+const KEY = randomBytes(32).toString('base64');
+const REQUIRED = { DATABASE_URL: DB, RABBITMQ_URL: 'amqp://notify:pw-not-real@broker:5672', NOTIFICATION_SECRET_KEYS: `k1:${KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en' };
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ ...REQUIRED, ...over });
 
 describe('notification-service configuration', () => {
   it('has one canonical identity, and production is the default environment (the safe behaviour)', () => {
@@ -14,7 +17,7 @@ describe('notification-service configuration', () => {
     expect(c.isProduction).toBe(true);
   });
 
-  it('in production needs only DATABASE_URL; every other setting has a default, and no default opens anything', () => {
+  it('in production needs only the database, the broker, the secret key ring and the default locale; no default opens anything', () => {
     const c = loadNotificationConfig(env({ NODE_ENV: 'production' }));
     expect(c.databaseUrl).toBe(DB);
     expect(c.port).toBe(3000);
@@ -30,16 +33,55 @@ describe('notification-service configuration', () => {
     expect(() => loadNotificationConfig(env({ DB_STATEMENT_TIMEOUT_MS: '30000', DB_QUERY_TIMEOUT_MS: '30000' }))).toThrow(/DB_QUERY_TIMEOUT_MS/);
   });
 
-  it('carries only what the service uses: no broker, policy, key ring, default locale or provider configuration yet', () => {
+  it('carries only what the service uses: no caller policy, docs, worker or provider configuration yet (16.6-16.8)', () => {
     const keys = Object.keys(loadNotificationConfig(env()));
-    for (const later of ['rabbitmqUrl', 'servicePolicy', 'secretKeys', 'defaultLocale', 'docs']) expect(keys).not.toContain(later);
+    for (const later of ['servicePolicy', 'docs', 'leaseMs', 'providerTimeoutMs', 'twilio', 'smtp']) expect(keys).not.toContain(later);
+  });
+
+  it.each(['RABBITMQ_URL', 'NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_SECRET_ACTIVE_KEY_ID', 'NOTIFICATION_DEFAULT_LOCALE'])('refuses to start without %s (no default)', (name) => {
+    const e = env();
+    delete e[name];
+    expect(() => loadNotificationConfig(e)).toThrow(ConfigError);
+  });
+
+  it('the broker settings have the Core bounds, and the broker URL is never echoed', () => {
+    const c = loadNotificationConfig(env());
+    expect([c.rabbitmqConfirmTimeoutMs, c.rabbitmqHeartbeatS]).toEqual([5000, 10]);
+    for (const [k, v] of [['RABBITMQ_CONFIRM_TIMEOUT_MS', '99'], ['RABBITMQ_HEARTBEAT_S', '0'], ['RABBITMQ_HEARTBEAT_S', '61']]) expect(() => loadNotificationConfig(env({ [k]: v }))).toThrow(ConfigError);
+    try {
+      loadNotificationConfig(env({ RABBITMQ_URL: 'http://notify:broker-pw-value@broker' }));
+      throw new Error('no throw');
+    } catch (e) {
+      expect((e as Error).message).toMatch(/RABBITMQ_URL/);
+      expect((e as Error).message).not.toContain('broker-pw-value');
+    }
+  });
+
+  it('the secret key ring: 32-byte keys, distinct ids and keys, an active id that exists; never echoed', () => {
+    const c = loadNotificationConfig(env({ NOTIFICATION_SECRET_KEYS: `k1:${KEY},k2:${randomBytes(32).toString('base64')}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k2' }));
+    expect([...c.secretKeys.keys()]).toEqual(['k1', 'k2']);
+    expect(c.secretActiveKeyId).toBe('k2');
+    for (const [keys, active] of [[`k1:${randomBytes(16).toString('base64')}`, 'k1'], [`k1:${KEY},k1:${randomBytes(32).toString('base64')}`, 'k1'], [`k1:${KEY},k2:${KEY}`, 'k1'], [`bad id:${KEY}`, 'bad id'], [`k1:${KEY}`, 'k9'], [KEY, 'k1']]) {
+      try {
+        loadNotificationConfig(env({ NOTIFICATION_SECRET_KEYS: keys, NOTIFICATION_SECRET_ACTIVE_KEY_ID: active }));
+        throw new Error('no throw');
+      } catch (e) {
+        expect(e, keys).toBeInstanceOf(ConfigError);
+        expect((e as Error).message).not.toContain(KEY);
+      }
+    }
+  });
+
+  it('the default locale is a BCP 47 locale', () => {
+    expect(loadNotificationConfig(env({ NOTIFICATION_DEFAULT_LOCALE: 'fr-TN' })).defaultLocale).toBe('fr-TN');
+    for (const bad of ['FR', 'fr_TN', 'french', 'x']) expect(() => loadNotificationConfig(env({ NOTIFICATION_DEFAULT_LOCALE: bad })), bad).toThrow(ConfigError);
   });
 
   it('refuses a missing or non-PostgreSQL DATABASE_URL, without echoing it', () => {
-    expect(() => loadNotificationConfig({})).toThrow(/DATABASE_URL/);
+    expect(() => loadNotificationConfig({ ...REQUIRED, DATABASE_URL: undefined })).toThrow(/DATABASE_URL/);
     for (const bad of ['mysql://u:secret-pw-value@h/db', 'not a url']) {
       try {
-        loadNotificationConfig({ DATABASE_URL: bad });
+        loadNotificationConfig(env({ DATABASE_URL: bad }));
         throw new Error('no throw');
       } catch (e) {
         expect(e).toBeInstanceOf(ConfigError);
@@ -50,7 +92,7 @@ describe('notification-service configuration', () => {
 
   it.each(['postgres', 'root', 'notification_migrator'])('refuses the %s database user in production (superuser / schema owner), without echoing the URL', (user) => {
     try {
-      loadNotificationConfig({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:s3cret-value@db:5432/notification` });
+      loadNotificationConfig(env({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:s3cret-value@db:5432/notification` }));
       throw new Error('no throw');
     } catch (e) {
       expect(e).toBeInstanceOf(ConfigError);
@@ -60,7 +102,7 @@ describe('notification-service configuration', () => {
   });
 
   it('allows any database user outside production (tests and local runs use an admin connection)', () => {
-    expect(loadNotificationConfig({ NODE_ENV: 'test', DATABASE_URL: 'postgres://postgres@localhost:5433/n' }).databaseUrl).toContain('postgres@');
+    expect(loadNotificationConfig(env({ NODE_ENV: 'test', DATABASE_URL: 'postgres://postgres@localhost:5433/n' })).databaseUrl).toContain('postgres@');
   });
 
   it('accepts registered service callers, and refuses malformed SERVICE_TOKENS without echoing them', () => {

@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { notificationMigrationsDir } from '../src/app.module.js';
 import { stableUuid } from '../src/templates/catalog.js';
@@ -15,7 +15,7 @@ import { describeWithEnv } from './support/env.js';
  * runtime role can do the service's work but cannot change the schema or get around the invariants. Self-contained: it creates and
  * drops its own roles and database, so it also runs in CI.
  */
-describeWithEnv('runtime database role: DML only, invariants unbypassable (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
+describeWithEnv('runtime database role: DML only, invariants unbypassable (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
   const suffix = randomBytes(4).toString('hex');
   const migrator = `nt_mig_${suffix}`;
   const appRole = `nt_app_${suffix}`;
@@ -67,7 +67,7 @@ describeWithEnv('runtime database role: DML only, invariants unbypassable (real 
   });
 
   it('the service is ready as the runtime role (database and migrations checks pass without owning anything)', async () => {
-    await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
+    await vi.waitFor(async () => expect((await request(t.app.getHttpServer()).get('/ready')).status).toBe(200), { timeout: 15_000, interval: 100 });
     const owner = await sql<{ o: string }>(adminTo(dbName), `SELECT tableowner AS o FROM pg_tables WHERE tablename = 'notification'`);
     expect(owner[0].o).toBe(migrator);
   });

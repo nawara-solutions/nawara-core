@@ -12,6 +12,10 @@ import { generateServiceToken } from '@nawara/service-kit';
  */
 const DB_PASSWORD = 'db-password-never-logged-0042';
 const RUNTIME_DB = `postgres://notification_app:${DB_PASSWORD}@127.0.0.1:1/notification`;
+const BROKER_PASSWORD = 'broker-password-never-logged-0043';
+const SECRET_KEY = Buffer.alloc(32, 7).toString('base64');
+/** Production-shaped: every required setting present; the database and the broker are unreachable on purpose. */
+const REQUIRED = { DATABASE_URL: RUNTIME_DB, RABBITMQ_URL: `amqp://notify:${BROKER_PASSWORD}@127.0.0.1:1`, NOTIFICATION_SECRET_KEYS: `k1:${SECRET_KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en' };
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -65,14 +69,14 @@ describe('notification-service as a built process (production configuration)', (
   it('boots with its database down: live, not ready (503), structured JSON logs without secrets, SIGTERM exit within its bound', async () => {
     const port = await freePort();
     const { digest } = generateServiceToken();
-    const run = start({ NODE_ENV: 'production', PORT: String(port), DATABASE_URL: RUNTIME_DB, SERVICE_TOKENS: `some-core-service:${digest}`, HTTP_DRAIN_TIMEOUT_MS: '2000', DB_CONNECTION_TIMEOUT_MS: '500' });
+    const run = start({ NODE_ENV: 'production', PORT: String(port), ...REQUIRED, SERVICE_TOKENS: `some-core-service:${digest}`, HTTP_DRAIN_TIMEOUT_MS: '2000', DB_CONNECTION_TIMEOUT_MS: '500' });
     runs.push(run);
     const base = `http://127.0.0.1:${port}`;
     await waitHealthy(base, run);
     expect(await (await fetch(`${base}/health`)).json()).toEqual({ status: 'ok' });
     const ready = await fetch(`${base}/ready`);
     expect(ready.status).toBe(503);
-    expect(await ready.json()).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
+    expect(await ready.json()).toEqual({ status: 'unavailable', failed: ['database', 'event-intake', 'migrations', 'rabbitmq'] });
     expect((await fetch(`${base}/`)).status).toBe(404); // no starter route
 
     const t0 = Date.now();
@@ -92,11 +96,18 @@ describe('notification-service as a built process (production configuration)', (
     expect(msgs.some((m) => m.startsWith('service_shutdown_complete signal=SIGTERM'))).toBe(true);
     expect(run.out()).not.toContain(digest);
     expect(run.out()).not.toContain(DB_PASSWORD);
+    expect(run.out()).not.toContain(BROKER_PASSWORD);
+    expect(run.out()).not.toContain(SECRET_KEY);
+    expect(msgs.some((m) => m.startsWith('event_intake_waiting reason=database_unavailable'))).toBe(true);
     expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|some-core-service/);
   }, 30_000);
 
   it.each([
+    ['a missing RABBITMQ_URL', { RABBITMQ_URL: '' }, /RABBITMQ_URL/],
+    ['a missing secret key ring', { NOTIFICATION_SECRET_KEYS: '' }, /NOTIFICATION_SECRET_KEYS/],
+    ['a short secret key', { NOTIFICATION_SECRET_KEYS: 'k1:c2hvcnQ=' }, /NOTIFICATION_SECRET_KEYS/],
+    ['a missing default locale', { NOTIFICATION_DEFAULT_LOCALE: '' }, /NOTIFICATION_DEFAULT_LOCALE/],
     ['a missing DATABASE_URL', { DATABASE_URL: '' }, /DATABASE_URL/],
     ['a non-PostgreSQL DATABASE_URL', { DATABASE_URL: `mysql://notification_app:${DB_PASSWORD}@db/notification` }, /DATABASE_URL/],
     ['the superuser as the runtime database role', { DATABASE_URL: `postgres://postgres:${DB_PASSWORD}@db/notification` }, /least-privilege runtime role/],
@@ -106,7 +117,7 @@ describe('notification-service as a built process (production configuration)', (
     ['an unknown environment', { NODE_ENV: 'staging' }, /NODE_ENV/],
     ['malformed service tokens', { SERVICE_TOKENS: 'caller:secret-looking-value-0123' }, /SERVICE_TOKENS/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
-    const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), DATABASE_URL: RUNTIME_DB, ...env });
+    const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), ...REQUIRED, ...env });
     runs.push(run);
     const exit = await run.exited;
     expect(exit.code).not.toBe(0);

@@ -163,7 +163,7 @@ jobs:
         run: bash infra/postgres/verify.sh --with-kit-migrations
 
   e2e-real-broker:
-    name: Billing/Payment Stage 4 loop over a real RabbitMQ broker
+    name: Real RabbitMQ loops (Billing/Payment Stage 4, Auth to Notification Stage 16.5)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -193,9 +193,9 @@ jobs:
       # This suite spawns billing-service and payment-service as separate OS processes from their OWN built
       # `dist/main.js` (never one service's TypeScript imported into the other's test — see `scripts/lib/checks.mjs`),
       # talking only over real HTTP and the real broker, so both must be built first.
-      - name: build service-kit, billing-service, payment-service
-        run: npm run build -w @nawara/service-kit -w billing-service -w payment-service
-      - name: real-broker Stage 4 E2E
+      - name: build service-kit, billing-service, payment-service, auth-service, notification-service
+        run: npm run build -w @nawara/service-kit -w billing-service -w payment-service -w auth-service -w notification-service
+      - name: real-broker E2E
         run: npm run test:e2e -w @nawara/e2e-real-broker
 
   e2e-auth-organization:

@@ -2,7 +2,8 @@
 
 - **Status:** Draft (Stage 16.1 design). Implemented so far: the Stage 16.2 Auth envelope, the Stage 16.3 service foundation
   ([record](../architecture/stage-16/stage-16-3-service-foundation.md)) and the Stage 16.4 persistence and template catalog
-  ([record](../architecture/stage-16/stage-16-4-persistence-and-templates.md)); nothing is consumed or sent yet
+  ([record](../architecture/stage-16/stage-16-4-persistence-and-templates.md)) and the Stage 16.5 event intake
+  ([record](../architecture/stage-16/stage-16-5-notification-event-intake.md)); nothing is sent yet
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map, event catalog, §17.3 certification in
   [core-validation.md](../architecture/core-validation.md))
@@ -432,6 +433,13 @@ row. The handler never calls a provider.
 
 Future Core producers either add a mapping entry (event intake, for producers that must not call Notification synchronously) or
 use the API.
+
+> **Implemented in Stage 16.5** as specified here, with these refinements (see the Stage 16.5 record):
+> - **invalid destination:** it becomes `FAILED invalid_destination` inside the intake transaction, along the allowed path `PENDING →
+>   SENDING → FAILED` (no attempt), and no secret is kept for it;
+> - **payload:** unknown extra fields are ignored and never stored;
+> - **start order:** the consumer starts only after the database, the migrations and the default-locale coverage are verified;
+> - **readiness:** `rabbitmq` plus `event-intake`.
 
 **The initial mapping** (Stage 16.5), taken exactly from Auth's current publishers. The source is `auth-service` and the version is
 1 for every row; `userId` is always the recipient; "dest" means `channel` + `destination`.
