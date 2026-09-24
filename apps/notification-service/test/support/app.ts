@@ -4,6 +4,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { InMemoryEventBus, JsonLogger, ReadinessRegistry, configureApp, type EventBus, type ServiceTokenEntry } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
 import { loadNotificationConfig, type NotificationConfig } from '../../src/config/notification-config.js';
+import type { ProviderRegistry } from '../../src/delivery/provider.js';
 import { mountDocs } from '../../src/docs/mount-docs.js';
 import { EventConsumer } from '../../src/intake/event-consumer.js';
 import { IntakeService } from '../../src/intake/intake.service.js';
@@ -49,6 +50,8 @@ export async function createTestApp(
     bus?: EventBus | 'rabbitmq';
     /** The raw NOTIFICATION_SERVICE_POLICY; defaults to `openPolicy` for the registered test callers. */
     policy?: string;
+    /** Stage 16.7: providers injected in place of the configured ones (fakes with controlled outcomes). */
+    providers?: ProviderRegistry;
   } = {},
 ): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
@@ -68,7 +71,7 @@ export async function createTestApp(
   const bus = opts.bus === 'rabbitmq' ? undefined : (opts.bus ?? new InMemoryEventBus());
   const logger = new JsonLogger(config.serviceName, 'debug', (l) => logs.push(JSON.parse(l)));
   const moduleRef = await Test.createTestingModule({
-    imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs, bus }), ...(opts.probes === false ? [] : [ProbeModule])],
+    imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs, bus, providers: opts.providers }), ...(opts.probes === false ? [] : [ProbeModule])],
   })
     .setLogger(logger)
     .compile();

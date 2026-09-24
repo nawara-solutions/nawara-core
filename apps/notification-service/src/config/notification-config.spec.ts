@@ -37,9 +37,12 @@ describe('notification-service configuration', () => {
     expect(() => loadNotificationConfig(env({ DB_STATEMENT_TIMEOUT_MS: '30000', DB_QUERY_TIMEOUT_MS: '30000' }))).toThrow(/DB_QUERY_TIMEOUT_MS/);
   });
 
-  it('carries only what the service uses: no worker or provider configuration yet (16.7 / 16.8)', () => {
-    const keys = Object.keys(loadNotificationConfig(env()));
-    for (const later of ['leaseMs', 'providerTimeoutMs', 'twilio', 'smtp', 'emailFrom']) expect(keys).not.toContain(later);
+  it('carries only what the service uses: no real provider configuration or credential yet (16.8)', () => {
+    const c = loadNotificationConfig(env());
+    for (const later of ['twilio', 'smtp', 'emailFrom', 'providerApiKey']) {
+      expect(Object.keys(c)).not.toContain(later);
+      expect(Object.keys(c.delivery)).not.toContain(later);
+    }
   });
 
   it.each(['RABBITMQ_URL', 'NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_SECRET_ACTIVE_KEY_ID', 'NOTIFICATION_DEFAULT_LOCALE', 'NOTIFICATION_REQUEST_HASH_KEY'])('refuses to start without %s (no default)', (name) => {
@@ -137,8 +140,57 @@ describe('notification-service configuration', () => {
     for (const v of values) expect(() => loadNotificationConfig(env({ [name]: v })), `${name}=${v}`).toThrow(ConfigError);
   });
 
-  it('HTTP_DRAIN_TIMEOUT_MS has the kit default and bounds (5000, 500-120000)', () => {
+  it('HTTP_DRAIN_TIMEOUT_MS has the kit default and bounds (5000, 500-120000), further bounded by the provider timeout (SDD §8.2)', () => {
     expect(loadNotificationConfig(env({ HTTP_DRAIN_TIMEOUT_MS: '500' })).httpDrainTimeoutMs).toBe(500);
-    expect(loadNotificationConfig(env({ HTTP_DRAIN_TIMEOUT_MS: '120000' })).httpDrainTimeoutMs).toBe(120_000);
+    expect(loadNotificationConfig(env({ HTTP_DRAIN_TIMEOUT_MS: '49999' })).httpDrainTimeoutMs).toBe(49_999);
+    // Stage 16.7: provider timeout (default 10 s) < the 60 s stop grace - the HTTP drain, so a drain of 50 s or more is refused.
+    expect(() => loadNotificationConfig(env({ HTTP_DRAIN_TIMEOUT_MS: '50000' }))).toThrow(/NOTIFICATION_PROVIDER_TIMEOUT_MS/);
+    expect(loadNotificationConfig(env({ HTTP_DRAIN_TIMEOUT_MS: '59000', NOTIFICATION_PROVIDER_TIMEOUT_MS: '900', NOTIFICATION_LEASE_MS: '5000' })).httpDrainTimeoutMs).toBe(59_000);
+    expect(() => loadNotificationConfig(env({ HTTP_DRAIN_TIMEOUT_MS: '120000', NOTIFICATION_PROVIDER_TIMEOUT_MS: '100', NOTIFICATION_LEASE_MS: '5000' }))).toThrow(ConfigError);
+  });
+
+  describe('delivery engine (Stage 16.7)', () => {
+    it('defaults: no provider (no worker), and the bounded engine values', () => {
+      expect(loadNotificationConfig(env()).delivery).toEqual({
+        provider: 'none', intervalMs: 1000, batchSize: 20, concurrency: 4, leaseMs: 60_000, providerTimeoutMs: 10_000, retryBaseMs: 30_000,
+        retryCeilingMs: 1_800_000, maxAttempts: 5, timeZone: 'UTC', callerTemplateLimitPerMinute: 6000, drainTimeoutMs: 12_000,
+      });
+    });
+
+    it('the test provider is accepted outside production and refused in production (it delivers nothing)', () => {
+      expect(loadNotificationConfig(env({ NODE_ENV: 'development', NOTIFICATION_DELIVERY_PROVIDER: 'test' })).delivery.provider).toBe('test');
+      expect(loadNotificationConfig(env({ NODE_ENV: 'test', NOTIFICATION_DELIVERY_PROVIDER: 'test' })).delivery.provider).toBe('test');
+      expect(() => loadNotificationConfig(env({ NODE_ENV: 'production', NOTIFICATION_DELIVERY_PROVIDER: 'test' }))).toThrow(/refused in production/);
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_DELIVERY_PROVIDER: 'test' }))).toThrow(/refused in production/); // production is the default
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_DELIVERY_PROVIDER: 'twilio' }))).toThrow(ConfigError);
+    });
+
+    it('enforces the SDD §8.2 relationships at startup', () => {
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_LEASE_MS: '19999' }))).toThrow(/at least 2 x NOTIFICATION_PROVIDER_TIMEOUT_MS/);
+      expect(loadNotificationConfig(env({ NOTIFICATION_LEASE_MS: '20000' })).delivery.leaseMs).toBe(20_000);
+      expect(loadNotificationConfig(env({ NOTIFICATION_PROVIDER_TIMEOUT_MS: '3000' })).delivery.drainTimeoutMs).toBe(5000); // drain >= timeout
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_RETRY_BASE_MS: '60000', NOTIFICATION_RETRY_CEILING_MS: '59999' }))).toThrow(/CEILING/);
+      expect(() => loadNotificationConfig(env({ NOTIFICATION_WORKER_CONCURRENCY: '10' }))).toThrow(/DB_POOL_MAX/); // pool default 10
+      expect(loadNotificationConfig(env({ NOTIFICATION_WORKER_CONCURRENCY: '10', DB_POOL_MAX: '11' })).delivery.concurrency).toBe(10);
+    });
+
+    it.each([
+      ['NOTIFICATION_LEASE_MS', ['4999', '3600001', 'x']],
+      ['NOTIFICATION_PROVIDER_TIMEOUT_MS', ['99', '30001']],
+      ['NOTIFICATION_RETRY_BASE_MS', ['999', '3600001']],
+      ['NOTIFICATION_RETRY_CEILING_MS', ['86400001']],
+      ['NOTIFICATION_WORKER_CONCURRENCY', ['0', '51']],
+      ['NOTIFICATION_WORKER_INTERVAL_MS', ['99', '60001']],
+      ['NOTIFICATION_WORKER_BATCH_SIZE', ['0', '501']],
+      ['NOTIFICATION_MAX_ATTEMPTS', ['0', '21']],
+      ['NOTIFICATION_RATE_CALLER_TEMPLATE_PER_MINUTE', ['0', '1000001']],
+      ['NOTIFICATION_TIME_ZONE', ['Mars/Olympus', 'not a zone']],
+    ])('refuses an invalid %s', (name, values) => {
+      for (const v of values) expect(() => loadNotificationConfig(env({ [name]: v })), `${name}=${v}`).toThrow(ConfigError);
+    });
+
+    it('accepts an IANA time zone', () => {
+      expect(loadNotificationConfig(env({ NOTIFICATION_TIME_ZONE: 'Africa/Tunis' })).delivery.timeZone).toBe('Africa/Tunis');
+    });
   });
 });

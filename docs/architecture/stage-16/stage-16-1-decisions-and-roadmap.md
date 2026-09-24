@@ -63,13 +63,15 @@ Each sub-stage is its own reviewed PR, following the repository workflow.
 
 **Progress:** 16.1 ✅ · 16.2 ✅ ([record](./stage-16-2-auth-event-envelope.md)) · 16.3 ✅ ([record](./stage-16-3-service-foundation.md)) ·
 16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5 ✅ ([record](./stage-16-5-notification-event-intake.md)) ·
-16.6 ✅ ([record](./stage-16-6-notification-send-api.md)) · 16.7–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+16.6 ✅ ([record](./stage-16-6-notification-send-api.md)) · 16.7 ✅ ([record](./stage-16-7-notification-delivery-engine.md); the
+destination limit `notif_dest` of D13 is deferred with D21, see its §13) · 16.8–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
 - 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
 - 16.3 → 16.5: the kit bus and the key ring;
 - 16.3 → 16.6: the caller policy (done in 16.6, with OpenAPI);
 - 16.4 → 16.5: variable **value** validation, locale resolution and `NOTIFICATION_DEFAULT_LOCALE` (done in 16.5, with the kit bus
   and the key ring);
-- 16.4 → 16.7: the renderer.
+- 16.4 → 16.7: the renderer (done in 16.7);
+- 16.7 → open (D21): the `notif_dest` destination limit; `notif_caller_template` is built.
 
 | Sub-stage | Objective | Scope | Depends on | Production files likely affected | Tests | Exit criteria | Non-goals |
 |---|---|---|---|---|---|---|---|

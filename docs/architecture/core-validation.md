@@ -2514,7 +2514,7 @@ This section is the **current** register at the close of Phase C.
 | `webhook_event` rows and `rawBody` | PRODUCT / SECURITY / LEGAL DECISION (O-17) | terminal state and past the dispute period; `rawBody` is immutable and may carry payer personal data | product / security / legal |
 | Auth / Organization audit trails | FUTURE AUDIT (audit-service) + LEGAL | after the audit retention period | security / legal |
 | DLQ messages | DECIDED (runbook) | after inspection and replay; never purged unseen | SRE |
-| Notification secret ciphertext (Stage 16, ADR-0046; column built in 16.4, sealing 16.5, purge worker 16.7) | DECIDED (technical) | purged once every delivery is terminal or `expiresAt` has passed | engineering |
+| Notification secret ciphertext (Stage 16, ADR-0046; column built in 16.4, sealing 16.5, purge worker 16.7: implemented) | DECIDED (technical) | purged once every delivery is terminal or `expiresAt` has passed | engineering |
 | Notification intents, deliveries (`destination`), `data` (Stage 16, ADR-0046; tables built in 16.4) | PRODUCT / LEGAL DECISION | personal data; no duration yet | product / legal |
 | Notification delivery attempts (Stage 16, ADR-0046; table built in 16.4) | SRE DECISION | operational evidence | SRE |
 | Notification template versions (Stage 16, ADR-0046; built and published in 16.4) | DECIDED: kept | explain past deliveries; immutable | – |
