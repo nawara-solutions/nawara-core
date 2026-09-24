@@ -2,6 +2,8 @@
 
 - **Status:** Draft (Stage 17.1 design, architecture frozen; nothing implemented). F16 decided: product-issued access tickets
   ([Stage 17.1 record](../architecture/stage-17/stage-17-1-decisions-and-roadmap.md) §3).
+  Stage 17.2: the service foundation only (health, readiness, service auth, caller policy; no file domain yet):
+  [Stage 17.2 record](../architecture/stage-17/stage-17-2-service-foundation.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)

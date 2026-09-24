@@ -88,7 +88,7 @@ const KIT_IDENTITY_CONTRACT_ALLOWLIST = new Set(['libs/service-kit/src/service-a
 export function checkSource(relPath, text) {
   const problems = [];
   const inKit = relPath.startsWith('libs/service-kit/');
-  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization)-service\/src\//.test(relPath);
+  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file)-service\/src\//.test(relPath);
   if ((inKit || inNewCore) && PRODUCT_TERMS.test(text)) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {
     problems.push(`${relPath}: declares a financial-domain concept; the service-kit holds technical infrastructure only`);

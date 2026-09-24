@@ -107,7 +107,7 @@ Browser / mobile ── redeems the ticket on File Service ── File validates
 | Stage | Scope | Notes |
 |---|---|---|
 | 17.1 | architecture and decisions | this record |
-| 17.2 | service foundation: NestJS skeleton on the kit, config (limits, policy parse, keys), health / ready, service auth, DB provisioning (`file_migrator` / `file_app`), Dockerfile, Compose, CI | as planned |
+| 17.2 | service foundation: NestJS skeleton on the kit, config (limits, policy parse, keys), health / ready, service auth, DB provisioning (`file_migrator` / `file_app`), Dockerfile, Compose, CI | as planned; **done**: [17.2 record](./stage-17-2-service-foundation.md) (the ticket and attach keys move to their stages, 17.5 / 17.6) |
 | 17.3 | persistence and metadata: `file` and `file_access_ticket` tables, state and attach constraints, triggers (immutability, transitions), indexes for the sweeps | delegation table with Notification attachments |
 | 17.4 | storage port: filesystem and S3-compatible adapters, bounded timeouts, normalized errors, MinIO adapter tests | before any upload |
 | 17.5 | upload lifecycle: service streamed upload, size cut-off, magic-byte type check, SHA-256, idempotency, attach, lease sweep; **upload tickets** (issue, single-use redemption) | **moved here:** content validation and checksum belong to upload correctness, not to 17.8 |
