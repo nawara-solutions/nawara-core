@@ -169,6 +169,7 @@ Decision D3 ([ADR-0033](../adr/0033-service-to-service-authentication-and-user-i
   (`eventId`, `occurredAt`, `correlationId`, producing service) travels in **message headers**, so payloads stay
   compatible. Auth's current publisher sends the payload only, with no headers, so Auth's events have no `eventId`
   until it adds one (a small Auth change, not made here); consumers must treat missing metadata as "cannot dedupe".
+  *(Stage 16.1: [ADR-0046](../adr/0046-notification-service-architecture.md) (D4) plans that change for Stage 16.2: Auth publishes the canonical kit envelope through the kit bus. The kit consumer dead-letters an envelope-less message as `malformed_envelope`.)*
 - **Delivery today:** RabbitMQ runs only in the local `docker-compose.yml`, not in production, and events are fire-and-forget, so **no event is reliably delivered yet**.
   A transactional outbox is the recommended fix and is out of scope here (O10).
 - **Rules:** a producer never blocks on the broker; a payload never contains a secret or a token; the only exception is
@@ -216,7 +217,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | Service | Finding | Concrete change needed |
 |---|---|---|
 | auth-service | Data model frozen. `GET /auth/platform-access/:platformId` exists today; `GET /auth/me` returns `memberships[]`. It already calls payment with a service token. | **None now.** Auth's hierarchy tables stay unchanged; its client to payment is to be repointed or removed (open decision). |
-| notification-service | Unmodified starter; no providers, no consumers. | Nothing until built; it will consume events and expose a token-guarded send API. |
+| notification-service | Unmodified starter; no providers, no consumers. | Nothing until built; it will consume events and expose a token-guarded send API. Design: [ADR-0046](../adr/0046-notification-service-architecture.md) and the [SDD](../sdd/notification-service.md) (Stage 16.1, proposed). |
 | payment-service | Unmodified starter. Its ADD/SDD assume a single-organization JWT, forwarding the admin JWT (ADR-0021), `Charge` as the transaction and entitlements inside payment; none holds after ADR-0030, ADR-0033, ADR-0035 and ADR-0038. | Rebuilt on [financial-architecture.md](./financial-architecture.md); the old ADD/SDD are marked superseded in their financial parts. No code to migrate. |
 | ai-service | 8-line FastAPI app, `/health` only. | Later: `/ready`, request ids, config validation and the service-token guard in Python. Not rewritten now. |
 
@@ -241,7 +242,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | O4 | Analytics store | ingestion port only |
 | O5 | Geocoding provider | provider port |
 | O6 | AI providers | not started |
-| O7 | Notification providers (SMS: Twilio is proposed in ADR-0019) | not started |
+| O7 | Notification providers (SMS: Twilio is proposed in ADR-0019; email vendor: a separate ADR before Stage 16.8) | architecture proposed: [ADR-0046](../adr/0046-notification-service-architecture.md) (Stage 16.1, pending acceptance) |
 | O8 | Auth ⇄ payment cycle (and its repointing to billing) | documented risk |
 | O9 | **Decided, 2026-09-20:** Auth keeps a validated non-authoritative reference cache and organization-service is the validator for service requests ([ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1). Original text: How Auth references Company, Platform and Organization once organization-service exists (and who validates organization → platform → company for non-user requests) | **decided** (ADR-0040 Accepted; ADR-0042 Amendment 1); lifecycle semantics (BD-5) remain open |
 | O10 | Reliable event delivery (outbox) and asymmetric token signing | out of scope |

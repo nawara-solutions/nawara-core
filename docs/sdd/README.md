@@ -46,3 +46,4 @@ are living documents revised in place as the module's design evolves.
 | [payment-service](./payment-service.md) | Draft (new design, for review; replaces the superseded one) |
 | [billing-service](./billing-service.md) | Draft (for review; Stages 1-3 implemented — foundation, domain schema, HTTP API) |
 | [organization-service](./organization-service.md) | Implemented (Stage 9); not authoritative: ownership migration from Auth (ADR-0039) not performed |
+| [notification-service](./notification-service.md) | Draft (Stage 16.1 design, for review; not implemented) |
