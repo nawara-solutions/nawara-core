@@ -47,7 +47,7 @@ Company
 | **payment-service** | How was it paid, by which method, and what is the payment state? | payment, attempt, method, provider transaction, cash workflow, refund, webhooks, idempotency, reconciliation | what is owed; the ledger; entitlements | yes | **implemented through Stage 12.7**: settlement, attempts, the `test` provider, webhooks, resolver/expiry sweeper, transactional outbox, real RabbitMQ publishing (proven end-to-end into billing-service's Subscription, Stage 12.7) |
 | **accounting-service** | What accounting effect did this have? | chart of accounts, journal, entries and lines, ledger, fiscal periods, tax, reports | payments and invoices as a source of truth | yes | to build (finance stages) |
 | **ai-service** | How do services use AI? | provider abstraction, model config, usage, quotas, cost, safety | product AI workflows | yes (later) | 8-line FastAPI, `/health` only |
-| **file-service** | Where is this file and who may read it? | file metadata, ownership, access control, lifecycle, storage port, limits, checksums | the binary in PostgreSQL | yes | to build (later, skeleton) |
+| **file-service** | Where is this file and who may read it? | file metadata, ownership, access control, lifecycle, storage port, limits, checksums | business meaning and document relationships (products own them); binaries are never stored in PostgreSQL | yes | designed (Stage 17.1: [ADR-0048](../adr/0048-file-service-architecture.md), [SDD](../sdd/file-service.md)); to build (17.2–17.10) |
 | **audit-service** | What happened, who did it, when? | immutable central event history, query, retention | Auth's **local** security audit (stays in Auth) | yes | to build (later, skeleton) |
 | **location-service** | Where is this place? | geocoding, reverse geocoding, distance, generic zones, provider port | product routing and assignment | none yet | to build (later, skeleton) |
 | **search-service** | How do I find things quickly? | derived index, query, reindex | source of truth (the owner stays authoritative) | none yet (derived) | to build (later, skeleton) |
@@ -100,7 +100,7 @@ that edge (it is not repointed to billing-service either; see ADR-0044 and `docs
 | any service → auth | who is this user, what memberships, what platform access | fail closed (503) |
 | payment → auth | organization → platform, and membership check for who may act for an organization (mechanism per ADR-0033; **supersedes ADR-0021's forwarded-JWT choice**) | fail closed |
 | ~~auth → payment~~ | **removed, Stage 12.1 (`f1901f9`).** Auth makes no synchronous financial-service call of any kind; the `requiresSubscription` field it stores is a non-authoritative onboarding hint (row below), never read to gate anything. | n/a |
-| file → auth | authorize a download/upload for an organization | fail closed |
+| ~~file → auth~~ | **rejected, Stage 17.1 ([ADR-0048](../adr/0048-file-service-architecture.md) F16).** File Service authorizes service callers (token + policy) and product-issued access tickets only; the product authorizes the user against its own resource before issuing a ticket. File never calls Auth, so Auth availability does not gate file access. | n/a |
 | billing, payment → auth | who is the caller, and is their membership active for this organization; seller authority for cash confirmation and invoicing | fail closed |
 | platform services → billing | effective-access status (`GET /billing/organizations/:organizationId/entitlement`, implemented Stage 12.5) at the point of use | each consumer documents fail-open or fail-closed |
 | billing → payment | create a payment request carrying an **immutable snapshot** (invoice id, amount, currency, payer, seller); payment **never calls billing back** and reports only through events | fail closed for the caller; billing retries |
@@ -189,7 +189,7 @@ entries — ADR-0044): its state changes are internal, applied inside the same t
 route (§4's `platform services → billing` row) rather than subscribing to an event.
 | payment | `payment.created/succeeded/failed/cancelled/expired`, `cash_payment.submitted/confirmed/rejected`, `refund.requested/succeeded/failed` (the authoritative catalog is in the [payment SDD](../sdd/payment-service.md); it supersedes the earlier `payment.pending`, `payment.refunded`, `refund.created` and `cash_payment.requested`) | billing (invoice paid, entitlement), accounting (journal entry), notification, audit, analytics |
 | accounting | `journal_entry.posted` (optional) | audit, analytics |
-| file | `file.uploaded`, `file.deleted` | audit, search, analytics |
+| file | `file.uploaded`, `file.attached`, `file.deleted`, `file.rejected` (ids only; [file-service SDD](../sdd/file-service.md) §17) | audit, search, analytics |
 | every service | security/administrative events worth keeping | audit |
 
 Auth keeps its **own** local security audit and never depends synchronously on audit-service.
@@ -238,7 +238,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | # | Open decision (nothing pulled in until decided) | Foundation ships |
 |---|---|---|
 | ~~O1~~ | ~~Accept RabbitMQ~~ **accepted for the financial services with outbox/inbox** (ADR-0037); deployment of RabbitMQ still needs its own approval | event publisher port |
-| O2 | Object storage provider for files (S3-compatible service, self-hosted, or a cloud provider) | storage port + in-memory adapter |
+| O2 | Object storage provider for files (S3-compatible service, self-hosted, or a cloud provider) | storage port + filesystem adapter (Stage 17.1: S3-compatible port; a vendor ADR before production enablement, [ADR-0048](../adr/0048-file-service-architecture.md) F6) |
 | O3 | Search engine (PostgreSQL full text, or a dedicated engine) | search port + in-memory adapter |
 | O4 | Analytics store | ingestion port only |
 | O5 | Geocoding provider | provider port |
