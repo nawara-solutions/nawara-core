@@ -1,0 +1,15 @@
+{
+  "variables": {
+    "ipAddress": {
+      "type": "string",
+      "required": true,
+      "maxLength": 45
+    },
+    "availableAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "bodyText": "Account recovery was requested from {{ipAddress}}. It becomes possible at {{availableAt}}. Not you? Sign in and cancel it.",
+  "smsMaxSegments": 3
+}

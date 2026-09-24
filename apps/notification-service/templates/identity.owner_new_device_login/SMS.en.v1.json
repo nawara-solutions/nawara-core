@@ -1,0 +1,15 @@
+{
+  "variables": {
+    "ipAddress": {
+      "type": "string",
+      "required": true,
+      "maxLength": 45
+    },
+    "occurredAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "bodyText": "New sign-in to your account at {{occurredAt}} ({{ipAddress}}). Not you? Secure your account now.",
+  "smsMaxSegments": 3
+}

@@ -56,7 +56,7 @@ to other databases) and proven by `infra/postgres/verify.sh`, which CI runs.
 **Production (auth-service): implemented in Stage 14.3 and applied.** `deploy/provision-and-deploy.sh` runs migrations as the database
 owner, then (re)creates `auth_app` (`NOSUPERUSER NOCREATEDB NOCREATEROLE`, CONNECT, DML on the tables, `SELECT` only on
 `schema_migrations`) and moves an owner `DATABASE_URL` to it. The production deploy of `ae7fc30` logged
-`~ DATABASE_URL (moved from the database owner to the runtime role auth_app)`. In production, Auth, Billing, Organization and Payment
+`~ DATABASE_URL (moved from the database owner to the runtime role auth_app)`. In production, Auth, Billing, Notification, Organization and Payment
 refuse a superuser, schema-owner or `*_migrator` runtime user at startup.
 
 ## 3. Backups and restore
@@ -125,7 +125,7 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 
 | Setting | Default | Bounds | Used by | Purpose |
 |---|---|---|---|---|
-| `DB_POOL_MAX` | 10 | 1–100 | Auth, Billing, Organization, Payment | connections per process |
+| `DB_POOL_MAX` | 10 | 1–100 | Auth, Billing, Notification (Stage 16.4), Organization, Payment | connections per process |
 | `DB_CONNECTION_TIMEOUT_MS` | 5000 | 100–60000 | same | bound on getting a pooled client or opening a connection |
 | `DB_STATEMENT_TIMEOUT_MS` | 30000 | 1000–600000 | same | PostgreSQL cancels a longer statement (57014) |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60000 | 1000–3600000 | same | PostgreSQL ends a session idle inside a transaction (25P03) |
@@ -134,7 +134,7 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | `RABBITMQ_HEARTBEAT_S` (Stage 15.3) | 10 | 5–60 | Billing, Payment | the AMQP heartbeat Core requests: a silent broker is detected, and every channel operation and close ended, within about 3 × this value whatever the broker's own heartbeat setting |
 | `WEBHOOK_RETRY_MAX_ATTEMPTS` (constant) | 10 | – | Payment | stored webhook retried at 10 s × 2ⁿ after receipt, then `failed` / `retries_exhausted` |
 | worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown; since Stage 15.5 one drain per worker, all started together at shutdown start |
-| `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5) | 5000 | 500–120000 | Auth, Billing, Organization, Payment | once shutdown starts, how long running requests may finish before every remaining connection is closed; `/ready` is 503 and new requests are refused from the first moment |
+| `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5) | 5000 | 500–120000 | Auth, Billing, Notification, Organization, Payment | once shutdown starts, how long running requests may finish before every remaining connection is closed; `/ready` is 503 and new requests are refused from the first moment |
 | `BILLING_DISPATCH_STALE_SENDING_MS` (Stage 15.8 relationship) | 60000 | 1000–3600000 and **≥ 2 × `PAYMENT_TIMEOUT_MS`** | Billing | re-send after a lost or failed send; the dispatcher renews its unsent claims every quarter of it |
 | consumer prefetch (Stage 15.8) | kit 5; Billing `min(10, max(1, DB_POOL_MAX / 2))` | 1–100 | Billing consumer | unacknowledged deliveries = concurrent handlers = pool clients: at most half the pool |
 | outbox relay pass / backoff (Stage 15.8, constants) | full batches of 50 back to back for ≤ 1 s per 1 s poll; per-row backoff 1 s × 2ⁿ up to 15 s | – | kit relay (Billing, Payment) | backlog drain; worst delivery delay after a broker outage |

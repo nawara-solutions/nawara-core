@@ -61,10 +61,12 @@ The adapter implements the §8.4 port. Nothing in Notification depends on the ve
 Each sub-stage is its own reviewed PR, following the repository workflow.
 
 **Progress:** 16.1 ✅ · 16.2 ✅ ([record](./stage-16-2-auth-event-envelope.md)) · 16.3 ✅ ([record](./stage-16-3-service-foundation.md)) ·
-16.4–16.10 ⏳. Stage 16.3 moved part of its row forward (owner-directed; the record §3):
-- `DbModule` and database provisioning → 16.4;
-- the kit bus and the key ring → 16.5;
-- the caller policy → 16.6.
+16.4 ✅ ([record](./stage-16-4-persistence-and-templates.md)) · 16.5–16.10 ⏳. Items moved between rows (owner-directed, each record says why):
+- 16.3 → 16.4: `DbModule` and database provisioning (done in 16.4);
+- 16.3 → 16.5: the kit bus and the key ring;
+- 16.3 → 16.6: the caller policy;
+- 16.4 → 16.5: variable **value** validation, locale resolution and `NOTIFICATION_DEFAULT_LOCALE`;
+- 16.4 → 16.7: the renderer.
 
 | Sub-stage | Objective | Scope | Depends on | Production files likely affected | Tests | Exit criteria | Non-goals |
 |---|---|---|---|---|---|---|---|

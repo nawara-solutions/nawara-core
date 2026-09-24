@@ -1,0 +1,16 @@
+{
+  "variables": {
+    "code": {
+      "type": "code",
+      "required": true,
+      "secret": true,
+      "maxLength": 12
+    },
+    "expiresAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "subject": "Your verification code",
+  "bodyText": "Your verification code is {{code}}.\n\nIt expires at {{expiresAt}}. Never share this code with anyone. If you did not ask for it, you can ignore this message."
+}

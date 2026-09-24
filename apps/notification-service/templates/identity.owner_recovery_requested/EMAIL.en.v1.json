@@ -1,0 +1,15 @@
+{
+  "variables": {
+    "ipAddress": {
+      "type": "string",
+      "required": true,
+      "maxLength": 45
+    },
+    "availableAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "subject": "Account recovery requested",
+  "bodyText": "A request to recover your account was made from {{ipAddress}}.\n\nIf nothing is done, recovery becomes possible at {{availableAt}}. If this was not you, sign in now and cancel the request."
+}

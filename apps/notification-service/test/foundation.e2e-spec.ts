@@ -7,7 +7,8 @@ import { createTestApp, type TestApp } from './support/app.js';
 /**
  * Stage 16.3: the notification-service foundation, on the REAL application module (plus test-only probe routes, see
  * support/probe.ts): the kit's health / readiness, request and correlation ids, error contract, validation, service authentication,
- * log hygiene and bounded HTTP drain. No database or broker: the foundation has neither (they arrive in 16.4 / 16.5).
+ * log hygiene and bounded HTTP drain. These run without PostgreSQL (an unreachable database URL): the database behaviour is proven
+ * against a real PostgreSQL in health / migrations / persistence / runtime-role e2e specs.
  */
 describe('notification-service foundation', () => {
   let t: TestApp;
@@ -27,8 +28,11 @@ describe('notification-service foundation', () => {
     await request(server()).get('/health').expect(200, { status: 'ok' });
   });
 
-  it('/ready is ready with no dependency check: the foundation depends on nothing yet (no database, broker or provider)', async () => {
-    await request(server()).get('/ready').expect(200, { status: 'ready' });
+  it('/ready depends on the database (Stage 16.4): with none reachable it is 503 naming only its checks, while /health stays 200', async () => {
+    await request(server()).get('/health').expect(200);
+    const r = await request(server()).get('/ready').expect(503);
+    expect(r.body).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
+    expect(JSON.stringify(r.body)).not.toMatch(/nobody|nothing|127\.0\.0\.1|ECONNREFUSED/); // no host, credential or error text
   });
 
   it('exposes no business route and no starter route: the send API is Stage 16.6', async () => {

@@ -7,8 +7,11 @@ import { generateServiceToken } from '@nawara/service-kit';
 /**
  * Stage 16.3: the BUILT service (`dist/main.js`, exactly what the image runs) as a real OS process, production configuration:
  * boots, answers /health and /ready, logs structured JSON with no secret, exits on SIGTERM within its bound, and refuses to start on
- * invalid configuration with a clear, non-secret message and a non-zero exit.
+ * invalid configuration with a clear, non-secret message and a non-zero exit. The database here is UNREACHABLE on purpose: liveness
+ * and shutdown must not depend on it (a real runtime-role boot is proven in runtime-role.e2e-spec and by the production image).
  */
+const DB_PASSWORD = 'db-password-never-logged-0042';
+const RUNTIME_DB = `postgres://notification_app:${DB_PASSWORD}@127.0.0.1:1/notification`;
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -59,17 +62,17 @@ describe('notification-service as a built process (production configuration)', (
     for (const r of runs.splice(0)) if (r.child.exitCode === null && r.child.signalCode === null) r.child.kill('SIGKILL');
   });
 
-  it('boots, is live and ready, logs structured JSON without secrets, and exits on SIGTERM within its bound', async () => {
+  it('boots with its database down: live, not ready (503), structured JSON logs without secrets, SIGTERM exit within its bound', async () => {
     const port = await freePort();
     const { digest } = generateServiceToken();
-    const run = start({ NODE_ENV: 'production', PORT: String(port), SERVICE_TOKENS: `some-core-service:${digest}`, HTTP_DRAIN_TIMEOUT_MS: '2000' });
+    const run = start({ NODE_ENV: 'production', PORT: String(port), DATABASE_URL: RUNTIME_DB, SERVICE_TOKENS: `some-core-service:${digest}`, HTTP_DRAIN_TIMEOUT_MS: '2000', DB_CONNECTION_TIMEOUT_MS: '500' });
     runs.push(run);
     const base = `http://127.0.0.1:${port}`;
     await waitHealthy(base, run);
     expect(await (await fetch(`${base}/health`)).json()).toEqual({ status: 'ok' });
     const ready = await fetch(`${base}/ready`);
-    expect(ready.status).toBe(200);
-    expect(await ready.json()).toEqual({ status: 'ready' });
+    expect(ready.status).toBe(503);
+    expect(await ready.json()).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
     expect((await fetch(`${base}/`)).status).toBe(404); // no starter route
 
     const t0 = Date.now();
@@ -88,16 +91,22 @@ describe('notification-service as a built process (production configuration)', (
     expect(msgs.some((m) => m.startsWith('service_shutdown_started'))).toBe(true);
     expect(msgs.some((m) => m.startsWith('service_shutdown_complete signal=SIGTERM'))).toBe(true);
     expect(run.out()).not.toContain(digest);
+    expect(run.out()).not.toContain(DB_PASSWORD);
+    expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|some-core-service/);
   }, 30_000);
 
   it.each([
+    ['a missing DATABASE_URL', { DATABASE_URL: '' }, /DATABASE_URL/],
+    ['a non-PostgreSQL DATABASE_URL', { DATABASE_URL: `mysql://notification_app:${DB_PASSWORD}@db/notification` }, /DATABASE_URL/],
+    ['the superuser as the runtime database role', { DATABASE_URL: `postgres://postgres:${DB_PASSWORD}@db/notification` }, /least-privilege runtime role/],
+    ['the migrator as the runtime database role', { DATABASE_URL: `postgres://notification_migrator:${DB_PASSWORD}@db/notification` }, /least-privilege runtime role/],
     ['an invalid port', { PORT: '70000' }, /PORT/],
     ['an invalid drain timeout', { HTTP_DRAIN_TIMEOUT_MS: '10' }, /HTTP_DRAIN_TIMEOUT_MS/],
     ['an unknown environment', { NODE_ENV: 'staging' }, /NODE_ENV/],
     ['malformed service tokens', { SERVICE_TOKENS: 'caller:secret-looking-value-0123' }, /SERVICE_TOKENS/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
-    const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), ...env });
+    const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), DATABASE_URL: RUNTIME_DB, ...env });
     runs.push(run);
     const exit = await run.exited;
     expect(exit.code).not.toBe(0);
@@ -105,6 +114,7 @@ describe('notification-service as a built process (production configuration)', (
     expect(run.out()).toMatch(/ConfigError/);
     expect(run.out()).toMatch(name);
     expect(run.out()).not.toContain('secret-looking-value-0123');
+    expect(run.out()).not.toContain(DB_PASSWORD);
     expect(run.out()).not.toContain('service_started');
   }, 30_000);
 });

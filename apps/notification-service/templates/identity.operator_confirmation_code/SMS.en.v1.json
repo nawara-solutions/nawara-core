@@ -1,0 +1,16 @@
+{
+  "variables": {
+    "code": {
+      "type": "code",
+      "required": true,
+      "secret": true,
+      "maxLength": 12
+    },
+    "expiresAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "bodyText": "Your confirmation code is {{code}}. Valid until {{expiresAt}}. Never share it.",
+  "smsMaxSegments": 2
+}

@@ -8,6 +8,7 @@
 #   docker compose --profile db run --rm payment-service npm run migrate  # container startup (see
 #                                                                          # docs/architecture/production-readiness.md)
 #   docker compose --profile db run --rm organization-service npm run migrate
+#   docker compose --profile db run --rm notification-service npm run migrate
 #   docker compose --profile db up -d auth-service billing-service payment-service organization-service notification-service
 #
 # `--profile db` is required on every invocation that touches postgres or an app service (billing/payment/auth all
@@ -48,6 +49,8 @@ services:
       ACCOUNTING_APP_PASSWORD: ${ACCOUNTING_APP_PASSWORD:?copy .env.example to .env}
       ORGANIZATION_MIGRATOR_PASSWORD: ${ORGANIZATION_MIGRATOR_PASSWORD:?copy .env.example to .env}
       ORGANIZATION_APP_PASSWORD: ${ORGANIZATION_APP_PASSWORD:?copy .env.example to .env}
+      NOTIFICATION_MIGRATOR_PASSWORD: ${NOTIFICATION_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      NOTIFICATION_APP_PASSWORD: ${NOTIFICATION_APP_PASSWORD:?copy .env.example to .env}
     volumes:
       - nawara_pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -200,9 +203,9 @@ services:
       timeout: 5s
       retries: 10
 
-  # Stage 16.3: the foundation only (ADR-0046). It needs no database (Stage 16.4), no broker (16.5) and no provider (16.8) yet, so it
-  # depends on nothing; /ready is 200 as soon as it listens. It shares the app services' profile. SERVICE_TOKENS is empty by default
-  # (every service-token call refused); no route uses it until the send API (16.6).
+  # ADR-0046. Stage 16.4: its own database (schema and published templates; /ready = database + migrations). No broker (16.5) and no
+  # provider (16.8) yet: it does not connect to RabbitMQ. SERVICE_TOKENS is empty by default (every service-token call refused); no
+  # route uses it until the send API (16.6).
   notification-service:
     profiles: [db]
     # Stage 15.5: explicit stop grace (Docker's default is 10 s); the service's own graceful shutdown is bounded by HTTP_DRAIN_TIMEOUT_MS.
@@ -210,10 +213,16 @@ services:
     build:
       context: .
       dockerfile: apps/notification-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - '127.0.0.1:3004:3000'
     environment:
       NODE_ENV: development
+      DATABASE_URL: postgres://notification_app:${NOTIFICATION_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/notification
+      # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
+      MIGRATION_DATABASE_URL: postgres://notification_migrator:${NOTIFICATION_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/notification
       SERVICE_TOKENS: ${NOTIFICATION_SERVICE_TOKENS:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']

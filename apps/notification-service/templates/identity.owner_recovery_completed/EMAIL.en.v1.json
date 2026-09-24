@@ -1,0 +1,15 @@
+{
+  "variables": {
+    "ipAddress": {
+      "type": "string",
+      "required": true,
+      "maxLength": 45
+    },
+    "occurredAt": {
+      "type": "datetime",
+      "required": true
+    }
+  },
+  "subject": "Account recovery completed",
+  "bodyText": "Your account recovery was completed at {{occurredAt}} from {{ipAddress}}.\n\nIf this was not you, contact support immediately."
+}
