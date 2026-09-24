@@ -443,8 +443,8 @@ Notes on this mapping:
 - **Phones:** Auth accepts `+?[0-9]{8,15}` (the `+` is optional), not E.164. A non-E.164 destination fails the delivery
   `invalid_destination`. That is terminal and visible, never guessed at: see D20.
 - **Operator code lifetime:** the shift end, possibly hours away. That is fine, since expiry is enforced per delivery.
-- **The Stage 16.2 prerequisite:** today these messages have no kit envelope and are rejected as `malformed_envelope`. Event intake
-  cannot start before 16.2 (§14).
+- **The Stage 16.2 prerequisite:** met. Auth now publishes the kit envelope and the kit consumer accepts every Auth event (§14).
+  Before 16.2 these messages had no envelope and were rejected as `malformed_envelope`.
 
 ### 7.2 API
 
@@ -748,6 +748,11 @@ Option **B**: store the pinned template version + non-secret data + the sealed s
   - the broker is inside the trusted boundary.
 
 ## 14. Auth prerequisite (Stage 16.2)
+
+> **Status: implemented and validated in Stage 16.2** as designed below, with a real-broker proof that the kit consumer accepts
+> every Auth event. See [the Stage 16.2 record](../architecture/stage-16/stage-16-2-auth-event-envelope.md) for the event inventory,
+> the envelope, the bounds (sequential publishing, a 1000-event backlog, a 5 s shutdown drain) and the evidence.
+> "The gap today" below describes the state before 16.2.
 
 **The gap today** (`apps/auth-service/src/events/events-publisher.service.ts`):
 - `AmqpConnection.publish(EVENTS_EXCHANGE, routingKey, payload)` sends no `messageId`, no `type`, no headers, `persistent` unset,

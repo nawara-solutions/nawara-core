@@ -5,6 +5,10 @@
 - **Deciders:** Anwar (project owner)
 
 > **Forward note (2026-09-19):** [ADR-0037](./0037-reliable-events-outbox-inbox.md) builds on this decision: the project owner accepted RabbitMQ for the financial services and added message headers, a transactional outbox and an inbox. This ADR's production-deployment deferral still holds.
+
+> **Forward note (2026-09-24):** Stage 16.2 ([ADR-0046](./0046-notification-service-architecture.md) rule 17) moved Auth, the last user
+> of `@golevelup/nestjs-rabbitmq`, onto the service-kit `RabbitMqEventBus` and its canonical header envelope. No Core service uses
+> `@golevelup/nestjs-rabbitmq` any more; the exchange (`nawara.events`) and the routing-key convention (event name verbatim) are unchanged.
 - **GitHub issue:** https://github.com/nawara-solutions/nawara-core/issues/17
 
 ## Context

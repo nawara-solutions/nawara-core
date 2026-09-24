@@ -52,7 +52,11 @@ const rand = () => randomBytes(32).toString('base64');
 export type TestCtx = Awaited<ReturnType<typeof createTestApp>>;
 
 /** A fully wired app against its own database cloned from the migrated template. */
-export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[] } = {}) {
+/**
+ * `extra.realEvents` (Stage 16.2): keep the REAL event wiring (the kit `RabbitMqEventBus` behind `EventsPublisherService`) against the
+ * broker at that URL instead of the recording bus; `bus` then records nothing.
+ */
+export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[]; realEvents?: { rabbitmqUrl: string } } = {}) {
   const adminUrl = inject('pgAdminUrl');
   const dbName = `t_${randomUUID().replace(/-/g, '')}`;
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -68,6 +72,7 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
     WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
     BCRYPT_COST: '4', ACCESS_TOKEN_TTL_SEC: '3600', RECOVERY_COOLDOWN_SEC: '3600', WORK_TIMEZONE: 'UTC',
     ...Object.fromEntries(RATE_BUCKETS.map((b) => [`RATE_${b}_LIMIT`, '100000'])),
+    ...(extra.realEvents ? { AUTH_EVENTS: 'on', RABBITMQ_URL: extra.realEvents.rabbitmqUrl } : {}),
     ...overrides,
   };
   const cfg: AppConfig = loadConfig(env as NodeJS.ProcessEnv);
@@ -75,12 +80,11 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   const bus = new RecordingBus();
   const logger = new CapturingLogger();
 
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule.register(cfg)], providers: extra.providers ?? [] })
+  const builder = Test.createTestingModule({ imports: [AppModule.register(cfg)], providers: extra.providers ?? [] })
     .overrideProvider(APP_CONFIG).useValue(cfg)
-    .overrideProvider(CLOCK).useValue(clock)
-    .overrideProvider(EVENT_BUS).useValue(bus)
-    .setLogger(logger)
-    .compile();
+    .overrideProvider(CLOCK).useValue(clock);
+  if (!extra.realEvents) builder.overrideProvider(EVENT_BUS).useValue(bus);
+  const moduleRef = await builder.setLogger(logger).compile();
   const app = moduleRef.createNestApplication();
   app.useLogger(logger);
   // Same HTTP baseline main.ts wires (Stage 13.2): request-context first, then the additive exception

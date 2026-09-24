@@ -81,9 +81,10 @@ export interface AppConfig {
   /**
    * Fire-and-forget event publishing (ADR-0018). `AUTH_EVENTS=off` disables it (tests, runs without a broker; the production
    * deploy sets it off today). When enabled, `rabbitmqUrl` is set: production requires an explicit `RABBITMQ_URL`; only
-   * development and test fall back to a local broker.
+   * development and test fall back to a local broker. Stage 16.2: `confirmTimeoutMs` (`RABBITMQ_CONFIRM_TIMEOUT_MS`, default 5000,
+   * 100-60000, the same variable and bounds as Billing and Payment) bounds the kit bus's publisher confirm; set only while enabled.
    */
-  events: { enabled: boolean; rabbitmqUrl?: string };
+  events: { enabled: boolean; rabbitmqUrl?: string; confirmTimeoutMs?: number };
   trustProxy: boolean;
   corsOrigins: string[];
   baselineRateLimitPerMinute: number;
@@ -223,7 +224,9 @@ export function loadConfig(
 
   const eventsEnabled = env.AUTH_EVENTS !== 'off';
   let rabbitmqUrl: string | undefined;
+  let confirmTimeoutMs: number | undefined;
   if (eventsEnabled) {
+    confirmTimeoutMs = int(env, 'RABBITMQ_CONFIRM_TIMEOUT_MS', 5_000, 100, 60_000);
     rabbitmqUrl = env.RABBITMQ_URL || undefined;
     if (rabbitmqUrl === undefined) {
       // Never connect a production service to a guessed broker with default credentials: fail closed instead.
@@ -276,7 +279,7 @@ export function loadConfig(
       queryTimeoutMs,
     },
     httpDrainTimeoutMs: int(env, 'HTTP_DRAIN_TIMEOUT_MS', DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS.min, HTTP_DRAIN_TIMEOUT_BOUNDS.max),
-    events: { enabled: eventsEnabled, rabbitmqUrl },
+    events: { enabled: eventsEnabled, rabbitmqUrl, confirmTimeoutMs },
     trustProxy: env.TRUST_PROXY === 'true',
     corsOrigins,
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),
