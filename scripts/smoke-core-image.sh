@@ -67,6 +67,11 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "NOTIFICATION_SECRET_ACTIVE_KEY_ID=k1"
       echo "NOTIFICATION_DEFAULT_LOCALE=en"
       ;;
+    file-service)
+      echo "DATABASE_URL=$(db_url file_app file)"
+      echo "SERVICE_TOKENS=smoke-caller:$(hex 32)" # proves the service-token and caller-policy configuration are parsed in production
+      echo 'FILE_SERVICE_POLICY={"callers":{"smoke-caller":{"operations":["upload","read"],"organizations":"request","mediaTypes":["application/pdf"],"maxBytes":1048576}}}'
+      ;;
     *)
       echo "unknown service: $service" >&2
       exit 2

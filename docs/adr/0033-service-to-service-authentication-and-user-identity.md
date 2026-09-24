@@ -53,3 +53,10 @@ Auth's authorization is deliberately **live** (reads the database on each reques
   Response caching is a later, explicit decision because it delays revocation.
 - Token distribution and rotation are manual until a secret manager exists.
 - The guard is an interface, so moving to signed service JWTs later changes one module per service.
+
+## Note (2026-09-24, Stage 17.2)
+
+A pointer, not a change to this decision: File Service access tickets ([ADR-0048](./0048-file-service-architecture.md) F16) are a
+deliberate case where Auth is not on the path of the call that reaches File Service. The end user is authenticated through Auth (and
+authorized by the product) **before** the product requests a ticket; the ticket redemption carries no user token, File Service never
+verifies one and never calls Auth.
