@@ -89,3 +89,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0046](./0046-notification-service-architecture.md) | Notification service architecture: Notification → Delivery → Attempt, persisted versioned templates, canonical event intake, ambiguity and secret policy | Accepted (2026-09-24, Stage 16.9 acceptance note) |
 | [0047](./0047-resend-as-the-email-provider.md) | Resend as the notification email provider (direct HTTPS, request idempotency keys) | Accepted (2026-09-24) |
 | [0048](./0048-file-service-architecture.md) | File Service architecture: generic immutable file objects, proxy streaming, storage port, caller policies and product-issued access tickets | Accepted (2026-09-24, Stage 17.1) |
+| [0049](./0049-audit-trail-architecture.md) | Security and business audit trail: producer-owned cataloged audit events through the transactional outbox, append-only records, tenant-safe query | Proposed (Stage 18.1) |
