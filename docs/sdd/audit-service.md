@@ -1,0 +1,138 @@
+# audit-service
+
+- **Status:** Draft (Stage 18.1 design, for review; nothing implemented).
+- **Owners:** Anwar (project owner)
+- **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
+  only, never a synchronous dependency)
+- **Related ADRs:** [0049](../adr/0049-audit-trail-architecture.md) (this service), [0032](../adr/0032-database-per-service-on-a-shared-server.md),
+  [0033](../adr/0033-service-to-service-authentication-and-user-identity.md), [0034](../adr/0034-shared-service-kit-and-api-conventions.md),
+  [0037](../adr/0037-reliable-events-outbox-inbox.md), [0042](../adr/0042-service-token-scopes-and-administrative-authorization.md)
+- **Decisions and roadmap:** [Stage 18.1](../architecture/stage-18/stage-18-1-decisions-and-roadmap.md) (A1–A71, the inventory, the threat
+  model, the growth model, the 18.2–18.10 plan)
+
+## 1. Responsibility
+
+**Owns:** validation, durable append-only storage, idempotent ingestion, retention and tenant-safe query of **audit records**: statements
+by an owning Core service that a cataloged security or business action occurred.
+
+**Does not own:** the meaning of any action (the producer decides), any domain's state or history of record (Billing's
+`billing_transition`, Auth's `auth_audit_event`, Organization's `admin_actor_event`, File lifecycle, Notification delivery history stay
+authoritative), application logs or metrics, user identity (ids only), administration UI and exports (Stage 19). It never calls Auth,
+Organization or a product service.
+
+## 2. Flow
+
+```text
+ owning Core service ── one transaction ──┬── domain change
+                                          └── outbox row  "audit.<action>"  (kit OutboxService, same client)
+                                                     │ COMMIT
+                                                     ▼
+                                      kit OutboxRelay ──► RabbitMQ nawara.events  (routing key audit.<action>)
+                                                                     │
+                                                                     ▼ queue audit-service.audit  (audit.#; .retry; .dead)
+                                                            audit-service consumer
+                                                                     │ validate (contract, catalog, producer, bounds)
+                                                                     │ INSERT … ON CONFLICT (sourceService, eventId) DO NOTHING
+                                                                     ▼
+                                                              audit_record (append-only)
+                                                                     │
+                                                    service token + AUDIT_SERVICE_POLICY
+                                                                     ▼
+                                           organization-scope / platform-scope queries (products, Stage 19)
+```
+
+## 3. Envelope
+
+The kit envelope, unchanged: headers `eventId` (the producer's outbox id, UUID), `occurredAt` (the producer database clock),
+`correlationId`, `source` (the producing service), `version` (the audit payload version, 1); name / routing key `audit.<action>`.
+
+## 4. Payload (contract version 1)
+
+```jsonc
+{
+  "action": "membership.revoked",               // = the event name without "audit."; catalog-listed
+  "actor": { "type": "user", "id": "<uuid>", "userKind": "owner" },   // user | service | system (A9)
+  "organizationId": "<uuid>" | null,            // resource-derived; null = platform-level (A11)
+  "resource": { "type": "membership", "id": "<uuid>" },
+  "subject": { "type": "user", "id": "<uuid>" }, // optional, at most one (A12)
+  "outcome": "succeeded",                        // succeeded | denied (catalog-limited)
+  "changes": { "status": { "from": "active", "to": "revoked" } },     // optional, catalog keys only (A27, A28)
+  "causationId": "<uuid>"                        // optional: the eventId that caused this action
+}
+```
+
+| Field | Rule |
+|---|---|
+| `action` | kit name grammar; in the catalog; its catalog producer = the envelope `source` |
+| `actor.type` | in the action's allowed set; `user` → `id` UUID + `userKind` ∈ {member, owner, operator}; `service` → `id` = a service name (caller grammar); `system` → `id` = a cataloged process code, no `userKind` |
+| `organizationId` | UUID or null, per the action's organization rule (required / none / resource-derived) |
+| `resource`, `subject` | `type` = the catalog's; `id` ≤ 128 chars `[A-Za-z0-9._:-]` |
+| `outcome` | `succeeded`, or `denied` only where the catalog allows it |
+| `changes` | ≤ 8 catalog keys; scalar or `{from, to}` of scalars; strings ≤ 64 safe chars; ≤ 1 KiB serialized; no secret-shaped value |
+| whole payload | ≤ 4 KiB; unknown top-level fields refused |
+
+Invalid → `PermanentEventFailure(reason)` → `<queue>.dead` at once, with a bounded reason: `invalid_envelope`, `unknown_action`,
+`unsupported_version`, `producer_not_admitted`, `invalid_actor`, `invalid_organization`, `invalid_resource`, `invalid_changes`,
+`sensitive_value`, `payload_too_large`, `event_id_conflict`.
+
+## 5. Data model (conceptual; the table is Stage 18.3)
+
+`audit_record` — one row per accepted event, never updated, never deleted by the runtime.
+
+| Column | Source | Null | Indexed | Notes |
+|---|---|---|---|---|
+| `id` | Audit (bigint identity) | no | PK | internal; the pagination tie-breaker; never exposed as identity |
+| `eventId` | envelope | no | unique with `sourceService` | the external identity |
+| `sourceService` | envelope `source` (authenticated per A20 once P-A1 exists) | no | (unique) | service grammar |
+| `action` | payload | no | filter | catalog value |
+| `category` | catalog | no | filter | security / business / commercial / administrative |
+| `schemaVersion` | envelope `version` | no | — | never rewritten |
+| `actorType`, `actorId`, `userKind` | payload | `userKind` only for users | (`actorType`, `actorId`, `occurredAt`) | ids only |
+| `organizationId` | payload | yes (platform-level) | (`organizationId`, `occurredAt`, `id`) | never a wildcard |
+| `resourceType`, `resourceId` | payload | no | (`resourceType`, `resourceId`, `occurredAt`) | |
+| `subjectType`, `subjectId` | payload | yes | partial | |
+| `outcome` | payload | no | filter | |
+| `changes` | payload | yes | no | bounded jsonb |
+| `correlationId` | envelope | yes | partial | navigation only (client-choosable) |
+| `causationId` | payload | yes | — | |
+| `occurredAt` | envelope | no | in the composite indexes | producer clock |
+| `recordedAt` | Audit `now()` | no | yes (retention) | Audit clock |
+
+Privileges: owner `audit_migrator`; runtime `audit_app` `INSERT, SELECT` (UPDATE / DELETE revoked from the Core default privileges);
+append-only and no-truncate triggers; a separate maintenance role for retention purges past each category's horizon (18.8).
+
+## 6. Query (Stage 18.6; shape, not frozen routes)
+
+- `GET /audit/organizations/{organizationId}/records` — capability `read_organization`; the path's organization is the only one
+  returned; null-organization records never appear.
+- `GET /audit/records` — capability `read_platform`; optional `organizationId` or `platform=true` for platform-level records; each call
+  recorded as `audit.platform_query`.
+- Filters: `action`, `category`, `actorType` + `actorId`, `resourceType` + `resourceId`, `subjectType` + `subjectId`, `sourceService`,
+  `outcome`, `correlationId`, `from` / `to` (required; ≤ 92 days organization scope, ≤ 31 days platform scope).
+- Pagination: `limit` ≤ 100 (default 50), opaque keyset cursor over (`occurredAt` DESC, `id` DESC); scope re-applied per page.
+- Response items: `eventId`, `occurredAt`, `recordedAt`, `action`, `category`, `actor`, `organizationId`, `resource`, `subject`,
+  `outcome`, `changes`, `sourceService`, `correlationId`, `causationId`. Identifiers only.
+- Errors: kit body; `400 validation_error`, `401`, `403 operation_not_allowed`, `429 rate_limited`; a query never answers 404 for an
+  organization without records (an empty page).
+
+## 7. Caller policy
+
+`AUDIT_SERVICE_POLICY` (deny by default, validated at boot, the File / Notification pattern): per caller `operations` ⊆
+{`read_organization`, `read_platform`}, `categories` (subset), optional `sourceServices` (subset). Producer admission is the catalog
+(action → producer), not the HTTP policy.
+
+## 8. Configuration (indicative; fixed in 18.2+)
+
+`DATABASE_URL` (runtime role), `SERVICE_TOKENS`, `AUDIT_SERVICE_POLICY`, `RABBITMQ_URL`, `AUDIT_QUEUE` (default
+`audit-service.audit`), consumer prefetch, retry count / delay (kit), query page / window bounds, retention durations per category
+(default: never purge until P-A2), clock-skew tolerance (5 min).
+
+## 9. Observability
+
+`audit_ops_snapshot` / counters in the File pattern: ingested, duplicates, invalid by reason, dead-lettered, clock skew, ingestion lag
+(p50 / p95 of `recordedAt − occurredAt`), database failures, queries, `429`s, latency; queue depth and oldest message (broker); outbox lag
+at producers (`check-outbox-lag`); DLQ depth (`check-dlq-depth`). Labels from closed sets only.
+
+## 10. Open items
+
+Library placement (18.4); retention durations and erasure policy (owner / legal); per-service broker identity (P-A1); Auth outbox (18.7).
