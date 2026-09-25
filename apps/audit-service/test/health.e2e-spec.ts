@@ -9,8 +9,8 @@ import { describeWithEnv } from './support/env.js';
 
 /**
  * Stage 18.2: readiness depends on the database and its migrations only (no broker until 18.5, never Auth, Organization or a product);
- * liveness never depends on them; the pool closes at shutdown. The migration baseline is the service-kit's (`auditMigrationsDir` holds
- * no migration until Stage 18.3).
+ * liveness never depends on them; the pool closes at shutdown. The migrations are the service-kit baseline and, from Stage 18.3, the
+ * append-only `audit_record` (0001).
  */
 describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
   let db: TestDatabase;
@@ -28,14 +28,13 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
       expect(pending.body).toEqual({ status: 'unavailable', failed: ['migrations'] });
       const applied = await runMigrations(db.url, [kitMigrationsDir, auditMigrationsDir]);
       expect(applied.applied.length).toBeGreaterThan(0);
-      expect(applied.applied.every((n) => n.startsWith('kit_'))).toBe(true); // the service has no migration of its own yet
+      expect(applied.applied.filter((n) => !n.startsWith('kit_'))).toEqual(['0001_audit_record.sql']); // Stage 18.3: the audit record
       await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
       const again = await runMigrations(db.url, [kitMigrationsDir, auditMigrationsDir]);
       expect(again.applied).toEqual([]); // a re-run is a no-op
       expect(again.alreadyApplied).toEqual(applied.applied);
-      // No audit domain yet (Stage 18.3): no audit table, no column of the future record.
-      expect(await sql(db.url, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'audit%'`)).toEqual([]);
-      expect(await sql(db.url, `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND column_name IN ('actorType', 'actorId', 'recordedAt', 'resourceType', 'resourceId', 'sourceService')`)).toEqual([]);
+      // Stage 18.3: exactly one audit table (no actor, resource, organization, user or catalog table).
+      expect(await sql(db.url, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'audit%'`)).toEqual([{ table_name: 'audit_record' }]);
     } finally {
       await t.app.close();
     }

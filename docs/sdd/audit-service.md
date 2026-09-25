@@ -1,7 +1,8 @@
 # audit-service
 
-- **Status:** Draft (Stage 18.1 design). Stage 18.2: the service foundation only (health, readiness, service auth, caller policy; no
-  audit domain yet): [Stage 18.2 record](../architecture/stage-18/stage-18-2-service-foundation.md).
+- **Status:** Draft (Stage 18.1 design). Stage 18.2: the service foundation (health, readiness, service auth, caller policy):
+  [Stage 18.2 record](../architecture/stage-18/stage-18-2-service-foundation.md). Stage 18.3: the append-only `audit_record` and its
+  repository: [Stage 18.3 record](../architecture/stage-18/stage-18-3-persistence-append-only.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)
@@ -101,6 +102,13 @@ Invalid → `PermanentEventFailure(reason)` → `<queue>.dead` at once, with a b
 
 Privileges: owner `audit_migrator`; runtime `audit_app` `INSERT, SELECT` (UPDATE / DELETE revoked from the Core default privileges);
 append-only and no-truncate triggers; a separate maintenance role for retention purges past each category's horizon (18.8).
+
+**Implemented (Stage 18.3, `0001_audit_record.sql`); clarifications, no decision changed:** `id` is `GENERATED ALWAYS` (never
+caller-supplied); `actorId` is never NULL (a system actor names its process code); `userKind` exactly for users; `changes` values are
+strings of 1–64 `[A-Za-z0-9._:+-]`, integers within ±(2^53 − 1), booleans or null, ≤ 8 keys, ≤ 1 024 bytes of canonical jsonb text;
+`recordedAt` is forced to the database clock by a trigger; `occurredAt` must be finite; `causationId` ≠ `eventId`; the mutating
+privileges are taken back by `audit_restrict_to_append_only(table)`, the convention for every later append-only table; no fingerprint
+column (every field is stored, so exact vs conflicting duplicates are compared field by field, `sameEvidence`).
 
 ## 6. Query (Stage 18.6; shape, not frozen routes)
 

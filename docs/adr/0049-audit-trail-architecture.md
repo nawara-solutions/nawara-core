@@ -1,6 +1,6 @@
 # 0049. Security and business audit trail architecture
 
-- **Status:** Proposed (Stage 18.1; for the owner's review)
+- **Status:** Accepted (2026-09-25, by the owner, after the Stage 18.1 review)
 - **Date:** 2026-09-25
 - **Deciders:** Anwar (project owner)
 - **Related:** [ADR-0032](./0032-database-per-service-on-a-shared-server.md) (database per service), [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md)
