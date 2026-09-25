@@ -17,7 +17,7 @@ expect_reject() { local out; out=$(sql "$2" "$3" "$4" "$5"); if echo "$out" | gr
 expect_deny() { local out; out=$(sql "$2" "$3" "$4" "$5"); if echo "$out" | grep -qiE 'permission denied|must be owner|not permitted|no pg_hba|FATAL'; then pass "$1"; else bad "$1 (was allowed: $out)"; fi; }
 
 pw_of() { local v="$1"; echo "${!v}"; }
-for svc in billing payment accounting organization notification file; do
+for svc in billing payment accounting organization notification file audit; do
   up=$(echo "$svc" | tr a-z A-Z)
   MIG=$(pw_of "${up}_MIGRATOR_PASSWORD"); APP=$(pw_of "${up}_APP_PASSWORD")
   echo "== $svc"
@@ -30,7 +30,7 @@ for svc in billing payment accounting organization notification file; do
   expect_deny "runtime role cannot truncate"                        "${svc}_app"      "$svc" "$APP" "TRUNCATE verify_t"
   expect_deny "runtime role cannot create a role"                   "${svc}_app"      "$svc" "$APP" "CREATE ROLE evil LOGIN"
   expect_deny "runtime role cannot create a database"               "${svc}_app"      "$svc" "$APP" "CREATE DATABASE evil"
-  for other in billing payment accounting organization notification file; do
+  for other in billing payment accounting organization notification file audit; do
     [ "$other" = "$svc" ] && continue
     expect_deny "runtime role cannot connect to the $other database"  "${svc}_app"      "$other" "$APP" "SELECT 1"
     expect_deny "migrator cannot connect to the $other database"      "${svc}_migrator" "$other" "$MIG" "SELECT 1"
@@ -44,7 +44,7 @@ done
 
 if [ "${1:-}" = "--with-kit-migrations" ]; then
   echo "== service-kit migrations under least privilege"
-  for svc in billing payment accounting organization notification file; do
+  for svc in billing payment accounting organization notification file audit; do
     up=$(echo "$svc" | tr a-z A-Z); MIG=$(pw_of "${up}_MIGRATOR_PASSWORD"); APP=$(pw_of "${up}_APP_PASSWORD")
     MIGRATION_DATABASE_URL="postgres://${svc}_migrator:${MIG}@127.0.0.1:${PORT}/${svc}" node libs/service-kit/dist/cli/migrate.js >/dev/null \
       && pass "$svc: migrations applied as the migrator" || bad "$svc: migration run failed"
