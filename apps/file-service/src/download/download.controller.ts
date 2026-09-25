@@ -55,6 +55,7 @@ export class DownloadController {
   @ApiResponse({ status: 404, description: 'file_not_found' })
   @ApiResponse({ status: 409, description: 'file_not_available' })
   @ApiResponse({ status: 410, description: 'file_deleted' })
+  @ApiResponse({ status: 429, description: 'rate_limited (service reads per caller / per organization, F32)' })
   @ApiResponse({ status: 503, description: 'storage_unavailable' })
   async content(@CallerService() caller: string, @Req() req: Request, @Res() res: Response): Promise<void> {
     await this.downloads.serviceContent(caller, req, res, req.params.id as string);
@@ -64,13 +65,14 @@ export class DownloadController {
   @HttpCode(201)
   @UseGuards(ServiceTokenGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Issue a short-lived download ticket for the caller\'s file (issue_ticket)', description: 'After the product\'s own authorization of its user. Bound to this file, this owner and organization; reusable until it expires unless singleUse. Returned once; only its digest is stored.' })
+  @ApiOperation({ summary: 'Issue a short-lived download ticket for the caller\'s file (issue_ticket)', description: 'After the product\'s own authorization of its user. Bound to this file, this owner and organization; reusable until it expires (at most FILE_TICKET_MAX_DOWNLOADS uses) unless singleUse. Returned once; only its digest is stored.' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader(ORG_HEADER)
   @ApiResponse({ status: 201, description: '{ ticketId, url, expiresAt }' })
   @ApiResponse({ status: 404, description: 'file_not_found' })
   @ApiResponse({ status: 409, description: 'file_not_available' })
   @ApiResponse({ status: 422, description: 'disposition_not_allowed' })
+  @ApiResponse({ status: 429, description: 'rate_limited (ticket issuance per caller / per organization, F32)' })
   issueTicket(@CallerService() caller: string, @Req() req: Request, @Param('id') id: string, @Body() dto: IssueDownloadTicketDto) {
     return this.downloads.issueDownloadTicket(caller, req, id, dto);
   }
@@ -89,7 +91,7 @@ export class DownloadController {
   }
 
   @Get('t/:token')
-  @ApiOperation({ summary: 'Redeem a download ticket (ticket holders; no authentication)', description: 'Streams exactly the bound file. Every unusable ticket is the same ticket_invalid. The path is never logged. No Range, no HEAD.' })
+  @ApiOperation({ summary: 'Redeem a download ticket (ticket holders; no authentication)', description: 'Streams exactly the bound file. A reusable ticket serves at most FILE_TICKET_MAX_DOWNLOADS times. Every unusable ticket is the same ticket_invalid. The path is never logged. No Range, no HEAD. The body is verified against the recorded SHA-256 while streaming; a mismatch ends the connection before the last bytes.' })
   @ApiParam({ name: 'token', description: 'The opaque ticket (from the issuing service)' })
   @ApiResponse({ status: 200, ...BYTES })
   @ApiResponse({ status: 404, description: 'ticket_invalid' })

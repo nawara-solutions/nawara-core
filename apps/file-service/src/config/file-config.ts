@@ -3,6 +3,7 @@ import { FileCallerPolicy } from '../policy/caller-policy.js';
 import { loadStorageConfig, type StorageConfig } from '../storage/storage-config.js';
 import { loadUploadConfig, type UploadConfig } from '../upload/upload-config.js';
 import { loadCleanupConfig, type CleanupConfig } from '../cleanup/cleanup-config.js';
+import { loadUsageLimitsConfig, type UsageLimitsConfig } from '../limits/usage-limiter.js';
 
 /** The one identity of this service: logs, the database `application_name`, Docker, documentation. */
 export const SERVICE_NAME = 'file-service';
@@ -43,6 +44,8 @@ export interface FileConfig extends BaseConfig {
   docs: { username: string; password?: string };
   /** Stage 17.7: the cleanup workers. */
   cleanup: CleanupConfig;
+  /** Stage 17.8 (F32): per-caller / per-organization usage limits and the reusable download-ticket use cap. */
+  limits: UsageLimitsConfig;
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -74,5 +77,6 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
     },
     cleanup: loadCleanupConfig(reader, storageBound),
+    limits: loadUsageLimitsConfig(reader),
   };
 }

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { HeadObjectCommand } from '@aws-sdk/client-s3';
+import { HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
@@ -60,6 +60,25 @@ describeWithEnv('upload lifecycle on the S3-compatible store (real PostgreSQL + 
     const head = await bucket.admin.send(new HeadObjectCommand({ Bucket: bucket.bucket, Key: row.storageKey }));
     expect(head.ContentLength).toBe(pdf.length);
     expect(head.ContentType).toBe('application/pdf');
+  });
+
+  it('Stage 17.8 concurrency on S3: 10 redemptions of one ticket create ONE file and ONE object; 10 concurrent downloads are byte-exact', async () => {
+    const token = await ticket(t);
+    const pdf = SAMPLES.pdf(300_000);
+    const rs = await Promise.all(Array.from({ length: 10 }, () => request(t.app.getHttpServer()).put(`/file/t/${token}`).send(pdf).then((r) => r)));
+    expect(rs.filter((r) => r.status === 201)).toHaveLength(1);
+    for (const r of rs) expect([200, 201, 409]).toContain(r.status); // the winner, retries of the completed upload, or "in progress"
+    const id = rs.find((r) => r.status === 201)!.body.id as string;
+    expect(Number(((await s.query(`SELECT count(*) AS n FROM file WHERE "ownerService" = 'core-drive' AND id IN (SELECT "fileId" FROM file_access_ticket WHERE "tokenDigest" = $1)`, [sha(Buffer.from(token))]))[0] as { n: string }).n)).toBe(1);
+    const listed = await bucket.admin.send(new ListObjectsV2Command({ Bucket: bucket.bucket, Prefix: `files/${id}/` }));
+    expect(listed.KeyCount).toBe(1);
+    const url = (await request(t.app.getHttpServer()).post(`/file/files/${id}/tickets`).set({ authorization: `Bearer ${drive.token}` }).send({ operation: 'download' })).body.url as string;
+    const downloads = await Promise.all(Array.from({ length: 10 }, () => request(t.app.getHttpServer()).get(new URL(url).pathname).buffer(true).parse((res, cb) => {
+      const parts: Buffer[] = [];
+      res.on('data', (c: Buffer) => parts.push(c));
+      res.on('end', () => cb(null, Buffer.concat(parts)));
+    }).then((r) => r)));
+    for (const d of downloads) expect([d.status, sha(d.body as Buffer)]).toEqual([200, sha(pdf)]);
   });
 
   it('a refused upload leaves no object in the bucket', async () => {

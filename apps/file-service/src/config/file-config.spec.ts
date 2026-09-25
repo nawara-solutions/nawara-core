@@ -120,4 +120,16 @@ describe('file-service configuration', () => {
     expect(loadFileConfig(env({ ...tokens, FILE_SERVICE_POLICY: policy(1000) })).callerPolicy.allows('some-core-service', 'upload')).toBe(true);
     expect(() => loadFileConfig(env({ ...tokens, FILE_MAX_BYTES: '1000', FILE_SERVICE_POLICY: policy(1001) }))).toThrow(/maxBytes/);
   });
+  it('Stage 17.8 (F32): usage limits have bounded defaults; an organization budget above its caller budget refuses to boot', () => {
+    expect(loadFileConfig(env()).limits).toEqual({
+      perCaller: { upload: 600, ticket: 1_200, download: 1_200 },
+      perOrganization: { upload: 120, ticket: 300, download: 300 },
+      ticketMaxDownloads: 50,
+      uploadMaxInFlight: 64,
+    });
+    expect(() => loadFileConfig(env({ FILE_TICKET_RATE_PER_CALLER: '10', FILE_TICKET_RATE_PER_ORGANIZATION: '11' }))).toThrow(/FILE_TICKET_RATE_PER_ORGANIZATION must not exceed/);
+    for (const bad of [{ FILE_UPLOAD_RATE_PER_CALLER: '0' }, { FILE_DOWNLOAD_RATE_PER_ORGANIZATION: 'lots' }, { FILE_TICKET_MAX_DOWNLOADS: '0' }, { FILE_TICKET_MAX_DOWNLOADS: '10001' }]) {
+      expect(() => loadFileConfig(env(bad))).toThrow(ConfigError);
+    }
+  });
 });

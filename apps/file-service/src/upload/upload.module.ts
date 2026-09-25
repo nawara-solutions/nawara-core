@@ -1,4 +1,5 @@
 import { Module, RequestMethod, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
+import { UsageLimitsModule } from '../limits/usage-limiter.js';
 import { PersistenceModule } from '../persistence/persistence.module.js';
 import { RedemptionModule } from '../tickets/redemption-limiter.js';
 import { UploadController } from './upload.controller.js';
@@ -7,7 +8,7 @@ import { UploadService } from './upload.service.js';
 
 /** The upload lifecycle (Stage 17.5): ticket issuance, ticket redemption, service upload, attach. */
 @Module({
-  imports: [PersistenceModule, RedemptionModule],
+  imports: [PersistenceModule, RedemptionModule, UsageLimitsModule],
   controllers: [UploadController],
   providers: [UploadService],
 })

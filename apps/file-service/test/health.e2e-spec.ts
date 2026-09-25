@@ -32,7 +32,7 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
       expect((await request(t.app.getHttpServer()).get('/ready').expect(503)).body.failed).toEqual(['migrations']); // the file schema is missing
       await request(t.app.getHttpServer()).get('/health').expect(200);
       const applied = await runMigrations(db.url, [kitMigrationsDir, fileMigrationsDir]);
-      expect(applied.applied).toEqual(['0001_file_schema.sql', '0002_file_deletion_worker.sql']);
+      expect(applied.applied).toEqual(['0001_file_schema.sql', '0002_file_deletion_worker.sql', '0003_file_name_marks.sql']);
       await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
       const again = await runMigrations(db.url, [kitMigrationsDir, fileMigrationsDir]);
       expect(again.applied).toEqual([]); // a re-run is a no-op

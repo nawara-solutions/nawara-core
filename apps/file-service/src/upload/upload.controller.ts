@@ -64,6 +64,7 @@ export class UploadController {
   @ApiResponse({ status: 400, description: 'validation_error' })
   @ApiResponse({ status: 401, description: 'no or unknown service token' })
   @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed | max_bytes_not_allowed | media_type_not_allowed' })
+  @ApiResponse({ status: 429, description: 'rate_limited (ticket issuance per caller / per organization, F32)' })
   issueTicket(@CallerService() caller: string, @Body() dto: IssueUploadTicketDto) {
     return this.uploads.issueUploadTicket(caller, dto);
   }
@@ -86,7 +87,8 @@ export class UploadController {
   @ApiResponse({ status: 413, description: 'file_too_large' })
   @ApiResponse({ status: 415, description: 'unsupported_media_type' })
   @ApiResponse({ status: 422, description: 'media_type_mismatch | checksum_mismatch | idempotency_key_reused' })
-  @ApiResponse({ status: 503, description: 'storage_unavailable' })
+  @ApiResponse({ status: 429, description: 'rate_limited (uploads per caller / per organization, F32; replays count)' })
+  @ApiResponse({ status: 503, description: 'storage_unavailable | upload_busy (too many uploads in progress; retry)' })
   async upload(@CallerService() caller: string, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await this.uploads.serviceUpload(caller, req);
     res.status(result.created ? 201 : 200);
@@ -122,7 +124,7 @@ export class UploadController {
   @ApiResponse({ status: 415, description: 'unsupported_media_type' })
   @ApiResponse({ status: 422, description: 'media_type_mismatch' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
-  @ApiResponse({ status: 503, description: 'storage_unavailable' })
+  @ApiResponse({ status: 503, description: 'storage_unavailable | upload_busy (too many uploads in progress; the ticket is not consumed)' })
   async redeem(@Param('token') token: string, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await this.uploads.redeemUploadTicket(token, req);
     res.status(result.created ? 201 : 200);
