@@ -37,6 +37,17 @@ describeWithEnv('rate limiter (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
     expect((await limiter.hit('signup', 'user-b', rule)).allowed).toBe(true); // same identifier, different bucket
   });
 
+  it('peek() reports the window without recording a hit (Stage 17.5: failure-only limits)', async () => {
+    const rule = { limit: 2, windowSec: 60 };
+    expect(await limiter.peek('failures', 'client-p', rule)).toEqual({ allowed: true, count: 0, limit: 2 });
+    await limiter.hit('failures', 'client-p', rule);
+    expect(await limiter.peek('failures', 'client-p', rule)).toEqual({ allowed: true, count: 1, limit: 2 });
+    expect(await limiter.peek('failures', 'client-p', rule)).toEqual({ allowed: true, count: 1, limit: 2 }); // peeking never counts
+    await limiter.hit('failures', 'client-p', rule);
+    expect(await limiter.peek('failures', 'client-p', rule)).toEqual({ allowed: false, count: 2, limit: 2 }); // at the limit: blocked
+    expect((await limiter.peek('failures', 'client-p', { limit: 2, windowSec: 0 })).count).toBe(0); // an elapsed window counts nothing
+  });
+
   it('resets the window once it has elapsed', async () => {
     const rule = { limit: 1, windowSec: 0 }; // window elapses immediately
     expect((await limiter.hit('resettest', 'user-d', rule)).allowed).toBe(true);

@@ -78,6 +78,10 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "FILE_S3_BUCKET=smoke-files"
       echo "FILE_S3_ACCESS_KEY_ID=smoke$(hex 8)"
       echo "FILE_S3_SECRET_ACCESS_KEY=$(hex 32)"
+      # Stage 17.5: the upload lifecycle (random keys; the base URL is only used to build ticket URLs).
+      echo "FILE_PUBLIC_BASE_URL=https://files.smoke.invalid"
+      echo "FILE_REQUEST_HASH_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+      echo "FILE_RATE_LIMIT_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
       ;;
     *)
       echo "unknown service: $service" >&2

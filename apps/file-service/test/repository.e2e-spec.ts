@@ -143,7 +143,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     const input = { scope: drive(null), fileId: f.id, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' as const };
     await expect(tickets.recordDownload({ ...input, tokenDigest: token as TicketDigest })).rejects.toThrow(/digest only/);
     await expect(tickets.recordUpload({ scope: drive(null), tokenDigest: token as TicketDigest, lifetimeSeconds: 120, maxBytes: 10, mediaTypes: ['application/pdf'], attach: false })).rejects.toThrow(/digest only/);
-    await expect(tickets.claimUse(token as TicketDigest)).rejects.toThrow(/digest only/);
+    await expect(tickets.claimUse(token as TicketDigest, 'download')).rejects.toThrow(/digest only/);
     expect(await s.query(`SELECT 1 FROM file_access_ticket WHERE "tokenDigest" = $1`, [token])).toEqual([]);
     expect(ticketDigest('too-short')).toBeUndefined();
     expect(ticketDigest(`${token}=`)).toBeUndefined();
@@ -169,8 +169,8 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     const d = digest();
     const u = await tickets.recordUpload({ scope: drive(null), tokenDigest: d, lifetimeSeconds: 300, maxBytes: 1024, mediaTypes: ['application/pdf', 'image/jpeg'], attach: true });
     expect(u).toMatchObject({ operation: 'upload', singleUse: true, fileId: null, maxBytes: '1024', mediaTypes: ['application/pdf', 'image/jpeg'], attach: true });
-    expect(await tickets.claimUse(d)).toMatchObject({ id: u.id, useCount: 1 });
-    expect(await tickets.claimUse(d)).toBeUndefined();
+    expect(await tickets.claimUse(d, 'upload')).toMatchObject({ id: u.id, useCount: 1 });
+    expect(await tickets.claimUse(d, 'upload')).toBeUndefined();
   });
 
   it('a download ticket is reusable until expiry by default (each use counted, the first stamped), or single-use when issued so', async () => {
@@ -178,14 +178,14 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     await makeAvailable(f);
     const d = digest();
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
-    const first = await tickets.claimUse(d);
-    const second = await tickets.claimUse(d);
+    const first = await tickets.claimUse(d, 'download');
+    const second = await tickets.claimUse(d, 'download');
     expect([first!.useCount, second!.useCount]).toEqual([1, 2]);
     expect(second!.usedAt).toEqual(first!.usedAt);
     const once = digest();
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: once, lifetimeSeconds: 120, singleUse: true, disposition: 'inline' });
-    expect(await tickets.claimUse(once)).toBeDefined();
-    expect(await tickets.claimUse(once)).toBeUndefined();
+    expect(await tickets.claimUse(once, 'download')).toBeDefined();
+    expect(await tickets.claimUse(once, 'download')).toBeUndefined();
   });
 
   it('unknown, expired, revoked and used-up tickets all give the same undefined (one `ticket_invalid` later)', async () => {
@@ -198,8 +198,8 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     await tickets.revoke('core-drive', r!.id);
     const used = digest();
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: used, lifetimeSeconds: 120, singleUse: true, disposition: 'attachment' });
-    await tickets.claimUse(used);
-    const outcomes = [await tickets.claimUse(digest()), await tickets.claimUse(expired), await tickets.claimUse(revoked), await tickets.claimUse(used)];
+    await tickets.claimUse(used, 'download');
+    const outcomes = [await tickets.claimUse(digest(), 'download'), await tickets.claimUse(expired, 'download'), await tickets.claimUse(revoked, 'download'), await tickets.claimUse(used, 'download')];
     expect(outcomes).toEqual([undefined, undefined, undefined, undefined]);
   });
 
@@ -208,14 +208,14 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     const d = digest();
     const tk = await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
     expect(await tickets.revoke('core-billing', tk!.id)).toBe(false);
-    expect(await tickets.claimUse(d)).toBeDefined(); // still live
+    expect(await tickets.claimUse(d, 'download')).toBeDefined(); // still live
     expect(await tickets.revoke('core-drive', randomUUID())).toBe(false);
     expect(await tickets.revoke('core-drive', 'nope')).toBe(false);
     expect(await tickets.revoke('core-drive', tk!.id)).toBe(true);
     const [{ revokedAt }] = await s.query<{ revokedAt: Date }>(`SELECT "revokedAt" FROM file_access_ticket WHERE id = $1`, [tk!.id]);
     expect(await tickets.revoke('core-drive', tk!.id)).toBe(true);
     expect((await s.query<{ revokedAt: Date }>(`SELECT "revokedAt" FROM file_access_ticket WHERE id = $1`, [tk!.id]))[0]!.revokedAt).toEqual(revokedAt);
-    expect(await tickets.claimUse(d)).toBeUndefined();
+    expect(await tickets.claimUse(d, 'download')).toBeUndefined();
   });
 
   it('a file\'s tickets are revoked in the caller\'s transaction: rolled back together, or committed together', async () => {
@@ -229,11 +229,11 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
       expect(await tickets.revokeAllForFile(q, f.id)).toBe(2);
       throw new Error('the logical delete failed');
     })).rejects.toThrow();
-    expect(await tickets.claimUse(ds[0]!)).toBeDefined(); // the rollback kept them live
+    expect(await tickets.claimUse(ds[0]!, 'download')).toBeDefined(); // the rollback kept them live
     expect(await dbs.tx((q) => tickets.revokeAllForFile(q, f.id))).toBe(2);
-    expect(await tickets.claimUse(ds[0]!)).toBeUndefined();
-    expect(await tickets.claimUse(ds[1]!)).toBeUndefined();
-    expect(await tickets.claimUse(otherDigest)).toBeDefined(); // another file's ticket untouched
+    expect(await tickets.claimUse(ds[0]!, 'download')).toBeUndefined();
+    expect(await tickets.claimUse(ds[1]!, 'download')).toBeUndefined();
+    expect(await tickets.claimUse(otherDigest, 'download')).toBeDefined(); // another file's ticket untouched
     expect(await dbs.tx((q) => tickets.revokeAllForFile(q, f.id))).toBe(0); // idempotent
   });
 
@@ -242,7 +242,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
   it('concurrent claims of one single-use ticket: exactly one wins (20 at once through the pool)', async () => {
     const d = digest();
     await tickets.recordUpload({ scope: drive(null), tokenDigest: d, lifetimeSeconds: 120, maxBytes: 10, mediaTypes: ['application/pdf'], attach: false });
-    const results = await Promise.all(Array.from({ length: 20 }, () => tickets.claimUse(d)));
+    const results = await Promise.all(Array.from({ length: 20 }, () => tickets.claimUse(d, 'upload')));
     expect(results.filter(Boolean)).toHaveLength(1);
     expect((await s.query<{ useCount: number }>(`SELECT "useCount" FROM file_access_ticket WHERE "tokenDigest" = $1`, [d]))[0]!.useCount).toBe(1);
   });
@@ -254,17 +254,17 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     await a.connect();
     try {
       await a.query('BEGIN');
-      const claimA = await tickets.claimUse(d, a); // A holds the row, uncommitted
+      const claimA = await tickets.claimUse(d, 'upload', a); // A holds the row, uncommitted
       expect(claimA).toBeDefined();
-      const claimB = tickets.claimUse(d); // B blocks on A's lock
+      const claimB = tickets.claimUse(d, 'upload'); // B blocks on A's lock
       await new Promise((r) => setTimeout(r, 200));
       await a.query('COMMIT');
       expect(await claimB).toBeUndefined(); // re-evaluated after A's commit: used up
       const d2 = digest();
       await tickets.recordUpload({ scope: drive(null), tokenDigest: d2, lifetimeSeconds: 120, maxBytes: 10, mediaTypes: ['application/pdf'], attach: false });
       await a.query('BEGIN');
-      expect(await tickets.claimUse(d2, a)).toBeDefined();
-      const waiting = tickets.claimUse(d2);
+      expect(await tickets.claimUse(d2, 'upload', a)).toBeDefined();
+      const waiting = tickets.claimUse(d2, 'upload');
       await new Promise((r) => setTimeout(r, 200));
       await a.query('ROLLBACK');
       expect(await waiting).toBeDefined(); // A never happened: B is the one use
@@ -282,7 +282,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     try {
       await a.query('BEGIN');
       expect(await tickets.revoke('core-drive', tk!.id, a)).toBe(true);
-      const claim = tickets.claimUse(d);
+      const claim = tickets.claimUse(d, 'download');
       await new Promise((r) => setTimeout(r, 200));
       await a.query('COMMIT');
       expect(await claim).toBeUndefined();
@@ -302,9 +302,10 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     }
     const logs = JSON.stringify(ALL_LOGS);
     expect(logs).toContain('unhandled error'); // it WAS logged (the scan is not vacuous) …
-    for (const leak of [REFUSED_ROW_MARKER, 'files/', new URL(db.url).password || 'no-password-set']) {
+    for (const leak of [REFUSED_ROW_MARKER, new URL(db.url).password || 'no-password-set']) {
       expect(logs).not.toContain(leak); // … without the row (PostgreSQL's `detail`) or a credential
     }
+    expect(logs).not.toMatch(/files\/[0-9a-f]{8}-[0-9a-f]{4}-/); // no storage key (route patterns such as /file/files are fine)
   });
 
   it('no digest, token or storage key reaches a log line during ticket and file operations', async () => {
@@ -312,8 +313,8 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     const d = ticketDigest(token)!;
     const f = await files.createUploading(upload(drive(null)));
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: true, disposition: 'attachment' });
-    await tickets.claimUse(d);
-    await tickets.claimUse(d);
+    await tickets.claimUse(d, 'download');
+    await tickets.claimUse(d, 'download');
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: true, disposition: 'attachment' }).catch(() => undefined);
     const logs = JSON.stringify(ALL_LOGS);
     for (const secret of [token, d, f.storageKey]) expect(logs).not.toContain(secret);

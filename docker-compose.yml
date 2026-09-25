@@ -284,6 +284,10 @@ services:
       # provider is configured: FILE_STORAGE_PROVIDER=s3 and FILE_S3_*; the production provider is not chosen yet, O2 / F6).
       FILE_STORAGE_PROVIDER: filesystem
       FILE_STORAGE_ROOT: /var/lib/file-service/storage
+      # Stage 17.5: ticket URLs point here; the two keys (base64, ≥ 32 bytes, different) come from .env (development values only).
+      FILE_PUBLIC_BASE_URL: http://127.0.0.1:3005
+      FILE_REQUEST_HASH_KEY: ${FILE_REQUEST_HASH_KEY:?copy .env.example to .env}
+      FILE_RATE_LIMIT_KEY: ${FILE_RATE_LIMIT_KEY:?copy .env.example to .env}
     volumes:
       - file_storage_dev:/var/lib/file-service/storage
     healthcheck:

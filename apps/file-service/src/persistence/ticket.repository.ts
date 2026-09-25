@@ -118,12 +118,38 @@ export class TicketRepository {
    * `undefined` for every unusable case alike. The redemption (17.6 / 17.5) then checks what lives outside the ticket: the file
    * (`FileRepository.findOwned` with the ticket's bindings; `AVAILABLE` for a download) and the issuer's current policy.
    */
-  async claimUse(tokenDigest: TicketDigest, q: Queryable = this.db): Promise<TicketRow | undefined> {
+  async claimUse(tokenDigest: TicketDigest, operation: TicketOperation, q: Queryable = this.db): Promise<TicketRow | undefined> {
     assertTicketDigest(tokenDigest);
     const { rows } = await q.query<TicketRow>(
       `UPDATE file_access_ticket SET "useCount" = "useCount" + 1, "usedAt" = COALESCE("usedAt", now())
-       WHERE "tokenDigest" = $1 AND "revokedAt" IS NULL AND "expiresAt" > now() AND (NOT "singleUse" OR "useCount" = 0)
+       WHERE "tokenDigest" = $1 AND operation = $2 AND "revokedAt" IS NULL AND "expiresAt" > now() AND (NOT "singleUse" OR "useCount" = 0)
        RETURNING ${COLUMNS}`,
+      [tokenDigest, operation],
+    );
+    return rows[0];
+  }
+
+  /**
+   * Records the ONE file an upload ticket created (Stage 17.5), in the claim's transaction. The schema re-checks that the file is the
+   * issuer's in the ticket's organization and that it is recorded once.
+   */
+  async bindCreatedFile(q: Queryable, ticketId: string, fileId: string): Promise<void> {
+    const { rowCount } = await q.query(
+      `UPDATE file_access_ticket SET "fileId" = $2 WHERE id = $1 AND operation = 'upload' AND "fileId" IS NULL`,
+      [ticketId, fileId],
+    );
+    if (rowCount !== 1) throw new Error('upload ticket already bound to a file');
+  }
+
+  /**
+   * An upload ticket that was ALREADY used and has created its file, while still valid (not revoked, not expired): the retry of a
+   * completed redemption returns that file (SDD §11.1). Never consumes anything.
+   */
+  async findUsedUpload(tokenDigest: TicketDigest, q: Queryable = this.db): Promise<TicketRow | undefined> {
+    assertTicketDigest(tokenDigest);
+    const { rows } = await q.query<TicketRow>(
+      `SELECT ${COLUMNS} FROM file_access_ticket
+       WHERE "tokenDigest" = $1 AND operation = 'upload' AND "revokedAt" IS NULL AND "expiresAt" > now() AND "fileId" IS NOT NULL`,
       [tokenDigest],
     );
     return rows[0];

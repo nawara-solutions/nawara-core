@@ -55,7 +55,7 @@ describeWithEnv('file schema: constraints and triggers (real PostgreSQL)', ['TES
     ['a name with a path separator', { originalName: '../../etc/passwd' }, 'file_original_name_safe'],
     ['a name with a backslash', { originalName: 'a\\b.pdf' }, 'file_original_name_safe'],
     ['a name with a control character', { originalName: 'a\r\nb.pdf' }, 'file_original_name_safe'],
-    ['a name with a bidi override', { originalName: 'invoice‮fdp.exe' }, 'file_original_name_safe'],
+    ['a name with a bidi override', { originalName: 'invoice\u202Efdp.exe' }, 'file_original_name_safe'],
     ['a name that is not NFC', { originalName: 'éte.pdf' }, 'file_original_name_safe'],
     ['a name above 255 UTF-8 bytes', { originalName: 'ع'.repeat(128) }, 'file_original_name_safe'],
     ['the name ".."', { originalName: '..' }, 'file_original_name_safe'],
