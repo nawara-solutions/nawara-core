@@ -28,6 +28,8 @@ export interface S3StorageConfig extends StorageLimits {
   connectTimeoutMs: number;
   idleTimeoutMs: number;
   maxAttempts: number;
+  /** Stage 17.9: `FILE_S3_MAX_SOCKETS` (default 96, 8–1024): the socket pool of EACH client (writer: uploads; reader: the rest). */
+  maxSockets: number;
 }
 
 export type StorageConfig = FilesystemStorageConfig | S3StorageConfig;
@@ -80,8 +82,9 @@ export function loadStorageConfig(reader: EnvReader, isProduction: boolean): Sto
     secretAccessKey: reader.secret('FILE_S3_SECRET_ACCESS_KEY', 16),
     forcePathStyle: reader.bool('FILE_S3_FORCE_PATH_STYLE', false),
     connectTimeoutMs: reader.int('FILE_STORAGE_CONNECT_TIMEOUT_MS', { default: 2_000, min: 100, max: 2_000 }),
-    idleTimeoutMs: reader.int('FILE_STORAGE_IDLE_TIMEOUT_MS', { default: 30_000, min: 1_000, max: 120_000 }),
+    idleTimeoutMs: reader.int('FILE_STORAGE_IDLE_TIMEOUT_MS', { default: 45_000, min: 1_000, max: 300_000 }),
     maxAttempts: reader.int('FILE_STORAGE_MAX_ATTEMPTS', { default: 3, min: 1, max: 5 }),
+    maxSockets: reader.int('FILE_S3_MAX_SOCKETS', { default: 96, min: 8, max: 1_024 }),
     ...limits,
   };
 }

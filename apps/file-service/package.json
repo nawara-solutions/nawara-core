@@ -20,6 +20,7 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
+    "test:ops": "vitest run --config ./vitest.config.ops.ts",
     "migrate": "node ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations",
     "reconcile": "node dist/cli/reconcile.js"
   },

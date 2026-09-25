@@ -12,6 +12,7 @@ import type { CallerPolicy, FileOperation } from '../policy/caller-policy.js';
 import type { FileMediaType } from '../policy/media-types.js';
 import { STORAGE_PORT, type StoragePort } from '../storage/storage.port.js';
 import { UsageLimiter } from '../limits/usage-limiter.js';
+import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
 import { uploadRequestTimeoutMs } from './http-server.js';
 import { decodeFileNameHeader } from './file-name.js';
@@ -68,8 +69,6 @@ export const UPLOAD_LEASE_MARGIN_SECONDS = 120;
 @Injectable()
 export class UploadService {
   private readonly logger = new Logger('Upload');
-  /** Uploads streaming in this process now (Stage 17.8: bounded by FILE_UPLOAD_MAX_IN_FLIGHT). */
-  private inFlight = 0;
 
   constructor(
     @Inject(FILE_CONFIG) private readonly config: FileConfig,
@@ -79,6 +78,7 @@ export class UploadService {
     private readonly db: DbService,
     private readonly redemptions: RedemptionLimiter,
     private readonly usage: UsageLimiter,
+    @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────── ticket issuance
@@ -194,12 +194,11 @@ export class UploadService {
     const { fileName, declaredType } = this.declaration(req);
     const expectedSha256 = contentDigest(req);
     const attach = attachHeader(req);
-    const requestHash = uploadRequestHash(this.config.upload.requestHashKey, {
-      organizationId, fileName: fileName ?? null, declaredType: declaredType ?? null, sizeBytes: length, sha256: expectedSha256 ?? null,
-    });
+    const declared = { organizationId, fileName: fileName ?? null, declaredType: declaredType ?? null, sizeBytes: length, sha256: expectedSha256 ?? null };
+    const requestHash = uploadRequestHash(this.config.upload.requestHashKey, declared);
     const release = this.admitUpload();
     try {
-      return await this.serviceUploadAdmitted(caller, req, { organizationId, key, length, limit, fileName, declaredType, expectedSha256, attach, requestHash, policy });
+      return await this.serviceUploadAdmitted(caller, req, { organizationId, key, length, limit, fileName, declaredType, expectedSha256, attach, requestHash, policy, declared });
     } finally {
       release();
     }
@@ -207,9 +206,9 @@ export class UploadService {
 
   private async serviceUploadAdmitted(caller: string, req: Request, d: {
     organizationId: string | null; key: string; length: number; limit: number; fileName?: string; declaredType?: string; expectedSha256?: string;
-    attach: boolean; requestHash: string; policy: CallerPolicy;
+    attach: boolean; requestHash: string; policy: CallerPolicy; declared: Parameters<typeof uploadRequestHash>[1];
   }): Promise<UploadResult> {
-    const { organizationId, key, length, limit, fileName, declaredType, expectedSha256, attach, requestHash, policy } = d;
+    const { organizationId, key, length, limit, fileName, declaredType, expectedSha256, attach, requestHash, policy, declared } = d;
     let file: FileRow;
     try {
       file = await this.files.createUploading({
@@ -222,7 +221,11 @@ export class UploadService {
         attachment: attach ? { attached: true } : { deadlineSeconds: this.config.upload.attachTtlSeconds },
       });
     } catch (e) {
-      if (e instanceof FilePersistenceError && e.code === 'idempotency_key_in_use') return this.idempotentReplay(caller, key, requestHash);
+      if (e instanceof FilePersistenceError && e.code === 'idempotency_key_in_use') {
+        // Stage 17.9: the current key first, then the previous keys of a rotation window (FILE_REQUEST_HASH_PREVIOUS_KEYS).
+        const candidates = [requestHash, ...this.config.upload.requestHashPreviousKeys.map((k) => uploadRequestHash(k, declared))];
+        return this.idempotentReplay(caller, key, candidates);
+      }
       throw e;
     }
     const done = await this.receive({
@@ -232,10 +235,10 @@ export class UploadService {
   }
 
   /** Same key + same declaration → the same file (bytes not read again); a different declaration → 422; still uploading → 409. */
-  private async idempotentReplay(caller: string, key: string, requestHash: string): Promise<UploadResult> {
+  private async idempotentReplay(caller: string, key: string, candidates: string[]): Promise<UploadResult> {
     const existing = await this.files.findLiveByIdempotencyKey(caller, key);
     if (!existing) throw fileError(409, 'upload_in_progress', 'This upload is being retried; try again.'); // it just failed: retryable
-    if (!sameHash(existing.requestHash, requestHash)) throw fileError(422, 'idempotency_key_reused', 'This Idempotency-Key was used for a different upload.');
+    if (!candidates.some((h) => sameHash(existing.requestHash, h))) throw fileError(422, 'idempotency_key_reused', 'This Idempotency-Key was used for a different upload.');
     if (existing.status === 'UPLOADING') throw fileError(409, 'upload_in_progress', 'This upload is already in progress.');
     return { created: false, file: fileView(existing) };
   }
@@ -285,7 +288,9 @@ export class UploadService {
     } catch (e) {
       if (!(e instanceof UploadRefused)) throw e;
       await this.files.refuseUpload(r.file.id, e.refusal.status, e.refusal.failureCode).catch(() => this.logger.warn(`file_upload_refuse_failed file=${r.file.id}`));
-      if (e.refusal.failureCode === 'storage_timeout') await this.forget(r.file); // the PUT's outcome is unknown: remove it if it landed
+      // The PUT's outcome is unknown: remove the object if it landed. In the background (Stage 17.9): the store just timed out, so this
+      // delete may wait out its own deadline, and the refusal (and the FAILED row) do not depend on it; a leftover is reconciliation's.
+      if (e.refusal.failureCode === 'storage_timeout') void this.forget(r.file);
       log(e.refusal.failureCode);
       throw refusalError(e);
     } finally {
@@ -313,16 +318,12 @@ export class UploadService {
    * (retryable, nothing consumed). Returns the release, called exactly once when the upload settles.
    */
   private admitUpload(): () => void {
-    if (this.inFlight >= this.config.limits.uploadMaxInFlight) {
+    const release = this.counters.tryEnter('upload', this.config.limits.uploadMaxInFlight); // Stage 17.9: the gauge IS the gate
+    if (!release) {
+      this.counters.bump('upload_busy');
       throw fileError(503, 'upload_busy', 'Too many uploads in progress; retry shortly.');
     }
-    this.inFlight += 1;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.inFlight -= 1;
-    };
+    return release;
   }
 
   private policy(caller: string, operation: FileOperation): CallerPolicy {

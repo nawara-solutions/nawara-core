@@ -27,7 +27,7 @@ export interface CleanupPassResult {
  *    DELETED (success or already absent) or rescheduled with backoff (the row stays DELETING: access is never restored);
  * 3. upload-lease sweep: UPLOADING rows past their lease (no live request can still write them): delete the key (idempotent), then
  *    FAILED `upload_abandoned`; a storage failure leaves the row for the next pass;
- * 4. ticket retention: expired ticket rows past the retention window, in a bounded batch;
+ * 4. ticket retention: expired ticket rows past the retention window, in bounded batches;
  * 5. Stage 17.8: limiter retention: this service's expired rate-limit windows, in a bounded batch.
  *
  * No database transaction is ever open during a storage call. Stops before the pool closes (`beforeApplicationShutdown`): no new claim,
@@ -64,19 +64,48 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
     await drain;
   }
 
-  /** One pass of every task (also the tests' entry point). Each task is bounded by the batch size. */
+  /**
+   * One pass of every task (also the tests' entry point). Stage 17.9: each task runs batch after batch while its batches come back full,
+   * up to FILE_CLEANUP_MAX_BATCHES_PER_PASS, and stops early on shutdown; every batch is still bounded and short.
+   */
   async runOnce(): Promise<CleanupPassResult> {
     if (this.stopping.signal.aborted) this.stopping = new AbortController(); // a stopped worker run again by hand (tests)
-    const expired = await this.expireUnattached();
-    const { deleted, retried } = await this.deleteDue();
-    const abandoned = await this.sweepAbandonedUploads();
-    const ticketsPurged = await this.tickets.purgeExpired(this.config.cleanup.ticketRetentionSeconds, this.config.cleanup.batchSize);
-    const limitsPurged = await this.usage.purgeExpiredWindows(this.config.cleanup.batchSize);
+    const { batchSize, purgeBatchSize } = this.config.cleanup;
+    const expired = await this.drain(batchSize, () => this.expireUnattached());
+    let deleted = 0;
+    let retried = 0;
+    // Progress, not work: only rows actually settled count toward "a full batch", so a failing or hanging store (every delete rescheduled,
+    // every abandoned upload left for later) ends the drain after ONE batch instead of repeating failures within the pass.
+    await this.drain(batchSize, async () => {
+      const r = await this.deleteDue();
+      deleted += r.deleted;
+      retried += r.retried;
+      return r.deleted;
+    });
+    let abandoned = 0;
+    await this.drain(batchSize, async () => {
+      const r = await this.sweepAbandonedUploads();
+      abandoned += r.failed;
+      return r.failed;
+    });
+    const ticketsPurged = await this.drain(purgeBatchSize, () => this.tickets.purgeExpired(this.config.cleanup.ticketRetentionSeconds, purgeBatchSize));
+    const limitsPurged = await this.drain(purgeBatchSize, () => this.usage.purgeExpiredWindows(purgeBatchSize));
     const result = { expired, deleted, retried, abandoned, ticketsPurged, limitsPurged };
     if (expired + deleted + retried + abandoned + ticketsPurged + limitsPurged > 0) {
       this.logger.log(`file_cleanup_pass expired=${expired} deleted=${deleted} retried=${retried} abandoned=${abandoned} tickets_purged=${ticketsPurged} limits_purged=${limitsPurged}`);
     }
     return result;
+  }
+
+  /** Repeats `batch` (which returns how many rows it took) while it takes a full `size`, at most maxBatchesPerPass times. */
+  private async drain(size: number, batch: () => Promise<number>): Promise<number> {
+    let total = 0;
+    for (let i = 0; i < this.config.cleanup.maxBatchesPerPass && !this.stopping.signal.aborted; i++) {
+      const n = await batch();
+      total += n;
+      if (n < size) break;
+    }
+    return total;
   }
 
   private async expireUnattached(): Promise<number> {
@@ -85,7 +114,7 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
     return ids.length;
   }
 
-  private async deleteDue(): Promise<{ deleted: number; retried: number }> {
+  private async deleteDue(): Promise<{ claimed: number; deleted: number; retried: number }> {
     const claims = await this.files.claimDeletions(this.config.cleanup.batchSize, this.config.cleanup.deleteLeaseSeconds);
     let deleted = 0;
     let retried = 0;
@@ -97,7 +126,7 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
       }
     };
     await Promise.all(Array.from({ length: Math.min(this.config.cleanup.deleteConcurrency, claims.length) }, runOne));
-    return { deleted, retried };
+    return { claimed: claims.length, deleted, retried };
   }
 
   /** One claimed deletion: the storage call runs outside any transaction; the row is finalized (or rescheduled) afterwards. */
@@ -122,9 +151,10 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
     return true;
   }
 
-  private async sweepAbandonedUploads(): Promise<number> {
+  private async sweepAbandonedUploads(): Promise<{ found: number; failed: number }> {
     let failed = 0;
-    for (const upload of await this.files.findAbandonedUploads(this.config.cleanup.batchSize)) {
+    const found = await this.files.findAbandonedUploads(this.config.cleanup.batchSize);
+    for (const upload of found) {
       try {
         // The object may exist (published, then the process died before finalizing): never promoted to AVAILABLE (its verified content
         // was never recorded): removed first, then the row is failed. A crash between the two repeats the idempotent delete.
@@ -138,6 +168,6 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
         this.logger.log(`file_upload_abandoned file=${upload.id}`);
       }
     }
-    return failed;
+    return { found: found.length, failed };
   }
 }

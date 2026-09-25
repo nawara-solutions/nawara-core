@@ -46,6 +46,8 @@ export interface FileConfig extends BaseConfig {
   cleanup: CleanupConfig;
   /** Stage 17.8 (F32): per-caller / per-organization usage limits and the reusable download-ticket use cap. */
   limits: UsageLimitsConfig;
+  /** Stage 17.9: `FILE_OPS_REPORT_INTERVAL_MS` (default 60 s, 10 s – 1 h): the operational snapshot (`file_ops_snapshot`). */
+  ops: { reportIntervalMs: number };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -64,6 +66,18 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
   const maxBytes = reader.int('FILE_MAX_BYTES', { default: DEFAULT_FILE_MAX_BYTES, min: 1, max: FILE_MAX_BYTES_BOUND });
   const storage = loadStorageConfig(reader, base.isProduction);
   const storageBound = { requestTimeoutMs: storage.requestTimeoutMs, maxAttempts: storage.provider === 's3' ? storage.maxAttempts : 1 };
+  const cleanup = loadCleanupConfig(reader, storageBound);
+  const limits = loadUsageLimitsConfig(reader);
+  const upload = loadUploadConfig(reader, base.isProduction);
+  if (storage.provider === 's3') {
+    checkSocketBudget(storage.maxSockets, limits, cleanup);
+    // Stage 17.9: when a CLIENT stalls, the service's own idle timer must fire first (the right cause, the right code); the store's
+    // socket goes quiet too (nothing to send or nothing read), so an equal or shorter store bound would blame the store instead.
+    const clientIdle = Math.max(upload.idleTimeoutMs, upload.downloadIdleTimeoutMs);
+    if (storage.idleTimeoutMs <= clientIdle) {
+      throw new ConfigError(`FILE_STORAGE_IDLE_TIMEOUT_MS (${storage.idleTimeoutMs}) must exceed FILE_UPLOAD_IDLE_TIMEOUT_MS and FILE_DOWNLOAD_IDLE_TIMEOUT_MS (${clientIdle})`);
+    }
+  }
   return {
     ...base,
     databaseUrl,
@@ -71,12 +85,31 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
     callerPolicy: FileCallerPolicy.parse(reader.get('FILE_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))], maxBytes),
     maxBytes,
     storage,
-    upload: loadUploadConfig(reader, base.isProduction),
+    upload,
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
     },
-    cleanup: loadCleanupConfig(reader, storageBound),
-    limits: loadUsageLimitsConfig(reader),
+    cleanup,
+    limits,
+    ops: { reportIntervalMs: reader.int('FILE_OPS_REPORT_INTERVAL_MS', { default: 60_000, min: 10_000, max: 3_600_000 }) },
   };
+}
+
+/** Sockets of the S3 reader pool kept for what is neither a download nor a worker delete: request-path heads and upload cleanup deletes. */
+export const S3_READER_RESERVE = 8;
+
+/**
+ * Stage 17.9: the byte-path bounds must fit the S3 socket pools, or they are not bounds at all (a request beyond a pool waits for a
+ * socket while its deadline runs). Measured: 60 held downloads on a 50-socket reader pool failed 10 of them AND an unrelated download
+ * (`storage_unavailable`). The writer pool carries uploads only; the reader pool carries downloads, worker deletes and a reserve.
+ */
+export function checkSocketBudget(maxSockets: number, limits: UsageLimitsConfig, cleanup: CleanupConfig): void {
+  if (limits.uploadMaxInFlight > maxSockets) {
+    throw new ConfigError(`FILE_UPLOAD_MAX_IN_FLIGHT (${limits.uploadMaxInFlight}) must not exceed FILE_S3_MAX_SOCKETS (${maxSockets})`);
+  }
+  const reader = limits.downloadMaxInFlight + cleanup.deleteConcurrency + S3_READER_RESERVE;
+  if (reader > maxSockets) {
+    throw new ConfigError(`FILE_DOWNLOAD_MAX_IN_FLIGHT + FILE_DELETE_CONCURRENCY + ${S3_READER_RESERVE} (${reader}) must not exceed FILE_S3_MAX_SOCKETS (${maxSockets})`);
+  }
 }

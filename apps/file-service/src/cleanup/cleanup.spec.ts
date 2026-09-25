@@ -6,7 +6,7 @@ const load = (env: NodeJS.ProcessEnv, storage = { requestTimeoutMs: 10_000, maxA
 
 describe('cleanup configuration (Stage 17.7)', () => {
   it('has bounded technical defaults (no legal retention)', () => {
-    expect(load({})).toEqual({ enabled: true, intervalMs: 30_000, batchSize: 20, deleteConcurrency: 4, deleteLeaseSeconds: 300, deleteRetryBaseSeconds: 30, deleteRetryMaxSeconds: 3_600, ticketRetentionSeconds: 86_400 });
+    expect(load({})).toEqual({ enabled: true, intervalMs: 30_000, batchSize: 20, maxBatchesPerPass: 10, purgeBatchSize: 500, deleteConcurrency: 4, deleteLeaseSeconds: 300, deleteRetryBaseSeconds: 30, deleteRetryMaxSeconds: 3_600, ticketRetentionSeconds: 86_400 });
   });
 
   it.each([

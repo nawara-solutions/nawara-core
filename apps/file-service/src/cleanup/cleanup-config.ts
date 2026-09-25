@@ -6,8 +6,16 @@ export interface CleanupConfig {
   enabled: boolean;
   /** `FILE_CLEANUP_INTERVAL_MS` (default 30 s): the pause between two passes. */
   intervalMs: number;
-  /** `FILE_CLEANUP_BATCH_SIZE` (default 20): rows claimed per task per pass. */
+  /** `FILE_CLEANUP_BATCH_SIZE` (default 20): rows claimed per BATCH of a storage-touching task (deletes, expiry, the lease sweep). */
   batchSize: number;
+  /**
+   * Stage 17.9: `FILE_CLEANUP_MAX_BATCHES_PER_PASS` (default 10, 1–100): a task repeats its batch while batches come back FULL, up to
+   * this many per pass (drain mode, the Notification 16.9 rule). One batch per pass capped every task at batchSize / interval (measured:
+   * 40 rows a minute at the defaults), below what issuance and deletes can produce, so backlogs could only grow.
+   */
+  maxBatchesPerPass: number;
+  /** Stage 17.9: `FILE_CLEANUP_PURGE_BATCH_SIZE` (default 500, 1–5 000): rows per batch of the SQL-only purges (expired tickets, limiter windows). */
+  purgeBatchSize: number;
   /** `FILE_DELETE_CONCURRENCY` (default 4): storage deletes running at once within a pass. */
   deleteConcurrency: number;
   /** `FILE_DELETE_LEASE_SECONDS` (default 300): how long a claimed deletion is reserved before another worker may take it over. */
@@ -24,6 +32,8 @@ export function loadCleanupConfig(reader: EnvReader, storage: { requestTimeoutMs
     enabled: reader.bool('FILE_CLEANUP_ENABLED', true),
     intervalMs: reader.int('FILE_CLEANUP_INTERVAL_MS', { default: 30_000, min: 1_000, max: 3_600_000 }),
     batchSize: reader.int('FILE_CLEANUP_BATCH_SIZE', { default: 20, min: 1, max: 500 }),
+    maxBatchesPerPass: reader.int('FILE_CLEANUP_MAX_BATCHES_PER_PASS', { default: 10, min: 1, max: 100 }),
+    purgeBatchSize: reader.int('FILE_CLEANUP_PURGE_BATCH_SIZE', { default: 500, min: 1, max: 5_000 }),
     deleteConcurrency: reader.int('FILE_DELETE_CONCURRENCY', { default: 4, min: 1, max: 16 }),
     deleteLeaseSeconds: reader.int('FILE_DELETE_LEASE_SECONDS', { default: 300, min: 30, max: 3_600 }),
     deleteRetryBaseSeconds: reader.int('FILE_DELETE_RETRY_BASE_SECONDS', { default: 30, min: 1, max: 3_600 }),

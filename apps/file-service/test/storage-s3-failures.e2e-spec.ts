@@ -112,6 +112,67 @@ describe('S3 adapter under storage outages (fake servers)', () => {
     expect((e as { cause?: unknown }).cause).toBeUndefined();
   });
 
+  /** A fake S3 endpoint for one test: `handler` decides what a stalled server does. */
+  async function fake(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ url: string; close: () => Promise<void> }> {
+    const open = new Set<Socket>();
+    const srv = createServer(handler);
+    srv.on('connection', (sk) => {
+      open.add(sk);
+      sk.on('close', () => open.delete(sk));
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    return {
+      url: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+      close: async () => {
+        for (const sk of open) sk.destroy();
+        await new Promise((r) => srv.close(r));
+      },
+    };
+  }
+
+  it('Stage 17.9: a read that stalls MID-BODY fails (a normalized storage error) at the idle bound (it used to wait for nothing but the caller)', async () => {
+    const f = await fake((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'application/pdf', 'content-length': String(1024 * 1024) });
+      res.write(Buffer.alloc(64 * 1024, 1)); // a first part, then silence (the socket stays open)
+    });
+    try {
+      const s = store(f.url, { idleTimeoutMs: 1_000 });
+      const t0 = Date.now();
+      const object = await s.get(newKey(), { signal: sig() });
+      const failure = await new Promise<unknown>((resolve) => {
+        object.body.on('data', () => undefined);
+        object.body.on('error', resolve);
+        object.body.on('end', () => resolve('ended'));
+      });
+      // The handler destroys the response on its idle timer without an error of its own, so the body only sees a reset: a normalized
+      // storage failure either way (after the first byte a read can only end the stream; the code is for the logs).
+      expect(['storage_timeout', 'storage_unavailable']).toContain(code(failure));
+      expect(Date.now() - t0).toBeLessThan(5_000); // the idle bound (1 s), not the caller's patience
+    } finally {
+      await f.close();
+    }
+  });
+
+  it('Stage 17.9: a write to a store that stops READING fails as `storage_timeout` at the idle bound, long before the whole-transfer deadline', async () => {
+    const f = await fake((req) => {
+      let seen = 0;
+      req.on('data', (c: Buffer) => {
+        seen += c.length;
+        if (seen > 256 * 1024) req.pause(); // reads a little, then never again, never answers
+      });
+    });
+    try {
+      const s = store(f.url, { idleTimeoutMs: 1_000 });
+      const data = randomBytes(8 * 1024 * 1024); // whole-transfer deadline: 1.5 s + 8 MiB at 64 KiB/s = 129.5 s
+      const { r, ms } = await elapsed(() => s.put(newKey(), bodyOf(data), { sizeBytes: data.length, contentType: 'application/pdf', signal: sig() }));
+      expect(code(r)).toBe('storage_timeout');
+      expect(ms).toBeLessThan(10_000);
+    } finally {
+      await f.close();
+    }
+  });
+
   it('the process lives on and the SDK wrote nothing to the console', () => {
     expect(process.exitCode ?? 0).toBe(0);
     for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled();

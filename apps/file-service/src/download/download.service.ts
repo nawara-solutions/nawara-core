@@ -15,6 +15,7 @@ import type { FileMediaType } from '../policy/media-types.js';
 import { isStorageError } from '../storage/storage-error.js';
 import { STORAGE_PORT, type StoragePort, type StoredObjectStream } from '../storage/storage.port.js';
 import { UsageLimiter, type UsageKind } from '../limits/usage-limiter.js';
+import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
 import { FILE_NOT_FOUND, fileError, fileView, organizationHeader, sizeBucket, type FileView } from '../upload/upload-http.js';
 import { contentDisposition } from './content-disposition.js';
@@ -27,6 +28,9 @@ export interface IssuedDownloadTicket {
 }
 
 class TicketNoLongerValid extends Error {}
+class DownloadBusy extends Error {}
+
+const DOWNLOAD_BUSY = () => fileError(503, 'download_busy', 'Too many downloads in progress; retry shortly.');
 
 /**
  * Verifies what is sent against the record without holding the object (Stage 17.8): counts the bytes (a body that runs over fails as
@@ -94,6 +98,7 @@ export class DownloadService {
     private readonly db: DbService,
     private readonly redemptions: RedemptionLimiter,
     private readonly usage: UsageLimiter,
+    @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── path A: trusted services
@@ -106,7 +111,12 @@ export class DownloadService {
   async serviceContent(caller: string, req: Request, res: Response, id: string): Promise<void> {
     const file = await this.owned(caller, 'read', req, id, 'download');
     assertDownloadable(file);
-    await this.stream(file, 'attachment', req, res, 'service');
+    const release = this.admitDownload();
+    try {
+      await this.stream(file, 'attachment', req, res, 'service');
+    } finally {
+      release();
+    }
   }
 
   async issueDownloadTicket(caller: string, req: Request, id: string, input: { disposition?: 'attachment' | 'inline'; singleUse?: boolean }): Promise<IssuedDownloadTicket> {
@@ -153,23 +163,37 @@ export class DownloadService {
     const { invalid } = await this.redemptions.admit(req); // a blocked client is refused for every ticket alike (no oracle)
     const digest = ticketDigest(token);
     if (!digest) throw await invalid();
-    let claimed: Awaited<ReturnType<TicketRepository['claimDownload']>>;
+    let release: (() => void) | undefined;
     try {
-      claimed = await this.db.tx(async (q) => {
-        // Ticket + file binding + AVAILABLE + the use cap (Stage 17.8: a leaked reusable ticket is not an unlimited download), one statement.
-        const c = await this.tickets.claimDownload(digest, q, this.config.limits.ticketMaxDownloads);
-        if (!c) return undefined;
-        const policy = this.config.callerPolicy.of(c.ticket.issuedBy);
-        // The issuer must STILL hold `issue_ticket` (and its organization mode) now (SDD §11.1); otherwise roll back: nothing consumed.
-        if (!policy?.operations.has('issue_ticket') || (c.ticket.organizationId !== null && policy.organizations === 'none')) throw new TicketNoLongerValid();
-        return c;
-      });
-    } catch (e) {
-      if (e instanceof TicketNoLongerValid) throw await invalid();
-      throw e;
+      let claimed: Awaited<ReturnType<TicketRepository['claimDownload']>>;
+      try {
+        claimed = await this.db.tx(async (q) => {
+          // Ticket + file binding + AVAILABLE + the use cap (Stage 17.8: a leaked reusable ticket is not an unlimited download), one statement.
+          const c = await this.tickets.claimDownload(digest, q, this.config.limits.ticketMaxDownloads);
+          if (!c) return undefined;
+          const policy = this.config.callerPolicy.of(c.ticket.issuedBy);
+          // The issuer must STILL hold `issue_ticket` (and its organization mode) now (SDD §11.1); otherwise roll back: nothing consumed.
+          if (!policy?.operations.has('issue_ticket') || (c.ticket.organizationId !== null && policy.organizations === 'none')) throw new TicketNoLongerValid();
+          // Stage 17.9: the download slot is taken INSIDE the claim's transaction, once the ticket has proved valid. A full process throws
+          // here and the claim rolls back (no use spent; the client retries the same URL), and an invalid ticket never occupies a slot, so
+          // a flood of junk tickets cannot starve real downloads (measured: taking the slot before the claim did exactly that).
+          release = this.counters.tryEnter('download', this.config.limits.downloadMaxInFlight);
+          if (!release) throw new DownloadBusy();
+          return c;
+        });
+      } catch (e) {
+        if (e instanceof TicketNoLongerValid) throw await invalid();
+        if (e instanceof DownloadBusy) {
+          this.counters.bump('download_busy');
+          throw DOWNLOAD_BUSY();
+        }
+        throw e;
+      }
+      if (!claimed) throw await invalid();
+      await this.stream(claimed.file, claimed.ticket.disposition ?? 'attachment', req, res, 'ticket');
+    } finally {
+      release?.(); // also when the commit itself failed after the slot was taken
     }
-    if (!claimed) throw await invalid();
-    await this.stream(claimed.file, claimed.ticket.disposition ?? 'attachment', req, res, 'ticket');
   }
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────────── streaming
@@ -205,6 +229,7 @@ export class DownloadService {
       object.body.destroy();
       res.off('close', onClose);
       req.off('close', onClose);
+      this.counters.bump('integrity_size_mismatch');
       this.logger.warn(`file_storage_inconsistent file=${file.id} reason=size_mismatch`); // never serve bytes that contradict the record
       log('size_mismatch', 0);
       throw fileError(500, 'file_content_missing', 'The file content is not available.');
@@ -224,6 +249,15 @@ export class DownloadService {
     // A ticket is a capability meant to be used by the product's client (possibly another origin, e.g. an inline image).
     if (route === 'ticket') res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setTimeout(this.config.upload.downloadIdleTimeoutMs, () => res.destroy()); // a client that stops reading is cut off
+    // Stage 17.9: the whole-transfer bound. The idle timeout alone lets a client that reads a trickle hold this slot (and the store
+    // stream) indefinitely; past the request timeout plus the size at FILE_DOWNLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND it is cut.
+    let overDeadline = false;
+    const deadline = setTimeout(() => {
+      overDeadline = true;
+      this.counters.bump('download_deadline');
+      res.destroy();
+    }, downloadDeadlineMs(size, this.config.storage.requestTimeoutMs, this.config.upload.downloadMinThroughputBytesPerSecond));
+    deadline.unref();
 
     const counter = new VerifiedDownload(size, file.sha256 as string);
     try {
@@ -235,9 +269,13 @@ export class DownloadService {
       // Classified by CAUSE: our own refusal of a short / long object, or a store failure mid-stream, is an integrity / storage failure
       // (destroying the response then also fires the close listener, so the signal alone cannot tell); only the client leaving is `aborted`.
       const failed = e instanceof ContentMismatch || isStorageError(e);
-      if (e instanceof ContentMismatch) this.logger.warn(`file_storage_inconsistent file=${file.id} reason=${e.message}`);
-      log(failed ? 'stream_failed' : abort.signal.aborted ? 'aborted' : 'stream_failed', counter.bytes);
+      if (e instanceof ContentMismatch) {
+        this.counters.bump(e.message === 'digest_mismatch' ? 'integrity_digest_mismatch' : 'integrity_size_mismatch');
+        this.logger.warn(`file_storage_inconsistent file=${file.id} reason=${e.message}`);
+      }
+      log(failed ? 'stream_failed' : overDeadline ? 'deadline' : abort.signal.aborted ? 'aborted' : 'stream_failed', counter.bytes);
     } finally {
+      clearTimeout(deadline);
       res.off('close', onClose);
       req.off('close', onClose);
     }
@@ -247,6 +285,7 @@ export class DownloadService {
     if (isStorageError(e)) {
       if (e.code === 'storage_not_found') {
         // The record says AVAILABLE but the object is gone: an integrity fault, reported (never auto-"repaired"; reconciliation is 17.7).
+        this.counters.bump('integrity_object_missing');
         this.logger.warn(`file_storage_inconsistent file=${file.id} reason=object_missing`);
         return fileError(500, 'file_content_missing', 'The file content is not available.');
       }
@@ -271,6 +310,21 @@ export class DownloadService {
     return file;
   }
 
+  /**
+   * Stage 17.9: the per-process bound on downloads streaming at once (FILE_DOWNLOAD_MAX_IN_FLIGHT), for service reads: taken after
+   * authorization, the usage limits and the lookup, before the store is opened; released exactly once when the download settles. Full:
+   * `503 download_busy` (retryable; nothing consumed). Distinct from `429 rate_limited`, which is a caller's policy budget. (A ticket
+   * redemption takes its slot inside the claim's transaction instead: see `redeem`.)
+   */
+  private admitDownload(): () => void {
+    const release = this.counters.tryEnter('download', this.config.limits.downloadMaxInFlight);
+    if (!release) {
+      this.counters.bump('download_busy');
+      throw DOWNLOAD_BUSY();
+    }
+    return release;
+  }
+
   private policy(caller: string, operation: FileOperation): CallerPolicy {
     const policy = this.config.callerPolicy.of(caller);
     if (!policy || !policy.operations.has(operation)) throw fileError(403, 'operation_not_allowed', 'Operation not allowed for this caller.');
@@ -281,6 +335,11 @@ export class DownloadService {
     if (organizationId !== null && policy.organizations === 'none') throw fileError(403, 'organization_not_allowed', 'This caller cannot act for an organization.');
     return organizationId;
   }
+}
+
+/** Stage 17.9: a download's whole-transfer bound, the upload rule (`putDeadlineMs`) with the download's own minimum throughput. */
+export function downloadDeadlineMs(sizeBytes: number, baseMs: number, minBytesPerSecond: number): number {
+  return baseMs + Math.ceil((sizeBytes / minBytesPerSecond) * 1000);
 }
 
 /** Only `AVAILABLE` files are served (SDD §5.1, §9). The owner learns why; nobody else ever reaches this check. */

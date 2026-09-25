@@ -70,7 +70,7 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `FILE_STORAGE_PROVIDER` | **required** | `filesystem`, `s3` | no default, no fallback; `filesystem` is refused in production |
 | `FILE_STORAGE_ROOT` | – (filesystem) | absolute | the development / test directory |
 | `FILE_S3_ENDPOINT`, `FILE_S3_REGION`, `FILE_S3_BUCKET`, `FILE_S3_ACCESS_KEY_ID`, `FILE_S3_SECRET_ACCESS_KEY` (`*_FILE`), `FILE_S3_FORCE_PATH_STYLE` | – (s3) | https in production | the S3-compatible store; credentials never logged |
-| `FILE_STORAGE_KEY_PREFIX`, `FILE_STORAGE_*_TIMEOUT_MS`, `FILE_STORAGE_MIN_THROUGHPUT_BYTES_PER_SECOND`, `FILE_STORAGE_MAX_ATTEMPTS` | `files`, 2 s / 30 s / 10 s, 64 KiB/s, 3 | see the [17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md) §3 | |
+| `FILE_STORAGE_KEY_PREFIX`, `FILE_STORAGE_*_TIMEOUT_MS`, `FILE_STORAGE_MIN_THROUGHPUT_BYTES_PER_SECOND`, `FILE_STORAGE_MAX_ATTEMPTS` | `files`, 2 s / 45 s (idle, since 17.9) / 10 s, 64 KiB/s, 3 | see the [17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md) §3 | |
 | `FILE_PUBLIC_BASE_URL` | **required** | https in production | ticket URLs are `<base>/file/t/<token>` |
 | `FILE_REQUEST_HASH_KEY`, `FILE_RATE_LIMIT_KEY` (`*_FILE`) | **required** | base64, ≥ 32 bytes, different | the service-upload request hash; the keyed client address of the redemption limiter |
 | `FILE_UPLOAD_TICKET_TTL_SECONDS`, `FILE_ATTACH_TTL_SECONDS`, `FILE_UPLOAD_IDLE_TIMEOUT_MS`, `FILE_TICKET_FAILURE_LIMIT` | 120 s, 24 h, 30 s, 20/min | see the [17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md) §12 | |
@@ -78,6 +78,8 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `FILE_DOWNLOAD_TICKET_TTL_SECONDS`, `FILE_DOWNLOAD_IDLE_TIMEOUT_MS` | 120 s, 30 s | 60–300 s, 1–120 s | download tickets; a client that stops reading is cut off |
 | `FILE_CLEANUP_ENABLED`, `FILE_CLEANUP_INTERVAL_MS`, `FILE_CLEANUP_BATCH_SIZE`, `FILE_DELETE_CONCURRENCY`, `FILE_DELETE_LEASE_SECONDS`, `FILE_DELETE_RETRY_BASE_SECONDS` / `_MAX_SECONDS`, `FILE_TICKET_RETENTION_SECONDS` | true, 30 s, 20, 4, 300 s, 30 s / 1 h, 24 h | see the [17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md) §10 | the cleanup workers |
 | `FILE_{UPLOAD,TICKET,DOWNLOAD}_RATE_PER_CALLER` / `_PER_ORGANIZATION`, `FILE_TICKET_MAX_DOWNLOADS`, `FILE_UPLOAD_MAX_IN_FLIGHT` | 600 / 120, 1200 / 300, 1200 / 300 per min; 50; 64 | see the [17.8 record](../../docs/architecture/stage-17/stage-17-8-security-integrity.md) §4 | usage limits (F32), reusable-ticket cap, per-process upload bound |
+| `FILE_DOWNLOAD_MAX_IN_FLIGHT`, `FILE_DOWNLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND`, `FILE_S3_MAX_SOCKETS` | 64, 16 KiB/s, 96 | see the [17.9 record](../../docs/architecture/stage-17/stage-17-9-operational-hardening.md) §17 | per-process download bound (`503 download_busy`), whole-transfer download deadline, S3 socket pool per client (checked against the bounds at boot) |
+| `FILE_OPS_REPORT_INTERVAL_MS`, `FILE_CLEANUP_MAX_BATCHES_PER_PASS`, `FILE_CLEANUP_PURGE_BATCH_SIZE`, `FILE_REQUEST_HASH_PREVIOUS_KEYS` | 60 s, 10, 500, empty | 17.9 record §17 | the operational snapshot, cleanup drain mode, request-hash key rotation |
 
 `FILE_SERVICE_POLICY`:
 
@@ -102,7 +104,12 @@ npm test -w file-service                                                        
 docker compose --profile storage-test up -d s3-test                                             # the S3-protocol TEST server (Stage 17.4)
 TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres \
   TEST_S3_ENDPOINT=http://127.0.0.1:9000 TEST_S3_ACCESS_KEY_ID=… TEST_S3_SECRET_ACCESS_KEY=… npm run test:e2e -w file-service
+# Stage 17.9 operational probes (slow, measurements; never part of test / test:e2e): the BUILT service, same environment variables
+OPS_REPORT=/tmp/file-ops.txt npm run test:ops -w file-service
 ```
+
+Operations: signals, alert conditions and procedures are in the runbook [docs/runbooks/file-service.md](../../docs/runbooks/file-service.md);
+the measured envelope is in the [Stage 17.9 record](../../docs/architecture/stage-17/stage-17-9-operational-hardening.md).
 
 The production image (`apps/file-service/Dockerfile`, repo-root context) is two stages with production dependencies only; it runs as
 the non-root `node` user with Node as PID 1. Compose gives it a 60 s stop grace. An existing local PostgreSQL volume predates the
@@ -118,4 +125,6 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 17.5 | ✅ streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
 | 17.6 | ✅ streamed download, safe headers, download tickets (issue, redeem, revoke) |
 | 17.7 | ✅ delete, orphan cleanup, reconciliation |
-| 17.8 / 17.9 / 17.10 | security and integrity, operational hardening, focused certification |
+| 17.8 | ✅ security and integrity |
+| 17.9 | ✅ operational hardening: measured envelope, download bound, idle / deadline fixes, drain mode, signals, runbook |
+| 17.10 | focused certification |

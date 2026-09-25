@@ -28,10 +28,10 @@ describe('storage configuration (Stage 17.4)', () => {
     expect(() => load({ ...FS, FILE_STORAGE_ROOT: root }, false)).toThrow(/FILE_STORAGE_ROOT/);
   });
 
-  it('loads S3 with bounded defaults (connect ≤ 2 s, idle 30 s, 3 attempts for idempotent operations)', () => {
+  it('loads S3 with bounded defaults (connect ≤ 2 s, idle 45 s since 17.9, 3 attempts for idempotent operations)', () => {
     expect(load(S3, true)).toEqual({
       provider: 's3', endpoint: 'https://objects.example.test', region: 'auto', bucket: 'nawara-files', accessKeyId: 'AKIDEXAMPLE', secretAccessKey: SECRET,
-      forcePathStyle: false, connectTimeoutMs: 2_000, idleTimeoutMs: 30_000, maxAttempts: 3, keyPrefix: 'files', requestTimeoutMs: 10_000, minThroughputBytesPerSecond: 65_536,
+      forcePathStyle: false, connectTimeoutMs: 2_000, idleTimeoutMs: 45_000, maxAttempts: 3, maxSockets: 96, keyPrefix: 'files', requestTimeoutMs: 10_000, minThroughputBytesPerSecond: 65_536,
     });
   });
 

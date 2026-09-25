@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { RateLimitModule, RateLimitService } from '@nawara/service-kit';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
+import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
 
 /** One stable answer for every unusable ticket, upload or download (SDD §11.1): never which check failed. */
 export const TICKET_INVALID = () => new HttpException({ message: 'The link is not valid.', code: 'ticket_invalid' }, 404);
@@ -22,6 +23,7 @@ export class RedemptionLimiter {
   constructor(
     @Inject(FILE_CONFIG) private readonly config: FileConfig,
     private readonly limiter: RateLimitService,
+    @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
   ) {}
 
   /** Refuses a blocked client (429); returns the one way to report this redemption as invalid (counted, then `ticket_invalid`). */
@@ -29,11 +31,13 @@ export class RedemptionLimiter {
     const client = createHmac('sha256', this.config.upload.rateLimitKey).update(req.ip ?? req.socket.remoteAddress ?? 'unknown').digest('hex');
     const rule = { limit: this.config.upload.ticketFailureLimit, windowSec: 60 }; // the same window as FILE_LIMITER_BUCKETS' retention
     if (!(await this.limiter.peek(TICKET_FAILURE_BUCKET, client, rule)).allowed) {
+      this.counters.bump('redemption_blocked');
       throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
     }
     return {
       invalid: async () => {
         await this.limiter.hit(TICKET_FAILURE_BUCKET, client, rule);
+        this.counters.bump('ticket_invalid');
         return TICKET_INVALID();
       },
     };

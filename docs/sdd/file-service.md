@@ -11,7 +11,9 @@
   redeem, revoke), safe download headers: [Stage 17.6 record](../architecture/stage-17/stage-17-6-download-authorization.md). Stage 17.7:
   deletion and the cleanup workers: [Stage 17.7 record](../architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md). Stage 17.8:
   threat-model verification, usage limits, download integrity, name hardening:
-  [Stage 17.8 record](../architecture/stage-17/stage-17-8-security-integrity.md).
+  [Stage 17.8 record](../architecture/stage-17/stage-17-8-security-integrity.md). Stage 17.9: the measured operational envelope,
+  signals and runbook: [Stage 17.9 record](../architecture/stage-17/stage-17-9-operational-hardening.md),
+  [runbook](../runbooks/file-service.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -296,6 +298,14 @@ issuance (upload and download tickets share one budget) and service content read
   platform in Core).
 - **Readiness:** database + migrations. Storage is not a readiness dependency (ADR-0048 §8); `storage_unavailable` and a periodic
   storage probe signal carry its health.
+- **Implemented (Stage 17.9); names as shipped:** the periodic lines are `file_ops_snapshot` (backlog from the partial indexes, in-flight
+  gauges, database pool), `file_ops_counters` (per-interval overload, rate-limit, invalid-ticket, integrity and deadline counts) and
+  `file_storage_ops` (per operation and outcome: count, mean and max duration), plus `file_integrity_incident` (error); the per-event
+  lines keep their 17.5–17.8 names (`file_upload`, `file_download`, `file_storage_inconsistent`, `file_deletion_retry`, …). There is no
+  separate storage probe: `file_storage_ops` carries the store's health from real traffic. Labels come from closed sets only. Overload
+  answers `503 upload_busy` / `download_busy` (per-process bounds), distinct from `429 rate_limited` (a caller's budget); neither
+  affects readiness. Timeouts: the store's idle bound is now enforced (it was inert with the SDK in use) and must exceed the client
+  idle bounds; downloads also have a whole-transfer deadline.
 - **Timeouts:** connect ≤ 2 s; an idle-stream timeout (no byte for 30 s) and a whole-transfer bound derived from size and a minimum
   throughput; retries only for `head`, `get` (before any byte is sent to the client) and `delete`; never for `put` mid-stream.
 
