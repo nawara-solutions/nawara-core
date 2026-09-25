@@ -1,14 +1,14 @@
 # audit-service
 
-> **Status: the service foundation (Stage 18.2).** Health, readiness (database and migrations), service authentication, the
-> deny-by-default caller policy, least-privilege database roles, the production image, Compose and CI. **No audit domain yet:** the
-> append-only `audit_record` table (18.3), the audit contract and catalog (18.4), RabbitMQ ingestion (18.5), the query API (18.6),
-> producer integration (18.7) and retention (18.8) arrive in their stages.
+> **Status: foundation (Stage 18.2) and append-only persistence (Stage 18.3).** The `audit_record` table: the runtime role can INSERT
+> and SELECT, never UPDATE, DELETE or TRUNCATE (grants + triggers; a database superuser remains outside the guarantee). **Not yet:** the
+> audit contract and catalog (18.4), RabbitMQ ingestion (18.5), the query API (18.6), producer integration (18.7), retention (18.8).
 
 Security and business audit trail for Nawara Core: owning services emit cataloged audit events through their transactional outbox;
 this service validates, stores them append-only and answers tenant-safe queries. Design: [ADR-0049](../../docs/adr/0049-audit-trail-architecture.md),
 [SDD](../../docs/sdd/audit-service.md), [Stage 18.1 decisions and roadmap](../../docs/architecture/stage-18/stage-18-1-decisions-and-roadmap.md),
-[Stage 18.2 record](../../docs/architecture/stage-18/stage-18-2-service-foundation.md).
+[Stage 18.2 record](../../docs/architecture/stage-18/stage-18-2-service-foundation.md),
+[Stage 18.3 record](../../docs/architecture/stage-18/stage-18-3-persistence-append-only.md).
 
 ## What exists (18.2 foundation)
 
@@ -59,4 +59,5 @@ by hand as `infra/postgres/init/01-service-databases.sh` does.
 |---|---|
 | 18.1 | ✅ architecture and decisions |
 | 18.2 | ✅ service foundation |
-| 18.3 – 18.10 | persistence, contract and catalog, ingestion, query, producers, security / retention, operations, certification |
+| 18.3 | ✅ append-only persistence (`audit_record`, repository, idempotency foundation) |
+| 18.4 – 18.10 | contract and catalog, ingestion, query, producers, security / retention, operations, certification |

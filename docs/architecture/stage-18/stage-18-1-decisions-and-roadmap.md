@@ -340,7 +340,7 @@ and producer integration is split by readiness because Auth needs an outbox firs
 |---|---|---|
 | 18.1 | architecture and decisions | this record, ADR-0049, SDD |
 | 18.2 | service foundation: `audit-service` on the kit (config, health / ready, service auth, `AUDIT_SERVICE_POLICY` skeleton, DB provisioning `audit_migrator` / `audit_app`, image, Compose, CI) | no domain yet; **done**: [18.2 record](./stage-18-2-service-foundation.md) |
-| 18.3 | persistence: `audit_record`, append-only privileges and triggers, indexes, the retention role's hook (no purge yet), repository with idempotent insert, plans at scale | |
+| 18.3 | persistence: `audit_record`, append-only privileges and triggers, indexes, the retention role's hook (no purge yet), repository with idempotent insert, plans at scale | **done**: [18.3 record](./stage-18-3-persistence-append-only.md) (the maintenance role's hook is documented, not built: 18.8) |
 | 18.4 | canonical contract and catalog: the contract library, payload validation (shared by producers and Audit), the initial Core catalog (§4.1), the catalog document, producer helper over the kit outbox | decides the library placement |
 | 18.5 | ingestion: the RabbitMQ consumer (`audit.#`), validation, producer admission, idempotency, DLQ reasons, clock-skew handling, with a test producer | |
 | 18.6 | query and authorization: organization / platform scope, filters, keyset pagination, limits, `audit.platform_query` | |

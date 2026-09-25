@@ -3,8 +3,9 @@ import { Global, Module, type DynamicModule } from '@nestjs/common';
 import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir } from '@nawara/service-kit';
 import type { AuditConfig } from './config/audit-config.js';
 import { AUDIT_CONFIG } from './config/audit-config.token.js';
+import { PersistenceModule } from './persistence/persistence.module.js';
 
-/** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup (empty until Stage 18.3). */
+/** The service's own migrations (Stage 18.3: the append-only `audit_record`), applied by the explicit `npm run migrate` step and never at startup. */
 export const auditMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
 
 export interface AppModuleOverrides {
@@ -26,8 +27,8 @@ class ConfigModule {
  *
  * Stage 18.2 (the foundation): the kit's health / readiness / bounded HTTP drain, the kit database (bounded pool and deadlines;
  * readiness `database` + `migrations`; the pool closes last) and service authentication, plus the validated configuration (with the
- * caller policy). There is no audit domain yet: no table (18.3), no contract or catalog (18.4), no consumer (18.5), no query route
- * (18.6).
+ * caller policy). Stage 18.3 adds the persistence layer (`PersistenceModule`: the append-only `audit_record` repository). Still absent:
+ * the contract and catalog (18.4), the consumer (18.5), any query route (18.6).
  *
  * Deliberately NOT here (ADR-0049): no RabbitMQ yet (the ingestion consumer and its readiness semantics are Stage 18.5), and no call to
  * Auth, Organization or any product service, for any purpose (A36).
@@ -51,6 +52,7 @@ export class AppModule {
         }),
         ServiceAuthModule.forRoot(config.serviceTokens),
         ConfigModule.forRoot(config),
+        PersistenceModule,
       ],
     };
   }
