@@ -87,9 +87,15 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `file.deleted` | business | service | as recorded (UUID or null) | file | — | succeeded | — | A stored document is deleted at its owner service's request (irreversible loss of content). |
 | `file.integrity_incident` | security | system (`file_download_integrity_check`, `file_reconciliation`) | as recorded (UUID or null) | file | — | succeeded | `reason`: digest_mismatch \| size_mismatch \| object_missing | Stored content no longer matches its record (altered, truncated or missing): possible tampering or loss. |
 
+## audit-service (1)
+
+| Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
+|---|---|---|---|---|---|---|---|---|
+| `platform_query.executed` | security | service | none (platform) | platform_query | — | succeeded | `target`: all \| organization \| platform<br>`window_days`: integer 1–31<br>`result_count`: integer 0–100<br>`page`: first \| next<br>`filtered`: boolean | A trusted service read audit evidence with the privileged platform scope (across organizations or platform-level): who, when, how broadly. |
+
 ## notification-service (0)
 
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 49 actions.**
+**Total: 50 actions.**

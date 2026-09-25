@@ -1,7 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, canonicalJson, type Queryable } from '@nawara/service-kit';
 import { AuditPersistenceError } from './persistence-error.js';
-import type { AuditRecordRow, InsertOutcome, NewAuditRecord } from './audit-record.types.js';
+import type { AuthorizedAuditQuery } from '../query/query-model.js';
+import type { AuditRecordRow, InsertOutcome, NewAuditRecord, PagedAuditRow } from './audit-record.types.js';
 
 const COLUMNS = `id, "eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId",
   "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt"`;
@@ -15,7 +16,7 @@ const REFUSED = new Set(['23514', '23502', '22P02', '22007', '22008', '22003', '
  * statement is parameterized; `id` and `recordedAt` are never taken from the caller. Every method accepts the caller's transaction
  * client, so the ingestion of Stage 18.5 can store a record in the same transaction as its own bookkeeping.
  *
- * Query primitives for the organization / platform scopes, filters and keyset pages are Stage 18.6.
+ * Stage 18.6 adds ONE read primitive, `findPage`, which takes only an `AuthorizedAuditQuery` (scope and policy built by the server).
  */
 @Injectable()
 export class AuditRecordRepository {
@@ -53,6 +54,44 @@ export class AuditRecordRepository {
     const existing = await this.findBySourceAndEventId(r.sourceService, r.eventId, q);
     if (!existing) throw new Error('audit_record conflict without a stored row'); // unreachable: the conflict names an existing row
     return { kind: 'duplicate', existing };
+  }
+
+  /**
+   * One keyset page (Stage 18.6), newest first: `ORDER BY "occurredAt" DESC, id DESC`, `LIMIT limit + 1` (one extra row = "there is a
+   * next page"). Every predicate is a fixed SQL fragment with a bound parameter, and they are only ever joined with AND: the scope
+   * (organization, or the platform target), the caller policy (categories, source services) and the time window are always present, so
+   * a filter or a cursor can only narrow. `id` (internal) and the position in microseconds are returned for the cursor, never as evidence.
+   */
+  async findPage(query: AuthorizedAuditQuery, q: Queryable = this.db): Promise<PagedAuditRow[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const bind = (v: unknown) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const s = query.scope;
+    if (s.kind === 'organization' || s.target === 'organization') where.push(`"organizationId" = ${bind(s.organizationId)}::uuid`);
+    else if (s.target === 'platform') where.push(`"organizationId" IS NULL`);
+    where.push(`category = ANY(${bind(query.policy.categories)}::text[])`);
+    if (query.policy.sourceServices) where.push(`"sourceService" = ANY(${bind(query.policy.sourceServices)}::text[])`);
+    where.push(`"occurredAt" >= ${bind(query.window.from)}`, `"occurredAt" < ${bind(query.window.to)}`);
+    const f = query.filters;
+    if (f.action !== undefined) where.push(`action = ${bind(f.action)}`);
+    if (f.category !== undefined) where.push(`category = ${bind(f.category)}`);
+    if (f.sourceService !== undefined) where.push(`"sourceService" = ${bind(f.sourceService)}`);
+    if (f.outcome !== undefined) where.push(`outcome = ${bind(f.outcome)}`);
+    if (f.correlationId !== undefined) where.push(`"correlationId" = ${bind(f.correlationId)}`);
+    if (f.actor) where.push(`"actorType" = ${bind(f.actor.type)}`, `"actorId" = ${bind(f.actor.id)}`);
+    if (f.resource) where.push(`"resourceType" = ${bind(f.resource.type)}`, `"resourceId" = ${bind(f.resource.id)}`);
+    if (f.subject) where.push(`"subjectType" = ${bind(f.subject.type)}`, `"subjectId" = ${bind(f.subject.id)}`);
+    if (query.after) {
+      where.push(`("occurredAt", id) < ('epoch'::timestamptz + ${bind(query.after.occurredAtUs)}::bigint * interval '1 microsecond', ${bind(query.after.id)}::bigint)`);
+    }
+    const sql = `SELECT ${COLUMNS}, (extract(epoch FROM "occurredAt") * 1000000)::bigint::text AS "occurredAtUs"
+                   FROM audit_record WHERE ${where.join(' AND ')}
+                  ORDER BY "occurredAt" DESC, id DESC LIMIT ${bind(query.limit + 1)}`;
+    const { rows } = await q.query<PagedAuditRow>(sql, params);
+    return rows;
   }
 
   /** The stored record of (sourceService, eventId), or undefined. Uses the unique constraint's index. */

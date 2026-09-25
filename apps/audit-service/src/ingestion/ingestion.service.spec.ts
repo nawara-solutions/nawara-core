@@ -94,6 +94,13 @@ describe('IngestionService (the pipeline and its classification)', () => {
     expect(repo.rows.size).toBe(0);
   });
 
+  it('Stage 18.6: audit-service\'s own action never arrives over the bus: a delivered platform_query.executed (source audit-service) is refused', async () => {
+    const { repo, svc } = make();
+    const payload = JSON.parse(JSON.stringify(sampleAuditPayload('platform_query.executed', 'complete')));
+    expect(await reasonOf(svc.ingest(envelope({ name: 'audit.platform_query.executed', payload, headers: { source: 'audit-service' } })))).toBe('permanent:producer_not_admitted');
+    expect(repo.rows.size).toBe(0);
+  });
+
   it('a record the schema refuses is permanent `invalid_record`; any other database error is transient and propagated unchanged (retried, never acknowledged)', async () => {
     const { repo, svc, counters } = make();
     repo.failNext = new AuditPersistenceError('invalid_record');

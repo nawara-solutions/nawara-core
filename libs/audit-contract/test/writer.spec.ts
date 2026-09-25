@@ -67,7 +67,7 @@ describe('AuditEventWriter', () => {
   });
 
   it('cannot be built for a service that owns no action, or with a malformed name', () => {
-    for (const s of ['notification-service', 'audit-service', 'File-Service', '', 'x']) {
+    for (const s of ['notification-service', 'billing', 'File-Service', '', 'x']) {
       expect(() => new AuditEventWriter({ sourceService: s, outbox: new FakeOutbox() })).toThrow(AuditContractError);
     }
   });

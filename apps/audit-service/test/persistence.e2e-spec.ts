@@ -64,13 +64,13 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── migrations and the catalog
 
-  it('an 18.2 foundation database upgrades to 18.3 (only 0001 applies), then re-runs as a no-op', async () => {
+  it('an 18.2 foundation database upgrades to the current schema (0001, then 18.6\'s 0002 index), then re-runs as a no-op', async () => {
     const up = await provisionServiceDatabase(env.TEST_DATABASE_ADMIN_URL, 'auu');
     try {
       const foundation = await runMigrations(up.migratorUrl, [kitMigrationsDir]); // the 18.2 state: the kit baseline, no audit migration
       expect(foundation.applied.every((n) => n.startsWith('kit_'))).toBe(true);
       const upgrade = await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
-      expect(upgrade.applied).toEqual(['0001_audit_record.sql']);
+      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql']);
       expect((await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]);
       const grants = await sql<{ p: string }>(up.adminUrl, `SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'audit_record' AND grantee = $1 ORDER BY 1`, [up.app]);
       expect(grants.map((g) => g.p)).toEqual(['INSERT', 'SELECT']);
@@ -498,7 +498,9 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
       ['organization scope, newest first (keyset page)', `SELECT * FROM audit_record WHERE "organizationId" = ${ORG_} AND "occurredAt" >= now() - interval '92 days'
         AND ("occurredAt", id) < (now(), 9223372036854775807) ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_org_time_idx'],
       ['platform-level records (organizationId IS NULL)', `SELECT * FROM audit_record WHERE "organizationId" IS NULL AND "occurredAt" >= now() - interval '31 days'
-        ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_org_time_idx'],
+        ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_(org_)?time_idx'], // either serves it; 18.6's time index is the tighter
+      ['every organization, newest first (18.6 platform scope)', `SELECT * FROM audit_record WHERE "occurredAt" >= now() - interval '31 days'
+        ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_time_idx'],
       ['an actor\'s actions', `SELECT * FROM audit_record WHERE "actorType" = 'user' AND "actorId" = ${USER_} ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_actor_time_idx'],
       ['a resource\'s history', `SELECT * FROM audit_record WHERE "resourceType" = 'membership' AND "resourceId" = md5('r4')::uuid::text ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_resource_time_idx'],
       ['a subject\'s history', `SELECT * FROM audit_record WHERE "subjectType" = 'user' AND "subjectId" = ${USER_} ORDER BY "occurredAt" DESC, id DESC LIMIT 50`, 'audit_record_subject_time_idx'],
@@ -508,7 +510,7 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
       ['retention scan by storage time', `SELECT id FROM audit_record WHERE "recordedAt" < now() - interval '1 day' LIMIT 500`, 'audit_record_recorded_idx'],
     ])('%s uses its index (no sequential scan)', async (_label, query, index) => {
       const p = await plan(query, []);
-      expect(p, p).toContain(index);
+      expect(p, p).toMatch(new RegExp(index));
       expect(p, p).not.toMatch(/Seq Scan on audit_record/);
     });
 

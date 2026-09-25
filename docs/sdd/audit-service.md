@@ -6,6 +6,8 @@
   `@nawara/audit-contract` (payload, catalog, validator, producer helper): [Stage 18.4 record](../architecture/stage-18/stage-18-4-canonical-contract-catalog.md),
   [catalog](../architecture/audit-event-catalog.md). Stage 18.5: the RabbitMQ ingestion (`audit-service.audit`, `audit.#`, the kit retry /
   DLQ, duplicate / conflict handling, readiness `rabbitmq` + `audit-ingestion`): [Stage 18.5 record](../architecture/stage-18/stage-18-5-rabbitmq-ingestion.md).
+  Stage 18.6: the organization / platform reads, cursor pagination, rate limits and the self-audit of platform reads:
+  [Stage 18.6 record](../architecture/stage-18/stage-18-6-query-authorization.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)
@@ -134,6 +136,14 @@ column (every field is stored, so exact vs conflicting duplicates are compared f
   `outcome`, `changes`, `sourceService`, `correlationId`, `causationId`. Identifiers only.
 - Errors: kit body; `400 validation_error`, `401`, `403 operation_not_allowed`, `429 rate_limited`; a query never answers 404 for an
   organization without records (an empty page).
+
+**Implemented (Stage 18.6); refinements, no decision changed:** the platform read is `GET /audit/platform/records` (explicit privileged
+path) with optional `organizationId` or `platform=true`; filters exactly as above (`action` exact, no prefix in V1); `[from, to)` on
+`occurredAt`, both required; the cursor is bound to caller + scope + filters + window (reuse elsewhere is `400 invalid_cursor`);
+capabilities are not hierarchical; the recorded platform read is the catalog action `platform_query.executed` (A57's
+`audit.platform_query`, renamed to the A13 grammar), written in the read's transaction, fail closed (`503 accountability_unavailable`);
+errors add `invalid_scope`, `invalid_cursor`, `window_too_large`, `category_not_allowed`, `source_not_allowed`, `unexpected_body`;
+`Cache-Control: no-store`; migration `0002` adds the platform-wide time index.
 
 ## 7. Caller policy
 
