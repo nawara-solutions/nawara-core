@@ -1,8 +1,8 @@
 # file-service
 
-> **Status: foundation + persistence + storage port (Stages 17.2–17.4).** A production-shaped service with health, readiness, service
-> authentication, the caller policy, the `file` / `file_access_ticket` schema with its repositories, and the `StoragePort` with its
-> filesystem and S3-compatible adapters. **No byte route yet:** no upload, download or ticket route (17.5–17.6).
+> **Status: foundation, persistence, storage port, upload lifecycle (Stages 17.2–17.5).** Services issue single-use upload tickets and
+> upload their own files; clients redeem tickets by streaming the bytes; the type is decided from the bytes; SHA-256 is computed while
+> streaming. **No download yet** (17.6), no cleanup workers (17.7).
 
 Generic file objects for Nawara Core: products keep the business meaning and relationships (`StudentDocument.fileId`); File Service
 owns immutable bytes, generic metadata, integrity, lifecycle, storage and controlled byte access. Design:
@@ -10,7 +10,8 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 [Stage 17.1 decisions and roadmap](../../docs/architecture/stage-17/stage-17-1-decisions-and-roadmap.md),
 [Stage 17.2 record](../../docs/architecture/stage-17/stage-17-2-service-foundation.md),
 [Stage 17.3 record](../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md),
-[Stage 17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md).
+[Stage 17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md),
+[Stage 17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md).
 
 ## What exists (17.2 foundation)
 
@@ -35,6 +36,11 @@ delete, neutral `StorageError`s), `FilesystemStorage` (development and tests; re
 S3-compatible provider by configuration; the production provider is not chosen yet), selected once by `FILE_STORAGE_PROVIDER`. Object
 storage is never a readiness check.
 
+**Upload (17.5):** `src/upload/`: `POST /file/uploads/tickets` (service, `issue_ticket`), `PUT /file/t/{token}` (the ticket
+holder; single-use), `POST /file/files` (service, `upload`, idempotent), `POST /file/files/{id}/attach` (service, `attach`). Raw
+streamed bodies with a required `Content-Length`; the type from the bytes (PDF, JPEG, PNG, WebP, HEIC, HEIF); SHA-256 while
+streaming; OpenAPI at `/file/docs` when `SWAGGER_PASSWORD` is set.
+
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency (and there
 is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 
@@ -54,6 +60,10 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `FILE_STORAGE_ROOT` | – (filesystem) | absolute | the development / test directory |
 | `FILE_S3_ENDPOINT`, `FILE_S3_REGION`, `FILE_S3_BUCKET`, `FILE_S3_ACCESS_KEY_ID`, `FILE_S3_SECRET_ACCESS_KEY` (`*_FILE`), `FILE_S3_FORCE_PATH_STYLE` | – (s3) | https in production | the S3-compatible store; credentials never logged |
 | `FILE_STORAGE_KEY_PREFIX`, `FILE_STORAGE_*_TIMEOUT_MS`, `FILE_STORAGE_MIN_THROUGHPUT_BYTES_PER_SECOND`, `FILE_STORAGE_MAX_ATTEMPTS` | `files`, 2 s / 30 s / 10 s, 64 KiB/s, 3 | see the [17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md) §3 | |
+| `FILE_PUBLIC_BASE_URL` | **required** | https in production | ticket URLs are `<base>/file/t/<token>` |
+| `FILE_REQUEST_HASH_KEY`, `FILE_RATE_LIMIT_KEY` (`*_FILE`) | **required** | base64, ≥ 32 bytes, different | the service-upload request hash; the keyed client address of the redemption limiter |
+| `FILE_UPLOAD_TICKET_TTL_SECONDS`, `FILE_ATTACH_TTL_SECONDS`, `FILE_UPLOAD_IDLE_TIMEOUT_MS`, `FILE_TICKET_FAILURE_LIMIT` | 120 s, 24 h, 30 s, 20/min | see the [17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md) §12 | |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI at `/file/docs` (basic auth) only when set |
 
 `FILE_SERVICE_POLICY`:
 
@@ -91,7 +101,7 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 |---|---|
 | 17.3 | ✅ the `file` and `file_access_ticket` tables, constraints, triggers, repositories |
 | 17.4 | ✅ the storage port, filesystem and S3-compatible adapters |
-| 17.5 | streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
+| 17.5 | ✅ streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
 | 17.6 | streamed download, safe headers, download tickets (issue, redeem, revoke) |
 | 17.7 | delete, orphan cleanup, reconciliation |
 | 17.8 / 17.9 / 17.10 | security and integrity, operational hardening, focused certification |

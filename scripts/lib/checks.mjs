@@ -89,9 +89,18 @@ const DOMAIN_DECLARATION = /\b(?:class|interface|type|enum|function|const)\s+\w*
 // The kit reads Auth's identity contract (an organization id, a membership status) but holds no organization or membership logic.
 const KIT_IDENTITY_CONTRACT_ALLOWLIST = new Set(['libs/service-kit/src/service-auth/auth-client.ts']);
 
+/**
+ * Stage 17.5: invisible bidirectional control characters (U+202A–U+202E, U+2066–U+2069) make source read differently from how it runs
+ * ("Trojan Source", CVE-2021-42574). Code and SQL must write them as escapes (`\u202E`). The one exception is a migration that is
+ * already applied and checksummed (forward-only: it cannot be edited); its constraint is behaviourally correct and tested.
+ */
+const BIDI_CONTROL = /[\u202A-\u202E\u2066-\u2069]/u;
+const BIDI_ALLOWLIST = new Set(['apps/file-service/db/migrations/0001_file_schema.sql']);
+
 /** No product concepts in Core services or the kit; no financial-domain declarations in the kit; no cross-service source imports. */
 export function checkSource(relPath, text) {
   const problems = [];
+  if (BIDI_CONTROL.test(text) && !BIDI_ALLOWLIST.has(relPath)) problems.push(`${relPath}: contains an invisible bidirectional control character (write it as an escape)`);
   const inKit = relPath.startsWith('libs/service-kit/');
   const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file)-service\/(src|db\/migrations)\//.test(relPath);
   if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);

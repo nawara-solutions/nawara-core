@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +17,9 @@ const POLICY = JSON.stringify({ callers: { 'some-core-service': { operations: ['
 /** Stage 17.4: production needs an S3-compatible store. It is never contacted at startup (an unresolvable host proves it). */
 const S3_SECRET = 's3-secret-looking-value-4567';
 const STORAGE = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.storage.invalid', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'file-process-test', FILE_S3_ACCESS_KEY_ID: 'AKIDPROCESSTEST', FILE_S3_SECRET_ACCESS_KEY: S3_SECRET };
-const REQUIRED = { DATABASE_URL: RUNTIME_DB, FILE_SERVICE_POLICY: POLICY, ...STORAGE };
+/** Stage 17.5: the upload settings (random keys per run). */
+const UPLOAD = { FILE_PUBLIC_BASE_URL: 'https://files.process.invalid', FILE_REQUEST_HASH_KEY: randomBytes(32).toString('base64'), FILE_RATE_LIMIT_KEY: randomBytes(32).toString('base64') };
+const REQUIRED = { DATABASE_URL: RUNTIME_DB, FILE_SERVICE_POLICY: POLICY, ...STORAGE, ...UPLOAD };
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -95,7 +98,7 @@ describe('file-service as a built process (production configuration)', () => {
     expect(msgs.filter((m) => m.startsWith('service_shutdown_started'))).toHaveLength(1); // one shutdown, never twice
     expect(msgs.some((m) => m.startsWith(`service_shutdown_complete signal=${signal}`))).toBe(true);
     expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
-    for (const s of [digest, DB_PASSWORD, S3_SECRET, 'AKIDPROCESSTEST', 'objects.storage.invalid']) expect(run.out()).not.toContain(s);
+    for (const s of [digest, DB_PASSWORD, S3_SECRET, 'AKIDPROCESSTEST', 'objects.storage.invalid', UPLOAD.FILE_REQUEST_HASH_KEY, UPLOAD.FILE_RATE_LIMIT_KEY]) expect(run.out()).not.toContain(s);
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|FILE_SERVICE_POLICY|some-core-service/);
   }, 30_000);
 
@@ -117,6 +120,8 @@ describe('file-service as a built process (production configuration)', () => {
     ['a plain-HTTP S3 endpoint in production', { FILE_S3_ENDPOINT: 'http://objects.storage.invalid' }, /FILE_S3_ENDPOINT/],
     ['a missing S3 bucket', { FILE_S3_BUCKET: '' }, /FILE_S3_BUCKET/],
     ['a missing S3 secret', { FILE_S3_SECRET_ACCESS_KEY: '' }, /FILE_S3_SECRET_ACCESS_KEY/],
+    ['a missing request-hash key', { FILE_REQUEST_HASH_KEY: '' }, /FILE_REQUEST_HASH_KEY/],
+    ['a plain-HTTP public base URL in production', { FILE_PUBLIC_BASE_URL: 'http://files.process.invalid' }, /FILE_PUBLIC_BASE_URL/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
     const { digest } = generateServiceToken();
     const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), ...REQUIRED, SERVICE_TOKENS: `some-core-service:${digest}`, ...env });

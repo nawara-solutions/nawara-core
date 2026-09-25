@@ -46,6 +46,21 @@ export class RateLimitService {
     return { allowed: rows[0].count <= rule.limit, count: rows[0].count, limit: rule.limit };
   }
 
+  /**
+   * Reports the current window's count WITHOUT recording a hit (Stage 17.5). For limits that count only failures: a caller checks
+   * `peek` before the attempt and `hit`s only when the attempt fails, so a blocked identifier is refused for every attempt alike
+   * (a limiter that only refused failures would tell a blocked client which of its attempts would have succeeded).
+   */
+  async peek(bucket: string, identifier: string, rule: RateLimitRule, q: Queryable = this.db): Promise<RateLimitResult> {
+    if (!BUCKET.test(bucket)) throw new Error(`invalid rate-limit bucket name: ${bucket}`);
+    const { rows } = await q.query<{ count: number }>(
+      `SELECT count FROM kit_rate_limit WHERE bucket = $1 AND key = $2 AND "windowStart" > now() - make_interval(secs => $3)`,
+      [bucket, this.key(bucket, identifier), rule.windowSec],
+    );
+    const count = rows[0]?.count ?? 0;
+    return { allowed: count < rule.limit, count, limit: rule.limit };
+  }
+
   /** Same as `hit`, but throws a 429 (with the additive `code: 'rate_limited'`) when the limit is exceeded. */
   async assert(bucket: string, identifier: string, rule: RateLimitRule, q?: Queryable): Promise<void> {
     const result = await this.hit(bucket, identifier, rule, q);

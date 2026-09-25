@@ -103,6 +103,9 @@ jobs:
 test('architecture: product terms, financial declarations and cross-service imports are refused', () => {
   assert.deepEqual(checkSource('libs/service-kit/src/db/db.service.ts', 'export class DbService {}'), []);
   assert.match(checkSource('libs/service-kit/src/x.ts', '// a student pays').join(), /product-specific term/);
+  // Stage 17.5: no invisible bidirectional control characters anywhere in source (escapes are fine).
+  assert.match(checkSource('apps/file-service/src/x.ts', 'const s = "admin\u202E";').join(), /bidirectional control character/);
+  assert.deepEqual(checkSource('apps/file-service/src/x.ts', 'const s = /[\\u202a-\\u202e]/;'), []);
   // Stage 17.3: a Core service's schema is checked like its source.
   assert.match(checkSource('apps/file-service/db/migrations/0002_x.sql', 'CREATE TABLE student_documents (id uuid);').join(), /product-specific term/);
   assert.match(checkSource('apps/file-service/db/migrations/0002_x.sql', 'ALTER TABLE file ADD COLUMN "instructorId" uuid;').join(), /product-specific term/);

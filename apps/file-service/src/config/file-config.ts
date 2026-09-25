@@ -1,6 +1,7 @@
 import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
 import { FileCallerPolicy } from '../policy/caller-policy.js';
 import { loadStorageConfig, type StorageConfig } from '../storage/storage-config.js';
+import { loadUploadConfig, type UploadConfig } from '../upload/upload-config.js';
 
 /** The one identity of this service: logs, the database `application_name`, Docker, documentation. */
 export const SERVICE_NAME = 'file-service';
@@ -17,10 +18,12 @@ export const FILE_MAX_BYTES_BOUND = 100 * 1024 * 1024;
  * - the database (the least-privilege runtime role; readiness = database + migrations, ADR-0048 §8);
  * - the accepted service callers (`SERVICE_TOKENS`) and their policy (`FILE_SERVICE_POLICY`, validated against FILE_MAX_BYTES);
  * - FILE_MAX_BYTES (the global ceiling every caller's `maxBytes` must respect);
- * - Stage 17.4: the object store (`FILE_STORAGE_PROVIDER` and its settings; required, fail closed, filesystem refused in production).
+ * - Stage 17.4: the object store (`FILE_STORAGE_PROVIDER` and its settings; required, fail closed, filesystem refused in production);
+ * - Stage 17.5: the upload lifecycle (upload-ticket lifetime, attach window, idle timeout, public base URL, the request-hash and
+ *   rate-limit keys).
  *
- * Deliberately absent until the stage that uses it: the attach window and the request-hash key (17.5), the ticket TTL (17.6).
- * Tickets need no secret (opaque random values, ADR-0048 F35).
+ * Deliberately absent until the stage that uses it: the download-ticket TTL (17.6). Tickets need no secret (opaque random values,
+ * ADR-0048 F35).
  */
 export interface FileConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `file_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -33,6 +36,10 @@ export interface FileConfig extends BaseConfig {
   maxBytes: number;
   /** The object store (Stage 17.4). Validated here; never contacted at startup, never a readiness dependency. */
   storage: StorageConfig;
+  /** The upload lifecycle (Stage 17.5). */
+  upload: UploadConfig;
+  /** OpenAPI at `/file/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
+  docs: { username: string; password?: string };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -56,5 +63,10 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
     callerPolicy: FileCallerPolicy.parse(reader.get('FILE_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))], maxBytes),
     maxBytes,
     storage: loadStorageConfig(reader, base.isProduction),
+    upload: loadUploadConfig(reader, base.isProduction),
+    docs: {
+      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
+      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
+    },
   };
 }

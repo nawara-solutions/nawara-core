@@ -62,10 +62,19 @@ export interface NewUpload {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** The verified content of an accepted upload (Stage 17.5): detected type, counted size, computed SHA-256. */
+export interface AcceptedContent {
+  mediaType: FileMediaType;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export type AttachOutcome = { kind: 'attached'; file: FileRow } | { kind: 'not_found' } | { kind: 'not_available' };
+
 /**
- * The only writer and reader of `file`. Stage 17.3 holds the creation of the metadata row and the scoped read; the lifecycle
- * transitions arrive with the stages that own their storage side (17.5 upload completion, 17.7 deletion), each as a named,
- * conditional operation, never a generic update. The schema enforces the state machine, set-once content and immutability anyway.
+ * The only writer and reader of `file`. Stage 17.3 holds the creation of the metadata row and the scoped read; Stage 17.5 the upload
+ * completion, refusal and attach; deletion is 17.7. Each transition is a named, CONDITIONAL operation (`… WHERE status = 'UPLOADING'`),
+ * never a generic update. The schema enforces the state machine, set-once content and immutability anyway.
  *
  * There is deliberately no unscoped lookup: a ticket redemption reads its file through `findOwned` with the ticket's own bindings
  * (issuer and organization), so no code path can read a file by id alone.
@@ -97,6 +106,59 @@ export class FileRepository {
       if (isUniqueViolation(e, 'file_idempotency_unique')) throw new FilePersistenceError('idempotency_key_in_use');
       throw e;
     }
+  }
+
+  /**
+   * The live file (not FAILED / REJECTED) holding this owner's Idempotency-Key (SDD §10): the replay / conflict / in-progress decision.
+   * Scoped to the owner by construction (the key is per caller).
+   */
+  async findLiveByIdempotencyKey(ownerService: string, idempotencyKey: string, q: Queryable = this.db): Promise<FileRow | undefined> {
+    const { rows } = await q.query<FileRow>(
+      `SELECT * FROM file WHERE "ownerService" = $1 AND "idempotencyKey" = $2 AND status NOT IN ('FAILED', 'REJECTED')`,
+      [ownerService, idempotencyKey],
+    );
+    return rows[0];
+  }
+
+  /**
+   * `UPLOADING` → `AVAILABLE` with the verified content, only after the bytes are stored (no scanner is configured, so `VERIFYING` is
+   * skipped, SDD §5.1). `attach` records the attachment at the same time (an upload ticket's attach-on-completion flag). `undefined`
+   * when the file is no longer `UPLOADING` (the transition happens at most once).
+   */
+  async completeUpload(id: string, content: AcceptedContent, attach: boolean, q: Queryable = this.db): Promise<FileRow | undefined> {
+    const { rows } = await q.query<FileRow>(
+      `UPDATE file SET status = 'AVAILABLE', "mediaType" = $2, "sizeBytes" = $3, sha256 = $4, "availableAt" = now(),
+         "attachedAt" = CASE WHEN $5 AND "attachedAt" IS NULL THEN now() ELSE "attachedAt" END
+       WHERE id = $1 AND status = 'UPLOADING' RETURNING *`,
+      [id, content.mediaType, content.sizeBytes, content.sha256, attach],
+    );
+    return rows[0];
+  }
+
+  /** `UPLOADING` → `REJECTED` (the content was refused) or `FAILED` (the transfer failed), with a bounded machine code. */
+  async refuseUpload(id: string, status: 'REJECTED' | 'FAILED', failureCode: string, q: Queryable = this.db): Promise<boolean> {
+    const { rowCount } = await q.query(`UPDATE file SET status = $2, "failureCode" = $3 WHERE id = $1 AND status = 'UPLOADING'`, [id, status, failureCode]);
+    return rowCount === 1;
+  }
+
+  /**
+   * Marks the owner's file attached (SDD §5.2), idempotently: an already attached file is the same success. A file of another owner
+   * or organization is `not_found`, indistinguishable from a missing one; a refused, failed or deleted file is `not_available`.
+   */
+  async attach(scope: FileScope, id: string, q: Queryable = this.db): Promise<AttachOutcome> {
+    if (!UUID.test(id)) return { kind: 'not_found' };
+    const { rows } = await q.query<FileRow>(
+      `UPDATE file SET "attachedAt" = now()
+       WHERE id = $1 AND "ownerService" = $2 AND "organizationId" IS NOT DISTINCT FROM $3 AND "attachedAt" IS NULL
+         AND status IN ('UPLOADING', 'VERIFYING', 'AVAILABLE')
+       RETURNING *`,
+      [id, scope.ownerService, scope.organizationId],
+    );
+    if (rows[0]) return { kind: 'attached', file: rows[0] };
+    const current = await this.findOwned(scope, id, q);
+    if (!current) return { kind: 'not_found' };
+    if (current.attachedAt) return { kind: 'attached', file: current };
+    return { kind: 'not_available' };
   }
 
   /**

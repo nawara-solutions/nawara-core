@@ -5,7 +5,9 @@
   Stage 17.2: the service foundation only (health, readiness, service auth, caller policy; no file domain yet):
   [Stage 17.2 record](../architecture/stage-17/stage-17-2-service-foundation.md). Stage 17.3: the schema and repositories (no
   byte path yet): [Stage 17.3 record](../architecture/stage-17/stage-17-3-persistence-metadata.md). Stage 17.4: the storage port and
-  its filesystem and S3-compatible adapters (no route uses them yet): [Stage 17.4 record](../architecture/stage-17/stage-17-4-storage-abstraction.md).
+  its filesystem and S3-compatible adapters: [Stage 17.4 record](../architecture/stage-17/stage-17-4-storage-abstraction.md). Stage 17.5:
+  the upload lifecycle (upload tickets, redemption, service upload, attach; no download yet):
+  [Stage 17.5 record](../architecture/stage-17/stage-17-5-upload-lifecycle.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -181,6 +183,13 @@ declared metadata: organization, name, declared type, length, and the client dig
 the same file (the body is not re-stored); a different declaration → `422 idempotency_key_reused`; a key whose upload is still
 `UPLOADING` → `409 upload_in_progress`; a `FAILED` / `REJECTED` attempt may be retried with the same key. Attach and delete are
 idempotent by state. Upload tickets are single-use (a second redemption of a completed ticket returns the same file).
+
+**Implemented (Stage 17.5); clarifications, no decision changed:** the upload ticket is consumed when the redemption's claim
+transaction commits (claim + `UPLOADING` row + binding, before any byte is read); a later failure leaves it spent. Ticket issuance is
+not idempotent (it creates no file, and a raw token is never recoverable). The upload ticket lifetime default is 120 s. Failed
+redemptions are limited per keyed client address, refusing every redemption of a blocked client alike. `Content-Length` over the
+limit and a missing `Content-Length` are refused before the claim; `X-File-Name` is percent-encoded UTF-8; `X-Attach: true` creates a
+service upload attached.
 
 ## 11. Authorization
 

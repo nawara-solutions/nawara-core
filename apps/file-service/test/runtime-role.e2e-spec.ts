@@ -99,7 +99,7 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
     });
     const d = ticketDigest(randomBytes(32).toString('base64url'))!;
     await t.app.get(TicketRepository).recordDownload({ scope: { ownerService: 'core-drive', organizationId: null }, fileId: f.id, tokenDigest: d, lifetimeSeconds: 60, singleUse: true, disposition: 'attachment' });
-    expect(await t.app.get(TicketRepository).claimUse(d)).toBeDefined();
+    expect(await t.app.get(TicketRepository).claimUse(d, 'download')).toBeDefined();
   });
 
   it('Stage 17.3: the runtime role cannot change the file schema, bypass its triggers, truncate it, or hard-delete a file', async () => {

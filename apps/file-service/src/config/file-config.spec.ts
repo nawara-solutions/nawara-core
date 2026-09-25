@@ -5,7 +5,9 @@ import { DEFAULT_FILE_MAX_BYTES, FILE_MAX_BYTES_BOUND, SERVICE_NAME, loadFileCon
 const DB = 'postgres://file_app:pw-not-real@db:5432/file';
 /** Stage 17.4: a store is required; production accepts only S3 (placeholder values: nothing is contacted at load). */
 const S3 = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.example.test', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'files-test', FILE_S3_ACCESS_KEY_ID: 'AKIDEXAMPLE', FILE_S3_SECRET_ACCESS_KEY: 'not-a-real-secret-0000' };
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...S3, ...over });
+/** Stage 17.5: the upload settings (placeholder keys: two different 32-byte values). */
+const UPLOAD = { FILE_PUBLIC_BASE_URL: 'https://files.example.test', FILE_REQUEST_HASH_KEY: Buffer.alloc(32, 1).toString('base64'), FILE_RATE_LIMIT_KEY: Buffer.alloc(32, 2).toString('base64') };
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...S3, ...UPLOAD, ...over });
 const A = generateServiceToken();
 
 describe('file-service configuration', () => {
@@ -28,11 +30,40 @@ describe('file-service configuration', () => {
     expect(c.callerPolicy.of('anyone')).toBeUndefined();
   });
 
-  it('carries only what is used so far: the store (17.4), no ticket, attach-window, request-hash, broker or Auth setting (later stages)', () => {
+  it('carries what is used so far: the store (17.4), the upload lifecycle (17.5); no download-ticket, broker or Auth setting', () => {
     const c = loadFileConfig(env());
     expect(c.storage.provider).toBe('s3');
-    const keys = Object.keys(c);
-    for (const later of ['ticketTtl', 'attachTtl', 'requestHashKey', 'rabbitmqUrl', 'authServiceUrl', 'docs']) expect(keys).not.toContain(later);
+    expect(c.upload).toMatchObject({ ticketTtlSeconds: 120, attachTtlSeconds: 86_400, idleTimeoutMs: 30_000, ticketFailureLimit: 20, publicBaseUrl: 'https://files.example.test' });
+    expect(c.docs.password).toBeUndefined(); // OpenAPI is not mounted by default
+    const keys = [...Object.keys(c), ...Object.keys(c.upload)];
+    for (const later of ['downloadTicketTtl', 'rabbitmqUrl', 'authServiceUrl']) expect(keys).not.toContain(later);
+  });
+
+  it.each([
+    ['FILE_PUBLIC_BASE_URL', { FILE_PUBLIC_BASE_URL: undefined }],
+    ['FILE_PUBLIC_BASE_URL', { FILE_PUBLIC_BASE_URL: 'http://files.example.test' }], // production requires TLS
+    ['FILE_PUBLIC_BASE_URL', { FILE_PUBLIC_BASE_URL: 'https://files.example.test/' }],
+    ['FILE_PUBLIC_BASE_URL', { FILE_PUBLIC_BASE_URL: 'https://u:p@files.example.test' }],
+    ['FILE_REQUEST_HASH_KEY', { FILE_REQUEST_HASH_KEY: undefined }],
+    ['FILE_REQUEST_HASH_KEY', { FILE_REQUEST_HASH_KEY: Buffer.alloc(16, 1).toString('base64') }],
+    ['FILE_REQUEST_HASH_KEY', { FILE_REQUEST_HASH_KEY: 'not base64!!' }],
+    ['FILE_RATE_LIMIT_KEY', { FILE_RATE_LIMIT_KEY: undefined }],
+    ['FILE_RATE_LIMIT_KEY', { FILE_RATE_LIMIT_KEY: Buffer.alloc(32, 1).toString('base64') }], // the same key as the request hash
+    ['FILE_UPLOAD_TICKET_TTL_SECONDS', { FILE_UPLOAD_TICKET_TTL_SECONDS: '30' }], // F16: 60-300 s
+    ['FILE_UPLOAD_TICKET_TTL_SECONDS', { FILE_UPLOAD_TICKET_TTL_SECONDS: '301' }],
+    ['FILE_ATTACH_TTL_SECONDS', { FILE_ATTACH_TTL_SECONDS: '10' }],
+    ['FILE_UPLOAD_IDLE_TIMEOUT_MS', { FILE_UPLOAD_IDLE_TIMEOUT_MS: '0' }],
+    ['FILE_TICKET_FAILURE_LIMIT', { FILE_TICKET_FAILURE_LIMIT: '0' }],
+    ['SWAGGER_PASSWORD', { SWAGGER_PASSWORD: 'short' }],
+  ])('Stage 17.5: refuses an invalid or missing %s, never echoing a value', (name, over) => {
+    try {
+      loadFileConfig(env(over));
+      throw new Error('accepted');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      expect((e as Error).message).toContain(name);
+      expect((e as Error).message).not.toContain(Buffer.alloc(32, 1).toString('base64'));
+    }
   });
 
   it('carries the kit database limits with their bounded defaults', () => {
