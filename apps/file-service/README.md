@@ -1,8 +1,8 @@
 # file-service
 
-> **Status: foundation, persistence, storage port, upload lifecycle (Stages 17.2–17.5).** Services issue single-use upload tickets and
-> upload their own files; clients redeem tickets by streaming the bytes; the type is decided from the bytes; SHA-256 is computed while
-> streaming. **No download yet** (17.6), no cleanup workers (17.7).
+> **Status: foundation, persistence, storage port, upload, download + authorization (Stages 17.2–17.6).** Services upload and read
+> their own files and issue upload / download tickets; clients redeem tickets directly (no user token, no call to Auth). **No deletion
+> or cleanup workers yet** (17.7).
 
 Generic file objects for Nawara Core: products keep the business meaning and relationships (`StudentDocument.fileId`); File Service
 owns immutable bytes, generic metadata, integrity, lifecycle, storage and controlled byte access. Design:
@@ -11,7 +11,8 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 [Stage 17.2 record](../../docs/architecture/stage-17/stage-17-2-service-foundation.md),
 [Stage 17.3 record](../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md),
 [Stage 17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md),
-[Stage 17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md).
+[Stage 17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md),
+[Stage 17.6 record](../../docs/architecture/stage-17/stage-17-6-download-authorization.md).
 
 ## What exists (17.2 foundation)
 
@@ -41,6 +42,11 @@ holder; single-use), `POST /file/files` (service, `upload`, idempotent), `POST /
 streamed bodies with a required `Content-Length`; the type from the bytes (PDF, JPEG, PNG, WebP, HEIC, HEIF); SHA-256 while
 streaming; OpenAPI at `/file/docs` when `SWAGGER_PASSWORD` is set.
 
+**Download (17.6):** `src/download/`: `GET /file/files/{id}` and `GET /file/files/{id}/content` (owner, `read`),
+`POST /file/files/{id}/tickets` (owner, `issue_ticket`; reusable until expiry unless `singleUse`), `DELETE /file/tickets/{ticketId}`
+(issuer), `GET /file/t/{token}` (the ticket holder). Streamed with backpressure; `attachment`, `private, no-store`, `nosniff`, a sandbox
+CSP; no Range, no HEAD.
+
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency (and there
 is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 
@@ -64,6 +70,7 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `FILE_REQUEST_HASH_KEY`, `FILE_RATE_LIMIT_KEY` (`*_FILE`) | **required** | base64, ≥ 32 bytes, different | the service-upload request hash; the keyed client address of the redemption limiter |
 | `FILE_UPLOAD_TICKET_TTL_SECONDS`, `FILE_ATTACH_TTL_SECONDS`, `FILE_UPLOAD_IDLE_TIMEOUT_MS`, `FILE_TICKET_FAILURE_LIMIT` | 120 s, 24 h, 30 s, 20/min | see the [17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md) §12 | |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI at `/file/docs` (basic auth) only when set |
+| `FILE_DOWNLOAD_TICKET_TTL_SECONDS`, `FILE_DOWNLOAD_IDLE_TIMEOUT_MS` | 120 s, 30 s | 60–300 s, 1–120 s | download tickets; a client that stops reading is cut off |
 
 `FILE_SERVICE_POLICY`:
 
@@ -102,6 +109,6 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 17.3 | ✅ the `file` and `file_access_ticket` tables, constraints, triggers, repositories |
 | 17.4 | ✅ the storage port, filesystem and S3-compatible adapters |
 | 17.5 | ✅ streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
-| 17.6 | streamed download, safe headers, download tickets (issue, redeem, revoke) |
+| 17.6 | ✅ streamed download, safe headers, download tickets (issue, redeem, revoke) |
 | 17.7 | delete, orphan cleanup, reconciliation |
 | 17.8 / 17.9 / 17.10 | security and integrity, operational hardening, focused certification |

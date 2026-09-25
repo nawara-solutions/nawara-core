@@ -42,28 +42,34 @@ describe('file-service foundation', () => {
     expect(JSON.stringify(r.body)).not.toMatch(/nobody|nothing|127\.0\.0\.1|ECONNREFUSED/); // no host, credential or error text
   });
 
-  it('Stage 17.5: ships the upload routes only — no download, metadata read, ticket revocation or delete route (17.6 / 17.7), no docs by default', async () => {
+  it('Stage 17.6: ships the upload and download routes — no delete or cleanup route (17.7), no HEAD on byte routes, no docs by default', async () => {
     const app = await createTestApp({ probes: false });
     try {
-      for (const [method, path] of [['get', '/'], ['get', '/file/files/x'], ['get', '/file/files/x/content'], ['get', '/file/t/token'], ['delete', '/file/files/x'],
-        ['post', '/file/files/x/tickets'], ['delete', '/file/tickets/x'], ['get', '/docs'], ['get', '/file/docs'], ['get', '/file/docs-json']] as const) {
+      for (const [method, path] of [['get', '/'], ['delete', '/file/files/x'], ['post', '/file/files/x/delete'], ['get', '/file/files'], ['get', '/docs'],
+        ['get', '/file/docs'], ['get', '/file/docs-json']] as const) {
         await request(app.app.getHttpServer())[method](path).expect(404);
       }
-      for (const [method, path] of [['post', '/file/files'], ['post', '/file/uploads/tickets'], ['post', '/file/files/x/attach']] as const) {
+      for (const [method, path] of [['post', '/file/files'], ['post', '/file/uploads/tickets'], ['post', '/file/files/x/attach'], ['get', '/file/files/x'],
+        ['get', '/file/files/x/content'], ['post', '/file/files/x/tickets'], ['delete', '/file/tickets/x']] as const) {
         await request(app.app.getHttpServer())[method](path).expect(401); // service routes: a service token first
       }
+      await request(app.app.getHttpServer()).head('/file/t/token').expect(405);
     } finally {
       await app.app.close();
     }
   });
 
-  it('Stage 17.5: OpenAPI at /file/docs only behind basic auth when SWAGGER_PASSWORD is set, documenting exactly the upload routes', async () => {
+  it('OpenAPI at /file/docs only behind basic auth when SWAGGER_PASSWORD is set, documenting exactly the upload and download routes', async () => {
     const password = 'docs-password-0123456789';
     const app = await createTestApp({ probes: false, env: { SWAGGER_PASSWORD: password }, docs: true });
     try {
       await request(app.app.getHttpServer()).get('/file/docs-json').expect(401);
       const doc = await request(app.app.getHttpServer()).get('/file/docs-json').auth('docs', password).expect(200);
-      expect(Object.keys(doc.body.paths as object).sort()).toEqual(['/file/files', '/file/files/{id}/attach', '/file/t/{token}', '/file/uploads/tickets', '/health', '/ready']); // no download, read, revoke or delete path
+      expect(Object.keys(doc.body.paths as object).sort()).toEqual(['/file/files', '/file/files/{id}', '/file/files/{id}/attach', '/file/files/{id}/content',
+        '/file/files/{id}/tickets', '/file/t/{token}', '/file/tickets/{ticketId}', '/file/uploads/tickets', '/health', '/ready']); // no delete path (17.7)
+      const redeem = (doc.body.paths as Record<string, Record<string, { security?: unknown[] }>>)['/file/t/{token}'];
+      expect(redeem.get?.security ?? []).toEqual([]); // the ticket route declares no bearer / JWT scheme: the ticket is the authority
+      expect(redeem.put?.security ?? []).toEqual([]);
     } finally {
       await app.app.close();
     }

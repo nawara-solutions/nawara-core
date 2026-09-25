@@ -141,8 +141,9 @@ describe('filesystem storage (real directories)', () => {
       outDigest = h.digest('hex');
     });
     expect(outDigest).toBe(src.digest());
-    expect(inGrowth).toBeLessThan(16 * 1024 * 1024); // a buffer-everything write would need ≥ 48 MiB here
-    expect(outGrowth).toBeLessThan(16 * 1024 * 1024);
+    // Relative to the object: a buffering implementation holds ≥ 1 × size; fast sampling in one process is noisy (up to ~20 MiB seen).
+    expect(inGrowth).toBeLessThan(0.75 * size);
+    expect(outGrowth).toBeLessThan(0.75 * size);
   }, 60_000);
 
   it('reads back through a slow consumer with backpressure (the stream is not drained ahead)', async () => {

@@ -150,7 +150,7 @@ describeWithEnv('upload lifecycle (real PostgreSQL, filesystem store)', ['TEST_D
     await s.query(`INSERT INTO file_access_ticket (id, operation, "issuedBy", "tokenDigest", "maxBytes", "mediaTypes", attach, "singleUse", "createdAt", "expiresAt")
       VALUES ($1, 'upload', 'core-drive', $2, 1000, ARRAY['application/pdf'], false, true, now() - interval '10 minutes', now() - interval '8 minutes')`, [randomUUID(), expired.digest]);
     const revokedUrl = (await issue()).body;
-    await t.app.get(TicketRepository).revoke('core-drive', revokedUrl.ticketId as string);
+    await t.app.get(TicketRepository).revoke({ ownerService: 'core-drive', organizationId: null }, revokedUrl.ticketId as string);
     const failedToken = tokenOf((await issue()).body.url as string);
     expect((await redeem(failedToken, ADVERSARIAL.windowsExe())).status).toBe(415); // consumed by a refused upload
     const download = newToken();
@@ -164,7 +164,7 @@ describeWithEnv('upload lifecycle (real PostgreSQL, filesystem store)', ['TEST_D
       bodies.push(rest);
     }
     expect(new Set(bodies.map((b) => JSON.stringify(b))).size).toBe(1); // indistinguishable
-    expect(bodies[0]).toEqual({ statusCode: 404, message: 'The upload link is not valid.', error: 'Not Found', code: 'ticket_invalid' });
+    expect(bodies[0]).toEqual({ statusCode: 404, message: 'The link is not valid.', error: 'Not Found', code: 'ticket_invalid' });
     expect((await s.query<{ useCount: number }>(`SELECT "useCount" FROM file_access_ticket WHERE "tokenDigest" = $1`, [download.digest]))[0]!.useCount).toBe(0); // not consumed by a PUT
   });
 
@@ -392,7 +392,7 @@ describeWithEnv('upload lifecycle (real PostgreSQL, filesystem store)', ['TEST_D
     const r = res as RawResponse;
     expect(r.status).toBe(201);
     expect(r.json()).toMatchObject({ sizeBytes: size, sha256: hash.digest('hex') });
-    expect(growth).toBeLessThan(12 * 1024 * 1024); // client + server together hold a small fraction of the 20 MiB
+    expect(growth).toBeLessThan(0.75 * size); // relative to the file: buffering holds ≥ 1 × size; fast sampling in one process is noisy
   }, 120_000);
 
   it('rate limit on failed redemptions: once over, EVERY redemption from that client is 429, valid or not (no oracle)', async () => {

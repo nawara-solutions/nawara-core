@@ -78,8 +78,9 @@ describeWithEnv('S3-compatible storage (real S3 protocol server)', TEST_S3_VARS,
       outDigest = h.digest('hex');
     });
     expect(outDigest).toBe(src.digest());
-    expect(inGrowth).toBeLessThan(16 * 1024 * 1024);
-    expect(outGrowth).toBeLessThan(16 * 1024 * 1024);
+    // Relative to the object: a buffering implementation holds ≥ 1 × size; fast sampling in one process is noisy (up to ~20 MiB seen).
+    expect(inGrowth).toBeLessThan(0.75 * size);
+    expect(outGrowth).toBeLessThan(0.75 * size);
   }, 120_000);
 
   it('the SDK never writes to the console (its messages would bypass the JSON logs)', () => {

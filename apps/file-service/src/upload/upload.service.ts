@@ -1,7 +1,7 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Request } from 'express';
-import { DbService, RateLimitService } from '@nawara/service-kit';
+import { DbService } from '@nawara/service-kit';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
 import { FileRepository, type FileRow } from '../persistence/file.repository.js';
@@ -11,13 +11,14 @@ import { TicketRepository } from '../persistence/ticket.repository.js';
 import type { CallerPolicy, FileOperation } from '../policy/caller-policy.js';
 import type { FileMediaType } from '../policy/media-types.js';
 import { STORAGE_PORT, type StoragePort } from '../storage/storage.port.js';
+import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
 import { putDeadlineMs } from '../storage/streams.js';
 import { decodeFileNameHeader } from './file-name.js';
 import { ingest, UploadRefused } from './ingest.js';
 import { declaredEssence } from './media-type.js';
 import {
   attachHeader, contentDigest, declaredLength, FILE_NOT_FOUND, fileError, fileView, idempotencyKey, organizationHeader, refusalError,
-  sizeBucket, TICKET_INVALID, uploadRequestHash, watchUpload, type FileView,
+  sizeBucket, uploadRequestHash, watchUpload, type FileView,
 } from './upload-http.js';
 
 export interface UploadResult {
@@ -32,9 +33,6 @@ export interface IssuedUploadTicket {
   url: string;
   expiresAt: string;
 }
-
-/** Failed ticket redemptions per client (keyed address), per minute (F32). */
-const TICKET_FAILURE_BUCKET = 'file_ticket_failures';
 
 interface Receive {
   req: Request;
@@ -73,7 +71,7 @@ export class UploadService {
     private readonly tickets: TicketRepository,
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
     private readonly db: DbService,
-    private readonly limiter: RateLimitService,
+    private readonly redemptions: RedemptionLimiter,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────── ticket issuance
@@ -106,14 +104,8 @@ export class UploadService {
   // ─────────────────────────────────────────────────────────────────────────────────────────────── ticket redemption
 
   async redeemUploadTicket(token: string, req: Request): Promise<UploadResult> {
-    const client = createHmac('sha256', this.config.upload.rateLimitKey).update(req.ip ?? req.socket.remoteAddress ?? 'unknown').digest('hex');
-    const rule = { limit: this.config.upload.ticketFailureLimit, windowSec: 60 };
     // A client over its failure budget is refused for EVERY redemption (valid or not): no oracle, even while blocked.
-    if (!(await this.limiter.peek(TICKET_FAILURE_BUCKET, client, rule)).allowed) throw fileError(429, 'rate_limited', 'Too many requests.');
-    const invalid = async () => {
-      await this.limiter.hit(TICKET_FAILURE_BUCKET, client, rule);
-      return TICKET_INVALID();
-    };
+    const { invalid } = await this.redemptions.admit(req);
 
     const digest = ticketDigest(token);
     if (!digest) throw await invalid(); // not even the shape of a token: no database read
