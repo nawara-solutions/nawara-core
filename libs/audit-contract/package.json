@@ -1,0 +1,47 @@
+{
+  "name": "@nawara/audit-contract",
+  "version": "1.0.0",
+  "description": "The Core audit contract (ADR-0049, Stage 18.4): the canonical audit payload, the reviewed event catalog, the one runtime validator shared by producers and audit-service, and the transactional producer helper over the kit outbox. No runtime dependencies.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./consumer": {
+      "types": "./dist/consumer.d.ts",
+      "default": "./dist/consumer.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "oxlint --type-aware src/ test/ scripts/",
+    "test": "vitest run",
+    "test:integration": "vitest run --config ./vitest.config.integration.ts",
+    "catalog:doc": "npm run build && node scripts/render-catalog-doc.mjs"
+  },
+  "devDependencies": {
+    "@nawara/service-kit": "*",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "oxlint": "^1.58.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "pg": "^8.23.0",
+    "reflect-metadata": "^0.2.2",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  }
+}

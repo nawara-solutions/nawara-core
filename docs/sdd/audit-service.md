@@ -2,7 +2,9 @@
 
 - **Status:** Draft (Stage 18.1 design). Stage 18.2: the service foundation (health, readiness, service auth, caller policy):
   [Stage 18.2 record](../architecture/stage-18/stage-18-2-service-foundation.md). Stage 18.3: the append-only `audit_record` and its
-  repository: [Stage 18.3 record](../architecture/stage-18/stage-18-3-persistence-append-only.md).
+  repository: [Stage 18.3 record](../architecture/stage-18/stage-18-3-persistence-append-only.md). Stage 18.4: the shared contract
+  `@nawara/audit-contract` (payload, catalog, validator, producer helper): [Stage 18.4 record](../architecture/stage-18/stage-18-4-canonical-contract-catalog.md),
+  [catalog](../architecture/audit-event-catalog.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)
@@ -77,6 +79,14 @@ Invalid → `PermanentEventFailure(reason)` → `<queue>.dead` at once, with a b
 `unsupported_version`, `producer_not_admitted`, `invalid_actor`, `invalid_organization`, `invalid_resource`, `invalid_changes`,
 `sensitive_value`, `payload_too_large`, `event_id_conflict`.
 
+**Implemented (Stage 18.4, `libs/audit-contract`); clarifications, no decision changed:** one validator for producers and Audit
+(`validateAuditPayload`, `validateAuditEvent`); `organizationId` must be present (null explicitly); `subject`, `changes`, `causationId`
+are absent rather than null / empty; every resource / subject id is a lowercase UUID; `code` changes are closed enumerations per action;
+the organization rule gains `self` (the resource is the organization) and `resource` (the target when it is an organization); the reason
+list is refined to `AUDIT_REFUSALS` (adds `invalid_payload`, `unknown_field`, `sensitive_field`, `event_type_mismatch`, `invalid_subject`,
+`invalid_outcome`, `invalid_causation`, `invalid_correlation`; `transaction_required` is the producer helper's). Producers write through
+`AuditEventWriter` on their business transaction. The catalog: [audit-event-catalog.md](../architecture/audit-event-catalog.md) (49 actions).
+
 ## 5. Data model (conceptual; the table is Stage 18.3)
 
 `audit_record` — one row per accepted event, never updated, never deleted by the runtime.
@@ -144,4 +154,4 @@ at producers (`check-outbox-lag`); DLQ depth (`check-dlq-depth`). Labels from cl
 
 ## 10. Open items
 
-Library placement (18.4); retention durations and erasure policy (owner / legal); per-service broker identity (P-A1); Auth outbox (18.7).
+Library placement: decided in 18.4 (`libs/audit-contract`). Retention durations and erasure policy (owner / legal); per-service broker identity (P-A1); Auth outbox (18.7).

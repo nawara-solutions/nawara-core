@@ -2,7 +2,7 @@ name: Core CI
 
 # Validates every Node workspace: lint, typecheck, unit tests, integration tests, build; plus the repository's static
 # safety and architecture checks. It builds and tests only: it never deploys, publishes an image or touches production.
-# Covered:      auth-service, notification-service, file-service, audit-service, payment-service, billing-service, organization-service, service-kit (Node), repository checks.
+# Covered:      auth-service, notification-service, file-service, audit-service, payment-service, billing-service, organization-service, service-kit, audit-contract (Node), repository checks.
 #               Production images of auth/organization/billing/payment-service are built and smoke-checked (job `images`), never pushed.
 # NOT covered:  ai-service (Python) has no CI job yet.
 on:
@@ -49,6 +49,9 @@ jobs:
         include:
           - name: service-kit
             workspace: '@nawara/service-kit'
+            integration: test:integration
+          - name: audit-contract
+            workspace: '@nawara/audit-contract'
             integration: test:integration
           - name: auth-service
             workspace: auth-service
@@ -106,9 +109,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci --ignore-scripts
-      # Services that depend on the kit consume its built output, so it is built first.
-      - name: build the service-kit
-        run: npm run build -w @nawara/service-kit
+      # Services that depend on the kit (and, for audit-service, the audit contract) consume the built output, so it is built first.
+      - name: build the service-kit and the audit contract
+        run: npm run build -w @nawara/service-kit -w @nawara/audit-contract
       - name: lint
         run: npm run lint -w ${{ matrix.workspace }}
       - name: typecheck
