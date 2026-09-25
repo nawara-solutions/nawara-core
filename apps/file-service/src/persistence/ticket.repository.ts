@@ -69,7 +69,7 @@ function reviveTicket(raw: Record<string, unknown>): TicketRow {
 
 function reviveFile(raw: Record<string, unknown>): FileRow {
   const f = raw as unknown as FileRow & Record<string, unknown>;
-  for (const k of ['uploadExpiresAt', 'attachDeadline', 'attachedAt', 'createdAt', 'availableAt', 'deletionRequestedAt', 'deletedAt', 'updatedAt'] as const) {
+  for (const k of ['uploadExpiresAt', 'attachDeadline', 'attachedAt', 'createdAt', 'availableAt', 'deletionRequestedAt', 'deletedAt', 'updatedAt', 'deleteNextAttemptAt', 'deleteLeaseUntil'] as const) {
     if (f[k] !== null) (f as Record<string, unknown>)[k] = new Date(f[k] as unknown as string);
   }
   if (f.sizeBytes !== null) f.sizeBytes = String(f.sizeBytes);
@@ -94,9 +94,10 @@ export class TicketRepository {
   constructor(private readonly db: DbService) {}
 
   /**
-   * Records a download ticket for a file the issuer owns in that organization, or returns `undefined` when there is no such file
-   * (the same answer as a missing file). The ownership check and the insert are ONE statement (no read-then-write gap); the schema
-   * re-checks the binding.
+   * Records a download ticket for an AVAILABLE file the issuer owns in that organization, or returns `undefined` otherwise (the same
+   * answer as a missing file). The check and the insert are ONE statement (no read-then-write gap); the schema re-checks the binding.
+   * Stage 17.7: `FOR SHARE` on the file row serializes it with a deletion (which updates the row): a ticket either commits before the
+   * deletion (which then revokes it) or sees the file DELETING and is not created.
    */
   async recordDownload(input: NewDownloadTicket, q: Queryable = this.db): Promise<TicketRow | undefined> {
     assertTicketDigest(input.tokenDigest);
@@ -105,7 +106,8 @@ export class TicketRepository {
     return this.insert(q,
       `INSERT INTO file_access_ticket (id, operation, "fileId", "issuedBy", "organizationId", "tokenDigest", disposition, "singleUse", "expiresAt")
        SELECT $1, 'download', f.id, f."ownerService", f."organizationId", $5, $6, $7, now() + make_interval(secs => $8)
-       FROM file f WHERE f.id = $2 AND f."ownerService" = $3 AND f."organizationId" IS NOT DISTINCT FROM $4
+       FROM file f WHERE f.id = $2 AND f."ownerService" = $3 AND f."organizationId" IS NOT DISTINCT FROM $4 AND f.status = 'AVAILABLE'
+       FOR SHARE OF f
        RETURNING ${COLUMNS}`,
       [randomUUID(), input.fileId, input.scope.ownerService, input.scope.organizationId, input.tokenDigest, input.disposition,
         input.singleUse, input.lifetimeSeconds]);
@@ -223,6 +225,21 @@ export class TicketRepository {
     const { rowCount } = await q.query(
       `UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = $1 AND "revokedAt" IS NULL`,
       [fileId],
+    );
+    return rowCount ?? 0;
+  }
+
+  /**
+   * Stage 17.7, ticket retention (SDD §11.1: "expired rows are removed by the retention worker"): tickets expired more than
+   * `retentionSeconds` ago, in a bounded batch. Live tickets are never touched (they have not expired).
+   */
+  async purgeExpired(retentionSeconds: number, limit: number): Promise<number> {
+    const { rowCount } = await this.db.query(
+      `WITH old AS MATERIALIZED (
+         SELECT id FROM file_access_ticket WHERE "expiresAt" < now() - make_interval(secs => $1) ORDER BY "expiresAt" LIMIT $2 FOR UPDATE SKIP LOCKED
+       )
+       DELETE FROM file_access_ticket t USING old WHERE t.id = old.id`,
+      [retentionSeconds, limit],
     );
     return rowCount ?? 0;
   }

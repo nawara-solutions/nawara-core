@@ -111,10 +111,12 @@ describeWithEnv('file schema: constraints and triggers (real PostgreSQL)', ['TES
     await s.update('file', f!.id, { status: 'AVAILABLE', availableAt: new Date() });
     expect((await s.refusedUpdate('file', f!.id, { status: 'UPLOADING' })).message).toMatch(/cannot move from AVAILABLE to UPLOADING/);
     expect((await s.refusedUpdate('file', f!.id, { status: 'DELETED', deletedAt: new Date() })).message).toMatch(/cannot move from AVAILABLE to DELETED/);
-    expect((await s.refusedUpdate('file', f!.id, { status: 'DELETING' })).constraint).toBe('file_deletion_requested_iff_deleting');
-    await s.update('file', f!.id, { status: 'DELETING', deletionRequestedAt: new Date() });
+    expect((await s.refusedUpdate('file', f!.id, { status: 'DELETING', deleteNextAttemptAt: new Date() })).constraint).toBe('file_deletion_requested_iff_deleting');
+    expect((await s.refusedUpdate('file', f!.id, { status: 'DELETING', deletionRequestedAt: new Date() })).constraint).toBe('file_delete_scheduled_iff_deleting'); // 0002
+    await s.update('file', f!.id, { status: 'DELETING', deletionRequestedAt: new Date(), deleteNextAttemptAt: new Date() });
     expect((await s.refusedUpdate('file', f!.id, { attachedAt: new Date() })).message).toMatch(/DELETING and cannot be attached/);
-    await s.update('file', f!.id, { status: 'DELETED', deletedAt: new Date() });
+    expect((await s.refusedUpdate('file', f!.id, { status: 'DELETED', deletedAt: new Date() })).constraint).toBe('file_delete_scheduled_iff_deleting'); // 0002: unscheduled
+    await s.update('file', f!.id, { status: 'DELETED', deletedAt: new Date(), deleteNextAttemptAt: null });
     expect((await s.refusedUpdate('file', f!.id, { status: 'AVAILABLE' })).message).toMatch(/cannot move from DELETED/);
     for (const change of [{ attachedAt: new Date(Date.now() + 1_000) }, { failureCode: 'x' }]) {
       expect((await s.refusedUpdate('file', f!.id, change)).message).toMatch(/is DELETED and final/);

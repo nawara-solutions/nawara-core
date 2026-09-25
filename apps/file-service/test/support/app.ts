@@ -52,6 +52,7 @@ export async function createTestApp(
     DATABASE_URL: opts.databaseUrl ?? UNREACHABLE_DATABASE_URL,
     FILE_STORAGE_PROVIDER: 'filesystem',
     FILE_STORAGE_ROOT: TEST_STORAGE_ROOT,
+    FILE_CLEANUP_ENABLED: 'false', // Stage 17.7: tests drive the workers explicitly (CleanupWorker.runOnce), never on a timer
     ...TEST_UPLOAD_ENV,
     ...(opts.tokens?.length
       ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(','), FILE_SERVICE_POLICY: opts.policy ?? readOnlyPolicy([...new Set(opts.tokens.map((t) => t.caller))]) }

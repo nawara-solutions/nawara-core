@@ -41,6 +41,23 @@ export interface FileRow {
   deletionRequestedAt: Date | null;
   deletedAt: Date | null;
   updatedAt: Date;
+  /** Stage 17.7 (0002): the delete worker's fence (incremented at each claim), schedule, lease and last failure code. */
+  deleteAttempts: number;
+  deleteNextAttemptAt: Date | null;
+  deleteLeaseUntil: Date | null;
+  deleteLastError: string | null;
+}
+
+export type DeletionRequest =
+  | { kind: 'deleting'; file: FileRow } // AVAILABLE → DELETING now, or already DELETING / DELETED (idempotent)
+  | { kind: 'not_found' }
+  | { kind: 'not_deletable'; file: FileRow }; // UPLOADING / VERIFYING (no cancellation in V1), REJECTED / FAILED (terminal, no bytes)
+
+/** One claimed deletion: the row's key and the attempt number that fences its completion / rescheduling. */
+export interface DeletionClaim {
+  id: string;
+  storageKey: string;
+  attempt: number;
 }
 
 /** The metadata of a file about to receive its bytes. Every identity and placement value is derived here, never taken from a caller. */
@@ -159,6 +176,123 @@ export class FileRepository {
     if (!current) return { kind: 'not_found' };
     if (current.attachedAt) return { kind: 'attached', file: current };
     return { kind: 'not_available' };
+  }
+
+  /**
+   * Stage 17.7: the owner asks for deletion (SDD §5.1, F17). In ONE transaction: `AVAILABLE` → `DELETING` (scheduled for the worker now)
+   * AND every live ticket of the file revoked; either both commit or neither. The row lock taken by the UPDATE serializes it with a
+   * concurrent download-ticket issuance (which share-locks the row) and redemption (whose claim needs `AVAILABLE`). Access stops when
+   * this commits; the bytes are removed asynchronously by the worker.
+   */
+  async requestDeletion(scope: FileScope, id: string): Promise<DeletionRequest> {
+    if (!UUID.test(id)) return { kind: 'not_found' };
+    return this.db.tx(async (q) => {
+      const { rows } = await q.query<FileRow>(
+        `UPDATE file SET status = 'DELETING', "deletionRequestedAt" = now(), "deleteNextAttemptAt" = now()
+         WHERE id = $1 AND "ownerService" = $2 AND "organizationId" IS NOT DISTINCT FROM $3 AND status = 'AVAILABLE'
+         RETURNING *`,
+        [id, scope.ownerService, scope.organizationId],
+      );
+      if (rows[0]) {
+        await q.query(`UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = $1 AND "revokedAt" IS NULL`, [id]);
+        return { kind: 'deleting', file: rows[0] };
+      }
+      const current = await this.findOwned(scope, id, q);
+      if (!current) return { kind: 'not_found' };
+      if (current.status === 'DELETING' || current.status === 'DELETED') return { kind: 'deleting', file: current };
+      return { kind: 'not_deletable', file: current };
+    });
+  }
+
+  /**
+   * Stage 17.7, the delete worker's claim: due DELETING rows whose lease is free (never claimed, or a crashed worker's lease expired),
+   * oldest schedule first, at most `limit`, skipping rows another replica holds. Each claim takes a lease and increments the attempt
+   * (the fence). A short transaction: no storage call happens while it is open. A materialized CTE bounds the batch (the Notification
+   * 16.9 finding: `IN (SELECT … LIMIT … SKIP LOCKED)` can be re-evaluated and exceed it).
+   */
+  async claimDeletions(limit: number, leaseSeconds: number): Promise<DeletionClaim[]> {
+    const { rows } = await this.db.query<DeletionClaim>(
+      `WITH due AS MATERIALIZED (
+         SELECT id FROM file
+         WHERE status = 'DELETING' AND "deleteNextAttemptAt" <= now() AND ("deleteLeaseUntil" IS NULL OR "deleteLeaseUntil" < now())
+         ORDER BY "deleteNextAttemptAt" LIMIT $1 FOR UPDATE SKIP LOCKED
+       )
+       UPDATE file f SET "deleteLeaseUntil" = now() + make_interval(secs => $2), "deleteAttempts" = f."deleteAttempts" + 1
+       FROM due WHERE f.id = due.id
+       RETURNING f.id, f."storageKey", f."deleteAttempts" AS attempt`,
+      [limit, leaseSeconds],
+    );
+    return rows;
+  }
+
+  /**
+   * `DELETING` → `DELETED` after the object is gone (a successful delete, or an object already absent: delete is idempotent). Conditional
+   * on the row still being DELETING; not fenced by the attempt: whoever removed the bytes may finish the row (the outcome is the same).
+   */
+  async completeDeletion(id: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `UPDATE file SET status = 'DELETED', "deletedAt" = now(), "deleteNextAttemptAt" = NULL, "deleteLeaseUntil" = NULL, "deleteLastError" = NULL
+       WHERE id = $1 AND status = 'DELETING'`,
+      [id],
+    );
+    return rowCount === 1;
+  }
+
+  /**
+   * A failed storage delete: the row stays DELETING (access is never restored) and is rescheduled after `delaySeconds`, with the bounded
+   * error code. Fenced: only the holder of the current attempt reschedules (a worker whose lease expired and was re-claimed changes nothing).
+   */
+  async retryDeletion(id: string, attempt: number, delaySeconds: number, errorCode: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `UPDATE file SET "deleteLeaseUntil" = NULL, "deleteNextAttemptAt" = now() + make_interval(secs => $3), "deleteLastError" = $4
+       WHERE id = $1 AND status = 'DELETING' AND "deleteAttempts" = $2`,
+      [id, attempt, delaySeconds, errorCode],
+    );
+    return rowCount === 1;
+  }
+
+  /**
+   * Stage 17.7, orphan expiry (SDD §5.2, F18): AVAILABLE files never attached before their deadline enter the SAME deletion path
+   * (DELETING + tickets revoked, one transaction each batch). Conditional on still being unattached: an attach that commits first wins
+   * (the UPDATE re-checks its condition on the locked row), and one that comes after finds the file DELETING and is refused.
+   */
+  async expireUnattached(limit: number): Promise<string[]> {
+    return this.db.tx(async (q) => {
+      const { rows } = await q.query<{ id: string }>(
+        `WITH due AS MATERIALIZED (
+           SELECT id FROM file WHERE status = 'AVAILABLE' AND "attachedAt" IS NULL AND "attachDeadline" <= now()
+           ORDER BY "attachDeadline" LIMIT $1 FOR UPDATE SKIP LOCKED
+         )
+         UPDATE file f SET status = 'DELETING', "deletionRequestedAt" = now(), "deleteNextAttemptAt" = now()
+         FROM due WHERE f.id = due.id AND f.status = 'AVAILABLE' AND f."attachedAt" IS NULL
+         RETURNING f.id`,
+        [limit],
+      );
+      const ids = rows.map((r) => r.id);
+      if (ids.length > 0) await q.query(`UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = ANY($1::uuid[]) AND "revokedAt" IS NULL`, [ids]);
+      return ids;
+    });
+  }
+
+  /**
+   * Stage 17.7, the upload-lease sweep: UPLOADING rows past their lease. The lease outlasts any request that could still be writing (it
+   * is derived from the server's request bound, 17.5 / 17.7), so a row past it is abandoned: no live upload can still publish its object.
+   */
+  async findAbandonedUploads(limit: number): Promise<Pick<FileRow, 'id' | 'storageKey'>[]> {
+    const { rows } = await this.db.query<Pick<FileRow, 'id' | 'storageKey'>>(
+      `SELECT id, "storageKey" FROM file WHERE status = 'UPLOADING' AND "uploadExpiresAt" <= now() ORDER BY "uploadExpiresAt" LIMIT $1`,
+      [limit],
+    );
+    return rows;
+  }
+
+  /** An abandoned upload → FAILED `upload_abandoned`, after its (possible) object was removed. Conditional on still being past its lease. */
+  async failAbandonedUpload(id: string): Promise<boolean> {
+    const { rowCount } = await this.db.query(
+      `UPDATE file SET status = 'FAILED', "failureCode" = 'upload_abandoned' WHERE id = $1 AND status = 'UPLOADING' AND "uploadExpiresAt" <= now()`,
+      [id],
+    );
+    return rowCount === 1;
   }
 
   /**
