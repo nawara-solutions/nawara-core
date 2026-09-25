@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { get as httpGet } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
@@ -141,6 +141,28 @@ describeWithEnv('download on the S3-compatible store (real PostgreSQL + S3 proto
     const r = await request(t.app.getHttpServer()).get(`/file/files/${id}/content`).set(auth);
     expect([r.status, r.body.code]).toEqual([500, 'file_content_missing']);
     expect(JSON.stringify(r.body)).not.toMatch(/NoSuchKey|bucket|127\.0\.0\.1|file-test-/i);
+  });
+
+  it('Stage 17.8 tampering in the bucket (same key): same size, other bytes → the response never completes; other size → 500', async () => {
+    const pdf = SAMPLES.pdf(400_000);
+    const id = await upload(pdf);
+    const key = ((await s.query('SELECT "storageKey" FROM file WHERE id = $1', [id]))[0] as { storageKey: string }).storageKey;
+    const forged = Buffer.from(pdf);
+    forged[forged.length - 1] = forged[forged.length - 1]! ^ 0x01; // one bit, at the very end
+    await bucket.admin.send(new PutObjectCommand({ Bucket: bucket.bucket, Key: key, Body: forged }));
+    const before = ALL_LOGS.length;
+    const r = await fetchAll(t, `/file/files/${id}/content`);
+    expect(r.status).toBe(200);
+    expect(r.bytes).toBeLessThan(pdf.length); // the last chunk is held back and never released
+    let line: string | undefined;
+    for (let i = 0; i < 100 && !line; i++) {
+      line = ALL_LOGS.slice(before).map((x) => String(x.msg)).find((m) => m === `file_storage_inconsistent file=${id} reason=digest_mismatch`);
+      if (!line) await new Promise((res) => setTimeout(res, 20));
+    }
+    expect(line).toBeDefined();
+    await bucket.admin.send(new PutObjectCommand({ Bucket: bucket.bucket, Key: key, Body: Buffer.concat([pdf, Buffer.from('x')]) }));
+    const longer = await request(t.app.getHttpServer()).get(`/file/files/${id}/content`).set(auth);
+    expect([longer.status, longer.body.code]).toEqual([500, 'file_content_missing']);
   });
 
   it('a storage outage: 503 storage_unavailable for the download, /ready stays 200', async () => {

@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { contentDisposition } from './content-disposition.js';
+import { ContentMismatch, VerifiedDownload } from './download.service.js';
 
 /** Built from code points so no invisible character is ever written literally in this source (see check:repo). */
 const cp = (...codes: number[]) => String.fromCodePoint(...codes);
@@ -36,5 +38,42 @@ describe('Content-Disposition: one encoder, never an injection (RFC 6266 / 8187)
     expect(contentDisposition('attachment', null, 'image/png')).toBe('attachment; filename="file.png"; filename*=UTF-8\'\'file.png');
     expect(contentDisposition('inline', cp(0x202e), 'image/jpeg')).toBe('inline; filename="file.jpg"; filename*=UTF-8\'\'file.jpg');
     expect(contentDisposition('attachment', '..', 'image/heic')).toBe('attachment; filename="file.heic"; filename*=UTF-8\'\'file.heic');
+  });
+});
+
+describe('download integrity: the exact streaming guarantee (Stage 17.8)', () => {
+  /** Feeds `chunks` through a verifier and reports what it released downstream and how it ended. */
+  async function through(chunks: Buffer[], recordedSha: string) {
+    const v = new VerifiedDownload(chunks.reduce((n, c) => n + c.length, 0), recordedSha);
+    const released: Buffer[] = [];
+    v.on('data', (c: Buffer) => released.push(c));
+    const ended = new Promise<Error | 'end'>((resolve) => {
+      v.on('end', () => resolve('end'));
+      v.on('error', (e) => resolve(e));
+    });
+    for (const c of chunks) v.write(c);
+    v.end();
+    return { released: Buffer.concat(released), outcome: await ended };
+  }
+  const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+  const chunks = [Buffer.alloc(65_536, 1), Buffer.alloc(65_536, 2), Buffer.alloc(1_000, 3)];
+
+  it('a matching digest releases every byte and ends normally', async () => {
+    const r = await through(chunks, sha(Buffer.concat(chunks)));
+    expect([r.outcome, r.released.length]).toEqual(['end', 132_072]);
+  });
+
+  it('a mismatch never ends normally, and releases everything EXCEPT the last chunk (altered earlier bytes do get out)', async () => {
+    const forged = [Buffer.alloc(65_536, 9), chunks[1]!, chunks[2]!]; // the alteration is in the FIRST chunk
+    const r = await through(forged, sha(Buffer.concat(chunks)));
+    expect(r.outcome).toBeInstanceOf(ContentMismatch);
+    expect((r.outcome as Error).message).toBe('digest_mismatch');
+    expect(r.released.length).toBe(131_072); // size - the last chunk (1 000 bytes held back)
+    expect(r.released.subarray(0, 65_536).equals(forged[0]!)).toBe(true); // the altered prefix WAS emitted
+  });
+
+  it('a file that fits in one chunk emits no body byte on a mismatch', async () => {
+    const r = await through([Buffer.from('%PDF-1.7 forged')], sha(Buffer.from('%PDF-1.7 honest')));
+    expect([r.outcome instanceof ContentMismatch, r.released.length]).toEqual([true, 0]);
   });
 });

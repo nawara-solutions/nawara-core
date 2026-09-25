@@ -77,6 +77,7 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI at `/file/docs` (basic auth) only when set |
 | `FILE_DOWNLOAD_TICKET_TTL_SECONDS`, `FILE_DOWNLOAD_IDLE_TIMEOUT_MS` | 120 s, 30 s | 60–300 s, 1–120 s | download tickets; a client that stops reading is cut off |
 | `FILE_CLEANUP_ENABLED`, `FILE_CLEANUP_INTERVAL_MS`, `FILE_CLEANUP_BATCH_SIZE`, `FILE_DELETE_CONCURRENCY`, `FILE_DELETE_LEASE_SECONDS`, `FILE_DELETE_RETRY_BASE_SECONDS` / `_MAX_SECONDS`, `FILE_TICKET_RETENTION_SECONDS` | true, 30 s, 20, 4, 300 s, 30 s / 1 h, 24 h | see the [17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md) §10 | the cleanup workers |
+| `FILE_{UPLOAD,TICKET,DOWNLOAD}_RATE_PER_CALLER` / `_PER_ORGANIZATION`, `FILE_TICKET_MAX_DOWNLOADS`, `FILE_UPLOAD_MAX_IN_FLIGHT` | 600 / 120, 1200 / 300, 1200 / 300 per min; 50; 64 | see the [17.8 record](../../docs/architecture/stage-17/stage-17-8-security-integrity.md) §4 | usage limits (F32), reusable-ticket cap, per-process upload bound |
 
 `FILE_SERVICE_POLICY`:
 

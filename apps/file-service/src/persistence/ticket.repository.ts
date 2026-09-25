@@ -179,23 +179,25 @@ export class TicketRepository {
    * not revoked, not expired, not used up when single-use) AND its file (the bound file, still `AVAILABLE`, still the issuer's in the
    * ticket's organization): a ticket never outlives its file's availability, and a file leaving `AVAILABLE` is never served through
    * an old ticket. `undefined` for every refusal alike (`ticket_invalid`). A reusable ticket counts each use; a single-use ticket is
-   * claimed once (concurrent claims serialize on the ticket row).
+   * claimed once (concurrent claims serialize on the ticket row). Stage 17.8: at most `maxUses` claims of any ticket (the reusable
+   * download cap, F32), enforced by the same conditional UPDATE, so concurrent claims can never exceed it.
    */
-  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db): Promise<{ ticket: TicketRow; file: FileRow } | undefined> {
+  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db, maxUses = 2_147_483_647): Promise<{ ticket: TicketRow; file: FileRow } | undefined> {
     assertTicketDigest(tokenDigest);
+    if (!Number.isSafeInteger(maxUses) || maxUses < 1) throw new Error('maxUses must be a positive integer');
     const { rows } = await q.query<{ ticket: Record<string, unknown>; file: Record<string, unknown> }>(
       `WITH claimed AS (
          UPDATE file_access_ticket t SET "useCount" = t."useCount" + 1, "usedAt" = COALESCE(t."usedAt", now())
          FROM file f
          WHERE t."tokenDigest" = $1 AND t.operation = 'download' AND t."revokedAt" IS NULL AND t."expiresAt" > now()
-           AND (NOT t."singleUse" OR t."useCount" = 0)
+           AND (NOT t."singleUse" OR t."useCount" = 0) AND t."useCount" < $2
            AND f.id = t."fileId" AND f.status = 'AVAILABLE' AND f."ownerService" = t."issuedBy"
            AND f."organizationId" IS NOT DISTINCT FROM t."organizationId"
          RETURNING t.id, t.operation, t."fileId", t."issuedBy", t."organizationId", t.disposition, t."maxBytes", t."mediaTypes", t.attach,
            t."singleUse", t."useCount", t."usedAt", t."revokedAt", t."expiresAt", t."createdAt", to_jsonb(f.*) AS file
        )
        SELECT to_jsonb(claimed.*) - 'file' AS ticket, claimed.file AS file FROM claimed`,
-      [tokenDigest],
+      [tokenDigest, maxUses],
     );
     const row = rows[0];
     if (!row) return undefined;

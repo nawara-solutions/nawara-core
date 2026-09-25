@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnAppl
 import { describeFailure, PollLoop } from '@nawara/service-kit';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
+import { UsageLimiter } from '../limits/usage-limiter.js';
 import { FileRepository, type DeletionClaim } from '../persistence/file.repository.js';
 import { TicketRepository } from '../persistence/ticket.repository.js';
 import { isStorageError } from '../storage/storage-error.js';
@@ -14,6 +15,7 @@ export interface CleanupPassResult {
   retried: number;
   abandoned: number;
   ticketsPurged: number;
+  limitsPurged: number;
 }
 
 /**
@@ -25,7 +27,8 @@ export interface CleanupPassResult {
  *    DELETED (success or already absent) or rescheduled with backoff (the row stays DELETING: access is never restored);
  * 3. upload-lease sweep: UPLOADING rows past their lease (no live request can still write them): delete the key (idempotent), then
  *    FAILED `upload_abandoned`; a storage failure leaves the row for the next pass;
- * 4. ticket retention: expired ticket rows past the retention window, in a bounded batch.
+ * 4. ticket retention: expired ticket rows past the retention window, in a bounded batch;
+ * 5. Stage 17.8: limiter retention: this service's expired rate-limit windows, in a bounded batch.
  *
  * No database transaction is ever open during a storage call. Stops before the pool closes (`beforeApplicationShutdown`): no new claim,
  * the running pass is waited for (bounded); a claim cut by shutdown is recovered when its lease expires.
@@ -41,6 +44,7 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
     private readonly files: FileRepository,
     private readonly tickets: TicketRepository,
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
+    private readonly usage: UsageLimiter,
   ) {
     this.loop = new PollLoop(
       () => this.runOnce(),
@@ -67,9 +71,10 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
     const { deleted, retried } = await this.deleteDue();
     const abandoned = await this.sweepAbandonedUploads();
     const ticketsPurged = await this.tickets.purgeExpired(this.config.cleanup.ticketRetentionSeconds, this.config.cleanup.batchSize);
-    const result = { expired, deleted, retried, abandoned, ticketsPurged };
-    if (expired + deleted + retried + abandoned + ticketsPurged > 0) {
-      this.logger.log(`file_cleanup_pass expired=${expired} deleted=${deleted} retried=${retried} abandoned=${abandoned} tickets_purged=${ticketsPurged}`);
+    const limitsPurged = await this.usage.purgeExpiredWindows(this.config.cleanup.batchSize);
+    const result = { expired, deleted, retried, abandoned, ticketsPurged, limitsPurged };
+    if (expired + deleted + retried + abandoned + ticketsPurged + limitsPurged > 0) {
+      this.logger.log(`file_cleanup_pass expired=${expired} deleted=${deleted} retried=${retried} abandoned=${abandoned} tickets_purged=${ticketsPurged} limits_purged=${limitsPurged}`);
     }
     return result;
   }

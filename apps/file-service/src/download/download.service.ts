@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
@@ -14,6 +14,7 @@ import type { CallerPolicy, FileOperation } from '../policy/caller-policy.js';
 import type { FileMediaType } from '../policy/media-types.js';
 import { isStorageError } from '../storage/storage-error.js';
 import { STORAGE_PORT, type StoragePort, type StoredObjectStream } from '../storage/storage.port.js';
+import { UsageLimiter, type UsageKind } from '../limits/usage-limiter.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
 import { FILE_NOT_FOUND, fileError, fileView, organizationHeader, sizeBucket, type FileView } from '../upload/upload-http.js';
 import { contentDisposition } from './content-disposition.js';
@@ -28,27 +29,45 @@ export interface IssuedDownloadTicket {
 class TicketNoLongerValid extends Error {}
 
 /**
- * Counts the bytes actually sent without holding any, and refuses to END short or long: a stored object that ends early mid-stream
- * would otherwise finish a response shorter than its Content-Length without error. Failing here destroys the connection instead, so
- * a client can never take a truncated file for a complete one.
+ * Verifies what is sent against the record without holding the object (Stage 17.8): counts the bytes (a body that runs over fails as
+ * soon as it passes the size; one that ends short fails at its end) and recomputes the SHA-256, holding back ONLY the last chunk until
+ * the digest matches the recorded `sha256` (the upload's `VerifiedBody` rule, one chunk of lag, no whole-file buffering).
+ *
+ * The exact guarantee: an integrity-mismatched download cannot COMPLETE successfully. The response is destroyed before its last chunk,
+ * so the client always receives fewer bytes than `Content-Length` (and never a normal end of message). It is NOT a promise that no
+ * altered byte is transmitted: every chunk before the last one has already been sent when the mismatch is found, so an alteration
+ * outside the last chunk reaches the client inside a truncated response. At most `size - (last chunk)` body bytes are emitted; the last
+ * chunk is at most the store stream's chunk size (64 KiB on the filesystem adapter; on S3, one HTTP read of the provider response). A
+ * file that fits in one chunk emits nothing at all: the headers go out with the first body write, so the connection closes without a
+ * response. The `ETag` (the recorded SHA-256) lets a client check what it got.
  */
-class ContentMismatch extends Error {}
+export class ContentMismatch extends Error {}
 
-class ByteCounter extends Transform {
+export class VerifiedDownload extends Transform {
   bytes = 0;
+  private held: Buffer | undefined;
+  private readonly hash = createHash('sha256');
 
-  constructor(private readonly expected: number) {
+  constructor(
+    private readonly expected: number,
+    private readonly sha256: string,
+  ) {
     super();
   }
 
   override _transform(chunk: Buffer, _enc: BufferEncoding, done: TransformCallback): void {
     this.bytes += chunk.length;
-    if (this.bytes > this.expected) return done(new ContentMismatch('object longer than its record'));
-    done(null, chunk);
+    if (this.bytes > this.expected) return done(new ContentMismatch('stream_length'));
+    this.hash.update(chunk);
+    const release = this.held;
+    this.held = chunk;
+    done(null, release);
   }
 
   override _flush(done: TransformCallback): void {
-    done(this.bytes === this.expected ? null : new ContentMismatch('object shorter than its record'));
+    if (this.bytes !== this.expected) return done(new ContentMismatch('stream_length'));
+    if (this.hash.digest('hex') !== this.sha256) return done(new ContentMismatch('digest_mismatch'));
+    done(null, this.held);
   }
 }
 
@@ -74,6 +93,7 @@ export class DownloadService {
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
     private readonly db: DbService,
     private readonly redemptions: RedemptionLimiter,
+    private readonly usage: UsageLimiter,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── path A: trusted services
@@ -84,13 +104,13 @@ export class DownloadService {
   }
 
   async serviceContent(caller: string, req: Request, res: Response, id: string): Promise<void> {
-    const file = await this.owned(caller, 'read', req, id);
+    const file = await this.owned(caller, 'read', req, id, 'download');
     assertDownloadable(file);
     await this.stream(file, 'attachment', req, res, 'service');
   }
 
   async issueDownloadTicket(caller: string, req: Request, id: string, input: { disposition?: 'attachment' | 'inline'; singleUse?: boolean }): Promise<IssuedDownloadTicket> {
-    const file = await this.owned(caller, 'issue_ticket', req, id);
+    const file = await this.owned(caller, 'issue_ticket', req, id, 'ticket');
     assertDownloadable(file);
     const disposition = input.disposition ?? 'attachment';
     // SDD §9: `inline` only for the image allow-list, and only when the caller asks for it.
@@ -101,7 +121,7 @@ export class DownloadService {
       try {
         const row = await this.tickets.recordDownload({
           scope, fileId: file.id, tokenDigest: ticketDigest(token)!, lifetimeSeconds: this.config.upload.downloadTicketTtlSeconds,
-          singleUse: input.singleUse ?? false, disposition,
+          singleUse: input.singleUse ?? false, disposition
         });
         if (!row) {
           // Stage 17.7: the insert requires AVAILABLE under a share lock; a deletion committed in between is reported as what it is.
@@ -136,7 +156,8 @@ export class DownloadService {
     let claimed: Awaited<ReturnType<TicketRepository['claimDownload']>>;
     try {
       claimed = await this.db.tx(async (q) => {
-        const c = await this.tickets.claimDownload(digest, q); // ticket + file binding + AVAILABLE, in one statement
+        // Ticket + file binding + AVAILABLE + the use cap (Stage 17.8: a leaked reusable ticket is not an unlimited download), one statement.
+        const c = await this.tickets.claimDownload(digest, q, this.config.limits.ticketMaxDownloads);
         if (!c) return undefined;
         const policy = this.config.callerPolicy.of(c.ticket.issuedBy);
         // The issuer must STILL hold `issue_ticket` (and its organization mode) now (SDD §11.1); otherwise roll back: nothing consumed.
@@ -204,7 +225,7 @@ export class DownloadService {
     if (route === 'ticket') res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.setTimeout(this.config.upload.downloadIdleTimeoutMs, () => res.destroy()); // a client that stops reading is cut off
 
-    const counter = new ByteCounter(size);
+    const counter = new VerifiedDownload(size, file.sha256 as string);
     try {
       await pipeline(object.body, counter, res);
       log('ok', counter.bytes);
@@ -214,7 +235,7 @@ export class DownloadService {
       // Classified by CAUSE: our own refusal of a short / long object, or a store failure mid-stream, is an integrity / storage failure
       // (destroying the response then also fires the close listener, so the signal alone cannot tell); only the client leaving is `aborted`.
       const failed = e instanceof ContentMismatch || isStorageError(e);
-      if (e instanceof ContentMismatch) this.logger.warn(`file_storage_inconsistent file=${file.id} reason=stream_length`);
+      if (e instanceof ContentMismatch) this.logger.warn(`file_storage_inconsistent file=${file.id} reason=${e.message}`);
       log(failed ? 'stream_failed' : abort.signal.aborted ? 'aborted' : 'stream_failed', counter.bytes);
     } finally {
       res.off('close', onClose);
@@ -237,10 +258,14 @@ export class DownloadService {
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────────── helpers
 
-  /** The caller's own file in the presented organization, or `404 file_not_found` for anything else (no existence oracle). */
-  private async owned(caller: string, operation: FileOperation, req: Request, id: string): Promise<FileRow> {
+  /**
+   * The caller's own file in the presented organization, or `404 file_not_found` for anything else (no existence oracle). A `usage`
+   * kind (Stage 17.8, F32) is charged after authorization and before the lookup, so a probe of foreign or missing ids spends budget too.
+   */
+  private async owned(caller: string, operation: FileOperation, req: Request, id: string, usage?: UsageKind): Promise<FileRow> {
     const policy = this.policy(caller, operation);
     const organizationId = this.organization(policy, organizationHeader(req));
+    if (usage) await this.usage.admit(usage, caller, organizationId);
     const file = await this.files.findOwned({ ownerService: caller, organizationId }, id);
     if (!file) throw FILE_NOT_FOUND();
     return file;

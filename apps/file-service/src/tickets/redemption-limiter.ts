@@ -27,7 +27,7 @@ export class RedemptionLimiter {
   /** Refuses a blocked client (429); returns the one way to report this redemption as invalid (counted, then `ticket_invalid`). */
   async admit(req: Request): Promise<{ invalid: () => Promise<HttpException> }> {
     const client = createHmac('sha256', this.config.upload.rateLimitKey).update(req.ip ?? req.socket.remoteAddress ?? 'unknown').digest('hex');
-    const rule = { limit: this.config.upload.ticketFailureLimit, windowSec: 60 };
+    const rule = { limit: this.config.upload.ticketFailureLimit, windowSec: 60 }; // the same window as FILE_LIMITER_BUCKETS' retention
     if (!(await this.limiter.peek(TICKET_FAILURE_BUCKET, client, rule)).allowed) {
       throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
     }

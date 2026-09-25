@@ -9,7 +9,9 @@
   the upload lifecycle (upload tickets, redemption, service upload, attach; no download yet):
   [Stage 17.5 record](../architecture/stage-17/stage-17-5-upload-lifecycle.md). Stage 17.6: owner reads, download tickets (issue,
   redeem, revoke), safe download headers: [Stage 17.6 record](../architecture/stage-17/stage-17-6-download-authorization.md). Stage 17.7:
-  deletion and the cleanup workers: [Stage 17.7 record](../architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md).
+  deletion and the cleanup workers: [Stage 17.7 record](../architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md). Stage 17.8:
+  threat-model verification, usage limits, download integrity, name hardening:
+  [Stage 17.8 record](../architecture/stage-17/stage-17-8-security-integrity.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -166,7 +168,9 @@ knowing a key grants nothing: buckets are private, and no permanent public URL e
 
 `originalName` is presentation metadata: NFC-normalized; C0/C1 controls, bidi overrides (U+202A–202E, U+2066–2069), path
 separators and NUL removed; `..` segments meaningless (never a path); at most 255 UTF-8 bytes (truncated on a code-point boundary,
-keeping the extension). Arabic, French and other Unicode names are kept. On download, the header is
+keeping the extension). Arabic, French and other Unicode names are kept. **Stage 17.8:** "bidi overrides" means every Unicode
+`Bidi_Control` character (also U+061C, U+200E, U+200F), and U+2028 / U+2029 / U+FEFF are removed too; controls are removed
+*before* NFC normalization (migration `0003` mirrors the set in the schema). On download, the header is
 `Content-Disposition: attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded>` (RFC 6266 / 8187), built by one
 encoder; the raw name never reaches a header. Filenames are treated as personal data and are not logged.
 
@@ -181,6 +185,9 @@ encoder; the raw name never reaches a header. Filenames are treated as personal 
   conditional GET is not implemented; HEAD is refused (`405`) on byte routes (it would otherwise redeem a ticket); `Cache-Control` is
   `private, no-store` with `Pragma: no-cache`; the ticket route sends `Cross-Origin-Resource-Policy: cross-origin`; a store size that
   contradicts the record, or an object that ends early, is never served as a complete file.
+- **Stage 17.8 (changes 17.6 explicitly):** the SHA-256 is recomputed during every download and the last chunk is held back until it
+  matches: an integrity-mismatched download cannot complete successfully (the stream is terminated before its last chunk;
+  `file_storage_inconsistent reason=digest_mismatch`). Bytes before the last chunk may already have been sent; no whole-file buffering.
 
 ## 10. Idempotency
 
@@ -225,6 +232,8 @@ service upload attached.
 - **Lifetime:** short, within 60–300 s (the default is frozen in 17.6); never extended.
 - **Use:** upload tickets are single-use (a conditional update claims them; a retry after completion returns the created file);
   download tickets are reusable until expiry by default (mobile retries, a browser's second request) and may be issued single-use.
+  Stage 17.8: a reusable ticket is bounded by both its TTL and a server-controlled use cap (`FILE_TICKET_MAX_DOWNLOADS`, default
+  50, 1–10 000, not settable by callers), enforced atomically by the same claim; an exhausted ticket is `ticket_invalid`.
 - **Revocation:** deleting the file, or revoking a ticket (owner route), invalidates it at once; expired rows are removed by the
   retention worker.
 - **Leakage:** the token travels only in the redemption URL path; File Service never logs ticket paths or tokens (request logging
@@ -270,7 +279,12 @@ through the kit outbox (§17). Health: `GET /health`, `GET /ready` (root, not ro
 Stable codes, never localized text as the contract: `file_not_found`, `file_not_available`, `file_too_large`,
 `unsupported_media_type`, `media_type_mismatch`, `checksum_mismatch`, `upload_in_progress`, `upload_expired`, `ticket_invalid`
 (expired, used or unknown: one code), `idempotency_key_reused`, `file_deleted`, `file_content_missing`, `storage_unavailable`,
-`rate_limited`, plus the kit's `validation_error` and the generic 401 / 403.
+`rate_limited`, `upload_busy` (17.8: too many uploads in progress in one process; retryable), plus the kit's `validation_error` and
+the generic 401 / 403.
+
+**Rate limits (F32, Stage 17.8):** per caller and per (caller, organization), one-minute windows, on service uploads, ticket
+issuance (upload and download tickets share one budget) and service content reads; charged after authorization, before any work;
+`429 rate_limited`. Failed ticket redemptions keep their per-keyed-client limiter (17.5).
 
 ## 15. Observability, logging, readiness
 

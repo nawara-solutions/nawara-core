@@ -11,6 +11,7 @@ import { TicketRepository } from '../persistence/ticket.repository.js';
 import type { CallerPolicy, FileOperation } from '../policy/caller-policy.js';
 import type { FileMediaType } from '../policy/media-types.js';
 import { STORAGE_PORT, type StoragePort } from '../storage/storage.port.js';
+import { UsageLimiter } from '../limits/usage-limiter.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
 import { uploadRequestTimeoutMs } from './http-server.js';
 import { decodeFileNameHeader } from './file-name.js';
@@ -67,6 +68,8 @@ export const UPLOAD_LEASE_MARGIN_SECONDS = 120;
 @Injectable()
 export class UploadService {
   private readonly logger = new Logger('Upload');
+  /** Uploads streaming in this process now (Stage 17.8: bounded by FILE_UPLOAD_MAX_IN_FLIGHT). */
+  private inFlight = 0;
 
   constructor(
     @Inject(FILE_CONFIG) private readonly config: FileConfig,
@@ -75,6 +78,7 @@ export class UploadService {
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
     private readonly db: DbService,
     private readonly redemptions: RedemptionLimiter,
+    private readonly usage: UsageLimiter,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────── ticket issuance
@@ -84,6 +88,7 @@ export class UploadService {
     const organizationId = this.organization(policy, input.organizationId ?? null);
     if (input.maxBytes > policy.maxBytes!) throw fileError(403, 'max_bytes_not_allowed', 'maxBytes exceeds this caller\'s limit.');
     if (input.mediaTypes.some((t) => !policy.mediaTypes!.has(t))) throw fileError(403, 'media_type_not_allowed', 'A media type is not allowed for this caller.');
+    await this.usage.admit('ticket', caller, organizationId); // Stage 17.8 (F32): after authorization, before any write
     for (let attempt = 0; ; attempt++) {
       const token = randomBytes(32).toString('base64url'); // 256 bits from the CSPRNG (F35)
       try {
@@ -115,7 +120,18 @@ export class UploadService {
     const length = declaredLength(req);
     if (length > this.config.maxBytes) throw fileError(413, 'file_too_large', 'The file exceeds the size allowed for this upload.');
     const { fileName, declaredType } = this.declaration(req);
+    const release = this.admitUpload(); // before the claim: a busy process never consumes a ticket
+    try {
+      return await this.redeemAdmitted(digest, req, length, fileName, declaredType, invalid);
+    } finally {
+      release();
+    }
+  }
 
+  private async redeemAdmitted(
+    digest: NonNullable<ReturnType<typeof ticketDigest>>, req: Request, length: number, fileName: string | undefined, declaredType: string | undefined,
+    invalid: () => Promise<Error>,
+  ): Promise<UploadResult> {
     let claimed: { file: FileRow; limit: number; allowed: ReadonlySet<FileMediaType>; attach: boolean; owner: string } | undefined;
     try {
       claimed = await this.db.tx(async (q) => {
@@ -170,6 +186,7 @@ export class UploadService {
   async serviceUpload(caller: string, req: Request): Promise<UploadResult> {
     const policy = this.policy(caller, 'upload');
     const organizationId = this.organization(policy, organizationHeader(req));
+    await this.usage.admit('upload', caller, organizationId); // Stage 17.8 (F32): replays count too; nothing is read or written first
     const key = idempotencyKey(req);
     const length = declaredLength(req);
     const limit = Math.min(this.config.maxBytes, policy.maxBytes!);
@@ -180,6 +197,19 @@ export class UploadService {
     const requestHash = uploadRequestHash(this.config.upload.requestHashKey, {
       organizationId, fileName: fileName ?? null, declaredType: declaredType ?? null, sizeBytes: length, sha256: expectedSha256 ?? null,
     });
+    const release = this.admitUpload();
+    try {
+      return await this.serviceUploadAdmitted(caller, req, { organizationId, key, length, limit, fileName, declaredType, expectedSha256, attach, requestHash, policy });
+    } finally {
+      release();
+    }
+  }
+
+  private async serviceUploadAdmitted(caller: string, req: Request, d: {
+    organizationId: string | null; key: string; length: number; limit: number; fileName?: string; declaredType?: string; expectedSha256?: string;
+    attach: boolean; requestHash: string; policy: CallerPolicy;
+  }): Promise<UploadResult> {
+    const { organizationId, key, length, limit, fileName, declaredType, expectedSha256, attach, requestHash, policy } = d;
     let file: FileRow;
     try {
       file = await this.files.createUploading({
@@ -276,6 +306,24 @@ export class UploadService {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────────── helpers
+
+  /**
+   * The per-process bound on uploads streaming at once (Stage 17.8; threat model §6 "upload flooding: bounded concurrency"). Checked
+   * after authorization and the usage limits, before any row, ticket claim or storage call; a full process answers `503 upload_busy`
+   * (retryable, nothing consumed). Returns the release, called exactly once when the upload settles.
+   */
+  private admitUpload(): () => void {
+    if (this.inFlight >= this.config.limits.uploadMaxInFlight) {
+      throw fileError(503, 'upload_busy', 'Too many uploads in progress; retry shortly.');
+    }
+    this.inFlight += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.inFlight -= 1;
+    };
+  }
 
   private policy(caller: string, operation: FileOperation): CallerPolicy {
     const policy = this.config.callerPolicy.of(caller);

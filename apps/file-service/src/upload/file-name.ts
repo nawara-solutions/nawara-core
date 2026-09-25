@@ -1,17 +1,21 @@
 /**
  * `originalName` sanitization (SDD §8, F14): presentation metadata only, never a path, never trusted, never logged.
  *
- * NFC; C0 / C1 controls, DEL, bidi embeddings / overrides / isolates (U+202A–202E, U+2066–2069), path separators and NUL removed;
+ * NFC; C0 / C1 controls, DEL, EVERY Unicode bidi control (the `Bidi_Control` property: embeddings / overrides U+202A–202E, isolates
+ * U+2066–2069 and, since Stage 17.8, the marks U+061C, U+200E, U+200F), the line / paragraph separators U+2028 / U+2029, the BOM
+ * U+FEFF, path separators and NUL removed (ZWJ / ZWNJ stay: scripts and emoji need them);
  * surrounding whitespace trimmed; at most 255 UTF-8 bytes, truncated on a code-point boundary while keeping the extension; `.` / `..`
  * and names that become empty are dropped (`undefined`). Arabic, French and other Unicode names are kept.
  */
 export const FILE_NAME_MAX_BYTES = 255;
 // eslint-disable-next-line no-control-regex -- intentional: control characters are exactly what this removes
-const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069/\\]/gu;
+const UNSAFE = /[\p{Cc}\p{Bidi_Control}\u2028\u2029\ufeff/\\]/gu;
 
 export function sanitizeFileName(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  const cleaned = raw.normalize('NFC').replace(UNSAFE, '').trim();
+  // Remove first, THEN normalize (Stage 17.8 fuzz finding): removing a control between a letter and a combining mark would otherwise
+  // leave a non-NFC name, which the schema refuses (an opaque 500 for a merely hostile name).
+  const cleaned = raw.replace(UNSAFE, '').normalize('NFC').trim();
   if (cleaned === '' || cleaned === '.' || cleaned === '..') return undefined;
   if (Buffer.byteLength(cleaned, 'utf8') <= FILE_NAME_MAX_BYTES) return cleaned;
   const dot = cleaned.lastIndexOf('.');
