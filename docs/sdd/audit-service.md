@@ -1,6 +1,7 @@
 # audit-service
 
-- **Status:** Draft (Stage 18.1 design, for review; nothing implemented).
+- **Status:** Draft (Stage 18.1 design). Stage 18.2: the service foundation only (health, readiness, service auth, caller policy; no
+  audit domain yet): [Stage 18.2 record](../architecture/stage-18/stage-18-2-service-foundation.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)

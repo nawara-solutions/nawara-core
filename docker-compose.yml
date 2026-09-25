@@ -10,7 +10,8 @@
 #   docker compose --profile db run --rm organization-service npm run migrate
 #   docker compose --profile db run --rm notification-service npm run migrate
 #   docker compose --profile db run --rm file-service npm run migrate
-#   docker compose --profile db up -d auth-service billing-service payment-service organization-service notification-service file-service
+#   docker compose --profile db run --rm audit-service npm run migrate
+#   docker compose --profile db up -d auth-service billing-service payment-service organization-service notification-service file-service audit-service
 #
 # `--profile db` is required on every invocation that touches postgres or an app service (billing/payment/auth all
 # `depends_on` it) — profile activation is per-invocation, not persistent. Every service runs alone with only the
@@ -54,6 +55,8 @@ services:
       NOTIFICATION_APP_PASSWORD: ${NOTIFICATION_APP_PASSWORD:?copy .env.example to .env}
       FILE_MIGRATOR_PASSWORD: ${FILE_MIGRATOR_PASSWORD:?copy .env.example to .env}
       FILE_APP_PASSWORD: ${FILE_APP_PASSWORD:?copy .env.example to .env}
+      AUDIT_MIGRATOR_PASSWORD: ${AUDIT_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      AUDIT_APP_PASSWORD: ${AUDIT_APP_PASSWORD:?copy .env.example to .env}
     volumes:
       - nawara_pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -290,6 +293,34 @@ services:
       FILE_RATE_LIMIT_KEY: ${FILE_RATE_LIMIT_KEY:?copy .env.example to .env}
     volumes:
       - file_storage_dev:/var/lib/file-service/storage
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ADR-0049. Stage 18.2: the foundation only (health / readiness, service authentication, the caller policy). Its own database
+  # (/ready = database + migrations). No RabbitMQ yet (the ingestion consumer is Stage 18.5) and never an Auth, Organization or product
+  # dependency. SERVICE_TOKENS is empty by default (every service-token call refused).
+  audit-service:
+    profiles: [db]
+    stop_grace_period: 60s
+    build:
+      context: .
+      dockerfile: apps/audit-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3006:3000'
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://audit_app:${AUDIT_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/audit
+      # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
+      MIGRATION_DATABASE_URL: postgres://audit_migrator:${AUDIT_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/audit
+      SERVICE_TOKENS: ${AUDIT_SERVICE_TOKENS:-}
+      # Every caller in SERVICE_TOKENS needs an explicit entry (deny by default); empty with no tokens is the default: nothing can call.
+      AUDIT_SERVICE_POLICY: ${AUDIT_SERVICE_POLICY:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

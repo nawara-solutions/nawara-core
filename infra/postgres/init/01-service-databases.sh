@@ -36,3 +36,4 @@ create_service accounting "${ACCOUNTING_MIGRATOR_PASSWORD:-}" "${ACCOUNTING_APP_
 create_service organization "${ORGANIZATION_MIGRATOR_PASSWORD:-}" "${ORGANIZATION_APP_PASSWORD:-}"
 create_service notification "${NOTIFICATION_MIGRATOR_PASSWORD:-}" "${NOTIFICATION_APP_PASSWORD:-}"
 create_service file "${FILE_MIGRATOR_PASSWORD:-}" "${FILE_APP_PASSWORD:-}"
+create_service audit "${AUDIT_MIGRATOR_PASSWORD:-}" "${AUDIT_APP_PASSWORD:-}"
