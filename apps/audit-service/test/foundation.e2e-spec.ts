@@ -35,14 +35,14 @@ describe('audit-service foundation', () => {
     await request(server()).get('/health').expect(200, { status: 'ok' });
   });
 
-  it('/ready depends on the database and its migrations only (no broker, Auth, Organization or product check): with no database it is 503, /health 200', async () => {
+  it('/ready depends on the database, its migrations, the broker and the ingestion consumer (no Auth, Organization or product check): with none of them it is 503, /health 200', async () => {
     await request(server()).get('/health').expect(200);
     const r = await request(server()).get('/ready').expect(503);
-    expect(r.body).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
+    expect(r.body).toEqual({ status: 'unavailable', failed: ['audit-ingestion', 'database', 'migrations', 'rabbitmq'] });
     expect(JSON.stringify(r.body)).not.toMatch(/nobody|nothing|127\.0\.0\.1|ECONNREFUSED/); // no host, credential or error text
   });
 
-  it('ships no route besides health and readiness: no audit query, ingestion or docs route yet (Stages 18.5 / 18.6)', async () => {
+  it('ships no route besides health and readiness: no audit query or docs route yet (18.6), and never an HTTP ingestion route (A16)', async () => {
     const app = await createTestApp({ probes: false });
     try {
       for (const [method, path] of [['get', '/'], ['get', '/audit/records'], ['get', '/audit/organizations/x/records'], ['post', '/audit/records'],

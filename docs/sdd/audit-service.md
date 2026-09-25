@@ -4,7 +4,8 @@
   [Stage 18.2 record](../architecture/stage-18/stage-18-2-service-foundation.md). Stage 18.3: the append-only `audit_record` and its
   repository: [Stage 18.3 record](../architecture/stage-18/stage-18-3-persistence-append-only.md). Stage 18.4: the shared contract
   `@nawara/audit-contract` (payload, catalog, validator, producer helper): [Stage 18.4 record](../architecture/stage-18/stage-18-4-canonical-contract-catalog.md),
-  [catalog](../architecture/audit-event-catalog.md).
+  [catalog](../architecture/audit-event-catalog.md). Stage 18.5: the RabbitMQ ingestion (`audit-service.audit`, `audit.#`, the kit retry /
+  DLQ, duplicate / conflict handling, readiness `rabbitmq` + `audit-ingestion`): [Stage 18.5 record](../architecture/stage-18/stage-18-5-rabbitmq-ingestion.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)
@@ -146,11 +147,22 @@ column (every field is stored, so exact vs conflicting duplicates are compared f
 `audit-service.audit`), consumer prefetch, retry count / delay (kit), query page / window bounds, retention durations per category
 (default: never purge until P-A2), clock-skew tolerance (5 min).
 
+**Implemented (Stage 18.5):** `RABBITMQ_URL` (required), `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` (kit bounds). The queue
+(`audit-service.audit`), its binding (`audit.#`), the prefetch (half the pool, 1–10) and the retry (kit default 3 × 5 s) are fixed, not
+settings; the clock-skew tolerance is the A22 constant (5 min). Readiness adds `rabbitmq` and `audit-ingestion`; `/health` unchanged.
+Ingestion uses the audit record's `(sourceService, eventId)` constraint as its only idempotency state (no kit inbox: it would hide
+conflicts). Refusal reasons are the contract codes verbatim plus `event_id_conflict`, `invalid_record`; the kit adds `malformed_envelope`
+and `retries_exhausted`.
+
 ## 9. Observability
 
 `audit_ops_snapshot` / counters in the File pattern: ingested, duplicates, invalid by reason, dead-lettered, clock skew, ingestion lag
 (p50 / p95 of `recordedAt − occurredAt`), database failures, queries, `429`s, latency; queue depth and oldest message (broker); outbox lag
 at producers (`check-outbox-lag`); DLQ depth (`check-dlq-depth`). Labels from closed sets only.
+
+**Implemented (Stage 18.5):** `audit_ops_snapshot` every 60 s and at shutdown: `received`, `persisted`, `duplicate`, `refused` +
+`refused_<reason>`, `transient_failure`, `clock_skew_future`, lag count / avg / max, `in_flight`, consumer state. Percentiles, queue depth
+and age in the snapshot, and alert rules are 18.9.
 
 ## 10. Open items
 

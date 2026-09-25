@@ -13,7 +13,8 @@ import { generateServiceToken } from '@nawara/service-kit';
 const DB_PASSWORD = 'db-password-never-logged-0072';
 const RUNTIME_DB = `postgres://audit_app:${DB_PASSWORD}@127.0.0.1:1/audit`;
 const POLICY = JSON.stringify({ callers: { 'some-core-service': { operations: ['read_organization'], categories: ['business', 'commercial'] } } });
-const REQUIRED = { DATABASE_URL: RUNTIME_DB, AUDIT_SERVICE_POLICY: POLICY };
+const MQ_PASSWORD = 'mq-password-never-logged-0072';
+const REQUIRED = { DATABASE_URL: RUNTIME_DB, AUDIT_SERVICE_POLICY: POLICY, RABBITMQ_URL: `amqp://audit_consumer:${MQ_PASSWORD}@127.0.0.1:1` };
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -74,7 +75,7 @@ describe('audit-service as a built process (production configuration)', () => {
     expect(await (await fetch(`${base}/health`)).json()).toEqual({ status: 'ok' });
     const ready = await fetch(`${base}/ready`);
     expect(ready.status).toBe(503);
-    expect(await ready.json()).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
+    expect(await ready.json()).toEqual({ status: 'unavailable', failed: ['audit-ingestion', 'database', 'migrations', 'rabbitmq'] });
     expect((await fetch(`${base}/`)).status).toBe(404); // no starter route
 
     const t0 = Date.now();
@@ -92,7 +93,7 @@ describe('audit-service as a built process (production configuration)', () => {
     expect(msgs.filter((m) => m.startsWith('service_shutdown_started'))).toHaveLength(1); // one shutdown, never twice
     expect(msgs.some((m) => m.startsWith(`service_shutdown_complete signal=${signal}`))).toBe(true);
     expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
-    for (const s of [digest, DB_PASSWORD]) expect(run.out()).not.toContain(s);
+    for (const s of [digest, DB_PASSWORD, MQ_PASSWORD]) expect(run.out()).not.toContain(s);
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|AUDIT_SERVICE_POLICY|some-core-service/);
   }, 30_000);
 
@@ -109,6 +110,9 @@ describe('audit-service as a built process (production configuration)', () => {
     ['a malformed caller policy', { AUDIT_SERVICE_POLICY: '{"callers": {"some-core-service": {"operations": ["*"], "categories": ["business"]}}}' }, /AUDIT_SERVICE_POLICY/],
     ['a caller policy that is not JSON', { AUDIT_SERVICE_POLICY: '{callers' }, /AUDIT_SERVICE_POLICY/],
     ['an unbounded database pool', { DB_POOL_MAX: '1000' }, /DB_POOL_MAX/],
+    ['a missing RABBITMQ_URL (Stage 18.5: ingestion is the primary job)', { RABBITMQ_URL: '' }, /RABBITMQ_URL/],
+    ['a non-AMQP RABBITMQ_URL', { RABBITMQ_URL: `http://audit_consumer:${MQ_PASSWORD}@broker:5672` }, /RABBITMQ_URL/],
+    ['a heartbeat outside its bounds', { RABBITMQ_HEARTBEAT_S: '0' }, /RABBITMQ_HEARTBEAT_S/],
     ['a query deadline not above the statement timeout', { DB_QUERY_TIMEOUT_MS: '1000' }, /DB_QUERY_TIMEOUT_MS/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
     const { digest } = generateServiceToken();
@@ -121,6 +125,7 @@ describe('audit-service as a built process (production configuration)', () => {
     expect(run.out()).toMatch(name);
     expect(run.out()).not.toContain('secret-looking-value-0123');
     expect(run.out()).not.toContain(DB_PASSWORD);
+    expect(run.out()).not.toContain(MQ_PASSWORD);
     expect(run.out()).not.toContain('service_started');
   }, 30_000);
 });
