@@ -3,7 +3,8 @@ import { ConfigError, generateServiceToken } from '@nawara/service-kit';
 import { SERVICE_NAME, loadAuditConfig } from './audit-config.js';
 
 const DB = 'postgres://audit_app:pw-not-real@db:5432/audit';
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...over });
+const MQ = 'amqp://audit_consumer:mq-not-real@broker:5672';
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, RABBITMQ_URL: MQ, ...over });
 const A = generateServiceToken();
 
 describe('audit-service configuration', () => {
@@ -15,7 +16,7 @@ describe('audit-service configuration', () => {
     expect(c.isProduction).toBe(true);
   });
 
-  it('in production needs only the database; no default opens anything', () => {
+  it('in production needs only the database and the broker; no default opens anything', () => {
     const c = loadAuditConfig(env({ NODE_ENV: 'production' }));
     expect(c.databaseUrl).toBe(DB);
     expect(c.port).toBe(3000);
@@ -27,9 +28,28 @@ describe('audit-service configuration', () => {
     expect(c.callerPolicy.of('anyone')).toBeUndefined();
   });
 
-  it('carries only what the foundation uses: no broker, queue, retention, query-bound, Auth or Organization setting (later stages / never)', () => {
+  it('Stage 18.5: the broker is required and bounded; the queue, prefetch and retry are not settings', () => {
+    const c = loadAuditConfig(env());
+    expect(c.rabbitmqUrl).toBe(MQ);
+    expect(c.rabbitmqConfirmTimeoutMs).toBe(5000);
+    expect(c.rabbitmqHeartbeatS).toBe(10);
+    expect(() => loadAuditConfig(env({ RABBITMQ_URL: undefined }))).toThrow(ConfigError);
+    for (const [name, value] of [['RABBITMQ_URL', 'http://broker:5672'], ['RABBITMQ_URL', 'not a url'], ['RABBITMQ_CONFIRM_TIMEOUT_MS', '50'], ['RABBITMQ_HEARTBEAT_S', '0'], ['RABBITMQ_HEARTBEAT_S', '61']]) {
+      let err: unknown;
+      try {
+        loadAuditConfig(env({ [name]: value }));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `${name}=${value}`).toBeInstanceOf(ConfigError);
+      expect(String((err as Error).message)).not.toContain('mq-not-real');
+    }
+    expect(() => loadAuditConfig(env({ RABBITMQ_URL: 'ftp://audit_consumer:mq-not-real@broker' }))).toThrow(/^(?!.*mq-not-real)/);
+  });
+
+  it('carries only what the service uses: no queue, prefetch, retention, query-bound, Auth or Organization setting (later stages / never)', () => {
     const keys = Object.keys(loadAuditConfig(env()));
-    for (const later of ['rabbitmqUrl', 'queue', 'prefetch', 'retention', 'retentionDays', 'pageSize', 'queryWindowDays', 'authServiceUrl', 'organizationServiceUrl']) {
+    for (const later of ['queue', 'prefetch', 'retention', 'retentionDays', 'pageSize', 'queryWindowDays', 'authServiceUrl', 'organizationServiceUrl']) {
       expect(keys).not.toContain(later);
     }
   });

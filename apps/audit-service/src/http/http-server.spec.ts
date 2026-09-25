@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { loadAuditConfig } from '../config/audit-config.js';
 import { SILENT_SOCKET_GRACE_MS, configureHttpServer, silentSocketTimeoutMs } from './http-server.js';
 
-const config = (over: NodeJS.ProcessEnv = {}) => loadAuditConfig({ DATABASE_URL: 'postgres://audit_app:pw@db/audit', ...over });
+const config = (over: NodeJS.ProcessEnv = {}) => loadAuditConfig({ DATABASE_URL: 'postgres://audit_app:pw@db/audit', RABBITMQ_URL: 'amqp://broker:5672', ...over });
 
 describe('HTTP server bounds', () => {
   it('a silent socket is closed after the headers timeout, or one full database wait when that is longer, plus a grace', () => {

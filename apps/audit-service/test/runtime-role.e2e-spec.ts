@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { auditMigrationsDir } from '../src/app.module.js';
 import { createTestApp, type TestApp } from './support/app.js';
@@ -17,7 +17,7 @@ import { describeWithEnv } from './support/env.js';
  * ready, and unable to change the schema, bypass triggers or migrate. Self-contained (own roles and database), so it also runs in CI.
  * The append-only privileges of `audit_record` itself (INSERT / SELECT only) are Stage 18.3.
  */
-describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
+describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
   const suffix = randomBytes(4).toString('hex');
   const migrator = `au_mig_${suffix}`;
   const appRole = `au_app_${suffix}`;
@@ -60,7 +60,7 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
     const first = await runMigrations(MIG(), [kitMigrationsDir, auditMigrationsDir]); // the explicit step, as the schema owner
     expect(first.applied.length).toBeGreaterThan(0);
     expect((await runMigrations(MIG(), [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]); // re-run: nothing new
-    t = await createTestApp({ databaseUrl: APP() }); // the RUNTIME role
+    t = await createTestApp({ databaseUrl: APP(), rabbitmqUrl: env.TEST_RABBITMQ_URL }); // the RUNTIME role
   });
 
   afterAll(async () => {
@@ -72,7 +72,7 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
   });
 
   it('the service is ready as the runtime role (database and migrations checks pass without owning anything)', async () => {
-    await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
+    await vi.waitFor(async () => expect((await request(t.app.getHttpServer()).get('/ready')).body).toEqual({ status: 'ready' }), { timeout: 15_000, interval: 100 });
   });
 
   it('every schema object belongs to the migrator; the runtime role owns nothing and has no role attribute', async () => {
