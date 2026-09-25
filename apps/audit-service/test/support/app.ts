@@ -40,6 +40,8 @@ export async function createTestApp(
   opts: {
     databaseUrl?: string; rabbitmqUrl?: string; bus?: EventBus; tokens?: ServiceTokenEntry[]; env?: NodeJS.ProcessEnv; probes?: boolean;
     migrationsDirs?: string[]; policy?: string;
+    /** Runs after the HTTP baseline and before `init`, where `main.ts` mounts the OpenAPI documentation. */
+    beforeInit?: (app: NestExpressApplication, config: AuditConfig) => void;
   } = {},
 ): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
@@ -65,6 +67,7 @@ export async function createTestApp(
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureApp(app, config, logger);
   configureHttpServer(app.getHttpServer(), config);
+  opts.beforeInit?.(app, config);
   await app.init();
   return { app, config, logs, registry: app.get(ReadinessRegistry) };
 }

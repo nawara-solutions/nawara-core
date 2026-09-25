@@ -90,9 +90,9 @@ describe('producer ownership (one canonical producer per action)', () => {
     expect(new Set(owned).size).toBe(owned.length);
   });
 
-  it('notification-service owns nothing (no privileged capability exists)', () => {
+  it('notification-service owns nothing (no privileged capability exists); audit-service owns only its platform-read record (18.6)', () => {
     expect(actionsOwnedBy('notification-service')).toEqual([]);
-    expect(actionsOwnedBy('audit-service')).toEqual([]);
+    expect(actionsOwnedBy('audit-service')).toEqual(['platform_query.executed']);
   });
 
   it.each(entries)('%s: every other service is refused deterministically (producer_not_admitted)', (action, e) => {

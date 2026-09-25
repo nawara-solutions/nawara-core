@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditContractError } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
 import { PermanentEventFailure, type EventEnvelope } from '@nawara/service-kit';
+import { SERVICE_NAME } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
 import { AuditRecordRepository, sameEvidence } from '../persistence/audit-record.repository.js';
 import { AuditPersistenceError } from '../persistence/persistence-error.js';
@@ -61,6 +62,9 @@ export class IngestionService {
       if (e instanceof AuditContractError) throw this.refuse(e.code, `eventId=${safeId(event?.id)}`);
       throw e;
     }
+    // Stage 18.6: audit-service's own action (`platform_query.executed`) is written by audit-service itself, directly, never over the bus.
+    // A delivered event claiming audit-service as its source is therefore a spoof (the broker credentials are shared, P-A1): refused.
+    if (validated.sourceService === SERVICE_NAME) throw this.refuse('producer_not_admitted', `eventId=${validated.eventId}`);
     const record = toNewAuditRecord(validated);
     const who = `eventId=${validated.eventId} action=${validated.payload.action} source=${validated.sourceService}`;
 

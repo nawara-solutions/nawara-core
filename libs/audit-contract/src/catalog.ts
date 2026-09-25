@@ -11,8 +11,11 @@ import type { AuditCategory, AuditOutcome, UserKind } from './contract.js';
  * The catalog records THAT an action occurred and who owns it; it is never business truth (the owning service remains the authority).
  */
 
-/** The Core services that may own catalog actions. notification-service owns none in V1 (no privileged capability exists). */
-export const CORE_PRODUCERS = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service'] as const;
+/**
+ * The Core services that may own catalog actions. notification-service owns none in V1 (no privileged capability exists). audit-service
+ * owns exactly one (Stage 18.6): the record of a privileged platform-scope read, which it writes itself (never over the bus).
+ */
+export const CORE_PRODUCERS = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service', 'audit-service'] as const;
 export type CoreProducer = (typeof CORE_PRODUCERS)[number];
 
 export type ChangeType = 'code' | 'uuid' | 'boolean' | 'integer' | 'timestamp';
@@ -348,6 +351,22 @@ const SPEC = {
     organization: 'optional', resource: ['file'], subject: NO_SUBJECT, outcomes: OK,
     changes: { reason: { type: 'code', shape: 'value', required: true, values: ['digest_mismatch', 'size_mismatch', 'object_missing'] } },
     purpose: 'Stored content no longer matches its record (altered, truncated or missing): possible tampering or loss.',
+  },
+
+  // ------------------------------------------------------------------------------------------------------------------------------ audit-service
+  // Stage 18.6 (A57, named `audit.platform_query` in Stage 18.1; renamed to the A13 grammar, since an action never sits in the `audit.`
+  // namespace that its event type adds). Written by audit-service itself, in the same transaction as the read it records.
+  'platform_query.executed': {
+    producer: 'audit-service', category: 'security', since: 1, actors: { service: true }, organization: 'none',
+    resource: ['platform_query'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      target: { type: 'code', shape: 'value', required: true, values: ['all', 'organization', 'platform'] },
+      window_days: { type: 'integer', shape: 'value', required: true, min: 1, max: 31 },
+      result_count: { type: 'integer', shape: 'value', required: true, min: 0, max: 100 },
+      page: { type: 'code', shape: 'value', required: true, values: ['first', 'next'] },
+      filtered: { type: 'boolean', shape: 'value', required: true },
+    },
+    purpose: 'A trusted service read audit evidence with the privileged platform scope (across organizations or platform-level): who, when, how broadly.',
   },
 } as const satisfies Record<string, CatalogEntry>;
 

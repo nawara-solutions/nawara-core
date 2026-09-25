@@ -57,6 +57,11 @@ export interface AuditRecordRow {
   recordedAt: Date;
 }
 
+/** A row of a query page (Stage 18.6): the stored record plus its keyset position (`occurredAt` in epoch microseconds). */
+export interface PagedAuditRow extends AuditRecordRow {
+  occurredAtUs: string;
+}
+
 /**
  * The outcome of an idempotent insert (A15, A48): the first occurrence of (sourceService, eventId) is stored; a later one returns the
  * record already stored, unchanged, for the caller (18.5) to classify as an exact or a conflicting duplicate (`sameEvidence`).

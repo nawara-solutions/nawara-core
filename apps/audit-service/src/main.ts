@@ -3,6 +3,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { JsonLogger, configureApp } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { loadAuditConfig } from './config/audit-config.js';
+import { mountDocs } from './docs/mount-docs.js';
 import { configureHttpServer } from './http/http-server.js';
 
 async function bootstrap() {
@@ -13,6 +14,7 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule.register(config), { bodyParser: false, bufferLogs: true });
   configureApp(app, config, logger); // includes enableShutdownHooks(): SIGTERM stops admission, drains HTTP (bounded), then exits
   configureHttpServer(app.getHttpServer(), config); // the silent-socket bound
+  mountDocs(app, config); // OpenAPI at /audit/docs, behind basic auth, only when SWAGGER_PASSWORD is set
 
   await app.listen(config.port);
   // Stage 14.7: one line that identifies this instance (no URL, credential or config dump). Liveness is /health, readiness /ready.

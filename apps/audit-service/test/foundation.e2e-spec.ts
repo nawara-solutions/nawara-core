@@ -42,13 +42,15 @@ describe('audit-service foundation', () => {
     expect(JSON.stringify(r.body)).not.toMatch(/nobody|nothing|127\.0\.0\.1|ECONNREFUSED/); // no host, credential or error text
   });
 
-  it('ships no route besides health and readiness: no audit query or docs route yet (18.6), and never an HTTP ingestion route (A16)', async () => {
+  it('ships only health, readiness and the two read routes (18.6, service token required); never an HTTP ingestion, write or delete route (A16)', async () => {
     const app = await createTestApp({ probes: false });
     try {
-      for (const [method, path] of [['get', '/'], ['get', '/audit/records'], ['get', '/audit/organizations/x/records'], ['post', '/audit/records'],
-        ['post', '/audit/events'], ['get', '/audit/records/x'], ['delete', '/audit/records/x'], ['get', '/docs'], ['get', '/audit/docs']] as const) {
+      for (const [method, path] of [['get', '/'], ['get', '/audit/records'], ['post', '/audit/records'], ['post', '/audit/events'], ['get', '/audit/records/x'],
+        ['delete', '/audit/records/x'], ['post', '/audit/organizations/x/records'], ['delete', '/audit/organizations/x/records'], ['post', '/audit/platform/records'],
+        ['put', '/audit/platform/records'], ['get', '/docs'], ['get', '/audit/docs']] as const) {
         await request(app.app.getHttpServer())[method](path).expect(404);
       }
+      for (const path of ['/audit/organizations/x/records', '/audit/platform/records']) await request(app.app.getHttpServer()).get(path).expect(401);
     } finally {
       await app.app.close();
     }

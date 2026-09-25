@@ -16,8 +16,10 @@ export const SERVICE_NAME = 'audit-service';
  *   kit bounds. The queue, bindings, prefetch and retry are NOT settings: the queue and binding are the architecture's (A20), the
  *   prefetch derives from the pool, the retry is the kit's default.
  *
- * Deliberately absent until the stage that uses it: query page / window bounds and rate limits (18.6), retention durations and the
- * maintenance role (18.8). There is no Auth or Organization setting at all: Audit
+ * - Stage 18.6: the query rate limits (per 60 s window) and the optional OpenAPI credentials. The page size (≤ 100) and the time windows
+ *   (92 / 31 days) are the architecture's (A66), not settings.
+ *
+ * Deliberately absent until the stage that uses it: retention durations and the maintenance role (18.8). There is no Auth or Organization setting at all: Audit
  * never calls them (A36).
  */
 export interface AuditConfig extends BaseConfig {
@@ -33,6 +35,15 @@ export interface AuditConfig extends BaseConfig {
   rabbitmqConfirmTimeoutMs: number;
   /** `RABBITMQ_HEARTBEAT_S` (default 10, 5–60): a silent broker is detected within about 3 × this. */
   rabbitmqHeartbeatS: number;
+  /**
+   * Stage 18.6 query rate limits, requests per caller per 60 s (A66), every attempt by an authorized caller counted:
+   * `AUDIT_QUERY_RATE_PER_CALLER` (organization scope, all organizations together; default 600), `AUDIT_QUERY_RATE_PER_ORGANIZATION`
+   * (organization scope, one caller and one organization; default 120; ≤ the per-caller limit), `AUDIT_PLATFORM_QUERY_RATE_PER_CALLER`
+   * (platform scope; default 30). Bounds 1–100000.
+   */
+  queryRates: { perCaller: number; perOrganization: number; platformPerCaller: number };
+  /** OpenAPI at `/audit/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
+  docs: { username: string; password?: string };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -57,5 +68,18 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
     rabbitmqUrl: reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']),
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
+    queryRates: queryRates(reader),
+    docs: {
+      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
+      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
+    },
   };
+}
+
+function queryRates(reader: EnvReader): AuditConfig['queryRates'] {
+  const bounds = { min: 1, max: 100_000 };
+  const perCaller = reader.int('AUDIT_QUERY_RATE_PER_CALLER', { default: 600, ...bounds });
+  const perOrganization = reader.int('AUDIT_QUERY_RATE_PER_ORGANIZATION', { default: 120, ...bounds });
+  if (perOrganization > perCaller) throw new ConfigError('AUDIT_QUERY_RATE_PER_ORGANIZATION must not exceed AUDIT_QUERY_RATE_PER_CALLER');
+  return { perCaller, perOrganization, platformPerCaller: reader.int('AUDIT_PLATFORM_QUERY_RATE_PER_CALLER', { default: 30, ...bounds }) };
 }

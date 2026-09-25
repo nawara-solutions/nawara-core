@@ -7,6 +7,7 @@ import { AUDIT_EVENT_BUS } from './ingestion/audit-consumer.js';
 import { AUDIT_EXCHANGE, consumerPrefetch } from './ingestion/ingestion.constants.js';
 import { IngestionModule } from './ingestion/ingestion.module.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
+import { QueryModule } from './query/query.module.js';
 
 /** The service's own migrations (Stage 18.3: the append-only `audit_record`), applied by the explicit `npm run migrate` step and never at startup. */
 export const auditMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -38,7 +39,8 @@ class ConfigModule {
  * readiness `database` + `migrations`; the pool closes last) and service authentication, plus the validated configuration (with the
  * caller policy). Stage 18.3 adds the persistence layer (`PersistenceModule`: the append-only `audit_record` repository). Stage 18.5
  * adds the ingestion (`IngestionModule`): the kit RabbitMQ bus, the consumer on `audit-service.audit` (`audit.#`), readiness `rabbitmq`
- * + `audit-ingestion`. Still absent: any query route (18.6).
+ * + `audit-ingestion`. Stage 18.6 adds the reads (`QueryModule`): `GET /audit/organizations/{id}/records` (read_organization) and
+ * `GET /audit/platform/records` (read_platform, each page recorded as `platform_query.executed`).
  *
  * Deliberately NOT here (ADR-0049): no call to Auth, Organization or any product service, for any purpose (A36); no HTTP ingestion
  * route (A16: the bus is the only ingestion path).
@@ -75,6 +77,7 @@ export class AppModule {
         ConfigModule.forRoot(config, bus),
         PersistenceModule,
         IngestionModule,
+        QueryModule,
       ],
     };
   }
