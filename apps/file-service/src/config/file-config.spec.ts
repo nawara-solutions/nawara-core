@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, generateServiceToken } from '@nawara/service-kit';
 import { DEFAULT_FILE_MAX_BYTES, FILE_MAX_BYTES_BOUND, SERVICE_NAME, loadFileConfig } from './file-config.js';
@@ -126,10 +127,50 @@ describe('file-service configuration', () => {
       perOrganization: { upload: 120, ticket: 300, download: 300 },
       ticketMaxDownloads: 50,
       uploadMaxInFlight: 64,
+      downloadMaxInFlight: 64,
     });
     expect(() => loadFileConfig(env({ FILE_TICKET_RATE_PER_CALLER: '10', FILE_TICKET_RATE_PER_ORGANIZATION: '11' }))).toThrow(/FILE_TICKET_RATE_PER_ORGANIZATION must not exceed/);
     for (const bad of [{ FILE_UPLOAD_RATE_PER_CALLER: '0' }, { FILE_DOWNLOAD_RATE_PER_ORGANIZATION: 'lots' }, { FILE_TICKET_MAX_DOWNLOADS: '0' }, { FILE_TICKET_MAX_DOWNLOADS: '10001' }]) {
       expect(() => loadFileConfig(env(bad))).toThrow(ConfigError);
     }
+  });
+  it('Stage 17.9: operational settings have bounded defaults and refuse out-of-range values', () => {
+    const c = loadFileConfig(env());
+    expect(c.ops.reportIntervalMs).toBe(60_000);
+    expect(c.upload.downloadMinThroughputBytesPerSecond).toBe(16_384);
+    expect(c.upload.requestHashPreviousKeys).toEqual([]);
+    expect(c.storage.provider === 's3' && c.storage.maxSockets).toBe(96);
+    for (const bad of [
+      { FILE_OPS_REPORT_INTERVAL_MS: '9999' }, { FILE_OPS_REPORT_INTERVAL_MS: '3600001' }, { FILE_DOWNLOAD_MAX_IN_FLIGHT: '0' }, { FILE_DOWNLOAD_MAX_IN_FLIGHT: '4097' },
+      { FILE_DOWNLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND: '1023' }, { FILE_S3_MAX_SOCKETS: '7' }, { FILE_S3_MAX_SOCKETS: '1025' }, { FILE_S3_MAX_SOCKETS: 'many' },
+    ]) {
+      expect(() => loadFileConfig(env(bad))).toThrow(ConfigError);
+    }
+  });
+
+  it('Stage 17.9: the byte-path bounds must fit the S3 socket pools (writer: uploads; reader: downloads + deletes + a reserve)', () => {
+    expect(() => loadFileConfig(env({ FILE_S3_MAX_SOCKETS: '64', FILE_UPLOAD_MAX_IN_FLIGHT: '65', FILE_DOWNLOAD_MAX_IN_FLIGHT: '8' }))).toThrow(/FILE_UPLOAD_MAX_IN_FLIGHT \(65\) must not exceed FILE_S3_MAX_SOCKETS \(64\)/);
+    // 53 + 4 + 8 = 65 > 64; 52 + 4 + 8 = 64 fits exactly.
+    expect(() => loadFileConfig(env({ FILE_S3_MAX_SOCKETS: '64', FILE_UPLOAD_MAX_IN_FLIGHT: '64', FILE_DOWNLOAD_MAX_IN_FLIGHT: '53' }))).toThrow(/\(65\) must not exceed FILE_S3_MAX_SOCKETS \(64\)/);
+    expect(loadFileConfig(env({ FILE_S3_MAX_SOCKETS: '64', FILE_UPLOAD_MAX_IN_FLIGHT: '64', FILE_DOWNLOAD_MAX_IN_FLIGHT: '52' })).limits.downloadMaxInFlight).toBe(52);
+    expect(() => loadFileConfig(env({ FILE_S3_MAX_SOCKETS: '64', FILE_UPLOAD_MAX_IN_FLIGHT: '8', FILE_DOWNLOAD_MAX_IN_FLIGHT: '52', FILE_DELETE_CONCURRENCY: '5' }))).toThrow(/FILE_DELETE_CONCURRENCY/);
+    // The filesystem adapter has no socket pool: no such relationship.
+    expect(loadFileConfig(env({ NODE_ENV: 'development', FILE_STORAGE_PROVIDER: 'filesystem', FILE_STORAGE_ROOT: '/tmp/x', FILE_DOWNLOAD_MAX_IN_FLIGHT: '4000' })).limits.downloadMaxInFlight).toBe(4000);
+  });
+
+  it('Stage 17.9: request-hash key rotation: at most 2 previous keys, each distinct from the current keys', () => {
+    const k = () => randomBytes(32).toString('base64');
+    expect(loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: `${k()},${k()}` })).upload.requestHashPreviousKeys).toHaveLength(2);
+    expect(() => loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: `${k()},${k()},${k()}` }))).toThrow(/at most 2/);
+    expect(() => loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: UPLOAD.FILE_REQUEST_HASH_KEY }))).toThrow(/must differ/);
+    expect(() => loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: UPLOAD.FILE_RATE_LIMIT_KEY }))).toThrow(/must differ/);
+    expect(() => loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: Buffer.alloc(16, 3).toString('base64') }))).toThrow(/at least 32 bytes/);
+  });
+  it('Stage 17.9: the store\'s idle bound must exceed the client-side idle bounds (a stalled client is cut by the right timer)', () => {
+    expect(() => loadFileConfig(env({ FILE_STORAGE_IDLE_TIMEOUT_MS: '30000' }))).toThrow(/FILE_STORAGE_IDLE_TIMEOUT_MS \(30000\) must exceed/);
+    expect(() => loadFileConfig(env({ FILE_STORAGE_IDLE_TIMEOUT_MS: '45000', FILE_DOWNLOAD_IDLE_TIMEOUT_MS: '60000' }))).toThrow(/must exceed/);
+    expect(loadFileConfig(env({ FILE_STORAGE_IDLE_TIMEOUT_MS: '30001' })).storage).toMatchObject({ idleTimeoutMs: 30_001 });
+    // The filesystem adapter has no socket: no such relationship.
+    expect(loadFileConfig(env({ NODE_ENV: 'development', FILE_STORAGE_PROVIDER: 'filesystem', FILE_STORAGE_ROOT: '/tmp/x', FILE_UPLOAD_IDLE_TIMEOUT_MS: '120000' })).upload.idleTimeoutMs).toBe(120_000);
   });
 });

@@ -8,6 +8,9 @@ import { StorageModule } from './storage/storage.module.js';
 import { DeletionModule } from './deletion/deletion.module.js';
 import { DownloadModule } from './download/download.module.js';
 import { UploadModule } from './upload/upload.module.js';
+import { OpsCounters, OPS_COUNTERS_TOKEN } from './ops/ops-counters.js';
+import { OpsModule } from './ops/ops-reporter.js';
+import { logObserver } from './storage/storage.module.js';
 
 /** The service's own migrations (Stage 17.3: the `file` and `file_access_ticket` schema), applied by the explicit `npm run migrate` step and never at startup. */
 export const fileMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.meta.url));
@@ -20,8 +23,12 @@ export interface AppModuleOverrides {
 @Global()
 @Module({})
 class ConfigModule {
-  static forRoot(config: FileConfig): DynamicModule {
-    return { module: ConfigModule, providers: [{ provide: FILE_CONFIG, useValue: config }], exports: [FILE_CONFIG] };
+  static forRoot(config: FileConfig, counters: OpsCounters): DynamicModule {
+    return {
+      module: ConfigModule,
+      providers: [{ provide: FILE_CONFIG, useValue: config }, { provide: OPS_COUNTERS_TOKEN, useValue: counters }],
+      exports: [FILE_CONFIG, OPS_COUNTERS_TOKEN],
+    };
   }
 }
 
@@ -43,6 +50,9 @@ class ConfigModule {
 @Module({})
 export class AppModule {
   static register(config: FileConfig, overrides: AppModuleOverrides = {}): DynamicModule {
+    // Stage 17.9: one set of operational counters per process, fed by the storage wrapper, the gates, the limiters and the byte path.
+    const counters = new OpsCounters();
+    const logStorage = logObserver();
     return {
       module: AppModule,
       imports: [
@@ -58,12 +68,16 @@ export class AppModule {
           migrations: { dirs: overrides.migrationsDirs ?? [kitMigrationsDir, fileMigrationsDir] },
         }),
         ServiceAuthModule.forRoot(config.serviceTokens),
-        ConfigModule.forRoot(config),
+        ConfigModule.forRoot(config, counters),
         PersistenceModule,
-        StorageModule.forRoot(config.storage),
+        StorageModule.forRoot(config.storage, (o) => {
+          logStorage(o);
+          counters.observeStorage(o);
+        }),
         UploadModule,
         DownloadModule,
         DeletionModule,
+        OpsModule, // Stage 17.9: the operational snapshot (file_ops_snapshot / file_ops_counters / file_storage_ops)
       ],
     };
   }

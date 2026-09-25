@@ -23,7 +23,7 @@ export function createStorage(config: StorageConfig, observe: StorageObserver): 
 }
 
 /** Storage operations at DEBUG, bounded fields only (never a key, id, bucket, endpoint, path or credential). */
-function logObserver(): StorageObserver {
+export function logObserver(): StorageObserver {
   const logger = new Logger('Storage');
   return (o) => {
     const line = `storage_op op=${o.operation} provider=${o.provider} outcome=${o.outcome} duration_ms=${o.durationMs}${o.bytes === undefined ? '' : ` bytes=${o.bytes}`}${o.detail ? ` detail=${o.detail}` : ''}`;

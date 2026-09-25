@@ -26,7 +26,16 @@ export interface S3StorageOptions {
   minThroughputBytesPerSecond: number;
   /** Attempts for the idempotent operations (get before the first byte, head, delete). `put` is always ONE attempt. */
   maxAttempts: number;
+  /**
+   * Stage 17.9: sockets per client (`FILE_S3_MAX_SOCKETS`). There are two clients, so two pools: the WRITER (uploads) and the READER
+   * (downloads, which hold a socket for their whole transfer, plus head / delete). A request beyond the pool waits for a socket; the
+   * configuration checks at boot that the byte-path bounds fit (`loadFileConfig`), so held downloads can never starve deletes.
+   */
+  maxSockets?: number;
 }
+
+/** Stage 17.9: the default socket pool per client (was a fixed 50 before 17.9). */
+export const DEFAULT_S3_MAX_SOCKETS = 96;
 
 /** The SDK must never write to the console: its messages bypass the service's JSON logs and can carry hosts and request ids. */
 const SILENT = { trace: () => undefined, debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -83,9 +92,14 @@ export class S3Storage implements StoragePort {
     const handler = () =>
       new NodeHttpHandler({
         connectionTimeout: options.connectTimeoutMs,
-        requestTimeout: options.idleTimeoutMs, // the socket idle timeout
-        httpAgent: new HttpAgent({ keepAlive: true, maxSockets: 50 }),
-        httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: 50 }),
+        // Stage 17.9: the socket IDLE bound. In @smithy/node-http-handler 4.x `requestTimeout` is a whole-request timer that only
+        // WARNS by default (and to the console); `socketTimeout` is the inactivity timeout that fails the request or the stream. Until
+        // 17.9 this setting was passed as `requestTimeout` and therefore never ended a stalled transfer (measured: a hanging store held
+        // an upload until the service's own 30 s timer, which then blamed the client).
+        socketTimeout: options.idleTimeoutMs,
+        logger: SILENT, // the handler's own warnings (socket acquisition) must not reach the console either
+        httpAgent: new HttpAgent({ keepAlive: true, maxSockets: options.maxSockets ?? DEFAULT_S3_MAX_SOCKETS }),
+        httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: options.maxSockets ?? DEFAULT_S3_MAX_SOCKETS }),
       });
     const common = {
       endpoint: options.endpoint,

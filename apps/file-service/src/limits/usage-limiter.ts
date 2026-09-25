@@ -2,6 +2,7 @@ import { HttpException, Inject, Injectable, Module } from '@nestjs/common';
 import { ConfigError, DbService, RateLimitModule, RateLimitService, type EnvReader } from '@nawara/service-kit';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
+import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
 
 /** What a trusted caller spends (F32): service uploads, ticket issuance (upload and download tickets), service content reads. */
 export type UsageKind = 'upload' | 'ticket' | 'download';
@@ -18,6 +19,11 @@ export interface UsageLimitsConfig {
   ticketMaxDownloads: number;
   /** `FILE_UPLOAD_MAX_IN_FLIGHT` (default 64): uploads streaming at once in ONE process (threat model: bounded concurrency). */
   uploadMaxInFlight: number;
+  /**
+   * Stage 17.9: `FILE_DOWNLOAD_MAX_IN_FLIGHT` (default 64, 1–4 096): downloads streaming at once in ONE process. A download holds a store
+   * stream (on S3, a socket of the reader pool) for its whole transfer; unbounded, slow readers starve every other download (measured).
+   */
+  downloadMaxInFlight: number;
 }
 
 const DEFAULTS: Record<UsageKind, { caller: number; organization: number }> = {
@@ -41,6 +47,7 @@ export function loadUsageLimitsConfig(reader: EnvReader): UsageLimitsConfig {
     perOrganization,
     ticketMaxDownloads: reader.int('FILE_TICKET_MAX_DOWNLOADS', { default: 50, min: 1, max: 10_000 }),
     uploadMaxInFlight: reader.int('FILE_UPLOAD_MAX_IN_FLIGHT', { default: 64, min: 1, max: 4_096 }),
+    downloadMaxInFlight: reader.int('FILE_DOWNLOAD_MAX_IN_FLIGHT', { default: 64, min: 1, max: 4_096 }),
   };
 }
 
@@ -61,6 +68,7 @@ export class UsageLimiter {
     @Inject(FILE_CONFIG) private readonly config: FileConfig,
     private readonly limiter: RateLimitService,
     private readonly db: DbService,
+    @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
   ) {}
 
   async admit(kind: UsageKind, caller: string, organizationId: string | null): Promise<void> {
@@ -69,7 +77,10 @@ export class UsageLimiter {
     const byOrganization = organizationId === null
       ? { allowed: true }
       : await this.limiter.hit(`file_${kind}_org`, `${caller}|${organizationId}`, { limit: limits.perOrganization[kind], windowSec: USAGE_WINDOW_SECONDS });
-    if (!byCaller.allowed || !byOrganization.allowed) throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+    if (!byCaller.allowed || !byOrganization.allowed) {
+      this.counters.bump(`rate_limited_${kind}`);
+      throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+    }
   }
 
   /**

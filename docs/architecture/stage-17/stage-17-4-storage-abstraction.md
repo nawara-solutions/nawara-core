@@ -76,7 +76,7 @@ provider stops the process.
 | `FILE_S3_ACCESS_KEY_ID`, `FILE_S3_SECRET_ACCESS_KEY` | required | also `*_FILE` (mounted secrets); the secret ≥ 16 characters; never echoed, logged or stored |
 | `FILE_S3_FORCE_PATH_STYLE` | `false` | path-style addressing for providers that need it |
 | `FILE_STORAGE_CONNECT_TIMEOUT_MS` | 2 000 | 100 – 2 000 (SDD §15: ≤ 2 s) |
-| `FILE_STORAGE_IDLE_TIMEOUT_MS` | 30 000 | 1 000 – 120 000: socket idle (no byte) bound |
+| `FILE_STORAGE_IDLE_TIMEOUT_MS` | 30 000 | 1 000 – 120 000: socket idle (no byte) bound. **Stage 17.9:** it was passed to the SDK as `requestTimeout`, which in `@smithy/node-http-handler` 4.x only warns, so it never ended a transfer; now `socketTimeout`, default 45 000, max 300 000 ([17.9 record](./stage-17-9-operational-hardening.md) O-3) |
 | `FILE_STORAGE_MAX_ATTEMPTS` | 3 | 1 – 5: idempotent operations only |
 
 Startup never contacts the store (a production smoke uses an unresolvable endpoint and boots): a storage outage never prevents the

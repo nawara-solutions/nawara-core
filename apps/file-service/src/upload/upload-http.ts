@@ -81,15 +81,31 @@ export function uploadRequestHash(key: Buffer, declared: { organizationId: strin
 export function watchUpload(req: Request, idleMs: number): { signal: AbortSignal; release: () => void } {
   const controller = new AbortController();
   const onClose = () => {
-    if (!req.complete) controller.abort(REFUSALS.aborted());
+    if (!req.complete) {
+      controller.abort(REFUSALS.aborted());
+      return;
+    }
+    // Stage 17.9: the client has sent every byte, so it can no longer be idle; the rest (the store accepting the tail) is bounded by
+    // the store's own deadlines. Without this the socket timeout set below outlived the body: Node does not deliver a socket timeout
+    // to a COMPLETE request, and with nobody listening it destroys the socket, so a slow store answered nothing after `idleMs`.
+    req.setTimeout(0);
   };
   const onError = () => controller.abort(REFUSALS.aborted());
   req.once('close', onClose);
   req.once('error', onError);
-  req.setTimeout(idleMs, () => {
+  const onIdle = () => {
+    // Stage 17.9: silence on the socket is not always the client's. When the store stops reading, backpressure leaves bytes UNREAD in
+    // this request's buffer: the CLIENT is not idle, the store is, and the store's own idle bound (FILE_STORAGE_IDLE_TIMEOUT_MS, longer
+    // than this one) ends the upload as `storage_timeout`. Re-arm instead of blaming the client. (Not `readableFlowing`: the pipeline
+    // reads through an async iterator, which keeps the stream in paused mode whether or not anything is waiting.)
+    if (req.readableLength > 0) {
+      req.setTimeout(idleMs, onIdle);
+      return;
+    }
     controller.abort(REFUSALS.idle());
     req.destroy();
-  });
+  };
+  req.setTimeout(idleMs, onIdle);
   return {
     signal: controller.signal,
     release: () => {

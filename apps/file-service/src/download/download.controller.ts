@@ -56,7 +56,7 @@ export class DownloadController {
   @ApiResponse({ status: 409, description: 'file_not_available' })
   @ApiResponse({ status: 410, description: 'file_deleted' })
   @ApiResponse({ status: 429, description: 'rate_limited (service reads per caller / per organization, F32)' })
-  @ApiResponse({ status: 503, description: 'storage_unavailable' })
+  @ApiResponse({ status: 503, description: 'storage_unavailable | download_busy (too many downloads in progress in this process; retry, nothing consumed)' })
   async content(@CallerService() caller: string, @Req() req: Request, @Res() res: Response): Promise<void> {
     await this.downloads.serviceContent(caller, req, res, req.params.id as string);
   }
@@ -96,7 +96,7 @@ export class DownloadController {
   @ApiResponse({ status: 200, ...BYTES })
   @ApiResponse({ status: 404, description: 'ticket_invalid' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
-  @ApiResponse({ status: 503, description: 'storage_unavailable' })
+  @ApiResponse({ status: 503, description: 'storage_unavailable | download_busy (too many downloads in progress in this process; retry, nothing consumed)' })
   async redeem(@Param('token') token: string, @Req() req: Request, @Res() res: Response): Promise<void> {
     await this.downloads.redeem(token, req, res);
   }

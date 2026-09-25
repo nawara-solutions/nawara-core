@@ -126,6 +126,14 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
     await this.pool.query('SELECT 1');
   }
 
+  /**
+   * Pool occupancy for operational signals (read-only; Stage 17.9): clients open, clients idle, and requests WAITING for a client (a
+   * sustained non-zero `waiting` is pool saturation; after DB_CONNECTION_TIMEOUT_MS such a request fails).
+   */
+  poolStats(): { total: number; idle: number; waiting: number } {
+    return { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount };
+  }
+
   /** Graceful shutdown: waits for checked-out clients to be released, then closes the pool. */
   async onApplicationShutdown(): Promise<void> {
     await this.pool.end();
