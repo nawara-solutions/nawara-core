@@ -97,12 +97,36 @@ const KIT_IDENTITY_CONTRACT_ALLOWLIST = new Set(['libs/service-kit/src/service-a
 const BIDI_CONTROL = /[\u202A-\u202E\u2066-\u2069]/u;
 const BIDI_ALLOWLIST = new Set(['apps/file-service/db/migrations/0001_file_schema.sql']);
 
+/**
+ * Stage 18.4: the audit contract's dependency direction. Producers and audit-service depend on `@nawara/audit-contract`; the contract
+ * depends on nothing at runtime (its src imports only its own files); the kit never depends on it (Audit is a domain contract above the
+ * transport); the consumer entry point (`/consumer`) is audit-service's; the `/testing` entry point is for tests only.
+ */
+function checkAuditContractDirection(relPath, spec) {
+  const problems = [];
+  const isContract = spec === '@nawara/audit-contract' || spec.startsWith('@nawara/audit-contract/');
+  if (relPath.startsWith('libs/service-kit/') && isContract) {
+    problems.push(`${relPath}: the service-kit must not depend on the audit contract (${spec}); audit is a domain contract above the kit`);
+  }
+  if (relPath.startsWith('libs/audit-contract/src/') && !spec.startsWith('./')) {
+    problems.push(`${relPath}: the audit contract has no runtime dependency (${spec}); its source imports only its own files`);
+  }
+  const consumerAllowed = relPath.startsWith('apps/audit-service/') || relPath.startsWith('libs/audit-contract/');
+  if (spec === '@nawara/audit-contract/consumer' && !consumerAllowed) {
+    problems.push(`${relPath}: only audit-service may use the audit consumer API (${spec}); producers use AuditEventWriter`);
+  }
+  const isTest = /(^|\/)test\//.test(relPath) || /\.(e2e-|int-)?spec\.ts$/.test(relPath);
+  if (spec === '@nawara/audit-contract/testing' && !isTest) problems.push(`${relPath}: ${spec} is test tooling; production code must not import it`);
+  return problems;
+}
+
 /** No product concepts in Core services or the kit; no financial-domain declarations in the kit; no cross-service source imports. */
 export function checkSource(relPath, text) {
   const problems = [];
   if (BIDI_CONTROL.test(text) && !BIDI_ALLOWLIST.has(relPath)) problems.push(`${relPath}: contains an invisible bidirectional control character (write it as an escape)`);
   const inKit = relPath.startsWith('libs/service-kit/');
-  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file|audit)-service\/(src|db\/migrations)\//.test(relPath);
+  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file|audit)-service\/(src|db\/migrations)\//.test(relPath)
+    || relPath.startsWith('libs/audit-contract/');
   if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {
     problems.push(`${relPath}: declares a financial-domain concept; the service-kit holds technical infrastructure only`);
@@ -112,6 +136,7 @@ export function checkSource(relPath, text) {
     const spec = m[1];
     const other = /(?:^|\/)apps\/([a-z-]+)\//.exec(spec)?.[1] ?? (/^(?:\.\.\/)+([a-z-]+-service)\b/.exec(spec)?.[1]);
     if (other && other !== app) problems.push(`${relPath}: imports another service's source (${spec}); services talk over APIs and events only`);
+    problems.push(...checkAuditContractDirection(relPath, spec));
   }
   return problems;
 }

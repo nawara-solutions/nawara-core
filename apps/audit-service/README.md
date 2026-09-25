@@ -1,14 +1,17 @@
 # audit-service
 
-> **Status: foundation (Stage 18.2) and append-only persistence (Stage 18.3).** The `audit_record` table: the runtime role can INSERT
-> and SELECT, never UPDATE, DELETE or TRUNCATE (grants + triggers; a database superuser remains outside the guarantee). **Not yet:** the
-> audit contract and catalog (18.4), RabbitMQ ingestion (18.5), the query API (18.6), producer integration (18.7), retention (18.8).
+> **Status: foundation (Stage 18.2), append-only persistence (Stage 18.3), the shared contract and catalog (Stage 18.4).** The
+> `audit_record` table: the runtime role can INSERT and SELECT, never UPDATE, DELETE or TRUNCATE (grants + triggers; a database superuser
+> remains outside the guarantee). The contract lives in [`@nawara/audit-contract`](../../libs/audit-contract/README.md) (49 cataloged
+> actions); this service owns the contract → record mapping. **Not yet:** RabbitMQ ingestion (18.5), the query API (18.6), producer
+> integration (18.7), retention (18.8).
 
 Security and business audit trail for Nawara Core: owning services emit cataloged audit events through their transactional outbox;
 this service validates, stores them append-only and answers tenant-safe queries. Design: [ADR-0049](../../docs/adr/0049-audit-trail-architecture.md),
 [SDD](../../docs/sdd/audit-service.md), [Stage 18.1 decisions and roadmap](../../docs/architecture/stage-18/stage-18-1-decisions-and-roadmap.md),
 [Stage 18.2 record](../../docs/architecture/stage-18/stage-18-2-service-foundation.md),
-[Stage 18.3 record](../../docs/architecture/stage-18/stage-18-3-persistence-append-only.md).
+[Stage 18.3 record](../../docs/architecture/stage-18/stage-18-3-persistence-append-only.md),
+[Stage 18.4 record](../../docs/architecture/stage-18/stage-18-4-canonical-contract-catalog.md), [event catalog](../../docs/architecture/audit-event-catalog.md).
 
 ## What exists (18.2 foundation)
 
@@ -42,7 +45,7 @@ RabbitMQ yet (18.5); no route besides health and readiness.
 ## Run and test
 
 ```bash
-npm run build -w @nawara/service-kit && npm run build -w audit-service
+npm run build -w @nawara/service-kit -w @nawara/audit-contract && npm run build -w audit-service
 npm test -w audit-service                                            # unit
 TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w audit-service   # e2e (real PostgreSQL)
 docker compose --profile db run --rm audit-service npm run migrate   # as audit_migrator
@@ -60,4 +63,5 @@ by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 18.1 | ✅ architecture and decisions |
 | 18.2 | ✅ service foundation |
 | 18.3 | ✅ append-only persistence (`audit_record`, repository, idempotency foundation) |
-| 18.4 – 18.10 | contract and catalog, ingestion, query, producers, security / retention, operations, certification |
+| 18.4 | ✅ contract and catalog (`@nawara/audit-contract`; `toNewAuditRecord` here) |
+| 18.5 – 18.10 | ingestion, query, producers, security / retention, operations, certification |
