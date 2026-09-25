@@ -47,4 +47,4 @@ are living documents revised in place as the module's design evolves.
 | [billing-service](./billing-service.md) | Draft (for review; Stages 1-3 implemented — foundation, domain schema, HTTP API) |
 | [organization-service](./organization-service.md) | Implemented (Stage 9); not authoritative: ownership migration from Auth (ADR-0039) not performed |
 | [notification-service](./notification-service.md) | Draft (Stage 16.1 design, for review; not implemented) |
-| [file-service](./file-service.md) | Draft (Stage 17.1 design, architecture frozen); foundation (17.2), persistence (17.3), storage port (17.4), upload lifecycle (17.5); no download yet |
+| [file-service](./file-service.md) | Draft (Stage 17.1 design, architecture frozen); foundation (17.2), persistence (17.3), storage port (17.4), upload (17.5), download + authorization (17.6); no deletion yet |

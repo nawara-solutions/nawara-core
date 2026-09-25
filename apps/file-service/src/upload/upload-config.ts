@@ -13,8 +13,12 @@ export interface UploadConfig {
   requestHashKey: Buffer;
   /** `FILE_RATE_LIMIT_KEY` (base64, ≥ 32 bytes; F32): keys client addresses before they reach the rate-limit table. */
   rateLimitKey: Buffer;
-  /** `FILE_TICKET_FAILURE_LIMIT` (default 20 per minute per client): failed ticket redemptions before a client is refused. */
+  /** `FILE_TICKET_FAILURE_LIMIT` (default 20 per minute per client): failed ticket redemptions (upload and download) before a client is refused. */
   ticketFailureLimit: number;
+  /** Stage 17.6: `FILE_DOWNLOAD_TICKET_TTL_SECONDS` (default 120, 60–300, F16): a download ticket's lifetime (reusable until then). */
+  downloadTicketTtlSeconds: number;
+  /** Stage 17.6: `FILE_DOWNLOAD_IDLE_TIMEOUT_MS` (default 30 s): a download whose client accepts no byte for this long is cut off. */
+  downloadIdleTimeoutMs: number;
 }
 
 function keyMaterial(reader: EnvReader, name: string): Buffer {
@@ -43,5 +47,7 @@ export function loadUploadConfig(reader: EnvReader, isProduction: boolean): Uplo
     requestHashKey,
     rateLimitKey,
     ticketFailureLimit: reader.int('FILE_TICKET_FAILURE_LIMIT', { default: 20, min: 1, max: 1_000 }),
+    downloadTicketTtlSeconds: reader.int('FILE_DOWNLOAD_TICKET_TTL_SECONDS', { default: 120, min: 60, max: 300 }),
+    downloadIdleTimeoutMs: reader.int('FILE_DOWNLOAD_IDLE_TIMEOUT_MS', { default: 30_000, min: 1_000, max: 120_000 }),
   };
 }

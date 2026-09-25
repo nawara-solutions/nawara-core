@@ -5,6 +5,7 @@ import type { FileConfig } from './config/file-config.js';
 import { FILE_CONFIG } from './config/file-config.token.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
 import { StorageModule } from './storage/storage.module.js';
+import { DownloadModule } from './download/download.module.js';
 import { UploadModule } from './upload/upload.module.js';
 
 /** The service's own migrations (Stage 17.3: the `file` and `file_access_ticket` schema), applied by the explicit `npm run migrate` step and never at startup. */
@@ -31,7 +32,8 @@ class ConfigModule {
  * readiness `database` + `migrations`; the pool closes last) and service authentication, plus the validated configuration (with the
  * caller policy). Stage 17.3 adds the persistence layer (the `file` and `file_access_ticket` repositories); Stage 17.4 the object
  * store (`STORAGE_PORT`: the configured filesystem or S3-compatible adapter, never a readiness check); Stage 17.5 the upload lifecycle
- * (`UploadModule`: upload tickets, their redemption, service upload, attach). Download and download tickets are 17.6.
+ * (`UploadModule`: upload tickets, their redemption, service upload, attach); Stage 17.6 the byte-read boundary (`DownloadModule`: owner
+ * metadata and content, download tickets, their redemption, ticket revocation). Deletion and cleanup are 17.7.
  *
  * Deliberately NOT here (ADR-0048): object storage is not a readiness dependency; there is no RabbitMQ (events come with Stage 18 /
  * 17.9 through the kit outbox) and no call to Auth or to any product service, for any purpose.
@@ -58,6 +60,7 @@ export class AppModule {
         PersistenceModule,
         StorageModule.forRoot(config.storage),
         UploadModule,
+        DownloadModule,
       ],
     };
   }

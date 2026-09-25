@@ -195,7 +195,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
       VALUES ($1, 'download', $2, 'core-drive', $3, 'attachment', false, now() - interval '10 minutes', now() - interval '8 minutes')`, [randomUUID(), f.id, expired]);
     const revoked = digest();
     const r = await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: revoked, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
-    await tickets.revoke('core-drive', r!.id);
+    await tickets.revoke({ ownerService: 'core-drive', organizationId: null }, r!.id);
     const used = digest();
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: used, lifetimeSeconds: 120, singleUse: true, disposition: 'attachment' });
     await tickets.claimUse(used, 'download');
@@ -207,13 +207,13 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     const f = await files.createUploading(upload(drive(null)));
     const d = digest();
     const tk = await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
-    expect(await tickets.revoke('core-billing', tk!.id)).toBe(false);
+    expect(await tickets.revoke({ ownerService: 'core-billing', organizationId: null }, tk!.id)).toBe(false);
     expect(await tickets.claimUse(d, 'download')).toBeDefined(); // still live
-    expect(await tickets.revoke('core-drive', randomUUID())).toBe(false);
-    expect(await tickets.revoke('core-drive', 'nope')).toBe(false);
-    expect(await tickets.revoke('core-drive', tk!.id)).toBe(true);
+    expect(await tickets.revoke({ ownerService: 'core-drive', organizationId: null }, randomUUID())).toBe(false);
+    expect(await tickets.revoke({ ownerService: 'core-drive', organizationId: null }, 'nope')).toBe(false);
+    expect(await tickets.revoke({ ownerService: 'core-drive', organizationId: null }, tk!.id)).toBe(true);
     const [{ revokedAt }] = await s.query<{ revokedAt: Date }>(`SELECT "revokedAt" FROM file_access_ticket WHERE id = $1`, [tk!.id]);
-    expect(await tickets.revoke('core-drive', tk!.id)).toBe(true);
+    expect(await tickets.revoke({ ownerService: 'core-drive', organizationId: null }, tk!.id)).toBe(true);
     expect((await s.query<{ revokedAt: Date }>(`SELECT "revokedAt" FROM file_access_ticket WHERE id = $1`, [tk!.id]))[0]!.revokedAt).toEqual(revokedAt);
     expect(await tickets.claimUse(d, 'download')).toBeUndefined();
   });
@@ -281,7 +281,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     await a.connect();
     try {
       await a.query('BEGIN');
-      expect(await tickets.revoke('core-drive', tk!.id, a)).toBe(true);
+      expect(await tickets.revoke({ ownerService: 'core-drive', organizationId: null }, tk!.id, a)).toBe(true);
       const claim = tickets.claimUse(d, 'download');
       await new Promise((r) => setTimeout(r, 200));
       await a.query('COMMIT');

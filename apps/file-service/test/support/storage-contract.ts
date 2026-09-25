@@ -231,3 +231,19 @@ export async function peakBufferGrowth(run: () => Promise<void>): Promise<number
   }
   return peak - base;
 }
+
+/**
+ * Stage 17.6 backpressure measure: live ArrayBuffer memory (after forced collections) sampled when a client PAUSES a download and
+ * again after it has held the pause. With backpressure the server stops reading the store once the stream buffers are full, so the
+ * growth during the pause is ~0 and the level at the pause is small, whatever the file size. A server that reads ahead grows during
+ * the pause; one that buffers the object first holds it already at the pause. (Sampling a fast transfer is noisy: client and server
+ * share one process, so in-flight chunks pile up during each forced collection.)
+ */
+export async function liveBytes(): Promise<number> {
+  const gc = (globalThis as { gc?: () => void }).gc;
+  if (!gc) throw new Error('run with --expose-gc (vitest.config.e2e.ts execArgv)');
+  gc();
+  await new Promise((r) => setImmediate(r)); // let released backing stores be finalized
+  gc();
+  return process.memoryUsage().arrayBuffers;
+}

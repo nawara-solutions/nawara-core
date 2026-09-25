@@ -7,7 +7,8 @@
   byte path yet): [Stage 17.3 record](../architecture/stage-17/stage-17-3-persistence-metadata.md). Stage 17.4: the storage port and
   its filesystem and S3-compatible adapters: [Stage 17.4 record](../architecture/stage-17/stage-17-4-storage-abstraction.md). Stage 17.5:
   the upload lifecycle (upload tickets, redemption, service upload, attach; no download yet):
-  [Stage 17.5 record](../architecture/stage-17/stage-17-5-upload-lifecycle.md).
+  [Stage 17.5 record](../architecture/stage-17/stage-17-5-upload-lifecycle.md). Stage 17.6: owner reads, download tickets (issue,
+  redeem, revoke), safe download headers: [Stage 17.6 record](../architecture/stage-17/stage-17-6-download-authorization.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -175,6 +176,10 @@ encoder; the raw name never reaches a header. Filenames are treated as personal 
   and only when the caller asks); `X-Content-Type-Options: nosniff`; `Content-Security-Policy: default-src 'none'; sandbox`;
   `Cache-Control: private, no-store`; `ETag` = the SHA-256 (immutable content).
 - No `Range` in V1 (documents and images; F9). Ticket URLs are never logged (§15).
+- **Implemented (Stage 17.6); clarifications, no decision changed:** the download-ticket TTL default is 120 s; `ETag` is sent but
+  conditional GET is not implemented; HEAD is refused (`405`) on byte routes (it would otherwise redeem a ticket); `Cache-Control` is
+  `private, no-store` with `Pragma: no-cache`; the ticket route sends `Cross-Origin-Resource-Policy: cross-origin`; a store size that
+  contradicts the record, or an object that ends early, is never served as a complete file.
 
 ## 10. Idempotency
 

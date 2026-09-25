@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import { FILE_MEDIA_TYPES, type FileMediaType } from '../policy/media-types.js';
-import type { FileScope } from './file.repository.js';
+import type { FileRow, FileScope } from './file.repository.js';
 import { FilePersistenceError } from './persistence-error.js';
 import { assertTicketDigest, type TicketDigest } from './ticket-digest.js';
 
@@ -58,6 +58,23 @@ export interface NewUploadTicket {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** JSON rows (to_jsonb) carry timestamps as strings: restore the Date fields of the row types. */
+function reviveTicket(raw: Record<string, unknown>): TicketRow {
+  const t = raw as unknown as TicketRow & Record<string, unknown>;
+  for (const k of ['usedAt', 'revokedAt', 'expiresAt', 'createdAt'] as const) if (t[k] !== null) (t as Record<string, unknown>)[k] = new Date(t[k] as unknown as string);
+  if (t.maxBytes !== null) t.maxBytes = String(t.maxBytes);
+  return t;
+}
+
+function reviveFile(raw: Record<string, unknown>): FileRow {
+  const f = raw as unknown as FileRow & Record<string, unknown>;
+  for (const k of ['uploadExpiresAt', 'attachDeadline', 'attachedAt', 'createdAt', 'availableAt', 'deletionRequestedAt', 'deletedAt', 'updatedAt'] as const) {
+    if (f[k] !== null) (f as Record<string, unknown>)[k] = new Date(f[k] as unknown as string);
+  }
+  if (f.sizeBytes !== null) f.sizeBytes = String(f.sizeBytes);
+  return f;
+}
 
 function checkLifetime(seconds: number): void {
   if (!Number.isInteger(seconds) || seconds < TICKET_LIFETIME_MIN_SECONDS || seconds > TICKET_LIFETIME_MAX_SECONDS) {
@@ -156,14 +173,44 @@ export class TicketRepository {
   }
 
   /**
-   * Revokes one of the issuer's tickets (the owner route, 17.6). `true` when the issuer has that ticket (revoking twice is the same
-   * success: the first stamp stays); `false` for an unknown ticket or another issuer's, indistinguishably.
+   * Stage 17.6: claims one use of a DOWNLOAD ticket and returns it with its file, atomically. One statement checks the ticket (operation,
+   * not revoked, not expired, not used up when single-use) AND its file (the bound file, still `AVAILABLE`, still the issuer's in the
+   * ticket's organization): a ticket never outlives its file's availability, and a file leaving `AVAILABLE` is never served through
+   * an old ticket. `undefined` for every refusal alike (`ticket_invalid`). A reusable ticket counts each use; a single-use ticket is
+   * claimed once (concurrent claims serialize on the ticket row).
    */
-  async revoke(issuer: string, ticketId: string, q: Queryable = this.db): Promise<boolean> {
+  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db): Promise<{ ticket: TicketRow; file: FileRow } | undefined> {
+    assertTicketDigest(tokenDigest);
+    const { rows } = await q.query<{ ticket: Record<string, unknown>; file: Record<string, unknown> }>(
+      `WITH claimed AS (
+         UPDATE file_access_ticket t SET "useCount" = t."useCount" + 1, "usedAt" = COALESCE(t."usedAt", now())
+         FROM file f
+         WHERE t."tokenDigest" = $1 AND t.operation = 'download' AND t."revokedAt" IS NULL AND t."expiresAt" > now()
+           AND (NOT t."singleUse" OR t."useCount" = 0)
+           AND f.id = t."fileId" AND f.status = 'AVAILABLE' AND f."ownerService" = t."issuedBy"
+           AND f."organizationId" IS NOT DISTINCT FROM t."organizationId"
+         RETURNING t.id, t.operation, t."fileId", t."issuedBy", t."organizationId", t.disposition, t."maxBytes", t."mediaTypes", t.attach,
+           t."singleUse", t."useCount", t."usedAt", t."revokedAt", t."expiresAt", t."createdAt", to_jsonb(f.*) AS file
+       )
+       SELECT to_jsonb(claimed.*) - 'file' AS ticket, claimed.file AS file FROM claimed`,
+      [tokenDigest],
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    return { ticket: reviveTicket(row.ticket), file: reviveFile(row.file) };
+  }
+
+  /**
+   * Revokes one of the owner's tickets (Stage 17.6 route): the issuer AND the ticket's organization must match. `true` when it has that
+   * ticket (revoking twice is the same success: the first stamp stays); `false` for an unknown ticket, another issuer's or another
+   * organization's, indistinguishably. Revocation stops FUTURE redemptions; a stream authorized before the commit may complete.
+   */
+  async revoke(scope: FileScope, ticketId: string, q: Queryable = this.db): Promise<boolean> {
     if (!UUID.test(ticketId)) return false;
     const { rows } = await q.query(
-      `UPDATE file_access_ticket SET "revokedAt" = COALESCE("revokedAt", now()) WHERE id = $1 AND "issuedBy" = $2 RETURNING id`,
-      [ticketId, issuer],
+      `UPDATE file_access_ticket SET "revokedAt" = COALESCE("revokedAt", now())
+       WHERE id = $1 AND "issuedBy" = $2 AND "organizationId" IS NOT DISTINCT FROM $3 RETURNING id`,
+      [ticketId, scope.ownerService, scope.organizationId],
     );
     return rows.length === 1;
   }

@@ -8,7 +8,6 @@ import { REFUSALS, UploadRefused } from './ingest.js';
 /** One stable error shape (the kit filter adds `statusCode`, `error`, `requestId`): a machine code, a generic message. */
 export const fileError = (status: number, code: string, message: string) => new HttpException({ message, code }, status);
 
-export const TICKET_INVALID = () => fileError(404, 'ticket_invalid', 'The upload link is not valid.');
 export const FILE_NOT_FOUND = () => fileError(404, 'file_not_found', 'No such file.');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 

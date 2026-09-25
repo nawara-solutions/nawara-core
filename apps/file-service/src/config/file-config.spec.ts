@@ -33,10 +33,11 @@ describe('file-service configuration', () => {
   it('carries what is used so far: the store (17.4), the upload lifecycle (17.5); no download-ticket, broker or Auth setting', () => {
     const c = loadFileConfig(env());
     expect(c.storage.provider).toBe('s3');
-    expect(c.upload).toMatchObject({ ticketTtlSeconds: 120, attachTtlSeconds: 86_400, idleTimeoutMs: 30_000, ticketFailureLimit: 20, publicBaseUrl: 'https://files.example.test' });
+    expect(c.upload).toMatchObject({ ticketTtlSeconds: 120, attachTtlSeconds: 86_400, idleTimeoutMs: 30_000, ticketFailureLimit: 20, publicBaseUrl: 'https://files.example.test',
+      downloadTicketTtlSeconds: 120, downloadIdleTimeoutMs: 30_000 }); // Stage 17.6 defaults
     expect(c.docs.password).toBeUndefined(); // OpenAPI is not mounted by default
     const keys = [...Object.keys(c), ...Object.keys(c.upload)];
-    for (const later of ['downloadTicketTtl', 'rabbitmqUrl', 'authServiceUrl']) expect(keys).not.toContain(later);
+    for (const later of ['rabbitmqUrl', 'authServiceUrl']) expect(keys).not.toContain(later);
   });
 
   it.each([
@@ -54,6 +55,9 @@ describe('file-service configuration', () => {
     ['FILE_ATTACH_TTL_SECONDS', { FILE_ATTACH_TTL_SECONDS: '10' }],
     ['FILE_UPLOAD_IDLE_TIMEOUT_MS', { FILE_UPLOAD_IDLE_TIMEOUT_MS: '0' }],
     ['FILE_TICKET_FAILURE_LIMIT', { FILE_TICKET_FAILURE_LIMIT: '0' }],
+    ['FILE_DOWNLOAD_TICKET_TTL_SECONDS', { FILE_DOWNLOAD_TICKET_TTL_SECONDS: '59' }], // F16: 60-300 s
+    ['FILE_DOWNLOAD_TICKET_TTL_SECONDS', { FILE_DOWNLOAD_TICKET_TTL_SECONDS: '301' }],
+    ['FILE_DOWNLOAD_IDLE_TIMEOUT_MS', { FILE_DOWNLOAD_IDLE_TIMEOUT_MS: '999999' }],
     ['SWAGGER_PASSWORD', { SWAGGER_PASSWORD: 'short' }],
   ])('Stage 17.5: refuses an invalid or missing %s, never echoing a value', (name, over) => {
     try {
