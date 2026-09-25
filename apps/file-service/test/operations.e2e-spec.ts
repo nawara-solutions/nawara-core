@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createServer as createHttpServer, get as httpGet, type Server as HttpServer } from 'node:http';
+import { createServer as createHttpServer, get as httpGet, IncomingMessage, type Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, expect, it } from 'vitest';
@@ -284,6 +284,41 @@ describeWithEnv('operational hardening (real PostgreSQL, filesystem store)', ['T
       expect(line).toMatch(/outcome=storage_timeout/);
       expect(t.logs.some((l) => String(l.msg).includes('outcome=upload_timeout'))).toBe(false);
     } finally {
+      for (const sk of sockets) sk.destroy();
+      await new Promise((r) => stalled.close(r));
+    }
+  }, 60_000);
+  it('Stage 17.10: while the store holds an upload back, the idle re-arm keeps ONE timeout listener (it used to double every idle period)', async () => {
+    // Measured before the fix with these bounds: 64 listeners on one request after a 3 s stall, 8 388 608 after 14 s.
+    let max = 0;
+    const original = Object.getOwnPropertyDescriptor(IncomingMessage.prototype, 'setTimeout')!.value as IncomingMessage['setTimeout'];
+    IncomingMessage.prototype.setTimeout = function (this: IncomingMessage, ...args: Parameters<typeof original>) {
+      const r = original.apply(this, args);
+      max = Math.max(max, this.listenerCount('timeout'));
+      return r;
+    } as typeof original;
+    const stalled: HttpServer = createHttpServer((req) => {
+      let seen = 0;
+      req.on('data', (c: Buffer) => {
+        seen += c.length;
+        if (seen > 256 * 1024) req.pause();
+      });
+    });
+    const sockets = new Set<import('node:net').Socket>();
+    stalled.on('connection', (sk) => sockets.add(sk));
+    await new Promise<void>((r) => stalled.listen(0, '127.0.0.1', r));
+    try {
+      const t = await app({
+        FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: `http://127.0.0.1:${(stalled.address() as AddressInfo).port}`, FILE_S3_REGION: 'us-east-1',
+        FILE_S3_BUCKET: 'stalled-bucket', FILE_S3_FORCE_PATH_STYLE: 'true', FILE_S3_ACCESS_KEY_ID: 'ops-test', FILE_S3_SECRET_ACCESS_KEY: 'ops-test-secret-0000',
+        FILE_UPLOAD_IDLE_TIMEOUT_MS: '1000', FILE_DOWNLOAD_IDLE_TIMEOUT_MS: '1000', FILE_STORAGE_IDLE_TIMEOUT_MS: '6000',
+      });
+      const body = SAMPLES.pdf(8 * 1024 * 1024);
+      const r = await rawRequest(t.app, { method: 'POST', path: '/file/files', headers: { ...auth(), 'idempotency-key': randomUUID(), 'content-type': 'application/pdf', 'content-length': String(body.length) }, body });
+      expect(r === 'socket_closed' ? r : [r.status, r.json().code]).toEqual([503, 'storage_unavailable']);
+      expect(max).toBe(1); // five idle periods passed with bytes waiting unread: still the one listener
+    } finally {
+      IncomingMessage.prototype.setTimeout = original;
       for (const sk of sockets) sk.destroy();
       await new Promise((r) => stalled.close(r));
     }

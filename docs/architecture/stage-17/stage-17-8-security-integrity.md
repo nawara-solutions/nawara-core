@@ -1,6 +1,6 @@
 # Stage 17.8 — File security and integrity hardening
 
-- **Status:** implemented and validated on `feat/file-service-security-integrity` (awaiting review).
+- **Status:** merged (PR #112); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** adversarial validation of every File Service boundary against the frozen threat model (Stage 17.1 §6), with minimal
   fixes where a boundary did not hold or a control promised for 17.8 was missing: the F32 usage limits, bounded upload concurrency,
   a cap on reusable download tickets, limiter retention, download integrity (SHA-256 verified while streaming), and two file-name
@@ -206,7 +206,11 @@ and 16 / 20 MiB streaming tests still pass). The CPU / throughput cost under con
 The sanitizer and the Content-Disposition encoder remove `\p{Cc}` (C0, DEL, C1), `\p{Bidi_Control}` (all twelve bidi controls),
 U+2028, U+2029, U+FEFF, `/` and `\`, **then** normalize to NFC. ZWJ / ZWNJ are kept (Persian and emoji need them). Migration
 `0003_file_name_marks.sql` adds `file_original_name_no_marks` (`NOT VALID`: names are immutable, so only new rows can be checked;
-no row outside development predates it). 0001 is not rewritten.
+no row outside development predates it). 0001 is not rewritten. **Correction (Stage 17.10, measured):** PostgreSQL enforces a `NOT VALID`
+CHECK on every UPDATE of an existing row, so a row written before 0003 with one of these marks in its name can make no lifecycle
+transition at all, and one such row in a worker batch fails the whole batch (the delete claim, for example). No such row can exist in a
+deployed database (production was never enabled before 0003); the operational precondition is in the migrations README and the
+[17.10 record](./stage-17-10-focused-certification.md) §5.
 
 ### 4.6 Limiter retention
 

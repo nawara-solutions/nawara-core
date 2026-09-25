@@ -82,12 +82,17 @@ export class UploadController {
   @ApiHeader({ name: 'X-Attach', required: false, description: 'true: create the file already attached' })
   @ApiResponse({ status: 201, ...FILE_VIEW })
   @ApiResponse({ status: 200, description: 'Idempotent replay: the same file' })
+  @ApiResponse({ status: 400, description: 'validation_error (headers) | upload_aborted | upload_incomplete (the client went away mid-body)' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
+  @ApiResponse({ status: 408, description: 'upload_timeout (no byte for FILE_UPLOAD_IDLE_TIMEOUT_MS)' })
   @ApiResponse({ status: 409, description: 'upload_in_progress' })
   @ApiResponse({ status: 411, description: 'length_required' })
   @ApiResponse({ status: 413, description: 'file_too_large' })
   @ApiResponse({ status: 415, description: 'unsupported_media_type' })
   @ApiResponse({ status: 422, description: 'media_type_mismatch | checksum_mismatch | idempotency_key_reused' })
   @ApiResponse({ status: 429, description: 'rate_limited (uploads per caller / per organization, F32; replays count)' })
+  @ApiResponse({ status: 500, description: 'storage_error | upload_failed (opaque; nothing is stored)' })
   @ApiResponse({ status: 503, description: 'storage_unavailable | upload_busy (too many uploads in progress; retry)' })
   async upload(@CallerService() caller: string, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await this.uploads.serviceUpload(caller, req);
@@ -103,6 +108,9 @@ export class UploadController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader({ name: 'X-Organization-Id', required: false, description: 'The file\'s organization, when it has one' })
   @ApiResponse({ status: 200, ...FILE_VIEW })
+  @ApiResponse({ status: 400, description: 'validation_error (X-Organization-Id)' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'file_not_found (also for another owner\'s or organization\'s file)' })
   @ApiResponse({ status: 409, description: 'file_not_available' })
   attach(@CallerService() caller: string, @Req() req: Request, @Param('id') id: string) {
@@ -117,6 +125,7 @@ export class UploadController {
   @ApiHeader({ name: 'X-File-Name', required: false, description: 'Percent-encoded UTF-8; presentation only' })
   @ApiResponse({ status: 201, ...FILE_VIEW })
   @ApiResponse({ status: 200, description: 'Retry of a completed upload: the same file' })
+  @ApiResponse({ status: 400, description: 'validation_error (headers) | upload_aborted | upload_incomplete' })
   @ApiResponse({ status: 404, description: 'ticket_invalid' })
   @ApiResponse({ status: 409, description: 'upload_in_progress' })
   @ApiResponse({ status: 411, description: 'length_required' })
@@ -124,6 +133,8 @@ export class UploadController {
   @ApiResponse({ status: 415, description: 'unsupported_media_type' })
   @ApiResponse({ status: 422, description: 'media_type_mismatch' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
+  @ApiResponse({ status: 408, description: 'upload_timeout' })
+  @ApiResponse({ status: 500, description: 'storage_error | upload_failed (opaque)' })
   @ApiResponse({ status: 503, description: 'storage_unavailable | upload_busy (too many uploads in progress; the ticket is not consumed)' })
   async redeem(@Param('token') token: string, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const result = await this.uploads.redeemUploadTicket(token, req);

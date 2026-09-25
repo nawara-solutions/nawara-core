@@ -1,6 +1,6 @@
 # Stage 17.2 — File Service foundation
 
-- **Status:** implemented and validated on `feat/file-service-foundation` (awaiting review).
+- **Status:** merged (PR #106); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** the production-shaped `file-service` application on `@nawara/service-kit`: bootstrap, configuration, logging and request
   context, errors, health and readiness, the bounded HTTP drain and shutdown, service authentication, the caller-policy foundation,
   database provisioning, the production image, Compose and CI integration, tests.

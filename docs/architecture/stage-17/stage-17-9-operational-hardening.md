@@ -1,6 +1,6 @@
 # Stage 17.9 — File operational hardening
 
-- **Status:** implemented and validated on `feat/file-service-operational-hardening` (awaiting review).
+- **Status:** merged (PR #113). **Stage 17.10 found and fixed one defect of this stage** (the upload idle re-arm, O-4: [17.10 record](./stage-17-10-focused-certification.md) §4).
 - **Scope:** the operational envelope of File Service, established by measurement: download verification cost, download and upload
   concurrency, connection pressure, slow and disconnecting clients, database pool pressure, storage latency / outage / recovery, cleanup
   backlog, rate limits under concurrency and growth, shutdown and restart recovery, credential rotation; the operational signals
@@ -325,12 +325,12 @@ runbook §10. No backup mechanism was built.
 
 | Suite | Result |
 |---|---|
-| unit (`npm test -w file-service`) | UNIT_RESULT |
-| e2e (`test:e2e`, PostgreSQL 16 + VersityGW) | E2E_RESULT |
-| operational probes (`test:ops`, 8 files) | all pass; the numbers above |
+| unit (`npm test -w file-service`) | not recorded at merge (placeholder); re-run in 17.10: 257 passed |
+| e2e (`test:e2e`, PostgreSQL 16 + VersityGW) | not recorded at merge (placeholder); re-run in 17.10: 293 passed on the merged code |
+| operational probes (`test:ops`, 8 files) | the numbers above; **17.10:** one probe (S3 pressure) no longer booted under the later 17.9 idle-bound check and was fixed; 18 / 18 pass |
 | lint (oxlint type-aware), typecheck, `check:repo`, `git diff --check` | clean |
-| image probe (production image) | IMAGE_RESULT |
-| `npm audit --omit=dev` | AUDIT_RESULT |
+| image probe (production image) | not recorded at merge (placeholder); certified in 17.10 |
+| `npm audit --omit=dev` | not recorded at merge (placeholder); 17.10: 0 vulnerabilities |
 
 New tests: `src/ops/ops.spec.ts` (gates, counters, cardinality, deadline and socket-bound formulas), configuration tests (bounds and the
 three relationships), `test/operations.e2e-spec.ts` (download bound and ticket rollback, junk tickets never busy, deadline, snapshot
@@ -339,7 +339,8 @@ in `storage-s3-failures.e2e-spec.ts` (mid-body read stall, a store that stops re
 
 ### Mutation campaign
 
-MUTATION_TABLE
+Not recorded at merge (the table was a placeholder). Stage 17.10 ran a risk-based campaign covering the 17.9 controls (overload gates,
+slot release, busy claims, cardinality, the idle re-arm): [17.10 record](./stage-17-10-focused-certification.md) §7.
 
 ## 16. Production prerequisites and deferred work
 

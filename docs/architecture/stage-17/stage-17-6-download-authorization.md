@@ -1,6 +1,6 @@
 # Stage 17.6 — File download and authorization
 
-- **Status:** implemented and validated on `feat/file-service-download-authorization` (awaiting review).
+- **Status:** merged (PR #110); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** the controlled byte-read boundary: owner metadata and content for trusted services (Option A), short-lived download tickets
   (issue, redeem, revoke) for clients (Option C), safe response headers, streaming with backpressure and cancellation, integrity faults
   on read, the shared redemption abuse bound, OpenAPI.
@@ -49,7 +49,7 @@
 - **Binding:** operation `download`, exactly one file (the path's file, never a request field), the issuing owner, the file's
   organization, the disposition (`inline` only for images, SDD §9).
 - **Reuse (F36):** reusable until expiry by default (a dropped connection can retry); `singleUse: true` makes it single-use. Each use is
-  counted (`useCount`).
+  counted (`useCount`). *(Superseded in part by Stage 17.8: a reusable ticket is also bounded by `FILE_TICKET_MAX_DOWNLOADS` uses.)*
 - **Redemption = one statement** (`TicketRepository.claimDownload`): the ticket (operation `download`, not revoked, not expired, unused if
   single-use) AND its file (the bound id, `AVAILABLE`, still the issuer's in the ticket's organization) are checked and the use is
   claimed atomically; the issuer's CURRENT policy (`issue_ticket`, organization mode) is re-checked in the same transaction (a refusal
@@ -113,6 +113,7 @@ authorize (service lookup or ticket claim)  →  StoragePort.get(key, signal)  �
 | stream fails after bytes began | connection destroyed | `file_download … outcome=stream_failed` |
 
 SHA-256 is **not** recomputed on each download (it is the `ETag`, verified at upload; continuous integrity scanning is later work).
+*(Superseded by Stage 17.8: the SHA-256 is recomputed during every download and a mismatched download cannot complete.)*
 `/ready` stays `200` during a storage outage (tested in-process and in the image).
 
 ## 7. Observability
