@@ -73,7 +73,8 @@ describeWithEnv('ops probe: byte-path pressure', ['TEST_DATABASE_ADMIN_URL'], (r
   for (const adapter of ['filesystem', 's3'] as const) {
     it(`${adapter}: ${HELD} paused readers — what they hold, and whether other storage work still gets through`, async (ctx) => {
       if (adapter === 's3' && !env.TEST_S3_ENDPOINT) return ctx.skip();
-      await withService(adapter, { FILE_DOWNLOAD_IDLE_TIMEOUT_MS: '60000' }, async (svc) => {
+      // The readers stay paused past the default idle bound; the store's idle bound must still exceed it (the 17.9 boot check).
+      await withService(adapter, { FILE_DOWNLOAD_IDLE_TIMEOUT_MS: '60000', FILE_STORAGE_IDLE_TIMEOUT_MS: '90000' }, async (svc) => {
         const up = await uploadOne(svc, 24 * MiB);
         expect(up.status).toBe(201);
         const url = `${svc.base}/file/files/${String(up.json.id)}/content`;

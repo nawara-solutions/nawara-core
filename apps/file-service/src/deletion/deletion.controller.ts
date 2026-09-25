@@ -18,6 +18,9 @@ export class DeletionController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader({ name: 'X-Organization-Id', required: false, description: "The file's organization, when it has one" })
   @ApiResponse({ status: 202, description: 'The file, DELETING or DELETED' })
+  @ApiResponse({ status: 400, description: 'validation_error (X-Organization-Id)' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'file_not_found (also another owner\'s or organization\'s file)' })
   @ApiResponse({ status: 409, description: 'upload_in_progress | file_not_available (a refused or failed upload)' })
   requestDeletion(@CallerService() caller: string, @Req() req: Request, @Param('id') id: string) {

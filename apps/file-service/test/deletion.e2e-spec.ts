@@ -214,6 +214,21 @@ describeWithEnv('delete + cleanup lifecycle (real PostgreSQL, filesystem store)'
     expect((await row(id)).status).toBe('DELETED');
   });
 
+  it('Stage 17.10: the attempt fence isolates a stale worker while the row is STILL DELETING (another worker holds it now)', async () => {
+    const id = await uploaded();
+    await del(id);
+    await dueNow(id);
+    const a = (await files.claimDeletions(10, 300)).find((c) => c.id === id)!; // worker A claims (attempt 1) and stalls
+    await s.query(`UPDATE file SET "deleteLeaseUntil" = now() - interval '1 second' WHERE id = $1`, [id]); // A's lease expires
+    const b = (await files.claimDeletions(10, 300)).find((c) => c.id === id)!; // worker B reclaims: attempt 2, a fresh lease
+    expect([a.attempt, b.attempt]).toEqual([1, 2]);
+    expect(await files.retryDeletion(id, a.attempt, 30, 'storage_unavailable')).toBe(false); // A cannot reschedule B's claim …
+    const held = await row(id);
+    expect(held).toMatchObject({ status: 'DELETING', deleteAttempts: 2, deleteLastError: null });
+    expect(held.deleteLeaseUntil).not.toBeNull(); // … nor release B's lease (which would let a third worker claim it concurrently)
+    expect(await files.retryDeletion(id, b.attempt, 30, 'storage_unavailable')).toBe(true); // the current holder can
+  });
+
   it('two replicas claim disjoint batches; together they delete every file exactly once', async () => {
     const ids = await Promise.all(Array.from({ length: 30 }, () => uploaded({ bytes: SAMPLES.pdf(300) })));
     for (const id of ids) await del(id);

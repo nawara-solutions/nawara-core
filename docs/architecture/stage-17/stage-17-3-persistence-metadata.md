@@ -1,6 +1,6 @@
 # Stage 17.3 — File persistence and metadata
 
-- **Status:** implemented and validated on `feat/file-service-persistence` (awaiting review).
+- **Status:** merged (PR #107); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** the durable `file` and `file_access_ticket` model (`apps/file-service/db/migrations/0001_file_schema.sql`) and its
   repository layer (`apps/file-service/src/persistence/`): metadata, ownership, organization scope, storage identity, integrity fields,
   the lifecycle, ticket persistence (digest, bindings, expiry, use, revocation).

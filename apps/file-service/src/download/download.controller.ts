@@ -40,6 +40,9 @@ export class DownloadController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader(ORG_HEADER)
   @ApiResponse({ status: 200, description: 'The file' })
+  @ApiResponse({ status: 400, description: 'validation_error (X-Organization-Id)' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'file_not_found' })
   metadata(@CallerService() caller: string, @Req() req: Request, @Param('id') id: string) {
     return this.downloads.metadata(caller, req, id);
@@ -52,10 +55,14 @@ export class DownloadController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader(ORG_HEADER)
   @ApiResponse({ status: 200, ...BYTES })
+  @ApiResponse({ status: 400, description: 'validation_error (X-Organization-Id)' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'file_not_found' })
   @ApiResponse({ status: 409, description: 'file_not_available' })
   @ApiResponse({ status: 410, description: 'file_deleted' })
   @ApiResponse({ status: 429, description: 'rate_limited (service reads per caller / per organization, F32)' })
+  @ApiResponse({ status: 500, description: 'file_content_missing (the stored object is missing or contradicts the record: an integrity incident) | storage_error' })
   @ApiResponse({ status: 503, description: 'storage_unavailable | download_busy (too many downloads in progress in this process; retry, nothing consumed)' })
   async content(@CallerService() caller: string, @Req() req: Request, @Res() res: Response): Promise<void> {
     await this.downloads.serviceContent(caller, req, res, req.params.id as string);
@@ -69,8 +76,12 @@ export class DownloadController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiHeader(ORG_HEADER)
   @ApiResponse({ status: 201, description: '{ ticketId, url, expiresAt }' })
+  @ApiResponse({ status: 400, description: 'validation_error' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'file_not_found' })
   @ApiResponse({ status: 409, description: 'file_not_available' })
+  @ApiResponse({ status: 410, description: 'file_deleted' })
   @ApiResponse({ status: 422, description: 'disposition_not_allowed' })
   @ApiResponse({ status: 429, description: 'rate_limited (ticket issuance per caller / per organization, F32)' })
   issueTicket(@CallerService() caller: string, @Req() req: Request, @Param('id') id: string, @Body() dto: IssueDownloadTicketDto) {
@@ -85,6 +96,8 @@ export class DownloadController {
   @ApiParam({ name: 'ticketId', format: 'uuid' })
   @ApiHeader(ORG_HEADER)
   @ApiResponse({ status: 204, description: 'Revoked' })
+  @ApiResponse({ status: 401, description: 'no or unknown service token' })
+  @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'ticket_not_found (also another caller\'s ticket)' })
   async revoke(@CallerService() caller: string, @Req() req: Request, @Param('ticketId') ticketId: string): Promise<void> {
     await this.downloads.revokeTicket(caller, req, ticketId);
@@ -96,6 +109,7 @@ export class DownloadController {
   @ApiResponse({ status: 200, ...BYTES })
   @ApiResponse({ status: 404, description: 'ticket_invalid' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
+  @ApiResponse({ status: 500, description: 'file_content_missing (an integrity incident) | storage_error' })
   @ApiResponse({ status: 503, description: 'storage_unavailable | download_busy (too many downloads in progress in this process; retry, nothing consumed)' })
   async redeem(@Param('token') token: string, @Req() req: Request, @Res() res: Response): Promise<void> {
     await this.downloads.redeem(token, req, res);

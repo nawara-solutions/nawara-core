@@ -98,8 +98,10 @@ export function watchUpload(req: Request, idleMs: number): { signal: AbortSignal
     // this request's buffer: the CLIENT is not idle, the store is, and the store's own idle bound (FILE_STORAGE_IDLE_TIMEOUT_MS, longer
     // than this one) ends the upload as `storage_timeout`. Re-arm instead of blaming the client. (Not `readableFlowing`: the pipeline
     // reads through an async iterator, which keeps the stream in paused mode whether or not anything is waiting.)
+    // Stage 17.10: re-arm the socket timer only. `setTimeout(ms, callback)` ADDS a listener every call, and every listener re-arms on the
+    // next idle period, so while the store held back they doubled each period (measured: 8 388 608 on one request after 14 s).
     if (req.readableLength > 0) {
-      req.setTimeout(idleMs, onIdle);
+      req.setTimeout(idleMs);
       return;
     }
     controller.abort(REFUSALS.idle());
@@ -111,6 +113,7 @@ export function watchUpload(req: Request, idleMs: number): { signal: AbortSignal
     release: () => {
       req.off('close', onClose);
       req.off('error', onError);
+      req.off('timeout', onIdle);
       req.setTimeout(0);
     },
   };

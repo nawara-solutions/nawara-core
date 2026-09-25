@@ -1,7 +1,10 @@
 # file-service
 
-- **Status:** Draft (Stage 17.1 design, architecture frozen; nothing implemented). F16 decided: product-issued access tickets
-  ([Stage 17.1 record](../architecture/stage-17/stage-17-1-decisions-and-roadmap.md) §3).
+- **Status:** Implemented (Stages 17.2–17.9) and certified for its V1 scope in Stage 17.10
+  ([certification record](../architecture/stage-17/stage-17-10-focused-certification.md)); production enablement still depends on the
+  prerequisites of §18. F16 decided: product-issued access tickets
+  ([Stage 17.1 record](../architecture/stage-17/stage-17-1-decisions-and-roadmap.md) §3). The "Implemented (17.x)" paragraphs below record
+  how the implementation settled each part; where they differ from the original design text, they are the current behaviour.
   Stage 17.2: the service foundation only (health, readiness, service auth, caller policy; no file domain yet):
   [Stage 17.2 record](../architecture/stage-17/stage-17-2-service-foundation.md). Stage 17.3: the schema and repositories (no
   byte path yet): [Stage 17.3 record](../architecture/stage-17/stage-17-3-persistence-metadata.md). Stage 17.4: the storage port and
@@ -146,7 +149,7 @@ the cleanup worker (orphan protection, F18). Generated files a service uploads f
 | `AVAILABLE`, object missing (operator error, provider loss) | `AVAILABLE` | a read gets `storage_not_found` → `file_content_missing` error, a `file_storage_inconsistent` signal; reconciliation reports it (§12) |
 | `DELETING` committed, storage delete fails | `DELETING` | the delete worker retries with backoff (delete is idempotent) |
 | storage delete succeeds, `DELETED` update fails | `DELETING`, object gone | the retry deletes a missing key (success) and marks `DELETED` |
-| object with no row (a write after the row was swept) | orphan object | the key prefix is never listable by a user; reconciliation deletes orphan keys older than the lease |
+| object with no row (a write after the row was swept) | orphan object | the key prefix is never listable by a user. **As implemented (17.7):** not searched: the port has no list operation and the reconcile tool never lists the bucket; such objects arise only from the crash windows above, which the lease sweep covers by key (a bucket inventory, if ever needed, is an operator task) |
 
 ## 6. Storage keys
 
@@ -163,7 +166,8 @@ knowing a key grants nothing: buckets are private, and no permanent public URL e
   extend): `application/pdf`, `image/jpeg`, `image/png`, `image/webp`, `image/heic`, `image/heif`. Refused by default: HTML, SVG,
   scripts, executables, archives, Office formats (macro risk), unknown types. Per-caller policy may narrow the list, never widen it.
 - **Checksum:** SHA-256 computed while streaming. A client may send `Content-Digest: sha-256=:…:` (RFC 9530); a mismatch is
-  `422 checksum_mismatch`, and the object is deleted. The provider checksum is used by the adapter where available, as a second check.
+  `422 checksum_mismatch`, and the object is deleted. The provider checksum as a second check is **not used** (17.4: the SDK's automatic
+  checksums are off for S3-compatible portability); it is an item of the production-provider evaluation (O2 / F6).
 - **Deduplication:** none (no cross-tenant content addressing; the checksum is never used to find another tenant's file).
 
 ## 8. Filenames
@@ -255,9 +259,11 @@ recorded key only (no bucket listing).
 Bounded workers (`PollLoop`, `SKIP LOCKED`, the Notification 16.9 batch pattern with a materialized CTE): the upload-lease sweep
 (`UPLOADING` past lease → `FAILED` + delete), orphan expiry (unattached past deadline → `DELETING`), the delete worker (`DELETING` →
 storage delete → `DELETED`, retried with backoff), ticket expiry. Reconciliation (operator tool, not a continuous scanner in V1):
-`AVAILABLE` rows whose object is missing, and objects older than the upload lease with no row, reported and optionally repaired.
+`AVAILABLE` rows whose object is missing (or the wrong size) are reported, never repaired; objects that still exist for `FAILED` /
+`REJECTED` / `DELETED` rows are reported and removed with `--repair`, by recorded key. Objects with no row are **not** searched (no bucket
+listing, 17.7 §7); same-size alterations are found only on read (17.8 digest check).
 
-## 13. API contract (V1, proposed; routes are fixed in 17.5 / 17.6)
+## 13. API contract (V1; implemented in 17.5–17.7 — the OpenAPI document at `/file/docs` is the detailed contract)
 
 Prefix `/file` (Core ADD API convention). Every route except ticket redemption requires a service token and the caller policy.
 
@@ -268,8 +274,8 @@ Prefix `/file` (Core ADD API convention). Every route except ticket redemption r
 | `GET /file/files/:id` (`X-Organization-Id` when the file has one) | owner (`read`) | metadata (never the key, provider or name encoding details) | `200` |
 | `GET /file/files/:id/content` | owner (`read`) | streamed bytes with the §9 headers | `200` stream |
 | `DELETE /file/files/:id` | owner (`delete`) | logical delete (idempotent) | `202` |
-| `POST /file/files/:id/tickets` `{ operation: download, disposition, singleUse? }` | owner (`issue_ticket`) | short-lived download ticket | `201 { url, expiresAt }` |
-| `POST /file/uploads/tickets` `{ organizationId?, maxBytes, mediaTypes, attach? }` | service (`issue_ticket`) | single-use upload intent | `201 { url, expiresAt }` |
+| `POST /file/files/:id/tickets` `{ operation: download, disposition, singleUse? }` | owner (`issue_ticket`) | short-lived download ticket | `201 { ticketId, url, expiresAt }` |
+| `POST /file/uploads/tickets` `{ organizationId?, maxBytes, mediaTypes, attach? }` | service (`issue_ticket`) | single-use upload intent | `201 { ticketId, url, expiresAt }` |
 | `DELETE /file/tickets/:ticketId` | issuer (`issue_ticket`) | revoke a ticket | `204` |
 | `GET /file/t/:token` · `PUT /file/t/:token` | **ticket holder** (no identity; the ticket is the only authority) | redeem a download / upload ticket | stream / `201` metadata |
 
@@ -281,8 +287,12 @@ through the kit outbox (§17). Health: `GET /health`, `GET /ready` (root, not ro
 Stable codes, never localized text as the contract: `file_not_found`, `file_not_available`, `file_too_large`,
 `unsupported_media_type`, `media_type_mismatch`, `checksum_mismatch`, `upload_in_progress`, `upload_expired`, `ticket_invalid`
 (expired, used or unknown: one code), `idempotency_key_reused`, `file_deleted`, `file_content_missing`, `storage_unavailable`,
-`rate_limited`, `upload_busy` (17.8: too many uploads in progress in one process; retryable), plus the kit's `validation_error` and
-the generic 401 / 403.
+`rate_limited`, `upload_busy` (17.8: too many uploads in progress in one process; retryable), `download_busy` (17.9: the same for
+downloads), plus the kit's `validation_error` and the generic 401 / 403. **As implemented (17.5–17.9)** the set also includes
+`length_required` (411), `upload_aborted` / `upload_incomplete` (400), `upload_timeout` (408), `storage_error` / `upload_failed` (500),
+`ticket_not_found` (404, revocation), `disposition_not_allowed` (422) and the policy refusals `operation_not_allowed`,
+`organization_not_allowed`, `max_bytes_not_allowed`, `media_type_not_allowed` (403); `upload_expired` was not needed (an expired upload
+is `FAILED upload_abandoned`, and an expired ticket is `ticket_invalid`). `429` is a caller's budget; `503 *_busy` is process capacity.
 
 **Rate limits (F32, Stage 17.8):** per caller and per (caller, organization), one-minute windows, on service uploads, ticket
 issuance (upload and download tickets share one budget) and service content reads; charged after authorization, before any work;
@@ -306,8 +316,10 @@ issuance (upload and download tickets share one budget) and service content read
   answers `503 upload_busy` / `download_busy` (per-process bounds), distinct from `429 rate_limited` (a caller's budget); neither
   affects readiness. Timeouts: the store's idle bound is now enforced (it was inert with the SDK in use) and must exceed the client
   idle bounds; downloads also have a whole-transfer deadline.
-- **Timeouts:** connect ≤ 2 s; an idle-stream timeout (no byte for 30 s) and a whole-transfer bound derived from size and a minimum
-  throughput; retries only for `head`, `get` (before any byte is sent to the client) and `delete`; never for `put` mid-stream.
+- **Timeouts:** connect ≤ 2 s; an idle-stream timeout (no byte for 30 s; **as implemented (17.9):** the client idle bounds are 30 s and
+  the store's idle bound 45 s, which must exceed them) and a whole-transfer bound derived from size and a minimum throughput (uploads
+  and, since 17.9, downloads); retries only for `head`, `get` (before any byte is sent to the client) and `delete`; never for `put`
+  mid-stream.
 
 ## 16. Security and privacy
 
@@ -325,3 +337,8 @@ events (`file.access_denied`, sensitive downloads) are audit-service concerns de
 Architecture: none open (F16 decided). Before production enablement: F6 storage provider (before production
 enablement); F19 malware policy (before production enablement); F23 legal retention; F13 allow-list extension (Office formats);
 default limits (25 MB per file, 24 h attach window).
+
+**Stage 17.10:** the complete, classified list (production prerequisites, residual risks, the Stage 21 / 21.x hand-off) is in the
+[certification record](../architecture/stage-17/stage-17-10-focused-certification.md) §9–§11; besides the items above it names backup /
+DR (F34), a real-provider run of the storage contract and probes, bucket and credential provisioning with SSE, external alert routing,
+and load-balancer connection limits.

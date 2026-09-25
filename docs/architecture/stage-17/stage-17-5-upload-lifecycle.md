@@ -1,6 +1,6 @@
 # Stage 17.5 — File upload lifecycle
 
-- **Status:** implemented and validated on `feat/file-service-upload-lifecycle` (awaiting review).
+- **Status:** merged (PR #109); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** the first path by which untrusted bytes enter File Service: upload-ticket issuance by a trusted service, ticket
   redemption by an untrusted client, service upload (Option A), attach; streaming ingestion with size enforcement, type detection
   from the bytes, SHA-256, storage through `StoragePort`, the lifecycle transitions, idempotency, failure semantics, abuse bound,

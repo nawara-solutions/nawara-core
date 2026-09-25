@@ -1,6 +1,6 @@
 # Stage 17.4 — File storage abstraction
 
-- **Status:** implemented and validated on `feat/file-service-storage` (awaiting review).
+- **Status:** merged (PR #108); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** the provider-neutral byte store behind File Service: `StoragePort`, the filesystem adapter (development and tests), the
   S3-compatible adapter, storage configuration and provider selection, error normalization, bounded timeouts and retries, abort
   propagation, observation hooks, one contract test suite run against both adapters, S3 test infrastructure (Compose profile, CI).

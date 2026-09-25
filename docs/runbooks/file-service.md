@@ -146,6 +146,9 @@ alterations are not detected (it compares sizes, not digests).
 
 ## 9. Deployment checklist (operational)
 
+- Migrations: `npm run migrate` (image: `npm run migrate` with `MIGRATION_DATABASE_URL` = the `file_migrator` role) before the new
+  version takes traffic; `/ready` stays 503 while one is pending; a re-run applies nothing. Before `0003` on a database older than it,
+  run the precondition query of `apps/file-service/db/migrations/README.md` (Stage 17.10).
 - `TRUST_PROXY=true` only behind a proxy that OVERWRITES `X-Forwarded-For` (the kit trusts every hop: a client that reaches the
   service directly could rotate addresses past the redemption limiter).
 - The load balancer caps connections per client and in total, and its idle timeout is below the service's (65 s silent-socket bound).

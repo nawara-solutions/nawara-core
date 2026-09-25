@@ -1,6 +1,6 @@
 # Stage 17.7 — File delete and cleanup lifecycle
 
-- **Status:** implemented and validated on `feat/file-service-delete-cleanup` (awaiting review).
+- **Status:** merged (PR #111); certified with the whole of Stage 17 in [17.10](./stage-17-10-focused-certification.md).
 - **Scope:** the owner delete route (logical first), the bounded cleanup workers of SDD §12 (orphan expiry, the physical-delete
   worker, the upload-lease sweep, ticket retention), the operator reconciliation tool, crash and race safety.
 - **Not in scope (and not present):** a scanner, DLP or content inspection (17.8); alerting, dashboards, key rotation, backup / DR, a

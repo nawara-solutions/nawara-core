@@ -1,8 +1,11 @@
 # file-service
 
-> **Status: the complete V1 lifecycle (Stages 17.2–17.7).** Services upload, read and delete their own files and issue upload /
-> download tickets; clients redeem tickets directly (no user token, no call to Auth); bounded workers remove deleted bytes, abandoned
-> uploads, expired temporary files and old tickets.
+> **Status: the complete V1 lifecycle (Stages 17.2–17.9), certified in Stage 17.10.** Services upload, read and delete their own files
+> and issue upload / download tickets; clients redeem tickets directly (no user token, no call to Auth); bounded workers remove deleted
+> bytes, abandoned uploads, expired temporary files, old tickets and expired limiter windows. Production enablement still needs the
+> prerequisites of the [17.10 record](../../docs/architecture/stage-17/stage-17-10-focused-certification.md) §10 (storage provider,
+> malware decision, backup / DR, alert routing, …). **No malware scanning exists** (Stage 17.8 decision B): a valid PDF or image may still
+> carry malicious content.
 
 Generic file objects for Nawara Core: products keep the business meaning and relationships (`StudentDocument.fileId`); File Service
 owns immutable bytes, generic metadata, integrity, lifecycle, storage and controlled byte access. Design:
@@ -13,7 +16,10 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 [Stage 17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md),
 [Stage 17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md),
 [Stage 17.6 record](../../docs/architecture/stage-17/stage-17-6-download-authorization.md),
-[Stage 17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md).
+[Stage 17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md),
+[Stage 17.8 record](../../docs/architecture/stage-17/stage-17-8-security-integrity.md),
+[Stage 17.9 record](../../docs/architecture/stage-17/stage-17-9-operational-hardening.md),
+[Stage 17.10 certification](../../docs/architecture/stage-17/stage-17-10-focused-certification.md), [runbook](../../docs/runbooks/file-service.md).
 
 ## What exists (17.2 foundation)
 
@@ -44,7 +50,7 @@ streamed bodies with a required `Content-Length`; the type from the bytes (PDF, 
 streaming; OpenAPI at `/file/docs` when `SWAGGER_PASSWORD` is set.
 
 **Download (17.6):** `src/download/`: `GET /file/files/{id}` and `GET /file/files/{id}/content` (owner, `read`),
-`POST /file/files/{id}/tickets` (owner, `issue_ticket`; reusable until expiry unless `singleUse`), `DELETE /file/tickets/{ticketId}`
+`POST /file/files/{id}/tickets` (owner, `issue_ticket`; reusable until expiry and at most `FILE_TICKET_MAX_DOWNLOADS` uses, unless `singleUse`), `DELETE /file/tickets/{ticketId}`
 (issuer), `GET /file/t/{token}` (the ticket holder). Streamed with backpressure; `attachment`, `private, no-store`, `nosniff`, a sandbox
 CSP; no Range, no HEAD.
 
@@ -52,8 +58,8 @@ CSP; no Range, no HEAD.
 idempotent); `src/cleanup/`: one bounded worker loop (orphan expiry, physical delete with lease + fence + backoff, upload-lease sweep,
 ticket retention); `npm run reconcile -- [--repair]` (the operator tool: reports missing objects, removes leftovers of failed rows).
 
-**Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency (and there
-is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
+**Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no RabbitMQ
+(outbox events wait for Stage 18); no user JWT; no malware scanner (decision B); no public or presigned URL, Range, multipart or versions.
 
 ## Configuration
 
@@ -127,4 +133,4 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 17.7 | ✅ delete, orphan cleanup, reconciliation |
 | 17.8 | ✅ security and integrity |
 | 17.9 | ✅ operational hardening: measured envelope, download bound, idle / deadline fixes, drain mode, signals, runbook |
-| 17.10 | focused certification |
+| 17.10 | ✅ focused certification: invariant matrix, integrated probes, one 17.9 defect fixed (idle re-arm listener growth), closure verdict |
