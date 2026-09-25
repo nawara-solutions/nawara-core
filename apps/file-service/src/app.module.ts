@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import { Global, Module, type DynamicModule } from '@nestjs/common';
-import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir } from '@nawara/service-kit';
+import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir, type EventBus } from '@nawara/service-kit';
 import type { FileConfig } from './config/file-config.js';
 import { FILE_CONFIG } from './config/file-config.token.js';
+import { FileAuditModule } from './audit/file-audit.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
 import { StorageModule } from './storage/storage.module.js';
 import { DeletionModule } from './deletion/deletion.module.js';
@@ -18,6 +19,8 @@ export const fileMigrationsDir = fileURLToPath(new URL('../db/migrations/', impo
 export interface AppModuleOverrides {
   /** Tests point readiness at the migrations they applied. */
   migrationsDirs?: string[];
+  /** TEST FIXTURES ONLY: the event bus the audit relay publishes to (production builds it from RABBITMQ_URL). */
+  bus?: EventBus;
 }
 
 @Global()
@@ -44,8 +47,11 @@ class ConfigModule {
  * metadata and content, download tickets, their redemption, ticket revocation); Stage 17.7 deletion and cleanup (`DeletionModule`: the
  * delete route and the bounded cleanup workers: orphan expiry, delete worker, upload-lease sweep, ticket retention).
  *
- * Deliberately NOT here (ADR-0048): object storage is not a readiness dependency; there is no RabbitMQ (events come with Stage 18 /
- * 17.9 through the kit outbox) and no call to Auth or to any product service, for any purpose.
+ * Stage 18.7.4 adds the central audit intent (`FileAuditModule`: `file.deleted`, `file.integrity_incident`) and the kit outbox relay that
+ * publishes it to RabbitMQ — the only events this service produces; it consumes none.
+ *
+ * Deliberately NOT here (ADR-0048): object storage is not a readiness dependency; no call to Auth or to any product service, for any
+ * purpose.
  */
 @Module({})
 export class AppModule {
@@ -70,6 +76,7 @@ export class AppModule {
         ServiceAuthModule.forRoot(config.serviceTokens),
         ConfigModule.forRoot(config, counters),
         PersistenceModule,
+        FileAuditModule.forRoot(config, overrides.bus), // Stage 18.7.4: the central audit intent and the kit relay (the ONE events use)
         StorageModule.forRoot(config.storage, (o) => {
           logStorage(o);
           counters.observeStorage(o);

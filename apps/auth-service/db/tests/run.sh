@@ -168,3 +168,23 @@ if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO \"user\"(id,kind,email,\"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0009_member_zero_membership.sql" || fail "M11: re-apply after rollback"
 echo "PASS: M11c rollback then re-apply round-trips, and the [1..N] rule is restored while rolled back"
 
+
+echo "== M12: migration 0010 (Stage 18.7.5) adds the audit outbox to a populated 0009 database; the outbox is immutable; rollback guards unpublished evidence =="
+db="$(newdb mig10)"
+for f in "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0010_*) ;; *) psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f" ;; esac; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara')"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO \"user\"(id,kind,email,\"passwordHash\",role) VALUES ('00000000-0000-0000-0000-0000000000f3','member','m10@x.io','pw','member')"
+before="$(psql -Atq -d "$db" -c "SELECT count(*) FROM \"user\"")"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0010_audit_outbox.sql" || fail "M12: 0010 must apply on a populated 0009 database"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM \"user\"")" = "$before" ] || fail "M12: 0010 must not touch existing data"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM information_schema.tables WHERE table_name IN ('inbox','rate_limit_bucket')")" = 0 ] || fail "M12: 0010 adds the outbox only"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO outbox(id,name,payload) VALUES ('00000000-0000-4000-8000-000000000a10','audit.login.succeeded','{\"k\":1}')"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE outbox SET payload='{\"k\":2}' WHERE id='00000000-0000-4000-8000-000000000a10'" >/dev/null 2>&1; then fail "M12: an outbox payload must be immutable"; fi
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO outbox(id,name,payload) VALUES (gen_random_uuid(),'NotDotted','{}')" >/dev/null 2>&1; then fail "M12: the event name shape must be enforced"; fi
+echo "PASS: M12a 0010 upgrades a populated database, adds only the outbox, and the outbox keeps the kit's immutability rules"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0010_audit_outbox.down.sql" >/dev/null 2>&1; then fail "M12: rollback must refuse while an unpublished event exists"; fi
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE outbox SET \"publishedAt\" = now()"
+if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE outbox SET \"publishedAt\" = NULL" >/dev/null 2>&1; then fail "M12: a published event cannot be unpublished"; fi
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0010_audit_outbox.down.sql" || fail "M12: rollback must succeed once every event is published"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0010_audit_outbox.sql" || fail "M12: re-apply after rollback"
+echo "PASS: M12b rollback refuses while unpublished evidence exists, succeeds once drained, and re-applies"

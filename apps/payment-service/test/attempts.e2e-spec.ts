@@ -14,7 +14,7 @@ const paymentBody = () => {
     paymentRequestId: crypto.randomUUID(),
     sourceType: 'invoice',
     sourceId: 'inv-1',
-    payer: { type: 'user', id: 'user-1' },
+    payer: { type: 'user', id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21' },
     seller: { type: 'organization', id: organizationId },
     organizationId,
     amount: 1000,
@@ -26,10 +26,11 @@ describeWithEnv('attempts API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
   let db: TestDatabase;
   let t: TestApp;
   const billing = generateServiceToken();
-  const userIdentity: AuthIdentity = { id: 'user-1', adminTier: null, isActive: true, memberships: [] };
+  // Stage 18.7: Auth user ids are UUIDs ("user".id uuid); a settling user becomes central audit evidence, which accepts only a real id.
+  const userIdentity: AuthIdentity = { id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21', adminTier: null, isActive: true, memberships: [] };
   const identities: Record<string, AuthIdentity> = {
     'user-1-jwt': userIdentity,
-    'someone-elses-jwt': { id: 'someone-else', adminTier: null, isActive: true, memberships: [] },
+    'someone-elses-jwt': { id: '2f1b8d6c-4e3a-4b7c-8d9e-8f7a6b5c4d32', adminTier: null, isActive: true, memberships: [] },
   };
   const authClient: AuthClient = { getIdentity: async (bearer) => identities[bearer] ?? null, hasPlatformAccess: async () => false };
 

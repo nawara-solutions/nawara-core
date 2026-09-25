@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit } from '../audit/central-audit.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { sha256Hex, randomToken } from '../crypto/random.js';
@@ -32,6 +33,7 @@ export class RefreshTokenService {
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   private expiry(now: Date, ceiling: Date | null): Date {
@@ -80,6 +82,11 @@ export class RefreshTokenService {
       if (t.replacedByTokenId) {
         await revokeFamily();
         await this.audit.record({ type: 'session.refresh_reuse_detected', outcome: 'denied', actorId: t.userId, sessionFamilyId: t.familyId, ip }, q);
+        // Stage 18.7.6: the central audit intent, in the transaction that revokes the family (no IP, no token material).
+        await this.central.write(q, {
+          action: 'session.refresh_reuse_detected', actor: { type: 'system', id: 'refresh_reuse_detection' }, organizationId: null,
+          resource: { type: 'user', id: t.userId }, outcome: 'denied',
+        });
         return { ok: false, reason: 'reuse' };
       }
       // A token merely REVOKED (logout, block, recovery, password change) is just refused.

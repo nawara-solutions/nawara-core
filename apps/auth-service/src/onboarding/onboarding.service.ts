@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, userActor } from '../audit/central-audit.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
@@ -51,6 +52,7 @@ export class OnboardingService {
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
     @Inject(StepUpService) private readonly stepUp: StepUpService,
     @Inject(PlatformAccessService) private readonly access: PlatformAccessService,
   ) {}
@@ -152,15 +154,21 @@ export class OnboardingService {
       const { rows } = await q.query(
         `INSERT INTO organization_join_code("organizationId","platformId","codeHash",audience,"requiresApproval","requiresSubscription","expiresAt","maxUses","createdBy")
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         RETURNING id, audience, "requiresApproval", "requiresSubscription", "expiresAt", "maxUses", "usedCount", "createdAt"`,
+         RETURNING id, audience, "requiresApproval", "requiresSubscription", "expiresAt", "maxUses", "usedCount", "createdAt", "organizationId"`,
         [organizationId, p!.platformId, hashJoinCode(this.cfg.secrets.joinCodePepper, code.normalized), dto.audience,
           dto.requiresApproval, dto.requiresSubscription, expiresAt, dto.maxUses ?? null, actor.userId],
       );
+      const { organizationId: persistedOrganization, ...created } = rows[0];
       await this.audit.record({
         type: 'onboarding.join_code.created', outcome: 'success', actorId: actor.userId, targetId: rows[0].id, sessionFamilyId: actor.sid, ip,
         metadata: { organizationId, audience: dto.audience, authority },
       }, q);
-      return { ...rows[0], code: code.display };
+      // Stage 18.7.6: the central audit intent, same transaction; the organization is the code row's.
+      await this.central.write(q, {
+        action: 'join_code.created', actor: userActor(actor), organizationId: persistedOrganization, resource: { type: 'join_code', id: created.id },
+        outcome: 'succeeded', changes: { authority },
+      });
+      return { ...created, code: code.display };
     });
   }
 
@@ -172,13 +180,17 @@ export class OnboardingService {
         await this.stepUp.consume(q, { ownerId: actor.userId, sid: actor.sid, purpose: 'join_code.revoke', token: stepUpToken });
       }
       const now = this.clock.now();
-      const { rowCount } = await q.query(
+      const { rows } = await q.query(
         `UPDATE organization_join_code SET "isActive" = false, "revokedAt" = $3, "revokedBy" = $4
-          WHERE id = $1 AND "organizationId" = $2 AND "revokedAt" IS NULL`,
+          WHERE id = $1 AND "organizationId" = $2 AND "revokedAt" IS NULL RETURNING "organizationId"`,
         [codeId, organizationId, now, actor.userId],
       );
-      if (rowCount !== 1) throw notFound(); // rolls back: the step-up is not burned
+      if (rows.length !== 1) throw notFound(); // rolls back: the step-up is not burned
       await this.audit.record({ type: 'onboarding.join_code.revoked', outcome: 'success', actorId: actor.userId, targetId: codeId, sessionFamilyId: actor.sid, ip, metadata: { organizationId, authority } }, q);
+      await this.central.write(q, {
+        action: 'join_code.revoked', actor: userActor(actor), organizationId: rows[0].organizationId, resource: { type: 'join_code', id: codeId },
+        outcome: 'succeeded', changes: { authority },
+      });
     });
   }
 

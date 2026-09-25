@@ -1,3 +1,5 @@
+import type { EventBus } from '@nawara/service-kit';
+import { OrganizationAuditModule } from './audit/organization-audit.js';
 import { fileURLToPath } from 'node:url';
 import { Module, type DynamicModule } from '@nestjs/common';
 import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir } from '@nawara/service-kit';
@@ -23,16 +25,18 @@ export interface AppModuleOverrides {
   servicePolicy?: ServicePolicy;
   /** TEST FIXTURES ONLY: replaces the real HTTP call to Auth's grant-facts/step-up-verify endpoints. */
   authGrantsClient?: AuthGrantsClient;
+  /** TEST FIXTURES ONLY: the event bus the audit relay publishes to (production builds it from RABBITMQ_URL). */
+  bus?: EventBus;
 }
 
 /**
  * The whole module graph. `main.ts` and the test suites build it through the SAME function, so a test can never pass against a
  * differently wired application than the one that ships.
  *
- * What is deliberately ABSENT everywhere except `admin/` (ADR-0042 decision 6, Amendment 1): no events module (no organization
- * events until a concrete consumer needs them), no outbound HTTP client of any other kind, no user-token handling. `admin/` is
- * the one bounded exception, exactly as `ownership/` already is for the migration/authority machinery (boundary.spec.ts carves
- * out both, and nothing else).
+ * What is deliberately ABSENT everywhere except `admin/` (ADR-0042 decision 6, Amendment 1): no outbound HTTP client of any other
+ * kind, no user-token handling. `admin/` is the one bounded exception, exactly as `ownership/` already is for the migration/authority
+ * machinery. Stage 18.7.3: `audit/` is the ONE place that touches events — the kit outbox and relay carry the service's central
+ * audit evidence (ADR-0049); there are still no organization domain events (boundary.spec.ts carves out all three, and nothing else).
  */
 @Module({})
 export class AppModule {
@@ -61,6 +65,7 @@ export class AppModule {
         OrganizationsModule,
         ReferenceModule,
         AdminModule.forRoot(config, overrides.authGrantsClient),
+        OrganizationAuditModule.forRoot(config, overrides.bus), // Stage 18.7.3: central audit intent + the kit relay (the ONE events use)
       ],
     };
   }

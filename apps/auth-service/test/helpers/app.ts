@@ -6,7 +6,7 @@ import { generateSync } from 'otplib';
 import pg from 'pg';
 import request from 'supertest';
 import { inject } from 'vitest';
-import { JsonLogger, requestContextMiddleware } from '@nawara/service-kit';
+import { InMemoryEventBus, JsonLogger, requestContextMiddleware, type EventBus as KitEventBus } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
 import { AuthExceptionFilter } from '../../src/errors.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../../src/common/ports.js';
@@ -56,7 +56,11 @@ export type TestCtx = Awaited<ReturnType<typeof createTestApp>>;
  * `extra.realEvents` (Stage 16.2): keep the REAL event wiring (the kit `RabbitMqEventBus` behind `EventsPublisherService`) against the
  * broker at that URL instead of the recording bus; `bus` then records nothing.
  */
-export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[]; realEvents?: { rabbitmqUrl: string } } = {}) {
+/**
+ * `extra.auditBus` (Stage 18.7.5): the bus the central audit relay publishes to; by default an in-memory bus exposed as `ctx.auditBus`
+ * (the relay runs for real against the test database's outbox either way).
+ */
+export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[]; realEvents?: { rabbitmqUrl: string }; auditBus?: KitEventBus } = {}) {
   const adminUrl = inject('pgAdminUrl');
   const dbName = `t_${randomUUID().replace(/-/g, '')}`;
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -80,7 +84,8 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   const bus = new RecordingBus();
   const logger = new CapturingLogger();
 
-  const builder = Test.createTestingModule({ imports: [AppModule.register(cfg)], providers: extra.providers ?? [] })
+  const auditBus = extra.auditBus ?? new InMemoryEventBus();
+  const builder = Test.createTestingModule({ imports: [AppModule.register(cfg, auditBus)], providers: extra.providers ?? [] })
     .overrideProvider(APP_CONFIG).useValue(cfg)
     .overrideProvider(CLOCK).useValue(clock);
   if (!extra.realEvents) builder.overrideProvider(EVENT_BUS).useValue(bus);
@@ -105,7 +110,7 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   const dbs = app.get(DbService);
 
   const ctx = {
-    app, cfg, clock, bus, logger, jsonLogs, db, http, users, dbs, env,
+    app, cfg, clock, bus, auditBus, logger, jsonLogs, db, http, users, dbs, env,
     async close() {
       await db.end();
       await app.close();

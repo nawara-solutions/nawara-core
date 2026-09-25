@@ -184,7 +184,7 @@ export class FileRepository {
    * concurrent download-ticket issuance (which share-locks the row) and redemption (whose claim needs `AVAILABLE`). Access stops when
    * this commits; the bytes are removed asynchronously by the worker.
    */
-  async requestDeletion(scope: FileScope, id: string): Promise<DeletionRequest> {
+  async requestDeletion(scope: FileScope, id: string, within?: (q: Queryable, file: FileRow) => Promise<void>): Promise<DeletionRequest> {
     if (!UUID.test(id)) return { kind: 'not_found' };
     return this.db.tx(async (q) => {
       const { rows } = await q.query<FileRow>(
@@ -195,6 +195,8 @@ export class FileRepository {
       );
       if (rows[0]) {
         await q.query(`UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = $1 AND "revokedAt" IS NULL`, [id]);
+        // Stage 18.7.4: only this transition (never a repeat) runs `within` — the central audit intent — in the same transaction.
+        if (within) await within(q, rows[0]);
         return { kind: 'deleting', file: rows[0] };
       }
       const current = await this.findOwned(scope, id, q);

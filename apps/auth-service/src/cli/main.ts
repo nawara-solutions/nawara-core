@@ -25,7 +25,8 @@ import { bootstrapOwner, checkTotpKeys, resealTotpSecrets } from './owner-tools.
  */
 const cmd = process.argv[2];
 process.env.AUTH_EVENTS = 'off';
-const app = await NestFactory.createApplicationContext(AppModule.register(loadConfig()), { logger: ['error'] });
+// Stage 18.7.6: no audit relay in a CLI process (the service's relay publishes the outbox); the CLI never connects to the broker.
+const app = await NestFactory.createApplicationContext(AppModule.register(loadConfig(), undefined, { auditRelay: false }), { logger: ['error'] });
 try {
   if (cmd === 'bootstrap-owner') {
     const { BOOTSTRAP_COMPANY_NAME: company, BOOTSTRAP_OWNER_EMAIL: email, BOOTSTRAP_OWNER_PASSWORD: password, BOOTSTRAP_COMPANY_ID: companyId } = process.env;

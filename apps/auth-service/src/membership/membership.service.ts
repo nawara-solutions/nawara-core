@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, userActor } from '../audit/central-audit.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
@@ -33,6 +34,7 @@ export class MembershipService {
     @Inject(EVENT_BUS) private readonly bus: EventBus,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
     @Inject(StepUpService) private readonly stepUp: StepUpService,
     @Inject(PlatformAccessService) private readonly access: PlatformAccessService,
   ) {}
@@ -128,6 +130,11 @@ export class MembershipService {
         type: decision === 'approve' ? 'membership.approved' : 'membership.rejected', outcome: 'success',
         actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip, metadata: { organizationId: m.organizationId, authority },
       }, q);
+      // Stage 18.7.6: the central audit intent, same transaction; the organization is the locked membership row's.
+      await this.central.write(q, {
+        action: decision === 'approve' ? 'membership.approved' : 'membership.rejected', actor: userActor(actor), organizationId: m.organizationId,
+        resource: { type: 'membership', id: m.id }, subject: { type: 'user', id: m.userId }, outcome: 'succeeded', changes: { authority },
+      } as never);
       return { userId: m.userId as string, email: m.email as string | null, phone: m.phone as string | null };
     });
     // Event after commit; nothing delivers it until notification-service and a broker exist (ADR-0028).
@@ -172,6 +179,10 @@ export class MembershipService {
         type: 'membership.revoked', outcome: 'success', actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip,
         metadata: { organizationId: m.organizationId, authority, wasAdmin: m.isOrganizationAdmin },
       }, q);
+      await this.central.write(q, {
+        action: 'membership.revoked', actor: userActor(actor), organizationId: m.organizationId, resource: { type: 'membership', id: m.id },
+        subject: { type: 'user', id: m.userId }, outcome: 'succeeded', changes: { authority, was_admin: m.isOrganizationAdmin === true },
+      });
       return { userId: m.userId as string, email: m.email as string | null, phone: m.phone as string | null };
     });
     this.bus.publish('membership.revoked', {
@@ -192,7 +203,7 @@ export class MembershipService {
       });
       const { rows } = await q.query(
         `UPDATE organization_membership SET "isOrganizationAdmin"=$3, "updatedAt"=$4
-          WHERE id=$1 AND "organizationId"=$2 AND status='active' AND "isOrganizationAdmin" <> $3 RETURNING "userId"`,
+          WHERE id=$1 AND "organizationId"=$2 AND status='active' AND "isOrganizationAdmin" <> $3 RETURNING "userId", "organizationId"`,
         [membershipId, organizationId, admin, this.clock.now()],
       );
       if (!rows[0]) throw notFound(); // rolls back: the step-up is not burned
@@ -200,6 +211,10 @@ export class MembershipService {
         type: admin ? 'organization.admin.granted' : 'organization.admin.revoked', outcome: 'success',
         actorId: actor.userId, targetId: rows[0].userId, sessionFamilyId: actor.sid, ip, metadata: { organizationId },
       }, q);
+      await this.central.write(q, {
+        action: admin ? 'membership.admin_granted' : 'membership.admin_revoked', actor: userActor(actor), organizationId: rows[0].organizationId,
+        resource: { type: 'membership', id: membershipId }, subject: { type: 'user', id: rows[0].userId }, outcome: 'succeeded',
+      } as never);
     });
   }
 }

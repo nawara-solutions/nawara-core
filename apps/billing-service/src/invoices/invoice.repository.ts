@@ -1,3 +1,4 @@
+import { BillingAudit } from '../audit/billing-audit.js';
 import { Injectable } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
 import { type Caller, type TransitionContext } from '../domain/actors.js';
@@ -31,6 +32,7 @@ export class InvoiceRepository {
   constructor(
     private readonly db: DbService,
     private readonly outbox: OutboxService,
+    private readonly audit: BillingAudit,
   ) {}
 
   /** Creates a draft (header + lines, one transaction) or replays the identical earlier request. `422`/`409`/`400` per SDD endpoint 7. */
@@ -112,6 +114,7 @@ export class InvoiceRepository {
       await recordTransition(q, { entityType: 'invoice', entityId: invoiceId, from: 'draft', to: 'open', revision: updated.revision, ctx });
       const invoice = (await this.load(q, invoiceId))!;
       await this.outbox.enqueue(q, invoiceCreatedEvent(invoice, ctx));
+      await this.audit.record(q, 'invoice.issued', { organizationId: updated.organizationId, resource: { type: 'invoice', id: invoiceId } }, ctx); // Stage 18.7.2
       return { invoice, changed: true };
     });
   }
@@ -124,6 +127,7 @@ export class InvoiceRepository {
       if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', `An invoice that is ${row.status} cannot be discarded.`);
       const { rows } = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'void', "voidReasonCode" = 'discarded' WHERE id = $1 RETURNING *`, [invoiceId]);
       await recordTransition(q, { entityType: 'invoice', entityId: invoiceId, from: 'draft', to: 'void', revision: rows[0]!.revision, ctx });
+      await this.audit.record(q, 'invoice.discarded', { organizationId: rows[0]!.organizationId, resource: { type: 'invoice', id: invoiceId } }, ctx); // Stage 18.7.2
       return { invoice: (await this.load(q, invoiceId))!, changed: true };
     });
   }

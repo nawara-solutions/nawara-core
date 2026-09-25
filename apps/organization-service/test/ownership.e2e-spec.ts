@@ -8,11 +8,14 @@ import { DbService, kitMigrationsDir, runMigrations } from '@nawara/service-kit'
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { organizationMigrationsDir } from '../src/app.module.js';
 import { CompanyRepository } from '../src/companies/company.repository.js';
+import { serviceActor } from '../src/audit/organization-audit.js';
 import { ACTIVATE_CONFIRMATION, OwnershipAdmin, OwnershipError, type OwnershipLogEvent } from '../src/ownership/ownership-admin.js';
 import { activateOwnership, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { client, sql } from './support/fixtures.js';
 import { ID, baseData, snapshotText } from './support/snapshot.js';
+
+const PROVISIONING = serviceActor('provisioning');
 
 async function failsWith(url: string, text: string, params: unknown[] = []): Promise<{ code?: string; message?: string }> {
   const c = new pg.Client({ connectionString: url });
@@ -409,21 +412,21 @@ describeWithEnv('ownership transition: state machine, gates, import, invariants 
       try {
         const companies = t.app.get(CompanyRepository);
         // Before the class is declared, nothing can bootstrap.
-        await expect(companies.create('provisioning', 'key-000001', { name: 'First' }, { bootstrap: true })).rejects.toMatchObject({ status: 409 });
+        await expect(companies.create('provisioning', 'key-000001', { name: 'First' }, PROVISIONING, { bootstrap: true })).rejects.toMatchObject({ status: 409 });
         await a.declareClass('op', 'fresh');
         expect((await refused(a.importSnapshot('op', snapshotText())))).toMatchObject({ code: 'import_not_applicable' }); // a fresh environment imports nothing
-        await expect(companies.create('provisioning', 'key-000002', { name: 'Second' })).rejects.toMatchObject({ status: 409 }); // not the bootstrap path
+        await expect(companies.create('provisioning', 'key-000002', { name: 'Second' }, PROVISIONING)).rejects.toMatchObject({ status: 409 }); // not the bootstrap path
         expect((await refused(a.verifyContent('op', 'x'.repeat(64)))).code).toBe('verification_mismatch');
         expect((await refused(a.verifyContent('op', await a.contentDigestNow()))).code).toBe('nothing_to_verify'); // no Company yet
 
-        const first = await companies.create('provisioning', 'key-000003', { name: 'First Company' }, { bootstrap: true });
+        const first = await companies.create('provisioning', 'key-000003', { name: 'First Company' }, PROVISIONING, { bootstrap: true });
         expect(first.replayed).toBe(false);
         expect(await state(db)).toMatchObject({ phase: 'PREPARED', authoritative: false }); // the bootstrap does not activate
 
         const v = await a.verifyContent('op', await a.contentDigestNow());
         expect(v.phase).toBe('VERIFIED');
         // Once verified, no further bootstrap.
-        await expect(companies.create('provisioning', 'key-000004', { name: 'Another' }, { bootstrap: true })).rejects.toMatchObject({ status: 409 });
+        await expect(companies.create('provisioning', 'key-000004', { name: 'Another' }, PROVISIONING, { bootstrap: true })).rejects.toMatchObject({ status: 409 });
 
         await a.approve('approver', 'fresh-rehearsal-1');
         expect((await state(db)).phase).toBe('ACTIVATABLE'); // no FROZEN phase: there is no legacy authority to freeze

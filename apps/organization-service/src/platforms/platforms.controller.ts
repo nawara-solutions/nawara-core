@@ -1,3 +1,4 @@
+import { serviceActor } from '../audit/organization-audit.js';
 import { Body, Controller, Get, Headers, Logger, Param, ParseUUIDPipe, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiHeader, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
@@ -35,7 +36,7 @@ export class PlatformsController {
   @ApiResponse({ status: 422, description: 'idempotency_key_reused' })
   async create(@CallerService() caller: string, @Body() body: unknown, @Headers('idempotency-key') idempotencyKey: string | undefined, @Res({ passthrough: true }) res: Response) {
     const key = requireIdempotencyKey(idempotencyKey);
-    const { platform, replayed } = await this.platforms.create(caller, key, normaliseCreatePlatform(body));
+    const { platform, replayed } = await this.platforms.create(caller, key, normaliseCreatePlatform(body), serviceActor(caller));
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     else this.log.log(`platform_created id=${platform.id} companyId=${platform.companyId} caller=${caller}`);
@@ -77,7 +78,7 @@ export class PlatformsController {
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 404 })
   async update(@CallerService() caller: string, @Param('id', new ParseUUIDPipe()) id: string, @Body() body: unknown) {
-    const platform = await this.platforms.update(id, normaliseUpdatePlatform(body));
+    const platform = await this.platforms.update(id, normaliseUpdatePlatform(body), serviceActor(caller));
     this.log.log(`platform_updated id=${id} caller=${caller}`);
     return representPlatform(platform);
   }

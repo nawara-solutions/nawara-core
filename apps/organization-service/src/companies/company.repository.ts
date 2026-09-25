@@ -1,3 +1,5 @@
+import type { AuditActor } from '@nawara/audit-contract';
+import { OrganizationAudit } from '../audit/organization-audit.js';
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DbService } from '@nawara/service-kit';
@@ -21,10 +23,15 @@ export interface CompanyRow {
  */
 @Injectable()
 export class CompanyRepository {
-  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly idempotency: IdempotencyService,
+    private readonly ownership: OwnershipService,
+    private readonly audit: OrganizationAudit,
+  ) {}
 
   /** The id is generated here, by this service. The database would also accept an explicit one (see migration 0001), but no API does. */
-  async create(caller: string, key: string, input: CreateCompanyInput, opts: { bootstrap?: boolean } = {}): Promise<{ company: CompanyRow; replayed: boolean }> {
+  async create(caller: string, key: string, input: CreateCompanyInput, actor: AuditActor, opts: { bootstrap?: boolean } = {}): Promise<{ company: CompanyRow; replayed: boolean }> {
     const id = randomUUID();
     return this.db.tx(async (q) => {
       await this.ownership.assertWritable(q, opts.bootstrap ? 'bootstrap' : 'normal');
@@ -37,6 +44,7 @@ export class CompanyRepository {
         return { company: rows[0], replayed: true };
       }
       const { rows } = await q.query<CompanyRow>('INSERT INTO company (id, name) VALUES ($1, $2) RETURNING *', [id, input.name]);
+      await this.audit.hierarchy(q, 'company.created', { type: 'company', id }, actor); // Stage 18.7.3: same transaction
       return { company: rows[0]!, replayed: false };
     });
   }
@@ -52,7 +60,7 @@ export class CompanyRepository {
   }
 
   /** Only the name can change. A no-op update writes nothing (and leaves `updatedAt` alone). */
-  async update(id: string, input: UpdateCompanyInput): Promise<CompanyRow> {
+  async update(id: string, input: UpdateCompanyInput, actor: AuditActor): Promise<CompanyRow> {
     return this.db.tx(async (q) => {
       await this.ownership.assertWritable(q);
       const { rows } = await q.query<CompanyRow>('SELECT * FROM company WHERE id = $1 FOR UPDATE', [id]);
@@ -60,6 +68,7 @@ export class CompanyRepository {
       if (!current) throw notFound();
       if (input.name === undefined || input.name === current.name) return current;
       const updated = await q.query<CompanyRow>('UPDATE company SET name = $2, "updatedAt" = now() WHERE id = $1 RETURNING *', [id, input.name]);
+      await this.audit.hierarchy(q, 'company.updated', { type: 'company', id }, actor); // a no-op update writes nothing, and no evidence
       return updated.rows[0]!;
     });
   }

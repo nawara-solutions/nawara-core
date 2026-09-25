@@ -1,3 +1,4 @@
+import { PaymentAudit } from '../audit/payment-audit.js';
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, OutboxService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
@@ -23,6 +24,7 @@ export class ExpirySweeper {
   constructor(
     @Inject(DbService) private readonly db: DbService,
     @Inject(OutboxService) private readonly outbox: OutboxService,
+    @Inject(PaymentAudit) private readonly audit: PaymentAudit,
   ) {}
 
   start(intervalMs = 5000): void {
@@ -69,6 +71,7 @@ export class ExpirySweeper {
       if (open.length > 0) return false; // money in flight must be resolved first (the resolver settles it)
       const { rows: updated } = await q.query<PaymentRow>(`UPDATE payment SET status = 'expired', "closedAt" = now() WHERE id = $1 RETURNING *`, [paymentId]);
       await this.outbox.enqueue(q, paymentEvent('payment.expired', updated[0], ctx, { expiresAt: payment.expiresAt.toISOString() }));
+      await this.audit.record(q, 'payment.expired', updated[0], ctx); // Stage 18.7.1
       return true;
     });
   }

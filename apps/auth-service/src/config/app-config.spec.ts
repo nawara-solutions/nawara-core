@@ -55,7 +55,7 @@ describe('configuration and key management fail closed', () => {
     const p = { ...good(), NODE_ENV: 'production' };
     expect(() => loadConfig(p)).toThrow(/WEBAUTHN/);
     expect(() => loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'http://a.test' })).toThrow(/https/);
-    expect(loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test', AUTH_EVENTS: 'off' }).env).toBe('production');
+    expect(loadConfig({ ...p, WEBAUTHN_RP_ID: 'a.test', WEBAUTHN_ORIGINS: 'https://a.test', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672' }).env).toBe('production');
   });
   it('a step-up can never be configured longer than the 15-minute database limit', () => {
     expect(() => loadConfig({ ...good(), STEP_UP_TTL_SEC: '901' })).toThrow(ConfigError);
@@ -76,7 +76,7 @@ describe('configuration and key management fail closed', () => {
 
 describe('runtime configuration is validated once and fails closed (Stage 14.3)', () => {
   const prod = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
-    ...good(), NODE_ENV: 'production', DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off',
+    ...good(), NODE_ENV: 'production', DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672',
     WEBAUTHN_RP_ID: 'example.com', WEBAUTHN_ORIGINS: 'https://app.example.com', ...over,
   });
 
@@ -84,6 +84,20 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
     const c = loadConfig(prod());
     expect(c.databaseUrl).toBe('postgres://auth_app:pw@db:5432/auth');
     expect(c.events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+    expect(c.audit).toEqual({ rabbitmqUrl: 'amqp://mq:5672', confirmTimeoutMs: 5000, heartbeatS: expect.any(Number) });
+  });
+  it('Stage 18.7.5: production requires RABBITMQ_URL for the central audit relay EVEN with AUTH_EVENTS=off, never echoing a value', () => {
+    expect(() => loadConfig(prod({ RABBITMQ_URL: undefined }))).toThrow(/RABBITMQ_URL is required in production: the central audit relay/);
+    expect(() => loadConfig(prod({ RABBITMQ_URL: '' }))).toThrow(/RABBITMQ_URL is required in production/);
+    try { loadConfig(prod({ RABBITMQ_URL: 'http://u:s3cret-value@mq' })); throw new Error('no throw'); } catch (err) {
+      expect((err as Error).message).toMatch(/RABBITMQ_URL must be/);
+      expect((err as Error).message).not.toContain('s3cret-value');
+    }
+  });
+  it('Stage 18.7.5: outside production the audit relay needs no broker (the in-memory bus); AUTH_EVENTS never changes the audit path', () => {
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: undefined }).audit.rabbitmqUrl).toBeUndefined();
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'on', RABBITMQ_URL: 'amqp://mq:5672' }).audit.rabbitmqUrl).toBe('amqp://mq:5672');
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672' }).audit.rabbitmqUrl).toBe('amqp://mq:5672');
   });
   it.each(['postgres', 'root', 'auth', 'auth_migrator'])('refuses the %s database user in production (superuser / schema owner), without echoing the URL', (user) => {
     try { loadConfig(prod({ DATABASE_URL: `postgres://${user}:s3cret-value@db:5432/auth` })); throw new Error('no throw'); } catch (err) {
@@ -99,7 +113,7 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
     expect(() => loadConfig({ ...good(), DATABASE_URL: url })).toThrow(ConfigError);
   });
   it('production with events enabled requires an explicit RABBITMQ_URL: no silent default broker or default credentials', () => {
-    expect(() => loadConfig(prod({ AUTH_EVENTS: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
+    expect(() => loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
     expect(loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: true, rabbitmqUrl: 'amqps://u:p@broker:5671', confirmTimeoutMs: 5000 });
   });
   it('outside production, events enabled without RABBITMQ_URL keep the local development broker', () => {
@@ -108,13 +122,16 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
   it('RABBITMQ_CONFIRM_TIMEOUT_MS (Stage 16.2) defaults to 5000 and is bounded (100-60000), like Billing and Payment', () => {
     expect(loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).events.confirmTimeoutMs).toBe(2000);
     for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
-    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: 'not validated when off' }).events.confirmTimeoutMs).toBeUndefined();
+    // Stage 18.7.5: the audit relay uses it too, so it is validated even when the legacy events are off.
+    expect(() => loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: 'abc' })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' })).toMatchObject({ events: { confirmTimeoutMs: undefined }, audit: { confirmTimeoutMs: 2000 } });
   });
   it.each(['http://broker:5672', 'broker:5672'])('refuses a RABBITMQ_URL that is not amqp:// or amqps://: %s', (url) => {
     expect(() => loadConfig({ ...good(), RABBITMQ_URL: url })).toThrow(/RABBITMQ_URL must be/);
   });
-  it('AUTH_EVENTS=off disables events and ignores RABBITMQ_URL', () => {
-    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'not validated when off' }).events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+  it('AUTH_EVENTS=off disables the legacy events only; RABBITMQ_URL is still validated, for the audit relay (Stage 18.7.5)', () => {
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672' }).events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+    expect(() => loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'not a broker url' })).toThrow(/RABBITMQ_URL must be/);
   });
   it('PORT and BASELINE_RATE_LIMIT_PER_MINUTE are validated integers with the previous defaults (3000, 100)', () => {
     const c = loadConfig(good());

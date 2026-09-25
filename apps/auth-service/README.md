@@ -22,7 +22,16 @@ npm run start:dev -w auth-service
 
 The process **refuses to start** if any secret is missing, weak or duplicated. Secrets come from the
 environment or from files (`NAME_FILE=/run/secrets/name`); see `.env.example` and the key-management
-section of the security review. Set `AUTH_EVENTS=off` to run without RabbitMQ.
+section of the security review. `AUTH_EVENTS=off` switches off the legacy fire-and-forget events only.
+
+**Central audit (Stage 18.7.5 / 18.7.6, ADR-0049; `src/audit/central-audit.ts`):** Auth's 24 catalog actions write their central audit
+intent through `AuditEventWriter` into Auth's own transactional outbox (migration `0010`, the kit's outbox table exactly), in the SAME
+transaction as the Auth change and its local `auth_audit_event` row; the kit relay (on Auth's own pool) publishes it to RabbitMQ with
+publisher confirms and retries. It is **independent of `AUTH_EVENTS`**: `RABBITMQ_URL` is **required in production** (the process
+refuses to start without it; the deploy script checks it before touching anything), and outside production its absence selects an
+in-memory bus. The local `auth_audit_event` trail is unchanged and keeps what central audit never receives (IP, session family,
+metadata). The CLI writes no central event and never runs a relay. See the
+[Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
 
 ## Organization onboarding (join codes)
 

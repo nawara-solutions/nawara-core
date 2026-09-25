@@ -80,7 +80,8 @@ describeWithEnv('producer transaction → outbox → relay → RabbitMQ → audi
 
   it('COMMIT: the business row and the audit intent commit together; the relay publishes; audit-service stores the record, field for field', async () => {
     const invoiceId = SAMPLE_IDS.resource;
-    const input = { ...sampleAuditPayload('invoice.issued', 'minimal'), resource: { type: 'invoice', id: invoiceId } };
+    // An organization's invoice (explicit since catalog correction G3 made the organization of invoice.issued optional: the minimal sample is null).
+    const input = { ...sampleAuditPayload('invoice.issued', 'minimal'), organizationId: SAMPLE_IDS.organization, resource: { type: 'invoice', id: invoiceId } };
     const { eventId, txNow } = await inTransaction(async (c) => {
       await c.query(`INSERT INTO invoice_stand_in VALUES ($1, $2, 'open')`, [invoiceId, SAMPLE_IDS.organization]);
       const { rows } = await c.query<{ now: Date }>('SELECT now()');

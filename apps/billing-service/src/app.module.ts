@@ -1,3 +1,4 @@
+import { BILLING_SERVICE_NAME, BillingAuditModule } from './audit/billing-audit.js';
 import { fileURLToPath } from 'node:url';
 import { Logger, Module, type DynamicModule } from '@nestjs/common';
 import {
@@ -60,8 +61,9 @@ export class AppModule {
         ServiceAuthModule.forRoot(config.serviceTokens),
         AuthClientModule.forRoot(overrides.authClient ?? { baseUrl: config.authServiceUrl, timeoutMs: config.authTimeoutMs }),
         BillingConfigModule.forRoot(config),
+        BillingAuditModule, // Stage 18.7: central audit intent (global; needs the kit OutboxService below)
         EventsModule.forRoot({
-          source: config.serviceName,
+          source: BILLING_SERVICE_NAME, // the same identity the audit writer is bound to (Stage 18.7)
           bus: overrides.bus ?? (config.rabbitmqUrl
             ? new RabbitMqEventBus({ url: config.rabbitmqUrl, retry: config.paymentEventRetry, prefetch: consumerPrefetch(config.db.poolMax), confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs, heartbeatS: config.rabbitmqHeartbeatS, onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message) })
             : new InMemoryEventBus()),

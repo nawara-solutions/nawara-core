@@ -24,7 +24,7 @@ const paymentBody = (over: Record<string, unknown> = {}) => {
     paymentRequestId: crypto.randomUUID(),
     sourceType: 'invoice',
     sourceId: 'inv-1',
-    payer: { type: 'user', id: 'user-1' },
+    payer: { type: 'user', id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21' },
     seller: { type: 'organization', id: organizationId },
     organizationId,
     amount: 1000,
@@ -41,7 +41,7 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
   let t: TestApp; // default attempt limit (3)
   let tOne: TestApp; // attempt limit 1, same database
   const billing = generateServiceToken();
-  const userIdentity: AuthIdentity = { id: 'user-1', adminTier: null, isActive: true, memberships: [] };
+  const userIdentity: AuthIdentity = { id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21', adminTier: null, isActive: true, memberships: [] };
   const authClient: AuthClient = { getIdentity: async (bearer) => (bearer === 'user-1-jwt' ? userIdentity : null), hasPlatformAccess: async () => false };
 
   beforeAll(async () => {
@@ -248,7 +248,7 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
       sourceType: 'invoice',
       sourceId: 'inv-1',
       organizationId: payment.organizationId,
-      payer: { type: 'user', id: 'user-1' },
+      payer: { type: 'user', id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21' },
       seller: payment.seller,
       amount: 1000,
       currency: 'TND',
@@ -268,7 +268,7 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
     const failed = await create(tOne);
     await startAttempt(tOne, failed.id, 'r12-key-fail', { scenario: 'failure' }).expect(201);
     const [ev] = await outbox('payment.failed', failed.id);
-    expect(ev.payload).toMatchObject({ paymentId: failed.id, paymentRequestId: failed.paymentRequestId, status: 'failed', failureCode: 'card_declined', payer: { type: 'user', id: 'user-1' }, amount: 1000 });
+    expect(ev.payload).toMatchObject({ paymentId: failed.id, paymentRequestId: failed.paymentRequestId, status: 'failed', failureCode: 'card_declined', payer: { type: 'user', id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21' }, amount: 1000 });
     expect(ev.payload.revision).toBeGreaterThan(0);
 
     const soon = await create(t, { expiresAt: new Date(Date.now() + 300).toISOString() });

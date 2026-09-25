@@ -1,3 +1,4 @@
+import { PAYMENT_SERVICE_NAME } from './audit/payment-audit.js';
 import { fileURLToPath } from 'node:url';
 import { Logger, Module } from '@nestjs/common';
 import {
@@ -32,7 +33,7 @@ const config = loadPaymentConfig();
     AuthClientModule.forRoot({ baseUrl: config.authServiceUrl, timeoutMs: config.authTimeoutMs }),
     PaymentConfigModule.forRoot(config),
     EventsModule.forRoot({
-      source: 'payment-service',
+      source: PAYMENT_SERVICE_NAME, // the same identity the audit writer is bound to
       bus: createEventBus(config),
       // Stage 5 hardening: an unpublished outbox row previously failed silently (the kit's default onError is a no-op).
       // Stage 14.7: each relay message carries its own event name (`outbox_publish_failure eventId=...`, `outbox_relay_pass_failure`, ...).

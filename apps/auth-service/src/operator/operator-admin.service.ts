@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { DbService } from '../db/db.service.js';
 import { notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
@@ -17,6 +18,7 @@ export class OperatorAdminService {
     @Inject(OperatorCodeService) private readonly codes: OperatorCodeService,
     @Inject(RefreshTokenService) private readonly refresh: RefreshTokenService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   async create(owner: { userId: string; sid: string }, ident: { email?: string; phone?: string }, stepUpToken: string | undefined, ip: string) {
@@ -28,6 +30,8 @@ export class OperatorAdminService {
       const op = await this.users.createOperator({ companyId, ...id }, q);
       await this.codes.issueConfirmation(q, op);
       await this.audit.record({ type: 'operator.create', outcome: 'success', actorId: owner.userId, targetId: op.id, sessionFamilyId: owner.sid, ip }, q);
+      // Stage 18.7.6: the central audit intent, same transaction (the owner was proven by ownerCompany above).
+      await this.central.write(q, { action: 'operator.created', actor: ownerActor(owner), organizationId: null, resource: { type: 'user', id: op.id }, outcome: 'succeeded' });
       return { id: op.id, email: op.email, phone: op.phone, isActive: op.isActive };
     });
   }
@@ -48,6 +52,9 @@ export class OperatorAdminService {
         await this.refresh.revokeAllForUser(q, operatorId);
       }
       await this.audit.record({ type: blocked ? 'account.disabled' : 'account.enabled', outcome: 'success', actorId: owner.userId, targetId: operatorId, sessionFamilyId: owner.sid, ip }, q);
+      await this.central.write(q, {
+        action: blocked ? 'account.disabled' : 'account.enabled', actor: ownerActor(owner), organizationId: null, resource: { type: 'user', id: operatorId }, outcome: 'succeeded',
+      } as never);
     });
   }
 }

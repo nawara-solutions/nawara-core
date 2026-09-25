@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS } from '@nawara/service-kit';
+import {
+  DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, HTTP_DRAIN_TIMEOUT_BOUNDS, RABBITMQ_HEARTBEAT_BOUNDS,
+} from '@nawara/service-kit';
 
 /**
  * All configuration and ALL secrets enter the service through this file, once, at startup.
@@ -85,6 +87,13 @@ export interface AppConfig {
    * 100-60000, the same variable and bounds as Billing and Payment) bounds the kit bus's publisher confirm; set only while enabled.
    */
   events: { enabled: boolean; rabbitmqUrl?: string; confirmTimeoutMs?: number };
+  /**
+   * Stage 18.7.5: the central audit relay (the kit outbox relay publishing `outbox` rows to RabbitMQ). INDEPENDENT of `AUTH_EVENTS`
+   * (which governs only the legacy fire-and-forget events): audit evidence is always written durably and always relayed. Production
+   * requires `RABBITMQ_URL` (fail closed: evidence is never silently kept from Audit); elsewhere its absence selects the in-memory bus.
+   * The relay connects lazily and retries: a broker outage never affects a request, the rows wait in the outbox.
+   */
+  audit: { rabbitmqUrl?: string; confirmTimeoutMs: number; heartbeatS: number };
   trustProxy: boolean;
   corsOrigins: string[];
   baselineRateLimitPerMinute: number;
@@ -239,6 +248,22 @@ export function loadConfig(
     }
   }
 
+  // Stage 18.7.5: the audit relay's broker, read regardless of AUTH_EVENTS; the same variables and bounds as the other Core producers.
+  const auditRabbitmqUrl = env.RABBITMQ_URL || undefined;
+  if (auditRabbitmqUrl === undefined && nodeEnv === 'production') {
+    throw new ConfigError('RABBITMQ_URL is required in production: the central audit relay publishes Auth\'s audit evidence (independent of AUTH_EVENTS)');
+  }
+  if (auditRabbitmqUrl !== undefined) {
+    let parsed: URL | undefined;
+    try { parsed = new URL(auditRabbitmqUrl); } catch { /* reported below */ }
+    if (!parsed || !['amqp:', 'amqps:'].includes(parsed.protocol)) throw new ConfigError('RABBITMQ_URL must be a valid amqp:// or amqps:// URL');
+  }
+  const auditRelay = {
+    rabbitmqUrl: auditRabbitmqUrl,
+    confirmTimeoutMs: int(env, 'RABBITMQ_CONFIRM_TIMEOUT_MS', 5_000, 100, 60_000),
+    heartbeatS: int(env, 'RABBITMQ_HEARTBEAT_S', DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS.min, RABBITMQ_HEARTBEAT_BOUNDS.max),
+  };
+
   const invitation = {
     minMinutes: int(env, 'INVITATION_MIN_MINUTES', 15, 1, 1440),
     defaultMinutes: int(env, 'INVITATION_DEFAULT_MINUTES', 1440, 1, 43_200),
@@ -280,6 +305,7 @@ export function loadConfig(
     },
     httpDrainTimeoutMs: int(env, 'HTTP_DRAIN_TIMEOUT_MS', DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS.min, HTTP_DRAIN_TIMEOUT_BOUNDS.max),
     events: { enabled: eventsEnabled, rabbitmqUrl, confirmTimeoutMs },
+    audit: auditRelay,
     trustProxy: env.TRUST_PROXY === 'true',
     corsOrigins,
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),

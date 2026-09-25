@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Request } from 'express';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
+import { FileAudit } from '../audit/file-audit.js';
 import { FileRepository } from '../persistence/file.repository.js';
 import { FILE_NOT_FOUND, fileError, fileView, organizationHeader, type FileView } from '../upload/upload-http.js';
 
@@ -17,6 +18,7 @@ export class DeletionService {
   constructor(
     @Inject(FILE_CONFIG) private readonly config: FileConfig,
     private readonly files: FileRepository,
+    @Inject(FileAudit) private readonly audit: FileAudit,
   ) {}
 
   async requestDeletion(caller: string, req: Request, id: string): Promise<FileView> {
@@ -24,7 +26,8 @@ export class DeletionService {
     if (!policy?.operations.has('delete')) throw fileError(403, 'operation_not_allowed', 'Operation not allowed for this caller.');
     const organizationId = organizationHeader(req);
     if (organizationId !== null && policy.organizations === 'none') throw fileError(403, 'organization_not_allowed', 'This caller cannot act for an organization.');
-    const outcome = await this.files.requestDeletion({ ownerService: caller, organizationId }, id);
+    // The audit intent is written in the deletion's transaction, from the row it changed (its organization) and the authenticated caller.
+    const outcome = await this.files.requestDeletion({ ownerService: caller, organizationId }, id, (q, file) => this.audit.deleted(q, file, caller));
     if (outcome.kind === 'not_found') throw FILE_NOT_FOUND(); // a foreign, missing or malformed id: the same answer
     if (outcome.kind === 'not_deletable') {
       // No cancellation of an upload in progress (V1); a refused or failed upload has no bytes and is already terminal.

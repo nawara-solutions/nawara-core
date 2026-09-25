@@ -7,10 +7,13 @@ FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY libs/service-kit/package.json libs/service-kit/package.json
+COPY libs/audit-contract/package.json libs/audit-contract/package.json
 COPY apps/organization-service/package.json apps/organization-service/package.json
-RUN npm ci --workspace=organization-service --workspace=@nawara/service-kit --include-workspace-root --ignore-scripts
+RUN npm ci --workspace=organization-service --workspace=@nawara/service-kit --workspace=@nawara/audit-contract --include-workspace-root --ignore-scripts
 COPY libs/service-kit libs/service-kit
 RUN npm run build -w @nawara/service-kit
+COPY libs/audit-contract libs/audit-contract
+RUN npm run build -w @nawara/audit-contract
 COPY apps/organization-service apps/organization-service
 RUN npm run build --workspace=organization-service
 
@@ -20,9 +23,11 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY libs/service-kit/package.json libs/service-kit/package.json
+COPY libs/audit-contract/package.json libs/audit-contract/package.json
 COPY apps/organization-service/package.json apps/organization-service/package.json
-RUN npm ci --workspace=organization-service --workspace=@nawara/service-kit --omit=dev --include-workspace-root --ignore-scripts
+RUN npm ci --workspace=organization-service --workspace=@nawara/service-kit --workspace=@nawara/audit-contract --omit=dev --include-workspace-root --ignore-scripts
 COPY --from=build /app/libs/service-kit/dist ./libs/service-kit/dist
+COPY --from=build /app/libs/audit-contract/dist ./libs/audit-contract/dist
 COPY libs/service-kit/migrations ./libs/service-kit/migrations
 COPY --from=build /app/apps/organization-service/dist ./apps/organization-service/dist
 # Schema of record travels with the image so a deploy always applies the migrations that match this exact code.

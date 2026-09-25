@@ -43,6 +43,13 @@ no production traffic can reach any of this (the test provider refuses to start 
   `actor`, `cause`, correlation id) plus `producer` (Stage 4: additional producer-isolation evidence
   for Billing's consumer, sourced only from the payment row, never overridable via event metadata —
   never a replacement for full snapshot validation).
+- **Central audit intent (Stage 18.7.1, ADR-0049; `src/audit/payment-audit.ts`):** `payment.created`, `payment.cancelled`,
+  `payment.expired`, `payment.succeeded`, `payment.failed` are written through `@nawara/audit-contract`'s `AuditEventWriter` into the SAME
+  outbox, in the SAME transaction as the transition, and relayed to audit-service like every other event. The actor is the
+  authenticated service, the Auth-verified user with the kind Auth verified (attempt start / sync), or Payment's own process
+  (`payment_attempt_resolver`, `payment_expiry_sweep`, `payment_webhook`); the organization is the payment row's. Event ids derive from
+  (payment, action), so a retried transition writes its evidence once. Identifiers only: no amount, reference, description or provider
+  failure code. See the [Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
 - Baseline rate limits on payment creation (per producer) and attempts (per payer), `PAYMENT_RATE_LIMIT_*`.
 - 52 unit + 107 integration/e2e tests (against a real PostgreSQL, including the service running as the restricted
   `payment_app`-style role) plus 47 database-level invariant assertions and 2 concurrency races in `db/tests/`.

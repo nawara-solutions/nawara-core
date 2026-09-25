@@ -1,8 +1,9 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { generateSecret, generateURI, verifySync } from 'otplib';
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit } from '../audit/central-audit.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { TotpSecretCipher } from '../crypto/totp-cipher.js';
@@ -32,6 +33,7 @@ const CONFIRMED = `"confirmedAt" IS NOT NULL AND "revokedAt" IS NULL`;
  */
 @Injectable()
 export class FactorService {
+  private readonly cloneLog = new Logger('audit');
   constructor(
     @Inject(DbService) private readonly db: DbService,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
@@ -39,6 +41,7 @@ export class FactorService {
     @Inject(TotpSecretCipher) private readonly cipher: TotpSecretCipher,
     @Inject(WebAuthnService) private readonly webauthn: WebAuthnService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   async list(ownerId: string, q: Queryable = this.db): Promise<FactorSummary[]> {
@@ -227,8 +230,25 @@ export class FactorService {
         // and commits); the step-up path passes the pool, where each statement commits on its own.
         await this.revoke(q, ownerId, f.id);
         await this.audit.tryRecord({ type: 'owner.webauthn.clone_suspected', outcome: 'denied', actorId: ownerId, targetId: f.id });
+        await this.recordCloneSuspected(ownerId, f.id);
       }
       return null;
+    }
+  }
+
+  /**
+   * Stage 18.7.6: the central audit intent of a suspected clone, in its OWN short transaction: the detection is a fact whatever happens
+   * to the caller's transaction, and a failed evidence write must never poison the transaction that revokes the factor (the security
+   * action comes first). Like the local record here (tryRecord), a failure is logged by ids and does not change the answer.
+   */
+  private async recordCloneSuspected(ownerId: string, factorId: string): Promise<void> {
+    try {
+      await this.db.tx((q) => this.central.write(q, {
+        action: 'owner.webauthn_clone_suspected', actor: { type: 'system', id: 'webauthn_clone_detection' }, organizationId: null,
+        resource: { type: 'factor', id: factorId }, subject: { type: 'user', id: ownerId }, outcome: 'denied',
+      }));
+    } catch (e) {
+      this.cloneLog.error(`central_audit_intent_failed action=owner.webauthn_clone_suspected factor=${factorId} error=${e instanceof Error ? e.name : 'error'}`);
     }
   }
 

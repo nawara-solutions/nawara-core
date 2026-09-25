@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.js';
 import { authError, notFound } from '../errors.js';
@@ -28,6 +29,7 @@ export class AssignmentService {
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(StepUpService) private readonly stepUp: StepUpService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   private async ownerCompany(q: Queryable, ownerId: string): Promise<string> {
@@ -55,6 +57,11 @@ export class AssignmentService {
           [operatorId, platformId, companyId, actor.userId, this.clock.now()],
         );
         await this.audit.record({ type: 'platform_assignment.grant', outcome: 'success', actorId: actor.userId, targetId: operatorId, sessionFamilyId: actor.sid, ip, metadata: { platformId } }, q);
+        // Stage 18.7.6: the central audit intent, same transaction; the platform is the assignment row's.
+        await this.central.write(q, {
+          action: 'platform_assignment.granted', actor: ownerActor(actor), organizationId: null, resource: { type: 'platform_assignment', id: rows[0].id },
+          subject: { type: 'user', id: operatorId }, outcome: 'succeeded', changes: { platform_id: rows[0].platformId },
+        });
         return rows[0];
       } catch (e) {
         if (isUniqueViolation(e, 'platform_assignment_one_active')) throw authError(409, 'assignment_conflict', 'An active assignment already exists.');
@@ -70,13 +77,17 @@ export class AssignmentService {
       await this.assertOperatorInCompany(q, operatorId, companyId);
       await this.stepUp.consume(q, { ownerId: actor.userId, sid: actor.sid, purpose: 'platform_assignment.revoke', token: stepUpToken });
       const now = this.clock.now();
-      const { rowCount } = await q.query(
+      const { rows } = await q.query(
         `UPDATE platform_assignment SET active=false, "revokedAt"=$5, "revokedBy"=$4, "updatedAt"=$5
-          WHERE "operatorId"=$1 AND "platformId"=$2 AND "companyId"=$3 AND active`,
+          WHERE "operatorId"=$1 AND "platformId"=$2 AND "companyId"=$3 AND active RETURNING id, "platformId"`,
         [operatorId, platformId, companyId, actor.userId, now],
       );
-      if (rowCount !== 1) throw notFound(); // rolls back: the step-up is not burned
+      if (rows.length !== 1) throw notFound(); // rolls back: the step-up is not burned
       await this.audit.record({ type: 'platform_assignment.revoke', outcome: 'success', actorId: actor.userId, targetId: operatorId, sessionFamilyId: actor.sid, ip, metadata: { platformId } }, q);
+      await this.central.write(q, {
+        action: 'platform_assignment.revoked', actor: ownerActor(actor), organizationId: null, resource: { type: 'platform_assignment', id: rows[0].id },
+        subject: { type: 'user', id: operatorId }, outcome: 'succeeded', changes: { platform_id: rows[0].platformId },
+      });
     });
   }
 

@@ -50,7 +50,8 @@ export class AttemptsController {
     const callerId = req.caller.kind === 'user' ? req.caller.identity.id : req.caller.service;
     // After authentication and authorization, so only a real payer consumes (and can exhaust) their own budget.
     await this.rateLimit.assert('payment-attempt', callerId, { limit: this.config.rateLimits.attemptPerMinute, windowSec: 60 });
-    const { attempt } = await this.attempts.start(paymentId, callerId, idempotencyKey, dto);
+    const userKind = req.caller.kind === 'user' ? (req.caller.identity.adminTier ?? 'member') : undefined; // Auth-verified, never the body
+    const { attempt } = await this.attempts.start(paymentId, callerId, idempotencyKey, dto, userKind);
     return representAttempt(attempt);
   }
 
@@ -69,7 +70,9 @@ export class AttemptsController {
     const attempt = await this.attempts.findById(attemptId);
     if (!attempt || attempt.paymentId !== paymentId) throw paymentError(404, 'not_found', 'Not found.');
     const actor = req.caller.kind === 'user' ? ({ type: 'user', id: req.caller.identity.id } as const) : ({ type: 'service', id: req.caller.service } as const);
-    const synced = await this.attempts.sync(attemptId, requestContext(actor));
+    // Stage 18.7 (G1): a user's kind comes from Auth's verified identity (its admin tier), never from the request.
+    const userKind = req.caller.kind === 'user' ? (req.caller.identity.adminTier ?? 'member') : undefined;
+    const synced = await this.attempts.sync(attemptId, { ...requestContext(actor), ...(userKind ? { userKind } : {}) });
     return representAttempt(synced);
   }
 }

@@ -1,0 +1,23 @@
+{
+  "name": "@nawara/e2e-audit-producers",
+  "private": true,
+  "description": "Stage 18.7: real Core producers -> their transactional outbox -> the kit relay -> a REAL RabbitMQ -> a live audit-service -> audit_record -> the audit query API. Every service runs from its own built dist/main.js as its own process (never imported: scripts/lib/checks.mjs). Needs the services built (npm run test:e2e:audit-producers builds them).",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "vitest run --config ./vitest.config.ts"
+  },
+  "dependencies": {
+    "@nawara/audit-contract": "*",
+    "@nawara/service-kit": "*",
+    "amqplib": "^2.0.1",
+    "bcryptjs": "^3.0.3",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
+    "typescript": "^6.0.2",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.1.2"
+  }
+}

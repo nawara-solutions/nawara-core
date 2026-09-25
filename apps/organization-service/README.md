@@ -87,6 +87,18 @@ deny-by-default policy (`SERVICE_POLICY`), enforced by `ServicePolicyGuard` on e
   the two sensitive creates (fail closed). `boundary.spec.ts` allows Auth access only under `admin/`.
 * Denials of the service-token routes are logged as `service_authorization_denied caller=… capability=… reason=…` (never a secret).
 
+## Central audit (Stage 18.7.3, ADR-0049)
+
+`src/audit/organization-audit.ts` writes the central audit intent of `company.created` / `.updated`, `platform.created` / `.updated`,
+`organization.created` / `.updated` (on real writes only: never a replay or a no-op) and `hierarchy.admin_operation_denied` through
+`AuditEventWriter` into the kit outbox, in the SAME transaction as the hierarchy write and its `admin_actor_event` row (a refusal's
+local record and central copy are written together too). The actor is the service-token caller, or on `admin/` routes the human Auth
+verified, with the kind Auth reported (catalog correction G5: an org-admin `member` updating its own organization is recorded as a
+`member`, never as another kind); the organization is the resource itself for an organization, none for a company or platform. The kit
+relay publishes to RabbitMQ: `RABBITMQ_URL` is **required in production** (outside it, its absence selects the in-memory bus). There
+are still no organization domain events, and nothing is consumed; `boundary.spec.ts` confines the broker, outbox and relay to `audit/`.
+See the [Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
+
 ## Database
 
 Own database `organization` (ADR-0032), two roles from `infra/postgres/init`: `organization_migrator` (owns the schema, used only
@@ -101,7 +113,7 @@ MIGRATION_DATABASE_URL=postgres://organization_migrator:…@host:5432/organizati
 
 | File | |
 |---|---|
-| `kit_0001…0003` | the kit's outbox/inbox, rate-limit and generic trigger functions (applied first; outbox/inbox are unused here: no events) |
+| `kit_0001…0003` | the kit's outbox/inbox, rate-limit and generic trigger functions (applied first; the outbox carries the central audit intent since Stage 18.7.3; the inbox is unused) |
 | `0001_company_platform_organization.sql` | the three tables, keys, `NOT NULL`/non-blank checks, indexes, immutability triggers |
 | `0002_idempotency_key.sql` | header-based idempotency for the three creates |
 | `0003_platform_key.sql` | `platform.key`, reproduced from auth-service migration 0004 (nullable `text`, format check, `UNIQUE`); additive, keeps existing rows |
@@ -182,5 +194,5 @@ representability, and the runtime-role privileges.
 
 The operator step-up contract (Auth side), Auth's reference-cache `ensure` and its first-touch flows, the Billing and Payment reference
 clients, production deployment, database roles and backups, monitoring and the production rehearsal (ADR-0040 gates G1 to G7:
-**none is met**), lifecycle semantics beyond I1 and I2, service events, organization-payer authority (B-026/O-18) and platform currency
+**none is met**), lifecycle semantics beyond I1 and I2, service (domain) events (the outbox carries only the central audit intent), organization-payer authority (B-026/O-18) and platform currency
 administration (B-036). See `docs/architecture/stage-10/stage-10-1-implementation.md`.

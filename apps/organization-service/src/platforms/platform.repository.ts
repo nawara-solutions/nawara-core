@@ -1,3 +1,5 @@
+import type { AuditActor } from '@nawara/audit-contract';
+import { OrganizationAudit } from '../audit/organization-audit.js';
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DbService, pgCode, pgConstraint, type Queryable } from '@nawara/service-kit';
@@ -24,10 +26,15 @@ export interface PlatformRow {
  */
 @Injectable()
 export class PlatformRepository {
-  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly idempotency: IdempotencyService,
+    private readonly ownership: OwnershipService,
+    private readonly audit: OrganizationAudit,
+  ) {}
 
   /** `within` runs inside the transaction after the write (see `OrganizationRepository.create`): the success actor record commits or rolls back with the platform. */
-  async create(caller: string, key: string, input: CreatePlatformInput, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<{ platform: PlatformRow; replayed: boolean }> {
+  async create(caller: string, key: string, input: CreatePlatformInput, actor: AuditActor, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<{ platform: PlatformRow; replayed: boolean }> {
     const id = randomUUID();
     try {
       return await this.db.tx(async (q) => {
@@ -43,6 +50,7 @@ export class PlatformRepository {
         }
         const { rows } = await q.query<PlatformRow>('INSERT INTO platform (id, "companyId", name) VALUES ($1, $2, $3) RETURNING *', [id, input.companyId, input.name]);
         await within?.(q, rows[0]!);
+        await this.audit.hierarchy(q, 'platform.created', { type: 'platform', id }, actor); // Stage 18.7.3: same transaction
         return { platform: rows[0]!, replayed: false };
       });
     } catch (e) {
@@ -61,7 +69,7 @@ export class PlatformRepository {
     return listPage<PlatformRow>(this.db, 'platform', query, { companyId: 'companyId' }, allowedPlatforms === undefined ? undefined : { column: 'id', values: allowedPlatforms === null ? null : [...allowedPlatforms] });
   }
 
-  async update(id: string, input: UpdatePlatformInput, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<PlatformRow> {
+  async update(id: string, input: UpdatePlatformInput, actor: AuditActor, within?: (q: Queryable, platform: PlatformRow) => Promise<void>): Promise<PlatformRow> {
     return this.db.tx(async (q) => {
       await this.ownership.assertWritable(q);
       const { rows } = await q.query<PlatformRow>('SELECT * FROM platform WHERE id = $1 FOR UPDATE', [id]);
@@ -73,6 +81,7 @@ export class PlatformRepository {
       }
       const updated = await q.query<PlatformRow>('UPDATE platform SET name = $2, "updatedAt" = now() WHERE id = $1 RETURNING *', [id, input.name]);
       await within?.(q, updated.rows[0]!);
+      await this.audit.hierarchy(q, 'platform.updated', { type: 'platform', id }, actor);
       return updated.rows[0]!;
     });
   }

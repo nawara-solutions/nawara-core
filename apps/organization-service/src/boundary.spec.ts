@@ -34,13 +34,27 @@ const isOwnership = (f: string) => f.includes('/ownership/') || f.endsWith('/cli
 // it makes no outbound call and imports no HTTP client — the admin module's own file-count assertion below still
 // requires the real client/guard/controller files to live under `admin/`).
 const isAdmin = (f: string) => f.includes('/admin/') || f.endsWith('/config/organization-config.ts');
+// Stage 18.7.3 (ADR-0049): the central audit intent is the ONE use of events. The kit outbox, relay and RabbitMQ bus live ONLY in
+// `audit/` (and the config loader names the broker URL); the outbound-call and Auth prohibitions still hold there. There are still
+// no organization domain events.
+const isAudit = (f: string) => f.includes('/audit/') || f.endsWith('/config/organization-config.ts');
 
 describe('service boundary (static)', () => {
   it('has source to inspect', () => expect(shipped.length).toBeGreaterThan(10));
 
-  it('makes no outbound call and has no Auth dependency outside admin/: no fetch, no HTTP client, no Auth client, no broker, no events', () => {
-    const forbidden = /\bfetch\(|\bHttpAuthClient\b|\bAuthClient\b|\bAUTH_SERVICE_URL\b|\bamqplib\b|\bEventsModule\b|\bOutboxService\b|\bInboxService\b|\bRabbitMq|\baxios\b|node:https?['"]|\bgot\(/;
+  it('makes no outbound call and has no Auth dependency outside admin/: no fetch, no HTTP client, no Auth client', () => {
+    const forbidden = /\bfetch\(|\bHttpAuthClient\b|\bAuthClient\b|\bAUTH_SERVICE_URL\b|\baxios\b|node:https?['"]|\bgot\(/;
     for (const f of shipped.filter((x) => !isAdmin(x))) expect(code(f), f).not.toMatch(forbidden);
+  });
+
+  it('touches the broker, the outbox and the relay ONLY in audit/ (the central audit intent), never consumes events, and nowhere else', () => {
+    const events = /\bamqplib\b|\bEventsModule\b|\bOutboxService\b|\bOutboxRelayService\b|\bRabbitMq/;
+    for (const f of shipped.filter((x) => !isAudit(x))) expect(code(f), f).not.toMatch(events);
+    for (const f of shipped) expect(code(f), f).not.toMatch(/\bInboxService\b|\bsubscribe\(/);
+    const audit = shipped.filter((f) => f.includes('/audit/'));
+    expect(audit).toHaveLength(1);
+    // Only the audit writer enqueues: no organization domain event is ever published.
+    expect(code(audit[0]!)).not.toMatch(/\.enqueue\(/);
   });
 
   it('admin/ is the only module with an outbound Auth dependency, and it never imports a service-token concept (it authenticates a HUMAN bearer, never a service credential)', () => {

@@ -36,6 +36,12 @@ exists() { docker inspect "$1" >/dev/null 2>&1; }
 ensure() { grep -q "^$2=" "$1" 2>/dev/null || { printf '%s=%s\n' "$2" "$3" >>"$1"; log "  + $2 (new)"; }; }
 
 mkdir -p "$DIR"; chmod 700 "$DIR"
+# Stage 18.7.5: the central audit relay publishes Auth's audit evidence to RabbitMQ, and the service refuses to start in production
+# without RABBITMQ_URL (independent of AUTH_EVENTS). Checked BEFORE anything is migrated or stopped, so a missing broker can never turn
+# a deploy into an outage. Supply it once (RABBITMQ_URL=amqps://... on the deploy command, or in "$APP_ENV"); the value is never echoed.
+if [ -z "${RABBITMQ_URL:-}" ] && ! grep -q '^RABBITMQ_URL=..*' "$APP_ENV" 2>/dev/null; then
+  die "RABBITMQ_URL is not set (neither in the deploy environment nor in $APP_ENV): auth-service needs a broker for its audit relay (Stage 18.7.5); nothing was changed"
+fi
 docker network inspect "$NET" >/dev/null 2>&1 || die "docker network '$NET' not found (Traefik's network); refusing to create it"
 command -v openssl >/dev/null || die "openssl is required on the server to generate secrets"
 
@@ -141,6 +147,8 @@ ensure "$APP_ENV" WEBAUTHN_RP_NAME Nawara
 ensure "$APP_ENV" PAYMENT_SERVICE_URL "${PAYMENT_SERVICE_URL:-http://nawara-core-payment-service:3000}"
 ensure "$APP_ENV" TRUST_PROXY true
 ensure "$APP_ENV" AUTH_EVENTS off
+# Stage 18.7.5: the audit relay's broker (AUTH_EVENTS=off above still disables only the legacy fire-and-forget events).
+[ -n "${RABBITMQ_URL:-}" ] && ensure "$APP_ENV" RABBITMQ_URL "$RABBITMQ_URL"
 ensure "$APP_ENV" WORK_TIMEZONE Africa/Tunis
 # No channel delivers verification codes yet, so it stays off in production until one exists.
 ensure "$APP_ENV" REQUIRE_CONTACT_VERIFICATION false

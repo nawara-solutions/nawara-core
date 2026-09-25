@@ -1,3 +1,4 @@
+import { BillingAudit } from '../audit/billing-audit.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import type { TransitionContext } from '../domain/actors.js';
@@ -27,6 +28,7 @@ export class SubscriptionRepository {
   constructor(
     private readonly db: DbService,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
+    private readonly audit: BillingAudit,
   ) {}
 
   /**
@@ -153,7 +155,22 @@ export class SubscriptionRepository {
     await this.createTx(q, params.organizationId, params.productId, params.priceId, ctx); // idempotent; conflict on offering mismatch
     const row = await this.lock(q, params.organizationId); // re-read UNDER LOCK: createTx's own "existing" read is not locked
     const anchor = row.status === 'pending' ? params.settledAt : renewalAnchor({ currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil }, params.settledAt);
-    return this.rollPeriod(q, row, anchor, ctx);
+    const result = await this.rollPeriod(q, row, anchor, ctx);
+    // Stage 18.7.2: the central evidence of the ONE live activation / renewal path (a settled payment, via the Payment event consumer or the
+    // reconciler), from the row locked BEFORE and the row written by this very statement (the period end is never re-derived later).
+    const updated = result.subscription;
+    const resource = { type: 'subscription', id: updated.id };
+    if (row.status === 'pending') {
+      await this.audit.record(q, 'subscription.activated', { organizationId: updated.organizationId, resource, changes: { product_id: updated.productId, price_id: updated.priceId } }, ctx);
+    } else if (row.status === 'active' || row.status === 'grace') {
+      await this.audit.record(q, 'subscription.renewed', {
+        organizationId: updated.organizationId, resource, identity: String(updated.revision),
+        changes: { period_end: { from: row.currentPeriodEnd!.toISOString(), to: updated.currentPeriodEnd!.toISOString() } },
+      }, ctx);
+    }
+    // `expired -> active` (a reactivation) has no catalog action and is unreachable today (nothing expires a subscription yet); the direct
+    // `renew()` / `activate()` API has no production caller. Whatever makes either live must come with its catalog review (18.7 record).
+    return result;
   }
 
   /**
