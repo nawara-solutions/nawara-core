@@ -6,7 +6,7 @@ import { toDomainCaller } from '../auth/domain-caller.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { Caller } from '../domain/actors.js';
-import { actorOf, requestTransitionContext } from '../domain/actors.js';
+import { actorOf, requestTransitionContext, withVerifiedKind } from '../domain/actors.js';
 import { PAYMENT_CLIENT } from '../payment-integration/payment-client.token.js';
 import type { PaymentClient } from '../payment-integration/payment-client.js';
 import { billingError } from '../domain/errors.js';
@@ -55,7 +55,7 @@ export class PaymentRequestsController {
     await this.rateLimit.assert('billing-payment-request-create', rateLimitKey, { limit: this.config.rateLimits.paymentRequestCreatePerMinute, windowSec: 60 });
 
     const caller = toDomainCaller(authCaller);
-    const ctx = requestTransitionContext(actorOf(caller));
+    const ctx = requestTransitionContext(withVerifiedKind(actorOf(caller), authCaller)); // Stage 18.7: the kind Auth verified, never the request
     const { request, created } = await this.paymentRequests.createForInvoice(invoiceId, caller, ctx);
     res.status(created ? 201 : 200);
     if (!created) res.setHeader('Idempotent-Replayed', 'true');
@@ -91,7 +91,7 @@ export class PaymentRequestsController {
   @ApiResponse({ status: 503, description: 'payment_unavailable: Payment could not confirm the cancellation; nothing was accepted. Retrying the same call is safe.' })
   async cancel(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string) {
     const caller: Caller = { kind: 'service', service: producer };
-    const ctx = requestTransitionContext(actorOf(caller));
+    const ctx = requestTransitionContext(actorOf(caller)); // service-only route: the actor is the authenticated service
     const request = await this.paymentRequests.findForCaller(id, caller);
 
     if (request.status === 'created') {

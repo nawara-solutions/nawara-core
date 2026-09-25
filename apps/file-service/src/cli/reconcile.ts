@@ -1,4 +1,5 @@
-import { DbService } from '@nawara/service-kit';
+import { DbService, OutboxService } from '@nawara/service-kit';
+import { FileAudit } from '../audit/file-audit.js';
 import { loadFileConfig } from '../config/file-config.js';
 import { createStorage } from '../storage/storage.module.js';
 import { reconcile } from './reconcile-core.js';
@@ -6,6 +7,8 @@ import { reconcile } from './reconcile-core.js';
 /**
  * `npm run reconcile -- [--repair] [--limit N] [--after <fileId>]` (Stage 17.7, SDD §12): the operator reconciliation tool, run with the
  * service's own configuration (runtime database role, configured store). Prints one JSON line per finding and a final summary; exit 0.
+ * Stage 18.7.4: each integrity incident also writes its central audit intent into the service's outbox (its own transaction); the
+ * running service's relay publishes it. The CLI never talks to the broker.
  */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -21,7 +24,10 @@ async function main(): Promise<void> {
   const storage = createStorage(config.storage, () => undefined);
   const db = new DbService({ url: config.databaseUrl, applicationName: 'file-service-reconcile', max: 1, statementTimeoutMs: config.db.statementTimeoutMs });
   try {
-    const summary = await reconcile(db, storage.port, { repair: args.includes('--repair'), limit, after }, (line) => process.stdout.write(`${JSON.stringify(line)}\n`));
+    const audit = new FileAudit(new OutboxService());
+    const onIncident = (file: { id: string; organizationId: string | null }, reason: 'object_missing' | 'size_mismatch') =>
+      db.tx((q) => audit.integrityIncident(q, file, 'file_reconciliation', reason));
+    const summary = await reconcile(db, storage.port, { repair: args.includes('--repair'), limit, after, onIncident }, (line) => process.stdout.write(`${JSON.stringify(line)}\n`));
     process.stdout.write(`${JSON.stringify({ summary })}\n`);
   } finally {
     await db.onApplicationShutdown();

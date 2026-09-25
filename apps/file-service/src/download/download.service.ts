@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { DbService } from '@nawara/service-kit';
+import { IntegrityIncidents } from '../audit/file-audit.js';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
 import { FileRepository, type FileRow, type FileScope } from '../persistence/file.repository.js';
@@ -99,6 +100,7 @@ export class DownloadService {
     private readonly redemptions: RedemptionLimiter,
     private readonly usage: UsageLimiter,
     @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
+    @Inject(IntegrityIncidents) private readonly incidents: IntegrityIncidents,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── path A: trusted services
@@ -223,7 +225,9 @@ export class DownloadService {
       res.off('close', onClose);
       req.off('close', onClose);
       log(isStorageError(e) ? e.code : abort.signal.aborted ? 'aborted' : 'storage_error', 0);
-      throw this.readFailure(e, file);
+      const failure = this.readFailure(e, file);
+      if (isStorageError(e) && e.code === 'storage_not_found') await this.incidents.detected(file, 'object_missing');
+      throw failure;
     }
     if (object.sizeBytes !== size) {
       object.body.destroy();
@@ -232,6 +236,7 @@ export class DownloadService {
       this.counters.bump('integrity_size_mismatch');
       this.logger.warn(`file_storage_inconsistent file=${file.id} reason=size_mismatch`); // never serve bytes that contradict the record
       log('size_mismatch', 0);
+      await this.incidents.detected(file, 'size_mismatch'); // Stage 18.7.4: the central audit intent (once per file and reason)
       throw fileError(500, 'file_content_missing', 'The file content is not available.');
     }
 
@@ -272,6 +277,8 @@ export class DownloadService {
       if (e instanceof ContentMismatch) {
         this.counters.bump(e.message === 'digest_mismatch' ? 'integrity_digest_mismatch' : 'integrity_size_mismatch');
         this.logger.warn(`file_storage_inconsistent file=${file.id} reason=${e.message}`);
+        // A short / long stream is the size fault of the catalog; a wrong hash is the digest fault.
+        await this.incidents.detected(file, e.message === 'digest_mismatch' ? 'digest_mismatch' : 'size_mismatch');
       }
       log(failed ? 'stream_failed' : overDeadline ? 'deadline' : abort.signal.aborted ? 'aborted' : 'stream_failed', counter.bytes);
     } finally {

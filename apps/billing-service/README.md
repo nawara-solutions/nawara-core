@@ -39,6 +39,13 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   `PaymentRequestRepository` (state-idempotent create, apply a Payment event, plus the Stage 4 dispatch/reconciliation/cancel
   support below). Every state change is one transaction: row lock, change, history row and, on issue, the `invoice.created` outbox
   event.
+- **Central audit intent (Stage 18.7.2, ADR-0049; `src/audit/billing-audit.ts`):** `invoice.issued` / `.discarded` / `.paid`,
+  `payment_request.created` / `.cancelled`, `subscription.activated` / `.renewed`, `product.created` / `.archived`, `price.created` /
+  `.retired`, written through `AuditEventWriter` into the outbox in the change's transaction (beside its `billing_transition` row). The
+  actor comes from the change's own `TransitionContext` (service caller, Auth-verified user, or Billing's `payment_event_consumer` /
+  `payment_reconciler`); the organization from the persisted invoice, subscription or product seller (catalog corrections G3/G4: null
+  for an organization-less invoice or a non-organization seller); a change caused by a Payment event carries its id as `causationId`.
+  See the [Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
 - **HTTP API** (`src/invoices/*.controller.ts`, mounted at `GET /docs`): products, prices, invoices (create, list, get, issue,
   discard) and payment requests (create, get, cancel). `@nestjs/swagger` decorators on every operation and DTO field.
 - **Payment integration** (`src/payment-integration`, SDD section 21):

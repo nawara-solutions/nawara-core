@@ -19,7 +19,9 @@ const S3_SECRET = 's3-secret-looking-value-4567';
 const STORAGE = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.storage.invalid', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'file-process-test', FILE_S3_ACCESS_KEY_ID: 'AKIDPROCESSTEST', FILE_S3_SECRET_ACCESS_KEY: S3_SECRET };
 /** Stage 17.5: the upload settings (random keys per run). */
 const UPLOAD = { FILE_PUBLIC_BASE_URL: 'https://files.process.invalid', FILE_REQUEST_HASH_KEY: randomBytes(32).toString('base64'), FILE_RATE_LIMIT_KEY: randomBytes(32).toString('base64') };
-const REQUIRED = { DATABASE_URL: RUNTIME_DB, FILE_SERVICE_POLICY: POLICY, ...STORAGE, ...UPLOAD };
+// Stage 18.7.4: the audit relay's broker, unreachable by construction (the relay retries in the background; it never gates startup or readiness).
+const BROKER = { RABBITMQ_URL: 'amqp://guest:guest@127.0.0.1:9' };
+const REQUIRED = { DATABASE_URL: RUNTIME_DB, FILE_SERVICE_POLICY: POLICY, ...STORAGE, ...UPLOAD, ...BROKER };
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 function freePort(): Promise<number> {
@@ -122,6 +124,8 @@ describe('file-service as a built process (production configuration)', () => {
     ['a missing S3 secret', { FILE_S3_SECRET_ACCESS_KEY: '' }, /FILE_S3_SECRET_ACCESS_KEY/],
     ['a missing request-hash key', { FILE_REQUEST_HASH_KEY: '' }, /FILE_REQUEST_HASH_KEY/],
     ['a plain-HTTP public base URL in production', { FILE_PUBLIC_BASE_URL: 'http://files.process.invalid' }, /FILE_PUBLIC_BASE_URL/],
+    ['no broker for the audit relay in production (Stage 18.7.4)', { RABBITMQ_URL: '' }, /RABBITMQ_URL is required in production/],
+    ['a non-AMQP broker URL', { RABBITMQ_URL: `http://guest:${DB_PASSWORD}@mq` }, /RABBITMQ_URL/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
     const { digest } = generateServiceToken();
     const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), ...REQUIRED, SERVICE_TOKENS: `some-core-service:${digest}`, ...env });

@@ -7,6 +7,7 @@ import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { PasswordService } from '../crypto/password.js';
 import { DbService } from '../db/db.service.js';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, userActor } from '../audit/central-audit.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { EnrollmentService } from './enrollment.service.js';
 import { FactorService } from './factor.service.js';
@@ -42,6 +43,7 @@ export class OwnerController {
     @Inject(PasswordService) private readonly passwords: PasswordService,
     @Inject(RefreshTokenService) private readonly refresh: RefreshTokenService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   private client(req: Request) {
@@ -154,6 +156,8 @@ export class OwnerController {
       await this.stepUp.consume(q, { ownerId: req.actor.userId, sid: req.actor.sid, purpose: 'owner.factor.remove', token: su });
       await this.factors.removeSafely(q, req.actor.userId, id);
       await this.audit.record({ type: 'owner.factor.removed', outcome: 'success', actorId: req.actor.userId, targetId: id, sessionFamilyId: req.actor.sid }, q);
+      // Stage 18.7.6: the central audit intent, same transaction (the owner is the guard's database-loaded actor).
+      await this.central.write(q, { action: 'owner.factor_removed', actor: userActor(req.actor), organizationId: null, resource: { type: 'factor', id }, outcome: 'succeeded' });
     });
   }
 
@@ -189,6 +193,7 @@ export class OwnerController {
       await this.stepUp.consume(q, { ownerId: req.actor.userId, sid: req.actor.sid, purpose: 'owner.secret_key.rotate', token: su });
       const r = await this.secretKeys.issue(q, req.actor.userId);
       await this.audit.record({ type: 'owner.secret_key.rotated', outcome: 'success', actorId: req.actor.userId, sessionFamilyId: req.actor.sid, ip: this.client(req).ip }, q);
+      await this.central.write(q, { action: 'owner.secret_key_rotated', actor: userActor(req.actor), organizationId: null, resource: { type: 'user', id: req.actor.userId }, outcome: 'succeeded' });
       return r;
     });
   }
@@ -206,6 +211,7 @@ export class OwnerController {
       await q.query(`UPDATE "user" SET "passwordHash"=$2, "updatedAt"=now() WHERE id=$1`, [req.actor.userId, hash]);
       await this.refresh.revokeAllForUser(q, req.actor.userId, req.actor.sid);
       await this.audit.record({ type: 'owner.password.changed', outcome: 'success', actorId: req.actor.userId, sessionFamilyId: req.actor.sid, ip: this.client(req).ip }, q);
+      await this.central.write(q, { action: 'owner.password_changed', actor: userActor(req.actor), organizationId: null, resource: { type: 'user', id: req.actor.userId }, outcome: 'succeeded' });
     });
   }
 

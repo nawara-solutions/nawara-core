@@ -1,3 +1,4 @@
+import { BillingAudit } from '../audit/billing-audit.js';
 import { HttpException, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import { actorOf, type Caller, type TransitionContext } from '../domain/actors.js';
@@ -68,6 +69,7 @@ export class PaymentRequestRepository {
   constructor(
     private readonly db: DbService,
     private readonly subscriptions: SubscriptionRepository,
+    private readonly audit: BillingAudit,
   ) {}
 
   /** State-idempotent creation (BI-13): the current active request is returned instead of a second one. */
@@ -92,6 +94,7 @@ export class PaymentRequestRepository {
       );
       const request = inserted.rows[0]!;
       await recordTransition(q, { entityType: 'payment_request', entityId: request.id, from: null, to: 'created', revision: request.revision, ctx });
+      await this.audit.record(q, 'payment_request.created', { organizationId: invoice.organizationId, resource: { type: 'payment_request', id: request.id }, changes: { invoice_id: invoiceId } }, ctx); // Stage 18.7.2 (G3)
       return { request, created: true };
     });
   }
@@ -235,14 +238,15 @@ export class PaymentRequestRepository {
   async cancelUnsent(requestId: string, caller: Caller, ctx: TransitionContext): Promise<PaymentRequestRow> {
     return this.db.tx(async (q) => {
       const { rows } = await q.query<PaymentRequestRow & { producer: string; payerType: string; payerId: string }>(
-        `SELECT pr.*, i.producer, i."payerType", i."payerId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1 FOR UPDATE OF pr`,
+        `SELECT pr.*, i.producer, i."payerType", i."payerId", i."organizationId" AS "invoiceOrganizationId" FROM payment_request pr JOIN invoice i ON i.id = pr."invoiceId" WHERE pr.id = $1 FOR UPDATE OF pr`,
         [requestId],
       );
-      const row = rows[0];
+      const row = rows[0] as (typeof rows)[number] & { invoiceOrganizationId: string | null };
       if (!row || relationTo(row, caller) === null) throw notFound();
       if (row.status !== 'created') throw billingError(409, 'payment_request_in_flight', 'This request has already been sent; it cannot be cancelled locally.');
       const { rows: updated } = await q.query<PaymentRequestRow>(`UPDATE payment_request SET status = 'cancelled' WHERE id = $1 RETURNING *`, [requestId]);
       await recordTransition(q, { entityType: 'payment_request', entityId: requestId, from: 'created', to: 'cancelled', revision: updated[0]!.revision, ctx });
+      await this.audit.record(q, 'payment_request.cancelled', { organizationId: row.invoiceOrganizationId, resource: { type: 'payment_request', id: requestId }, changes: { invoice_id: row.invoiceId } }, ctx); // Stage 18.7.2
       return updated[0]!;
     });
   }
@@ -334,10 +338,15 @@ export class PaymentRequestRepository {
       let subscription: SubscriptionSettlementOutcome = null;
       if (decision.outcome === 'applied' && request && invoice) {
         await this.transitionRequest(q, request, decision.requestTo, ctx);
+        if (decision.requestTo === 'cancelled') {
+          // Stage 18.7.2 (G2): a requested payment's cancellation completes here, when Payment's event (or the reconciler) confirms it.
+          await this.audit.record(q, 'payment_request.cancelled', { organizationId: invoice.organizationId, resource: { type: 'payment_request', id: request.id }, changes: { invoice_id: invoice.id } }, ctx);
+        }
         if (decision.invoiceTo === 'paid') {
           // the request is `paid` first: the invoice trigger insists on it (BI-14)
           const updated = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'paid', "paidAt" = now() WHERE id = $1 RETURNING *`, [invoice.id]);
           await recordTransition(q, { entityType: 'invoice', entityId: invoice.id, from: 'open', to: 'paid', revision: updated.rows[0]!.revision, ctx });
+          await this.audit.record(q, 'invoice.paid', { organizationId: invoice.organizationId, resource: { type: 'invoice', id: invoice.id } }, ctx); // Stage 18.7.2
           subscription = await this.linkSubscription(q, invoice, settledAt, ctx);
         }
       }

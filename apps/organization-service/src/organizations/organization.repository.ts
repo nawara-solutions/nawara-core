@@ -1,3 +1,5 @@
+import type { AuditActor } from '@nawara/audit-contract';
+import { OrganizationAudit } from '../audit/organization-audit.js';
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DbService, pgCode, pgConstraint, type Queryable } from '@nawara/service-kit';
@@ -29,13 +31,18 @@ const UPDATABLE = ['name', 'taxCode', 'address', 'phone', 'type'] as const;
  */
 @Injectable()
 export class OrganizationRepository {
-  constructor(private readonly db: DbService, private readonly idempotency: IdempotencyService, private readonly ownership: OwnershipService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly idempotency: IdempotencyService,
+    private readonly ownership: OwnershipService,
+    private readonly audit: OrganizationAudit,
+  ) {}
 
   /**
    * `within`, when given, runs INSIDE the transaction after the write (the human-admin controller writes its success actor record
    * there, so a mutation cannot commit without it). It runs on a replay too, as the record always has; if it throws, everything rolls back.
    */
-  async create(caller: string, key: string, input: CreateOrganizationInput, within?: (q: Queryable, organization: OrganizationRow) => Promise<void>): Promise<{ organization: OrganizationRow; replayed: boolean }> {
+  async create(caller: string, key: string, input: CreateOrganizationInput, actor: AuditActor, within?: (q: Queryable, organization: OrganizationRow) => Promise<void>): Promise<{ organization: OrganizationRow; replayed: boolean }> {
     const id = randomUUID();
     try {
       return await this.db.tx(async (q) => {
@@ -54,6 +61,7 @@ export class OrganizationRepository {
           [id, input.platformId, input.name, input.taxCode, input.address, input.phone, input.type],
         );
         await within?.(q, rows[0]!);
+        await this.audit.hierarchy(q, 'organization.created', { type: 'organization', id }, actor); // Stage 18.7.3: identifiers only (no name, tax code, address, phone)
         return { organization: rows[0]!, replayed: false };
       });
     } catch (e) {
@@ -73,7 +81,7 @@ export class OrganizationRepository {
   }
 
   /** Writes only the fields that actually change; a request that changes nothing writes nothing (and leaves `updatedAt` alone). */
-  async update(id: string, input: UpdateOrganizationInput, within?: (q: Queryable, organization: OrganizationRow) => Promise<void>): Promise<OrganizationRow> {
+  async update(id: string, input: UpdateOrganizationInput, actor: AuditActor, within?: (q: Queryable, organization: OrganizationRow) => Promise<void>): Promise<OrganizationRow> {
     return this.db.tx(async (q) => {
       await this.ownership.assertWritable(q);
       const { rows } = await q.query<OrganizationRow>('SELECT * FROM organization WHERE id = $1 FOR UPDATE', [id]);
@@ -88,6 +96,7 @@ export class OrganizationRepository {
       const sets = changed.map((f, i) => `"${f}" = $${i + 2}`).join(', ');
       const updated = await q.query<OrganizationRow>(`UPDATE organization SET ${sets}, "updatedAt" = now() WHERE id = $1 RETURNING *`, [id, ...changed.map((f) => input[f])]);
       await within?.(q, updated.rows[0]!);
+      await this.audit.hierarchy(q, 'organization.updated', { type: 'organization', id }, actor);
       return updated.rows[0]!;
     });
   }

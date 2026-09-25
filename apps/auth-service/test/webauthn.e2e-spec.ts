@@ -135,6 +135,14 @@ describe('WebAuthn / passkeys: real protocol verification', () => {
     expect(f.rows[0].revokedAt).not.toBeNull();
     const a = await t.db.query(`SELECT count(*)::int n FROM auth_audit_event WHERE type='owner.webauthn.clone_suspected' AND "actorId"=$1`, [o.id]);
     expect(a.rows[0].n).toBe(1);
+    // Stage 18.7.6: the central audit intent of the detection (system actor, the factor, the owner as subject) and of the passkey enrollment.
+    const factorId = (await t.db.query(`SELECT id FROM owner_auth_factor WHERE "ownerId"=$1`, [o.id])).rows[0].id;
+    const central = (await t.db.query(`SELECT name, payload FROM outbox WHERE payload->'resource'->>'id' = $1 ORDER BY "occurredAt"`, [factorId])).rows;
+    expect(central.map((r) => r.name)).toEqual(['audit.owner.factor_enrolled', 'audit.owner.webauthn_clone_suspected']);
+    expect(central[0].payload).toMatchObject({ actor: { type: 'user', id: o.id, userKind: 'owner' }, changes: { method: 'webauthn' } });
+    expect(central[1].payload).toMatchObject({
+      actor: { type: 'system', id: 'webauthn_clone_detection' }, organizationId: null, resource: { type: 'factor', id: factorId }, subject: { type: 'user', id: o.id }, outcome: 'denied',
+    });
     // the only factor is gone: recovery is the path, not a password-only re-enrollment
     const login = await t.http.post('/auth/login').send({ email: o.email, password: o.password }).expect(200);
     expect(login.body).toEqual({ status: 'recovery_required' });

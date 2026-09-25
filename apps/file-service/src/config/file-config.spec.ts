@@ -8,7 +8,9 @@ const DB = 'postgres://file_app:pw-not-real@db:5432/file';
 const S3 = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.example.test', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'files-test', FILE_S3_ACCESS_KEY_ID: 'AKIDEXAMPLE', FILE_S3_SECRET_ACCESS_KEY: 'not-a-real-secret-0000' };
 /** Stage 17.5: the upload settings (placeholder keys: two different 32-byte values). */
 const UPLOAD = { FILE_PUBLIC_BASE_URL: 'https://files.example.test', FILE_REQUEST_HASH_KEY: Buffer.alloc(32, 1).toString('base64'), FILE_RATE_LIMIT_KEY: Buffer.alloc(32, 2).toString('base64') };
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...S3, ...UPLOAD, ...over });
+/** Stage 18.7.4: the audit relay's broker (required in production). */
+const MQ = { RABBITMQ_URL: 'amqp://mq.example.test:5672' };
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...S3, ...UPLOAD, ...MQ, ...over });
 const A = generateServiceToken();
 
 describe('file-service configuration', () => {
@@ -31,14 +33,28 @@ describe('file-service configuration', () => {
     expect(c.callerPolicy.of('anyone')).toBeUndefined();
   });
 
-  it('carries what is used so far: the store (17.4), the upload lifecycle (17.5); no download-ticket, broker or Auth setting', () => {
+  it('carries what is used so far: the store (17.4), the upload lifecycle (17.5), the audit relay broker (18.7.4); no Auth setting', () => {
     const c = loadFileConfig(env());
     expect(c.storage.provider).toBe('s3');
     expect(c.upload).toMatchObject({ ticketTtlSeconds: 120, attachTtlSeconds: 86_400, idleTimeoutMs: 30_000, ticketFailureLimit: 20, publicBaseUrl: 'https://files.example.test',
       downloadTicketTtlSeconds: 120, downloadIdleTimeoutMs: 30_000 }); // Stage 17.6 defaults
     expect(c.docs.password).toBeUndefined(); // OpenAPI is not mounted by default
     const keys = [...Object.keys(c), ...Object.keys(c.upload)];
-    for (const later of ['rabbitmqUrl', 'authServiceUrl']) expect(keys).not.toContain(later);
+    expect(keys).not.toContain('authServiceUrl');
+    expect(c).toMatchObject({ rabbitmqUrl: MQ.RABBITMQ_URL, rabbitmqConfirmTimeoutMs: 5_000 });
+  });
+
+  it('Stage 18.7.4: RABBITMQ_URL is required in production, optional elsewhere (the in-memory bus), only amqp(s); never echoed', () => {
+    expect(() => loadFileConfig(env({ RABBITMQ_URL: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
+    expect(loadFileConfig(env({ NODE_ENV: 'development', RABBITMQ_URL: undefined })).rabbitmqUrl).toBeUndefined();
+    let message = '';
+    try {
+      loadFileConfig(env({ RABBITMQ_URL: 'http://user:s3cret@mq' }));
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain('RABBITMQ_URL');
+    expect(message).not.toContain('s3cret');
   });
 
   it.each([

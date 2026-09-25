@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, userActor } from '../audit/central-audit.js';
 import { SessionService } from '../auth/session.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
@@ -53,6 +54,7 @@ export class InvitationService {
     @Inject(EVENT_BUS) private readonly bus: EventBus,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
     @Inject(StepUpService) private readonly stepUp: StepUpService,
     @Inject(PlatformAccessService) private readonly access: PlatformAccessService,
     @Inject(UsersService) private readonly users: UsersService,
@@ -155,19 +157,25 @@ export class InvitationService {
         `UPDATE organization_admin_invitation SET "consumedAt" = $2, "consumedBy" = $3
           WHERE "codeHash" = $1 AND "consumedAt" IS NULL AND "revokedAt" IS NULL AND "expiresAt" > $2
             AND ("inviteeContactHash" IS NULL OR "inviteeContactHash" = $4)
-        RETURNING id`,
+        RETURNING id, "organizationId"`,
         [this.hash(normalized), now, user.id, contactHash],
       );
       if (!rows[0]) throw authError(403, 'invitation_not_acceptable', ACCEPT_REFUSED); // lost the race, revoked, or expired meanwhile: rolls the user back
-      await q.query(
+      const membership = await q.query(
         `INSERT INTO organization_membership("userId","organizationId",status,"invitationId",audience,"requestedAt","approvedAt","approvedBy","isOrganizationAdmin","createdAt","updatedAt")
-         VALUES ($1,$2,'active',$3,$6,$4,$4,$5,true,$4,$4)`,
+         VALUES ($1,$2,'active',$3,$6,$4,$4,$5,true,$4,$4) RETURNING id, "organizationId"`,
         [user.id, inv.organizationId, inv.id, now, inv.createdBy, inv.invitationType],
       );
       await this.audit.record({
         type: 'onboarding.admin_invitation.consumed', outcome: 'success', actorId: user.id, targetId: inv.id, ip: client.ip,
         metadata: { organizationId: inv.organizationId, invitationType: inv.invitationType },
       }, q);
+      // Stage 18.7.6: the central audit intent, same transaction. The actor is the member this acceptance just created (its kind from
+      // the row); the organization and the invitation are the consumed invitation's and the new membership's, never a request value.
+      await this.central.write(q, {
+        action: 'membership.admin_provisioned', actor: userActor({ userId: user.id, kind: user.kind }), organizationId: membership.rows[0].organizationId,
+        resource: { type: 'membership', id: membership.rows[0].id }, outcome: 'succeeded', changes: { invitation_id: rows[0].id },
+      });
       return { user, tokens: await this.sessions.issue(q, user) };
     });
     const ts = this.clock.now().toISOString();
@@ -222,14 +230,19 @@ export class InvitationService {
       try {
         const { rows } = await q.query(
           `INSERT INTO organization_admin_invitation("organizationId","platformId","codeHash","invitationType","inviteeContactHash","expiresAt","createdBy","createdAt")
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, "invitationType", "expiresAt", "createdAt"`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, "invitationType", "expiresAt", "createdAt", "organizationId"`,
           [organizationId, p!.platformId, this.hash(code.normalized), dto.invitationType, bound, expiresAt, actor.userId, now],
         );
+        const { organizationId: persistedOrganization, ...created } = rows[0];
         await this.audit.record({
           type: 'onboarding.admin_invitation.created', outcome: 'success', actorId: actor.userId, targetId: rows[0].id, sessionFamilyId: actor.sid, ip,
           metadata: { organizationId, invitationType: dto.invitationType, authority, durationMinutes: minutes, contactBound: !!bound },
         }, q);
-        return { ...rows[0], contactBound: !!bound, code: code.display };
+        await this.central.write(q, {
+          action: 'admin_invitation.created', actor: userActor(actor), organizationId: persistedOrganization, resource: { type: 'admin_invitation', id: created.id },
+          outcome: 'succeeded', changes: { authority },
+        });
+        return { ...created, contactBound: !!bound, code: code.display };
       } catch (e) {
         if (isUniqueViolation(e)) throw authError(409, 'conflict', 'Please try again.'); // a 60-bit collision is astronomically unlikely
         throw e;
@@ -244,13 +257,17 @@ export class InvitationService {
       if (authority === 'owner') {
         await this.stepUp.consume(q, { ownerId: actor.userId, sid: actor.sid, purpose: 'admin_invitation.revoke', token: stepUpToken });
       }
-      const { rowCount } = await q.query(
+      const { rows } = await q.query(
         `UPDATE organization_admin_invitation SET "revokedAt" = $3, "revokedBy" = $4
-          WHERE id = $1 AND "organizationId" = $2 AND "consumedAt" IS NULL AND "revokedAt" IS NULL`,
+          WHERE id = $1 AND "organizationId" = $2 AND "consumedAt" IS NULL AND "revokedAt" IS NULL RETURNING "organizationId"`,
         [invitationId, organizationId, this.clock.now(), actor.userId],
       );
-      if (rowCount !== 1) throw notFound(); // nothing to revoke (already consumed/revoked): rolls back, step-up not burned
+      if (rows.length !== 1) throw notFound(); // nothing to revoke (already consumed/revoked): rolls back, step-up not burned
       await this.audit.record({ type: 'onboarding.admin_invitation.revoked', outcome: 'success', actorId: actor.userId, targetId: invitationId, sessionFamilyId: actor.sid, ip, metadata: { organizationId, authority } }, q);
+      await this.central.write(q, {
+        action: 'admin_invitation.revoked', actor: userActor(actor), organizationId: rows[0].organizationId, resource: { type: 'admin_invitation', id: invitationId },
+        outcome: 'succeeded', changes: { authority },
+      });
     });
   }
 

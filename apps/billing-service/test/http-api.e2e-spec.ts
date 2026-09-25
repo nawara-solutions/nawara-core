@@ -19,15 +19,15 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
   const producer = generateServiceToken();
   const otherProducer = generateServiceToken();
 
-  const payer: AuthIdentity = { id: 'user-1', adminTier: null, isActive: true, memberships: [] };
-  const otherUser: AuthIdentity = { id: 'user-2', adminTier: null, isActive: true, memberships: [] };
+  const payer: AuthIdentity = { id: '1a1a1a1a-0000-4000-8000-000000000001', adminTier: null, isActive: true, memberships: [] };
+  const otherUser: AuthIdentity = { id: '2b2b2b2b-0000-4000-8000-000000000002', adminTier: null, isActive: true, memberships: [] };
   // A generic Auth capability is never Billing authority (SDD 19.1): an owner-tier identity gets no special access.
-  const platformOwner: AuthIdentity = { id: 'owner-1', adminTier: 'owner', isActive: true, memberships: [] };
+  const platformOwner: AuthIdentity = { id: '3c3c3c3c-0000-4000-8000-000000000003', adminTier: 'owner', isActive: true, memberships: [] };
   const identities: Record<string, AuthIdentity> = {
     'payer-jwt': payer,
     'other-user-jwt': otherUser,
     'owner-jwt': platformOwner,
-    'inactive-jwt': { id: 'user-3', adminTier: null, isActive: false, memberships: [] },
+    'inactive-jwt': { id: '4d4d4d4d-0000-4000-8000-000000000004', adminTier: null, isActive: false, memberships: [] },
   };
   const authClient: AuthClient = { getIdentity: async (bearer) => identities[bearer] ?? null, hasPlatformAccess: async () => false };
 
@@ -79,7 +79,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
     return {
       invoiceRequestId: o.request ?? crypto.randomUUID(),
       seller: { type: 'organization', id: o.sellerId },
-      payer: { type: 'user', id: o.payerId ?? 'user-1' },
+      payer: { type: 'user', id: o.payerId ?? '1a1a1a1a-0000-4000-8000-000000000001' },
       sourceType: 'contract',
       sourceId: `src-${++seq}`,
       issuerSnapshot: { schemaVersion: 1 },
@@ -198,7 +198,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('gets an invoice for its producer and for its payer; 404 (collapsed) for an unrelated user, even one with a platform-owner Auth flag', async () => {
       const { priceId, sellerId } = await seedPrice();
-      const { body: invoice } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: 'user-1' })).expect(201);
+      const { body: invoice } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
 
       await asProducer.get(`/billing/invoices/${invoice.id}`).expect(200);
       await asPayer.get(`/billing/invoices/${invoice.id}`).expect(200);
@@ -249,9 +249,9 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
   describe('billing history: listing, pagination, filters, isolation', () => {
     it('a producer lists only what it created; a payer lists only invoices where they are the payer (never another caller\'s data)', async () => {
       const { priceId, sellerId } = await seedPrice();
-      await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: 'user-1' })).expect(201);
+      await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       const { priceId: p2, sellerId: s2 } = await seedPrice({ producer: asOtherProducer });
-      await asOtherProducer.post('/billing/invoices', invoiceBody({ priceId: p2, sellerId: s2, payerId: 'user-1' })).expect(201);
+      await asOtherProducer.post('/billing/invoices', invoiceBody({ priceId: p2, sellerId: s2, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
 
       const producerList = await asProducer.get('/billing/invoices').expect(200);
       expect(producerList.body.items.length).toBeGreaterThan(0);
@@ -310,7 +310,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
   describe('payment requests: Billing-side creation (the Payment integration itself — dispatch, cancel, events — is covered in payment-integration.e2e-spec.ts)', () => {
     it('creates a payment request equal to the full invoice total; paymentId is ALWAYS null and status ALWAYS "created" (the dispatcher never runs in this suite — its own interval is set to an hour, and nothing here calls dispatchOnce())', async () => {
       const { priceId, sellerId } = await seedPrice({ unitAmount: 2000 });
-      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, quantity: 1, payerId: 'user-1' })).expect(201);
+      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, quantity: 1, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);
 
       const r = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(201);
@@ -319,7 +319,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('state-idempotent: a second request while one is active returns the SAME request, never a duplicate (BI-13)', async () => {
       const { priceId, sellerId } = await seedPrice();
-      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: 'user-1' })).expect(201);
+      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);
       const first = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(201);
       const second = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(200);
@@ -328,7 +328,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('refuses a payment request for a draft (not open): 409 invoice_not_payable', async () => {
       const { priceId, sellerId } = await seedPrice();
-      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: 'user-1' })).expect(201);
+      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       const r = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(409);
       expect(r.body.code).toBe('invoice_not_payable');
     });
@@ -343,7 +343,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('a request can be created ONLY for the invoice\'s full total and currency — there is no field to override either (no client-supplied amount/currency exists)', async () => {
       const { priceId, sellerId } = await seedPrice({ unitAmount: 777 });
-      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, quantity: 1, payerId: 'user-1' })).expect(201);
+      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, quantity: 1, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);
       const r = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`, { amount: 1, currency: 'USD' }).expect(201);
       expect(r.body.amount).toBe(777); // the body is ignored: amount/currency always come from the invoice (BI-09)
@@ -352,7 +352,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('gets a payment request for its payer and for the invoice\'s producer; 404 for an unrelated user', async () => {
       const { priceId, sellerId } = await seedPrice();
-      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: 'user-1' })).expect(201);
+      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);
       const { body: pr } = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(201);
 
@@ -363,7 +363,7 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('the invoice representation reflects the active payment request without ever implying Payment accepted it', async () => {
       const { priceId, sellerId } = await seedPrice();
-      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: 'user-1' })).expect(201);
+      const { body: draft } = await asProducer.post('/billing/invoices', invoiceBody({ priceId, sellerId, payerId: '1a1a1a1a-0000-4000-8000-000000000001' })).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);
       const { body: pr } = await asPayer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(201);
       const invoice = await asProducer.get(`/billing/invoices/${draft.id}`).expect(200);

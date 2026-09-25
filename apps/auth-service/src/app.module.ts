@@ -1,10 +1,11 @@
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { HealthModule as KitHealthModule } from '@nawara/service-kit';
+import { HealthModule as KitHealthModule, type EventBus } from '@nawara/service-kit';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuditService } from './audit/audit.service.js';
+import { AuditRelayModule } from './audit/central-audit.js';
 import { AuthController } from './auth/auth.controller.js';
 import { AuthGuard } from './auth/auth.guard.js';
 import { AuthService } from './auth/auth.service.js';
@@ -14,7 +15,6 @@ import { CLOCK, EVENT_BUS, NoopEventBus, SystemClock } from './common/ports.js';
 import { APP_CONFIG, type AppConfig } from './config/app-config.js';
 import { PasswordService } from './crypto/password.js';
 import { TotpSecretCipher } from './crypto/totp-cipher.js';
-import { DbService } from './db/db.service.js';
 import { EventsModule } from './events/events.module.js';
 import { EventsPublisherService } from './events/events-publisher.service.js';
 import { HealthController } from './health/health.controller.js';
@@ -63,7 +63,7 @@ import { UsersService } from './users/users.service.js';
     },
     { provide: PasswordService, useFactory: (c: AppConfig) => new PasswordService(c.bcryptCost), inject: [APP_CONFIG] },
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
-    DbService, AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
+    AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,
     OperatorAvailabilityService, OperatorCodeService, OperatorAdminService,
@@ -71,7 +71,11 @@ import { UsersService } from './users/users.service.js';
   ],
 })
 export class AppModule {
-  static register(cfg: AppConfig): DynamicModule {
+  /**
+   * `auditBus`: TEST FIXTURES ONLY, the bus the audit relay publishes to (production builds it from RABBITMQ_URL). `auditRelay: false`: the
+   * operator CLI, which writes to the outbox (if ever) but never runs a relay or connects to the broker.
+   */
+  static register(cfg: AppConfig, auditBus?: EventBus, opts: { auditRelay?: boolean } = {}): DynamicModule {
     return {
       module: AppModule,
       imports: [
@@ -82,6 +86,8 @@ export class AppModule {
         // DbService below) alongside Auth's own existing GET /auth/health, which is unchanged and stays the
         // route production deploy tooling and Compose already poll (Stage 13.2: additive, not a replacement).
         KitHealthModule.forRoot({ checkTimeoutMs: 1500, httpDrainTimeoutMs: cfg.httpDrainTimeoutMs }), // Stage 15.5: bounded HTTP drain
+        // Stage 18.7.5: Auth's pool (DbService) and the durable central audit path (the kit outbox + relay), independent of AUTH_EVENTS.
+        AuditRelayModule.forRoot(cfg, auditBus, { relay: opts.auditRelay }),
         // Broker wiring is switched off with AUTH_EVENTS=off (tests, runs without RabbitMQ).
         ...(cfg.events.enabled && cfg.events.rabbitmqUrl && cfg.events.confirmTimeoutMs ? [EventsModule.register({ rabbitmqUrl: cfg.events.rabbitmqUrl, confirmTimeoutMs: cfg.events.confirmTimeoutMs })] : []),
       ],

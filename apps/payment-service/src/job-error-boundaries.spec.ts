@@ -24,7 +24,7 @@ const flakyDb = (firstError: unknown) => {
 const jobs: Array<{ name: string; event: string; make: (db: unknown) => Job }> = [
   {
     name: 'ExpirySweeper', event: 'expiry_sweep_pass_failure',
-    make: (db) => { const j = new ExpirySweeper(db as never, {} as never); return { start: (i) => j.start(i), stop: () => j.stop(), run: () => j.sweepOnce() }; },
+    make: (db) => { const j = new ExpirySweeper(db as never, {} as never, {} as never); return { start: (i) => j.start(i), stop: () => j.stop(), run: () => j.sweepOnce() }; },
   },
   {
     name: 'AttemptResolver', event: 'attempt_resolver_pass_failure',

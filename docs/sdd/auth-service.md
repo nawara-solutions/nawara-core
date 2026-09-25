@@ -2,6 +2,10 @@
 
 - **Status:** Partially implemented <!-- Draft | Reviewed | Implemented --> — the authentication, session, MFA, step-up, recovery, operator-code and platform-authorization surface is implemented and tested (`apps/auth-service`); the rest is still design. Needs re-review after ADR-0024/0025/0026/0027.
 - **Canonical references:** the migrations (`apps/auth-service/db/migrations/0001…0007`) are the schema of record; ADR-0026 is the data-model/entitlement reference and [ADR-0027](../adr/0027-service-layer-security-model.md) the service-layer model; the implementation report is [`docs/security/auth-service-security-review.md`](../security/auth-service-security-review.md). Older PDFs of this model (`auth-service-data-model.pdf`, `…-adr-0024.pdf`) are **superseded**.
+- **Central audit (Stage 18.7.5–18.7.6, ADR-0049):** migration `0010` adds Auth's transactional outbox (the kit's table exactly); the 24
+  Auth catalog actions write their central audit intent in the same transaction as the change and its local `auth_audit_event` row, and
+  the kit relay publishes it (independent of `AUTH_EVENTS`; `RABBITMQ_URL` required in production). The local audit trail is unchanged.
+  See the [Stage 18.7 record](../architecture/stage-18/stage-18-7-core-producer-integration.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [docs/add/auth-service.md](../add/auth-service.md)
 - **Related ADRs:** [0001](../adr/0001-generic-organization-id-scoping-claim.md) (generic

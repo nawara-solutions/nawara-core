@@ -58,8 +58,17 @@ CSP; no Range, no HEAD.
 idempotent); `src/cleanup/`: one bounded worker loop (orphan expiry, physical delete with lease + fence + backoff, upload-lease sweep,
 ticket retention); `npm run reconcile -- [--repair]` (the operator tool: reports missing objects, removes leftovers of failed rows).
 
-**Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no RabbitMQ
-(outbox events wait for Stage 18); no user JWT; no malware scanner (decision B); no public or presigned URL, Range, multipart or versions.
+**Central audit intent (18.7.4, ADR-0049; `src/audit/file-audit.ts`):** `file.deleted` in the deletion request's transaction (the
+`AVAILABLE` → `DELETING` transition only; actor = the owner service; organization = the file row's); `file.integrity_incident` when a
+download finds the stored bytes contradicting the record (`file_download_integrity_check`) or the reconcile tool finds an object missing
+or of the wrong size (`file_reconciliation`), ONE event per (file, reason) (a deterministic event id). Recording an incident never
+changes a download's answer; the reconcile CLI writes into the outbox and the running service's relay publishes it. The kit outbox relay
+publishes to RabbitMQ (`RABBITMQ_URL`, required in production); nothing is consumed. See the
+[Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
+
+**Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no File
+domain events (the broker carries only the audit intent); no user JWT; no malware scanner (decision B); no public or presigned URL,
+Range, multipart or versions.
 
 ## Configuration
 
@@ -72,6 +81,8 @@ ticket retention); `npm run reconcile -- [--repair]` (the operator tool: reports
 | `MIGRATION_DATABASE_URL` | – | | the migrator, read only by `npm run migrate` |
 | `SERVICE_TOKENS` | empty | `<caller>:<sha256 hex>`, ≤ 2 per caller | empty refuses every service-token call |
 | `FILE_SERVICE_POLICY` | empty | `{"callers": {…}}` | required once `SERVICE_TOKENS` registers a caller; see below |
+| `RABBITMQ_URL` | none; **required in production** | `amqp:` / `amqps:` | Stage 18.7.4: the audit relay's broker; absent outside production = the in-memory bus; never echoed |
+| `RABBITMQ_CONFIRM_TIMEOUT_MS` / `RABBITMQ_HEARTBEAT_S` | 5000 / kit default | 100–60000 / kit bounds | the relay's publisher confirm and heartbeat |
 | `FILE_MAX_BYTES` | 26214400 (25 MiB) | 1 – 104857600 (100 MiB) | the global ceiling; every caller's `maxBytes` must be ≤ it; enforced on uploads from 17.5 |
 | `FILE_STORAGE_PROVIDER` | **required** | `filesystem`, `s3` | no default, no fallback; `filesystem` is refused in production |
 | `FILE_STORAGE_ROOT` | – (filesystem) | absolute | the development / test directory |

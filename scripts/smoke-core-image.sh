@@ -39,6 +39,7 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "WEBAUTHN_RP_ID=smoke.invalid"
       echo "WEBAUTHN_ORIGINS=https://smoke.invalid"
       echo "AUTH_EVENTS=off" # as the production deploy (apps/auth-service/deploy/provision-and-deploy.sh)
+      echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672" # Stage 18.7.5: the audit relay's broker (production requires it, even with AUTH_EVENTS=off)
       ;;
     billing-service)
       echo "DATABASE_URL=$(db_url billing_app billing)"
@@ -56,6 +57,7 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
     organization-service)
       echo "DATABASE_URL=$(db_url organization_app organization)"
       echo "AUTH_SERVICE_URL=http://127.0.0.1:9"
+      echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672" # Stage 18.7.3: the audit relay's broker (production config requires it)
       ;;
     notification-service)
       echo "DATABASE_URL=$(db_url notification_app notification)"
@@ -82,6 +84,7 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "FILE_PUBLIC_BASE_URL=https://files.smoke.invalid"
       echo "FILE_REQUEST_HASH_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
       echo "FILE_RATE_LIMIT_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+      echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672" # Stage 18.7.4: the audit relay's broker (production config requires it)
       ;;
     audit-service)
       echo "DATABASE_URL=$(db_url audit_app audit)"

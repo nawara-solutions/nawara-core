@@ -24,6 +24,11 @@ export interface EventContext {
   actor: EventActor;
   cause: EventCause;
   correlationId?: string;
+  /**
+   * Stage 18.7: for a USER actor only, the kind Auth verified for it (its admin tier, else member), used by the central audit evidence.
+   * Deliberately not part of `actor` (which domain events carry unchanged); never taken from a request value.
+   */
+  userKind?: 'member' | 'owner' | 'operator';
 }
 
 /** Context for work started by an HTTP request: the caller is the actor, the request id the cause. */

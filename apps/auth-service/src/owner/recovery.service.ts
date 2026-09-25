@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, ownerActor, userActor } from '../audit/central-audit.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
@@ -50,6 +51,7 @@ export class RecoveryService {
     @Inject(ChallengeService) private readonly challenges: ChallengeService,
     @Inject(RefreshTokenService) private readonly refresh: RefreshTokenService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   async start(a: { email?: string; phone?: string; password: string; secretKey: string }, client: ClientInfo) {
@@ -78,6 +80,8 @@ export class RecoveryService {
         [owner.id, sha256Hex(token), client.ip, now, availableAt, new Date(availableAt.getTime() + this.cfg.recovery.requestTtlSec * 1000)],
       );
       await this.audit.record({ type: 'owner.recovery.start', outcome: 'success', actorId: owner.id, ip: client.ip, metadata: { cooldownSec: this.cfg.recovery.cooldownSec } }, q);
+      // Stage 18.7.6: the central audit intent, same transaction (no IP: that stays in the local record).
+      await this.central.write(q, { action: 'owner.recovery_started', actor: userActor({ userId: owner.id, kind: owner.kind }), organizationId: null, resource: { type: 'user', id: owner.id }, outcome: 'succeeded' });
     });
     this.bus.publish('admin.owner_recovery_requested', {
       userId: owner.id, channel: owner.email ? 'email' : 'phone', destination: owner.email ?? owner.phone,
@@ -88,11 +92,16 @@ export class RecoveryService {
 
   /** Cancel from an authenticated owner session (one that still has a working factor). */
   async cancel(ownerId: string, sid: string, ip: string): Promise<void> {
-    const { rowCount } = await this.db.query(
-      `UPDATE owner_recovery_request SET status='cancelled', "resolvedAt"=$2 WHERE "ownerId"=$1 AND status='pending'`,
-      [ownerId, this.clock.now()],
-    );
-    if (rowCount) await this.audit.record({ type: 'owner.recovery.cancel', outcome: 'success', actorId: ownerId, sessionFamilyId: sid, ip });
+    // Stage 18.7.6: one transaction, so the cancellation, its local record and its central audit intent commit together.
+    await this.db.tx(async (q) => {
+      const { rowCount } = await q.query(
+        `UPDATE owner_recovery_request SET status='cancelled', "resolvedAt"=$2 WHERE "ownerId"=$1 AND status='pending'`,
+        [ownerId, this.clock.now()],
+      );
+      if (!rowCount) return;
+      await this.audit.record({ type: 'owner.recovery.cancel', outcome: 'success', actorId: ownerId, sessionFamilyId: sid, ip }, q);
+      await this.central.write(q, { action: 'owner.recovery_cancelled', actor: ownerActor({ userId: ownerId }), organizationId: null, resource: { type: 'user', id: ownerId }, outcome: 'succeeded' });
+    });
   }
 
   async complete(a: { recoveryToken: string; secretKey: string }, client: ClientInfo) {
@@ -126,6 +135,7 @@ export class RecoveryService {
       await q.query(`UPDATE owner_auth_challenge SET "consumedAt"=$2 WHERE "ownerId"=$1 AND "consumedAt" IS NULL`, [req.ownerId, now]);
       const ch = await this.challenges.create(q, { ownerId: req.ownerId, kind: 'enrollment', ttlSec: this.cfg.recovery.enrollmentTtlSec, bearer: true });
       await this.audit.record({ type: 'owner.recovery.complete', outcome: 'success', actorId: req.ownerId, ip: client.ip }, q);
+      await this.central.write(q, { action: 'owner.recovery_completed', actor: userActor({ userId: owner.id, kind: owner.kind }), organizationId: null, resource: { type: 'user', id: owner.id }, outcome: 'succeeded' });
       return ch.token!;
     });
     this.bus.publish('admin.owner_recovery_completed', {

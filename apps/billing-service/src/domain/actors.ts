@@ -4,6 +4,11 @@ import { getRequestContext } from '@nawara/service-kit';
 export interface Actor {
   type: 'user' | 'service' | 'system';
   id: string | null;
+  /**
+   * Stage 18.7: for a USER actor, the kind Auth verified (its admin tier, else member), set by a controller from the authenticated
+   * identity and used only by the central audit evidence. Never stored in `billing_transition`, never taken from a request.
+   */
+  userKind?: 'member' | 'owner' | 'operator';
 }
 
 export interface Cause {
@@ -37,6 +42,11 @@ export function jobTransitionContext(cause: 'sweep' | 'reconciliation' | 'dispat
 
 /** The caller a service method acts for. Authentication established it; it says WHO, never what they may do. */
 export type Caller = { kind: 'service'; service: string } | { kind: 'user'; userId: string };
+
+/** Stage 18.7: adds the Auth-verified kind of a USER caller (its admin tier, else member) to its actor. */
+export function withVerifiedKind(actor: Actor, authCaller: { kind: 'service' } | { kind: 'user'; identity: { adminTier: 'owner' | 'operator' | null } }): Actor {
+  return authCaller.kind === 'user' && actor.type === 'user' ? { ...actor, userKind: authCaller.identity.adminTier ?? 'member' } : actor;
+}
 
 export function actorOf(caller: Caller): Actor {
   return caller.kind === 'service' ? { type: 'service', id: caller.service } : { type: 'user', id: caller.userId };

@@ -232,7 +232,9 @@ const SPEC = {
     purpose: 'A tenant organization comes into existence.',
   },
   'organization.updated': {
-    producer: 'organization-service', category: 'administrative', since: 1, actors: { user: ['owner', 'operator'], service: true },
+    // Catalog correction G5 (Stage 18.7.3): Organization's authorization lets a `member` who is an admin of THIS organization update it
+    // (organization-service authorization-evaluator: kind 'member' + organizationAdminMemberships → org_admin). Only this action.
+    producer: 'organization-service', category: 'administrative', since: 1, actors: { user: USERS_ALL, service: true },
     organization: 'self', resource: ['organization'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A tenant organization record is changed.',
   },
@@ -263,50 +265,58 @@ const SPEC = {
     purpose: 'A paid entitlement is extended by a settled payment.',
   },
   'invoice.issued': {
-    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'required',
+    // 18.7 G3: an invoice may have no organization (its seller / payer is a user or company): the organization recorded on the invoice.
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'optional',
     resource: ['invoice'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'An invoice becomes a legal claim (numbered, immutable).',
   },
   'invoice.discarded': {
-    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'required',
+    // 18.7 G3: an invoice may have no organization (its seller / payer is a user or company): the organization recorded on the invoice.
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'optional',
     resource: ['invoice'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A draft invoice is abandoned before issue.',
   },
   'invoice.paid': {
     producer: 'billing-service', category: 'commercial', since: 1, actors: { system: ['payment_event_consumer', 'payment_reconciler'] },
-    organization: 'required', resource: ['invoice'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
+    organization: 'optional', resource: ['invoice'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, // 18.7 G3
     purpose: 'An issued invoice is settled.',
   },
   'payment_request.created': {
-    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'required',
+    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'optional', // 18.7 G3
     resource: ['payment_request'], subject: NO_SUBJECT, outcomes: OK,
     changes: { invoice_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'Collection of an invoice is requested.',
   },
   'payment_request.cancelled': {
-    producer: 'billing-service', category: 'commercial', since: 1, actors: { user: USERS_ALL, service: true }, organization: 'required',
+    // 18.7 G2: a REQUESTED payment's cancellation completes when Payment's event (or the reconciler) confirms it; 18.7 G3: organization optional.
+    producer: 'billing-service', category: 'commercial', since: 1,
+    actors: { user: USERS_ALL, service: true, system: ['payment_event_consumer', 'payment_reconciler'] }, organization: 'optional',
     resource: ['payment_request'], subject: NO_SUBJECT, outcomes: OK,
     changes: { invoice_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A pending collection is withdrawn.',
   },
   'product.created': {
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'none',
+    // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
     resource: ['product'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A sellable product enters the platform catalog.',
   },
   'product.archived': {
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'none',
+    // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
     resource: ['product'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A product stops being sellable.',
   },
   'price.created': {
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'none',
+    // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
     resource: ['price'], subject: NO_SUBJECT, outcomes: OK,
     changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A price (what an organization will be charged) is published.',
   },
   'price.retired': {
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'none',
+    // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
     resource: ['price'], subject: NO_SUBJECT, outcomes: OK,
     changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A price stops being offered.',
@@ -324,13 +334,16 @@ const SPEC = {
     purpose: 'A pending collection is cancelled by its requester.',
   },
   'payment.succeeded': {
-    producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true, system: ['payment_webhook'] },
+    // 18.7 G1: also settled by a verified user's attempt sync and by the attempt resolver.
+    producer: 'payment-service', category: 'commercial', since: 1,
+    actors: { user: USERS_ALL, service: true, system: ['payment_webhook', 'payment_attempt_resolver'] },
     organization: 'optional', resource: ['payment'], subject: NO_SUBJECT, outcomes: OK,
     changes: { settled_method: { type: 'code', shape: 'value', required: true, values: ['gateway'] } },
     purpose: 'Money is accepted as settled.',
   },
   'payment.failed': {
-    producer: 'payment-service', category: 'commercial', since: 1, actors: { service: true, system: ['payment_webhook'] },
+    producer: 'payment-service', category: 'commercial', since: 1, // 18.7 G1
+    actors: { user: USERS_ALL, service: true, system: ['payment_webhook', 'payment_attempt_resolver'] },
     organization: 'optional', resource: ['payment'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A collection definitively failed.',
   },

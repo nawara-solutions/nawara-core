@@ -1,3 +1,4 @@
+import { PaymentAudit } from '../audit/payment-audit.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, OutboxService, isUniqueViolation } from '@nawara/service-kit';
 import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
@@ -33,6 +34,7 @@ export class PaymentService {
     @Inject(OutboxService) private readonly outbox: OutboxService,
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
     @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
+    @Inject(PaymentAudit) private readonly audit: PaymentAudit,
   ) {}
 
   /** Creates a payment, or replays an identical one (SDD sections 3.1–3.3, 6). */
@@ -78,6 +80,7 @@ export class PaymentService {
         );
         const payment = rows[0];
         await this.outbox.enqueue(q, paymentEvent('payment.created', payment, ctx));
+        await this.audit.record(q, 'payment.created', payment, ctx); // Stage 18.7.1: central audit intent, same transaction
         return { payment, replayed: false };
       } catch (e) {
         if (!isUniqueViolation(e, 'payment_request_id_unique')) throw e;
@@ -136,6 +139,7 @@ export class PaymentService {
         [id],
       );
       await this.outbox.enqueue(q, paymentEvent('payment.cancelled', updated[0], ctx));
+      await this.audit.record(q, 'payment.cancelled', updated[0], ctx);
       return { payment: updated[0], replayed: false };
     });
   }

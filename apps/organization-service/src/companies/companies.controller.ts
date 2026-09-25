@@ -1,3 +1,4 @@
+import { serviceActor } from '../audit/organization-audit.js';
 import { Body, Controller, Get, Headers, Logger, Param, ParseUUIDPipe, Patch, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiHeader, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
@@ -37,7 +38,7 @@ export class CompaniesController {
   @ApiResponse({ status: 422, description: 'idempotency_key_reused: the key was used with a different request' })
   async create(@CallerService() caller: string, @Body() body: unknown, @Headers('idempotency-key') idempotencyKey: string | undefined, @Res({ passthrough: true }) res: Response) {
     const key = requireIdempotencyKey(idempotencyKey);
-    const { company, replayed } = await this.companies.create(caller, key, normaliseCreateCompany(body), { bootstrap: true });
+    const { company, replayed } = await this.companies.create(caller, key, normaliseCreateCompany(body), serviceActor(caller), { bootstrap: true });
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     else this.log.log(`company_created id=${company.id} caller=${caller}`);
@@ -75,7 +76,7 @@ export class CompaniesController {
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 404 })
   async update(@CallerService() caller: string, @Param('id', new ParseUUIDPipe()) id: string, @Body() body: unknown) {
-    const company = await this.companies.update(id, normaliseUpdateCompany(body));
+    const company = await this.companies.update(id, normaliseUpdateCompany(body), serviceActor(caller));
     this.log.log(`company_updated id=${id} caller=${caller}`);
     return representCompany(company);
   }

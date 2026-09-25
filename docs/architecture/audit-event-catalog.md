@@ -51,7 +51,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `platform.created` | administrative | user (owner, operator); service | none (platform) | platform | — | succeeded | — | A platform is created in the hierarchy. |
 | `platform.updated` | administrative | user (owner, operator); service | none (platform) | platform | — | succeeded | — | A platform record is changed. |
 | `organization.created` | administrative | user (owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization comes into existence. |
-| `organization.updated` | administrative | user (owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
+| `organization.updated` | administrative | user (member, owner, operator); service | the organization itself | organization | — | succeeded | — | A tenant organization record is changed. |
 | `hierarchy.admin_operation_denied` | security | user (member, owner, operator) | the target when it is an organization, else none | company \| platform \| organization | — | denied | `operation`: platform.create \| platform.update \| organization.create \| organization.update<br>`reason`: no_authority \| step_up_required | A human was refused a hierarchy administration operation (no authority, or no fresh step-up). |
 
 ## billing-service (11)
@@ -60,15 +60,15 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 |---|---|---|---|---|---|---|---|---|
 | `subscription.activated` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | required | subscription | — | succeeded | `product_id`: uuid<br>`price_id`: uuid | An organization first gains a paid entitlement (its subscription becomes active after a settled payment). |
 | `subscription.renewed` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | required | subscription | — | succeeded | `period_end`: {from, to} of timestamp | A paid entitlement is extended by a settled payment. |
-| `invoice.issued` | commercial | user (member, owner, operator); service | required | invoice | — | succeeded | — | An invoice becomes a legal claim (numbered, immutable). |
-| `invoice.discarded` | commercial | user (member, owner, operator); service | required | invoice | — | succeeded | — | A draft invoice is abandoned before issue. |
-| `invoice.paid` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | required | invoice | — | succeeded | — | An issued invoice is settled. |
-| `payment_request.created` | commercial | user (member, owner, operator); service | required | payment_request | — | succeeded | `invoice_id`: uuid | Collection of an invoice is requested. |
-| `payment_request.cancelled` | commercial | user (member, owner, operator); service | required | payment_request | — | succeeded | `invoice_id`: uuid | A pending collection is withdrawn. |
-| `product.created` | administrative | service | none (platform) | product | — | succeeded | — | A sellable product enters the platform catalog. |
-| `product.archived` | administrative | service | none (platform) | product | — | succeeded | — | A product stops being sellable. |
-| `price.created` | administrative | service | none (platform) | price | — | succeeded | `product_id`: uuid | A price (what an organization will be charged) is published. |
-| `price.retired` | administrative | service | none (platform) | price | — | succeeded | `product_id`: uuid | A price stops being offered. |
+| `invoice.issued` | commercial | user (member, owner, operator); service | as recorded (UUID or null) | invoice | — | succeeded | — | An invoice becomes a legal claim (numbered, immutable). |
+| `invoice.discarded` | commercial | user (member, owner, operator); service | as recorded (UUID or null) | invoice | — | succeeded | — | A draft invoice is abandoned before issue. |
+| `invoice.paid` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | invoice | — | succeeded | — | An issued invoice is settled. |
+| `payment_request.created` | commercial | user (member, owner, operator); service | as recorded (UUID or null) | payment_request | — | succeeded | `invoice_id`: uuid | Collection of an invoice is requested. |
+| `payment_request.cancelled` | commercial | user (member, owner, operator); service; system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | payment_request | — | succeeded | `invoice_id`: uuid | A pending collection is withdrawn. |
+| `product.created` | administrative | service | as recorded (UUID or null) | product | — | succeeded | — | A sellable product enters the platform catalog. |
+| `product.archived` | administrative | service | as recorded (UUID or null) | product | — | succeeded | — | A product stops being sellable. |
+| `price.created` | administrative | service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price (what an organization will be charged) is published. |
+| `price.retired` | administrative | service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price stops being offered. |
 
 ## payment-service (5)
 
@@ -76,8 +76,8 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 |---|---|---|---|---|---|---|---|---|
 | `payment.created` | commercial | service | as recorded (UUID or null) | payment | — | succeeded | — | A service asks for money to be collected. |
 | `payment.cancelled` | commercial | service | as recorded (UUID or null) | payment | — | succeeded | — | A pending collection is cancelled by its requester. |
-| `payment.succeeded` | commercial | service; system (`payment_webhook`) | as recorded (UUID or null) | payment | — | succeeded | `settled_method`: gateway | Money is accepted as settled. |
-| `payment.failed` | commercial | service; system (`payment_webhook`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection definitively failed. |
+| `payment.succeeded` | commercial | user (member, owner, operator); service; system (`payment_webhook`, `payment_attempt_resolver`) | as recorded (UUID or null) | payment | — | succeeded | `settled_method`: gateway | Money is accepted as settled. |
+| `payment.failed` | commercial | user (member, owner, operator); service; system (`payment_webhook`, `payment_attempt_resolver`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection definitively failed. |
 | `payment.expired` | commercial | system (`payment_expiry_sweep`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection lapsed unpaid. |
 
 ## file-service (2)

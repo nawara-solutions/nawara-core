@@ -1,5 +1,7 @@
+import { BillingAudit, sellerOrganization } from '../audit/billing-audit.js';
+import { actorOf, requestTransitionContext } from '../domain/actors.js';
 import { Injectable } from '@nestjs/common';
-import { DbService, isUniqueViolation } from '@nawara/service-kit';
+import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import type { Caller } from '../domain/actors.js';
 import { billingError, notFound } from '../domain/errors.js';
 import type { NormalisedCreateProductInput } from '../domain/product-input.js';
@@ -20,30 +22,45 @@ export interface ProductWriteResult {
  */
 @Injectable()
 export class ProductRepository {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly audit: BillingAudit,
+  ) {}
 
   /** Creates a product, or replays the identical earlier request for the same `(seller, code)`. `409 product_conflict` when the content differs. */
   async create(producer: string, input: NormalisedCreateProductInput): Promise<ProductWriteResult> {
-    try {
-      const { rows } = await this.db.query<ProductRow>(
-        `INSERT INTO product (producer, "sellerType", "sellerId", code, name, description, "entitlementKind")
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [producer, input.seller.type, input.seller.id, input.code, input.name, input.description, input.entitlementKind],
-      );
-      return { product: rows[0]!, changed: true };
-    } catch (e) {
-      if (!isUniqueViolation(e, 'product_code_unique')) throw e;
-      const { rows } = await this.db.query<ProductRow>(
-        `SELECT * FROM product WHERE "sellerType" = $1 AND "sellerId" = $2 AND code = $3`,
-        [input.seller.type, input.seller.id, input.code],
-      );
-      const existing = rows[0];
-      if (!existing) throw e; // lost the race in a way that also lost the row: surface the original error
-      if (existing.name !== input.name || existing.description !== input.description || existing.entitlementKind !== input.entitlementKind) {
-        throw billingError(409, 'product_conflict', 'This seller and code were used with different content.');
+    // Stage 18.7.2: one transaction, so the product and its central audit intent commit together. A savepoint (not a bare catch) keeps
+    // the transaction usable for the replay lookup after a unique violation (the Payment `create` pattern).
+    return this.db.tx(async (q) => {
+      await q.query('SAVEPOINT create_product');
+      try {
+        const { rows } = await q.query<ProductRow>(
+          `INSERT INTO product (producer, "sellerType", "sellerId", code, name, description, "entitlementKind")
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          [producer, input.seller.type, input.seller.id, input.code, input.name, input.description, input.entitlementKind],
+        );
+        const product = rows[0]!;
+        await this.audit.record(q, 'product.created', { organizationId: sellerOrganization(product), resource: { type: 'product', id: product.id } }, requestTransitionContext({ type: 'service', id: producer }));
+        return { product, changed: true };
+      } catch (e) {
+        if (!isUniqueViolation(e, 'product_code_unique')) throw e;
+        await q.query('ROLLBACK TO SAVEPOINT create_product');
+        return this.replayCreate(q, e, input);
       }
-      return { product: existing, changed: false };
+    });
+  }
+
+  private async replayCreate(q: Queryable, e: unknown, input: NormalisedCreateProductInput): Promise<ProductWriteResult> {
+    const { rows } = await q.query<ProductRow>(
+      `SELECT * FROM product WHERE "sellerType" = $1 AND "sellerId" = $2 AND code = $3`,
+      [input.seller.type, input.seller.id, input.code],
+    );
+    const existing = rows[0];
+    if (!existing) throw e; // lost the race in a way that also lost the row: surface the original error
+    if (existing.name !== input.name || existing.description !== input.description || existing.entitlementKind !== input.entitlementKind) {
+      throw billingError(409, 'product_conflict', 'This seller and code were used with different content.');
     }
+    return { product: existing, changed: false };
   }
 
   /** Reads one product for a caller. No relation is indistinguishable from "does not exist" (SDD 19.2). */
@@ -63,6 +80,7 @@ export class ProductRepository {
       if (catalogRelationTo(row, caller) === null) throw notFound();
       if (row.status === 'archived') return { product: row, changed: false };
       const updated = await q.query<ProductRow>(`UPDATE product SET status = 'archived' WHERE id = $1 RETURNING *`, [id]);
+      await this.audit.record(q, 'product.archived', { organizationId: sellerOrganization(row), resource: { type: 'product', id } }, requestTransitionContext(actorOf(caller))); // Stage 18.7.2 (G4)
       return { product: updated.rows[0]!, changed: true };
     });
   }

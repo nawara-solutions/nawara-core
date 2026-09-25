@@ -7,7 +7,9 @@
   [catalog](../architecture/audit-event-catalog.md). Stage 18.5: the RabbitMQ ingestion (`audit-service.audit`, `audit.#`, the kit retry /
   DLQ, duplicate / conflict handling, readiness `rabbitmq` + `audit-ingestion`): [Stage 18.5 record](../architecture/stage-18/stage-18-5-rabbitmq-ingestion.md).
   Stage 18.6: the organization / platform reads, cursor pagination, rate limits and the self-audit of platform reads:
-  [Stage 18.6 record](../architecture/stage-18/stage-18-6-query-authorization.md).
+  [Stage 18.6 record](../architecture/stage-18/stage-18-6-query-authorization.md). Stage 18.7: every Core producer writes its catalog
+  actions through the transactional outbox (Payment, Billing, Organization, File, and Auth after its outbox foundation), catalog
+  corrections G1–G5: [Stage 18.7 record](../architecture/stage-18/stage-18-7-core-producer-integration.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)
@@ -176,4 +178,4 @@ and age in the snapshot, and alert rules are 18.9.
 
 ## 10. Open items
 
-Library placement: decided in 18.4 (`libs/audit-contract`). Retention durations and erasure policy (owner / legal); per-service broker identity (P-A1); Auth outbox (18.7).
+Library placement: decided in 18.4 (`libs/audit-contract`). Auth outbox: built in 18.7.5 (migration `0010`, the kit relay). Retention durations and erasure policy (owner / legal); per-service broker identity (P-A1); a broker for the deployed Auth (production prerequisite, Stage 18.7 §AF).

@@ -1,3 +1,4 @@
+import { PaymentAudit } from '../audit/payment-audit.js';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
@@ -26,6 +27,7 @@ export class AttemptService {
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
     @Inject(ProviderRegistry) private readonly providers: ProviderRegistry,
     @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
+    @Inject(PaymentAudit) private readonly audit: PaymentAudit,
   ) {}
 
   async findById(id: string): Promise<AttemptRow | null> {
@@ -33,8 +35,9 @@ export class AttemptService {
     return rows[0] ?? null;
   }
 
-  async start(paymentId: string, callerId: string, idempotencyKey: string, dto: StartAttemptDto): Promise<StartAttemptResult> {
-    const ctx = requestContext({ type: 'user', id: callerId });
+  async start(paymentId: string, callerId: string, idempotencyKey: string, dto: StartAttemptDto, userKind?: EventContext['userKind']): Promise<StartAttemptResult> {
+    // Only the payer (a verified user) starts an attempt; a fatal provider rejection fails the payment under this context (Stage 18.7 G1).
+    const ctx: EventContext = { ...requestContext({ type: 'user', id: callerId }), ...(userKind ? { userKind } : {}) };
     const providerId = dto.provider ?? 'test';
     const provider = this.providers.get(providerId); // throws 422 invalid_provider if not enabled
     const attemptId = randomUUID();
@@ -186,6 +189,7 @@ export class AttemptService {
           [payment.id, attemptId],
         );
         await this.outbox.enqueue(q, paymentEvent('payment.succeeded', settled[0], ctx, { settledMethod: 'gateway', succeededAt: settled[0].closedAt?.toISOString() }));
+        await this.audit.record(q, 'payment.succeeded', settled[0], ctx); // Stage 18.7.1 (G1)
         return rows[0];
       }
 
@@ -213,6 +217,9 @@ export class AttemptService {
       `UPDATE payment SET status = $2, "closedAt" = CASE WHEN $2 = 'failed' THEN now() ELSE "closedAt" END WHERE id = $1 RETURNING *`,
       [paymentId, nextStatus],
     );
-    if (nextStatus === 'failed') await this.outbox.enqueue(q, paymentEvent('payment.failed', updated[0], ctx, { failureCode }));
+    if (nextStatus === 'failed') {
+      await this.outbox.enqueue(q, paymentEvent('payment.failed', updated[0], ctx, { failureCode }));
+      await this.audit.record(q, 'payment.failed', updated[0], ctx); // Stage 18.7.1 (G1); the provider failure code stays out of central audit
+    }
   }
 }

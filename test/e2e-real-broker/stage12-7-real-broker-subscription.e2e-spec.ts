@@ -50,7 +50,7 @@ const EXCHANGE = 'nawara.events';
 const BILLING_QUEUE = 'billing.payment-events';
 const BILLING_DEAD_QUEUE = `${BILLING_QUEUE}.dead`;
 const PAYER_TOKEN = 'e2e-payer-jwt';
-const PAYER_ID = 'e2e-payer-1';
+const PAYER_ID = 'e2e0e2e0-0000-4000-8000-00000000fa01'; // Stage 18.7: a real Auth user id is a UUID (the central audit actor must be one)
 
 describeWithEnv(
   'Stage 12.7: Payment settlement -> real RabbitMQ -> Billing -> Subscription -> Effective Access',

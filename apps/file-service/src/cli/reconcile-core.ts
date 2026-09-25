@@ -20,6 +20,12 @@ export interface ReconcileOptions {
   /** Resume after this file id (the previous run's `next_after`). */
   after?: string;
   batchSize?: number;
+  /**
+   * Stage 18.7.4: called for each integrity incident found (object missing / size mismatch), with the row's persisted facts, BEFORE it is
+   * reported. The CLI writes the central audit intent here (`file.integrity_incident`, actor `file_reconciliation`); a failure stops the
+   * run (resume with `after`: the event id derives from file and reason, so a re-run never duplicates).
+   */
+  onIncident?: (file: { id: string; organizationId: string | null }, reason: 'object_missing' | 'size_mismatch') => Promise<void>;
 }
 
 export interface ReconcileSummary {
@@ -45,8 +51,8 @@ export async function reconcile(db: Queryable, storage: StoragePort, opts: Recon
     report({ fileId, status, finding }); // ids and states only: never a key, path, bucket or name
   };
   while (scanned < opts.limit) {
-    const { rows } = await db.query<{ id: string; status: string; storageKey: string; sizeBytes: string | null }>(
-      `SELECT id, status, "storageKey", "sizeBytes" FROM file
+    const { rows } = await db.query<{ id: string; status: string; storageKey: string; sizeBytes: string | null; organizationId: string | null }>(
+      `SELECT id, status, "storageKey", "sizeBytes", "organizationId" FROM file
        WHERE id > $1 AND status IN ('AVAILABLE', 'FAILED', 'REJECTED', 'DELETED') ORDER BY id LIMIT $2`,
       [after, Math.min(batch, opts.limit - scanned)],
     );
@@ -63,8 +69,11 @@ export async function reconcile(db: Queryable, storage: StoragePort, opts: Recon
         continue;
       }
       if (row.status === 'AVAILABLE') {
-        if (!head) note(row.id, row.status, 'object_missing');
-        else if (head.sizeBytes !== Number(row.sizeBytes)) note(row.id, row.status, 'size_mismatch');
+        const incident = !head ? 'object_missing' : head.sizeBytes !== Number(row.sizeBytes) ? 'size_mismatch' : undefined;
+        if (incident) {
+          await opts.onIncident?.({ id: row.id, organizationId: row.organizationId }, incident);
+          note(row.id, row.status, incident);
+        }
       } else if (head) {
         if (!opts.repair) note(row.id, row.status, 'orphan_object');
         else {

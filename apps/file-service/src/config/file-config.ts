@@ -1,4 +1,6 @@
-import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
+import {
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry,
+} from '@nawara/service-kit';
 import { FileCallerPolicy } from '../policy/caller-policy.js';
 import { loadStorageConfig, type StorageConfig } from '../storage/storage-config.js';
 import { loadUploadConfig, type UploadConfig } from '../upload/upload-config.js';
@@ -48,6 +50,13 @@ export interface FileConfig extends BaseConfig {
   limits: UsageLimitsConfig;
   /** Stage 17.9: `FILE_OPS_REPORT_INTERVAL_MS` (default 60 s, 10 s – 1 h): the operational snapshot (`file_ops_snapshot`). */
   ops: { reportIntervalMs: number };
+  /**
+   * Stage 18.7.4: the broker the kit relay publishes the central audit intent to (the only events this service produces). Required in
+   * production; elsewhere its absence selects the in-memory bus. Never consumed from: File subscribes to nothing.
+   */
+  rabbitmqUrl?: string;
+  rabbitmqConfirmTimeoutMs: number;
+  rabbitmqHeartbeatS: number;
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -69,6 +78,11 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
   const cleanup = loadCleanupConfig(reader, storageBound);
   const limits = loadUsageLimitsConfig(reader);
   const upload = loadUploadConfig(reader, base.isProduction);
+  const rabbitmqUrl = reader.get('RABBITMQ_URL') === undefined ? undefined : reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']);
+  if (base.isProduction && rabbitmqUrl === undefined) {
+    // Stage 18.7.4: the audit intent committed with every deletion and integrity incident must leave the service.
+    throw new ConfigError('RABBITMQ_URL is required in production (the in-memory event bus is for development and tests only)');
+  }
   if (storage.provider === 's3') {
     checkSocketBudget(storage.maxSockets, limits, cleanup);
     // Stage 17.9: when a CLIENT stalls, the service's own idle timer must fire first (the right cause, the right code); the store's
@@ -93,6 +107,9 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
     cleanup,
     limits,
     ops: { reportIntervalMs: reader.int('FILE_OPS_REPORT_INTERVAL_MS', { default: 60_000, min: 10_000, max: 3_600_000 }) },
+    rabbitmqUrl,
+    rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
+    rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
   };
 }
 

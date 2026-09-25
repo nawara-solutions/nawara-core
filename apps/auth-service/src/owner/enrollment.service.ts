@@ -1,6 +1,7 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { SessionService } from '../auth/session.service.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
@@ -35,6 +36,7 @@ export class EnrollmentService {
     @Inject(SessionService) private readonly sessions: SessionService,
     @Inject(UsersService) private readonly users: UsersService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
 
   async fromToken(token: string): Promise<EnrollCtx> {
@@ -71,7 +73,8 @@ export class EnrollmentService {
    * not burn the enrollment token or the step-up. (Failed attempts against an enrollment token are
    * still counted, outside the transaction, so it cannot be guessed at forever.)
    */
-  private async finish(c: EnrollCtx, stepUpToken: string | undefined, confirm: (q: Queryable) => Promise<boolean>, method: string) {
+  /** `confirm` answers the confirmed factor's id, or false (Stage 18.7.6: the id is the central audit resource). */
+  private async finish(c: EnrollCtx, stepUpToken: string | undefined, confirm: (q: Queryable) => Promise<string | false>, method: 'totp' | 'webauthn') {
     try {
       return await this.db.tx(async (q) => {
         const hadFactors = (await this.factors.countConfirmed(c.ownerId, q)) > 0;
@@ -81,8 +84,14 @@ export class EnrollmentService {
         } else if (hadFactors) {
           await this.stepUp.consume(q, { ownerId: c.ownerId, sid: c.sid!, purpose: 'owner.factor.enroll', token: stepUpToken });
         }
-        if (!(await confirm(q))) throw authError(400, 'verification_failed', 'Verification failed.');
+        const factorId = await confirm(q);
+        if (!factorId) throw authError(400, 'verification_failed', 'Verification failed.');
         await this.audit.record({ type: 'owner.factor.enrolled', outcome: 'success', actorId: c.ownerId, sessionFamilyId: c.sid, metadata: { method, first: !hadFactors } }, q);
+        // Stage 18.7.6: the central audit intent, same transaction (factors belong to an owner row: the kind is a database fact).
+        await this.central.write(q, {
+          action: 'owner.factor_enrolled', actor: ownerActor({ userId: c.ownerId }), organizationId: null, resource: { type: 'factor', id: factorId },
+          outcome: 'succeeded', changes: { method },
+        });
         if (!c.enrollmentChallengeId) return { session: null };
         const owner = (await this.users.findById(c.ownerId, q))!;
         const s = await this.sessions.issue(q, owner);
@@ -99,7 +108,7 @@ export class EnrollmentService {
 
   async confirmTotp(c: EnrollCtx, factorId: string, code: string, stepUpToken?: string) {
     await this.throttle.hit('factor_enroll_owner', c.ownerId);
-    return this.finish(c, stepUpToken, (q) => this.factors.confirmTotp(q, c.ownerId, factorId, code), 'totp');
+    return this.finish(c, stepUpToken, async (q) => ((await this.factors.confirmTotp(q, c.ownerId, factorId, code)) ? factorId : false), 'totp');
   }
 
   async webauthnOptions(c: EnrollCtx) {
@@ -120,8 +129,7 @@ export class EnrollmentService {
     try {
       return await this.finish(c, stepUpToken, async (q) => {
         if (!(await this.challenges.consume(q, ch.id))) return false;
-        await this.factors.registerWebauthn(q, c.ownerId, response, expected);
-        return true;
+        return this.factors.registerWebauthn(q, c.ownerId, response, expected);
       }, 'webauthn');
     } catch (e) {
       if (e instanceof HttpException) throw e;

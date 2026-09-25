@@ -15,7 +15,7 @@ const latch = () => {
 };
 
 const workers = [
-  { name: 'ExpirySweeper', make: () => { const w = new ExpirySweeper({} as never, {} as never); return { w, pass: 'sweepOnce', svc: new ExpirySweeperService(w) }; } },
+  { name: 'ExpirySweeper', make: () => { const w = new ExpirySweeper({} as never, {} as never, {} as never); return { w, pass: 'sweepOnce', svc: new ExpirySweeperService(w) }; } },
   { name: 'AttemptResolver', make: () => { const w = new AttemptResolver({} as never, {} as never, {} as never); return { w, pass: 'drainOnce', svc: new AttemptResolverService(w) }; } },
   { name: 'WebhookRetriever', make: () => { const w = new WebhookRetriever({} as never, {} as never, {} as never); return { w, pass: 'drainOnce', svc: new WebhookRetrierService(w) }; } },
 ];

@@ -1,3 +1,5 @@
+import { BillingAudit, sellerOrganization } from '../audit/billing-audit.js';
+import { actorOf, requestTransitionContext } from '../domain/actors.js';
 import { Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import type { Caller } from '../domain/actors.js';
@@ -19,7 +21,10 @@ export interface PriceWriteResult {
  */
 @Injectable()
 export class PriceRepository {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly audit: BillingAudit,
+  ) {}
 
   /**
    * Creates a price for a product the caller produced, or replays the identical earlier request. `404` if the product is
@@ -30,7 +35,7 @@ export class PriceRepository {
   async create(caller: Caller, input: NormalisedCreatePriceInput, supportedCurrencies: string[]): Promise<PriceWriteResult> {
     if (!supportedCurrencies.includes(input.currency)) throw billingError(422, 'unsupported_currency', 'The currency is not supported.');
     return this.db.tx(async (q) => {
-      await this.assertOwnsProduct(q, input.productId, caller);
+      const product = await this.assertOwnsProduct(q, input.productId, caller);
 
       try {
         const { rows } = await q.query<PriceRow>(
@@ -38,7 +43,9 @@ export class PriceRepository {
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
           [input.productId, input.clientReference, input.currency, input.unitAmount.toString(), input.interval, input.intervalUnit, input.intervalCount, input.effectiveFrom],
         );
-        return { price: rows[0]!, changed: true };
+        const price = rows[0]!;
+        await this.audit.record(q, 'price.created', { organizationId: sellerOrganization(product), resource: { type: 'price', id: price.id }, changes: { product_id: product.id } }, requestTransitionContext(actorOf(caller))); // Stage 18.7.2 (G4)
+        return { price, changed: true };
       } catch (e) {
         if (!isUniqueViolation(e, 'price_reference_unique')) throw e;
         const { rows } = await q.query<PriceRow>(`SELECT * FROM price WHERE "productId" = $1 AND "clientReference" = $2`, [input.productId, input.clientReference]);
@@ -73,21 +80,22 @@ export class PriceRepository {
   async retire(id: string, caller: Caller): Promise<PriceWriteResult> {
     return this.db.tx(async (q) => {
       const { rows } = await q.query<PriceWithProducer>(
-        `SELECT pr.*, p.producer FROM price pr JOIN product p ON p.id = pr."productId" WHERE pr.id = $1 FOR UPDATE OF pr`,
+        `SELECT pr.*, p.producer, p."sellerType", p."sellerId" FROM price pr JOIN product p ON p.id = pr."productId" WHERE pr.id = $1 FOR UPDATE OF pr`,
         [id],
       );
       const row = rows[0];
       if (!row) throw notFound();
       if (catalogRelationTo(row, caller) === null) throw notFound();
-      const { producer: _producer, ...price } = row;
+      const { producer: _producer, sellerType, sellerId, ...price } = row as typeof row & { sellerType: string; sellerId: string };
       if (price.retiredAt !== null) return { price, changed: false };
       const updated = await q.query<PriceRow>(`UPDATE price SET "retiredAt" = now() WHERE id = $1 RETURNING *`, [id]);
+      await this.audit.record(q, 'price.retired', { organizationId: sellerOrganization({ sellerType, sellerId }), resource: { type: 'price', id }, changes: { product_id: price.productId } }, requestTransitionContext(actorOf(caller))); // Stage 18.7.2 (G4)
       return { price: updated.rows[0]!, changed: true };
     });
   }
 
-  private async assertOwnsProduct(q: Queryable, productId: string, caller: Caller): Promise<{ id: string; producer: string; status: string }> {
-    const { rows } = await q.query<{ id: string; producer: string; status: string }>(`SELECT id, producer, status FROM product WHERE id = $1`, [productId]);
+  private async assertOwnsProduct(q: Queryable, productId: string, caller: Caller): Promise<{ id: string; producer: string; status: string; sellerType: string; sellerId: string }> {
+    const { rows } = await q.query<{ id: string; producer: string; status: string; sellerType: string; sellerId: string }>(`SELECT id, producer, status, "sellerType", "sellerId" FROM product WHERE id = $1`, [productId]);
     const product = rows[0];
     if (!product || catalogRelationTo(product, caller) === null) throw notFound();
     return product;

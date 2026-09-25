@@ -24,14 +24,24 @@ describe('loadOrganizationConfig', () => {
     expect(cfg.corsOrigins).toEqual([]);
   });
 
-  it('carries ONLY what this service uses: no broker, no outbound service token, no currencies (nothing to publish or price); the one bounded Auth dependency is the human-admin module\'s grant-facts/step-up client (ADR-0042 decision 6)', () => {
+  it('carries ONLY what this service uses: no outbound service token, no currencies (nothing to price); the broker only for the audit relay (Stage 18.7.3); the one bounded Auth dependency is the human-admin module\'s grant-facts/step-up client (ADR-0042 decision 6)', () => {
     expect(Object.keys(loadOrganizationConfig(BASE)).sort()).toEqual([
-      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel', 'nodeEnv', 'port', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy',
+      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel', 'nodeEnv', 'port',
+      'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy',
     ]);
   });
 
+  it('RABBITMQ_URL (the audit relay\'s broker) is required in production, optional elsewhere (the in-memory bus), and only an amqp(s) URL; its refusal never echoes the value', () => {
+    expect(loadOrganizationConfig(BASE).rabbitmqUrl).toBeUndefined();
+    expect(refusal({ ...BASE, NODE_ENV: 'production', DATABASE_URL: 'postgres://organization_app:pw@h/organization' })).toContain('RABBITMQ_URL');
+    const bad = refusal({ ...BASE, RABBITMQ_URL: 'http://user:s3cret@mq' });
+    expect(bad).toContain('RABBITMQ_URL');
+    expect(bad).not.toContain('s3cret');
+    expect(loadOrganizationConfig({ ...BASE, RABBITMQ_URL: 'amqp://u:p@mq:5672' }).rabbitmqUrl).toBe('amqp://u:p@mq:5672');
+  });
+
   it('defaults to production behaviour when NODE_ENV is unset', () => {
-    const env = { DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization', AUTH_SERVICE_URL: 'http://localhost:3001' };
+    const env = { DATABASE_URL: 'postgres://organization_app:pw@localhost:5433/organization', AUTH_SERVICE_URL: 'http://localhost:3001', RABBITMQ_URL: 'amqp://mq' };
     expect(loadOrganizationConfig(env).isProduction).toBe(true);
   });
 
@@ -56,10 +66,10 @@ describe('loadOrganizationConfig', () => {
 
   it('refuses a superuser or schema-owner database role in production (ADR-0032), but not in development', () => {
     for (const user of ['postgres', 'root', 'organization_migrator']) {
-      expect(refusal({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL })).toContain('least-privilege');
-      expect(loadOrganizationConfig({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL }).databaseUrl).toContain(user);
+      expect(refusal({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL, RABBITMQ_URL: 'amqp://mq' })).toContain('least-privilege');
+      expect(loadOrganizationConfig({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL, RABBITMQ_URL: 'amqp://mq' }).databaseUrl).toContain(user);
     }
-    expect(loadOrganizationConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgres://organization_app:pw@h/organization', AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL }).isProduction).toBe(true);
+    expect(loadOrganizationConfig({ NODE_ENV: 'production', DATABASE_URL: 'postgres://organization_app:pw@h/organization', AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL, RABBITMQ_URL: 'amqp://mq' }).isProduction).toBe(true);
   });
 
   it('parses service tokens as <caller>:<digest>, keeps only digests, and refuses malformed entries', () => {
