@@ -103,7 +103,13 @@ export class DownloadService {
           scope, fileId: file.id, tokenDigest: ticketDigest(token)!, lifetimeSeconds: this.config.upload.downloadTicketTtlSeconds,
           singleUse: input.singleUse ?? false, disposition,
         });
-        if (!row) throw FILE_NOT_FOUND(); // the file changed hands or disappeared between the lookup and the insert (not in V1)
+        if (!row) {
+          // Stage 17.7: the insert requires AVAILABLE under a share lock; a deletion committed in between is reported as what it is.
+          const now = await this.files.findOwned(scope, file.id);
+          if (!now) throw FILE_NOT_FOUND();
+          assertDownloadable(now);
+          throw fileError(409, 'file_not_available', 'The file is not available.');
+        }
         this.logger.log(`file_download_ticket_issued owner=${caller} ticket=${row.id} single_use=${row.singleUse} ttl_s=${this.config.upload.downloadTicketTtlSeconds}`);
         return { ticketId: row.id, url: `${this.config.upload.publicBaseUrl}/file/t/${token}`, expiresAt: row.expiresAt.toISOString() };
       } catch (e) {

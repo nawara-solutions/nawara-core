@@ -124,6 +124,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
   it('a download ticket is recorded only for a file the issuer owns in that organization, in one statement', async () => {
     const org = randomUUID();
     const f = await files.createUploading(upload(drive(org)));
+    await makeAvailable(f); // Stage 17.7: download tickets are issued for AVAILABLE files only
     const base = { fileId: f.id, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' as const };
     const ok = await tickets.recordDownload({ ...base, scope: drive(org), tokenDigest: digest() });
     expect(ok).toMatchObject({ operation: 'download', fileId: f.id, issuedBy: 'core-drive', organizationId: org, useCount: 0 });
@@ -190,6 +191,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
 
   it('unknown, expired, revoked and used-up tickets all give the same undefined (one `ticket_invalid` later)', async () => {
     const f = await files.createUploading(upload(drive(null)));
+    await makeAvailable(f); // Stage 17.7: download tickets are issued for AVAILABLE files only
     const expired = digest();
     await s.query(`INSERT INTO file_access_ticket (id, operation, "fileId", "issuedBy", "tokenDigest", disposition, "singleUse", "createdAt", "expiresAt")
       VALUES ($1, 'download', $2, 'core-drive', $3, 'attachment', false, now() - interval '10 minutes', now() - interval '8 minutes')`, [randomUUID(), f.id, expired]);
@@ -205,6 +207,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
 
   it('revocation is issuer-scoped and idempotent; another issuer (or an unknown id) gets the same false and changes nothing', async () => {
     const f = await files.createUploading(upload(drive(null)));
+    await makeAvailable(f); // Stage 17.7: download tickets are issued for AVAILABLE files only
     const d = digest();
     const tk = await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
     expect(await tickets.revoke({ ownerService: 'core-billing', organizationId: null }, tk!.id)).toBe(false);
@@ -220,9 +223,11 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
 
   it('a file\'s tickets are revoked in the caller\'s transaction: rolled back together, or committed together', async () => {
     const f = await files.createUploading(upload(drive(null)));
+    await makeAvailable(f); // Stage 17.7: download tickets are issued for AVAILABLE files only
     const ds = [digest(), digest()];
     for (const d of ds) await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
     const other = await files.createUploading(upload(drive(null)));
+    await makeAvailable(other); // Stage 17.7: download tickets are issued for AVAILABLE files only
     const otherDigest = digest();
     await tickets.recordDownload({ scope: drive(null), fileId: other.id, tokenDigest: otherDigest, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
     await expect(dbs.tx(async (q) => {
@@ -275,6 +280,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
 
   it('a claim racing a revocation: whichever commits first decides; a ticket is never used after its revocation', async () => {
     const f = await files.createUploading(upload(drive(null)));
+    await makeAvailable(f); // Stage 17.7: download tickets are issued for AVAILABLE files only
     const d = digest();
     const tk = await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: false, disposition: 'attachment' });
     const a = new pg.Client({ connectionString: db.url });
@@ -312,6 +318,7 @@ describeWithEnv('file persistence: repositories (real PostgreSQL)', ['TEST_DATAB
     const { token } = newToken();
     const d = ticketDigest(token)!;
     const f = await files.createUploading(upload(drive(null)));
+    await makeAvailable(f); // Stage 17.7: download tickets are issued for AVAILABLE files only
     await tickets.recordDownload({ scope: drive(null), fileId: f.id, tokenDigest: d, lifetimeSeconds: 120, singleUse: true, disposition: 'attachment' });
     await tickets.claimUse(d, 'download');
     await tickets.claimUse(d, 'download');

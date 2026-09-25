@@ -8,7 +8,8 @@
   its filesystem and S3-compatible adapters: [Stage 17.4 record](../architecture/stage-17/stage-17-4-storage-abstraction.md). Stage 17.5:
   the upload lifecycle (upload tickets, redemption, service upload, attach; no download yet):
   [Stage 17.5 record](../architecture/stage-17/stage-17-5-upload-lifecycle.md). Stage 17.6: owner reads, download tickets (issue,
-  redeem, revoke), safe download headers: [Stage 17.6 record](../architecture/stage-17/stage-17-6-download-authorization.md).
+  redeem, revoke), safe download headers: [Stage 17.6 record](../architecture/stage-17/stage-17-6-download-authorization.md). Stage 17.7:
+  deletion and the cleanup workers: [Stage 17.7 record](../architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "Where is this file and who may read it?";
   O2 storage provider)
@@ -233,6 +234,12 @@ service upload attached.
   OAuth-style flow.
 
 ## 12. Cleanup and reconciliation (Stage 17.7)
+
+**Implemented (Stage 17.7); clarifications, no decision changed:** migration `0002` adds the delete worker's lease, fence and retry
+schedule; the upload lease is derived from the server's request bound (so no live request can still write when the sweep acts); the
+download-ticket insert share-locks an AVAILABLE file (no ticket after a deletion); `DELETE` of an UPLOADING file is `409` (no
+cancellation in V1), of a FAILED / REJECTED one `409 file_not_available`; the reconciliation tool reports and optionally repairs by
+recorded key only (no bucket listing).
 
 Bounded workers (`PollLoop`, `SKIP LOCKED`, the Notification 16.9 batch pattern with a materialized CTE): the upload-lease sweep
 (`UPLOADING` past lease → `FAILED` + delete), orphan expiry (unattached past deadline → `DELETING`), the delete worker (`DELETING` →

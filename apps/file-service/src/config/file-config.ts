@@ -2,6 +2,7 @@ import { ConfigError, EnvReader, loadBaseConfig, parseServiceTokens, type BaseCo
 import { FileCallerPolicy } from '../policy/caller-policy.js';
 import { loadStorageConfig, type StorageConfig } from '../storage/storage-config.js';
 import { loadUploadConfig, type UploadConfig } from '../upload/upload-config.js';
+import { loadCleanupConfig, type CleanupConfig } from '../cleanup/cleanup-config.js';
 
 /** The one identity of this service: logs, the database `application_name`, Docker, documentation. */
 export const SERVICE_NAME = 'file-service';
@@ -40,6 +41,8 @@ export interface FileConfig extends BaseConfig {
   upload: UploadConfig;
   /** OpenAPI at `/file/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
   docs: { username: string; password?: string };
+  /** Stage 17.7: the cleanup workers. */
+  cleanup: CleanupConfig;
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -56,17 +59,20 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
   }
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   const maxBytes = reader.int('FILE_MAX_BYTES', { default: DEFAULT_FILE_MAX_BYTES, min: 1, max: FILE_MAX_BYTES_BOUND });
+  const storage = loadStorageConfig(reader, base.isProduction);
+  const storageBound = { requestTimeoutMs: storage.requestTimeoutMs, maxAttempts: storage.provider === 's3' ? storage.maxAttempts : 1 };
   return {
     ...base,
     databaseUrl,
     serviceTokens,
     callerPolicy: FileCallerPolicy.parse(reader.get('FILE_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))], maxBytes),
     maxBytes,
-    storage: loadStorageConfig(reader, base.isProduction),
+    storage,
     upload: loadUploadConfig(reader, base.isProduction),
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
     },
+    cleanup: loadCleanupConfig(reader, storageBound),
   };
 }

@@ -12,7 +12,7 @@ import type { CallerPolicy, FileOperation } from '../policy/caller-policy.js';
 import type { FileMediaType } from '../policy/media-types.js';
 import { STORAGE_PORT, type StoragePort } from '../storage/storage.port.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
-import { putDeadlineMs } from '../storage/streams.js';
+import { uploadRequestTimeoutMs } from './http-server.js';
 import { decodeFileNameHeader } from './file-name.js';
 import { ingest, UploadRefused } from './ingest.js';
 import { declaredEssence } from './media-type.js';
@@ -48,6 +48,9 @@ interface Receive {
 }
 
 class TicketNoLongerValid extends Error {}
+
+/** The margin of the upload lease beyond the server's request bound: Node checks request timeouts every 30 s; clock skew. */
+export const UPLOAD_LEASE_MARGIN_SECONDS = 120;
 
 /**
  * The upload lifecycle (Stage 17.5; ADR-0048, SDD §5, §7, §10, §11.1):
@@ -286,9 +289,13 @@ export class UploadService {
     return organizationId;
   }
 
-  /** The upload lease: the store's whole-transfer bound for this size, plus a margin (a crashed upload is swept after it, 17.7). */
-  private leaseSeconds(limit: number): number {
-    return Math.ceil(putDeadlineMs(limit, this.config.storage.requestTimeoutMs, this.config.storage.minThroughputBytesPerSecond) / 1000) + 60;
+  /**
+   * The upload lease (Stage 17.7): the abandoned-upload sweep fails an UPLOADING row only after it, so it must outlast ANY request that
+   * could still be writing. Every request is bounded by the server's `requestTimeout` (`uploadRequestTimeoutMs`, enforced by Node at
+   * least every 30 s), and the store's own write deadline is shorter; the lease adds a margin for that check interval and clock skew.
+   */
+  private leaseSeconds(_limit: number): number {
+    return Math.ceil(uploadRequestTimeoutMs(this.config) / 1000) + UPLOAD_LEASE_MARGIN_SECONDS;
   }
 
   /** The untrusted declarations: a sanitized name (`X-File-Name`, percent-encoded UTF-8) and a declared type (a hint only). */

@@ -160,8 +160,8 @@ describeWithEnv('download + authorization (real PostgreSQL, filesystem store)', 
     const row = async (status: string) => {
       const f = await uploaded(SAMPLES.pdf(400));
       if (status === 'DELETING' || status === 'DELETED') {
-        await s.query(`UPDATE file SET status = 'DELETING', "deletionRequestedAt" = now() WHERE id = $1`, [f.id]);
-        if (status === 'DELETED') await s.query(`UPDATE file SET status = 'DELETED', "deletedAt" = now() WHERE id = $1`, [f.id]);
+        await s.query(`UPDATE file SET status = 'DELETING', "deletionRequestedAt" = now(), "deleteNextAttemptAt" = now() WHERE id = $1`, [f.id]);
+        if (status === 'DELETED') await s.query(`UPDATE file SET status = 'DELETED', "deletedAt" = now(), "deleteNextAttemptAt" = NULL WHERE id = $1`, [f.id]);
         return f.id;
       }
       const id = randomUUID();
@@ -264,7 +264,7 @@ describeWithEnv('download + authorization (real PostgreSQL, filesystem store)', 
     await s.query(`UPDATE file_access_ticket SET "fileId" = $2 WHERE id = $1`, [uploadBoundId, bound.id]);
     const gone = await uploaded(SAMPLES.pdf(700));
     const goneUrl = (await issue(gone.id)).body.url as string;
-    await s.query(`UPDATE file SET status = 'DELETING', "deletionRequestedAt" = now() WHERE id = $1`, [gone.id]); // after issuance
+    await s.query(`UPDATE file SET status = 'DELETING', "deletionRequestedAt" = now(), "deleteNextAttemptAt" = now() WHERE id = $1`, [gone.id]); // after issuance
     const bodies: string[] = [];
     for (const token of ['abc', newToken().token, '../../etc/passwd', expired.token, tokenOf(revoked.url as string), tokenOf(uploadTicket.body.url as string), uploadBound.token, tokenOf(goneUrl)]) {
       const r = await request(server()).get(`/file/t/${encodeURIComponent(token)}`);

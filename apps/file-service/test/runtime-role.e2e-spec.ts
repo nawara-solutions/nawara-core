@@ -97,6 +97,8 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
     const f = await t.app.get(FileRepository).createUploading({
       scope: { ownerService: 'core-drive', organizationId: null }, storage: { provider: 'filesystem', keyPrefix: 'files' }, uploadLeaseSeconds: 600, attachment: { deadlineSeconds: 3_600 },
     });
+    // Stage 17.7: download tickets need an AVAILABLE file (the runtime role completes it, DML only).
+    await sql(APP(), `UPDATE file SET status = 'AVAILABLE', "mediaType" = 'application/pdf', "sizeBytes" = 10, sha256 = repeat('a', 64), "availableAt" = now() WHERE id = $1`, [f.id]);
     const d = ticketDigest(randomBytes(32).toString('base64url'))!;
     await t.app.get(TicketRepository).recordDownload({ scope: { ownerService: 'core-drive', organizationId: null }, fileId: f.id, tokenDigest: d, lifetimeSeconds: 60, singleUse: true, disposition: 'attachment' });
     expect(await t.app.get(TicketRepository).claimUse(d, 'download')).toBeDefined();

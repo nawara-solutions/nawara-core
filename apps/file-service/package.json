@@ -20,7 +20,8 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
-    "migrate": "node ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations"
+    "migrate": "node ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations",
+    "reconcile": "node dist/cli/reconcile.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1140.0",

@@ -1,8 +1,8 @@
 # file-service
 
-> **Status: foundation, persistence, storage port, upload, download + authorization (Stages 17.2–17.6).** Services upload and read
-> their own files and issue upload / download tickets; clients redeem tickets directly (no user token, no call to Auth). **No deletion
-> or cleanup workers yet** (17.7).
+> **Status: the complete V1 lifecycle (Stages 17.2–17.7).** Services upload, read and delete their own files and issue upload /
+> download tickets; clients redeem tickets directly (no user token, no call to Auth); bounded workers remove deleted bytes, abandoned
+> uploads, expired temporary files and old tickets.
 
 Generic file objects for Nawara Core: products keep the business meaning and relationships (`StudentDocument.fileId`); File Service
 owns immutable bytes, generic metadata, integrity, lifecycle, storage and controlled byte access. Design:
@@ -12,7 +12,8 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 [Stage 17.3 record](../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md),
 [Stage 17.4 record](../../docs/architecture/stage-17/stage-17-4-storage-abstraction.md),
 [Stage 17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md),
-[Stage 17.6 record](../../docs/architecture/stage-17/stage-17-6-download-authorization.md).
+[Stage 17.6 record](../../docs/architecture/stage-17/stage-17-6-download-authorization.md),
+[Stage 17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md).
 
 ## What exists (17.2 foundation)
 
@@ -47,6 +48,10 @@ streaming; OpenAPI at `/file/docs` when `SWAGGER_PASSWORD` is set.
 (issuer), `GET /file/t/{token}` (the ticket holder). Streamed with backpressure; `attachment`, `private, no-store`, `nosniff`, a sandbox
 CSP; no Range, no HEAD.
 
+**Delete and cleanup (17.7):** `DELETE /file/files/{id}` (owner, `delete`; logical: DELETING + tickets revoked, `202`,
+idempotent); `src/cleanup/`: one bounded worker loop (orphan expiry, physical delete with lease + fence + backoff, upload-lease sweep,
+ticket retention); `npm run reconcile -- [--repair]` (the operator tool: reports missing objects, removes leftovers of failed rows).
+
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency (and there
 is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 
@@ -71,6 +76,7 @@ is no storage until 17.4); no RabbitMQ; no user JWT; no worker.
 | `FILE_UPLOAD_TICKET_TTL_SECONDS`, `FILE_ATTACH_TTL_SECONDS`, `FILE_UPLOAD_IDLE_TIMEOUT_MS`, `FILE_TICKET_FAILURE_LIMIT` | 120 s, 24 h, 30 s, 20/min | see the [17.5 record](../../docs/architecture/stage-17/stage-17-5-upload-lifecycle.md) §12 | |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 | OpenAPI at `/file/docs` (basic auth) only when set |
 | `FILE_DOWNLOAD_TICKET_TTL_SECONDS`, `FILE_DOWNLOAD_IDLE_TIMEOUT_MS` | 120 s, 30 s | 60–300 s, 1–120 s | download tickets; a client that stops reading is cut off |
+| `FILE_CLEANUP_ENABLED`, `FILE_CLEANUP_INTERVAL_MS`, `FILE_CLEANUP_BATCH_SIZE`, `FILE_DELETE_CONCURRENCY`, `FILE_DELETE_LEASE_SECONDS`, `FILE_DELETE_RETRY_BASE_SECONDS` / `_MAX_SECONDS`, `FILE_TICKET_RETENTION_SECONDS` | true, 30 s, 20, 4, 300 s, 30 s / 1 h, 24 h | see the [17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md) §10 | the cleanup workers |
 
 `FILE_SERVICE_POLICY`:
 
@@ -110,5 +116,5 @@ or provision it by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 17.4 | ✅ the storage port, filesystem and S3-compatible adapters |
 | 17.5 | ✅ streamed upload, type from bytes, SHA-256, idempotency, attach, upload tickets |
 | 17.6 | ✅ streamed download, safe headers, download tickets (issue, redeem, revoke) |
-| 17.7 | delete, orphan cleanup, reconciliation |
+| 17.7 | ✅ delete, orphan cleanup, reconciliation |
 | 17.8 / 17.9 / 17.10 | security and integrity, operational hardening, focused certification |

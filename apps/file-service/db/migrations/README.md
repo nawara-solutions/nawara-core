@@ -7,3 +7,4 @@ only: a change is a new numbered file. Only `*.sql` files count; this README is 
 | File | Stage | Adds |
 |---|---|---|
 | `0001_file_schema.sql` | 17.3 | `file` and `file_access_ticket`: shapes, the lifecycle state machine, set-once content, immutability, ticket bindings, single use, no hard delete, the sweep and redemption indexes ([record](../../../../docs/architecture/stage-17/stage-17-3-persistence-metadata.md)) |
+| `0002_file_deletion_worker.sql` | 17.7 | the delete worker's lease, fence and retry schedule (`deleteAttempts`, `deleteNextAttemptAt`, `deleteLeaseUntil`, `deleteLastError`), the claim index ([record](../../../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md)) |
