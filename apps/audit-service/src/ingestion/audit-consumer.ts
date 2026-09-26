@@ -6,6 +6,7 @@ import {
 import { DbService, DB_OPTIONS, ReadinessRegistry, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
 import type { AuditConfig } from '../config/audit-config.js';
+import { BrokerNotices } from './broker-notices.js';
 import { auditDeadLetterPolicy } from './dead-letter-policy.js';
 import { AUDIT_BINDINGS, AUDIT_QUEUE, OPS_SNAPSHOT_INTERVAL_MS } from './ingestion.constants.js';
 import { IngestionCounters } from './ingestion-counters.js';
@@ -52,6 +53,7 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     @Inject(DB_OPTIONS) private readonly dbOptions: DbOptions,
     @Inject(ReadinessRegistry) private readonly readiness: ReadinessRegistry,
     @Inject(AUDIT_CONFIG) private readonly config: AuditConfig,
+    @Inject(BrokerNotices) private readonly notices: BrokerNotices,
   ) {}
 
   onModuleInit(): void {
@@ -125,10 +127,13 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
   private snapshot(): void {
     const s = this.counters.drain();
     const refused = Object.entries(s.refused).map(([k, v]) => `refused_${k}=${v}`).join(' ');
+    const b = this.notices.drain();
+    const broker = Object.entries(b.counts).map(([k, v]) => `${k}=${v}`).join(' ');
     this.log.log(
       `audit_ops_snapshot received=${s.counts.received} persisted=${s.counts.persisted} duplicate=${s.counts.duplicate} refused=${s.counts.refused}` +
         `${refused ? ` ${refused}` : ''} transient_failure=${s.counts.transient_failure} clock_skew_future=${s.counts.clock_skew_future}` +
-        ` lag_count=${s.lag.count} lag_avg_ms=${s.lag.avgMs} lag_max_ms=${s.lag.maxMs} in_flight=${s.inFlight} consumer=${this.subscription ? 'attached' : 'detached'}`,
+        ` lag_count=${s.lag.count} lag_avg_ms=${s.lag.avgMs} lag_max_ms=${s.lag.maxMs} in_flight=${s.inFlight} consumer=${this.subscription ? 'attached' : 'detached'}` +
+        ` ${broker} logs_suppressed=${b.suppressed + s.logsSuppressed}`,
     );
   }
 

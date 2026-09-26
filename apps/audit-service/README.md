@@ -66,7 +66,7 @@ ingestion route (A16: the bus is the only way in); no write, delete or search ro
 | Delivery | at least once, with idempotent immutable persistence (never "exactly once") |
 | Prefetch | half `DB_POOL_MAX` (1–10; 5 by default): at most that many deliveries in flight or in memory |
 | Readiness | `database`, `migrations`, `rabbitmq`, `audit-ingestion`; `/health` never depends on them |
-| Observability | `audit_ops_snapshot` every 60 s; `audit_event_persisted` / `_duplicate` / `_refused`, `audit_clock_skew`, the kit's retry / DLQ notices |
+| Observability | `audit_ops_snapshot` every 60 s and at shutdown: ingestion outcomes and refusal reasons, lag, in-flight, and (18.9) the broker signals — `retry_scheduled` / `_exhausted`, `dead_lettered` (by class), `dead_letter_retained` / `_redacted` (non-replayable) / `_deferred`, consumer and confirm events — plus `logs_suppressed`; `audit_event_persisted` / `_duplicate` / `_refused`, `audit_clock_skew`, the kit's notices. Closed-set labels only; per-event warnings are budgeted (20 per kind per interval, all counted) |
 
 **Dead letters** (the kit tool; the broker URL only from `RABBITMQ_URL`): `nawara-dlq list --queue audit-service.audit.dead` peeks without
 consuming; after fixing the cause, `nawara-dlq replay --queue audit-service.audit.dead --event-id <id>` sends ONE message back through the
@@ -145,4 +145,5 @@ by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 18.6 | ✅ query and authorization (organization / platform reads, cursor, rate limits, self-audited platform reads, index `0002`) |
 | 18.7 | ✅ producer integration (Payment, Billing, Organization, File, Auth) |
 | 18.8 | ✅ security, privacy, retention (DLQ redaction, retention role and purge mechanism, limiter purge, migration `0003`) |
-| 18.9 – 18.10 | operations, certification |
+| 18.9 | ✅ operational hardening (DLQ-confirm hold, broker counters, log budget, fault-injected outages, backlog, retention interruption) |
+| 18.10 | focused certification |

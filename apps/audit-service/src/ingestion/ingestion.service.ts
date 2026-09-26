@@ -76,7 +76,8 @@ export class IngestionService {
       // transient fault: dead-lettered, not retried.
       if (e instanceof AuditPersistenceError) throw this.refuse('invalid_record', who);
       this.counters.bump('transient_failure');
-      this.log.warn(`audit_ingest_transient_failure ${who} error=${e instanceof Error ? e.name : 'Error'} — not acknowledged; the kit retries it`);
+      // Stage 18.9: during a long database outage every retry attempt fails here: counted always, logged within the budget.
+      if (this.counters.mayLog('transient')) this.log.warn(`audit_ingest_transient_failure ${who} error=${e instanceof Error ? e.name : 'Error'} — not acknowledged; the kit retries it`);
       throw e;
     }
 
@@ -102,7 +103,8 @@ export class IngestionService {
 
   private refuse(reason: IngestionRefusal, who: string): PermanentEventFailure {
     this.counters.refused(reason);
-    this.log.warn(`audit_event_refused reason=${reason} ${who} — dead-lettered, not retried`);
+    // Stage 18.9: counted always; logged within a per-reason budget (a flood of refused messages is not a log storm).
+    if (this.counters.mayLog(`refused:${reason}`)) this.log.warn(`audit_event_refused reason=${reason} ${who} — dead-lettered, not retried`);
     return new PermanentEventFailure(reason);
   }
 }

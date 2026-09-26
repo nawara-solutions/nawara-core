@@ -1,3 +1,4 @@
+import { BrokerNotices } from '../../src/ingestion/broker-notices.js';
 import { Test } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { JsonLogger, ReadinessRegistry, configureApp, type EventBus, type ServiceTokenEntry } from '@nawara/service-kit';
@@ -40,6 +41,8 @@ export async function createTestApp(
   opts: {
     databaseUrl?: string; rabbitmqUrl?: string; bus?: EventBus; tokens?: ServiceTokenEntry[]; env?: NodeJS.ProcessEnv; probes?: boolean;
     migrationsDirs?: string[]; policy?: string;
+    /** Stage 18.9: the counters an injected bus's `onNotice` feeds (production wires its own). */
+    brokerNotices?: BrokerNotices;
     /** Runs after the HTTP baseline and before `init`, where `main.ts` mounts the OpenAPI documentation. */
     beforeInit?: (app: NestExpressApplication, config: AuditConfig) => void;
   } = {},
@@ -60,7 +63,7 @@ export async function createTestApp(
     ALL_LOGS.push(line);
   });
   const moduleRef = await Test.createTestingModule({
-    imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs, bus: opts.bus }), ...(opts.probes === false ? [] : [ProbeModule])],
+    imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs, bus: opts.bus, brokerNotices: opts.brokerNotices }), ...(opts.probes === false ? [] : [ProbeModule])],
   })
     .setLogger(logger)
     .compile();
