@@ -13,8 +13,9 @@ export function mountDocs(app: NestExpressApplication, config: ReleaseConfig): b
   const document = new DocumentBuilder()
     .setTitle('release-service API')
     .setDescription(
-      'Release metadata and client compatibility (ADR-0051), never delivery. Stage 20.3: CI automation registers and publishes releases ' +
-        'with a service token and a per-product policy (release.register / release.publish). No human, owner or operator route exists yet.',
+      'Release metadata and client compatibility (ADR-0051), never delivery. CI automation (Stage 20.3) registers and publishes releases ' +
+        'with a service token and a per-product policy (release.register / release.publish). The owner of the operating Company (Stage 20.4), ' +
+        'with their own Auth bearer and a factor step-up, withdraws releases and changes minimum versions. No operator route exists.',
     )
     .setVersion('0.1.0')
     .addBearerAuth()

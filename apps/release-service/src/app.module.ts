@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { Global, Module, type DynamicModule } from '@nestjs/common';
 import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir, type EventBus } from '@nawara/service-kit';
 import { ReleaseAuditModule } from './audit/release-audit.js';
+import { AdminModule } from './admin/admin.module.js';
 import { AutomationModule } from './automation/automation.module.js';
 import type { ReleaseConfig } from './config/release-config.js';
 import { RELEASE_CONFIG } from './config/release-config.token.js';
@@ -34,8 +35,11 @@ class ConfigModule {
  *
  * Stage 20.3: service authentication (ADR-0033), the central audit intent and the kit outbox relay that publishes it (`ReleaseAuditModule`:
  * `release.registered`, `release.published`; the only events this service produces, it consumes none), and the CI automation API
- * (`AutomationModule`: registration and publication, per-product policy). Owner administration is 20.4, the public compatibility read
- * 20.5. The service calls no other service (not Auth, Billing, File or Notification), and nothing in a product's request path calls it.
+ * (`AutomationModule`: registration and publication, per-product policy).
+ *
+ * Stage 20.4: owner administration (`AdminModule`, only when configured): withdrawal and minimum-version changes by the verified owner of
+ * the operating Company with a factor step-up. Its Auth client is the ONLY call to another service (Auth, with the human's own bearer). The
+ * public compatibility read is 20.5. Nothing in a product's request path calls this service.
  */
 @Module({})
 export class AppModule {
@@ -59,6 +63,7 @@ export class AppModule {
         PersistenceModule,
         ReleaseAuditModule.forRoot(config, overrides.bus), // Stage 20.3: the audit intent and the kit relay (the ONE events use)
         AutomationModule, // Stage 20.3: CI registration and publication
+        AdminModule.register(config), // Stage 20.4: owner withdrawal and minimum-version changes (only when owner administration is configured)
       ],
     };
   }

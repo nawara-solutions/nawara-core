@@ -149,6 +149,30 @@ export class ReleaseStore {
     throw new ReleaseStoreError('invalid_transition');
   }
 
+  /**
+   * Stage 20.4: takes the component's transaction-scoped advisory lock (the one the policy and withdrawal triggers take), FIRST, so a
+   * policy change and a withdrawal of the same component are serialized and every read after it sees the other's committed result.
+   */
+  async lockComponent(componentId: string, q: Queryable): Promise<void> {
+    await q.query(`SELECT release_lock_component($1)`, [componentId]).catch(refused);
+  }
+
+  /**
+   * Stage 20.4: would withdrawing this published release leave the current minimum above the new latest? The same rule the
+   * `release_withdrawal_keeps_minimum` trigger enforces (which stays the authority); used only to refuse early, before a step-up is spent.
+   */
+  async withdrawalBreaksMinimum(componentId: string, releaseId: string, q: Queryable = this.db): Promise<boolean> {
+    const { rows } = await q.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM (SELECT "minimumMajor" AS ma, "minimumMinor" AS mi, "minimumPatch" AS pa FROM compatibility_policy
+                         WHERE "componentId" = $1 ORDER BY "policyVersion" DESC LIMIT 1) p
+          WHERE NOT EXISTS (SELECT 1 FROM release r WHERE r."componentId" = $1 AND r.id <> $2 AND r.status = 'published' AND r.prerelease IS NULL
+                              AND (r.major, r.minor, r.patch) >= (p.ma, p.mi, p.pa))) AS breaks`,
+      [componentId, releaseId],
+    ).catch(refused);
+    return rows[0]?.breaks === true;
+  }
+
   /** "Latest" (ADR-0051 §4): the highest published, not-withdrawn release without a pre-release tag, by SemVer precedence. */
   async latestRelease(componentId: string, q: Queryable = this.db): Promise<Release | null> {
     const { rows } = await q.query(

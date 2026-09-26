@@ -104,9 +104,10 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 });
 
 describe('nothing else was broadened', () => {
-  it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(52);
-    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service')).toEqual(['release.registered', 'release.published']); // Stage 20.3 (ADR-0051 §9), additive
+  it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3 and the two of Stage 20.4, and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
+    expect(AUDIT_ACTIONS).toHaveLength(54);
+    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
+      .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
       'product.created', 'product.archived', 'price.created', 'price.retired']);
     const optional = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.organization === 'optional' && !corrected.has(a));

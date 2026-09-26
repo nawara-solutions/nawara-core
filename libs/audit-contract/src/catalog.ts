@@ -397,6 +397,34 @@ const SPEC = {
     purpose: 'Automation publishes a registered release: it may become the latest version that clients are offered or required to use.',
   },
 
+  // Stage 20.4 (ADR-0051 decisions 8, 9; the ADR-0050 human path): the verified owner of the configured operating Company, with a factor
+  // step-up verified and consumed through Auth, withdraws a release or changes a client component's minimum supported version. The actor
+  // is that human, never a service. Platform-level; written in the mutation's transaction, only when something changed. Additive (A50).
+  'release.withdrawn': {
+    producer: 'release-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['release'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      component_id: { type: 'uuid', shape: 'value', required: true },
+      kind: { type: 'code', shape: 'value', required: true, values: ['backend', 'web', 'desktop', 'mobile_ios', 'mobile_android'] },
+    },
+    purpose: 'A published release is withdrawn: it stops being offered, and clients running it are required to update.',
+  },
+  // The policy row has no UUID of its own, so the resource is the component; the minimum is named by the release it designates (always a
+  // published release when set), never by free version text.
+  'compatibility_policy.changed': {
+    producer: 'release-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['component'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      kind: { type: 'code', shape: 'value', required: true, values: ['web', 'desktop', 'mobile_ios', 'mobile_android'] },
+      policy_version: { type: 'integer', shape: 'transition', required: true, min: 0, max: 2_147_483_647 },
+      minimum_release_id: { type: 'uuid', shape: 'value', required: true },
+      previous_minimum_release_id: { type: 'uuid', shape: 'value', required: false },
+    },
+    purpose: 'A client component\'s minimum supported version changes: clients below it are required to update.',
+  },
+
   // ------------------------------------------------------------------------------------------------------------------------------ audit-service
   // Stage 18.6 (A57, named `audit.platform_query` in Stage 18.1; renamed to the A13 grammar, since an action never sits in the `audit.`
   // namespace that its event type adds). Written by audit-service itself, in the same transaction as the read it records.

@@ -95,15 +95,28 @@ describe('producer ownership (one canonical producer per action)', () => {
     expect(actionsOwnedBy('audit-service')).toEqual(['platform_query.executed']);
   });
 
-  it('release-service owns exactly its two automation actions (Stage 20.3): platform-level, a service actor only, never a user', () => {
-    expect(actionsOwnedBy('release-service')).toEqual(['release.registered', 'release.published']);
-    for (const a of actionsOwnedBy('release-service')) {
+  it('release-service owns its two automation actions (Stage 20.3): platform-level, a service actor only, never a user', () => {
+    expect(actionsOwnedBy('release-service')).toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']);
+    for (const a of ['release.registered', 'release.published'] as const) {
       const e = AUDIT_CATALOG.get(a)!;
       expect(e).toMatchObject({ category: 'administrative', organization: 'none', resource: ['release'], actors: { service: true } });
       expect('user' in e.actors || 'system' in e.actors).toBe(false);
       // bounded facts only: identifiers and the closed kind; no version text, build id, revision, notes or product key
       expect(Object.keys(e.changes).sort()).toEqual(['component_id', 'kind', 'product_id']);
     }
+  });
+
+  it('release-service owns its two human administration actions (Stage 20.4): security, the verified OWNER only, never a service or system', () => {
+    for (const a of ['release.withdrawn', 'compatibility_policy.changed'] as const) {
+      const e = AUDIT_CATALOG.get(a)!;
+      expect(e).toMatchObject({ category: 'security', organization: 'none', actors: { user: ['owner'] } });
+      expect('service' in e.actors || 'system' in e.actors).toBe(false);
+    }
+    expect(AUDIT_CATALOG.get('release.withdrawn')!.resource).toEqual(['release']);
+    const policy = AUDIT_CATALOG.get('compatibility_policy.changed')!;
+    expect(policy.resource).toEqual(['component']);
+    expect(Object.keys(policy.changes).sort()).toEqual(['kind', 'minimum_release_id', 'policy_version', 'previous_minimum_release_id', 'product_id']);
+    expect((policy.changes.kind as { values: readonly string[] }).values).not.toContain('backend'); // a backend has no policy
   });
 
   it.each(entries)('%s: every other service is refused deterministically (producer_not_admitted)', (action, e) => {

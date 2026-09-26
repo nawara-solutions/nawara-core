@@ -15,7 +15,7 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
   let doc: Record<string, any>;
 
   beforeAll(async () => {
-    t = await createTestApp({ env: { SWAGGER_PASSWORD: password } });
+    t = await createTestApp({ env: { SWAGGER_PASSWORD: password, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RELEASE_OPERATING_COMPANY_ID: '00000000-0000-4000-8000-000000000001' } });
     const r = await request(t.app.getHttpServer()).get('/release/docs-json').set('authorization', basic);
     expect(r.status).toBe(200);
     doc = r.body as Record<string, any>;
@@ -37,13 +37,17 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
     }
   });
 
-  it('documents exactly the two automation operations besides the kit probes (no list, read, withdrawal, policy, compatibility or deployment route)', () => {
+  it('documents exactly the two automation and two owner operations besides the kit probes (no list, read, compatibility or deployment route)', () => {
     const ops = Object.entries(doc.paths as Record<string, Record<string, unknown>>).flatMap(([p, methods]) => Object.keys(methods).map((m) => `${m.toUpperCase()} ${p}`));
     expect(ops.filter((o) => !['GET /health', 'GET /ready'].includes(o)).sort()).toEqual([
+      'POST /release/admin/products/{product}/components/{component}/compatibility-policy',
+      'POST /release/admin/products/{product}/components/{component}/releases/{version}/withdraw',
       'POST /release/products/{product}/components/{component}/releases',
       'POST /release/products/{product}/components/{component}/releases/{version}/publish',
-    ]);
-    expect(Object.keys(doc.paths).join(' ')).not.toMatch(/withdraw|minimum|policy|compatib|deploy|channel|artifact|latest/i);
+    ].sort());
+    const automation = Object.keys(doc.paths).filter((p) => p.startsWith('/release/products'));
+    expect(automation.join(' ')).not.toMatch(/withdraw|minimum|policy|compatib|deploy|channel|artifact|latest/i); // CI can do none of that
+    expect(Object.keys(doc.paths).join(' ')).not.toMatch(/deploy|channel|artifact|latest|compatibility(?!-policy)/i); // no 20.5 read
   });
 
   it('declares bearer (service token) security and the statuses the runtime returns', () => {
@@ -75,5 +79,26 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
     const release = doc.components.schemas.ReleaseDto;
     expect(Object.keys(release.properties).sort()).toEqual(['buildId', 'component', 'id', 'kind', 'notesRef', 'product', 'publishedAt', 'registeredAt', 'sourceRevision', 'status', 'version', 'withdrawnAt']);
     expect(release.properties.status.enum).toEqual(['registered', 'published', 'withdrawn']);
+  });
+
+  it('Stage 20.4: the owner routes declare the human bearer, the required step-up header and the statuses the runtime returns', () => {
+    const w = doc.paths['/release/admin/products/{product}/components/{component}/releases/{version}/withdraw'].post;
+    const p = doc.paths['/release/admin/products/{product}/components/{component}/compatibility-policy'].post;
+    for (const op of [w, p]) {
+      expect(op.security).toEqual([{ bearer: [] }]);
+      expect(op.parameters.find((x: { in: string; name: string }) => x.in === 'header' && x.name === 'x-step-up-token')).toMatchObject({ required: true });
+      expect(op.responses['403'].description).toMatch(/operation_not_allowed.*step_up_required/);
+      expect(op.responses['503'].description).toMatch(/auth_timeout \| auth_unavailable/);
+      expect(op.responses['401'].description).toMatch(/SERVICE token/);
+    }
+    expect(w.summary).toMatch(/"release\.withdraw"/);
+    expect(p.summary).toMatch(/"compatibility_policy\.change"/);
+    expect(Object.keys(w.responses).sort()).toEqual(['200', '400', '401', '403', '404', '409', '503']);
+    expect(Object.keys(p.responses).sort()).toEqual(['200', '400', '401', '403', '404', '409', '503']);
+    expect(w.responses['409'].description).toMatch(/invalid_transition.*would_break_minimum/);
+    expect(p.responses['409'].description).toMatch(/policy_conflict.*invalid_minimum.*minimum_above_latest.*policy_not_applicable/);
+    const dto = doc.components.schemas.ChangePolicyDto;
+    expect(Object.keys(dto.properties).sort()).toEqual(['expectedPolicyVersion', 'minimumVersion']);
+    expect(dto.required.sort()).toEqual(['expectedPolicyVersion', 'minimumVersion']);
   });
 });
