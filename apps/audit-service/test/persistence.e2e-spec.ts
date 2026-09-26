@@ -64,13 +64,13 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── migrations and the catalog
 
-  it('an 18.2 foundation database upgrades to the current schema (0001, then 18.6\'s 0002 index), then re-runs as a no-op', async () => {
+  it('an 18.2 foundation database upgrades to the current schema (0001, 18.6\'s 0002 index, 18.8\'s 0003 retention), then re-runs as a no-op', async () => {
     const up = await provisionServiceDatabase(env.TEST_DATABASE_ADMIN_URL, 'auu');
     try {
       const foundation = await runMigrations(up.migratorUrl, [kitMigrationsDir]); // the 18.2 state: the kit baseline, no audit migration
       expect(foundation.applied.every((n) => n.startsWith('kit_'))).toBe(true);
       const upgrade = await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
-      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql']);
+      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql']);
       expect((await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]);
       const grants = await sql<{ p: string }>(up.adminUrl, `SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'audit_record' AND grantee = $1 ORDER BY 1`, [up.app]);
       expect(grants.map((g) => g.p)).toEqual(['INSERT', 'SELECT']);
@@ -91,7 +91,8 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
     for (const c of cols) expect(c.c).not.toMatch(/email|phone|name|ip|agent|password|token|secret|payload|snapshot|metadata|updated/i);
     expect(await sql(d.adminUrl, `SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'audit_record'::regclass`)).toEqual([]);
     const tables = await sql<{ t: string }>(d.adminUrl, `SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('outbox', 'inbox', 'kit_rate_limit', 'schema_migrations')`);
-    expect(tables.map((r) => r.t)).toEqual(['audit_record']);
+    // Stage 18.8: plus the retention policy and its ledger (owner-only / retention-only: never the runtime's).
+    expect(tables.map((r) => r.t).sort()).toEqual(['audit_record', 'audit_retention_policy', 'audit_retention_run']);
     const [owner] = await sql<{ o: string }>(d.adminUrl, `SELECT tableowner AS o FROM pg_tables WHERE tablename = 'audit_record'`);
     expect(owner!.o).toBe(d.migrator);
   });

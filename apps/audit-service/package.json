@@ -15,6 +15,7 @@
     "start:prod": "node dist/main",
     "lint": "oxlint --type-aware src/ test/",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "retention": "node dist/cli/retention.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",

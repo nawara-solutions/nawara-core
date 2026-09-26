@@ -33,6 +33,30 @@ export interface EventSubscription {
    * `PermanentEventFailure` is dead-lettered at once (retrying cannot change the outcome).
    */
   handler(event: EventEnvelope): Promise<void>;
+  /**
+   * Stage 18.8 (optional; RabbitMQ implementation): what the DEAD-LETTER copy of a failed delivery may keep. Without it the copy is the
+   * original message, body and headers, plus the kit annotations (unchanged). With it, the bus asks once per dead-lettering and:
+   * - `original`: keeps the body byte-for-byte (so it stays replayable) but ONLY the headers returned here, plus the annotations;
+   * - `redacted`: replaces the body with a small kit document (`{"redacted":true,…}`: no byte of the original), keeps only the returned
+   *   headers, marks the copy `x-nawara-body-redacted`, and keeps the message id / type only when they are safe tokens.
+   * A consumer that must not become a store of what an untrusted publisher sent (audit-service) uses it. If it throws, the copy is
+   * redacted with no header (fail closed); if a copy cannot be confirmed, the delivery is requeued rather than left to the broker's own
+   * dead-lettering (which would move the untouched original).
+   */
+  deadLetterPolicy?(input: DeadLetterInput): DeadLetterDecision;
+}
+
+/** What a dead-letter policy is told: the parsed envelope (absent when the message was not an event at all) and why it failed. */
+export interface DeadLetterInput {
+  event: EventEnvelope | undefined;
+  failure: 'malformed' | 'permanent' | 'retries_exhausted';
+  reason?: string;
+}
+
+export interface DeadLetterDecision {
+  body: 'original' | 'redacted';
+  /** The only original headers the copy keeps (the kit annotations are added to them). */
+  headers: Record<string, string | number>;
 }
 
 /**

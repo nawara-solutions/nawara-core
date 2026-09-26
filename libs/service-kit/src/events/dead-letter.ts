@@ -16,6 +16,8 @@ export const HEADER = {
   failureError: 'x-nawara-failure-error',
   failedAt: 'x-nawara-failed-at',
   consumer: 'x-nawara-consumer',
+  /** Stage 18.8: the dead-letter copy's body was replaced (a `deadLetterPolicy` said `redacted`); such a copy is never replayed. */
+  bodyRedacted: 'x-nawara-body-redacted',
 } as const;
 
 export type FailureClass = 'malformed' | 'permanent' | 'retries_exhausted';

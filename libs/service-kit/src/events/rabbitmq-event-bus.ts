@@ -1,6 +1,6 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
-import { EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
+import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
   url: string;
@@ -103,6 +103,45 @@ export type NoticeLevel = 'info' | 'warn' | 'error';
 // Message ids reach a log line: anything that is not a short, predictable token (a malformed or foreign message) is not echoed.
 const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const messageIdOf = (id: unknown): string => safeToken(id, MESSAGE_ID, '-');
+
+interface DeadLetterCopy {
+  content: Buffer;
+  contentType: string | undefined;
+  messageId: string | undefined;
+  type: string | undefined;
+  headers: Record<string, unknown>;
+  redacted: boolean;
+}
+
+/**
+ * Stage 18.8: the dead-letter copy a subscription's `deadLetterPolicy` allows. Only the headers it returns (string / finite number values)
+ * survive; a redacted body is a kit document carrying nothing of the original but its size; a policy that throws redacts (fail closed).
+ */
+function deadLetterCopy(sub: EventSubscription, msg: ConsumeMessage, event: EventEnvelope | undefined, failure: FailureClass, reason: string | undefined): DeadLetterCopy {
+  let decision: DeadLetterDecision;
+  try {
+    decision = sub.deadLetterPolicy!({ event, failure, ...(reason ? { reason } : {}) });
+  } catch {
+    decision = { body: 'redacted', headers: {} };
+  }
+  const headers: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(decision.headers ?? {})) {
+    if (typeof v === 'string' || (typeof v === 'number' && Number.isFinite(v))) headers[k] = v;
+  }
+  // The kit's own replay bookkeeping always survives (validated), so `nawara-dlq replay` still recognizes a copy rejected again.
+  const original = msg.properties.headers ?? {};
+  const replays = counter(original[HEADER.replayCount]);
+  if (replays > 0) headers[HEADER.replayCount] = replays;
+  const replayedAt = original[HEADER.replayedAt];
+  if (typeof replayedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(replayedAt)) headers[HEADER.replayedAt] = replayedAt;
+  const safeId = typeof msg.properties.messageId === 'string' && MESSAGE_ID.test(msg.properties.messageId) ? msg.properties.messageId : undefined;
+  const safeType = typeof msg.properties.type === 'string' && EVENT_NAME.test(msg.properties.type) ? msg.properties.type : undefined;
+  if (decision.body === 'original') {
+    return { content: msg.content, contentType: msg.properties.contentType, messageId: msg.properties.messageId, type: msg.properties.type, headers, redacted: false };
+  }
+  const document = { redacted: true, failure, ...(reason ? { reason } : {}), bodyBytes: msg.content.length };
+  return { content: Buffer.from(JSON.stringify(document)), contentType: 'application/json', messageId: safeId, type: safeType, headers, redacted: true };
+}
 
 export type ConsumerState = 'consuming' | 'reconnecting' | 'closed';
 export interface ConsumerStatus {
@@ -428,6 +467,7 @@ export class RabbitMqEventBus implements EventBus {
     if (failure === 'retries_exhausted') this.notice(`event_retry_exhausted ${who} retries=${retryCount} error=${errorName}`);
     const reason = permanent ? safeToken((error as PermanentEventFailure).reason, REASON_CODE, 'unspecified') : undefined;
     const outcome = `${who} classification=${failure}${reason ? ` reason=${reason}` : ''} retries=${retryCount} error=${errorName}`;
+    const copy = sub.deadLetterPolicy ? deadLetterCopy(sub, msg, event, failure, reason) : undefined;
     try {
       await this.ensureDeadQueue(ch, sub);
       await this.republish(deadQueueName(sub.queue), msg, {
@@ -437,10 +477,18 @@ export class RabbitMqEventBus implements EventBus {
         [HEADER.failedAt]: new Date().toISOString(),
         [HEADER.consumer]: sub.queue,
         [HEADER.retryCount]: retryCount,
-      });
-      this.notice(`event_dead_lettered ${outcome}`, 'error');
+        ...(copy?.redacted ? { [HEADER.bodyRedacted]: 'true' } : {}),
+      }, undefined, copy);
+      this.notice(`event_dead_lettered ${outcome}${copy?.redacted ? ' body=redacted' : ''}`, 'error');
       this.settle(() => ch.ack(msg), sub);
     } catch {
+      if (copy) {
+        // Stage 18.8: a consumer with a dead-letter policy never lets the broker dead-letter the untouched original: requeued instead
+        // (redelivered, re-handled idempotently, dead-lettered through the policy once the broker confirms again).
+        this.notice(`event_dead_letter_deferred ${outcome} — the copy could not be confirmed; requeued`, 'error');
+        this.settle(() => ch.nack(msg, false, true), sub);
+        return;
+      }
       // the annotated copy could not be confirmed: the broker's own dead-lettering (the queue was just re-declared and bound) still moves the original, unannotated
       this.notice(`event_dead_lettered ${outcome} annotated=false`, 'error');
       this.settle(() => ch.nack(msg, false, false), sub);
@@ -464,7 +512,7 @@ export class RabbitMqEventBus implements EventBus {
    * Publishes a copy of `msg` straight to a queue (default exchange) on the confirm channel and resolves once the broker has accepted it.
    * Same body, message id, type, timestamp and headers, plus `annotations`; `mandatory` so a missing queue is an error, not a silent drop.
    */
-  private async republish(queue: string, msg: ConsumeMessage, annotations: Record<string, unknown>, expiration?: string): Promise<void> {
+  private async republish(queue: string, msg: ConsumeMessage, annotations: Record<string, unknown>, expiration?: string, copy?: DeadLetterCopy): Promise<void> {
     const ch = await this.publishChannel();
     let returned = false;
     const onReturn = (m: { properties: { messageId?: unknown } }) => {
@@ -472,14 +520,14 @@ export class RabbitMqEventBus implements EventBus {
     };
     ch.on('return', onReturn);
     try {
-      ch.sendToQueue(queue, msg.content, {
+      ch.sendToQueue(queue, copy ? copy.content : msg.content, {
         persistent: true,
         mandatory: true,
-        contentType: msg.properties.contentType,
-        messageId: msg.properties.messageId,
-        type: msg.properties.type,
+        contentType: copy ? copy.contentType : msg.properties.contentType,
+        messageId: copy ? copy.messageId : msg.properties.messageId,
+        type: copy ? copy.type : msg.properties.type,
         timestamp: msg.properties.timestamp,
-        headers: { ...withoutBrokerHistory(msg.properties.headers), ...annotations },
+        headers: { ...(copy ? copy.headers : withoutBrokerHistory(msg.properties.headers)), ...annotations },
         ...(expiration ? { expiration } : {}),
       });
       await this.confirmed(ch, `eventId=${messageIdOf(msg.properties.messageId)} target=${queue}`); // bounded; a basic.return, if any, arrives before the confirm

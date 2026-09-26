@@ -6,6 +6,7 @@ import {
 import { DbService, DB_OPTIONS, ReadinessRegistry, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
 import type { AuditConfig } from '../config/audit-config.js';
+import { auditDeadLetterPolicy } from './dead-letter-policy.js';
 import { AUDIT_BINDINGS, AUDIT_QUEUE, OPS_SNAPSHOT_INTERVAL_MS } from './ingestion.constants.js';
 import { IngestionCounters } from './ingestion-counters.js';
 import { IngestionService } from './ingestion.service.js';
@@ -80,7 +81,10 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     try {
       const blocker = await this.startBlocker();
       if (blocker) throw new Error(blocker);
-      const sub = await this.bus.subscribe({ queue: AUDIT_QUEUE, bindings: [...AUDIT_BINDINGS], handler: (e) => this.handle(e) });
+      const sub = await this.bus.subscribe({
+        queue: AUDIT_QUEUE, bindings: [...AUDIT_BINDINGS], handler: (e) => this.handle(e),
+        deadLetterPolicy: auditDeadLetterPolicy, // Stage 18.8: refused content is not kept verbatim in the DLQ
+      });
       if (this.stopped) {
         await sub.close();
         return;

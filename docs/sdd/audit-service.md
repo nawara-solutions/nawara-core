@@ -9,7 +9,9 @@
   Stage 18.6: the organization / platform reads, cursor pagination, rate limits and the self-audit of platform reads:
   [Stage 18.6 record](../architecture/stage-18/stage-18-6-query-authorization.md). Stage 18.7: every Core producer writes its catalog
   actions through the transactional outbox (Payment, Billing, Organization, File, and Auth after its outbox foundation), catalog
-  corrections G1–G5: [Stage 18.7 record](../architecture/stage-18/stage-18-7-core-producer-integration.md).
+  corrections G1–G5: [Stage 18.7 record](../architecture/stage-18/stage-18-7-core-producer-integration.md). Stage 18.8: dead-letter
+  redaction, the retention role and purge mechanism (no duration: P-A2), the limiter purge:
+  [Stage 18.8 record](../architecture/stage-18/stage-18-8-security-privacy-retention.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)
@@ -116,7 +118,9 @@ list is refined to `AUDIT_REFUSALS` (adds `invalid_payload`, `unknown_field`, `s
 | `recordedAt` | Audit `now()` | no | yes (retention) | Audit clock |
 
 Privileges: owner `audit_migrator`; runtime `audit_app` `INSERT, SELECT` (UPDATE / DELETE revoked from the Core default privileges);
-append-only and no-truncate triggers; a separate maintenance role for retention purges past each category's horizon (18.8).
+append-only and no-truncate triggers; a separate maintenance role for retention purges past each category's horizon (built in 18.8:
+migration `0003`, `audit_retention_policy` shipping empty, `audit_grant_retention`, the `audit_retention_run` ledger; the horizon is
+measured on `recordedAt`, never the producer-controlled `occurredAt`).
 
 **Implemented (Stage 18.3, `0001_audit_record.sql`); clarifications, no decision changed:** `id` is `GENERATED ALWAYS` (never
 caller-supplied); `actorId` is never NULL (a system actor names its process code); `userKind` exactly for users; `changes` values are
@@ -178,4 +182,4 @@ and age in the snapshot, and alert rules are 18.9.
 
 ## 10. Open items
 
-Library placement: decided in 18.4 (`libs/audit-contract`). Auth outbox: built in 18.7.5 (migration `0010`, the kit relay). Retention durations and erasure policy (owner / legal); per-service broker identity (P-A1); a broker for the deployed Auth (production prerequisite, Stage 18.7 §AF).
+Library placement: decided in 18.4 (`libs/audit-contract`). Auth outbox: built in 18.7.5 (migration `0010`, the kit relay). Retention mechanism: built in 18.8. Retention durations and erasure policy (owner / legal); Auth local-audit IP retention and minimization (P-A5, a decision: Stage 18.8 §7); per-service broker identity (P-A1); a broker for the deployed Auth (production prerequisite, Stage 18.7 §AF).

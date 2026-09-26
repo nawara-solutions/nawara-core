@@ -37,3 +37,17 @@ create_service organization "${ORGANIZATION_MIGRATOR_PASSWORD:-}" "${ORGANIZATIO
 create_service notification "${NOTIFICATION_MIGRATOR_PASSWORD:-}" "${NOTIFICATION_APP_PASSWORD:-}"
 create_service file "${FILE_MIGRATOR_PASSWORD:-}" "${FILE_APP_PASSWORD:-}"
 create_service audit "${AUDIT_MIGRATOR_PASSWORD:-}" "${AUDIT_APP_PASSWORD:-}"
+
+# Stage 18.8 (ADR-0049 A41 / A45): audit-service's THIRD role, the retention (maintenance) role. It is neither the runtime nor the owner:
+# CONNECT and schema USAGE here; its table grants (DELETE on audit_record past a category's horizon, SELECT of id / category / recordedAt
+# only, the policy and the ledger) come from audit-service migration 0003 (`audit_grant_retention`). Created only when a password is
+# given, so an existing .env keeps working; without it there is simply no retention role (and no purge).
+if [ -n "${AUDIT_RETENTION_PASSWORD:-}" ]; then
+  valid "$AUDIT_RETENTION_PASSWORD" || { echo "init: AUDIT_RETENTION_PASSWORD must be 8+ characters of [A-Za-z0-9_.-]" >&2; exit 1; }
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<SQL
+CREATE ROLE audit_retention LOGIN PASSWORD '${AUDIT_RETENTION_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+GRANT CONNECT ON DATABASE audit TO audit_retention;
+SQL
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname audit -c "GRANT USAGE ON SCHEMA public TO audit_retention;"
+  echo "init: retention role created for audit"
+fi

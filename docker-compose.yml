@@ -57,6 +57,7 @@ services:
       FILE_APP_PASSWORD: ${FILE_APP_PASSWORD:?copy .env.example to .env}
       AUDIT_MIGRATOR_PASSWORD: ${AUDIT_MIGRATOR_PASSWORD:?copy .env.example to .env}
       AUDIT_APP_PASSWORD: ${AUDIT_APP_PASSWORD:?copy .env.example to .env}
+      AUDIT_RETENTION_PASSWORD: ${AUDIT_RETENTION_PASSWORD:-}
     volumes:
       - nawara_pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -333,6 +334,8 @@ services:
       DATABASE_URL: postgres://audit_app:${AUDIT_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/audit
       # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
       MIGRATION_DATABASE_URL: postgres://audit_migrator:${AUDIT_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/audit
+      # Stage 18.8: used ONLY by `npm run retention` (the separate retention role), run explicitly; never read at app startup.
+      RETENTION_DATABASE_URL: postgres://audit_retention:${AUDIT_RETENTION_PASSWORD:-unset}@postgres:5432/audit
       SERVICE_TOKENS: ${AUDIT_SERVICE_TOKENS:-}
       # Every caller in SERVICE_TOKENS needs an explicit entry (deny by default); empty with no tokens is the default: nothing can call.
       AUDIT_SERVICE_POLICY: ${AUDIT_SERVICE_POLICY:-}
