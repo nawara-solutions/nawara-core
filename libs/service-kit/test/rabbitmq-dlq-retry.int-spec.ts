@@ -355,3 +355,86 @@ describeWithEnv('RabbitMQ retry, dead-letter annotations and replay (real broker
     await sub.close();
   });
 });
+
+/**
+ * Stage 18.9 (18.8 deferred O1): the dead-letter copy of a policy-protected subscription cannot be confirmed because the BROKER refuses
+ * publishes to the DLQ (a real queue policy, `max-length: 0` + `reject-publish`, set through the management API). The delivery is
+ * held for the retry delay before each requeue (never a tight loop), never dead-lettered raw, and a closing consumer ends the hold at once.
+ */
+describeWithEnv('RabbitMQ dead-letter copy refused by the broker (real broker, management API)', ['TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  const exchange = `nawara.events.m18${uniq()}`;
+  const queue = `q.m18.${uniq()}`;
+  const notices: string[] = [];
+  let conn: ChannelModel;
+  const mgmt = async (method: string, path: string, body?: unknown) => {
+    const u = new URL(env.TEST_RABBITMQ_MGMT_URL);
+    const r = await fetch(`${u.origin}/api${path}`, {
+      method, body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { authorization: `Basic ${Buffer.from(`${u.username}:${u.password}`).toString('base64')}`, 'content-type': 'application/json' },
+    });
+    if (!r.ok && r.status !== 404) throw new Error(`management ${method} ${path}: ${r.status}`);
+    return method === 'GET' && r.ok ? ((await r.json()) as Record<string, unknown>) : undefined;
+  };
+  const depth = async (q: string) => {
+    const ch = await conn.createChannel();
+    ch.on('error', () => undefined);
+    try {
+      return (await ch.checkQueue(q)).messageCount;
+    } finally {
+      await ch.close().catch(() => undefined);
+    }
+  };
+
+  beforeAll(async () => {
+    conn = await amqp.connect(env.TEST_RABBITMQ_URL);
+  });
+  afterAll(async () => {
+    await mgmt('DELETE', '/policies/%2F/m18-reject');
+    const ch = await conn.createChannel();
+    for (const q of [queue, `${queue}.retry`, `${queue}.dead`]) await ch.deleteQueue(q).catch(() => undefined);
+    await ch.close().catch(() => undefined);
+    await conn.close().catch(() => undefined);
+  });
+
+  it('held for the retry delay before each requeue (bounded rate), never dead-lettered raw; close() ends the hold at once and the message stays queued', async () => {
+    const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange, retry: { maxRetries: 0, delayMs: 500 }, onNotice: (m) => notices.push(m) });
+    const publisher = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange });
+    const sub = await bus.subscribe({
+      queue, bindings: ['payment.#'], handler: async () => { throw new PermanentEventFailure('refused_for_test'); },
+      deadLetterPolicy: () => ({ body: 'redacted', headers: {} }),
+    });
+    await mgmt('PUT', '/policies/%2F/m18-reject', { pattern: `^${queue.replace(/\./g, '\\.')}\\.dead$`, definition: { 'max-length': 0, overflow: 'reject-publish' }, 'apply-to': 'queues', priority: 100 });
+    for (let i = 0; i < 50; i++) {
+      if (((await mgmt('GET', `/queues/%2F/${encodeURIComponent(`${queue}.dead`)}`)) as { policy?: string } | undefined)?.policy === 'm18-reject') break;
+      await sleep(100);
+    }
+    await publisher.publish(envelope());
+    await waitFor(() => notices.filter((n) => n.startsWith('event_dead_letter_deferred')).length >= 1);
+    const before = notices.filter((n) => n.startsWith('event_dead_letter_deferred')).length;
+    await sleep(3000);
+    const deferrals = notices.filter((n) => n.startsWith('event_dead_letter_deferred')).length - before;
+    expect(deferrals).toBeGreaterThanOrEqual(2);
+    expect(deferrals).toBeLessThanOrEqual(8); // 500 ms holds: ~6 in 3 s (a tight loop would be hundreds)
+    expect(await depth(`${queue}.dead`)).toBe(0);
+    await sub.close();
+    await bus.close();
+    expect(await depth(queue)).toBe(1);
+    expect(await depth(`${queue}.dead`)).toBe(0);
+
+    // A LONG hold (4 s) — a closing consumer must cut it short, not wait it out (bounded shutdown under the fault).
+    const slow = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange, retry: { maxRetries: 0, delayMs: 4000 }, onNotice: (m) => notices.push(m) });
+    const seen = notices.length;
+    const held = await slow.subscribe({
+      queue, bindings: ['payment.#'], handler: async () => { throw new PermanentEventFailure('refused_for_test'); },
+      deadLetterPolicy: () => ({ body: 'redacted', headers: {} }),
+    });
+    await waitFor(() => notices.slice(seen).some((n) => n.startsWith('event_dead_letter_deferred')));
+    const began = Date.now();
+    await held.close();
+    expect(Date.now() - began).toBeLessThan(1000);
+    await slow.close();
+    await publisher.close();
+    expect(await depth(queue)).toBe(1);
+    expect(await depth(`${queue}.dead`)).toBe(0);
+  }, 30_000);
+});

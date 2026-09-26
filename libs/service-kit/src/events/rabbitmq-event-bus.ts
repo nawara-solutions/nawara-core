@@ -104,6 +104,20 @@ export type NoticeLevel = 'info' | 'warn' | 'error';
 const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const messageIdOf = (id: unknown): string => safeToken(id, MESSAGE_ID, '-');
 
+/** Waits `ms`, or less if `signal` aborts first (already aborted: returns at once). Never rejects. */
+function holdUnless(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 interface DeadLetterCopy {
   content: Buffer;
   contentType: string | undefined;
@@ -160,6 +174,8 @@ interface ConsumerHandle {
   closed: boolean;
   /** Deliveries whose handler (and settlement) is still running: awaited, bounded, before the channel is closed. */
   inFlight: Set<Promise<void>>;
+  /** Stage 18.9: aborted when the consumer stops, so a delivery held before a requeue (below) settles at once instead of waiting. */
+  stopping: AbortController;
 }
 
 /**
@@ -294,7 +310,7 @@ export class RabbitMqEventBus implements EventBus {
   }
 
   async subscribe(sub: EventSubscription) {
-    const handle: ConsumerHandle = { sub, state: 'reconnecting', attempts: 0, closed: false, inFlight: new Set() };
+    const handle: ConsumerHandle = { sub, state: 'reconnecting', attempts: 0, closed: false, inFlight: new Set(), stopping: new AbortController() };
     this.consumers.add(handle);
     try {
       await this.attach(handle);
@@ -330,7 +346,7 @@ export class RabbitMqEventBus implements EventBus {
           this.consumerLost(h, ch);
           return;
         }
-        const delivery: Promise<void> = this.deliver(ch, msg, sub).finally(() => h.inFlight.delete(delivery));
+        const delivery: Promise<void> = this.deliver(ch, msg, sub, h.stopping.signal).finally(() => h.inFlight.delete(delivery));
         h.inFlight.add(delivery);
       });
       if (h.closed) throw new Error('consumer closed while attaching');
@@ -376,6 +392,7 @@ export class RabbitMqEventBus implements EventBus {
 
   private async stopConsumer(h: ConsumerHandle): Promise<void> {
     h.closed = true;
+    h.stopping.abort();
     h.state = 'closed';
     if (h.timer) clearTimeout(h.timer);
     h.timer = undefined;
@@ -406,7 +423,7 @@ export class RabbitMqEventBus implements EventBus {
     this.opts.onNotice?.(message, level);
   }
 
-  private async deliver(ch: Channel, msg: ConsumeMessage, sub: EventSubscription): Promise<void> {
+  private async deliver(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, stopping?: AbortSignal): Promise<void> {
     const h = msg.properties.headers ?? {};
     const retryCount = counter(h[HEADER.retryCount]);
     let event: EventEnvelope | undefined;
@@ -438,14 +455,14 @@ export class RabbitMqEventBus implements EventBus {
       };
       await sub.handler(event);
     } catch (e) {
-      await this.onFailure(ch, msg, sub, event, e, retryCount);
+      await this.onFailure(ch, msg, sub, event, e, retryCount, stopping);
       return;
     }
     this.settle(() => ch.ack(msg), sub);
   }
 
   /** A failed delivery ends in exactly one of: a confirmed copy in `<queue>.retry`, or a confirmed copy in `<queue>.dead`, then an ack. */
-  private async onFailure(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, event: EventEnvelope | undefined, error: unknown, retryCount: number): Promise<void> {
+  private async onFailure(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, event: EventEnvelope | undefined, error: unknown, retryCount: number, stopping?: AbortSignal): Promise<void> {
     const maxRetries = this.opts.retry?.maxRetries ?? 3;
     const delayMs = this.opts.retry?.delayMs ?? 5000;
     const permanent = error instanceof PermanentEventFailure;
@@ -485,7 +502,12 @@ export class RabbitMqEventBus implements EventBus {
       if (copy) {
         // Stage 18.8: a consumer with a dead-letter policy never lets the broker dead-letter the untouched original: requeued instead
         // (redelivered, re-handled idempotently, dead-lettered through the policy once the broker confirms again).
-        this.notice(`event_dead_letter_deferred ${outcome} — the copy could not be confirmed; requeued`, 'error');
+        // Stage 18.9: RabbitMQ redelivers a requeued message at once, so while the copy keeps failing an immediate requeue is a tight
+        // loop. The delivery is HELD (unacknowledged, occupying one prefetch slot) for the retry delay first: at most `prefetch`
+        // deferrals per delay, whatever the fault lasts. A stopping consumer ends the hold at once (shutdown stays bounded; the
+        // unacknowledged message is redelivered to the next instance either way).
+        this.notice(`event_dead_letter_deferred ${outcome} delayMs=${delayMs} — the copy could not be confirmed; requeued after the delay`, 'error');
+        await holdUnless(delayMs, stopping);
         this.settle(() => ch.nack(msg, false, true), sub);
         return;
       }

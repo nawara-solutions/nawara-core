@@ -1,10 +1,11 @@
 import { fileURLToPath } from 'node:url';
-import { Global, Logger, Module, type DynamicModule } from '@nestjs/common';
+import { Global, Module, type DynamicModule } from '@nestjs/common';
 import { DbModule, HealthModule, RabbitMqEventBus, ServiceAuthModule, kitMigrationsDir, type EventBus } from '@nawara/service-kit';
 import type { AuditConfig } from './config/audit-config.js';
 import { AUDIT_CONFIG } from './config/audit-config.token.js';
 import { AUDIT_EVENT_BUS } from './ingestion/audit-consumer.js';
 import { AUDIT_EXCHANGE, consumerPrefetch } from './ingestion/ingestion.constants.js';
+import { BrokerNotices } from './ingestion/broker-notices.js';
 import { IngestionModule } from './ingestion/ingestion.module.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
 import { QueryModule } from './query/query.module.js';
@@ -17,16 +18,18 @@ export interface AppModuleOverrides {
   migrationsDirs?: string[];
   /** Tests may inject a bus (a kit RabbitMQ bus with test retry options); production builds the kit RabbitMQ bus below. */
   bus?: EventBus;
+  /** Tests that inject a bus pass its `onNotice` to these counters (production wires its own bus to them). */
+  brokerNotices?: BrokerNotices;
 }
 
 @Global()
 @Module({})
 class ConfigModule {
-  static forRoot(config: AuditConfig, bus: EventBus): DynamicModule {
+  static forRoot(config: AuditConfig, bus: EventBus, notices: BrokerNotices): DynamicModule {
     return {
       module: ConfigModule,
-      providers: [{ provide: AUDIT_CONFIG, useValue: config }, { provide: AUDIT_EVENT_BUS, useValue: bus }],
-      exports: [AUDIT_CONFIG, AUDIT_EVENT_BUS],
+      providers: [{ provide: AUDIT_CONFIG, useValue: config }, { provide: AUDIT_EVENT_BUS, useValue: bus }, { provide: BrokerNotices, useValue: notices }],
+      exports: [AUDIT_CONFIG, AUDIT_EVENT_BUS, BrokerNotices],
     };
   }
 }
@@ -48,6 +51,8 @@ class ConfigModule {
 @Module({})
 export class AppModule {
   static register(config: AuditConfig, overrides: AppModuleOverrides = {}): DynamicModule {
+    // Stage 18.9: every kit notice is counted (closed set) and logged within a budget (see BrokerNotices).
+    const notices = overrides.brokerNotices ?? new BrokerNotices();
     const bus =
       overrides.bus ??
       new RabbitMqEventBus({
@@ -57,7 +62,7 @@ export class AppModule {
         confirmTimeoutMs: config.rabbitmqConfirmTimeoutMs,
         heartbeatS: config.rabbitmqHeartbeatS,
         // retry: the kit default (3 retries × 5 s through audit-service.audit.retry, then audit-service.audit.dead).
-        onNotice: (message, level) => new Logger('RabbitMqEventBus')[level === 'info' ? 'log' : level](message),
+        onNotice: (message, level) => notices.observe(message, level),
       });
     return {
       module: AppModule,
@@ -74,7 +79,7 @@ export class AppModule {
           migrations: { dirs: overrides.migrationsDirs ?? [kitMigrationsDir, auditMigrationsDir] },
         }),
         ServiceAuthModule.forRoot(config.serviceTokens),
-        ConfigModule.forRoot(config, bus),
+        ConfigModule.forRoot(config, bus, notices),
         PersistenceModule,
         IngestionModule,
         QueryModule,

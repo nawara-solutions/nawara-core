@@ -11,7 +11,9 @@
   actions through the transactional outbox (Payment, Billing, Organization, File, and Auth after its outbox foundation), catalog
   corrections G1–G5: [Stage 18.7 record](../architecture/stage-18/stage-18-7-core-producer-integration.md). Stage 18.8: dead-letter
   redaction, the retention role and purge mechanism (no duration: P-A2), the limiter purge:
-  [Stage 18.8 record](../architecture/stage-18/stage-18-8-security-privacy-retention.md).
+  [Stage 18.8 record](../architecture/stage-18/stage-18-8-security-privacy-retention.md). Stage 18.9: operational hardening (the
+  dead-letter confirm-failure hold, broker / dead-letter counters in `audit_ops_snapshot`, a per-interval log budget, fault-injected
+  outages and retention interruption): [Stage 18.9 record](../architecture/stage-18/stage-18-9-operational-hardening.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)

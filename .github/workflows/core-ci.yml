@@ -89,15 +89,19 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
       rabbitmq:
-        image: rabbitmq:3.13-alpine
+        # Stage 18.9: the same 3.13 broker with its management API, which audit-service's fault-injection suite uses to make the broker
+        # itself refuse dead-letter publishes (a queue policy); nothing else uses it.
+        image: rabbitmq:3.13-management-alpine
         ports:
           - 5672:5672
+          - 15672:15672
         options: >-
           --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
     env:
       # Integration suites FAIL (never skip) in CI when a service they need is missing.
       TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
       TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      TEST_RABBITMQ_MGMT_URL: http://guest:guest@localhost:15672
       PGHOST: localhost
       PGPORT: '5432'
       PGUSER: postgres

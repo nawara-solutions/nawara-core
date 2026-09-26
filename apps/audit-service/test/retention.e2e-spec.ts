@@ -42,6 +42,15 @@ describeWithEnv('audit retention (real PostgreSQL 16, real roles)', ['TEST_DATAB
     }
     return ids;
   };
+  /** The internal id of a record: the only key the retention role may filter on (it can read id, category, recordedAt only). */
+  const idOf = async (eventId: string) => (await sql<{ id: string }>(d.adminUrl, `SELECT id::text AS id FROM audit_record WHERE "eventId" = $1`, [eventId]))[0]!.id;
+  /** A DELETE the retention role is allowed to ATTEMPT (by id): so a refusal is the TRIGGER's, never a missing column privilege. */
+  const triggerRefuses = async (url: string, eventIds: string[]) => {
+    const ids = await Promise.all(eventIds.map(idOf));
+    const f = await failure(url, `DELETE FROM audit_record WHERE id = ANY($1::bigint[])`, [ids]);
+    expect(f.code).toBe('42501');
+    expect(f.message).toMatch(/append-only \(DELETE refused\)/); // the trigger, not a privilege error
+  };
   const present = async (ids: string[]) => (await sql<{ n: number }>(d.adminUrl, `SELECT count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[])`, [ids]))[0]!.n;
   const setPolicy = (category: Category, days: number) =>
     sql(d.migratorUrl, `INSERT INTO audit_retention_policy(category, "retainDays") VALUES ($1, $2) ON CONFLICT (category) DO UPDATE SET "retainDays" = EXCLUDED."retainDays", "setAt" = now()`, [category, days]);
@@ -74,8 +83,8 @@ describeWithEnv('audit retention (real PostgreSQL 16, real roles)', ['TEST_DATAB
       const r = await runRetention(db(d.retentionUrl), opts());
       expect(r).toEqual({ dryRun: false, neverPurged: [...CATEGORIES], categories: [] });
       expect(await present(old)).toBe(1);
-      expect((await failure(d.retentionUrl, `DELETE FROM audit_record WHERE "eventId" = $1`, [old[0]])).code).toBe('42501'); // the trigger: no policy
-      expect((await failure(d.migratorUrl, `DELETE FROM audit_record WHERE "eventId" = $1`, [old[0]])).code).toBe('42501'); // even the owner, triggers on
+      await triggerRefuses(d.retentionUrl, [old[0]!]); // the trigger: no policy
+      await triggerRefuses(d.migratorUrl, [old[0]!]); // even the owner, triggers on
     });
   });
 
@@ -134,12 +143,16 @@ describeWithEnv('audit retention (real PostgreSQL 16, real roles)', ['TEST_DATAB
       await setPolicy('business', 30);
       const [young] = await seed('business', [29 * DAY]);
       const [otherOld] = await seed('security', [400 * DAY]);
-      expect((await failure(d.retentionUrl, `DELETE FROM audit_record WHERE "eventId" = $1`, [young])).code).toBe('42501');
-      expect((await failure(d.retentionUrl, `DELETE FROM audit_record WHERE "eventId" = $1`, [otherOld])).code).toBe('42501');
+      await triggerRefuses(d.retentionUrl, [young!]);
+      await triggerRefuses(d.retentionUrl, [otherOld!]);
       // A batch containing one row inside its horizon is refused WHOLE (nothing half-done).
       const [past] = await seed('business', [31 * DAY]);
-      expect((await failure(d.retentionUrl, `DELETE FROM audit_record WHERE "eventId" = ANY($1::uuid[])`, [[past, young]])).code).toBe('42501');
+      await triggerRefuses(d.retentionUrl, [past!, young!]);
       expect(await present([young!, past!, otherOld!])).toBe(3);
+      // Positive control: the SAME statement shape succeeds for a row past its horizon (the trigger admits it).
+      const pastId = await idOf(past!);
+      await sql(d.retentionUrl, `DELETE FROM audit_record WHERE id = $1::bigint`, [pastId]);
+      expect(await present([past!])).toBe(0);
     });
   });
 
@@ -257,7 +270,7 @@ describeWithEnv('audit retention (real PostgreSQL 16, real roles)', ['TEST_DATAB
       await setPolicy('business', 1);
       const [old] = await seed('business', [2 * DAY]);
       await sql(d.migratorUrl, `DELETE FROM audit_retention_policy WHERE category = 'business'`);
-      expect((await failure(d.retentionUrl, `DELETE FROM audit_record WHERE "eventId" = $1`, [old])).code).toBe('42501');
+      await triggerRefuses(d.retentionUrl, [old!]);
     });
   });
 });
