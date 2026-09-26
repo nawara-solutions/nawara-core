@@ -266,7 +266,10 @@ identifiers, and actor ids in audit evidence.
 > | 20.4 Compatibility / Admin | ✅ PASSED, merged: [Stage 20.4 record](./stage-20-4-compatibility-and-owner-administration.md) |
 > | 20.5 Client Compatibility API | ✅ PASSED, merged: [Stage 20.5 record](./stage-20-5-client-compatibility-api.md) |
 > | 20.6 Security / Ops Hardening | ✅ PASSED, merged: [Stage 20.6 record](./stage-20-6-security-operational-hardening.md) |
-> | 20.7 Focused Certification | ✅ PASSED, Stage 20 ready to close (awaiting review): [Stage 20.7 record](./stage-20-7-focused-certification.md) |
+> | 20.7 Focused Certification | ✅ PASSED, merged (PR #137): [Stage 20.7 record](./stage-20-7-focused-certification.md) |
+>
+> **🏁 Stage 20 CLOSED: Release Management Core V1 certified.** Production prerequisites are carried to Stage 21.x; Full Core Validation
+> is reserved for Stage 22.
 
 The provisional sequence was challenged. Authority travels with each capability instead of sitting in one late "security" stage, and one
 combined hardening stage precedes certification.

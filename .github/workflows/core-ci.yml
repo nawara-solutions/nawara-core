@@ -125,6 +125,10 @@ jobs:
         run: npm run typecheck -w ${{ matrix.workspace }}
       - name: unit tests
         run: npm test -w ${{ matrix.workspace }}
+      # Stage 21 (CI-1): built BEFORE the integration suites, which spawn the service's own CLIs from `dist/` (audit-service
+      # `dist/cli/retention.js`, notification-service `dist/cli/secret-keys.js`). Built after them, those suites failed on every run.
+      - name: build
+        run: npm run build -w ${{ matrix.workspace }}
       # Stage 17.4: an S3-protocol TEST server for the file-service S3 adapter suites (VersityGW, pinned; test infrastructure, not a
       # production provider choice). Credentials are random per run; nothing external, no cloud account.
       - name: start the S3-compatible test server
@@ -141,8 +145,6 @@ jobs:
       - name: database invariant tests
         if: matrix.database-tests
         run: npm run test:db -w ${{ matrix.workspace }}
-      - name: build
-        run: npm run build -w ${{ matrix.workspace }}
 
   # Stage 14.2: every deployable Core service image must build from a clean context and boot. A Dockerfile, a missing
   # workspace package (the Stage 13.2 regression: Auth imported @nawara/service-kit its image never provided), a compile
@@ -221,8 +223,9 @@ jobs:
       # This suite spawns billing-service and payment-service as separate OS processes from their OWN built
       # `dist/main.js` (never one service's TypeScript imported into the other's test — see `scripts/lib/checks.mjs`),
       # talking only over real HTTP and the real broker, so both must be built first.
-      - name: build service-kit, billing-service, payment-service, auth-service, notification-service
-        run: npm run build -w @nawara/service-kit -w billing-service -w payment-service -w auth-service -w notification-service
+      # Stage 21 (CI-1): the audit contract is built right after the kit: every Core producer imports it (Stage 18.7).
+      - name: build service-kit, audit-contract, billing-service, payment-service, auth-service, notification-service
+        run: npm run build -w @nawara/service-kit -w @nawara/audit-contract -w billing-service -w payment-service -w auth-service -w notification-service
       - name: real-broker E2E
         run: npm run test:e2e -w @nawara/e2e-real-broker
 
@@ -250,7 +253,43 @@ jobs:
       # This suite spawns auth-service and organization-service as separate OS processes from their OWN built
       # `dist/main.js` (never one service's TypeScript imported into the other's test — see `scripts/lib/checks.mjs`),
       # talking only over real HTTP, so both must be built first.
-      - name: build service-kit, auth-service, organization-service
-        run: npm run build -w @nawara/service-kit -w auth-service -w organization-service
+      # Stage 21 (CI-1): the audit contract is built right after the kit: both services import it (Stage 18.7).
+      - name: build service-kit, audit-contract, auth-service, organization-service
+        run: npm run build -w @nawara/service-kit -w @nawara/audit-contract -w auth-service -w organization-service
       - name: Stage 10.1 Auth/Organization wire-contract E2E
         run: npm run test:e2e -w @nawara/e2e-auth-organization
+
+  # Stage 21: the shared platform as one system — every Core audit producer (Auth, Organization, Billing, Payment, File, Release) and
+  # Notification, each from its own built dist as its own process, one real RabbitMQ, a live audit-service: the Stage 18.7 producer
+  # suites, Stage 19.3 Audit-X, the Stage 20 release suites and the Stage 21 shared-platform integration (credential confusion, failure
+  # isolation). It builds from a clean `npm ci`, contract first (`test:e2e:audit-producers`): never from a stale local `dist`.
+  e2e-shared-platform:
+    name: Core shared platform integration (all producers, real RabbitMQ)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: build (kit, contract, every service) and run the shared-platform suites
+        run: npm run test:e2e:audit-producers
