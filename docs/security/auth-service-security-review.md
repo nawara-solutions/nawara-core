@@ -312,3 +312,16 @@ redeem without the `maxUses` predicate (1). All restored; the unmutated spec pas
 | Pruning of throttle/challenge rows | NEEDS IMPLEMENTATION (deferred) |
 | Owner password reset, device registration, payment-service authentication | NEEDS IMPLEMENTATION (deferred) |
 | Operator/org-admin step-up (F22), organization/platform creation path (F23) | NEEDS DECISION |
+
+## O. Addendum: member account suspension (2026-09-26, Stage 19.2, ADR-0050)
+
+| Question | Answer (tested in `member-security.e2e-spec.ts`) |
+|---|---|
+| Who can suspend or restore a member | the Company owner only, with a factor step-up (`account.suspend` / `account.restore`; never the secret key). Operators and members get 403, and so does an organization-admin member |
+| Company boundary | derived from `organization_membership → organization → platform → company`. It refuses (404) a member with an active or pending membership under another Company, as well as another Company's member, a member without an active membership here, operators and owners. Several organizations of the same Company are allowed |
+| Existing sessions | the access token is refused on the next request (`/auth/me`, `/auth/grants`, every guarded Auth route); refresh and login are refused; every refresh family is revoked. Restoring does not revive them |
+| Evidence | `account.disabled` (with the closed reason) and `account.enabled`, in the mutation's transaction. The actor is the owner, with the kind from the database. An outbox failure rolls everything back; a broker outage delays publication and never undoes the change |
+| Spoofing | `x-owner-id`, `x-user-kind`, `x-acting-user` and similar headers are ignored. Body fields naming an actor or scope are a 400 |
+| Concurrency | the target row is locked (`FOR UPDATE`). A concurrent membership insert under another Company is serialized and seen. Duplicate or racing requests produce one change and one piece of evidence each |
+| Residual | an identity shared by two Companies cannot be suspended by either owner in Core V1 (ADR-0050 decision 5). Company-specific access disabling is a future concern |
+

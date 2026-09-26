@@ -18,6 +18,8 @@ import { TotpSecretCipher } from './crypto/totp-cipher.js';
 import { EventsModule } from './events/events.module.js';
 import { EventsPublisherService } from './events/events-publisher.service.js';
 import { HealthController } from './health/health.controller.js';
+import { MemberSecurityController } from './members/member-security.controller.js';
+import { MemberSecurityService } from './members/member-security.service.js';
 import { OrganizationController } from './membership/organization.controller.js';
 import { MembershipService } from './membership/membership.service.js';
 import { ContactVerificationService } from './onboarding/contact-verification.service.js';
@@ -51,7 +53,7 @@ import { UsersService } from './users/users.service.js';
  * suites all go through `AppModule.register(cfg)`, so no module reads `process.env` on its own.
  */
 @Module({
-  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController],
+  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController, MemberSecurityController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -66,7 +68,7 @@ import { UsersService } from './users/users.service.js';
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,
-    OperatorAvailabilityService, OperatorCodeService, OperatorAdminService,
+    OperatorAvailabilityService, OperatorCodeService, OperatorAdminService, MemberSecurityService,
     PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, GrantsService, AuthGuard,
   ],
 })

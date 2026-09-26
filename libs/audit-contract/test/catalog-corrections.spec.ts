@@ -124,3 +124,23 @@ describe('nothing else was broadened', () => {
     for (const a of AUDIT_ACTIONS.filter((x) => !member.includes(x))) expect(ok(a, { actor: USER }), a).toThrow('invalid_actor');
   });
 });
+
+describe('Stage 19.2: account.disabled accepts the closed suspension reason (ADR-0050 D6), and nothing else widens', () => {
+  const owner = { type: 'user', id: SAMPLE_IDS.user, userKind: 'owner' };
+  it.each(['compromised_account', 'security_incident', 'policy_violation'])('%s is accepted; no reason (the operator block) still is', (reason) => {
+    expect(ok('account.disabled', { actor: owner, changes: { reason } })).not.toThrow();
+    expect(ok('account.disabled', { actor: owner })).not.toThrow();
+  });
+
+  it('owner_request, free text, a non-string, another key and an empty object are refused', () => {
+    for (const changes of [{ reason: 'owner_request' }, { reason: 'he was rude' }, { reason: 'x'.repeat(200) }, { reason: 7 }, { note: 'free text' }, { reason: 'compromised_account', note: 'x' }, {}]) {
+      expect(ok('account.disabled', { actor: owner, changes }), JSON.stringify(changes)).toThrow('invalid_changes');
+    }
+  });
+
+  it('the actor stays owner-only, the organization stays none, and account.enabled still carries no changes', () => {
+    for (const userKind of ['operator', 'member']) expect(ok('account.disabled', { actor: { ...owner, userKind } }), userKind).toThrow('invalid_actor');
+    expect(ok('account.disabled', { actor: owner, organizationId: SAMPLE_IDS.organization })).toThrow('invalid_organization');
+    expect(ok('account.enabled', { actor: owner, changes: { reason: 'compromised_account' } })).toThrow('invalid_changes');
+  });
+});

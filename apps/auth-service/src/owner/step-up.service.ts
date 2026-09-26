@@ -40,6 +40,9 @@ export const STEP_UP_METHODS = {
   // Minting or revoking an administrator invitation is a privilege grant: factor only, never the bare key.
   'admin_invitation.create': ['totp', 'webauthn'],
   'admin_invitation.revoke': ['totp', 'webauthn'],
+  // Member account suspension / restoration (Stage 19.2, ADR-0050 decision 5): a security intervention on a whole identity, factor only.
+  'account.suspend': ['totp', 'webauthn'],
+  'account.restore': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 

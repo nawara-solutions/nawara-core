@@ -3409,6 +3409,51 @@ than one membership or any revoked one; `0006.down` only verifies `revoked` is u
 dropped). **Tests.** `multi-membership.e2e-spec.ts` (22), `tenant-isolation.e2e-spec.ts` (7), the SQL groups `MO`,
 `MEM`, `INV` and migration scenarios M9/M10, and the CORS unit test.
 
+## Member account suspension by the owner (Stage 19.2, ADR-0050)
+
+**Routes (owner only, factor step-up; operators and members are refused by the guard with 403).**
+
+| Route | Step-up purpose |
+|---|---|
+| `POST /auth/admin/members/:id/suspend {reason}` | `account.suspend` |
+| `POST /auth/admin/members/:id/restore` | `account.restore` |
+
+- **Step-up:** both purposes are **factor-only** (TOTP or passkey); the secret key is refused.
+- **Reason:** `reason` is the closed D6 set: `compromised_account`, `security_incident` or `policy_violation`. Anything else,
+  including extra body fields, is a 400.
+- **Response:** `{ id, suspended, changed }` only.
+
+**Code.** `MemberSecurityService` runs one transaction:
+1. the owner's Company, from the `owner` row;
+2. `StepUpService.consume`;
+3. `SELECT … FROM "user" … FOR UPDATE` on the target. A concurrent membership INSERT needs `FOR KEY SHARE` on that row, through
+   `membership_member_fk`, so it is serialized with the suspension;
+4. eligibility:
+   - kind `member`;
+   - at least one `active` membership in an organization of the owner's Company;
+   - **no `active` or `pending` membership in an organization of another Company**;
+   - memberships in several organizations of the same Company are fine;
+5. the state change. It sets `"user"."isActive"`, the same flag the operator block uses and every live check reads. Suspension also
+   revokes every refresh family;
+6. the local `auth_audit_event` (`account.disabled` / `account.enabled`, metadata `kind: member` and the reason);
+7. the central `account.disabled` / `account.enabled` intent, in the same transaction.
+
+**Idempotency.** An account already in the requested state is a 200 with `changed: false`. Nothing is written, and the step-up is
+still consumed.
+
+**Refusals.** Every ineligible target is the same collapsed 404, recorded locally as `denied` with `why`:
+- an unknown id, an operator or an owner;
+- another Company's member;
+- a member with only pending memberships, or no membership, in this Company;
+- an identity shared with another Company.
+
+The refusal rolls back, so the step-up is not burned.
+
+**Restoration** uses the same eligibility, so an owner cannot re-enable access under another Company. It does not revive revoked
+sessions. `isActive` has no other writer for members, so restoration never undoes a different kind of disablement.
+
+**Tests.** `member-security.e2e-spec.ts` (25 tests).
+
 ## Open questions
 
 - **ADR-0024 follow-ups.** (1) `role: 'admin'` is now reserved for owners/operators — any consumer
