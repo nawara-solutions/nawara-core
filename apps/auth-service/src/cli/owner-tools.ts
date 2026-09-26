@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
 import { assertPasswordPolicy, PasswordService } from '../crypto/password.js';
 import type { TotpSecretCipher } from '../crypto/totp-cipher.js';
 import type { DbService } from '../db/db.service.js';
@@ -17,9 +18,25 @@ import type { UsersService } from '../users/users.service.js';
 export async function bootstrapOwner(
   db: DbService, users: UsersService, passwords: PasswordService,
   a: { companyName: string; email: string; password: string; companyId?: string },
+  /**
+   * Stage 21.C.2 (ADR-0040 A1.2 and A2.5 F4; ADR-0042 AD-4): when an authoritative Company id is given, its validated reference row is placed
+   * by the reference-cache protocol (`ensure`, from Organization Service) BEFORE the owner is created, and auth-service never inserts a
+   * Company of its own. Needs Auth's Organization Service credential; fails closed without it or when Organization Service cannot answer.
+   */
+  hierarchy?: HierarchyReference,
 ): Promise<{ created: boolean; ownerId?: string }> {
   assertPasswordPolicy(a.password);
   const hash = await passwords.hash(a.password);
+  if (a.companyId && hierarchy) {
+    const exists = await (async () => {
+      try {
+        return await hierarchy.ensure('company', a.companyId!);
+      } catch {
+        throw new Error('Organization Service could not confirm that Company (unavailable, not yet readable, or the reference write was refused); nothing was created');
+      }
+    })();
+    if (!exists) throw new Error('Organization Service does not know that Company id (or it is outside auth-service\'s credential); nothing was created');
+  }
   return db.tx(async (q) => {
     // Check-then-insert is only safe when bootstraps are serialised: otherwise two concurrent runs each
     // see "no owner" and each create a Company + Owner (the one-owner-per-company index cannot stop two
@@ -36,7 +53,12 @@ export async function bootstrapOwner(
       const ref = await q.query(`SELECT id FROM company WHERE id = $1`, [a.companyId]);
       if (!ref.rowCount) throw new Error('no validated reference row exists for that Company id; place it with the reference-cache protocol first (nothing is created here)');
       companyId = ref.rows[0].id;
+    } else if (a.companyId && hierarchy) {
+      companyId = a.companyId.toLowerCase(); // the validated reference row placed above (a fresh environment's F4): no Company insert
     } else {
+      // Stage 21.C.2 (ADR-0040 A1.2 "the local hierarchy write paths are already off"): with Organization Service as the source, even a
+      // not-yet-activated (fresh) environment never gets an Auth-created Company.
+      if (hierarchy?.fromOrganizationService) throw new Error('the hierarchy source is organization-service: pass the authoritative Company id (BOOTSTRAP_COMPANY_ID); auth-service does not create a Company');
       const company = await q.query(`SELECT id FROM company ORDER BY "createdAt" LIMIT 1`);
       companyId = company.rows[0]?.id ?? (await q.query(`INSERT INTO company(id,name) VALUES ($1,$2) RETURNING id`, [randomUUID(), a.companyName])).rows[0].id;
     }

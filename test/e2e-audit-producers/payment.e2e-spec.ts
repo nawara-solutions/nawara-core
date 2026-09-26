@@ -4,6 +4,11 @@ import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/serv
 import { APPS, PROHIBITED, deadDepth, resetAuditQueues, sql, startAudit, type LiveAudit } from './support/audit.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+
+/** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
+const refStub = await startReferenceStub();
+afterAll(() => refStub.close());
 
 /**
  * Stage 18.7.1: REAL Payment → its outbox (same transaction) → its kit relay → a REAL RabbitMQ → a live audit-service → audit_record →
@@ -45,7 +50,7 @@ describeWithEnv('Payment → outbox → RabbitMQ → audit-service (all real)', 
     await proxy.start();
     payment = spawnService('payment', PAYMENT_DIR, {
       NODE_ENV: 'test', PORT: String(PAYMENT_PORT), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: proxy.url,
-      PAYMENT_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `billing-service:${billing.digest}`,
+      PAYMENT_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `billing-service:${billing.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
     });
     try {
       await waitForHealth(`${PAYMENT_URL}/health`, 30_000);

@@ -206,7 +206,9 @@ Secrets may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME`. 
 | `DATABASE_URL` | yes | runtime connection, the `billing_app` role. In production a superuser or `*_migrator` login is refused |
 | `AUTH_SERVICE_URL`, `AUTH_TIMEOUT_MS` | URL yes | live identity for user bearers (sent to Auth only) |
 | `BILLING_SUPPORTED_CURRENCIES` | yes | ISO 4217 codes accepted on an invoice or price; **no default** (B-005). Each must also exist in the immutable `currency` table |
-| `SERVICE_TOKENS` | no | accepted callers, `<caller>:<sha256 digest>`; empty means every service call is refused |
+| `SERVICE_TOKENS` | no | accepted callers, `<caller>:<sha256 digest>`; empty means every service call is refused. **Core V1 admits none** (ADR-0052, Q5) |
+| `BILLING_SERVICE_POLICY` | when a token is registered | Stage 21.C.2: each caller's operations and `allowedPlatforms` (deny by default; kit caller-policy mechanism). V1: `{"callers":{}}` |
+| `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_REFERENCE_TOKEN`, `ORGANIZATION_REFERENCE_TIMEOUT_MS` | in production once a caller is admitted | Organization verification of asserted Organizations and of the entitlement read (fails closed, `503 hierarchy_unavailable`); `ORGANIZATION_REFERENCE_FIXTURE` is a non-production alternative, refused in production |
 | `RABBITMQ_URL` | **in production** | event bus; without it the in-memory bus is used (development and tests only) |
 | `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_TOKEN` | yes | payment-service's base URL and Billing's own service token (bearer sent to Payment; a user's bearer is never forwarded) |
 | `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |

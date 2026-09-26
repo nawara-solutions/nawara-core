@@ -1,4 +1,8 @@
-import { ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
+import {
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, loadOrganizationReferenceConfig, parseServiceTokens,
+  registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
+} from '@nawara/service-kit';
+import { parseBillingServicePolicy, type BillingCallerPolicy } from '../admission/caller-admission.policy.js';
 
 /**
  * billing-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16 lists the settings a Core
@@ -10,6 +14,13 @@ export interface BillingConfig extends BaseConfig {
   databaseUrl: string;
   /** Accepted callers, `<caller>:<sha256 digest>` (ADR-0033). May be empty: every service call is then refused. */
   serviceTokens: ServiceTokenEntry[];
+  /**
+   * `BILLING_SERVICE_POLICY` (Stage 21.C.2, ADR-0052; ADR-0042 D3/A.3): what each registered caller may do, deny by default. Core V1
+   * admits NO service caller, so the approved configuration is an empty policy with no registered token.
+   */
+  servicePolicy: CallerPolicyMap<BillingCallerPolicy>;
+  /** Where an asserted Organization is resolved (ADR-0052 decision 3). Required in production once any caller is admitted. */
+  organizationReference: OrganizationReferenceConfig;
   /** Live identity and membership: user bearers are sent to Auth ONLY (ADR-0033). */
   authServiceUrl: string;
   authTimeoutMs: number;
@@ -97,12 +108,16 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     subscriptionGraceDays = n;
   }
 
+  const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
+  const servicePolicy = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(serviceTokens));
   const config = {
     ...base,
     databaseUrl,
     supportedCurrencies: [...new Set(supportedCurrencies)],
     subscriptionGraceDays,
-    serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
+    serviceTokens,
+    servicePolicy,
+    organizationReference: loadOrganizationReferenceConfig(reader, base.isProduction, servicePolicy.size > 0),
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,

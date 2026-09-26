@@ -10,6 +10,7 @@ import { writeFileSync } from 'node:fs';
 import { HierarchyAuthorityError, contentDigestNow, exportHierarchy, freeze, retireWrites, status as hierarchyStatus, unfreeze } from '../hierarchy/hierarchy-authority.js';
 import { serializeSnapshot } from '../hierarchy/snapshot.js';
 import { bootstrapOwner, checkTotpKeys, resealTotpSecrets } from './owner-tools.js';
+import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
 
 /**
  *   node dist/cli/main.js bootstrap-owner     env: BOOTSTRAP_COMPANY_NAME, BOOTSTRAP_OWNER_EMAIL, BOOTSTRAP_OWNER_PASSWORD
@@ -31,7 +32,8 @@ try {
   if (cmd === 'bootstrap-owner') {
     const { BOOTSTRAP_COMPANY_NAME: company, BOOTSTRAP_OWNER_EMAIL: email, BOOTSTRAP_OWNER_PASSWORD: password, BOOTSTRAP_COMPANY_ID: companyId } = process.env;
     if (!company || !email || !password) throw new Error('BOOTSTRAP_COMPANY_NAME, BOOTSTRAP_OWNER_EMAIL and BOOTSTRAP_OWNER_PASSWORD are required');
-    const r = await bootstrapOwner(app.get(DbService), app.get(UsersService), app.get(PasswordService), { companyName: company, email, password, companyId });
+    // Stage 21.C.2: with an authoritative Company id, the reference-cache protocol places it (never an Auth Company insert).
+    const r = await bootstrapOwner(app.get(DbService), app.get(UsersService), app.get(PasswordService), { companyName: company, email, password, companyId }, app.get(HierarchyReference));
     console.log(r.created ? 'owner created' : 'an owner already exists: nothing changed');
     process.exitCode = r.created ? 0 : 1;
   } else if (cmd === 'reseal-totp-keys') {

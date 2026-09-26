@@ -1,9 +1,17 @@
-import { ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry } from '@nawara/service-kit';
+import {
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, loadOrganizationReferenceConfig,
+  parseServiceTokens, registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
+} from '@nawara/service-kit';
+import { parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
+
 
 /** payment-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16). */
 export interface PaymentConfig extends BaseConfig {
   databaseUrl: string;
   serviceTokens: ServiceTokenEntry[];
+  /** `PAYMENT_SERVICE_POLICY` (Stage 21.C.2, ADR-0052, ADR-0042 D3/AD-2): what each registered caller may do, deny by default. */
+  servicePolicy: CallerPolicyMap<PaymentCallerPolicy>;
+  organizationReference: OrganizationReferenceConfig;
   authServiceUrl: string;
   authTimeoutMs: number;
   /** Unset means "use the in-memory event bus" (local/dev/test only); set means RabbitMQ. Required when `NODE_ENV=production`. */
@@ -57,10 +65,13 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   if (supportedCurrencies.length === 0 || supportedCurrencies.some((c) => !/^[A-Z]{3}$/.test(c))) {
     throw new ConfigError('PAYMENT_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
   }
+  const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   return {
     ...base,
     databaseUrl,
-    serviceTokens: parseServiceTokens(reader.get('SERVICE_TOKENS')),
+    serviceTokens,
+    servicePolicy: parsePaymentServicePolicy(reader.get('PAYMENT_SERVICE_POLICY'), registeredCallers(serviceTokens)),
+    organizationReference: loadOrganizationReferenceConfig(reader, base.isProduction),
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
     rabbitmqUrl,

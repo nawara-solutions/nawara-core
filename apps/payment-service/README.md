@@ -7,6 +7,16 @@ state machines, idempotency, authorization, events) and
 for how it fits alongside billing-service and accounting-service. It is **not** the billing or
 accounting system: it never decides what is owed and keeps no ledger.
 
+## Caller admission (Stage 21.C.2, ADR-0052; ADR-0042 AD-2 and Amendment 3)
+
+- `PAYMENT_SERVICE_POLICY` (the kit caller-policy mechanism, deny by default) names each registered caller's operations and
+  `allowedPlatforms`. The approved V1 content: `billing-service` with `payment.create`, `payment.read` and `payment.cancel` only.
+  `auth-service` has no Payment authority. No service may start or sync an attempt (payer-only routes).
+- An Organization named on a create is verified through Organization Service's reference read (`ORGANIZATION_SERVICE_URL`,
+  `ORGANIZATION_REFERENCE_TOKEN`, required in production) and must be in the caller's Platforms: otherwise `403
+  organization_not_permitted`; if it cannot be verified (before the 21.x cutover it cannot), `503 hierarchy_unavailable` and nothing is
+  written. A replay is answered from the stored payment. `ORGANIZATION_REFERENCE_FIXTURE` is non-production only.
+
 ## Status: Phase 1 (technical foundation)
 
 Gateway-settlement lifecycle only. No cash, no refunds — see the SDD's "Implementation readiness

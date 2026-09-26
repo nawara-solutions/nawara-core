@@ -1,7 +1,9 @@
 import { Body, Controller, Get, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CallerService, DbService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
+import {
+  CallerService, DbService, RateLimitService, RequireServiceOperation, ServiceOperationGuard, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest,
+} from '@nawara/service-kit';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { AuthorizationService } from '../authorization/authorization.service.js';
@@ -24,16 +26,19 @@ export class PaymentsController {
   ) {}
 
   @Post()
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment.create')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create a payment (producer service only). Identical replay of the same paymentRequestId returns the existing payment.' })
   @ApiResponse({ status: 201, description: 'Payment created.' })
   @ApiResponse({ status: 200, description: 'Identical replay of an existing payment (Idempotent-Replayed: true).' })
   @ApiResponse({ status: 400, description: 'invalid_payment_request' })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted (the calling service does not hold payment.create) / organization_not_permitted (the organization is unknown or outside the caller\'s Platform scope: one answer)' })
   @ApiResponse({ status: 409, description: 'payment_request_conflict: same paymentRequestId, different snapshot' })
   @ApiResponse({ status: 422, description: 'unsupported_currency' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
+  @ApiResponse({ status: 503, description: 'hierarchy_unavailable: the organization could not be verified (Organization Service unavailable or not yet authoritative); nothing was written' })
   async create(@CallerService() producer: string, @Body() dto: CreatePaymentDto, @Res({ passthrough: true }) res: Response) {
     // Keyed by the AUTHENTICATED producer (the guard already ran), so an unauthenticated caller cannot write limiter rows.
     await this.rateLimit.assert('payment-create', producer, { limit: this.config.rateLimits.createPerMinute, windowSec: 60 });
@@ -44,11 +49,13 @@ export class PaymentsController {
   }
 
   @Get(':id')
-  @UseGuards(ServiceOrUserGuard)
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment.read')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get a payment. 404 (collapsed) when the caller has no relation to it — never distinguishes "missing" from "forbidden".' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold payment.read' })
   @ApiResponse({ status: 404 })
   async get(@Param('id', new ParseUUIDPipe()) id: string, @Req() req: CallerRequest) {
     const payment = await this.payments.findById(id);
@@ -59,7 +66,8 @@ export class PaymentsController {
 
   @Post(':id/cancel')
   @HttpCode(200)
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment.cancel')
   @ApiBearerAuth()
   @ApiOperation({
     summary:
@@ -69,6 +77,7 @@ export class PaymentsController {
   @ApiResponse({ status: 200, description: 'Cancelled, or an identical replay of the original cancellation.' })
   @ApiResponse({ status: 400, description: 'idempotency_key_required' })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold payment.cancel' })
   @ApiResponse({ status: 404, description: 'collapsed: missing, or not this caller\'s payment' })
   @ApiResponse({ status: 409, description: 'invalid_state_transition / payment_has_open_attempt' })
   @ApiResponse({ status: 422, description: 'idempotency_key_reused' })

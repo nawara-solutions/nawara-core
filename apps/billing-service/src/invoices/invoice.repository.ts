@@ -186,6 +186,12 @@ export class InvoiceRepository {
     return rows[0] ? this.withLines(q, rows[0]) : null;
   }
 
+  /** Stage 21.C.2: whether this producer's invoiceRequestId already exists, so a replay is answered without asking Organization Service. */
+  async naturalKeyExists(producer: string, invoiceRequestId: string): Promise<boolean> {
+    const { rows } = await this.db.query(`SELECT 1 FROM invoice WHERE producer = $1 AND "invoiceRequestId" = $2`, [producer, invoiceRequestId]);
+    return rows.length > 0;
+  }
+
   private async findByNaturalKey(q: Queryable, producer: string, invoiceRequestId: string): Promise<(InvoiceRecord & { requestHash: string }) | null> {
     const { rows } = await q.query<InvoiceRow>(`SELECT ${INVOICE_COLUMNS} FROM invoice WHERE producer = $1 AND "invoiceRequestId" = $2`, [producer, invoiceRequestId]);
     return rows[0] ? ((await this.withLines(q, rows[0])) as InvoiceRecord & { requestHash: string }) : null;

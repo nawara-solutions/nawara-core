@@ -50,6 +50,12 @@ export class ProductRepository {
     });
   }
 
+  /** Stage 21.C.2: whether (seller, code) already exists, so a replay is answered without asking Organization Service again. */
+  async naturalKeyExists(input: NormalisedCreateProductInput): Promise<boolean> {
+    const { rows } = await this.db.query(`SELECT 1 FROM product WHERE "sellerType" = $1 AND "sellerId" = $2 AND code = $3`, [input.seller.type, input.seller.id, input.code]);
+    return rows.length > 0;
+  }
+
   private async replayCreate(q: Queryable, e: unknown, input: NormalisedCreateProductInput): Promise<ProductWriteResult> {
     const { rows } = await q.query<ProductRow>(
       `SELECT * FROM product WHERE "sellerType" = $1 AND "sellerId" = $2 AND code = $3`,

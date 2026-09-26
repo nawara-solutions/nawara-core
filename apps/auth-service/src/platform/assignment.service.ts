@@ -4,6 +4,7 @@ import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.js';
 import { authError, notFound } from '../errors.js';
+import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
 import { StepUpService } from '../owner/step-up.service.js';
 
 export interface OwnerActor {
@@ -30,6 +31,7 @@ export class AssignmentService {
     @Inject(StepUpService) private readonly stepUp: StepUpService,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(CentralAudit) private readonly central: CentralAudit,
+    @Inject(HierarchyReference) private readonly hierarchy: HierarchyReference,
   ) {}
 
   private async ownerCompany(q: Queryable, ownerId: string): Promise<string> {
@@ -44,6 +46,9 @@ export class AssignmentService {
   }
 
   async grant(actor: OwnerActor, operatorId: string, platformId: string, stepUpToken: string | undefined, ip: string) {
+    // Stage 21.C.2 (ADR-0040 decision 2): the first assignment on a Platform is its first touch; `ensure` places it when the source is
+    // Organization Service (bounded, fail closed). The company check below still decides whether this owner may assign it.
+    if (!(await this.hierarchy.firstTouchPlatform(platformId))) throw notFound();
     const row = await this.db.tx(async (q) => {
       const companyId = await this.ownerCompany(q, actor.userId);
       await this.assertOperatorInCompany(q, operatorId, companyId);

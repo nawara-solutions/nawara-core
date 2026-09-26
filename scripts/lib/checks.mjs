@@ -87,6 +87,7 @@ const PRODUCT_TERMS = /\b(student|teacher|driver|lesson|classroom|instructor|veh
 const identifierWords = (text) => text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
 const DOMAIN_DECLARATION = /\b(?:class|interface|type|enum|function|const)\s+\w*(Invoice|Refund|Ledger|Journal|Wallet|Settlement|Payout|Payment|Product|Tax)\w*/;
 // The kit reads Auth's identity contract (an organization id, a membership status) but holds no organization or membership logic.
+const REFERENCE_WRITE_ALLOWLIST = new Set(['apps/auth-service/src/hierarchy/hierarchy-authority.ts', 'apps/auth-service/src/hierarchy/hierarchy-reference.ts']);
 const KIT_IDENTITY_CONTRACT_ALLOWLIST = new Set(['libs/service-kit/src/service-auth/auth-client.ts']);
 
 /**
@@ -130,6 +131,13 @@ export function checkSource(relPath, text) {
   if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {
     problems.push(`${relPath}: declares a financial-domain concept; the service-kit holds technical infrastructure only`);
+  }
+  // Stage 21.C.2 (ADR-0040 decision 1): after the cutover Auth's hierarchy tables are a reference cache that ONLY the reference-cache
+  // protocol writes. The database gate (migration 0008) opens for a transaction that sets `nawara.reference_write`; only the protocol
+  // (`HierarchyReference.ensure`) and the helper that defines the gate may name it, so no other Auth path can place a hierarchy row.
+  if (relPath.startsWith('apps/auth-service/src/') && !REFERENCE_WRITE_ALLOWLIST.has(relPath) && !relPath.endsWith('.spec.ts')
+    && (/\bwithReferenceWrite\b/.test(text) || /nawara\.reference_write/.test(text))) {
+    problems.push(`${relPath}: opens the hierarchy reference-write gate; only the reference-cache protocol (hierarchy/hierarchy-reference.ts) may place hierarchy rows`);
   }
   const app = /^apps\/([a-z-]+)\//.exec(relPath)?.[1];
   for (const m of text.matchAll(/from\s+['"]([^'"]+)['"]/g)) {

@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 
 export interface LiveService {
   stop(): Promise<void>;
+  /** Stage 21.C.2: kills the process at once (SIGKILL: no shutdown hook, no drain), as a crash would. */
+  kill(): Promise<void>;
   /** The last N lines of stdout+stderr, for a failure's diagnostic message — never asserted on, only printed. */
   tail(): string;
 }
@@ -26,6 +28,12 @@ export function spawnService(name: string, cwd: string, env: NodeJS.ProcessEnv):
   });
   return {
     tail: () => lines.join('\n'),
+    async kill() {
+      if (exited || child.exitCode !== null) return;
+      const gone = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      child.kill('SIGKILL');
+      await gone;
+    },
     async stop() {
       if (exited || child.exitCode !== null) return;
       child.kill('SIGTERM');

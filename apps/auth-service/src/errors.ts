@@ -39,7 +39,8 @@ export type AuthErrorCode =
   | 'step_up_required'
   | 'assignment_conflict'
   | 'recovery_failed'
-  | 'recovery_not_available';
+  | 'recovery_not_available'
+  | 'hierarchy_unavailable';
 
 export function authError(status: number, code: AuthErrorCode, message: string): HttpException {
   return new HttpException({ message, code }, status);

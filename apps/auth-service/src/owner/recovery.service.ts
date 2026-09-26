@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
 import { CentralAudit, ownerActor, userActor } from '../audit/central-audit.js';
 import type { ClientInfo } from '../common/client-info.js';
-import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
+import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { PasswordService } from '../crypto/password.js';
 import { randomToken, sha256Hex } from '../crypto/random.js';
@@ -42,7 +42,7 @@ export class RecoveryService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Inject(EVENT_BUS) private readonly bus: EventBus,
+    @Inject(DOMAIN_EVENTS) private readonly events: DomainEvents,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(UsersService) private readonly users: UsersService,
     @Inject(PasswordService) private readonly passwords: PasswordService,
@@ -82,10 +82,12 @@ export class RecoveryService {
       await this.audit.record({ type: 'owner.recovery.start', outcome: 'success', actorId: owner.id, ip: client.ip, metadata: { cooldownSec: this.cfg.recovery.cooldownSec } }, q);
       // Stage 18.7.6: the central audit intent, same transaction (no IP: that stays in the local record).
       await this.central.write(q, { action: 'owner.recovery_started', actor: userActor({ userId: owner.id, kind: owner.kind }), organizationId: null, resource: { type: 'user', id: owner.id }, outcome: 'succeeded' });
-    });
-    this.bus.publish('admin.owner_recovery_requested', {
-      userId: owner.id, channel: owner.email ? 'email' : 'phone', destination: owner.email ?? owner.phone,
-      availableAt: availableAt.toISOString(), ipAddress: client.ip, timestamp: now.toISOString(),
+      // Stage 21.C.2 (ADR-0052 decision 4): the security alert commits WITH the recovery request. The ADR-0025 cool-down relies on the owner
+      // being told, and a lost alert cannot be reconstructed.
+      await this.events.emit(q, 'admin.owner_recovery_requested', {
+        userId: owner.id, channel: owner.email ? 'email' : 'phone', destination: owner.email ?? owner.phone,
+        availableAt: availableAt.toISOString(), ipAddress: client.ip, timestamp: now.toISOString(),
+      });
     });
     return { recoveryToken: token, availableAt };
   }
@@ -136,10 +138,10 @@ export class RecoveryService {
       const ch = await this.challenges.create(q, { ownerId: req.ownerId, kind: 'enrollment', ttlSec: this.cfg.recovery.enrollmentTtlSec, bearer: true });
       await this.audit.record({ type: 'owner.recovery.complete', outcome: 'success', actorId: req.ownerId, ip: client.ip }, q);
       await this.central.write(q, { action: 'owner.recovery_completed', actor: userActor({ userId: owner.id, kind: owner.kind }), organizationId: null, resource: { type: 'user', id: owner.id }, outcome: 'succeeded' });
+      await this.events.emit(q, 'admin.owner_recovery_completed', {
+        userId: owner.id, channel: owner.email ? 'email' : 'phone', destination: owner.email ?? owner.phone, ipAddress: client.ip, timestamp: now.toISOString(),
+      });
       return ch.token!;
-    });
-    this.bus.publish('admin.owner_recovery_completed', {
-      userId: owner.id, channel: owner.email ? 'email' : 'phone', destination: owner.email ?? owner.phone, ipAddress: client.ip, timestamp: now.toISOString(),
     });
     return { status: 'enrollment_required' as const, enrollmentToken: enrollment };
   }

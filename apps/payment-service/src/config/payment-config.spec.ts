@@ -6,6 +6,10 @@ const BASE_ENV = {
   DATABASE_URL: 'postgres://payment_app:pw@localhost:5433/payment',
   AUTH_SERVICE_URL: 'http://localhost:3001',
 };
+/** Stage 21.C.2: production needs Payment's own Organization reference credential (Organization verification has no bypass). */
+const PROD_REFERENCE = { ORGANIZATION_SERVICE_URL: 'http://organization-service:3000', ORGANIZATION_REFERENCE_TOKEN: 'r'.repeat(43) };
+const P1 = 'aaaaaaaa-0000-4000-8000-0000000000f1';
+const BILLING_POLICY = JSON.stringify({ callers: { 'billing-service': { operations: ['payment.create', 'payment.read', 'payment.cancel'], allowedPlatforms: [P1] } } });
 
 describe('loadPaymentConfig', () => {
   it('loads with sane defaults from the minimal required env', () => {
@@ -42,8 +46,79 @@ describe('loadPaymentConfig', () => {
 
   it('parses SERVICE_TOKENS via the kit helper', () => {
     const digest = 'a'.repeat(64);
-    const cfg = loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}` });
+    const cfg = loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}`, PAYMENT_SERVICE_POLICY: BILLING_POLICY });
     expect(cfg.serviceTokens).toEqual([{ caller: 'billing-service', digest }]);
+  });
+
+  describe('PAYMENT_SERVICE_POLICY (Stage 21.C.2, ADR-0052; ADR-0042 AD-2 and Amendment 3)', () => {
+    const digest = 'a'.repeat(64);
+    const authDigest = 'b'.repeat(64);
+
+    it('billing-service holds exactly its three approved operations within its Platforms', () => {
+      const p = loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}`, PAYMENT_SERVICE_POLICY: BILLING_POLICY }).servicePolicy.of('billing-service');
+      expect([...p!.operations].sort()).toEqual(['payment.cancel', 'payment.create', 'payment.read']);
+      expect([...p!.allowedPlatforms]).toEqual([P1]);
+    });
+
+    it('a registered token with no policy refuses to start (deny by default)', () => {
+      expect(() => loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}` })).toThrow(/PAYMENT_SERVICE_POLICY is required/);
+    });
+
+    it('auth-service cannot be admitted with nothing (no empty operation list), and no attempt operation exists to grant', () => {
+      const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest},auth-service:${authDigest}` };
+      const policy = (auth: unknown) => JSON.stringify({ callers: { 'billing-service': JSON.parse(BILLING_POLICY).callers['billing-service'], 'auth-service': auth } });
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy({ operations: [], allowedPlatforms: [] }) })).toThrow(/non-empty list/);
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: BILLING_POLICY })).toThrow(/registered caller "auth-service" has no PAYMENT_SERVICE_POLICY entry/);
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy({ operations: ['payment.attempt.sync'], allowedPlatforms: [] }) })).toThrow(/value other than/);
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy({ operations: ['*'], allowedPlatforms: [] }) })).toThrow(/value other than/);
+    });
+
+    it('allowedPlatforms is required and explicit (no wildcard)', () => {
+      const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}` };
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: { 'billing-service': { operations: ['payment.read'] } } }) })).toThrow(/allowedPlatforms must be an explicit list/);
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: { 'billing-service': { operations: ['payment.read'], allowedPlatforms: ['*'] } } }) })).toThrow(/wrong form/);
+    });
+
+    it('errors never echo the digest or a policy value', () => {
+      try {
+        loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${digest}`, PAYMENT_SERVICE_POLICY: JSON.stringify({ callers: { 'billing-service': { operations: ['s3cret-op'], allowedPlatforms: [] } } }) });
+        throw new Error('no throw');
+      } catch (e) {
+        expect((e as Error).message).not.toMatch(/s3cret-op|aaaaaaaa/);
+      }
+    });
+  });
+
+  describe('Organization reference (Stage 21.C.2, ADR-0052 decision 3; AD-5: no bypass)', () => {
+    const fixture = JSON.stringify([{ organizationId: 'bbbbbbbb-0000-4000-8000-000000000001', platformId: P1, companyId: 'cccccccc-0000-4000-8000-000000000001' }]);
+    const PROD = { ...BASE_ENV, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://broker:5672' };
+
+    it('production requires Organization Service and Payment\'s own reference credential', () => {
+      expect(() => loadPaymentConfig(PROD)).toThrow(/ORGANIZATION_SERVICE_URL and ORGANIZATION_REFERENCE_TOKEN are required in production/);
+      expect(loadPaymentConfig({ ...PROD, ...PROD_REFERENCE }).organizationReference).toMatchObject({ kind: 'http', baseUrl: PROD_REFERENCE.ORGANIZATION_SERVICE_URL, timeoutMs: 2000 });
+    });
+
+    it('the fixture is impossible to enable in production, even alongside a real reference', () => {
+      expect(() => loadPaymentConfig({ ...PROD, ORGANIZATION_REFERENCE_FIXTURE: fixture })).toThrow(/refused in production/);
+      expect(() => loadPaymentConfig({ ...PROD, ...PROD_REFERENCE, ORGANIZATION_REFERENCE_FIXTURE: fixture })).toThrow(/refused in production/);
+    });
+
+    it('outside production: the fixture, the real reference, or none (then every Organization-bearing create fails closed)', () => {
+      expect(loadPaymentConfig({ ...BASE_ENV, ORGANIZATION_REFERENCE_FIXTURE: fixture }).organizationReference.kind).toBe('fixture');
+      expect(loadPaymentConfig({ ...BASE_ENV, ...PROD_REFERENCE }).organizationReference.kind).toBe('http');
+      expect(loadPaymentConfig(BASE_ENV).organizationReference.kind).toBe('none');
+    });
+
+    it('half a reference, or a fixture combined with a reference, is refused; a short token is refused without being echoed', () => {
+      expect(() => loadPaymentConfig({ ...BASE_ENV, ORGANIZATION_SERVICE_URL: 'http://org:3000' })).toThrow(/must be set together/);
+      expect(() => loadPaymentConfig({ ...BASE_ENV, ...PROD_REFERENCE, ORGANIZATION_REFERENCE_FIXTURE: fixture })).toThrow(/cannot be combined/);
+      try {
+        loadPaymentConfig({ ...BASE_ENV, ORGANIZATION_SERVICE_URL: 'http://org:3000', ORGANIZATION_REFERENCE_TOKEN: 'short-s3cret' });
+        throw new Error('no throw');
+      } catch (e) {
+        expect((e as Error).message).not.toContain('short-s3cret');
+      }
+    });
   });
 
   it('reads the baseline rate limits, with defaults, and refuses a nonsensical value', () => {
@@ -55,7 +130,7 @@ describe('loadPaymentConfig', () => {
   });
 
   describe('event bus configuration (audit finding M-03)', () => {
-    const PROD = { ...BASE_ENV, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://user:s3cret-pw@broker.internal:5672' };
+    const PROD = { ...BASE_ENV, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://user:s3cret-pw@broker.internal:5672' };
     const refusal = (env: NodeJS.ProcessEnv): string => {
       try {
         loadPaymentConfig(env);
@@ -96,7 +171,7 @@ describe('loadPaymentConfig', () => {
   });
 
   // Stage 14.3: parity with billing-service/organization-service configuration rules.
-  const PROD_ENV = { ...BASE_ENV, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://broker:5672' };
+  const PROD_ENV = { ...BASE_ENV, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://broker:5672' };
 
   it('accepts the least-privilege runtime role in production', () => {
     expect(loadPaymentConfig(PROD_ENV).databaseUrl).toBe(BASE_ENV.DATABASE_URL);

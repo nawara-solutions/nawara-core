@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
-import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
+import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { hmacHex } from '../crypto/hmac.js';
 import { authError } from '../errors.js';
@@ -28,7 +28,7 @@ export class ContactVerificationService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Inject(EVENT_BUS) private readonly bus: EventBus,
+    @Inject(DOMAIN_EVENTS) private readonly events: DomainEvents,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(AuditService) private readonly audit: AuditService,
   ) {}
@@ -54,9 +54,10 @@ export class ContactVerificationService {
         [userId, channel, this.digest(userId, code), now, expiresAt],
       );
       await this.audit.record({ type: 'member.contact.code_requested', outcome: 'success', actorId: userId, ip: client.ip, metadata: { channel } }, q);
+      // The code travels only in this delivery event (like the operator working code), never in a log or audit row. Stage 21.C.2: written in
+      // the SAME transaction as its hash (so a rolled-back request sends nothing); the outbox row is short-lived (CodeEventPurge).
+      await this.events.emit(q, 'member.contact_verification_requested', { userId, channel, destination: channel === 'email' ? u.email : u.phone, code, expiresAt: expiresAt.toISOString() });
     });
-    // The code travels only in this delivery event (like the operator working code), never in a log or audit row.
-    this.bus.publish('member.contact_verification_requested', { userId, channel, destination: channel === 'email' ? u.email : u.phone, code, expiresAt: expiresAt.toISOString() });
   }
 
   async verify(userId: string, code: string, client: ClientInfo): Promise<void> {

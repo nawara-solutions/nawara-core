@@ -3,8 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { Logger, Module, type DynamicModule } from '@nestjs/common';
 import {
   DbModule, EventsModule, HealthModule, InMemoryEventBus, RabbitMqEventBus, RateLimitModule, ServiceAuthModule, kitMigrationsDir,
-  type AuthClient, type EventBus,
+  type AuthClient, type EventBus, type OrganizationReferenceResolver,
 } from '@nawara/service-kit';
+import { CallerAdmissionModule } from './admission/caller-admission.module.js';
 import { AuthClientModule } from './auth/auth-client.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
@@ -32,6 +33,8 @@ export interface AppModuleOverrides {
   bus?: EventBus;
   /** Tests point readiness at the migrations they applied. */
   migrationsDirs?: string[];
+  /** Tests replace the Organization reference source (production: `buildOrganizationReference` from the configuration). */
+  organizationReference?: OrganizationReferenceResolver;
 }
 
 /**
@@ -61,6 +64,7 @@ export class AppModule {
         ServiceAuthModule.forRoot(config.serviceTokens),
         AuthClientModule.forRoot(overrides.authClient ?? { baseUrl: config.authServiceUrl, timeoutMs: config.authTimeoutMs }),
         BillingConfigModule.forRoot(config),
+        CallerAdmissionModule.forRoot(config, overrides.organizationReference), // Stage 21.C.2: operation policy + Organization reference (ADR-0052)
         BillingAuditModule, // Stage 18.7: central audit intent (global; needs the kit OutboxService below)
         EventsModule.forRoot({
           source: BILLING_SERVICE_NAME, // the same identity the audit writer is bound to (Stage 18.7)

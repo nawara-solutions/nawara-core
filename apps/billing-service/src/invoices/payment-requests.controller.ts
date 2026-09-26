@@ -1,7 +1,7 @@
 import { Controller, Get, HttpCode, Inject, Logger, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CallerService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
+import { CallerService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest, RequireServiceOperation, ServiceOperationGuard } from '@nawara/service-kit';
 import { toDomainCaller } from '../auth/domain-caller.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
@@ -34,7 +34,8 @@ export class PaymentRequestsController {
   ) {}
 
   @Post('invoices/:invoiceId/payment-requests')
-  @UseGuards(ServiceOrUserGuard)
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment_request.create')
   @ApiBearerAuth()
   @ApiOperation({
     summary:
@@ -45,6 +46,7 @@ export class PaymentRequestsController {
   @ApiResponse({ status: 201, description: 'Request created (status: created, paymentId: null — the dispatcher has not sent it yet).' })
   @ApiResponse({ status: 200, description: 'The current active request was returned (state idempotency).' })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold payment_request.create' })
   @ApiResponse({ status: 404 })
   @ApiResponse({ status: 409, description: 'invoice_not_payable (not open) or payment_request_not_supported (payer is not a user, B-026)' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
@@ -63,11 +65,13 @@ export class PaymentRequestsController {
   }
 
   @Get('payment-requests/:id')
-  @UseGuards(ServiceOrUserGuard)
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment_request.read')
   @ApiBearerAuth()
   @ApiOperation({ summary: "Get a Billing payment request. 404 (collapsed) when the caller has no relation to its invoice. Reflects Billing's OWN durable record, kept current by the event consumer and reconciler — never a synchronous live call to Payment." })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold payment_request.read' })
   @ApiResponse({ status: 404 })
   async get(@Param('id', new ParseUUIDPipe()) id: string, @Req() req: CallerRequest) {
     const caller = toDomainCaller(req.caller!);
@@ -76,7 +80,8 @@ export class PaymentRequestsController {
 
   @Post('payment-requests/:id/cancel')
   @HttpCode(200)
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('payment_request.cancel')
   @ApiBearerAuth()
   @ApiOperation({
     summary:
@@ -86,6 +91,7 @@ export class PaymentRequestsController {
   })
   @ApiResponse({ status: 200, description: 'Cancelled locally (never sent), or cancellation requested at Payment (terminal state arrives later).' })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold payment_request.cancel' })
   @ApiResponse({ status: 404 })
   @ApiResponse({ status: 409, description: 'payment_request_in_flight: still being sent, already closed, or Payment refused (an attempt or cash submission is in progress)' })
   @ApiResponse({ status: 503, description: 'payment_unavailable: Payment could not confirm the cancellation; nothing was accepted. Retrying the same call is safe.' })

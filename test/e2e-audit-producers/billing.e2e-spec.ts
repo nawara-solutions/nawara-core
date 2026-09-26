@@ -4,6 +4,11 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { APPS, PROHIBITED, deadDepth, resetAuditQueues, sql, startAudit, type LiveAudit } from './support/audit.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+
+/** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
+const refStub = await startReferenceStub();
+afterAll(() => refStub.close());
 
 /**
  * Stage 18.7.2: REAL Billing (HTTP) → its outbox (same transaction as the change and its billing_transition row) → its kit relay → a REAL
@@ -34,7 +39,7 @@ describeWithEnv('Billing → outbox → RabbitMQ → audit-service (all real)', 
     await runMigrations(billingDb.url, [kitMigrationsDir, `${BILLING_DIR}/db/migrations/`]);
     billing = spawnService('billing', BILLING_DIR, {
       NODE_ENV: 'test', PORT: String(BILLING_PORT), DATABASE_URL: billingDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: env.TEST_RABBITMQ_URL,
-      BILLING_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `test-producer:${producer.digest}`, PAYMENT_SERVICE_URL: 'http://127.0.0.1:9', PAYMENT_SERVICE_TOKEN: generateServiceToken().token,
+      BILLING_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `test-producer:${producer.digest}`, ...billingPolicy('test-producer'), ...refStub.env, PAYMENT_SERVICE_URL: 'http://127.0.0.1:9', PAYMENT_SERVICE_TOKEN: generateServiceToken().token,
       BILLING_DISPATCH_INTERVAL_MS: '300000', BILLING_RECONCILE_INTERVAL_MS: '3600000',
     });
     try {

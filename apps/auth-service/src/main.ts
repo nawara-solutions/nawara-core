@@ -47,6 +47,6 @@ async function bootstrap() {
 
   await app.listen(cfg.port);
   // Stage 14.7: one line that identifies this instance (no URL, credential or config dump). Liveness is /health, readiness /ready.
-  logger.info('service_started', { port: cfg.port, environment: cfg.env, events: cfg.events.enabled ? 'rabbitmq' : 'off' });
+  logger.info('service_started', { port: cfg.port, environment: cfg.env, domainEvents: cfg.events.enabled ? 'outbox' : 'off' });
 }
 await bootstrap();

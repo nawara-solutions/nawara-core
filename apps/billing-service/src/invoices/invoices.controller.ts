@@ -1,7 +1,8 @@
 import { Body, Controller, Get, HttpCode, Inject, Param, ParseUUIDPipe, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CallerService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest } from '@nawara/service-kit';
+import { CallerService, RateLimitService, ServiceOrUserGuard, ServiceTokenGuard, type CallerRequest, RequireServiceOperation, ServiceOperationGuard } from '@nawara/service-kit';
+import { OrganizationScopeService } from '../admission/organization-scope.service.js';
 import { toDomainCaller } from '../auth/domain-caller.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
@@ -26,22 +27,29 @@ export class InvoicesController {
     private readonly paymentRequests: PaymentRequestRepository,
     private readonly rateLimit: RateLimitService,
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
+    private readonly organizationScope: OrganizationScopeService,
   ) {}
 
   @Post()
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('invoice.create')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create a draft invoice (producer service only). Identical replay of the same invoiceRequestId returns the existing draft. No amount, total, tax, currency or status field: everything is computed server-side from catalog prices.' })
   @ApiResponse({ status: 201, description: 'Draft created.' })
   @ApiResponse({ status: 200, description: 'Identical replay of an existing draft (Idempotent-Replayed: true).' })
   @ApiResponse({ status: 400, description: 'invalid_invoice_request' })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted / organization_not_permitted (unknown or outside the caller\'s Platform scope: one answer)' })
   @ApiResponse({ status: 409, description: 'invoice_request_conflict: same invoiceRequestId, different content' })
+  @ApiResponse({ status: 503, description: 'hierarchy_unavailable: the organization could not be verified; nothing was written' })
   @ApiResponse({ status: 422, description: 'unsupported_currency or price_not_available' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
   async create(@CallerService() producer: string, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     await this.rateLimit.assert('billing-invoice-create', producer, { limit: this.config.rateLimits.invoiceCreatePerMinute, windowSec: 60 });
     const input = normaliseCreateInvoiceInput(body);
+    // Stage 21.C.2 (ADR-0052 decision 3): an asserted Organization is verified BEFORE the transaction, unless this is a replay of an
+    // invoice already created (and verified then).
+    if (input.organizationId !== null && !(await this.invoices.naturalKeyExists(producer, input.invoiceRequestId))) await this.organizationScope.assertInScope(producer, input.organizationId);
     const ctx = requestTransitionContext({ type: 'service', id: producer });
     const { invoice, changed } = await this.invoices.createDraft(producer, input, this.config.supportedCurrencies, ctx);
     res.status(changed ? 201 : 200);
@@ -50,11 +58,13 @@ export class InvoicesController {
   }
 
   @Get(':id')
-  @UseGuards(ServiceOrUserGuard)
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RequireServiceOperation('invoice.read')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get an invoice. 404 (collapsed) when the caller has no relation to it (not the producer, not the payer) — never distinguishes "missing" from "forbidden".' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold invoice.read' })
   @ApiResponse({ status: 404 })
   async get(@Param('id', new ParseUUIDPipe()) id: string, @Req() req: CallerRequest) {
     // req.caller is always set here: ServiceOrUserGuard either sets it or throws 401 before this handler runs.
@@ -65,7 +75,8 @@ export class InvoicesController {
   }
 
   @Get()
-  @UseGuards(ServiceOrUserGuard)
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RequireServiceOperation('invoice.list')
   @ApiBearerAuth()
   @ApiOperation({
     summary:
@@ -82,6 +93,7 @@ export class InvoicesController {
   @ApiQuery({ name: 'dueBefore', required: false })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold invoice.list' })
   async list(@Req() req: CallerRequest, @Query() query: Record<string, unknown>) {
     // req.caller is always set here: ServiceOrUserGuard either sets it or throws 401 before this handler runs.
     const caller = toDomainCaller(req.caller!);
@@ -95,12 +107,14 @@ export class InvoicesController {
 
   @Post(':id/issue')
   @HttpCode(200)
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('invoice.issue')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Issue a draft (draft -> open): assigns the number, sets the presentation snapshot, enqueues invoice.created. Replays if already open. Producer only.' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 400, description: 'invalid_invoice_request: a bad optional locale' })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold invoice.issue' })
   @ApiResponse({ status: 403 })
   @ApiResponse({ status: 404 })
   @ApiResponse({ status: 409, description: 'invalid_state_transition: the invoice is paid or void' })
@@ -114,11 +128,13 @@ export class InvoicesController {
 
   @Post(':id/discard')
   @HttpCode(200)
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('invoice.discard')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Discard a draft (draft -> void): abandoning a draft that was never announced. No number consumed, no event. Producer only.' })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold invoice.discard' })
   @ApiResponse({ status: 403 })
   @ApiResponse({ status: 404 })
   @ApiResponse({ status: 409, description: 'invalid_state_transition: the invoice is not a draft' })

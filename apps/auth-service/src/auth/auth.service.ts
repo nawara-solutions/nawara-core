@@ -1,7 +1,7 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
-import { EVENT_BUS, CLOCK, type Clock, type EventBus } from '../common/ports.js';
+import { DOMAIN_EVENTS, CLOCK, type Clock, type DomainEvents } from '../common/ports.js';
 import { PasswordService, assertPasswordPolicy } from '../crypto/password.js';
 import { DbService, isUniqueViolation } from '../db/db.service.js';
 import { authError } from '../errors.js';
@@ -29,7 +29,7 @@ export class AuthService {
     @Inject(RefreshTokenService) private readonly refresh: RefreshTokenService,
     @Inject(OwnerAuthService) private readonly ownerAuth: OwnerAuthService,
     @Inject(AuditService) private readonly audit: AuditService,
-    @Inject(EVENT_BUS) private readonly bus: EventBus,
+    @Inject(DOMAIN_EVENTS) private readonly events: DomainEvents,
     @Inject(CLOCK) private readonly clock: Clock,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(OnboardingService) private readonly onboarding: OnboardingService,
@@ -74,11 +74,12 @@ export class AuthService {
       if (status === 'pending') {
         await this.audit.record({ type: 'membership.requested', outcome: 'success', actorId: user.id, targetId: user.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
       }
+      // Stage 21.C.2 (ADR-0052 decision 4): the domain events in the SAME transaction (outbox), relayed after the commit.
+      const now = this.clock.now().toISOString();
+      await this.events.emit(q, 'user.registered', { userId: user.id, role: code.audience, organizationId: code.organizationId, timestamp: now });
+      if (status === 'pending') await this.events.emit(q, 'membership.requested', { userId: user.id, organizationId: code.organizationId, audience: code.audience, timestamp: now });
       return { user, code, status, tokens: await this.sessions.issue(q, user) };
     });
-    const now = this.clock.now().toISOString();
-    this.bus.publish('user.registered', { userId: result.user.id, role: result.code.audience, organizationId: result.code.organizationId, timestamp: now });
-    if (result.status === 'pending') this.bus.publish('membership.requested', { userId: result.user.id, organizationId: result.code.organizationId, audience: result.code.audience, timestamp: now });
     const { sid: _sid, ...tokens } = result.tokens;
     return {
       ...tokens,
@@ -120,11 +121,11 @@ export class AuthService {
       if (status === 'pending') {
         await this.audit.record({ type: 'membership.requested', outcome: 'success', actorId: userId, targetId: userId, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience } }, q);
       }
+      if (status === 'pending') {
+        await this.events.emit(q, 'membership.requested', { userId, organizationId: code.organizationId, audience: code.audience, timestamp: this.clock.now().toISOString() });
+      }
       return { code, status };
     });
-    if (result.status === 'pending') {
-      this.bus.publish('membership.requested', { userId, organizationId: result.code.organizationId, audience: result.code.audience, timestamp: this.clock.now().toISOString() });
-    }
     return {
       onboarding: {
         audience: result.code.audience,

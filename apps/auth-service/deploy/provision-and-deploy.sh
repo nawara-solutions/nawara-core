@@ -147,7 +147,8 @@ ensure "$APP_ENV" WEBAUTHN_RP_NAME Nawara
 ensure "$APP_ENV" PAYMENT_SERVICE_URL "${PAYMENT_SERVICE_URL:-http://nawara-core-payment-service:3000}"
 ensure "$APP_ENV" TRUST_PROXY true
 ensure "$APP_ENV" AUTH_EVENTS off
-# Stage 18.7.5: the audit relay's broker (AUTH_EVENTS=off above still disables only the legacy fire-and-forget events).
+# Stage 18.7.5: the outbox relay's broker. Stage 21.C.2: AUTH_EVENTS=off above now means "write no domain-event rows" (the relay still
+# publishes audit evidence); enabling it in production is Stage 21.x.
 [ -n "${RABBITMQ_URL:-}" ] && ensure "$APP_ENV" RABBITMQ_URL "$RABBITMQ_URL"
 ensure "$APP_ENV" WORK_TIMEZONE Africa/Tunis
 # No channel delivers verification codes yet, so it stays off in production until one exists.

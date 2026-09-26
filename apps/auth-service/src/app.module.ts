@@ -11,12 +11,13 @@ import { AuthGuard } from './auth/auth.guard.js';
 import { AuthService } from './auth/auth.service.js';
 import { GrantsService } from './auth/grants.service.js';
 import { SessionService } from './auth/session.service.js';
-import { CLOCK, EVENT_BUS, NoopEventBus, SystemClock } from './common/ports.js';
+import { CLOCK, DOMAIN_EVENTS, SystemClock } from './common/ports.js';
 import { APP_CONFIG, type AppConfig } from './config/app-config.js';
 import { PasswordService } from './crypto/password.js';
 import { TotpSecretCipher } from './crypto/totp-cipher.js';
-import { EventsModule } from './events/events.module.js';
-import { EventsPublisherService } from './events/events-publisher.service.js';
+import { CodeEventPurge } from './events/code-event-purge.js';
+import { HierarchyReference, ORGANIZATION_DIRECTORY, OrganizationDirectoryClient } from './hierarchy/hierarchy-reference.js';
+import { OutboxDomainEvents } from './events/domain-events.js';
 import { HealthController } from './health/health.controller.js';
 import { MemberSecurityController } from './members/member-security.controller.js';
 import { MemberSecurityCounters, MemberSecurityReporter } from './members/member-security.counters.js';
@@ -59,11 +60,11 @@ import { UsersService } from './users/users.service.js';
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: CLOCK, useClass: SystemClock },
-    {
-      provide: EVENT_BUS,
-      useFactory: (pub?: EventsPublisherService) => pub ?? new NoopEventBus(),
-      inject: [{ token: EventsPublisherService, optional: true }],
-    },
+    // Stage 21.C.2 (ADR-0052 decision 4): domain events through Auth's transactional outbox (the one kit relay publishes them).
+    { provide: DOMAIN_EVENTS, useClass: OutboxDomainEvents },
+    // Stage 21.C.2 (ADR-0040 decision 1): the reference-cache protocol and Auth's own Organization Service client (absent: no credential).
+    { provide: ORGANIZATION_DIRECTORY, useFactory: (c: AppConfig) => (c.hierarchy.client ? new OrganizationDirectoryClient(c.hierarchy.client) : null), inject: [APP_CONFIG] },
+    HierarchyReference,
     { provide: PasswordService, useFactory: (c: AppConfig) => new PasswordService(c.bcryptCost), inject: [APP_CONFIG] },
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
@@ -91,11 +92,10 @@ export class AppModule {
         KitHealthModule.forRoot({ checkTimeoutMs: 1500, httpDrainTimeoutMs: cfg.httpDrainTimeoutMs }), // Stage 15.5: bounded HTTP drain
         // Stage 18.7.5: Auth's pool (DbService) and the durable central audit path (the kit outbox + relay), independent of AUTH_EVENTS.
         AuditRelayModule.forRoot(cfg, auditBus, { relay: opts.auditRelay }),
-        // Broker wiring is switched off with AUTH_EVENTS=off (tests, runs without RabbitMQ).
-        ...(cfg.events.enabled && cfg.events.rabbitmqUrl && cfg.events.confirmTimeoutMs ? [EventsModule.register({ rabbitmqUrl: cfg.events.rabbitmqUrl, confirmTimeoutMs: cfg.events.confirmTimeoutMs })] : []),
       ],
       // Stage 19.5: the member-security snapshot line runs in the service, never in the operator CLI (auditRelay: false).
-      providers: [{ provide: APP_CONFIG, useValue: cfg }, ...(opts.auditRelay === false ? [] : [MemberSecurityReporter])],
+      // Stage 21.C.2: the code-row purge runs in the service only, like the relay (never in the operator CLI).
+      providers: [{ provide: APP_CONFIG, useValue: cfg }, ...(opts.auditRelay === false ? [] : [MemberSecurityReporter, CodeEventPurge])],
     };
   }
 }
