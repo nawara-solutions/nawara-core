@@ -11,7 +11,8 @@
 #   docker compose --profile db run --rm notification-service npm run migrate
 #   docker compose --profile db run --rm file-service npm run migrate
 #   docker compose --profile db run --rm audit-service npm run migrate
-#   docker compose --profile db up -d auth-service billing-service payment-service organization-service notification-service file-service audit-service
+#   docker compose --profile db run --rm release-service npm run migrate
+#   docker compose --profile db up -d auth-service billing-service payment-service organization-service notification-service file-service audit-service release-service
 #
 # `--profile db` is required on every invocation that touches postgres or an app service (billing/payment/auth all
 # `depends_on` it) — profile activation is per-invocation, not persistent. Every service runs alone with only the
@@ -58,6 +59,8 @@ services:
       AUDIT_MIGRATOR_PASSWORD: ${AUDIT_MIGRATOR_PASSWORD:?copy .env.example to .env}
       AUDIT_APP_PASSWORD: ${AUDIT_APP_PASSWORD:?copy .env.example to .env}
       AUDIT_RETENTION_PASSWORD: ${AUDIT_RETENTION_PASSWORD:-}
+      RELEASE_MIGRATOR_PASSWORD: ${RELEASE_MIGRATOR_PASSWORD:?copy .env.example to .env}
+      RELEASE_APP_PASSWORD: ${RELEASE_APP_PASSWORD:?copy .env.example to .env}
     volumes:
       - nawara_pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -342,6 +345,31 @@ services:
       # Stage 18.5: the ingestion consumer (queue audit-service.audit, bound to audit.#). Local development uses the shared broker user;
       # production needs one broker identity per service (ADR-0049 P-A1: publish limited to owned routing keys).
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ADR-0051. Stage 20.2: the foundation and domain only (health / readiness; its own database; /ready = database + migrations). No route
+  # besides /health and /ready yet (CI registration 20.3, owner administration 20.4, the public compatibility read 20.5). It calls no other
+  # service, and no product request path calls it.
+  release-service:
+    profiles: [db]
+    stop_grace_period: 60s
+    build:
+      context: .
+      dockerfile: apps/release-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3007:3000'
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://release_app:${RELEASE_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/release
+      # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
+      MIGRATION_DATABASE_URL: postgres://release_migrator:${RELEASE_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/release
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s
