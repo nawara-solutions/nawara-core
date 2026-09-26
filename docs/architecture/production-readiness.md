@@ -292,8 +292,9 @@ in the sweep.)* Details: `core-validation.md` sections 13.4 and 13.8.
 - Invariants I1–I18 hold: authentication, security, authorization and commercial boundaries, tenant isolation, idempotency, durable
   async work, outbox and consumer correctness, bounded database failures, worker concurrency, shutdown, recovery, the V1 commercial
   lifecycle, Payment as settlement authority, failure truthfulness, and bounded resources.
-- Every remaining item is a policy or Stage 20 decision with an owner, a target and a risk: `core-validation.md` section 17.
-- **Still blocking production (Stage 20, not Phase C):**
+- Every remaining item is a policy or Stage 21.x decision with an owner, a target and a risk: `core-validation.md` section 17.
+- **Still blocking production (Stage 21.x Production Prerequisite Closure, not Phase C; moved from "Stage 20" by ADR-0051 D3, 2026-09-26,
+  since Stage 20 is Release Management; earlier "Stage 20" mentions in this document mean Stage 21.x):**
   - the backup job and a restore drill on the real volume;
   - RPO / RTO and retention durations;
   - branch protection (F2);
