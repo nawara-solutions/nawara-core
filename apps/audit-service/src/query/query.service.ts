@@ -8,9 +8,9 @@ import { SERVICE_NAME, type AuditConfig } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
 import { AuditRecordRepository } from '../persistence/audit-record.repository.js';
 import type { PagedAuditRow } from '../persistence/audit-record.types.js';
-import { OWNER_AUTHORITY, type OwnerAuthority } from '../owner/owner-authority.client.js';
+import { AuthDependencyError, OWNER_AUTHORITY, type OwnerAuthority } from '../owner/owner-authority.client.js';
 import type { CallerPolicy } from '../policy/caller-policy.js';
-import { QueryCounters, type QueryScopeLabel } from './query-counters.js';
+import { QueryCounters, type QueryOutcome, type QueryScopeLabel } from './query-counters.js';
 import type { AuthorizedAuditQuery, QueryScope } from './query-model.js';
 import { decodeCursor, encodeCursor, parseOrganizationPath, parseQuery, queryFingerprint, type ParsedQuery } from './query-params.js';
 
@@ -146,24 +146,44 @@ export class AuditQueryService {
     return this.measured('owner', 'owner', async () => {
       const authority = this.ownerAuthority;
       if (!authority) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404); // not configured: the route does not exist
-      const ownerId = await authority.verifyOwner(userBearer);
-      await this.limitOwner(ownerId);
-      const organizationId = parseOrganizationPath(organizationParam);
-      const parsed = parseQuery(rawQuery, 'owner');
-      if (!(await authority.ownsOrganization(userBearer, organizationId))) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404);
-      const caller = `owner:${ownerId}`;
-      const query = this.authorized(caller, OWNER_POLICY, { kind: 'organization', organizationId }, parsed);
-      const rows = await this.db.tx(async (q) => {
-        const found = await this.records.findPage(query, q);
-        await this.recordPlatformQuery(q, { type: 'user', id: ownerId, userKind: 'owner' }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined, organizationId);
-        return found;
-      }).catch((e: unknown) => {
-        if (e instanceof HttpException) throw e;
-        this.log.error(`audit_owner_query_unrecorded error=${e instanceof Error ? e.name : 'Error'} — no evidence returned (fail closed)`);
-        throw new HttpException({ message: 'The query could not be recorded; no evidence is returned.', code: 'accountability_unavailable' }, 503);
-      });
-      return this.page(rows, query, caller);
+      // Stage 19.5: ONE Auth budget for the whole request (both calls), so an owner read waits on Auth at most AUTH_TIMEOUT_MS in total.
+      const deadline = AbortSignal.timeout(this.config.ownerAccess?.authTimeoutMs ?? 3_000);
+      let authMs = 0;
+      const asked = async <T>(call: () => Promise<T>): Promise<T> => {
+        const t0 = performance.now();
+        try {
+          return await call();
+        } finally {
+          authMs += performance.now() - t0;
+        }
+      };
+      try {
+        const ownerId = await asked(() => authority.verifyOwner(userBearer, deadline));
+        await this.limitOwner(ownerId);
+        const organizationId = parseOrganizationPath(organizationParam);
+        const parsed = parseQuery(rawQuery, 'owner');
+        if (!(await asked(() => authority.ownsOrganization(userBearer, organizationId, deadline)))) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404);
+        return await this.ownerRead(ownerId, organizationId, parsed);
+      } finally {
+        if (authMs > 0) this.counters.ownerAuth(authMs);
+      }
     });
+  }
+
+  /** The owner read proper, after Auth verified the owner and the organization: the read and its self-audit in one transaction. */
+  private async ownerRead(ownerId: string, organizationId: string, parsed: ParsedQuery): Promise<AuditPage> {
+    const caller = `owner:${ownerId}`;
+    const query = this.authorized(caller, OWNER_POLICY, { kind: 'organization', organizationId }, parsed);
+    const rows = await this.db.tx(async (q) => {
+      const found = await this.records.findPage(query, q);
+      await this.recordPlatformQuery(q, { type: 'user', id: ownerId, userKind: 'owner' }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined, organizationId);
+      return found;
+    }).catch((e: unknown) => {
+      if (e instanceof HttpException) throw e;
+      this.log.error(`audit_owner_query_unrecorded error=${e instanceof Error ? e.name : 'Error'} — no evidence returned (fail closed)`);
+      throw new HttpException({ message: 'The query could not be recorded; no evidence is returned.', code: 'accountability_unavailable' }, 503);
+    });
+    return this.page(rows, query, caller);
   }
 
   /** Per verified owner (the id Auth returned, never a request value). Keys are hashed by the kit. */
@@ -273,7 +293,10 @@ export class AuditQueryService {
       return page;
     } catch (e) {
       const status = e instanceof HttpException ? e.getStatus() : 500;
-      const outcome = status === 403 ? 'denied' : status === 400 ? 'invalid' : status === 429 ? 'rate_limited' : status === 503 ? 'unavailable' : 'error';
+      // Stage 19.5 (19.4 H11): every refusal of the caller is `denied` (401, 403, and the owner read's collapsed 404), never an error; an
+      // Auth failure is its own class; `unavailable` is the read that could not be recorded; anything else is `error`.
+      const outcome: QueryOutcome = e instanceof AuthDependencyError ? e.failure
+        : status === 401 || status === 403 || status === 404 ? 'denied' : status === 400 ? 'invalid' : status === 429 ? 'rate_limited' : status === 503 ? 'unavailable' : 'error';
       this.counters.count(scope, outcome);
       const body = e instanceof HttpException ? (e.getResponse() as { code?: unknown }) : undefined;
       const code = typeof body?.code === 'string' ? body.code : body ? String(status) : 'unexpected';

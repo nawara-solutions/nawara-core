@@ -19,6 +19,7 @@ import { EventsModule } from './events/events.module.js';
 import { EventsPublisherService } from './events/events-publisher.service.js';
 import { HealthController } from './health/health.controller.js';
 import { MemberSecurityController } from './members/member-security.controller.js';
+import { MemberSecurityCounters, MemberSecurityReporter } from './members/member-security.counters.js';
 import { MemberSecurityService } from './members/member-security.service.js';
 import { OrganizationController } from './membership/organization.controller.js';
 import { MembershipService } from './membership/membership.service.js';
@@ -68,7 +69,7 @@ import { UsersService } from './users/users.service.js';
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
     OwnerAuthService, EnrollmentService, RecoveryService,
-    OperatorAvailabilityService, OperatorCodeService, OperatorAdminService, MemberSecurityService,
+    OperatorAvailabilityService, OperatorCodeService, OperatorAdminService, MemberSecurityService, MemberSecurityCounters,
     PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, GrantsService, AuthGuard,
   ],
 })
@@ -93,7 +94,8 @@ export class AppModule {
         // Broker wiring is switched off with AUTH_EVENTS=off (tests, runs without RabbitMQ).
         ...(cfg.events.enabled && cfg.events.rabbitmqUrl && cfg.events.confirmTimeoutMs ? [EventsModule.register({ rabbitmqUrl: cfg.events.rabbitmqUrl, confirmTimeoutMs: cfg.events.confirmTimeoutMs })] : []),
       ],
-      providers: [{ provide: APP_CONFIG, useValue: cfg }],
+      // Stage 19.5: the member-security snapshot line runs in the service, never in the operator CLI (auditRelay: false).
+      providers: [{ provide: APP_CONFIG, useValue: cfg }, ...(opts.auditRelay === false ? [] : [MemberSecurityReporter])],
     };
   }
 }

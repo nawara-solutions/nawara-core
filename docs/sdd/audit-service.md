@@ -182,6 +182,16 @@ errors add `invalid_scope`, `invalid_cursor`, `window_too_large`, `category_not_
 - **`AUTH_SERVICE_URL`:** credentials, a query or a fragment are refused at startup; an empty value means disabled.
 - **Service reads:** a service platform read narrowed to one organization now also records `changes.organization_id`.
 
+**Stage 19.5 operation:**
+- **Auth budget:** one `AUTH_TIMEOUT_MS` budget shared by both Auth calls.
+- **Failure codes:** Auth failures are 503 with `code` `auth_timeout` or `auth_unavailable`; a read that cannot be recorded stays
+  `accountability_unavailable`.
+- **Counters:** the owner outcomes (`owner_denied` for 401 / 403 / 404, `owner_auth_timeout`, `owner_auth_unavailable`,
+  `owner_unavailable`) and `owner_auth_count / _avg_ms / _max_ms` are in `audit_query_snapshot`.
+- **Startup:** a line says `audit_owner_access enabled` or `disabled`.
+- **Readiness:** never depends on Auth.
+- **Runbook:** Stage 19.5 record §4.
+
 ## 7. Caller policy
 
 `AUDIT_SERVICE_POLICY` (deny by default, validated at boot, the File / Notification pattern): per caller `operations` ⊆

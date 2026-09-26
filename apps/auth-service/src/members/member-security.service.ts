@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { DbService, type Queryable } from '../db/db.service.js';
@@ -6,6 +6,7 @@ import { notFound } from '../errors.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { UsersService } from '../users/users.service.js';
+import { MemberSecurityCounters } from './member-security.counters.js';
 
 /** The closed D6 vocabulary (ADR-0050 decision 5): security metadata, never a note. Mirrors the `account.disabled` catalog entry. */
 export const SUSPENSION_REASONS = ['compromised_account', 'security_incident', 'policy_violation'] as const;
@@ -49,6 +50,7 @@ export class MemberSecurityService {
     @Inject(RefreshTokenService) private readonly refresh: RefreshTokenService,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(CentralAudit) private readonly central: CentralAudit,
+    @Inject(MemberSecurityCounters) private readonly counters: MemberSecurityCounters,
   ) {}
 
   suspend(owner: Owner, memberId: string, reason: SuspensionReason, stepUpToken: string | undefined, ip: string): Promise<MemberSecurityState> {
@@ -61,8 +63,9 @@ export class MemberSecurityService {
 
   private async apply(owner: Owner, memberId: string, suspend: boolean, reason: SuspensionReason | undefined, stepUpToken: string | undefined, ip: string) {
     const type = suspend ? 'account.disabled' : 'account.enabled';
+    const operation = suspend ? 'suspend' : 'restore';
     try {
-      return await this.db.tx(async (q) => {
+      const out = await this.db.tx(async (q) => {
         const companyId = await this.users.ownerCompany(owner.userId, q);
         if (!companyId) throw notFound();
         await this.stepUp.consume(q, { ownerId: owner.userId, sid: owner.sid, purpose: suspend ? 'account.suspend' : 'account.restore', token: stepUpToken });
@@ -77,8 +80,14 @@ export class MemberSecurityService {
         } as never);
         return { id: memberId, suspended: suspend, changed: true };
       });
+      this.counters.count(operation, out.changed ? 'changed' : 'unchanged');
+      return out;
     } catch (e) {
-      if (!(e instanceof NotEligible)) throw e;
+      if (!(e instanceof NotEligible)) {
+        this.counters.count(operation, e instanceof HttpException && e.getStatus() === 403 ? 'step_up_denied' : 'failed');
+        throw e;
+      }
+      this.counters.count(operation, 'target_refused');
       // Local security evidence of the refusal (the transaction, and the step-up consumption with it, rolled back). Never shown to the caller.
       await this.audit.tryRecord({ type, outcome: 'denied', actorId: owner.userId, targetId: memberId, sessionFamilyId: owner.sid, ip, metadata: { kind: 'member', why: e.why } });
       throw notFound();

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { InMemoryEventBus } from '@nawara/service-kit';
 import { validateAuditPayload } from '@nawara/audit-contract';
+import { MemberSecurityCounters, MemberSecurityReporter } from '../src/members/member-security.counters.js';
 import { bearer, createTestApp, noReqId, type TestCtx, type Tokens } from './helpers/app.js';
 
 type Owner = Awaited<ReturnType<TestCtx['readyOwner']>>;
@@ -455,6 +456,37 @@ describe('Owner member security administration (Stage 19.2)', () => {
       });
       for (const r of rs) expect(shape(r)).toEqual(shape(rs[0]!));
       expect(rs[0]!.status).toBe(404);
+    });
+  });
+  describe('Stage 19.5 operational signals (closed labels, no identifiers)', () => {
+    it('counts each outcome of suspend / restore; guard refusals are not this capability\'s; the snapshot line carries no id or reason', async () => {
+      ownerA = { ...ownerA, tokens: await t.ownerLogin(ownerA, ownerA.totpSecret) }; // a fresh session: the fake clock has moved past earlier tokens
+      const counters = t.app.get(MemberSecurityCounters);
+      counters.drain();
+      const m = await memberA();
+      st(await suspend(m.id, { reason: 'policy_violation' }), 200); // changed
+      st(await suspend(m.id), 200); // unchanged
+      st(await restore(m.id), 200); // changed
+      await t.http.post(`/auth/admin/members/${m.id}/suspend`).set(bearer(ownerA.tokens)).send({ reason: 'compromised_account' }).expect(403); // step-up denied
+      st(await suspend((await t.member(w.orgClinic, `b${uniq()}@b.test`)).id), 404); // target refused
+      const other = await memberA();
+      const token = await su('account.suspend');
+      await t.db.query(`CREATE FUNCTION s195_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's195 refused'; END $$`);
+      await t.db.query(`CREATE TRIGGER s195_refuse BEFORE INSERT ON outbox FOR EACH ROW WHEN (NEW.name = 'audit.account.disabled') EXECUTE FUNCTION s195_refuse()`);
+      try {
+        await t.http.post(`/auth/admin/members/${other.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', token).send({ reason: 'compromised_account' }).expect(500); // failed
+      } finally {
+        await t.db.query(`DROP TRIGGER s195_refuse ON outbox`);
+        await t.db.query(`DROP FUNCTION s195_refuse()`);
+      }
+      const opTokens = await t.operatorLogin((await t.operator(w.companyA, `op${uniq()}@a.test`)).email);
+      await t.http.post(`/auth/admin/members/${m.id}/suspend`).set(bearer(opTokens)).send({ reason: 'compromised_account' }).expect(403); // guard: not counted
+      const before = t.logger.lines.length;
+      t.app.get(MemberSecurityReporter).snapshot();
+      const line = t.logger.lines.slice(before).find((x) => x.startsWith('auth_member_security_snapshot'))!;
+      expect(line).toContain('auth_member_security_snapshot suspend_changed=1 suspend_unchanged=1 suspend_step_up_denied=1 suspend_target_refused=1 suspend_failed=1 restore_changed=1 restore_unchanged=0 restore_step_up_denied=0 restore_target_refused=0 restore_failed=0');
+      expect(Object.values(counters.drain()).every((v) => v === 0)).toBe(true); // drained by the snapshot
+      expect(line).not.toMatch(/[0-9a-f]{8}-|policy_violation|@/);
     });
   });
 });
