@@ -27,6 +27,7 @@ export async function createTestApp(opts: { databaseUrl?: string; env?: NodeJS.P
     .compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureApp(app, config, logger);
+  app.set('etag', false); // as main.ts (Stage 20.5)
   mountDocs(app, config); // only when SWAGGER_PASSWORD is set, as in main.ts
   configureHttpServer(app.getHttpServer(), config);
   await app.init();

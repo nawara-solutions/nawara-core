@@ -4,7 +4,8 @@ import { SERVICE_NAME, loadReleaseConfig } from './release-config.js';
 
 const DB = 'postgres://release_app:pw-not-real@db:5432/release';
 const BROKER = 'amqp://guest:guest@broker:5672';
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, RABBITMQ_URL: BROKER, ...over });
+const KEY = Buffer.alloc(32, 7).toString('base64');
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, RABBITMQ_URL: BROKER, RELEASE_RATE_LIMIT_KEY: KEY, ...over });
 const DIGEST = 'a'.repeat(64);
 
 describe('release-service configuration', () => {
@@ -87,5 +88,25 @@ describe('release-service configuration', () => {
       expect(String((err as Error).message)).not.toContain('pw-not-real');
     }
     expect(() => loadReleaseConfig(env({ AUTH_SERVICE_URL: 'http://auth:3000', RELEASE_OPERATING_COMPANY_ID: company, AUTH_TIMEOUT_MS: '50' }))).toThrow(ConfigError);
+  });
+
+  it('Stage 20.5 public read: bounded freshness and rate; the limiter key is base64 ≥ 32 bytes, required in production, never echoed', () => {
+    const c = loadReleaseConfig(env());
+    expect(c.compatibility).toEqual({ maxAgeS: 60, ratePerClient: 120, rateLimitKey: Buffer.alloc(32, 7) });
+    expect(() => loadReleaseConfig(env({ RELEASE_RATE_LIMIT_KEY: undefined }))).toThrow(/required in production/);
+    expect(loadReleaseConfig(env({ NODE_ENV: 'development', RELEASE_RATE_LIMIT_KEY: undefined })).compatibility.rateLimitKey).toHaveLength(32);
+    for (const bad of ['c2hvcnQ=', 'not base64!!']) {
+      let err: unknown;
+      try {
+        loadReleaseConfig(env({ RELEASE_RATE_LIMIT_KEY: bad }));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, bad).toBeInstanceOf(ConfigError);
+      expect(String((err as Error).message)).not.toContain(bad);
+    }
+    for (const [name, value] of [['RELEASE_COMPATIBILITY_MAX_AGE_S', '301'], ['RELEASE_COMPATIBILITY_MAX_AGE_S', '-1'], ['RELEASE_COMPATIBILITY_RATE_PER_CLIENT', '0']]) {
+      expect(() => loadReleaseConfig(env({ [name]: value })), `${name}=${value}`).toThrow(ConfigError);
+    }
   });
 });

@@ -99,6 +99,7 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo 'RELEASE_SERVICE_POLICY={"callers":{"smoke-ci":{"products":{"smoke":["release.register","release.publish"]}}}}'
       echo "AUTH_SERVICE_URL=http://127.0.0.1:9" # Stage 20.4: owner administration configured (Auth is never contacted at startup)
       echo "RELEASE_OPERATING_COMPANY_ID=00000000-0000-4000-8000-000000000001"
+      echo "RELEASE_RATE_LIMIT_KEY=$(b64 32)" # Stage 20.5: keys client addresses for the public rate limit (production requires it)
       ;;
     *)
       echo "unknown service: $service" >&2

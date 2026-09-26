@@ -4,6 +4,7 @@ import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir, type Event
 import { ReleaseAuditModule } from './audit/release-audit.js';
 import { AdminModule } from './admin/admin.module.js';
 import { AutomationModule } from './automation/automation.module.js';
+import { CompatibilityModule } from './compatibility/compatibility.module.js';
 import type { ReleaseConfig } from './config/release-config.js';
 import { RELEASE_CONFIG } from './config/release-config.token.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
@@ -38,8 +39,10 @@ class ConfigModule {
  * (`AutomationModule`: registration and publication, per-product policy).
  *
  * Stage 20.4: owner administration (`AdminModule`, only when configured): withdrawal and minimum-version changes by the verified owner of
- * the operating Company with a factor step-up. Its Auth client is the ONLY call to another service (Auth, with the human's own bearer). The
- * public compatibility read is 20.5. Nothing in a product's request path calls this service.
+ * the operating Company with a factor step-up. Its Auth client is the ONLY call to another service (Auth, with the human's own bearer).
+ *
+ * Stage 20.5: the public compatibility decision (`CompatibilityModule`): read-only, unauthenticated, rate-limited per client address,
+ * cacheable with a strong ETag; it calls no other service. Clients call it occasionally; no product request path depends on it.
  */
 @Module({})
 export class AppModule {
@@ -64,6 +67,7 @@ export class AppModule {
         ReleaseAuditModule.forRoot(config, overrides.bus), // Stage 20.3: the audit intent and the kit relay (the ONE events use)
         AutomationModule, // Stage 20.3: CI registration and publication
         AdminModule.register(config), // Stage 20.4: owner withdrawal and minimum-version changes (only when owner administration is configured)
+        CompatibilityModule, // Stage 20.5: the public compatibility decision (read-only, rate-limited, cacheable)
       ],
     };
   }

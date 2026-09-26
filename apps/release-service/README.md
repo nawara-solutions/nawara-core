@@ -4,11 +4,11 @@ Release management for Nawara Core ([ADR-0051](../../docs/adr/0051-release-manag
 and client compatibility, never delivery**. It is not CI/CD, a deployment engine, an artifact store or CDN, a signing service,
 authorization, entitlement or analytics. No product request path calls it synchronously.
 
-**State: Stage 20.4.** Built on the Stage 20.2 foundation (own database, the domain schema and its invariants, persistence primitives):
+**State: Stage 20.5.** Built on the Stage 20.2 foundation (own database, the domain schema and its invariants, persistence primitives):
 - CI registers and publishes releases, with a service token and a per-product policy (20.3);
 - the owner of the configured operating Company withdraws releases and changes minimum versions, with their own Auth bearer and a factor
   step-up (20.4);
-- the public compatibility read is 20.5.
+- any web, desktop, iOS or Android client asks, publicly, whether its build is still usable (20.5).
 
 ## Automation API (Stage 20.3)
 
@@ -63,6 +63,22 @@ Human only (ADR-0051 decision 8, ADR-0050):
 - **Consumption happens in Auth**, so a mutation that fails afterwards needs a new step-up.
 - **Auth failures** fail closed: 503 `auth_timeout` / `auth_unavailable`. One `AUTH_TIMEOUT_MS` budget covers every Auth call of the request.
 
+## Public compatibility decision (Stage 20.5)
+
+`GET /release/products/{product}/components/{component}/compatibility?version=2.5.0`
+- **Public:** no bearer and no identity input.
+- **Answers:**
+  - `{update: required|available|none, reason?: withdrawn|below_minimum, latestVersion, minimumVersion}`;
+  - supported ⟺ `update` ≠ `required` (derived; never sent).
+- **Input errors, never a decision:** 400 `invalid_version`, 404 `unknown_component` (including a backend), 404 `unknown_release`.
+- **Rate limit:** 429 `rate_limited` per keyed client address.
+- **Caching:** `Cache-Control: public, max-age=60` and a strong `ETag` over the release status, the current policy and the latest release;
+  `If-None-Match` gives 304.
+- **Side effects:** nothing is written except the hashed limiter counter, and nothing is audited.
+
+Client behaviour (web reload, desktop updater, mobile store; fail open with the last trusted decision, a cached `required` stays binding)
+is in [the client integration guide](../../docs/architecture/release-compatibility-client-guide.md).
+
 ## Domain
 
 ```text
@@ -108,8 +124,9 @@ bad input early with a bounded code.
 
 | `AUTH_SERVICE_URL`, `RELEASE_OPERATING_COMPANY_ID` | – | Stage 20.4, **both or neither** (the owner routes exist only with both). The URL is a plain `http(s)` origin: no credentials, query or fragment. The Company is a UUID |
 | `AUTH_TIMEOUT_MS` | 3000 (100–30000) | one Auth budget per owner request |
-
-Nothing else is configured yet. The public-read cache and rate limit arrive in 20.5.
+| `RELEASE_COMPATIBILITY_MAX_AGE_S` | 60 (0–300) | Stage 20.5: `Cache-Control: max-age` of a decision (no stale-while-revalidate) |
+| `RELEASE_COMPATIBILITY_RATE_PER_CLIENT` | 120 (1–100000) | requests per client address per 60 s |
+| `RELEASE_RATE_LIMIT_KEY` | required in production | base64 of at least 32 bytes; keys client addresses before they reach the limiter table (random per process outside production) |
 
 ## Run and test
 
