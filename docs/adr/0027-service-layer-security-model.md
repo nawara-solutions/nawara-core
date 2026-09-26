@@ -1,6 +1,6 @@
 # 0027. Service-layer security model: cool-down recovery, enrollment rules, live authorization, shared security state, key management
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-26, by the owner, Stage 19.1 decision D1 after R1; see the note at the end)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
@@ -8,6 +8,8 @@
 > service that consumes the code-carrying events below. It does not adopt a RabbitMQ message TTL: a TTL would move expired codes
 > into the dead-letter queue, or purge unseen messages. Instead Notification enforces each code's `expiresAt`: an expired code is
 > never sent, even when replayed from the DLQ, and it never logs payloads.
+
+> **Amended by [ADR-0050](./0050-platform-administration-and-verified-human-authority.md)** (2026-09-26, Stage 19.1 R1; on the following point only): Costs names "ADR-0017's CLI reset" as the ops path when the cool-down is unacceptable. That CLI **was never implemented and is not part of Core V1**; the cool-down recovery is the extreme recovery path, and direct database manipulation is **not** an approved operational recovery procedure.
 
 > **Amends [ADR-0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md)** on two points:
 > owner recovery is no longer an immediate "password + secret key ⇒ factors replaced" action, and
@@ -157,3 +159,15 @@ loader and a documented rotation; revocation semantics are explicit instead of i
   published keys would let downstream services verify without holding a signing secret.
 - Whether `/docs` (Swagger) should be disabled or authenticated in production.
 - The registration-time license check (ADR-0026 item 4) still couples onboarding to `payment-service`.
+
+## Note (2026-09-26, Stage 19.1 — acceptance)
+
+Accepted by the owner under Stage 19.1 decision D1, after a conformance check of the running code ([Stage 19.1 record](../architecture/stage-19/stage-19-1-decisions-and-roadmap.md) §14.1)
+and the R1 amendment above. No decision changes. Verified: cool-down recovery `start` / `complete` / `cancel` (`RECOVERY_COOLDOWN_SEC`,
+default 24 h; the `owner_recovery_guard` trigger makes timing immutable and the request undeletable); the enrollment-token rules; the live
+`AuthGuard` (HS256, issuer and audience pinned, `isActive`, tier = kind, active session); the migration `0003` tables; the single secrets
+loader (`NAME` / `NAME_FILE`, no defaults, the five secrets, the TOTP key ring and `reseal-totp-keys`); step-up token = row id;
+HMAC-peppered operator codes; refresh-token reuse detection. Historical, not current: §3's "downstream services that verify the JWT
+locally" no longer exist (ADR-0033: every service verifies through Auth, live); §6's `PaymentClient` and the registration license check
+were removed (`f1901f9`; B-035, ADR-0044), which also closes that open question; the queue-TTL remark is answered by ADR-0046 (forward
+note above). The pruning job for `auth_throttle` / `owner_auth_challenge` is still not built, as stated.

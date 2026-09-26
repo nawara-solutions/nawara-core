@@ -9,6 +9,8 @@
   [audit-service SDD](../sdd/audit-service.md). Decisions, inventory, threat model and roadmap:
   [Stage 18.1](../architecture/stage-18/stage-18-1-decisions-and-roadmap.md).
 
+> **Amended by [ADR-0050](./0050-platform-administration-and-verified-human-authority.md)** (2026-09-26, Stage 19.1; for one read path only; the rest of this ADR stands): A6, A36b and A57 are amended so that a Company **owner**, with their own bearer, may read the records of **one organization of their own Company** per request. Audit verifies the owner and the organization through **Auth only** (never organization-service), and records `platform_query.executed` with the verified owner as actor, in the read's transaction, failing closed. Ingestion and service-token reads stay Auth-free. Null-organization records stay service-only. Not implemented until Stage 19.3.
+
 ## Context
 
 Core needs cross-platform accountability evidence: who changed a membership, suspended an organization, revoked an operator's

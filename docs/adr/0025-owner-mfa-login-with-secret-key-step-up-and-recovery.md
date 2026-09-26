@@ -1,12 +1,14 @@
 # 0025. Owner login with password + second factor; secret key as step-up and recovery credential
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-26, by the owner, Stage 19.1 decision D1 after R1; see the note at the end)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
 > **Extended by [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) Amendment 1 (2026-09-20):** the step-up mechanism is extended to operators for sensitive Organization Service operations. Every owner purpose in this ADR is unchanged and remains valid for owner operations. The allow-list gains **one new owner purpose**, for creating an Organization (ADR-0042 Amendment 1, A.2); nothing here is superseded.
 
 > **Amended by [ADR-0027](./0027-service-layer-security-model.md)** on two points: (1) **recovery is no longer immediate** — `start` (password + key) opens a cool-down request that changes nothing; `complete` (recovery token + key, after the cool-down) revokes factors/sessions, spends the key and returns only an enrollment token; (2) **password-only enrollment is limited to an owner who has never had a factor** — afterwards a password yields `recovery_required`. The rest of this ADR stands.
+
+> **Amended by [ADR-0050](./0050-platform-administration-and-verified-human-authority.md)** (2026-09-26, Stage 19.1 R1; on the following point only): the ADR-0017 reset CLI that this ADR calls "unchanged" and names for "key leaked, factors intact" **was never implemented and is not part of Core V1**. A leaked key is handled in-band by `owner.secret_key.rotate` with a TOTP or passkey step-up; lost factors by the cool-down recovery (ADR-0027). Direct database manipulation is not an approved recovery procedure, so the Costs sentence "the ops CLI/DB access remains the last resort" no longer describes an approved path: an owner who has lost the password (recovery needs password + key) has no approved recovery in Core V1, a recorded limitation (Stage 19.1 record, P-S4).
 
 > **Supersedes the login mechanism of [ADR-0010](./0010-owner-secret-key-login-with-device-alerting.md)**
 > (`POST /auth/admin/login/secret-key`). ADR-0010's new-device alerting, SHA-256 hashing rationale
@@ -152,3 +154,15 @@ the step-up proves *re-verification*, it does not replace that derivation.
 - Whether step-up should be per-operation-instance (bind the token to the target ids) rather than
   per-purpose; per-purpose is used here because the DB row is generic and the consumption is
   transactional with the operation.
+
+## Note (2026-09-26, Stage 19.1 — acceptance)
+
+Accepted by the owner under Stage 19.1 decision D1, after a conformance check of the running code ([Stage 19.1 record](../architecture/stage-19/stage-19-1-decisions-and-roadmap.md) §14.1)
+and the R1 amendment above. No decision changes. Verified: `POST /auth/login` answers an owner with `mfa_required`,
+`enrollment_required` or `recovery_required`; TOTP (sealed secret) and passkey factors; `owner_step_up` is single-use, session- and
+purpose-bound and at most 15 minutes (database CHECK); `x-step-up-token`; factor-only purposes refuse the secret key; new-device alerting
+on owner login; operator block/unblock without step-up. Historical, not current: the allow-list is named `STEP_UP_METHODS` in code (not
+`STEP_UP_REQUIRED_PURPOSES`) and has gained purposes from ADR-0028, ADR-0029 and ADR-0042; the `platform.create` route is hosted by
+organization-service (`POST /organization/admin/platforms`, ADR-0042), which verifies the step-up through `POST /auth/step-up/verify`,
+not by Auth; recovery follows ADR-0027; and the Consequences sentence "not yet implemented" about TOTP / WebAuthn validity is obsolete
+(both are verified by the service).
