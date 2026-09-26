@@ -5,6 +5,7 @@ import { ReleaseAuditModule } from './audit/release-audit.js';
 import { AdminModule } from './admin/admin.module.js';
 import { AutomationModule } from './automation/automation.module.js';
 import { CompatibilityModule } from './compatibility/compatibility.module.js';
+import { ReleaseOpsModule } from './ops/release-ops.js';
 import type { ReleaseConfig } from './config/release-config.js';
 import { RELEASE_CONFIG } from './config/release-config.token.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
@@ -62,6 +63,7 @@ export class AppModule {
           migrations: { dirs: overrides.migrationsDirs ?? [kitMigrationsDir, releaseMigrationsDir] },
         }),
         ServiceAuthModule.forRoot(config.serviceTokens),
+        ReleaseOpsModule.forRoot(), // Stage 20.6: bounded operational counters, the outbox backlog snapshot, the startup surface line
         ConfigModule.forRoot(config),
         PersistenceModule,
         ReleaseAuditModule.forRoot(config, overrides.bus), // Stage 20.3: the audit intent and the kit relay (the ONE events use)

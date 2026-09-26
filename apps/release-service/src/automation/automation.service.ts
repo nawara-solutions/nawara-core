@@ -6,6 +6,7 @@ import { REGISTRY_KEY, type Component, type ComponentKind, type Release } from '
 import { isCanonicalVersion } from '../domain/version.js';
 import { ReleaseStoreError } from '../persistence/persistence-error.js';
 import { ReleaseStore } from '../persistence/release-store.js';
+import { ReleaseCounters, type AutomationOutcome } from '../ops/release-counters.js';
 import type { ReleaseCapability } from '../policy/caller-policy.js';
 import { authorizationDenial, denialError } from '../policy/release-policy.guard.js';
 
@@ -78,6 +79,7 @@ export class AutomationService {
     @Inject(RELEASE_CONFIG) private readonly config: ReleaseConfig,
     @Inject(ReleaseStore) private readonly store: ReleaseStore,
     @Inject(ReleaseAudit) private readonly audit: ReleaseAudit,
+    @Inject(ReleaseCounters) private readonly counters: ReleaseCounters,
   ) {}
 
   async register(caller: string, product: string, componentKey: string, input: RegisterReleaseInput): Promise<AutomationResult> {
@@ -151,6 +153,7 @@ export class AutomationService {
       this.outcome(operation, caller, 'invalid');
       return INVALID('The release');
     }
+    this.counters.automation.count(operation, 'failed');
     this.log.error(`release_automation_failed operation=${operation} caller=${caller} error=${e instanceof ReleaseStoreError ? e.code : e instanceof Error ? e.name : 'error'}`);
     return e;
   }
@@ -160,6 +163,8 @@ export class AutomationService {
    * the operation, the outcome class, the configured caller name, a release UUID. Never a version, build id, product key or header.
    */
   private outcome(operation: Operation, caller: string, outcome: Outcome, releaseId?: string): void {
+    const bounded: AutomationOutcome = outcome === 'created' || outcome === 'published' ? 'changed' : outcome;
+    this.counters.automation.count(operation, bounded);
     this.log.log(`release_automation operation=${operation} outcome=${outcome} caller=${caller}${releaseId ? ` release=${releaseId}` : ''}`);
   }
 }
