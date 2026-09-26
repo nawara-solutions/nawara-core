@@ -144,3 +144,23 @@ describe('Stage 19.2: account.disabled accepts the closed suspension reason (ADR
     expect(ok('account.enabled', { actor: owner, changes: { reason: 'compromised_account' } })).toThrow('invalid_changes');
   });
 });
+
+describe('Stage 19.3: platform_query.executed accepts a verified Company owner (Audit-X) and the queried organization, nothing else widens', () => {
+  const owner = { type: 'user', id: SAMPLE_IDS.user, userKind: 'owner' };
+  const facts = { target: 'organization', window_days: 29, result_count: 3, page: 'first', filtered: false };
+  it('an owner actor with organization_id, and the unchanged service reader without it', () => {
+    expect(ok('platform_query.executed', { actor: owner, changes: { ...facts, organization_id: SAMPLE_IDS.organization } })).not.toThrow();
+    expect(ok('platform_query.executed', { actor: { type: 'service', id: 'platform-reader' }, changes: { ...facts, target: 'all' } })).not.toThrow();
+  });
+
+  it('operators, members and system actors are refused; the record stays platform-level; organization_id is a UUID', () => {
+    for (const userKind of ['operator', 'member']) expect(ok('platform_query.executed', { actor: { ...owner, userKind }, changes: facts }), userKind).toThrow('invalid_actor');
+    expect(ok('platform_query.executed', { actor: system('audit_query'), changes: facts })).toThrow('invalid_actor');
+    expect(ok('platform_query.executed', { actor: owner, organizationId: SAMPLE_IDS.organization, changes: facts })).toThrow('invalid_organization');
+    for (const bad of ['*', 'all', [SAMPLE_IDS.organization]]) expect(ok('platform_query.executed', { actor: owner, changes: { ...facts, organization_id: bad } })).toThrow('invalid_changes');
+  });
+
+  it('no other audit-service action gains an owner actor', () => {
+    for (const a of AUDIT_ACTIONS.filter((x) => producer(x) === 'audit-service' && x !== 'platform_query.executed')) expect(ok(a, { actor: owner }), a).toThrow('invalid_actor');
+  });
+});

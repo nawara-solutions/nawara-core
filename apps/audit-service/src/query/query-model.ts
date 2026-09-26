@@ -46,5 +46,8 @@ export interface AuthorizedAuditQuery {
 
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 100;
-/** A66: an organization-scope window is at most 92 days, a platform-scope window at most 31. */
-export const MAX_WINDOW_MS = { organization: 92 * 86_400_000, platform: 31 * 86_400_000 } as const;
+/**
+ * A66: an organization-scope window is at most 92 days, a platform-scope window at most 31. Stage 19.3: a Company owner's read (Audit-X)
+ * is a privileged, self-audited read like the platform scope, so it keeps the platform bound (the self-audit's `window_days` is 1–31).
+ */
+export const MAX_WINDOW_MS = { organization: 92 * 86_400_000, platform: 31 * 86_400_000, owner: 31 * 86_400_000 } as const;

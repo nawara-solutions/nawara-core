@@ -53,9 +53,9 @@ function pair(raw: Record<string, string>, typeKey: string, idKey: string, typeO
 /**
  * Parses the query string of an audit read, strictly. Every parameter is a closed grammar; an unknown parameter, a repeated one (an
  * array), an empty value or an over-long one is a 400 — nothing is coerced, trimmed, clamped or ignored. `from` and `to` are required
- * (A66): the half-open window `[from, to)` on `occurredAt`, at most 92 days (organization) or 31 days (platform).
+ * (A66): the half-open window `[from, to)` on `occurredAt`, at most 92 days (organization) or 31 days (platform, and the Stage 19.3 owner read).
  */
-export function parseQuery(input: unknown, route: 'organization' | 'platform'): ParsedQuery {
+export function parseQuery(input: unknown, route: 'organization' | 'platform' | 'owner'): ParsedQuery {
   if (typeof input !== 'object' || input === null) throw badRequest('invalid_query', 'invalid query string');
   const allowed = new Set<string>(route === 'platform' ? [...COMMON, ...PLATFORM_ONLY] : COMMON);
   const raw: Record<string, string> = {};
@@ -71,7 +71,7 @@ export function parseQuery(input: unknown, route: 'organization' | 'platform'): 
   const to = instant(raw.to, 'to');
   if (to.getTime() <= from.getTime()) throw badRequest('invalid_query', 'to must be after from');
   if (to.getTime() - from.getTime() > MAX_WINDOW_MS[route]) {
-    throw badRequest('window_too_large', `the time window may not exceed ${route === 'organization' ? 92 : 31} days`);
+    throw badRequest('window_too_large', `the time window may not exceed ${MAX_WINDOW_MS[route] / 86_400_000} days`);
   }
 
   let limit = DEFAULT_LIMIT;

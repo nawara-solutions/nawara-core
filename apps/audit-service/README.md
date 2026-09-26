@@ -113,6 +113,8 @@ There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: r
 | `RABBITMQ_URL` | **required** | `amqp:` / `amqps:` | the ingestion broker; never logged. Local: the shared `guest` user; production: a per-service identity (P-A1) |
 | `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | 5000, 10 | 100–60000, 5–60 | kit bounds (retry / DLQ copy confirms; silent-broker detection ≈ 3 × heartbeat) |
 | `AUDIT_QUERY_RATE_PER_CALLER`, `AUDIT_QUERY_RATE_PER_ORGANIZATION`, `AUDIT_PLATFORM_QUERY_RATE_PER_CALLER` | 600, 120, 30 | 1–100000 (per organization ≤ per caller) | reads per 60 s: organization scope per caller and per (caller, organization); platform scope per caller |
+| `AUTH_SERVICE_URL` | unset (no owner route; Audit calls no other service) | `http:` / `https:` | Stage 19.3 Audit-X: mounts `GET /audit/owner/organizations/{id}/records`, which verifies the Company owner and the organization through Auth with the owner's own bearer |
+| `AUDIT_OWNER_QUERY_RATE_PER_OWNER`, `AUTH_TIMEOUT_MS` | 30, 3000 | 1–100000, 100–30000 | owner reads per verified owner per 60 s; Auth slower than the timeout fails the read closed (503) |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 characters | OpenAPI at `/audit/docs`, mounted only with a password |
 
 ## Run and test

@@ -155,6 +155,27 @@ capabilities are not hierarchical; the recorded platform read is the catalog act
 errors add `invalid_scope`, `invalid_cursor`, `window_too_large`, `category_not_allowed`, `source_not_allowed`, `unexpected_body`;
 `Cache-Control: no-store`; migration `0002` adds the platform-wide time index.
 
+### 6.1 Company owner read (Stage 19.3, Audit-X, ADR-0050 decision 6)
+
+`GET /audit/owner/organizations/{organizationId}/records`, mounted only when `AUTH_SERVICE_URL` is set.
+
+**Who may call it.** The caller presents their own Auth bearer. A service token is refused (401) and never forwarded to Auth.
+
+**How Audit verifies the caller**, through Auth, with that bearer:
+- `GET /auth/grants` answers who the caller is. The kind must be `owner`: 403 otherwise, 401 when Auth refuses the bearer.
+- `GET /auth/admin/organizations/{id}` confirms that the organization belongs to the owner's Company. Auth's collapsed 404 is kept.
+- Any other answer, or a timeout, is a 503 and no evidence is returned.
+
+**The read:**
+- **Rate limit:** keyed by the verified owner id.
+- **Scope:** organization scope only, so records with a null organization are never returned.
+- **Window:** the platform-scope bound, 31 days. Page size 100, and the filters of the organization read.
+- **Cursor:** bound to `owner:<id>`.
+- **Self-audit:** the read and its `platform_query.executed` record commit in one transaction, or nothing is returned (503). The
+  record carries `actor {type: user, userKind: owner}`, organization none and `changes.organization_id`.
+
+**Unchanged:** ingestion and the service-token routes never call Auth.
+
 ## 7. Caller policy
 
 `AUDIT_SERVICE_POLICY` (deny by default, validated at boot, the File / Notification pattern): per caller `operations` ⊆

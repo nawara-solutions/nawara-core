@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
-import { catalogEntry } from '@nawara/audit-contract';
+import { HttpException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { AUDIT_CATEGORIES, catalogEntry } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
 import { DbService, RateLimitService, getRequestContext, type Queryable } from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
@@ -8,6 +8,7 @@ import { SERVICE_NAME, type AuditConfig } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
 import { AuditRecordRepository } from '../persistence/audit-record.repository.js';
 import type { PagedAuditRow } from '../persistence/audit-record.types.js';
+import { OWNER_AUTHORITY, type OwnerAuthority } from '../owner/owner-authority.client.js';
 import type { CallerPolicy } from '../policy/caller-policy.js';
 import { QueryCounters, type QueryScopeLabel } from './query-counters.js';
 import type { AuthorizedAuditQuery, QueryScope } from './query-model.js';
@@ -39,10 +40,16 @@ export interface AuditPage {
 
 /** The fixed rate-limit window (A66). */
 export const QUERY_WINDOW_SECONDS = 60;
-export const QUERY_LIMITER_BUCKETS = ['audit_query_org_caller', 'audit_query_org_pair', 'audit_query_platform_caller'] as const;
+export const QUERY_LIMITER_BUCKETS = ['audit_query_org_caller', 'audit_query_org_pair', 'audit_query_platform_caller', 'audit_query_owner'] as const;
 const PLATFORM_QUERY_ACTION = 'platform_query.executed';
 const CORRELATION = /^[A-Za-z0-9._:-]{8,128}$/;
 const DAY_MS = 86_400_000;
+/**
+ * Stage 19.3: what a verified Company owner may read inside an organization of their Company: every category and every source (ADR-0050
+ * decision 6 bounds the owner by the organization, not by category). Built by the server, never from the request.
+ */
+const OWNER_POLICY: CallerPolicy = { operations: new Set(), categories: new Set(AUDIT_CATEGORIES) };
+type QueryActor = { type: 'service'; id: string } | { type: 'user'; id: string; userKind: 'owner' };
 
 const forbidden = (code: string, message: string) => new HttpException({ message, code }, 403);
 
@@ -90,6 +97,7 @@ export class AuditQueryService {
     @Inject(RateLimitService) private readonly limiter: RateLimitService,
     @Inject(QueryCounters) private readonly counters: QueryCounters,
     @Inject(AUDIT_CONFIG) private readonly config: AuditConfig,
+    @Optional() @Inject(OWNER_AUTHORITY) private readonly ownerAuthority?: OwnerAuthority,
   ) {}
 
   organization(caller: string, organizationParam: unknown, rawQuery: unknown): Promise<AuditPage> {
@@ -113,7 +121,7 @@ export class AuditQueryService {
       // The read and its accountability record commit together; the response is built only after the commit (never across it).
       const rows = await this.db.tx(async (q) => {
         const found = await this.records.findPage(query, q);
-        await this.recordPlatformQuery(q, caller, query, Math.min(found.length, query.limit), parsed.cursor !== undefined);
+        await this.recordPlatformQuery(q, { type: 'service', id: caller }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined);
         return found;
       }).catch((e: unknown) => {
         if (e instanceof HttpException) throw e;
@@ -122,6 +130,45 @@ export class AuditQueryService {
       });
       return this.page(rows, query, caller);
     });
+  }
+
+  /**
+   * Stage 19.3 Audit-X (ADR-0050 decision 6): a Company owner reads ONE organization of their own Company, with their own bearer. The order
+   * is fixed: the owner is verified by Auth (live; never a header, a claim or a body) → rate limit keyed by the VERIFIED owner id → the
+   * organization id and the query are validated → Auth confirms the organization belongs to the owner's Company (its collapsed 404 is kept)
+   * → the organization scope (never platform-level records) with the platform-scope bounds → the read and its `platform_query.executed`
+   * record (the owner as the actor) commit together, or nothing is returned (503). The cursor fingerprint is bound to `owner:<id>`, so a
+   * cursor never crosses owners, organizations, services, filters or windows.
+   */
+  owner(userBearer: string, organizationParam: unknown, rawQuery: unknown): Promise<AuditPage> {
+    return this.measured('owner', 'owner', async () => {
+      const authority = this.ownerAuthority;
+      if (!authority) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404); // not configured: the route does not exist
+      const ownerId = await authority.verifyOwner(userBearer);
+      await this.limitOwner(ownerId);
+      const organizationId = parseOrganizationPath(organizationParam);
+      const parsed = parseQuery(rawQuery, 'owner');
+      if (!(await authority.ownsOrganization(userBearer, organizationId))) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404);
+      const caller = `owner:${ownerId}`;
+      const query = this.authorized(caller, OWNER_POLICY, { kind: 'organization', organizationId }, parsed);
+      const rows = await this.db.tx(async (q) => {
+        const found = await this.records.findPage(query, q);
+        await this.recordPlatformQuery(q, { type: 'user', id: ownerId, userKind: 'owner' }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined, organizationId);
+        return found;
+      }).catch((e: unknown) => {
+        if (e instanceof HttpException) throw e;
+        this.log.error(`audit_owner_query_unrecorded error=${e instanceof Error ? e.name : 'Error'} — no evidence returned (fail closed)`);
+        throw new HttpException({ message: 'The query could not be recorded; no evidence is returned.', code: 'accountability_unavailable' }, 503);
+      });
+      return this.page(rows, query, caller);
+    });
+  }
+
+  /** Per verified owner (the id Auth returned, never a request value). Keys are hashed by the kit. */
+  private async limitOwner(ownerId: string): Promise<void> {
+    const limit = this.config.ownerAccess?.ratePerOwner ?? 1;
+    const r = await this.limiter.hit('audit_query_owner', ownerId, { limit, windowSec: QUERY_WINDOW_SECONDS });
+    if (!r.allowed) throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
   }
 
   private authorize(caller: string, operation: 'read_organization' | 'read_platform'): CallerPolicy {
@@ -174,9 +221,10 @@ export class AuditQueryService {
   /**
    * `platform_query.executed` (A57): built as a canonical event and passed through the SAME shared validator and mapping as every ingested
    * event, then inserted directly (never over the bus, so there is no recursion and no dependency on the broker). Bounded facts only: which
-   * target, how wide the window, how many records, which page, whether filters narrowed it — never a filter value or a returned record.
+   * target, how wide the window, how many records, which page, whether filters narrowed it, and (Stage 19.3, an owner's read) which
+   * organization — never a filter value or a returned record.
    */
-  private async recordPlatformQuery(q: Queryable, caller: string, query: AuthorizedAuditQuery, count: number, nextPage: boolean): Promise<void> {
+  private async recordPlatformQuery(q: Queryable, actor: QueryActor, query: AuthorizedAuditQuery, count: number, nextPage: boolean, organizationId?: string): Promise<void> {
     const eventId = randomUUID();
     const { rows } = await q.query<{ now: Date }>('SELECT now()');
     const correlation = getRequestContext()?.correlationId;
@@ -187,7 +235,7 @@ export class AuditQueryService {
       name: `audit.${PLATFORM_QUERY_ACTION}`,
       payload: {
         action: PLATFORM_QUERY_ACTION,
-        actor: { type: 'service', id: caller },
+        actor,
         organizationId: null,
         resource: { type: 'platform_query', id: eventId },
         outcome: 'succeeded',
@@ -197,6 +245,7 @@ export class AuditQueryService {
           result_count: count,
           page: nextPage ? 'next' : 'first',
           filtered,
+          ...(organizationId ? { organization_id: organizationId } : {}),
         },
       },
       headers: {

@@ -372,8 +372,10 @@ const SPEC = {
   // ------------------------------------------------------------------------------------------------------------------------------ audit-service
   // Stage 18.6 (A57, named `audit.platform_query` in Stage 18.1; renamed to the A13 grammar, since an action never sits in the `audit.`
   // namespace that its event type adds). Written by audit-service itself, in the same transaction as the read it records.
+  // Stage 19.3 (ADR-0050 decision 6, Audit-X): also a verified Company OWNER's read of one organization of their Company, the owner as the
+  // actor (never the audit service); `organization_id` names that organization (the record itself stays platform-level). Additive (A50).
   'platform_query.executed': {
-    producer: 'audit-service', category: 'security', since: 1, actors: { service: true }, organization: 'none',
+    producer: 'audit-service', category: 'security', since: 1, actors: { service: true, user: ['owner'] }, organization: 'none',
     resource: ['platform_query'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
       target: { type: 'code', shape: 'value', required: true, values: ['all', 'organization', 'platform'] },
@@ -381,8 +383,9 @@ const SPEC = {
       result_count: { type: 'integer', shape: 'value', required: true, min: 0, max: 100 },
       page: { type: 'code', shape: 'value', required: true, values: ['first', 'next'] },
       filtered: { type: 'boolean', shape: 'value', required: true },
+      organization_id: { type: 'uuid', shape: 'value', required: false },
     },
-    purpose: 'A trusted service read audit evidence with the privileged platform scope (across organizations or platform-level): who, when, how broadly.',
+    purpose: 'Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), or by a Company owner (one organization of their Company). Who, when, which organization, how broadly.',
   },
 } as const satisfies Record<string, CatalogEntry>;
 

@@ -8,6 +8,7 @@ import { AUDIT_EXCHANGE, consumerPrefetch } from './ingestion/ingestion.constant
 import { BrokerNotices } from './ingestion/broker-notices.js';
 import { IngestionModule } from './ingestion/ingestion.module.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
+import type { OwnerAuthority } from './owner/owner-authority.client.js';
 import { QueryModule } from './query/query.module.js';
 
 /** The service's own migrations (Stage 18.3: the append-only `audit_record`), applied by the explicit `npm run migrate` step and never at startup. */
@@ -20,6 +21,8 @@ export interface AppModuleOverrides {
   bus?: EventBus;
   /** Tests that inject a bus pass its `onNotice` to these counters (production wires its own bus to them). */
   brokerNotices?: BrokerNotices;
+  /** Stage 19.3: tests may inject the Auth port of the owner read (used only when `AUTH_SERVICE_URL` is configured). */
+  ownerAuthority?: OwnerAuthority;
 }
 
 @Global()
@@ -45,8 +48,11 @@ class ConfigModule {
  * + `audit-ingestion`. Stage 18.6 adds the reads (`QueryModule`): `GET /audit/organizations/{id}/records` (read_organization) and
  * `GET /audit/platform/records` (read_platform, each page recorded as `platform_query.executed`).
  *
- * Deliberately NOT here (ADR-0049): no call to Auth, Organization or any product service, for any purpose (A36); no HTTP ingestion
- * route (A16: the bus is the only ingestion path).
+ * Stage 19.3 (Audit-X, ADR-0050 decision 6 amending A36b for one read path): when `AUTH_SERVICE_URL` is set, the Company owner's read of
+ * one organization, verified through Auth with the owner's own bearer.
+ *
+ * Deliberately NOT here (ADR-0049): no call to Organization or any product service, for any purpose; no call to Auth except that one owner
+ * read (never on ingestion, never for a service-token read); no HTTP ingestion route (A16: the bus is the only ingestion path).
  */
 @Module({})
 export class AppModule {
@@ -82,7 +88,7 @@ export class AppModule {
         ConfigModule.forRoot(config, bus, notices),
         PersistenceModule,
         IngestionModule,
-        QueryModule,
+        QueryModule.register(config, overrides.ownerAuthority),
       ],
     };
   }
