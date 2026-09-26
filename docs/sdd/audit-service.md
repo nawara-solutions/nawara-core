@@ -13,7 +13,9 @@
   redaction, the retention role and purge mechanism (no duration: P-A2), the limiter purge:
   [Stage 18.8 record](../architecture/stage-18/stage-18-8-security-privacy-retention.md). Stage 18.9: operational hardening (the
   dead-letter confirm-failure hold, broker / dead-letter counters in `audit_ops_snapshot`, a per-interval log budget, fault-injected
-  outages and retention interruption): [Stage 18.9 record](../architecture/stage-18/stage-18-9-operational-hardening.md).
+  outages and retention interruption): [Stage 18.9 record](../architecture/stage-18/stage-18-9-operational-hardening.md). Stage 18.10:
+  focused certification — **Stage 18 closed**; open production prerequisites listed there:
+  [Stage 18.10 record](../architecture/stage-18/stage-18-10-focused-certification.md).
 - **Owners:** Anwar (project owner)
 - **Related ADD:** [core-architecture.md](../architecture/core-architecture.md) (service map: "What happened, who did it, when?"; events
   only, never a synchronous dependency)

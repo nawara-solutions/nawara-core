@@ -64,7 +64,7 @@ describeWithEnv('audit operational hardening (real PostgreSQL 16, real RabbitMQ 
     ch = await conn.createChannel();
     ch.on('error', () => undefined);
     await deleteAuditQueues(ch);
-    mgmt = brokerManagement(env.TEST_RABBITMQ_MGMT_URL);
+    mgmt = brokerManagement(env.TEST_RABBITMQ_MGMT_URL, conn);
   });
   afterEach(async () => {
     await mgmt.acceptPublishes().catch(() => undefined);
@@ -99,17 +99,14 @@ describeWithEnv('audit operational hardening (real PostgreSQL 16, real RabbitMQ 
     measured.o1_deferrals_per_4s = deferrals;
     expect(await depth(ch, DEAD_QUEUE)).toBe(0); // nothing — above all not the raw original — reached the DLQ
     expect(await rows()).toBe(0);
-    // The original is still owned by the work queue (ready or held unacknowledged): not lost. (Management statistics refresh every ~5 s.)
-    await until(async () => {
-      const q = await mgmt.queue(AUDIT_QUEUE);
-      return (q?.ready ?? 0) + (q?.unacked ?? 0) === 1;
-    }, 30_000); // statistics are sampled (5 s by default) and can lag under load; the post-shutdown depth below proves it directly
+    // Not lost is proven AUTHORITATIVELY below (Stage 18.10): after shutdown the message is back in the work queue — an acknowledged or
+    // dead-lettered message could not be. (18.9 read the management API's sampled statistics here; they lag and are not evidence.)
 
     // SHUTDOWN during the fault: bounded (the hold ends at once), the message stays in the work queue for the next instance.
     const shutdownMs = await close(t);
     measured.o1_shutdown_ms_during_fault = shutdownMs;
     expect(shutdownMs).toBeLessThan(5000);
-    expect(await depth(ch, AUDIT_QUEUE)).toBe(1);
+    expect(await depth(ch, AUDIT_QUEUE)).toBe(1); // authoritative: never acknowledged, never dead-lettered, not lost
     expect(await depth(ch, DEAD_QUEUE)).toBe(0);
 
     // Recovery: a new instance, the DLQ accepts again → sanitized again, confirmed, only then the original is acknowledged.

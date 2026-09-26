@@ -404,8 +404,24 @@ describeWithEnv('RabbitMQ dead-letter copy refused by the broker (real broker, m
       deadLetterPolicy: () => ({ body: 'redacted', headers: {} }),
     });
     await mgmt('PUT', '/policies/%2F/m18-reject', { pattern: `^${queue.replace(/\./g, '\\.')}\\.dead$`, definition: { 'max-length': 0, overflow: 'reject-publish' }, 'apply-to': 'queues', priority: 100 });
-    for (let i = 0; i < 50; i++) {
-      if (((await mgmt('GET', `/queues/%2F/${encodeURIComponent(`${queue}.dead`)}`)) as { policy?: string } | undefined)?.policy === 'm18-reject') break;
+    // In force when the BROKER refuses a probe (authoritative), never when the sampled management statistics say so (Stage 18.10).
+    for (let i = 0; ; i++) {
+      const probe = await conn.createConfirmChannel();
+      probe.on('error', () => undefined);
+      const refused = await (async () => {
+        try {
+          probe.sendToQueue(`${queue}.dead`, Buffer.from('{}'));
+          await probe.waitForConfirms();
+          await probe.purgeQueue(`${queue}.dead`);
+          return false;
+        } catch {
+          return true;
+        } finally {
+          await probe.close().catch(() => undefined);
+        }
+      })();
+      if (refused) break;
+      if (i > 300) throw new Error('the broker never refused publishes to the DLQ');
       await sleep(100);
     }
     await publisher.publish(envelope());

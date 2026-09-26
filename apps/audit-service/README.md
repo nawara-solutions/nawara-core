@@ -146,4 +146,4 @@ by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 18.7 | ✅ producer integration (Payment, Billing, Organization, File, Auth) |
 | 18.8 | ✅ security, privacy, retention (DLQ redaction, retention role and purge mechanism, limiter purge, migration `0003`) |
 | 18.9 | ✅ operational hardening (DLQ-confirm hold, broker counters, log budget, fault-injected outages, backlog, retention interruption) |
-| 18.10 | focused certification |
+| 18.10 | ✅ focused certification — Stage 18 closed ([record](../../docs/architecture/stage-18/stage-18-10-focused-certification.md)) |
