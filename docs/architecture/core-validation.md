@@ -2522,24 +2522,28 @@ This section is the **current** register at the close of Phase C.
 
 ### 17.2 Open decisions and deferred items
 
+> **2026-09-26 (ADR-0051, owner decision D3):** every item this register targeted at "Stage 20" now targets **Stage 21.x Production
+> Prerequisite Closure**. Stage 20 is Release Management (release metadata and client compatibility), not deployment engineering.
+> Earlier "Stage 20" mentions in the historical sections of this document mean Stage 21.x.
+
 | Item | Class | Why deferred | Owner | Target | Risk if ignored |
 |---|---|---|---|---|---|
 | F2: required CI checks / branch protection on `main` | SRE DECISION (repository setting) | outside the code | repository admin | before Phase D merges | a change can merge without CI |
-| Backup job, off-host copy, restore drill on the real volume, RPO / RTO | STAGE 20 (a production blocker, not a Phase C one) | needs production infrastructure and a policy | SRE / product | Stage 20 | data loss without a tested restore |
+| Backup job, off-host copy, restore drill on the real volume, RPO / RTO | STAGE 21.x (a production blocker, not a Phase C one) | needs production infrastructure and a policy | SRE / product | Stage 21.x | data loss without a tested restore |
 | F12 retention durations (17.1) | PRODUCT / LEGAL / SECURITY / SRE | no duration is established | the owners in 17.1 | before production data accumulates | unbounded growth (about 30 KB per lifecycle; 32 % is published outbox) |
-| O2: should Billing / Payment `/ready` include RabbitMQ? | SRE DECISION | orchestration policy; `/ready` costs one AMQP connection per probe (55 ms) | SRE | Stage 20 | a broker outage takes both services out of routing although HTTP works |
+| O2: should Billing / Payment `/ready` include RabbitMQ? | SRE DECISION | orchestration policy; `/ready` costs one AMQP connection per probe (55 ms) | SRE | Stage 21.x | a broker outage takes both services out of routing although HTTP works |
 | Auth health probes share the global throttle (429 on probes, not logged); raising the limit costs quadratic CPU | SRE / SECURITY DECISION | exemption vs forwarded-address key vs shared storage | SRE / security | before routing Auth behind a gateway | healthchecks fail under ordinary traffic from one address |
 | O3: a database-unavailable request is an opaque 500; the filter logs a message, not facts | FOLLOW-UP (a: engineering) / API DECISION (b: 503 mapping) | (b) changes the contract of all services | engineering / API | Stage 16 or later | alerting cannot tell a database outage from a bug |
 | Log taxonomy gaps (broker readiness `error=Error`, closed pool, idle-in-transaction as `db_connection_lost`) | FOLLOW-UP | observability only | engineering | any later stage | weaker classification in logs |
 | D1: honour Payment's documented idempotency expiry | FOLLOW-UP | changes what a client sees on a retry after 24 h | engineering | before the first cleanup job | none today (stricter than documented) |
 | Organization idempotency expiry model | PRODUCT DECISION | no retry horizon defined | product / API | before retention work | key table grows without bound |
-| O1: 60 s stale-resend window | SRE DECISION | since 15.8 only a recovery-time vs retry-pressure trade-off | SRE | Stage 20 | up to 60 s before a request is re-sent after a transient Payment failure |
-| Acceptable outage log volume and alerting thresholds | SRE DECISION | per-item retry lines grow with the backlog | SRE | Stage 20 | noisy logs during long outages |
-| Payment `0007` index built without `CONCURRENTLY` | STAGE 20 | release mechanics | engineering / SRE | Stage 20 | writes to `payment` wait during the build on a large table |
-| Migrate before deploying (Payment `0008` before the lease code) | STAGE 20 | release ordering | SRE | Stage 20 | the new resolver would fail its claim on an old schema |
-| Connection budget per deployment (Σ pools × processes + reserve ≤ `max_connections`) | STAGE 20 | replicas not established | SRE | Stage 20 | pool exhaustion at the database |
-| Restart policy (Billing exits at startup without RabbitMQ), rolling deploy (Auth stops before start), init process (tini) | STAGE 20 | deployment design | SRE | Stage 20 | an outage per deploy; Billing down until restarted |
-| O7: Auth deploy writes `PAYMENT_SERVICE_URL`, which Auth never reads | FOLLOW-UP (hygiene; verified still present in `apps/auth-service/deploy/provision-and-deploy.sh`) | harmless | engineering | Stage 20 | confusion only |
+| O1: 60 s stale-resend window | SRE DECISION | since 15.8 only a recovery-time vs retry-pressure trade-off | SRE | Stage 21.x | up to 60 s before a request is re-sent after a transient Payment failure |
+| Acceptable outage log volume and alerting thresholds | SRE DECISION | per-item retry lines grow with the backlog | SRE | Stage 21.x | noisy logs during long outages |
+| Payment `0007` index built without `CONCURRENTLY` | STAGE 21.x | release mechanics | engineering / SRE | Stage 21.x | writes to `payment` wait during the build on a large table |
+| Migrate before deploying (Payment `0008` before the lease code) | STAGE 21.x | release ordering | SRE | Stage 21.x | the new resolver would fail its claim on an old schema |
+| Connection budget per deployment (Σ pools × processes + reserve ≤ `max_connections`) | STAGE 21.x | replicas not established | SRE | Stage 21.x | pool exhaustion at the database |
+| Restart policy (Billing exits at startup without RabbitMQ), rolling deploy (Auth stops before start), init process (tini) | STAGE 21.x | deployment design | SRE | Stage 21.x | an outage per deploy; Billing down until restarted |
+| O7: Auth deploy writes `PAYMENT_SERVICE_URL`, which Auth never reads | FOLLOW-UP (hygiene; verified still present in `apps/auth-service/deploy/provision-and-deploy.sh`) | harmless | engineering | Stage 21.x | confusion only |
 | SDD endpoint 15: cancel answers `200` in code, `202` in the SDD | FOLLOW-UP (documentation) | doc review | engineering | Billing doc review | reader confusion |
 | Organization service authority activation (built, not authoritative; gated operation never performed) | PRODUCT DECISION | a deliberate, explicit activation | project owner | before Organization is the source of truth | Auth stays the owner of Company / Platform / Organization |
 | ADR-0035, 0038, 0044 and 0045 still *Proposed* though 0044 / 0045 record merged decisions | PRODUCT DECISION (governance) | acceptance is the owner's act | project owner | before Phase D | ambiguity about which decisions are binding |

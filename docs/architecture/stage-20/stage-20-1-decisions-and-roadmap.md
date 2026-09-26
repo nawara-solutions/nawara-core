@@ -1,8 +1,8 @@
 # Stage 20.1: Release management, architecture and decisions
 
-- **Status:** **DECISION REQUIRED.** The architecture is proposed in
-  [ADR-0051](../../adr/0051-release-management-and-client-compatibility.md) (Proposed); four owner decisions (§18) must be answered
-  before Stage 20.2.
+- **Status:** **PASSED** (2026-09-26).
+  - Owner decisions D1 to D4 were approved (§18), and the compatibility result model was finalized after a final review (§9).
+  - [ADR-0051](../../adr/0051-release-management-and-client-compatibility.md) is **Accepted**.
 - **Branch:** `feat/release-management-architecture`, from `main` @ `f568194` (Stage 19 closed; Stage 19.6 merged, PR #130).
 - **Implementation:** none; this stage is investigation and architecture only.
 
@@ -134,33 +134,64 @@ Core services already deploy independently (A50 ordering, additive APIs).
 - **Channels: none in Core V1** (D4). Mobile store tracks and CI provide pre-release distribution. Channels would only make sense for
   installed targets, and are added when a product proves the need.
 
-## 9. Compatibility model
+## 9. Compatibility model (final)
 
-The decision is per client component (web, desktop, iOS, Android):
+**The final review.** The first proposal used one status, `supported | update_available | update_required | unsupported`. It
+conflated two things:
+- `supported` meant "at the latest release", although an older release above the minimum is also supported;
+- `unsupported` mixed a policy verdict with bad input.
 
-| Decision | When | Client action |
+Separating *support* from *update* is right conceptually. In this policy, however, the two are **not independent**: an update is
+required exactly when the release is not supported (below the minimum, or withdrawn). The options compared:
+
+| Representation | States it can express | Verdict |
 |---|---|---|
-| `update_required` | the version is below the minimum supported, or it is a withdrawn release | web: reload; installed: block and update |
-| `update_available` | at or above the minimum, and below the latest **published** release | offer an update |
-| `supported` | at or above the latest published (or nothing newer published) | none |
-| `unsupported` | an unknown component, or a malformed version | treated as a client or configuration error, never guessed |
+| one overloaded status (first proposal) | 4, with misleading names | rejected |
+| two fields `{support: supported \| unsupported, update: none \| available \| required}` | 6, of which 3 must never occur (supported + required, unsupported + none, unsupported + available) | rejected: representable invalid states, and clients could disagree |
+| **one field `update: none \| available \| required`**, support derived, bad input an error | exactly the 3 valid states | **chosen** |
 
-- **Latest ≠ minimum.** "A newer version exists" never forces an update; only the minimum (a compatibility or security policy) and
-  withdrawal do.
-- **Minimum supported version** applies to web, desktop and mobile. It does not apply to backends.
-- **Web staleness** (an old tab after a deploy): the web client checks on start and periodically (for example on focus, or when an API
-  answers an unknown-route or `/v2` refusal). `update_required` means reload.
-  - **Deferred options:** a build hash in an HTTP header, service-worker update flows.
-  - **Tradeoff:** a check period adds read load, bounded by caching.
-- **Installed clients** check at start and on resume. They honour a cached `update_required` offline. The update itself is the native
-  updater or store.
+**Input errors** are never a decision and never "compatible":
+- `invalid_version`: malformed;
+- `unknown_component`: the component does not exist;
+- `unknown_release`: a well-formed version that is not a registered release of that component. CI registers every shipped web and
+  installed build.
+
+**Decision for a known release:**
+
+| `update` | When | Web | Desktop | iOS / Android |
+|---|---|---|---|---|
+| `required` + `reason` (`withdrawn` \| `below_minimum`) | the release is withdrawn, or its version is below the minimum | stop using the loaded build: **reload** the deployed web application (never "install") | block until updated through the updater | block until updated through the store |
+| `available` | not required, and a newer latest release exists | optional refresh prompt | optional update offer | optional store prompt |
+| `none` | not required, and nothing newer is published | – | – | – |
+
+- **Supported ⟺ `update` ≠ `required`**. With minimum `2.0.0` and latest `3.0.0`, version `2.5.0` is supported, with
+  `update: available`.
+- A newer release alone never forces an update. Only the minimum and withdrawal force one.
+- **"Latest"** is the highest published, not-withdrawn release **without a pre-release tag** (no channels, so a pre-release is never
+  everyone's latest). A registered-but-unpublished version, such as a build in store review, is a known release. A client running it
+  above the latest gets `none`.
+- **A withdrawn release above the latest** (`2.0.0` withdrawn, latest `1.0.0`) stays `required` / `withdrawn`. `latestVersion` may then
+  be lower than the client's own, and it is never a downgrade target for installed clients: they stay blocked until a fix-forward
+  release is published. A web client reloads the deployed build, and redeploying an older web build is CI's rollback.
+- **Invariant: minimum ≤ latest published.** It is enforced on policy changes **and on withdrawals**: a withdrawal that would leave the
+  minimum above the new latest is refused until the minimum is lowered. This prevents a lockout with nothing to update to.
+- **Response:** `{ update, reason?, latestVersion, minimumVersion }`. These are public release facts, with no user data.
+- **Caching:** short max-age, and an `ETag` over the policy version and the latest release.
+- **Failure:**
+  - service unreachable → fail open, using the cached decision (a cached `required` stays binding);
+  - an input error is definitive and never compatible (installed clients handle it as `required`; web reloads);
+  - registration and administration fail closed.
+- **Web staleness** (an old tab after a deploy): check on start and periodically. `required` means reload. A build-hash header and
+  service-worker flows are deferred options.
+- **Installed clients** check at start and on resume, and honour a cached `required` offline. The native updater or store delivers the
+  update.
 
 ## 10. Security and authority
 
 | Operation | Caller | Authentication | Authorization |
 |---|---|---|---|
 | Register a release; publish a release | CI | service token (ADR-0033) | an ADR-0042 policy: `release.register` / `release.publish`, per product |
-| Withdraw a release; change the minimum supported version | a human | own Auth bearer, verified live, plus a factor step-up (ADR-0050) | the owner of the configured operating Company (D2); no operator power (P-S1) |
+| Withdraw a release; change the minimum supported version | a human | own Auth bearer, verified live, plus a **mandatory** factor step-up (ADR-0050) | the verified owner of the configured operating Company (**D2, approved**); operators have no Release Management authority in Core V1 |
 | Compatibility read | any client | none | none: public, minimal, rate-limited |
 
 - **Is release administration an operator capability?** Not in Core V1. Operators have no independent factor (P-S1), and ADR-0050
@@ -223,51 +254,52 @@ identifiers, and actor ids in audit evidence.
 | Maintenance mode | a real client need (planned downtime); not release metadata | 21.C candidate |
 | Client capability discovery (which features a server supports) | the API prefix convention covers V1 | 21.C candidate |
 
-## 17. Stage 20 decomposition (proposed)
+## 17. Stage 20 decomposition (final)
 
-The provisional sequence was challenged. Security is not a separate late stage: each substage carries its own authority. A combined
-hardening stage precedes certification.
+The provisional sequence was challenged. Authority travels with each capability instead of sitting in one late "security" stage, and one
+combined hardening stage precedes certification.
 
 | Stage | Purpose | Scope | Depends on | Must not |
 |---|---|---|---|---|
-| **20.1** | architecture and decisions | this record, ADR-0051 | none | implement |
-| **20.2** | service foundation and domain | the `release-service` skeleton (kit, config, health, migrations, CI job, image); schema and invariants (uniqueness, immutability trigger, status transitions, SemVer parsing and comparison); repository | D1 accepted | expose APIs; add audit actions |
-| **20.3** | registration and lifecycle (automation) | CI service-token policy (`release.register` / `release.publish`); register (idempotent) and publish; the audit catalog `release.registered` / `.published`; outbox | 20.2 | human authority; public reads |
-| **20.4** | compatibility policy and human administration | minimum-version policy and withdrawal by the verified owner (ADR-0050 pattern, step-up); `compatibility_policy.changed`, `release.withdrawn` | 20.3, D2 | operator powers; channels |
-| **20.5** | client compatibility API | the public decision endpoint, caching and ETag, rate limit, fail-open client guidance, a web / installed-client integration guide | 20.4 | authenticated user data; a hot path |
-| **20.6** | security, privacy and operational hardening | adversarial review, counters, alertable signals, runbooks, deployment order | 20.5 | new features |
-| **20.7** | focused certification and closure | the Stage 19.6 pattern | 20.6 | Full Core Validation |
+| **20.1** | Architecture & decisions | the inventory, ADR-0051 (Accepted), D1–D4, the compatibility model, the D3 register reassignment | none | implement |
+| **20.2** | Service foundation & domain | the `release-service` skeleton (kit config, health, readiness, migrations, OpenAPI, Dockerfile, CI job, production image); schema and invariants (unique keys, the immutability trigger, `registered → published → withdrawn`, append-only policy, minimum ≤ latest, SemVer parsing and precedence, "latest" excluding pre-releases); the repository; the CLAUDE.md and core-architecture service lists | ADR-0051 (D1) | expose APIs; add audit actions; channels |
+| **20.3** | Release registration & lifecycle (automation) | the CI service-token policy (`release.register`, `release.publish`, per product); idempotent registration; publication; audit catalog `release.registered`, `release.published`; outbox | 20.2 | human authority; public reads; deploying anything |
+| **20.4** | Compatibility policy & human administration | minimum-version changes and withdrawal by the verified owner of the operating Company with a mandatory factor step-up (ADR-0050 pattern); the invariant on both; audit `compatibility_policy.changed`, `release.withdrawn` | 20.3 (D2) | operator authority; channels |
+| **20.5** | Client compatibility API | the public decision endpoint (`update`, `reason`, input errors), cache and `ETag`, rate limit, fail-open guidance; an integration guide for web, desktop, iOS and Android | 20.4 | user data; a hot-path dependency; per-user tracking |
+| **20.6** | Security, privacy & operational hardening | adversarial review, bounded counters, alertable signals, runbooks, deployment order | 20.5 | new features |
+| **20.7** | Focused certification & closure | the Stage 19.6 pattern | 20.6 | Full Core Validation; Stage 21 work |
 
-## 18. Owner decisions required
+## 18. Owner decisions (approved 2026-09-26)
 
-| # | Decision | Recommendation |
+| # | Decision | Owner answer |
 |---|---|---|
-| D1 | Create `release-service` (a new deployable, its own database), adding it to the planned-services list | yes |
-| D2 | The human authority for withdrawal and minimum-version changes | the owner of the configured operating Company, with a factor step-up (ADR-0050 pattern). Alternative: CI-only, with approval in the CI system (weaker human accountability) |
-| D3 | Move the §17.2 "Stage 20" deployment and production items (backups and restore, rolling deploy, restart policy, init, the connection budget, `CONCURRENTLY`, migrate-before-deploy, O1, O2, log thresholds, O7, production RabbitMQ / `AUTH_EVENTS`) to **Stage 21.x Production Prerequisite Closure** | yes: they are CI/CD and production engineering, not release metadata |
-| D4 | No release channels in Core V1 | yes: defer until a product proves the need |
+| D1 | a dedicated `release-service` with its own PostgreSQL database | **APPROVED** |
+| D2 | withdrawal and minimum-version / compatibility-policy changes: the verified owner of the configured operating Company, with their own bearer, live verification and a mandatory factor step-up. CI stays a service identity and never impersonates a human. Operators get no Release Management authority in Core V1 | **APPROVED** |
+| D3 | the deployment and production items labelled "Stage 20" move to **Stage 21.x Production Prerequisite Closure** (backups, rolling deployment, restart policy, the connection budget, `CONCURRENTLY`, migrate-before-deploy and equivalent concerns). Release Management is not a deployment engine | **APPROVED**; applied to `core-validation.md` §17.2 (with a dated note) and `production-readiness.md` |
+| D4 | no release channels in Core V1; the architecture stays extensible (a channel would later scope "latest" and the policy per component) | **APPROVED** |
 
 ## 19. Decision table
 
 | Decision | Options | Recommendation | Reason | Status |
 |---|---|---|---|---|
-| Dedicated service? | none (CDN manifest) / inside an existing service / `release-service` | `release-service` | independent authority, data, consumers, security boundary | DECISION REQUIRED (D1) |
-| Product vs component? | component only / product + component / + product release | product + component; no product release | clients check components; products scope authority | DECIDED (proposed) |
-| Version model? | SemVer / CalVer / build numbers / SHA | SemVer canonical + opaque native `buildId` + optional `sourceRevision` | comparable, and native identifiers kept | DECIDED (proposed) |
-| Environment ownership? | a release field / a deployment entity / one service per environment | one service per environment | releases are environment-independent; matches Core | DECIDED (proposed) |
-| Channels? | none / installed-only / all | none in V1 | no demonstrated need; stores provide tracks | DECISION REQUIRED (D4) |
-| Web compatibility? | none / minimum version + reload / build-hash header | minimum version + reload; the header deferred | real stale-tab problem, no installer semantics | DECIDED (proposed) |
-| Desktop compatibility? | decision only / + artifacts and updater manifest | decision only | the updater is distribution | DECIDED (proposed) |
-| Mobile compatibility? | decision only / + store integration | decision only (iOS and Android as separate kinds) | stores are distribution | DECIDED (proposed) |
+| Dedicated service? | none (CDN manifest) / inside an existing service / `release-service` | `release-service` | independent authority, data, consumers, security boundary | DECIDED (D1) |
+| Product vs component? | component only / product + component / + product release | product + component; no product release | clients check components; products scope authority | DECIDED |
+| Version model? | SemVer / CalVer / build numbers / SHA | SemVer canonical + opaque native `buildId` + optional `sourceRevision` | comparable, and native identifiers kept | DECIDED |
+| Environment ownership? | a release field / a deployment entity / one service per environment | one service per environment | releases are environment-independent; matches Core | DECIDED |
+| Channels? | none / installed-only / all | none in V1 | no demonstrated need; stores provide tracks | DECIDED (D4) |
+| Web compatibility? | none / minimum version + reload / build-hash header | minimum version + reload; the header deferred | real stale-tab problem, no installer semantics | DECIDED |
+| Compatibility result shape? | one overloaded status / two fields / one `update` field + input errors | one `update` field (`none` / `available` / `required` + `reason`); support derived; input errors separate | no representable invalid state; unambiguous | DECIDED (final review) |
+| Desktop compatibility? | decision only / + artifacts and updater manifest | decision only | the updater is distribution | DECIDED |
+| Mobile compatibility? | decision only / + store integration | decision only (iOS and Android as separate kinds) | stores are distribution | DECIDED |
 | AI release metadata? | in Release / separate | separate (ai-service, Stage 36+); `ai` kind reserved | model and prompt versions are configuration | DEFERRED |
-| CI/CD identity? | human bearer / service token + policy | service token, ADR-0042 capabilities, per product | no impersonation | DECIDED (proposed) |
-| Human authority? | operator / owner of the operating Company / CI-only | the owner of the operating Company, with step-up | ADR-0050; P-S1 | DECISION REQUIRED (D2) |
-| Audit events? | none / four actions | the four actions, organization none | accountability | DECIDED (proposed) |
-| Artifact storage? | release-service / File / external | external distribution infrastructure | not a CDN or signer | DECIDED (proposed) |
+| CI/CD identity? | human bearer / service token + policy | service token, ADR-0042 capabilities, per product | no impersonation | DECIDED |
+| Human authority? | operator / owner of the operating Company / CI-only | the owner of the operating Company, with step-up | ADR-0050; P-S1 | DECIDED (D2) |
+| Audit events? | none / four actions | the four actions, organization none | accountability | DECIDED |
+| Artifact storage? | release-service / File / external | external distribution infrastructure | not a CDN or signer | DECIDED |
 | Configuration / capability management? | A / B / C / D | D (after Core V1), revisited in 21.C | no generic V1 need proven | DEFERRED (21.C) |
 | Feature flags? | V1 / defer | defer | no V1 need | DEFERRED (21.C) |
 | Maintenance mode? | in Release / separate / defer | not Release; 21.C candidate | a different concern | DEFERRED (21.C) |
-| Stage 20 register items | keep in Stage 20 / move to 21.x | move to 21.x | deployment engineering | DECISION REQUIRED (D3) |
+| Stage 20 register items | keep in Stage 20 / move to 21.x | move to 21.x | deployment engineering | DECIDED (D3) |
 
 ## 20. Production prerequisites (preliminary register)
 
@@ -283,5 +315,4 @@ hardening stage precedes certification.
 
 ## 21. Open decisions
 
-D1 to D4 (§18). Everything else is decided in ADR-0051 (Proposed) or deferred with a destination. The architecture is **ready for
-Stage 20.2 once D1 to D4 are answered and ADR-0051 is accepted**.
+None. D1 to D4 are approved, and the compatibility model is final. The architecture is **ready for Stage 20.2**, which has not started.
