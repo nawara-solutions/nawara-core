@@ -48,4 +48,4 @@ are living documents revised in place as the module's design evolves.
 | [organization-service](./organization-service.md) | Implemented (Stage 9); not authoritative: ownership migration from Auth (ADR-0039) not performed |
 | [notification-service](./notification-service.md) | Draft (Stage 16.1 design, for review; not implemented) |
 | [file-service](./file-service.md) | Draft (Stage 17.1 design, architecture frozen); foundation (17.2), persistence (17.3), storage port (17.4), upload (17.5), download + authorization (17.6), delete + cleanup (17.7) |
-| [audit-service](./audit-service.md) | Draft (Stage 18.1 design); foundation (18.2), persistence (18.3), contract and catalog (18.4), RabbitMQ ingestion (18.5), query and authorization (18.6), producer integration (18.7), security / privacy / retention (18.8), operational hardening (18.9) |
+| [audit-service](./audit-service.md) | Draft (Stage 18.1 design); foundation (18.2), persistence (18.3), contract and catalog (18.4), RabbitMQ ingestion (18.5), query and authorization (18.6), producer integration (18.7), security / privacy / retention (18.8), operational hardening (18.9), certified and closed (18.10) |
