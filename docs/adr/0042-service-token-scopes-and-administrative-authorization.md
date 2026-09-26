@@ -3,7 +3,7 @@
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (accepted by the architecture owner. The acceptance statement was given together with the owner's answers to D1 to D4, recorded verbatim in the [owner-decision sheet](../architecture/stage-10/stage-10-bd4-owner-decisions.md), and is subject to those four answers being recorded as the architecture-owner decisions, which they are. **Acceptance is a decision about architecture only: nothing is implemented, and implementation is a separate phase that does not begin merely because this ADR is accepted.**)
 - **Date:** 2026-09-20 (drafted). The owner's D1 to D4 answers carry the date 2026-09-19 as given by the owner; the acceptance statement itself is undated in the record.
 - **Deciders:** Anwar (project owner); decisions D1 to D4 were made by the architecture owner.
-- **Amended:** **Amendment 1 (2026-09-20)** at the end of this ADR records the architecture owner's DEC-1 to DEC-5 direction; **Amendment 2** records the consequences of ADR-0040 being Accepted. The ADR **stays Accepted**. The original text below is kept for the historical record; where the amendment differs, the amendment governs.
+- **Amended:** **Amendment 1 (2026-09-20)** at the end of this ADR records the architecture owner's DEC-1 to DEC-5 direction; **Amendment 2** records the consequences of ADR-0040 being Accepted; **Amendment 3 (2026-09-26)** withdraws `auth-service`'s admission to Payment (Stage 21.C.1, Q1). The ADR **stays Accepted**. The original text below is kept for the historical record; where the amendment differs, the amendment governs.
 
 > Related, none modified: [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (header status Proposed; its token mechanism is implemented in service-kit), [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), [ADR-0040](./0040-organization-ownership-migration-decisions.md) (Proposed), [ADR-0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) (Proposed). The analysis, evidence and decision matrix are in the [BD-4 study](../architecture/stage-10/stage-10-bd4-service-authorization-study.md); the owner's answers are in the [owner-decision sheet](../architecture/stage-10/stage-10-bd4-owner-decisions.md). This ADR does **not amend** ADR-0033: it keeps its authentication and adds the authorization layer that ADR-0033 does not define. ADR-0040, ADR-0041, ADR-0020, ADR-0022 and ADR-0024 keep their own header status; this ADR adopts, for hierarchy administration, the rules it names from them and does not change those ADRs.
 
@@ -237,3 +237,27 @@ Nothing is implemented by this amendment or by the acceptance of this ADR. Imple
   - **Follow-up.** ADR-0040's open item and cutover sequence are done (Amendments 1 and 2).
 - **Unchanged.** The confirmations marked "derived" in A.3 and A.5, OPEN-3 and OPEN-4 (non-blocking, defaults as recorded in A.2 and A.6), and everything Amendment 1 leaves undecided.
 - **Implementation boundary.** Nothing is implemented.
+
+## Amendment 3 (2026-09-26): `auth-service` is no longer admitted to Payment Service
+
+- **Status:** Accepted, recorded from the architecture owner's Stage 21.C.1 decision Q1 ("REMOVE VIA ADR AMENDMENT"). ADR-0042 **stays
+  Accepted**. This amendment changes one row of D3 and nothing else. The original text above is kept as the historical record; where they
+  differ, this amendment governs.
+- **What it changes.**
+
+| Original text | Effect of Amendment 3 |
+|---|---|
+| Decision 4 (D3) table: `auth-service` → Payment Service: **Admitted** | **Withdrawn.** `auth-service` holds **no Payment authority**: no operation, no admission and no Payment credential |
+| A.3: "`auth-service` to Payment has no approved operation merely because it is admitted"; AD-2: the intended Auth call `GET /payment/licenses/:id/status` | **Superseded.** That call was the admission's only purpose. Payment never implemented the route (M-05), and commit `f1901f9` (Stage 11, B-035: Auth owns identity and membership, never commercial entitlement) removed Auth's license check and its Payment client |
+| Consequences, residual risk: "the Auth-token-on-Payment finding" | **Closed by design.** It closes in implementation once Payment enforces its caller policy (ADR-0052, Stage 21.C.2) and the development `AUTH_TO_PAYMENT_*` credential is retired |
+
+- **Why.** No accepted ADR, SDD or roadmap describes an Auth → Payment flow for Core V1. A credential that authorizes nothing is only a
+  latent grant, and the ADR-0052 caller-policy mechanism deliberately cannot express an admitted caller with an empty operation list.
+- **The V1 rule for Payment Service.**
+  - `billing-service` may use exactly the operations approved for it: create, retrieve and cancel a payment (AD-2, A.3).
+  - `auth-service` has no Payment authority.
+  - Every other service caller is denied unless a future architecture decision admits it through this ADR's D3 process.
+- **Unchanged.** Every other admission, decision 5, A.1 to A.6, and Amendment 2. Organization Service's admission of `auth-service` (full
+  read, A.3) is a different target and is **not** affected. A future Auth → Payment need would be a new D3 admission.
+- **Implementation boundary.** Enforcement and the retirement of the development credential belong to Stage 21.C.2 (ADR-0052). Production
+  credential removal belongs to Stage 21.x.
