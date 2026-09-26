@@ -1,4 +1,4 @@
-import { Body, Controller, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Header, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { IsIn } from 'class-validator';
 import { Actors, type AuthedRequest } from '../auth/auth.guard.js';
@@ -32,6 +32,7 @@ export class MemberSecurityController {
 
   @Post(':id/suspend')
   @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
   @Actors('owner')
   @ApiBearerAuth()
   @ApiHeader({ name: 'x-step-up-token', required: true, description: 'Factor step-up (TOTP or passkey) for purpose "account.suspend".' })
@@ -45,6 +46,7 @@ export class MemberSecurityController {
 
   @Post(':id/restore')
   @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
   @Actors('owner')
   @ApiBearerAuth()
   @ApiHeader({ name: 'x-step-up-token', required: true, description: 'Factor step-up (TOTP or passkey) for purpose "account.restore".' })

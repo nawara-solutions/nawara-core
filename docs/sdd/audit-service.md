@@ -176,6 +176,12 @@ errors add `invalid_scope`, `invalid_cursor`, `window_too_large`, `category_not_
 
 **Unchanged:** ingestion and the service-token routes never call Auth.
 
+**Stage 19.4 hardening:**
+- **Redirects:** the Auth client never follows a redirect (`redirect: 'manual'`); any status other than 200 is a 503.
+- **Response size:** Auth's answer is read up to 16 KiB and is a 503 above that.
+- **`AUTH_SERVICE_URL`:** credentials, a query or a fragment are refused at startup; an empty value means disabled.
+- **Service reads:** a service platform read narrowed to one organization now also records `changes.organization_id`.
+
 ## 7. Caller policy
 
 `AUDIT_SERVICE_POLICY` (deny by default, validated at boot, the File / Notification pattern): per caller `operations` ⊆

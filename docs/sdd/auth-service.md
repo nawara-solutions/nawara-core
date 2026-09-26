@@ -3421,7 +3421,7 @@ dropped). **Tests.** `multi-membership.e2e-spec.ts` (22), `tenant-isolation.e2e-
 - **Step-up:** both purposes are **factor-only** (TOTP or passkey); the secret key is refused.
 - **Reason:** `reason` is the closed D6 set: `compromised_account`, `security_incident` or `policy_violation`. Anything else,
   including extra body fields, is a 400.
-- **Response:** `{ id, suspended, changed }` only.
+- **Response:** `{ id, suspended, changed }` only, with `Cache-Control: no-store` (Stage 19.4).
 
 **Code.** `MemberSecurityService` runs one transaction:
 1. the owner's Company, from the `owner` row;

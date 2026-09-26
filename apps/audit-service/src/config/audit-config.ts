@@ -78,7 +78,7 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
     queryRates: queryRates(reader),
     ...(reader.get('AUTH_SERVICE_URL') === undefined ? {} : {
       ownerAccess: {
-        authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
+        authServiceUrl: authServiceUrl(reader),
         ratePerOwner: reader.int('AUDIT_OWNER_QUERY_RATE_PER_OWNER', { default: 30, min: 1, max: 100_000 }),
         authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3_000, min: 100, max: 30_000 }),
       },
@@ -88,6 +88,19 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
     },
   };
+}
+
+/**
+ * Stage 19.4: the destination of the owner's bearer. An `http:` / `https:` origin (optionally with a base path) and nothing else: embedded
+ * credentials, a query or a fragment are refused at startup (they would change what, or where, the bearer is sent). The value is never echoed.
+ */
+function authServiceUrl(reader: EnvReader): string {
+  const v = reader.url('AUTH_SERVICE_URL', ['http:', 'https:']);
+  const u = new URL(v);
+  if (u.username || u.password || u.search || u.hash || v.includes('?') || v.includes('#')) {
+    throw new ConfigError('AUTH_SERVICE_URL must be a plain http(s) origin, optionally with a path: no credentials, query or fragment');
+  }
+  return v;
 }
 
 function queryRates(reader: EnvReader): AuditConfig['queryRates'] {
