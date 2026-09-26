@@ -325,8 +325,9 @@ Auth's local audit (`auth_audit_event`), as the operator block is today. Central
 > | 19.2 Owner Account Security Administration | ✅ PASSED, merged: [Stage 19.2 record](./stage-19-2-owner-account-security-administration.md) |
 > | 19.3 Audit-X | ✅ PASSED, merged: [Stage 19.3 record](./stage-19-3-audit-x.md) |
 > | 19.4 Security & Privacy Hardening | ✅ PASSED, merged: [Stage 19.4 record](./stage-19-4-security-privacy-hardening.md) |
-> | 19.5 Operational Hardening | ✅ PASSED on its branch, awaiting review: [Stage 19.5 record](./stage-19-5-operational-hardening.md) |
-> | 19.6 Focused Certification & Closure | ⏳ |
+> | 19.5 Operational Hardening | ✅ PASSED, merged: [Stage 19.5 record](./stage-19-5-operational-hardening.md) |
+> | 19.6 Focused Certification & Closure | ✅ PASSED: [Stage 19.6 record](./stage-19-6-focused-certification-and-closure.md) |
+> | **Stage 19 — Security / Platform Administration** | **🏁 CLOSED** |
 
 The ordering the brief suggested was checked against the evidence and rejected where the evidence contradicts it:
 - **Foundation:** the verified-human foundation already exists (Auth's own guard; organization-service's human path).
