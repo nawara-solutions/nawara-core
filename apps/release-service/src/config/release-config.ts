@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
@@ -16,7 +17,8 @@ export const SERVICE_NAME = 'release-service';
  * - Stage 20.4: owner administration (`ownerAdmin`): Auth's address and time budget, and the configured operating Company whose verified
  *   owner may withdraw releases and change minimum versions (ADR-0051 decision 8).
  *
- * Deliberately absent until the stage that uses it: the public compatibility read and its rate limit / cache (20.5). Never: channels, artifacts, signing keys, stores, CDNs, feature flags, maintenance mode (ADR-0051 §12).
+ * - Stage 20.5: the public compatibility read (`compatibility`): its freshness (`Cache-Control: max-age`), the per-client rate limit and
+ *   the key that hashes client addresses before they reach the limiter table. Never: channels, artifacts, signing keys, stores, CDNs, feature flags, maintenance mode (ADR-0051 §12).
  */
 export interface ReleaseConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `release_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -40,6 +42,15 @@ export interface ReleaseConfig extends BaseConfig {
    * budget shared by every Auth call of a request (owner verification, then the step-up), so a slow Auth fails the request closed.
    */
   ownerAdmin?: { authServiceUrl: string; authTimeoutMs: number; operatingCompanyId: string };
+  /**
+   * Stage 20.5 (ADR-0051 decision 10), the public compatibility read:
+   * - `maxAgeS` (`RELEASE_COMPATIBILITY_MAX_AGE_S`, default 60, 0–300): how long a decision may be reused, so a new `required` reaches every
+   *   client within it. No stale-while-revalidate: a withdrawal must not be hidden longer than this.
+   * - `ratePerClient` (`RELEASE_COMPATIBILITY_RATE_PER_CLIENT`, default 120, 1–100000): requests per client address per 60 s.
+   * - `rateLimitKey` (`RELEASE_RATE_LIMIT_KEY`, base64, ≥ 32 bytes): keys client addresses before they reach the limiter table (an unkeyed
+   *   IPv4 digest is reversible). Required in production; elsewhere a random per-process key is used when it is absent.
+   */
+  compatibility: { maxAgeS: number; ratePerClient: number; rateLimitKey: Buffer };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -73,7 +84,25 @@ export function loadReleaseConfig(env: NodeJS.ProcessEnv = process.env): Release
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     ...ownerAdmin(reader),
+    compatibility: {
+      maxAgeS: reader.int('RELEASE_COMPATIBILITY_MAX_AGE_S', { default: 60, min: 0, max: 300 }),
+      ratePerClient: reader.int('RELEASE_COMPATIBILITY_RATE_PER_CLIENT', { default: 120, min: 1, max: 100_000 }),
+      rateLimitKey: rateLimitKey(reader, base.isProduction),
+    },
   };
+}
+
+/** `RELEASE_RATE_LIMIT_KEY`: base64, at least 32 bytes (the File rule). Never echoed. */
+function rateLimitKey(reader: EnvReader, isProduction: boolean): Buffer {
+  const raw = reader.get('RELEASE_RATE_LIMIT_KEY');
+  if (raw === undefined) {
+    if (isProduction) throw new ConfigError('RELEASE_RATE_LIMIT_KEY is required in production (it keys client addresses for the public rate limit)');
+    return randomBytes(32);
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) throw new ConfigError('RELEASE_RATE_LIMIT_KEY must be base64');
+  const key = Buffer.from(raw, 'base64');
+  if (key.length < 32) throw new ConfigError('RELEASE_RATE_LIMIT_KEY must decode to at least 32 bytes');
+  return key;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

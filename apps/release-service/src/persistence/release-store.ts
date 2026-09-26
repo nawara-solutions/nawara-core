@@ -5,6 +5,7 @@ import {
   type Component, type ComponentKind, type CompatibilityPolicy, type Product, type Release, type ReleaseIdentity,
 } from '../domain/model.js';
 import { isCanonicalVersion, isStableVersion } from '../domain/version.js';
+import type { CompatibilityState } from '../compatibility/decision.js';
 import { ReleaseStoreError } from './persistence-error.js';
 
 const RELEASE_COLUMNS = `id, "componentId", version, "buildId", "sourceRevision", "notesRef", status, "registeredAt", "publishedAt", "withdrawnAt"`;
@@ -171,6 +172,33 @@ export class ReleaseStore {
       [componentId, releaseId],
     ).catch(refused);
     return rows[0]?.breaks === true;
+  }
+
+  /**
+   * Stage 20.5: everything one compatibility decision needs — the component, the exact release, the CURRENT policy (the highest version)
+   * and the latest (highest published, not withdrawn, stable) — in ONE statement, so it is one snapshot of committed state (READ
+   * COMMITTED takes a snapshot per statement): a withdrawal or a policy change commits either entirely before or entirely after it, and
+   * every committed state satisfies the invariants. Read-only; uses the unique keys, the policy key and `release_latest_idx`.
+   */
+  async compatibilityState(productKey: string, componentKey: string, version: string, q: Queryable = this.db): Promise<CompatibilityState> {
+    const { rows } = await q.query(
+      `WITH c AS (SELECT c.id, c.kind FROM component c JOIN product p ON p.id = c."productId" WHERE p.key = $1 AND c.key = $2),
+            r AS (SELECT r.id, r.status FROM release r JOIN c ON r."componentId" = c.id WHERE r.version = $3),
+            pol AS (SELECT p."policyVersion", p."minimumVersion" FROM compatibility_policy p JOIN c ON p."componentId" = c.id
+                     ORDER BY p."policyVersion" DESC LIMIT 1),
+            lat AS (SELECT r.id, r.version FROM release r JOIN c ON r."componentId" = c.id
+                     WHERE r.status = 'published' AND r.prerelease IS NULL ORDER BY r.major DESC, r.minor DESC, r.patch DESC LIMIT 1)
+       SELECT c.id AS "componentId", c.kind, r.id AS "releaseId", r.status, pol."policyVersion", pol."minimumVersion", lat.id AS "latestId", lat.version AS "latestVersion"
+         FROM (SELECT 1) one LEFT JOIN c ON true LEFT JOIN r ON true LEFT JOIN pol ON true LEFT JOIN lat ON true`,
+      [productKey, componentKey, version],
+    ).catch(refused);
+    const x = rows[0] as Row;
+    return {
+      component: x.componentId ? { id: x.componentId as string, kind: x.kind as ComponentKind } : null,
+      release: x.releaseId ? { id: x.releaseId as string, status: x.status as Release['status'] } : null,
+      policy: x.policyVersion != null ? { policyVersion: Number(x.policyVersion), minimumVersion: x.minimumVersion as string } : null,
+      latest: x.latestId ? { id: x.latestId as string, version: x.latestVersion as string } : null,
+    };
   }
 
   /** "Latest" (ADR-0051 §4): the highest published, not-withdrawn release without a pre-release tag, by SemVer precedence. */

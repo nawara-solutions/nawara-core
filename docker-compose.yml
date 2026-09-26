@@ -382,6 +382,8 @@ services:
       # Company, own bearer + factor step-up through Auth). Empty = the owner routes do not exist.
       AUTH_SERVICE_URL: ${RELEASE_AUTH_SERVICE_URL:-}
       RELEASE_OPERATING_COMPANY_ID: ${RELEASE_OPERATING_COMPANY_ID:-}
+      # Stage 20.5: the public compatibility read. Development without a key uses a random per-process key; production requires one.
+      RELEASE_RATE_LIMIT_KEY: ${RELEASE_RATE_LIMIT_KEY:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

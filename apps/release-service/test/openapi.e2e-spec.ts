@@ -37,17 +37,18 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
     }
   });
 
-  it('documents exactly the two automation and two owner operations besides the kit probes (no list, read, compatibility or deployment route)', () => {
+  it('documents exactly the two automation, two owner and one public operation besides the kit probes (no list, deployment or artifact route)', () => {
     const ops = Object.entries(doc.paths as Record<string, Record<string, unknown>>).flatMap(([p, methods]) => Object.keys(methods).map((m) => `${m.toUpperCase()} ${p}`));
     expect(ops.filter((o) => !['GET /health', 'GET /ready'].includes(o)).sort()).toEqual([
+      'GET /release/products/{product}/components/{component}/compatibility',
       'POST /release/admin/products/{product}/components/{component}/compatibility-policy',
       'POST /release/admin/products/{product}/components/{component}/releases/{version}/withdraw',
       'POST /release/products/{product}/components/{component}/releases',
       'POST /release/products/{product}/components/{component}/releases/{version}/publish',
     ].sort());
-    const automation = Object.keys(doc.paths).filter((p) => p.startsWith('/release/products'));
+    const automation = Object.keys(doc.paths).filter((p) => p.startsWith('/release/products') && !p.endsWith('/compatibility'));
     expect(automation.join(' ')).not.toMatch(/withdraw|minimum|policy|compatib|deploy|channel|artifact|latest/i); // CI can do none of that
-    expect(Object.keys(doc.paths).join(' ')).not.toMatch(/deploy|channel|artifact|latest|compatibility(?!-policy)/i); // no 20.5 read
+    expect(Object.keys(doc.paths).join(' ')).not.toMatch(/deploy|channel|artifact|latest|download|install|store/i);
   });
 
   it('declares bearer (service token) security and the statuses the runtime returns', () => {
@@ -100,5 +101,20 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
     const dto = doc.components.schemas.ChangePolicyDto;
     expect(Object.keys(dto.properties).sort()).toEqual(['expectedPolicyVersion', 'minimumVersion']);
     expect(dto.required.sort()).toEqual(['expectedPolicyVersion', 'minimumVersion']);
+  });
+
+  it('Stage 20.5: the public decision is a GET with no security, the version query, the three updates and the bounded errors', () => {
+    const g = doc.paths['/release/products/{product}/components/{component}/compatibility'].get;
+    expect(g.security ?? []).toEqual([]); // public
+    expect(g.parameters.filter((x: { in: string }) => x.in === 'query').map((x: { name: string; required: boolean }) => [x.name, x.required])).toEqual([['version', true]]);
+    expect(Object.keys(g.responses).sort()).toEqual(['200', '304', '400', '404', '429']);
+    expect(g.responses['400'].description).toMatch(/invalid_version/);
+    expect(g.responses['404'].description).toMatch(/unknown_component.*unknown_release/);
+    expect(g.responses['429'].description).toMatch(/rate_limited.*Not a decision/);
+    const dto = doc.components.schemas.DecisionDto;
+    expect(Object.keys(dto.properties).sort()).toEqual(['latestVersion', 'minimumVersion', 'reason', 'update']); // no `supported` field (derived)
+    expect(dto.properties.update.enum).toEqual(['required', 'available', 'none']);
+    expect(dto.properties.reason.enum).toEqual(['withdrawn', 'below_minimum']);
+    expect(dto.required.sort()).toEqual(['latestVersion', 'minimumVersion', 'update']);
   });
 });
