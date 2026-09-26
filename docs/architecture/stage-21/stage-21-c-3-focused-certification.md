@@ -204,6 +204,7 @@ with `NODE_ENV=test`.
 |---|---|---|
 | **S21-7** Notification fairness | failed on PR #139's CI; reproduced locally in 1 of 5 runs; Notification is unchanged by 21.C.2 | **pre-existing, PRE-STAGE-22 BLOCKER** (not disabled) |
 | **S21C2-1** Release limiter-key test | `apps/release-service/test/compatibility.e2e-spec.ts` scans stored rows, which include a random 64-character hex key, for `/ffff/` (meant for `::ffff:` addresses); about 0.09% per row; release-service unchanged | **unrelated; 21.R1/R2 stabilization**. Fix: match `::ffff:` or exclude the key |
+| **S21C3-1** File S3 client-abort timing (found in PR #140's CI) | `apps/file-service/test/download-s3.e2e-spec.ts:134` expects under 50% of the 8 MiB object read after a client abort; CI read about 51.6% (4 332 616 bytes) on a slower shared runner, while 313 other tests passed; locally 8 of 8 pass on CI's S3 gateway (`versitygw v1.8.0`); no Stage 21.C change to file-service. The PostgreSQL permission-denied lines in that job are the intended least-privilege tests (they passed) | **unrelated; 21.R1/R2 stabilization** (not changed in PR #140) |
 | Auth outbox durability timing | isolated 5×, suite group 2×, full parallel Auth e2e 2×, 9/9 green. Stall test 1.52–1.62 s and connection-lost test 3.00–3.08 s, against windows of 90 s (formerly 15 s and 40 s). The single 21.C.2 failure hit the old windows exactly and never recurred | **B/C: environment and test synchronization, not an implementation race** (§15.1) |
 
 ### 15.1 Why the old windows could be exceeded
