@@ -112,8 +112,8 @@ services:
       JOIN_CODE_PEPPER: ${AUTH_JOIN_CODE_PEPPER:?copy .env.example to .env}
       TOTP_ENCRYPTION_KEYS: k1:${AUTH_TOTP_KEY_K1:?copy .env.example to .env}
       TOTP_ENCRYPTION_ACTIVE_KEY_ID: k1
-      # Stage 18.7.5: the central audit relay's broker (required in production, independent of AUTH_EVENTS). Here it is also the broker
-      # of the legacy fire-and-forget events, which otherwise fall back to localhost (unreachable inside this container).
+      # Stage 18.7.5 / 21.C.2: the outbox relay's broker (required in production). The one relay publishes Auth's audit evidence and,
+      # while AUTH_EVENTS is on (the default here), its domain events, written to the outbox in each change's transaction.
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/auth/health >/dev/null || exit 1']
@@ -145,6 +145,9 @@ services:
       BILLING_SUPPORTED_CURRENCIES: TND
       PAYMENT_SERVICE_URL: http://payment-service:3000
       PAYMENT_SERVICE_TOKEN: ${BILLING_TO_PAYMENT_TOKEN:?copy .env.example to .env}
+      # Stage 21.C.2 (ADR-0052; ADR-0042 A.3, Q5): Core V1 admits NO service caller to Billing. No SERVICE_TOKENS and an empty
+      # BILLING_SERVICE_POLICY: every service-token route is refused, deliberately. Admitting a caller is an explicit D3 decision.
+      BILLING_SERVICE_POLICY: '{"callers":{}}'
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s
@@ -176,7 +179,16 @@ services:
       # Dev-only test gateway adapter (refused when NODE_ENV=production): lets a payment settle locally with no
       # real provider credentials, so the Billing <-> Payment loop can be exercised end to end through Compose.
       PAYMENT_TEST_PROVIDER: 'true'
-      SERVICE_TOKENS: billing-service:${BILLING_TO_PAYMENT_DIGEST:?copy .env.example to .env},auth-service:${AUTH_TO_PAYMENT_DIGEST:?copy .env.example to .env}
+      # Stage 21.C.2 (ADR-0052; ADR-0042 Amendment 3): billing-service is the only Payment caller; the retired auth-service credential is
+      # no longer registered. PAYMENT_SERVICE_POLICY grants billing-service exactly create/read/cancel (deny by default).
+      SERVICE_TOKENS: billing-service:${BILLING_TO_PAYMENT_DIGEST:?copy .env.example to .env}
+      PAYMENT_SERVICE_POLICY: ${PAYMENT_SERVICE_POLICY:?copy .env.example to .env}
+      # Organization verification (ADR-0052 decision 3): unset here, so a create that names an Organization fails closed with
+      # 503 hierarchy_unavailable, exactly as production does until the 21.x cutover. To exercise that path locally, either point
+      # these at an ACTIVE organization-service (URL + Payment's own reference token) or set a non-production fixture (never both).
+      ORGANIZATION_SERVICE_URL: ${PAYMENT_ORGANIZATION_SERVICE_URL:-}
+      ORGANIZATION_REFERENCE_TOKEN: ${PAYMENT_TO_ORGANIZATION_TOKEN:-}
+      ORGANIZATION_REFERENCE_FIXTURE: ${PAYMENT_ORGANIZATION_REFERENCE_FIXTURE:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

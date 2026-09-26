@@ -831,6 +831,11 @@ are unchanged. Removing `@golevelup/nestjs-rabbitmq` from Auth is part of 16.2 i
 - **Re-certification:** Auth unit / E2E, Auth–Organization E2E, and a new real-broker test proving the kit consumer accepts Auth
   events.
 
+> **Update (Stage 21.C.2, ADR-0052 decision 4):** the Auth outbox below is now **built**. Auth writes every domain event to its transactional
+> outbox in the change's transaction; its one kit relay publishes it (at least once, the outbox row id as the event id), and this intake's
+> `(sourceService, sourceEventId)` identity absorbs a re-publication. Payloads and routing keys are unchanged. The text below is the
+> Stage 16 record.
+
 **Auth outbox: deferred (D19).**
 - Without it, an Auth transaction can commit while its event is lost (a broker outage, a crash between the commit and the confirm).
 - For codes, the user asks again (Auth's throttles apply). For notices, one notice is lost.

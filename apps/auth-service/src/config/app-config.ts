@@ -81,15 +81,25 @@ export interface AppConfig {
   /** `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5), same default and bounds as the kit: once shutdown starts, how long running requests may finish. */
   httpDrainTimeoutMs: number;
   /**
-   * Fire-and-forget event publishing (ADR-0018). `AUTH_EVENTS=off` disables it (tests, runs without a broker; the production
-   * deploy sets it off today). When enabled, `rabbitmqUrl` is set: production requires an explicit `RABBITMQ_URL`; only
-   * development and test fall back to a local broker. Stage 16.2: `confirmTimeoutMs` (`RABBITMQ_CONFIRM_TIMEOUT_MS`, default 5000,
-   * 100-60000, the same variable and bounds as Billing and Payment) bounds the kit bus's publisher confirm; set only while enabled.
+   * `AUTH_EVENTS` (Stage 21.C.2, ADR-0052 decision 4, Q4): whether Auth WRITES its domain-event rows into its transactional outbox. `off`
+   * writes none (the production deploy sets it off until Stage 21.x enables it); anything else writes them in each change's transaction.
+   * It never governs the relay: rows already committed are always published, and toggling never duplicates or replays an event. The
+   * former fire-and-forget publisher and its separate broker connection are gone; the one relay below publishes domain events and audit
+   * evidence alike.
    */
-  events: { enabled: boolean; rabbitmqUrl?: string; confirmTimeoutMs?: number };
+  events: { enabled: boolean };
   /**
-   * Stage 18.7.5: the central audit relay (the kit outbox relay publishing `outbox` rows to RabbitMQ). INDEPENDENT of `AUTH_EVENTS`
-   * (which governs only the legacy fire-and-forget events): audit evidence is always written durably and always relayed. Production
+   * Stage 21.C.2 (ADR-0040 decisions 1 and 2, A1.2; ADR-0042 A.3/A.5): where Auth's hierarchy facts come from. `local` (the default, and
+   * the value until the 21.x cutover switches it): Auth's own tables are the authority, as today. `organization-service`: the tables are a
+   * validated, non-authoritative reference cache; an administrative first touch (join code, invitation, platform assignment) places a
+   * missing Company / Platform / Organization by `ensure`, bounded and fail closed. The switch is this configuration, never a code deploy.
+   * `client` is Auth's own full-read credential at Organization Service (also used by the owner bootstrap of a fresh environment).
+   * Login, refresh, logout, `/auth/me`, registration, join and consume NEVER call Organization Service.
+   */
+  hierarchy: { source: 'local' | 'organization-service'; client?: { baseUrl: string; token: string; timeoutMs: number } };
+  /**
+   * Stage 18.7.5: the outbox relay (the kit relay publishing `outbox` rows to RabbitMQ): audit evidence and, since Stage 21.C.2, domain
+   * events. INDEPENDENT of `AUTH_EVENTS`: every committed row is always relayed. Production
    * requires `RABBITMQ_URL` (fail closed: evidence is never silently kept from Audit); elsewhere its absence selects the in-memory bus.
    * The relay connects lazily and retries: a broker outage never affects a request, the rows wait in the outbox.
    */
@@ -172,8 +182,6 @@ function rule(env: NodeJS.ProcessEnv, name: string, limit: number, windowSec: nu
  */
 const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|auth|.+_migrator)$/;
 
-/** Development/test convenience only (a broker on the developer's machine); refused as a silent default in production. */
-const LOCAL_DEV_RABBITMQ_URL = 'amqp://guest:guest@localhost:5672';
 
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -232,23 +240,8 @@ export function loadConfig(
   }
 
   const eventsEnabled = env.AUTH_EVENTS !== 'off';
-  let rabbitmqUrl: string | undefined;
-  let confirmTimeoutMs: number | undefined;
-  if (eventsEnabled) {
-    confirmTimeoutMs = int(env, 'RABBITMQ_CONFIRM_TIMEOUT_MS', 5_000, 100, 60_000);
-    rabbitmqUrl = env.RABBITMQ_URL || undefined;
-    if (rabbitmqUrl === undefined) {
-      // Never connect a production service to a guessed broker with default credentials: fail closed instead.
-      if (nodeEnv === 'production') throw new ConfigError('RABBITMQ_URL is required in production while events are enabled (set AUTH_EVENTS=off to run without a broker)');
-      rabbitmqUrl = LOCAL_DEV_RABBITMQ_URL;
-    } else {
-      let parsed: URL | undefined;
-      try { parsed = new URL(rabbitmqUrl); } catch { /* reported below */ }
-      if (!parsed || !['amqp:', 'amqps:'].includes(parsed.protocol)) throw new ConfigError('RABBITMQ_URL must be a valid amqp:// or amqps:// URL');
-    }
-  }
 
-  // Stage 18.7.5: the audit relay's broker, read regardless of AUTH_EVENTS; the same variables and bounds as the other Core producers.
+  // Stage 18.7.5: the relay's broker, read regardless of AUTH_EVENTS; the same variables and bounds as the other Core producers.
   const auditRabbitmqUrl = env.RABBITMQ_URL || undefined;
   if (auditRabbitmqUrl === undefined && nodeEnv === 'production') {
     throw new ConfigError('RABBITMQ_URL is required in production: the central audit relay publishes Auth\'s audit evidence (independent of AUTH_EVENTS)');
@@ -304,7 +297,8 @@ export function loadConfig(
       queryTimeoutMs,
     },
     httpDrainTimeoutMs: int(env, 'HTTP_DRAIN_TIMEOUT_MS', DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS.min, HTTP_DRAIN_TIMEOUT_BOUNDS.max),
-    events: { enabled: eventsEnabled, rabbitmqUrl, confirmTimeoutMs },
+    events: { enabled: eventsEnabled },
+    hierarchy: loadHierarchy(env, src),
     audit: auditRelay,
     trustProxy: env.TRUST_PROXY === 'true',
     corsOrigins,
@@ -383,3 +377,19 @@ export function loadConfig(
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
+
+/** Stage 21.C.2: `AUTH_HIERARCHY_SOURCE` and Auth's Organization Service credential. Errors never echo a value. */
+function loadHierarchy(env: NodeJS.ProcessEnv, src: SecretSource): AppConfig['hierarchy'] {
+  const source = env.AUTH_HIERARCHY_SOURCE ?? 'local';
+  if (source !== 'local' && source !== 'organization-service') throw new ConfigError('AUTH_HIERARCHY_SOURCE must be "local" or "organization-service"');
+  const url = env.ORGANIZATION_SERVICE_URL || undefined;
+  const token = src.get('ORGANIZATION_SERVICE_TOKEN') || undefined;
+  if ((url === undefined) !== (token === undefined)) throw new ConfigError('ORGANIZATION_SERVICE_URL and ORGANIZATION_SERVICE_TOKEN must be set together');
+  if (source === 'organization-service' && url === undefined) throw new ConfigError('AUTH_HIERARCHY_SOURCE=organization-service needs ORGANIZATION_SERVICE_URL and ORGANIZATION_SERVICE_TOKEN');
+  if (url === undefined || token === undefined) return { source };
+  let parsed: URL | undefined;
+  try { parsed = new URL(url); } catch { /* reported below */ }
+  if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) throw new ConfigError('ORGANIZATION_SERVICE_URL must be a valid http:// or https:// URL');
+  if (token.length < 32) throw new ConfigError('ORGANIZATION_SERVICE_TOKEN must be at least 32 characters (a generated service token)');
+  return { source, client: { baseUrl: url, token, timeoutMs: int(env, 'ORGANIZATION_SERVICE_TIMEOUT_MS', 2000, 100, 10_000) } };
+}

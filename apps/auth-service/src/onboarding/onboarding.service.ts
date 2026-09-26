@@ -7,6 +7,7 @@ import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { generateJoinCode, hashJoinCode, normalizeJoinCode } from '../crypto/join-code.js';
 import { DbService, type Queryable } from '../db/db.service.js';
 import { authError, notFound } from '../errors.js';
+import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -55,6 +56,7 @@ export class OnboardingService {
     @Inject(CentralAudit) private readonly central: CentralAudit,
     @Inject(StepUpService) private readonly stepUp: StepUpService,
     @Inject(PlatformAccessService) private readonly access: PlatformAccessService,
+    @Inject(HierarchyReference) private readonly hierarchy: HierarchyReference,
   ) {}
 
   /** Shared brute-force guard for every endpoint that accepts a join code (resolve AND register). */
@@ -141,6 +143,9 @@ export class OnboardingService {
     stepUpToken: string | undefined, ip: string,
   ) {
     await this.throttle.hit('join_code_manage_actor', actor.userId);
+    // Stage 21.C.2 (ADR-0040 decision 2): an administrative first touch. With Organization Service as the source, a not-yet-cached
+    // Organization is placed by `ensure` (bounded, fail closed) BEFORE the local authority check reads its anchors. Unknown: the usual 404.
+    if (!(await this.hierarchy.firstTouchOrganization(organizationId))) throw notFound();
     return this.db.tx(async (q) => {
       const authority = await this.authorize(q, actor, organizationId);
       if (authority === 'owner') {

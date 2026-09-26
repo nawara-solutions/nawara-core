@@ -9,7 +9,8 @@ import { inject } from 'vitest';
 import { InMemoryEventBus, JsonLogger, requestContextMiddleware, type EventBus as KitEventBus } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
 import { AuthExceptionFilter } from '../../src/errors.js';
-import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../../src/common/ports.js';
+import { auditEventBus } from '../../src/audit/central-audit.js';
+import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../../src/common/ports.js';
 import { APP_CONFIG, loadConfig, type AppConfig } from '../../src/config/app-config.js';
 import { generateJoinCode, hashJoinCode } from '../../src/crypto/join-code.js';
 import { PasswordService } from '../../src/crypto/password.js';
@@ -23,9 +24,14 @@ export class FakeClock implements Clock {
   set(d: Date) { this.t = d; }
 }
 
-export class RecordingBus implements EventBus {
+/**
+ * Stage 21.C.2: records every domain event as the service emits it (inside its transaction), so suites can read a delivered code without a
+ * broker. It replaces the outbox writer, so it writes no row; the outbox path itself is proved by `test/domain-events-outbox.e2e-spec.ts`
+ * and the real-broker suite (`extra.realEvents`).
+ */
+export class RecordingBus implements DomainEvents {
   events: Array<{ key: string; payload: any }> = [];
-  publish(key: string, payload: object) { this.events.push({ key, payload }); }
+  async emit(_q: unknown, key: string, payload: object) { this.events.push({ key, payload }); }
   last(key: string) { return [...this.events].reverse().find((e) => e.key === key)?.payload; }
   all(key: string) { return this.events.filter((e) => e.key === key).map((e) => e.payload); }
 }
@@ -53,14 +59,14 @@ export type TestCtx = Awaited<ReturnType<typeof createTestApp>>;
 
 /** A fully wired app against its own database cloned from the migrated template. */
 /**
- * `extra.realEvents` (Stage 16.2): keep the REAL event wiring (the kit `RabbitMqEventBus` behind `EventsPublisherService`) against the
- * broker at that URL instead of the recording bus; `bus` then records nothing.
+ * `extra.realEvents` (Stage 16.2; Stage 21.C.2): keep the REAL event path (the outbox writer, `AUTH_EVENTS` on) instead of the recording bus;
+ * `bus` then records nothing. With `rabbitmqUrl`, the relay publishes to that broker (otherwise to `extra.auditBus` / the in-memory bus).
  */
 /**
  * `extra.auditBus` (Stage 18.7.5): the bus the central audit relay publishes to; by default an in-memory bus exposed as `ctx.auditBus`
  * (the relay runs for real against the test database's outbox either way).
  */
-export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[]; realEvents?: { rabbitmqUrl: string }; auditBus?: KitEventBus } = {}) {
+export async function createTestApp(overrides: Record<string, string> = {}, extra: { providers?: Provider[]; realEvents?: { rabbitmqUrl?: string }; auditBus?: KitEventBus } = {}) {
   const adminUrl = inject('pgAdminUrl');
   const dbName = `t_${randomUUID().replace(/-/g, '')}`;
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -76,7 +82,7 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
     WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
     BCRYPT_COST: '4', ACCESS_TOKEN_TTL_SEC: '3600', RECOVERY_COOLDOWN_SEC: '3600', WORK_TIMEZONE: 'UTC',
     ...Object.fromEntries(RATE_BUCKETS.map((b) => [`RATE_${b}_LIMIT`, '100000'])),
-    ...(extra.realEvents ? { AUTH_EVENTS: 'on', RABBITMQ_URL: extra.realEvents.rabbitmqUrl } : {}),
+    ...(extra.realEvents ? { AUTH_EVENTS: 'on', ...(extra.realEvents.rabbitmqUrl ? { RABBITMQ_URL: extra.realEvents.rabbitmqUrl } : {}) } : {}),
     ...overrides,
   };
   const cfg: AppConfig = loadConfig(env as NodeJS.ProcessEnv);
@@ -84,11 +90,12 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   const bus = new RecordingBus();
   const logger = new CapturingLogger();
 
-  const auditBus = extra.auditBus ?? new InMemoryEventBus();
+  // Stage 21.C.2: with a real broker, the ONE relay publishes domain events and audit evidence to it (as in production).
+  const auditBus = extra.auditBus ?? (extra.realEvents?.rabbitmqUrl ? auditEventBus(cfg) : new InMemoryEventBus());
   const builder = Test.createTestingModule({ imports: [AppModule.register(cfg, auditBus)], providers: extra.providers ?? [] })
     .overrideProvider(APP_CONFIG).useValue(cfg)
     .overrideProvider(CLOCK).useValue(clock);
-  if (!extra.realEvents) builder.overrideProvider(EVENT_BUS).useValue(bus);
+  if (!extra.realEvents) builder.overrideProvider(DOMAIN_EVENTS).useValue(bus);
   const moduleRef = await builder.setLogger(logger).compile();
   const app = moduleRef.createNestApplication();
   app.useLogger(logger);

@@ -53,6 +53,9 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "DATABASE_URL=$(db_url payment_app payment)"
       echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672"
       echo "AUTH_SERVICE_URL=http://127.0.0.1:9"
+      # Stage 21.C.2 (ADR-0052): Organization verification is required in production; the reference is not contacted at startup.
+      echo "ORGANIZATION_SERVICE_URL=http://127.0.0.1:9"
+      echo "ORGANIZATION_REFERENCE_TOKEN=$(hex 32)"
       ;;
     organization-service)
       echo "DATABASE_URL=$(db_url organization_app organization)"

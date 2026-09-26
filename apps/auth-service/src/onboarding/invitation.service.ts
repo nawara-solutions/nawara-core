@@ -3,12 +3,13 @@ import { AuditService } from '../audit/audit.service.js';
 import { CentralAudit, userActor } from '../audit/central-audit.js';
 import { SessionService } from '../auth/session.service.js';
 import type { ClientInfo } from '../common/client-info.js';
-import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
+import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { generateInvitationCode, hashInvitationCode, hashInviteeContact, normalizeInvitationCode } from '../crypto/join-code.js';
 import { PasswordService, assertPasswordPolicy } from '../crypto/password.js';
 import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.js';
 import { authError, notFound } from '../errors.js';
+import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
 import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
@@ -51,7 +52,7 @@ export class InvitationService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Inject(EVENT_BUS) private readonly bus: EventBus,
+    @Inject(DOMAIN_EVENTS) private readonly events: DomainEvents,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(CentralAudit) private readonly central: CentralAudit,
@@ -60,6 +61,7 @@ export class InvitationService {
     @Inject(UsersService) private readonly users: UsersService,
     @Inject(PasswordService) private readonly passwords: PasswordService,
     @Inject(SessionService) private readonly sessions: SessionService,
+    @Inject(HierarchyReference) private readonly hierarchy: HierarchyReference,
   ) {}
 
   private hash(normalized: string) {
@@ -176,11 +178,12 @@ export class InvitationService {
         action: 'membership.admin_provisioned', actor: userActor({ userId: user.id, kind: user.kind }), organizationId: membership.rows[0].organizationId,
         resource: { type: 'membership', id: membership.rows[0].id }, outcome: 'succeeded', changes: { invitation_id: rows[0].id },
       });
+      // Stage 21.C.2 (ADR-0052 decision 4): the domain events in the SAME transaction (outbox), relayed after the commit.
+      const ts = this.clock.now().toISOString();
+      await this.events.emit(q, 'user.registered', { userId: user.id, role: inv.invitationType, organizationId: inv.organizationId, timestamp: ts });
+      await this.events.emit(q, 'membership.admin_provisioned', { userId: user.id, organizationId: inv.organizationId, invitationType: inv.invitationType, timestamp: ts });
       return { user, tokens: await this.sessions.issue(q, user) };
     });
-    const ts = this.clock.now().toISOString();
-    this.bus.publish('user.registered', { userId: result.user.id, role: inv.invitationType, organizationId: inv.organizationId, timestamp: ts });
-    this.bus.publish('membership.admin_provisioned', { userId: result.user.id, organizationId: inv.organizationId, invitationType: inv.invitationType, timestamp: ts });
     const { sid: _sid, ...tokens } = result.tokens;
     return {
       ...tokens,
@@ -218,6 +221,8 @@ export class InvitationService {
     let bound: string | null = null;
     if (dto.inviteeContact) bound = this.contactHash(dto.inviteeContact.includes('@') ? { email: dto.inviteeContact } : { phone: dto.inviteeContact });
     await this.throttle.hit('invitation_manage_actor', actor.userId);
+    // Stage 21.C.2 (ADR-0040 decision 2): an administrative first touch (see OnboardingService.create).
+    if (!(await this.hierarchy.firstTouchOrganization(organizationId))) throw notFound();
     return this.db.tx(async (q) => {
       const authority = await this.authorize(q, actor, organizationId);
       if (authority === 'owner') {

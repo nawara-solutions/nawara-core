@@ -20,6 +20,16 @@ export { ServiceTokenGuard, CallerService, SERVICE_TOKENS, type ServiceRequest }
 export { ServiceAuthModule } from './service-auth/service-auth.module.js';
 export { HttpAuthClient, type AuthClient, type AuthIdentity, type AuthMembership, type HttpAuthClientOptions } from './service-auth/auth-client.js';
 export { ServiceOrUserGuard, RequestCaller, AUTH_CLIENT, type Caller, type CallerRequest } from './service-auth/service-or-user.guard.js';
+export {
+  parseCallerPolicy, parseJsonStrict, policyList, policyChoice, registeredCallers, operationsPolicy, operationNotPermitted,
+  CallerPolicyMap, ServiceOperationGuard, RequireServiceOperation, RefuseServiceCallers, SERVICE_OPERATION_POLICY, NO_SERVICE_OPERATION,
+  type CallerPolicySpec, type PolicyListOptions, type ServiceOperationPolicy,
+} from './service-auth/caller-policy.js';
+export {
+  HttpOrganizationReferenceClient, MemoizedOrganizationReference, FixtureOrganizationReference, HierarchyUnavailableError,
+  parseOrganizationReferenceFixture, loadOrganizationReferenceConfig, buildOrganizationReference, unavailableOrganizationReference,
+  ORGANIZATION_REFERENCE, MAX_REFERENCE_RESPONSE_BYTES, type OrganizationReferenceConfig, type OrganizationReference, type OrganizationReferenceResolver, type HttpOrganizationReferenceOptions,
+} from './service-auth/organization-reference.js';
 
 export { DbModule } from './db/db.module.js';
 export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, isQueryTimeout, type DbOptions, type Queryable, type IsolationLevel } from './db/db.service.js';

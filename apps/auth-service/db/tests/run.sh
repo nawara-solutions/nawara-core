@@ -171,7 +171,8 @@ echo "PASS: M11c rollback then re-apply round-trips, and the [1..N] rule is rest
 
 echo "== M12: migration 0010 (Stage 18.7.5) adds the audit outbox to a populated 0009 database; the outbox is immutable; rollback guards unpublished evidence =="
 db="$(newdb mig10)"
-for f in "$mig"/[0-9]*.sql; do case "$(basename "$f")" in 0010_*) ;; *) psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f" ;; esac; done
+# M12 deliberately builds a populated 0009 database: exactly 0001-0009 (never "every migration but 0010", which breaks once later ones exist).
+for f in "$mig"/000[1-9]_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara')"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO \"user\"(id,kind,email,\"passwordHash\",role) VALUES ('00000000-0000-0000-0000-0000000000f3','member','m10@x.io','pw','member')"
 before="$(psql -Atq -d "$db" -c "SELECT count(*) FROM \"user\"")"
@@ -188,3 +189,19 @@ if psql -q -v ON_ERROR_STOP=1 -d "$db" -c "UPDATE outbox SET \"publishedAt\" = N
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0010_audit_outbox.down.sql" || fail "M12: rollback must succeed once every event is published"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0010_audit_outbox.sql" || fail "M12: re-apply after rollback"
 echo "PASS: M12b rollback refuses while unpublished evidence exists, succeeds once drained, and re-applies"
+
+echo "== M13: migration 0011 (Stage 21.C.2) adds one partial index to a populated 0010 database; no data changes; rollback drops only that index =="
+db="$(newdb mig11)"
+for f in "$mig"/000[1-9]_*.sql "$mig"/0010_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO outbox(id,name,payload) VALUES ('00000000-0000-4000-8000-000000000b11','admin.operator_code_issued','{\"code\":\"1\"}'), ('00000000-0000-4000-8000-000000000b12','audit.login.succeeded','{\"k\":1}')"
+digest() { psql -Atq -d "$db" -c "SELECT md5(string_agg(id::text || payload::text || coalesce(\"publishedAt\"::text, ''), ',' ORDER BY id)) FROM outbox"; }
+indexes() { psql -Atq -d "$db" -c "SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes WHERE tablename = 'outbox'"; }
+before="$(digest)"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0011_code_event_purge_index.sql" || fail "M13: 0011 must apply on a populated 0010 database"
+[ "$(indexes)" = "outbox_code_event_purge_idx,outbox_pkey,outbox_unpublished_idx" ] || fail "M13: 0011 adds exactly the partial index"
+[ "$(digest)" = "$before" ] || fail "M13: 0011 must not change any outbox row"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0011_code_event_purge_index.down.sql" || fail "M13: rollback of 0011"
+[ "$(indexes)" = "outbox_pkey,outbox_unpublished_idx" ] || fail "M13: rollback drops only the 0011 index"
+[ "$(digest)" = "$before" ] || fail "M13: rollback must not change any outbox row"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0011_code_event_purge_index.sql" || fail "M13: re-apply after rollback"
+echo "PASS: M13 0011 is expand-only: one partial index, no outbox row changed, and rollback returns exactly the 0010 indexes"

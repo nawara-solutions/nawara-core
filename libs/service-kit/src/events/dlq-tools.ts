@@ -54,6 +54,13 @@ export interface ReplayResult {
   replayCount: number;
 }
 
+/**
+ * Stage 21.C.2 (ADR-0052 decision 5): a field whose NAME marks a secret is never shown, even when asked for by name. Some dead-lettered
+ * events legitimately carry a one-time code for delivery (Auth's code events in Notification's queue); an operator inspecting the queue
+ * sees `redacted`, never the value.
+ */
+export const SECRET_FIELD_NAME = /(^|[_-])(code|otp|pin)$|secret|token|password|passphrase|credential|ciphertext|key$/i;
+
 const describe = (queue: string, position: number, msg: GetMessage | ConsumeMessage, fieldNames: string[]): DeadLetterInfo => {
   const h = msg.properties.headers ?? {};
   const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
@@ -63,7 +70,8 @@ const describe = (queue: string, position: number, msg: GetMessage | ConsumeMess
       const body = JSON.parse(msg.content.toString('utf8')) as Record<string, unknown>;
       for (const name of fieldNames) {
         const v = body?.[name];
-        if (typeof v === 'string') fields[name] = v.slice(0, 128);
+        if (v !== undefined && SECRET_FIELD_NAME.test(name)) fields[name] = 'redacted';
+        else if (typeof v === 'string') fields[name] = v.slice(0, 128);
         else if (typeof v === 'number' || typeof v === 'boolean' || v === null) fields[name] = v;
       }
     } catch {

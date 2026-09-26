@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { SessionService } from '../auth/session.service.js';
 import type { ClientInfo } from '../common/client-info.js';
-import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
+import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { hmacHex } from '../crypto/hmac.js';
 import { authError } from '../errors.js';
@@ -32,7 +32,7 @@ export class OperatorCodeService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Inject(EVENT_BUS) private readonly bus: EventBus,
+    @Inject(DOMAIN_EVENTS) private readonly events: DomainEvents,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(UsersService) private readonly users: UsersService,
     @Inject(OperatorAvailabilityService) private readonly availability: OperatorAvailabilityService,
@@ -84,13 +84,13 @@ export class OperatorCodeService {
     }
     const expiresAt = await this.availability.shiftEndOrFallback(op.user.id, now);
     if (expiresAt <= now) return;
-    const code = await this.db.tx(async (q) => {
-      const c = await this.issue(q, op.user.id, 'login', expiresAt);
+    await this.db.tx(async (q) => {
+      const code = await this.issue(q, op.user.id, 'login', expiresAt);
       await this.audit.record({ type: 'operator.code.issued', outcome: 'success', actorId: op.user.id, ip: client.ip, metadata: { purpose: 'login' } }, q);
-      return c;
+      // The raw code leaves this process only toward the notification channel (never logged; stored only as a hash). Stage 21.C.2: its
+      // delivery event commits with the code's hash; the outbox row is short-lived (CodeEventPurge).
+      await this.events.emit(q, 'admin.operator_code_issued', { userId: op.user.id, ...this.contactOf(op.user), code, expiresAt: expiresAt.toISOString(), timestamp: now.toISOString() });
     });
-    // The raw code leaves this process only toward the notification channel (never logged/stored).
-    this.bus.publish('admin.operator_code_issued', { userId: op.user.id, ...this.contactOf(op.user), code, expiresAt: expiresAt.toISOString(), timestamp: now.toISOString() });
   }
 
   /** Issues the confirmation code for a freshly created operator (flat lifetime, ADR-0015). */
@@ -98,7 +98,9 @@ export class OperatorCodeService {
     const now = this.clock.now();
     const expiresAt = new Date(now.getTime() + this.cfg.operator.confirmationTtlSec * 1000);
     const code = await this.issue(q, operator.id, 'confirmation', expiresAt);
-    this.bus.publish('admin.operator_confirmation_code_issued', { userId: operator.id, ...this.contactOf(operator), code, expiresAt: expiresAt.toISOString(), timestamp: now.toISOString() });
+    // Stage 21.C.2: on the caller's transaction `q` (the operator's creation). Before, this was queued BEFORE that transaction committed,
+    // so a rolled-back creation could still send a dead code; now the event exists only if the operator does.
+    await this.events.emit(q, 'admin.operator_confirmation_code_issued', { userId: operator.id, ...this.contactOf(operator), code, expiresAt: expiresAt.toISOString(), timestamp: now.toISOString() });
   }
 
   /**

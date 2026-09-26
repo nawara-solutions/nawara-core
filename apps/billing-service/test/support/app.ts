@@ -1,7 +1,7 @@
 import { Test } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import {
-  EVENT_BUS, InMemoryEventBus, JsonLogger, ReadinessRegistry, configureApp, kitMigrationsDir, type AuthClient, type ServiceTokenEntry,
+  EVENT_BUS, InMemoryEventBus, JsonLogger, ReadinessRegistry, configureApp, kitMigrationsDir, type AuthClient, type OrganizationReferenceResolver, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { AppModule, billingMigrationsDir } from '../../src/app.module.js';
 import { loadBillingConfig, type BillingConfig } from '../../src/config/billing-config.js';
@@ -9,6 +9,7 @@ import { mountDocs } from '../../src/docs/mount-docs.js';
 import { PAYMENT_CLIENT } from '../../src/payment-integration/payment-client.token.js';
 import type { PaymentClient } from '../../src/payment-integration/payment-client.js';
 import { ProbeModule } from './probe.js';
+import { BILLING_OPERATIONS } from '../../src/admission/caller-admission.policy.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -30,6 +31,22 @@ const noopAuthClient: AuthClient = {
  * wired exactly as `main.ts` wires the HTTP baseline (`configureApp`, docs). Only what a test must control is replaced: the Auth
  * client (no network) and the event bus (in memory).
  */
+/** The Platform every Organization resolves to under the default test reference (a test double, never production code). */
+export const TEST_PLATFORM = 'aaaaaaaa-0000-4000-8000-00000000a11f';
+/** Default test reference: any uuid is an Organization of TEST_PLATFORM. Suites that test verification pass their own. */
+export const anyOrganizationReference: OrganizationReferenceResolver = {
+  resolve: async (organizationId) => ({ organizationId: organizationId.toLowerCase(), platformId: TEST_PLATFORM, companyId: 'aaaaaaaa-0000-4000-8000-00000000c0de' }),
+};
+/**
+ * Stage 21.C.2: Core V1 admits NO service caller to Billing. The pre-enforcement suites exercise producers' OBJECT rules, so by default
+ * every TEST caller holds every Billing operation within TEST_PLATFORM (a test fixture, never the approved configuration). The admission
+ * suite passes its own `BILLING_SERVICE_POLICY`.
+ */
+export function allOperationsPolicy(tokens: ServiceTokenEntry[]): string {
+  const callers = [...new Set(tokens.map((t) => t.caller))];
+  return JSON.stringify({ callers: Object.fromEntries(callers.map((c) => [c, { operations: [...BILLING_OPERATIONS], allowedPlatforms: [TEST_PLATFORM] }])) });
+}
+
 export async function createTestApp(opts: {
   databaseUrl: string;
   tokens?: ServiceTokenEntry[];
@@ -38,6 +55,8 @@ export async function createTestApp(opts: {
   paymentClient?: PaymentClient;
   env?: NodeJS.ProcessEnv;
   migrationsDirs?: string[];
+  /** Replaces the Organization reference source (default: `anyOrganizationReference`). */
+  organizationReference?: OrganizationReferenceResolver;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
   const config = loadBillingConfig({
@@ -56,7 +75,7 @@ export async function createTestApp(opts: {
     // A fixture value, not a Nawara business default (none exists — see billing-config.ts): tests that need grace
     // disabled override it with an empty string via `env`.
     SUBSCRIPTION_GRACE_DAYS: '7',
-    ...(opts.tokens?.length ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(',') } : {}),
+    ...(opts.tokens?.length ? { SERVICE_TOKENS: opts.tokens.map((t) => `${t.caller}:${t.digest}`).join(','), BILLING_SERVICE_POLICY: allOperationsPolicy(opts.tokens) } : {}),
     ...opts.env,
   });
   const logger = new JsonLogger(config.serviceName, 'debug', (l) => logs.push(JSON.parse(l)));
@@ -68,6 +87,7 @@ export async function createTestApp(opts: {
         authClient: opts.authClient ?? noopAuthClient,
         bus,
         migrationsDirs: opts.migrationsDirs ?? [kitMigrationsDir, billingMigrationsDir],
+        organizationReference: opts.organizationReference ?? anyOrganizationReference,
       }),
       ProbeModule,
     ],

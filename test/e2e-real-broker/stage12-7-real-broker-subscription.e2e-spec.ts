@@ -8,6 +8,11 @@ import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/serv
 import { describeWithEnv } from './support/env.js';
 import { startFakeAuthServer, type FakeAuthServer } from './support/fake-auth.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+
+/** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
+const refStub = await startReferenceStub();
+afterAll(() => refStub.close());
 
 /**
  * Stage 12.7 — real-broker integration: proves the loop the Stage 4/5 suite (`stage4-real-broker.e2e-spec.ts`)
@@ -123,7 +128,7 @@ describeWithEnv(
         RABBITMQ_URL: proxy.url,
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
         PAYMENT_TEST_PROVIDER: 'true',
-        SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`,
+        SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
       });
       billing = spawnService('billing', BILLING_DIR, {
         NODE_ENV: 'test',
@@ -132,7 +137,7 @@ describeWithEnv(
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
         RABBITMQ_URL: proxy.url,
         BILLING_SUPPORTED_CURRENCIES: 'TND',
-        SERVICE_TOKENS: `test-producer:${producerToken.digest}`,
+        SERVICE_TOKENS: `test-producer:${producerToken.digest}`, ...billingPolicy('test-producer'), ...refStub.env,
         PAYMENT_SERVICE_URL: PAYMENT_URL,
         PAYMENT_SERVICE_TOKEN: billingToPaymentToken.token,
         BILLING_DISPATCH_INTERVAL_MS: '300',
@@ -385,7 +390,7 @@ describeWithEnv(
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
         RABBITMQ_URL: proxy.url,
         BILLING_SUPPORTED_CURRENCIES: 'TND',
-        SERVICE_TOKENS: `test-producer:${producerToken.digest}`,
+        SERVICE_TOKENS: `test-producer:${producerToken.digest}`, ...billingPolicy('test-producer'), ...refStub.env,
         PAYMENT_SERVICE_URL: PAYMENT_URL,
         PAYMENT_SERVICE_TOKEN: billingToPaymentToken.token,
         BILLING_DISPATCH_INTERVAL_MS: '300',

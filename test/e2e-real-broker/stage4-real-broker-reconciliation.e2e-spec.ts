@@ -7,6 +7,11 @@ import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/s
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+
+/** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
+const refStub = await startReferenceStub();
+afterAll(() => refStub.close());
 
 /**
  * Stage 5 hardening — completion pass, item 1(b): proves `PaymentReconciler` repairs a REAL "Payment succeeded (here,
@@ -95,7 +100,7 @@ describeWithEnv(
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
         RABBITMQ_URL: env.TEST_RABBITMQ_URL,
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
-        SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`,
+        SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
       });
       billing = spawnService('billing', BILLING_DIR, {
         NODE_ENV: 'test',
@@ -104,7 +109,7 @@ describeWithEnv(
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
         RABBITMQ_URL: env.TEST_RABBITMQ_URL,
         BILLING_SUPPORTED_CURRENCIES: 'TND',
-        SERVICE_TOKENS: `test-producer:${producerToken.digest}`,
+        SERVICE_TOKENS: `test-producer:${producerToken.digest}`, ...billingPolicy('test-producer'), ...refStub.env,
         PAYMENT_SERVICE_URL: PAYMENT_URL,
         PAYMENT_SERVICE_TOKEN: billingToPaymentToken.token,
         BILLING_DISPATCH_INTERVAL_MS: '300',

@@ -7,6 +7,11 @@ import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/s
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+
+/** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
+const refStub = await startReferenceStub();
+afterAll(() => refStub.close());
 
 /**
  * Stage 5 hardening (production/integration audit, Candidate A §4.1): proves the Stage 4 loop
@@ -115,7 +120,7 @@ describeWithEnv(
         AUTH_SERVICE_URL: 'http://127.0.0.1:9', // never called: both routes this suite drives are ServiceTokenGuard-only
         RABBITMQ_URL: env.TEST_RABBITMQ_URL,
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
-        SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, // the caller name IS the `producer` on every event (EXPECTED_PRODUCER)
+        SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env, // the caller name IS the `producer` on every event (EXPECTED_PRODUCER)
       });
       billing = spawnService('billing', BILLING_DIR, {
         NODE_ENV: 'test',
@@ -124,7 +129,7 @@ describeWithEnv(
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
         RABBITMQ_URL: env.TEST_RABBITMQ_URL,
         BILLING_SUPPORTED_CURRENCIES: 'TND',
-        SERVICE_TOKENS: `test-producer:${producerToken.digest}`,
+        SERVICE_TOKENS: `test-producer:${producerToken.digest}`, ...billingPolicy('test-producer'), ...refStub.env,
         PAYMENT_SERVICE_URL: PAYMENT_URL,
         PAYMENT_SERVICE_TOKEN: billingToPaymentToken.token,
         // Fast dispatch so the test does not need a long wait for the real background job to notice the new row;

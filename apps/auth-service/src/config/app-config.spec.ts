@@ -83,7 +83,7 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
   it('accepts a production configuration that uses the least-privilege runtime role', () => {
     const c = loadConfig(prod());
     expect(c.databaseUrl).toBe('postgres://auth_app:pw@db:5432/auth');
-    expect(c.events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+    expect(c.events).toEqual({ enabled: false });
     expect(c.audit).toEqual({ rabbitmqUrl: 'amqp://mq:5672', confirmTimeoutMs: 5000, heartbeatS: expect.any(Number) });
   });
   it('Stage 18.7.5: production requires RABBITMQ_URL for the central audit relay EVEN with AUTH_EVENTS=off, never echoing a value', () => {
@@ -112,25 +112,26 @@ describe('runtime configuration is validated once and fails closed (Stage 14.3)'
   it.each(['not a url', 'mysql://u:p@h/db', 'http://h/db'])('refuses a malformed or non-PostgreSQL DATABASE_URL: %s', (url) => {
     expect(() => loadConfig({ ...good(), DATABASE_URL: url })).toThrow(ConfigError);
   });
-  it('production with events enabled requires an explicit RABBITMQ_URL: no silent default broker or default credentials', () => {
+  it('Stage 21.C.2: production requires RABBITMQ_URL (the one outbox relay), whatever AUTH_EVENTS says; AUTH_EVENTS only gates writing rows', () => {
     expect(() => loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
-    expect(loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: true, rabbitmqUrl: 'amqps://u:p@broker:5671', confirmTimeoutMs: 5000 });
+    expect(loadConfig(prod({ AUTH_EVENTS: undefined, RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: true });
+    expect(loadConfig(prod({ AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqps://u:p@broker:5671' })).events).toEqual({ enabled: false });
   });
-  it('outside production, events enabled without RABBITMQ_URL keep the local development broker', () => {
-    expect(loadConfig(good()).events).toEqual({ enabled: true, rabbitmqUrl: 'amqp://guest:guest@localhost:5672', confirmTimeoutMs: 5000 });
+  it('Stage 21.C.2: outside production, events are written by default (the relay uses the in-memory bus without a broker)', () => {
+    expect(loadConfig(good()).events).toEqual({ enabled: true });
+    expect(loadConfig({ ...good(), RABBITMQ_URL: undefined }).audit.rabbitmqUrl).toBeUndefined();
   });
-  it('RABBITMQ_CONFIRM_TIMEOUT_MS (Stage 16.2) defaults to 5000 and is bounded (100-60000), like Billing and Payment', () => {
-    expect(loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).events.confirmTimeoutMs).toBe(2000);
+  it('RABBITMQ_CONFIRM_TIMEOUT_MS (Stage 16.2) defaults to 5000 and is bounded (100-60000), like Billing and Payment; it bounds the one relay', () => {
+    expect(loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' }).audit.confirmTimeoutMs).toBe(2000);
     for (const bad of ['0', '99', '60001', 'abc', '1.5']) expect(() => loadConfig({ ...good(), RABBITMQ_CONFIRM_TIMEOUT_MS: bad })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
-    // Stage 18.7.5: the audit relay uses it too, so it is validated even when the legacy events are off.
     expect(() => loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: 'abc' })).toThrow(/RABBITMQ_CONFIRM_TIMEOUT_MS/);
-    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' })).toMatchObject({ events: { confirmTimeoutMs: undefined }, audit: { confirmTimeoutMs: 2000 } });
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_CONFIRM_TIMEOUT_MS: '2000' })).toMatchObject({ events: { enabled: false }, audit: { confirmTimeoutMs: 2000 } });
   });
   it.each(['http://broker:5672', 'broker:5672'])('refuses a RABBITMQ_URL that is not amqp:// or amqps://: %s', (url) => {
     expect(() => loadConfig({ ...good(), RABBITMQ_URL: url })).toThrow(/RABBITMQ_URL must be/);
   });
-  it('AUTH_EVENTS=off disables the legacy events only; RABBITMQ_URL is still validated, for the audit relay (Stage 18.7.5)', () => {
-    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672' }).events).toEqual({ enabled: false, rabbitmqUrl: undefined });
+  it('AUTH_EVENTS=off stops writing domain-event rows only; RABBITMQ_URL is still validated, for the relay (Stage 18.7.5, 21.C.2)', () => {
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672' }).events).toEqual({ enabled: false });
     expect(() => loadConfig({ ...good(), AUTH_EVENTS: 'off', RABBITMQ_URL: 'not a broker url' })).toThrow(/RABBITMQ_URL must be/);
   });
   it('PORT and BASELINE_RATE_LIMIT_PER_MINUTE are validated integers with the previous defaults (3000, 100)', () => {
@@ -190,5 +191,32 @@ describe('HTTP drain deadline, same contract as the service-kit (Stage 15.5, F-A
   });
   it.each(['0', '499', '120001', 'ten'])('refuses HTTP_DRAIN_TIMEOUT_MS=%s', (value) => {
     expect(() => drain({ HTTP_DRAIN_TIMEOUT_MS: value })).toThrow(/HTTP_DRAIN_TIMEOUT_MS/);
+  });
+
+  describe('Stage 21.C.2: AUTH_HIERARCHY_SOURCE and Auth\'s Organization Service credential (ADR-0040 decision 3: a configuration switch)', () => {
+    const cred = { ORGANIZATION_SERVICE_URL: 'http://organization-service:3000', ORGANIZATION_SERVICE_TOKEN: 't'.repeat(43) };
+    it('defaults to the local source with no client (today\'s behavior until the 21.x switch)', () => {
+      expect(loadConfig(good()).hierarchy).toEqual({ source: 'local' });
+    });
+    it('organization-service needs the credential; the credential is a pair; only the two values are accepted', () => {
+      expect(() => loadConfig({ ...good(), AUTH_HIERARCHY_SOURCE: 'organization-service' })).toThrow(/needs ORGANIZATION_SERVICE_URL/);
+      expect(() => loadConfig({ ...good(), ORGANIZATION_SERVICE_URL: cred.ORGANIZATION_SERVICE_URL })).toThrow(/must be set together/);
+      expect(() => loadConfig({ ...good(), AUTH_HIERARCHY_SOURCE: 'auth' })).toThrow(/must be "local" or "organization-service"/);
+      expect(loadConfig({ ...good(), ...cred, AUTH_HIERARCHY_SOURCE: 'organization-service' }).hierarchy).toEqual({
+        source: 'organization-service', client: { baseUrl: cred.ORGANIZATION_SERVICE_URL, token: cred.ORGANIZATION_SERVICE_TOKEN, timeoutMs: 2000 },
+      });
+      // the credential alone (a fresh environment's bootstrap, before the switch)
+      expect(loadConfig({ ...good(), ...cred }).hierarchy.source).toBe('local');
+    });
+    it('a short token or a non-http URL is refused, never echoed', () => {
+      for (const env of [{ ...cred, ORGANIZATION_SERVICE_TOKEN: 'short-s3cret' }, { ...cred, ORGANIZATION_SERVICE_URL: 'ftp://s3cret-host' }]) {
+        try {
+          loadConfig({ ...good(), ...env });
+          throw new Error('no throw');
+        } catch (e) {
+          expect((e as Error).message).not.toMatch(/s3cret/);
+        }
+      }
+    });
   });
 });

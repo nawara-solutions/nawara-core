@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
 import { CentralAudit, userActor } from '../audit/central-audit.js';
-import { CLOCK, EVENT_BUS, type Clock, type EventBus } from '../common/ports.js';
+import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
 import { authError, notFound } from '../errors.js';
@@ -31,7 +31,7 @@ export class MembershipService {
     @Inject(DbService) private readonly db: DbService,
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(CLOCK) private readonly clock: Clock,
-    @Inject(EVENT_BUS) private readonly bus: EventBus,
+    @Inject(DOMAIN_EVENTS) private readonly events: DomainEvents,
     @Inject(ThrottleService) private readonly throttle: ThrottleService,
     @Inject(AuditService) private readonly audit: AuditService,
     @Inject(CentralAudit) private readonly central: CentralAudit,
@@ -98,7 +98,7 @@ export class MembershipService {
   /** pending -> active | rejected, atomically. */
   async decide(actor: OrgActor, organizationId: string, membershipId: string, decision: 'approve' | 'reject', ip: string) {
     await this.throttle.hit('membership_op_actor', actor.userId);
-    const outcome = await this.db.tx(async (q) => {
+    await this.db.tx(async (q) => {
       // Lock the row first: a concurrent decision on the same membership queues behind us and then finds it resolved.
       const { rows } = await q.query(
         `SELECT m.id, m."userId", m."organizationId", m.status, u.email, u.phone, u."contactVerifiedAt"
@@ -135,12 +135,11 @@ export class MembershipService {
         action: decision === 'approve' ? 'membership.approved' : 'membership.rejected', actor: userActor(actor), organizationId: m.organizationId,
         resource: { type: 'membership', id: m.id }, subject: { type: 'user', id: m.userId }, outcome: 'succeeded', changes: { authority },
       } as never);
-      return { userId: m.userId as string, email: m.email as string | null, phone: m.phone as string | null };
-    });
-    // Event after commit; nothing delivers it until notification-service and a broker exist (ADR-0028).
-    this.bus.publish(decision === 'approve' ? 'membership.approved' : 'membership.rejected', {
-      userId: outcome.userId, organizationId, channel: outcome.email ? 'email' : 'phone', destination: outcome.email ?? outcome.phone,
-      timestamp: this.clock.now().toISOString(),
+      // Stage 21.C.2 (ADR-0052 decision 4): the domain event in the SAME transaction (outbox), relayed after the commit.
+      await this.events.emit(q, decision === 'approve' ? 'membership.approved' : 'membership.rejected', {
+        userId: m.userId, organizationId, channel: m.email ? 'email' : 'phone', destination: m.email ?? m.phone,
+        timestamp: this.clock.now().toISOString(),
+      });
     });
     return { id: membershipId, status: decision === 'approve' ? 'active' : 'rejected' };
   }
@@ -155,7 +154,7 @@ export class MembershipService {
    */
   async revoke(actor: OrgActor, organizationId: string, membershipId: string, ip: string) {
     await this.throttle.hit('membership_op_actor', actor.userId);
-    const outcome = await this.db.tx(async (q) => {
+    await this.db.tx(async (q) => {
       const { rows } = await q.query(
         `SELECT m.id, m."userId", m."organizationId", m.status, m."isOrganizationAdmin", u.email, u.phone
            FROM organization_membership m JOIN "user" u ON u.id = m."userId"
@@ -183,11 +182,10 @@ export class MembershipService {
         action: 'membership.revoked', actor: userActor(actor), organizationId: m.organizationId, resource: { type: 'membership', id: m.id },
         subject: { type: 'user', id: m.userId }, outcome: 'succeeded', changes: { authority, was_admin: m.isOrganizationAdmin === true },
       });
-      return { userId: m.userId as string, email: m.email as string | null, phone: m.phone as string | null };
-    });
-    this.bus.publish('membership.revoked', {
-      userId: outcome.userId, organizationId, channel: outcome.email ? 'email' : 'phone', destination: outcome.email ?? outcome.phone,
-      timestamp: this.clock.now().toISOString(),
+      await this.events.emit(q, 'membership.revoked', {
+        userId: m.userId, organizationId, channel: m.email ? 'email' : 'phone', destination: m.email ?? m.phone,
+        timestamp: this.clock.now().toISOString(),
+      });
     });
     return { id: membershipId, status: 'revoked' as const };
   }

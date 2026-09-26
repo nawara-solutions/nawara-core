@@ -10,6 +10,11 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { APPS, deadDepth, resetAuditQueues, sql, startAudit, type LiveAudit } from './support/audit.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
+import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+
+/** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
+const refStub = await startReferenceStub();
+afterAll(() => refStub.close());
 
 /**
  * Stage 18.7.7 closure: ALL FIVE Core producers (built dists) → their own outboxes → their kit relays → ONE real RabbitMQ → ONE live
@@ -57,11 +62,11 @@ describeWithEnv('all Core producers → one audit-service → query (all real)',
 
     await start('payment', 'payment-service', {
       DATABASE_URL: await database('payment', [kitMigrationsDir, `${APPS}payment-service/db/migrations/`]), AUTH_SERVICE_URL: 'http://127.0.0.1:9',
-      SERVICE_TOKENS: `core-caller:${caller.digest}`, PAYMENT_SUPPORTED_CURRENCIES: 'TND',
+      SERVICE_TOKENS: `core-caller:${caller.digest}`, ...paymentPolicy('core-caller'), ...refStub.env, PAYMENT_SUPPORTED_CURRENCIES: 'TND',
     });
     await start('billing', 'billing-service', {
       DATABASE_URL: await database('billing', [kitMigrationsDir, `${APPS}billing-service/db/migrations/`]), AUTH_SERVICE_URL: 'http://127.0.0.1:9',
-      BILLING_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `core-caller:${caller.digest}`, PAYMENT_SERVICE_URL: 'http://127.0.0.1:9', PAYMENT_SERVICE_TOKEN: generateServiceToken().token,
+      BILLING_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `core-caller:${caller.digest}`, ...billingPolicy('core-caller'), ...refStub.env, PAYMENT_SERVICE_URL: 'http://127.0.0.1:9', PAYMENT_SERVICE_TOKEN: generateServiceToken().token,
       BILLING_DISPATCH_INTERVAL_MS: '300000', BILLING_RECONCILE_INTERVAL_MS: '3600000',
     });
     const orgUrl = await database('organization', [kitMigrationsDir, `${APPS}organization-service/db/migrations/`]);

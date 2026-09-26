@@ -1,28 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import amqp, { type Channel, type ChannelModel, type ConsumeMessage } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { RabbitMqEventBus, type EventBus as KitEventBus, type EventEnvelope } from '@nawara/service-kit';
+import { RabbitMqEventBus, type EventEnvelope } from '@nawara/service-kit';
 import { BrokerProxy } from '@nawara/service-kit/testing';
-import { EVENT_BUS } from '../src/common/ports.js';
-import { EventsPublisherService, KIT_EVENT_BUS } from '../src/events/events-publisher.service.js';
+import { DOMAIN_EVENTS } from '../src/common/ports.js';
+import { OutboxDomainEvents } from '../src/events/domain-events.js';
 import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
 
 /**
- * Stage 16.2 (ADR-0046 rule 17, SDD notification-service §14): Auth's REAL event wiring (the kit `RabbitMqEventBus` behind
- * `EventsPublisherService`, driven by real Auth HTTP flows) against a REAL RabbitMQ, consumed by the certified kit consumer:
+ * Stage 16.2, re-certified for Stage 21.C.2 (ADR-0052 decision 4): Auth's REAL event path against a REAL RabbitMQ, consumed by the
+ * certified kit consumer:
  *
- *   Auth request -> EventsPublisherService -> kit RabbitMqEventBus.publish -> nawara.events -> kit consumer (temporary queue)
+ *   Auth request -> transaction (change + outbox row) -> COMMIT -> the one kit relay -> nawara.events -> kit consumer (temporary queue)
  *
- * Proves: the consumer accepts every Auth event as a canonical envelope (no `malformed_envelope`, nothing dead-lettered); messages are
- * persistent (delivery mode 2 as the broker delivers them) and confirmed; payloads arrive exactly as the service published them; ids
- * are unique; a broker that is down, severed or not confirming never fails or stalls the Auth request, stays bounded, and leaks no
- * payload value into a log. A pre-16.2 message (no id, no type) is still dead-lettered: the consumer check the proof relies on is live.
+ * Proves: every Auth event is a canonical envelope (no `malformed_envelope`, nothing dead-lettered); the envelope id is the outbox row's;
+ * messages are persistent and confirmed; payloads arrive exactly as the service wrote them; ids are unique. A broker that is down, severed
+ * or not confirming never fails or stalls an Auth request, AND (new with the outbox) never loses the event: it stays committed and pending,
+ * and is delivered once the broker is back. No payload value reaches a log. A pre-16.2 message (no id, no type) is still dead-lettered.
  *
  * Needs TEST_RABBITMQ_URL (skipped otherwise). Every queue it declares is uniquely named and deleted afterwards.
  */
 const RABBIT = process.env.TEST_RABBITMQ_URL;
 const EXCHANGE = 'nawara.events';
-/** Every event name Auth publishes (the source's `bus.publish(...)` call sites). */
+/** Every event name Auth writes (the source's `events.emit(...)` call sites). */
 const AUTH_EVENTS = [
   'user.registered', 'membership.requested', 'membership.admin_provisioned', 'membership.approved', 'membership.rejected', 'membership.revoked',
   'member.contact_verification_requested', 'admin.operator_code_issued', 'admin.operator_confirmation_code_issued',
@@ -30,8 +30,9 @@ const AUTH_EVENTS = [
 ] as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const uniq = () => randomUUID().slice(0, 8);
+const sortedKeys = (o: object) => Object.keys(o).sort();
 
-describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonical kit envelopes', () => {
+describe.skipIf(!RABBIT)('Auth events on a real RabbitMQ are canonical kit envelopes, relayed from the outbox', () => {
   const run = uniq();
   const queue = `auth-envelope-e2e-${run}`;
   const rawQueue = `auth-envelope-e2e-${run}-raw`;
@@ -41,7 +42,7 @@ describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonic
   let ch: Channel;
   const accepted: EventEnvelope[] = [];
   const raw: ConsumeMessage[] = [];
-  /** Every payload EventsPublisherService was handed, in order, captured from the live service (not re-built by the test). */
+  /** Every payload the service wrote, in order, captured from the live writer (not re-built by the test). */
   const handed: Array<{ name: string; payload: object }> = [];
   let t: TestCtx;
   const logs = () => [...t.logger.lines, ...t.jsonLogs.map((l) => JSON.stringify(l))].join('\n');
@@ -52,15 +53,14 @@ describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonic
   }
   const acceptedOf = (name: string, pred: (p: Record<string, unknown>) => boolean = () => true) => accepted.filter((e) => e.name === name && pred(e.payload));
   async function waitAccepted(name: string, pred?: (p: Record<string, unknown>) => boolean): Promise<EventEnvelope> {
-    await vi.waitFor(() => expect(acceptedOf(name, pred).length).toBeGreaterThan(0), { timeout: 10_000, interval: 25 });
+    await vi.waitFor(() => expect(acceptedOf(name, pred).length).toBeGreaterThan(0), { timeout: 15_000, interval: 25 });
     return acceptedOf(name, pred).at(-1)!;
   }
 
   beforeAll(async () => {
-    // The certified kit consumer, as a future Notification would bind (retries off: a rejection dead-letters at once).
+    // The certified kit consumer, as Notification binds (retries off: a rejection dead-letters at once).
     consumerBus = new RabbitMqEventBus({ url: RABBIT!, retry: { maxRetries: 0 } });
     consumer = await consumerBus.subscribe({ queue, bindings: [...AUTH_EVENTS], handler: async (e) => { accepted.push(e); } });
-    // A raw observer on the same exchange: the AMQP properties exactly as the broker delivers them (delivery mode, content type, headers).
     conn = await amqp.connect(RABBIT!);
     ch = await conn.createChannel();
     await ch.assertQueue(rawQueue, { durable: false, autoDelete: false });
@@ -68,12 +68,12 @@ describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonic
     await ch.consume(rawQueue, (m) => { if (m) { raw.push(m); ch.ack(m); } });
 
     t = await createTestApp({}, { realEvents: { rabbitmqUrl: RABBIT! } });
-    const pub = t.app.get<EventsPublisherService>(EVENT_BUS);
-    expect(pub).toBeInstanceOf(EventsPublisherService); // the real wiring, not the recording bus
-    const original = pub.publish.bind(pub);
-    vi.spyOn(pub, 'publish').mockImplementation((name, payload) => {
+    const writer = t.app.get<OutboxDomainEvents>(DOMAIN_EVENTS);
+    expect(writer).toBeInstanceOf(OutboxDomainEvents); // the real path, not the recording double
+    const original = writer.emit.bind(writer);
+    vi.spyOn(writer, 'emit').mockImplementation(async (q, name, payload) => {
       handed.push({ name, payload: structuredClone(payload) });
-      original(name, payload);
+      await original(q, name, payload);
     });
   });
 
@@ -87,25 +87,21 @@ describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonic
 
   it('real Auth flows (one-time code, security alert, membership decision) reach the kit consumer as canonical, persistent envelopes with the payload unchanged', async () => {
     const w = await t.world();
-    // one-time code: operator login code
     const opEmail = `op${uniq()}@leak-probe.test`;
     await t.operator(w.companyA, opEmail);
     const t0 = Date.now();
     await t.http.post('/auth/admin/login/operator/request-code').set('x-correlation-id', `corr-${run}-1`).send({ email: opEmail }).expect(204);
     expect(Date.now() - t0).toBeLessThan(5_000);
     const code = await waitAccepted('admin.operator_code_issued', (p) => p.destination === opEmail);
-    // security alert: owner login from a new device
     const owner = await t.readyOwner(w.companyA, `own${uniq()}@leak-probe.test`);
     await t.ownerLogin(owner, owner.totpSecret);
     const alert = await waitAccepted('admin.owner_login_from_new_device', (p) => p.destination === owner.email);
-    // membership decision: register through a join code that needs approval, then the owner approves
     const jc = await t.joinCode(w.orgDrive, { audience: 'driver', requiresApproval: true });
     const memberEmail = `m${uniq()}@leak-probe.test`;
     await t.http.post('/auth/register').send({ email: memberEmail, password: 'member password 1', joinCode: jc.code }).expect(201);
     const mid = (await t.db.query(`SELECT m.id FROM organization_membership m JOIN "user" u ON u.id = m."userId" WHERE u.email = $1`, [memberEmail])).rows[0].id;
     await t.http.post(`/auth/organizations/${w.orgDrive}/memberships/${mid}/approve`).set(bearer(owner.tokens)).expect(200);
     const decision = await waitAccepted('membership.approved', (p) => p.destination === memberEmail);
-    // events that are not Notification's (they share the publisher and must not break)
     const registered = await waitAccepted('user.registered', (p) => p.organizationId === w.orgDrive);
     const requested = await waitAccepted('membership.requested', (p) => p.organizationId === w.orgDrive);
 
@@ -116,42 +112,43 @@ describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonic
       expect(e.headers.version).toBe(1);
       expect(Date.parse(e.headers.occurredAt)).not.toBeNaN();
       expect(e.headers.occurredAt.endsWith('Z')).toBe(true);
-      // the payload the consumer received is exactly the one the service handed to its publisher
-      const given = handed.filter((h) => h.name === e.name).map((h) => JSON.stringify(h.payload));
-      expect(given).toContain(JSON.stringify(e.payload));
-      // AMQP level, as the broker delivered it
+      const given = handed.filter((h) => h.name === e.name).map((h) => h.payload);
+      expect(given.some((g) => JSON.stringify(sortedKeys(g).map((k) => [k, (g as Record<string, unknown>)[k]])) === JSON.stringify(sortedKeys(e.payload).map((k) => [k, e.payload[k]])))).toBe(true);
       await vi.waitFor(() => expect(raw.find((r) => r.properties.messageId === e.id)).toBeDefined(), { timeout: 5_000 });
       const msg = raw.find((r) => r.properties.messageId === e.id)!;
-      expect(msg.properties.deliveryMode).toBe(2); // persistent
+      expect(msg.properties.deliveryMode).toBe(2);
       expect(msg.properties.type).toBe(e.name);
       expect(msg.properties.contentType).toBe('application/json');
       expect(msg.fields.routingKey).toBe(e.name);
       expect(msg.properties.headers).toMatchObject({ eventId: e.id, source: 'auth-service', version: 1, occurredAt: e.headers.occurredAt });
       expect(JSON.parse(msg.content.toString('utf8'))).toStrictEqual(e.payload);
     }
-    expect(code.headers.correlationId).toBe(`corr-${run}-1`); // the request's correlation id follows the event
-    // Payload shapes stay the pre-16.2 ones (ADD/SDD), field for field.
-    expect(Object.keys(code.payload)).toEqual(['userId', 'channel', 'destination', 'code', 'expiresAt', 'timestamp']);
+    expect(code.headers.correlationId).toBe(`corr-${run}-1`);
+    // The field sets stay the pre-16.2 ones (ADD/SDD), field for field (jsonb decides the key ORDER; JSON consumers never rely on it).
+    expect(sortedKeys(code.payload)).toEqual(['channel', 'code', 'destination', 'expiresAt', 'timestamp', 'userId']);
     expect(code.payload.code).toMatch(/^\d{6,}$/);
-    expect(Object.keys(alert.payload)).toEqual(['userId', 'channel', 'destination', 'ipAddress', 'timestamp']);
-    expect(Object.keys(decision.payload)).toEqual(['userId', 'organizationId', 'channel', 'destination', 'timestamp']);
-    expect(await deadCount()).toBe(0); // nothing dead-lettered (no malformed_envelope)
+    expect(sortedKeys(alert.payload)).toEqual(['channel', 'destination', 'ipAddress', 'timestamp', 'userId']);
+    expect(sortedKeys(decision.payload)).toEqual(['channel', 'destination', 'organizationId', 'timestamp', 'userId']);
+    expect(await deadCount()).toBe(0);
 
     for (const v of [code.payload.code, code.payload.destination, alert.payload.destination, alert.payload.ipAddress, decision.payload.destination, owner.password]) sensitive.add(String(v));
     const l = logs();
     for (const s of sensitive) expect(l).not.toContain(s);
   });
 
-  it('every Auth event name is accepted by the kit consumer; ids are unique; source and version are stable', async () => {
-    const pub = t.app.get(EVENT_BUS) as EventsPublisherService;
+  it('every Auth event name is accepted by the kit consumer; ids are the outbox row ids, unique; source and version are stable', async () => {
+    const writer = t.app.get<OutboxDomainEvents>(DOMAIN_EVENTS);
     const tag = `all-${run}`;
-    for (const name of AUTH_EVENTS) pub.publish(name, { userId: tag, marker: name });
-    await vi.waitFor(() => expect(accepted.filter((e) => e.payload.userId === tag)).toHaveLength(AUTH_EVENTS.length), { timeout: 10_000, interval: 25 });
+    await t.dbs.tx(async (q) => {
+      for (const name of AUTH_EVENTS) await writer.emit(q, name, { userId: tag, marker: name });
+    });
+    const rowIds = new Set((await t.db.query(`SELECT id FROM outbox WHERE payload->>'userId' = $1`, [tag])).rows.map((r) => r.id));
+    await vi.waitFor(() => expect(accepted.filter((e) => e.payload.userId === tag)).toHaveLength(AUTH_EVENTS.length), { timeout: 15_000, interval: 25 });
     const mine = accepted.filter((e) => e.payload.userId === tag);
     expect(new Set(mine.map((e) => e.name))).toEqual(new Set(AUTH_EVENTS));
-    expect(mine.every((e) => e.payload.marker === e.name)).toBe(true);
+    expect(mine.every((e) => e.payload.marker === e.name && rowIds.has(e.id))).toBe(true);
     const ids = accepted.map((e) => e.id);
-    expect(new Set(ids).size).toBe(ids.length); // unique across everything published in this file so far
+    expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(accepted.map((e) => `${e.headers.source}|${e.headers.version}`))).toEqual(new Set(['auth-service|1']));
     expect(await deadCount()).toBe(0);
   });
@@ -168,91 +165,83 @@ describe.skipIf(!RABBIT)('Stage 16.2: Auth events on a real RabbitMQ are canonic
   });
 });
 
-describe.skipIf(!RABBIT)('Stage 16.2: broker failures never fail or stall an Auth request, stay bounded and log no payload', () => {
+describe.skipIf(!RABBIT)('Stage 21.C.2: a broker failure never fails an Auth request and never loses its event', () => {
   const target = RABBIT ? new URL(RABBIT) : undefined;
+  const run = uniq();
+  const queue = `auth-durable-e2e-${run}`;
   let proxy: BrokerProxy;
   let t: TestCtx;
   let companyId: string;
+  let consumerBus: RabbitMqEventBus;
+  let consumer: { close(): Promise<void> };
   let closed = false;
+  const accepted: EventEnvelope[] = [];
   const sensitive = new Set<string>();
   const logs = () => [...t.logger.lines, ...t.jsonLogs.map((l) => JSON.stringify(l))].join('\n');
 
-  /** Requests an operator code (an event carrying a one-time code and a destination); returns how long the request took. */
-  async function requestCode(): Promise<number> {
+  /** Requests an operator code; returns how long the request took and the committed outbox row. */
+  async function requestCode(): Promise<{ ms: number; rowId: string }> {
     const email = `op${uniq()}@leak-probe.test`;
     await t.operator(companyId, email);
     sensitive.add(email);
     const t0 = Date.now();
     await t.http.post('/auth/admin/login/operator/request-code').send({ email }).expect(204);
-    return Date.now() - t0;
+    const ms = Date.now() - t0;
+    const { rows } = await t.db.query(`SELECT id, payload->>'code' AS code FROM outbox WHERE name = 'admin.operator_code_issued' AND payload->>'destination' = $1`, [email]);
+    expect(rows).toHaveLength(1); // committed with the request, whatever the broker is doing
+    sensitive.add(rows[0].code);
+    return { ms, rowId: rows[0].id };
   }
-  const lines = (needle: string) => t.logger.lines.filter((l) => l.includes(needle));
-  /** Outcome of every kit-bus publish, in order: 'confirmed' or the error name. */
-  const outcomes: string[] = [];
-  async function requestCodeAndSettle(): Promise<{ ms: number; outcome: string }> {
-    const n = outcomes.length;
-    const ms = await requestCode();
-    await vi.waitFor(() => expect(outcomes.length).toBe(n + 1), { timeout: 15_000, interval: 25 });
-    return { ms, outcome: outcomes[n] };
-  }
+  // Generous windows (Stage 21.C.2): the relay's backoff ceiling is 15 s, and under a full parallel e2e run the proxy leg is slower.
+  const deliveredOnce = (id: string) => vi.waitFor(() => expect(accepted.filter((e) => e.id === id)).toHaveLength(1), { timeout: 90_000, interval: 50 });
 
   beforeAll(async () => {
+    consumerBus = new RabbitMqEventBus({ url: RABBIT!, retry: { maxRetries: 0 } });
+    consumer = await consumerBus.subscribe({ queue, bindings: ['admin.operator_code_issued'], handler: async (e) => { accepted.push(e); } });
     proxy = new BrokerProxy({ host: target!.hostname, port: Number(target!.port || 5672) });
     await proxy.start();
     const url = new URL(RABBIT!);
     url.host = `127.0.0.1:${proxy.port}`;
     t = await createTestApp({ RABBITMQ_CONFIRM_TIMEOUT_MS: '500' }, { realEvents: { rabbitmqUrl: url.toString() } });
-    const pub = t.app.get<EventsPublisherService>(EVENT_BUS);
-    const original = pub.publish.bind(pub);
-    vi.spyOn(pub, 'publish').mockImplementation((name, payload) => {
-      for (const k of ['code', 'destination', 'ipAddress']) if ((payload as Record<string, unknown>)[k]) sensitive.add(String((payload as Record<string, unknown>)[k]));
-      original(name, payload);
-    });
-    const kit = t.app.get<KitEventBus>(KIT_EVENT_BUS);
-    const kitPublish = kit.publish.bind(kit);
-    vi.spyOn(kit, 'publish').mockImplementation((e) => kitPublish(e).then(
-      () => { outcomes.push('confirmed'); },
-      (err: unknown) => { outcomes.push(err instanceof Error ? err.name : 'unknown'); throw err; },
-    ));
     companyId = await t.newCompany();
-    expect((await requestCodeAndSettle()).outcome).toBe('confirmed'); // connected and confirmed through the proxy
+    await deliveredOnce((await requestCode()).rowId); // connected and delivered through the proxy
   });
 
   afterAll(async () => {
     proxy?.thaw();
     if (!closed) await t?.close();
     await proxy?.sever();
+    await consumer?.close();
+    await consumerBus?.close();
+    const c = await amqp.connect(RABBIT!);
+    const ch = await c.createChannel();
+    for (const q of [queue, `${queue}.retry`, `${queue}.dead`]) await ch.deleteQueue(q).catch(() => undefined);
+    await c.close().catch(() => undefined);
   });
 
-  it('confirm not received (a stalled broker): the request returns at once; the publish fails after RABBITMQ_CONFIRM_TIMEOUT_MS, logged without payload', async () => {
-    expect(lines('event_publish_failure')).toHaveLength(0);
+  it('confirm not received (a stalled broker): the request returns at once; the row stays pending; once the broker answers it is delivered', async () => {
     proxy.freeze();
-    const t0 = Date.now();
-    const { ms, outcome } = await requestCodeAndSettle();
-    expect(ms).toBeLessThan(2_000); // the request did not wait for the broker
-    expect(outcome).toBe('PublisherConfirmTimeoutError');
-    expect(Date.now() - t0).toBeLessThan(3_000); // bounded by RABBITMQ_CONFIRM_TIMEOUT_MS (500 ms here)
-    expect(lines('rabbitmq_confirm_timeout')).toHaveLength(1);
-    expect(lines('event_publish_failure')).toHaveLength(1);
-    expect(lines('event_publish_failure')[0]).toMatch(/name=admin\.operator_code_issued error=PublisherConfirmTimeoutError/);
+    const { ms, rowId } = await requestCode();
+    expect(ms).toBeLessThan(2_000);
+    await vi.waitFor(async () => {
+      const { rows } = await t.db.query(`SELECT attempts, "publishedAt" FROM outbox WHERE id = $1`, [rowId]);
+      expect(rows[0].attempts).toBeGreaterThan(0);
+      expect(rows[0].publishedAt).toBeNull();
+    }, { timeout: 45_000, interval: 100 });
+    expect(logs()).toMatch(new RegExp(`outbox_publish_failure eventId=${rowId} name=admin\\.operator_code_issued`));
     proxy.thaw();
-  });
+    await deliveredOnce(rowId);
+  }, 180_000);
 
-  it('connection lost, then broker unreachable: the request still returns at once; the failure is logged and bounded; publishing resumes when the broker is back', async () => {
-    await proxy.sever(); // every socket dies and new connections are refused
-    const before = lines('event_publish_failure').length;
-    const t0 = Date.now();
-    const lost = await requestCodeAndSettle();
-    expect(lost.ms).toBeLessThan(2_000);
-    expect(lost.outcome).not.toBe('confirmed');
-    expect(Date.now() - t0).toBeLessThan(7_000); // bounded (connection refused at once; connect timeout 5 s at worst)
-    expect(lines('event_publish_failure')).toHaveLength(before + 1);
-    expect(lines('event_publish_failure').at(-1)).toMatch(/name=admin\.operator_code_issued error=\S+/);
-    // back: the next event is published and confirmed on a fresh connection (no restart of Auth)
+  it('connection lost, then broker unreachable: the request still returns at once; the event is delivered when the broker is back (no restart)', async () => {
+    await proxy.sever();
+    const { ms, rowId } = await requestCode();
+    expect(ms).toBeLessThan(2_000);
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(accepted.some((e) => e.id === rowId)).toBe(false);
     await proxy.start();
-    expect((await requestCodeAndSettle()).outcome).toBe('confirmed');
-    expect(lines('event_publish_failure')).toHaveLength(before + 1);
-  });
+    await deliveredOnce(rowId);
+  }, 180_000);
 
   it('no payload value, broker credential or secret reaches any log line', async () => {
     const url = new URL(RABBIT!);
@@ -260,13 +249,16 @@ describe.skipIf(!RABBIT)('Stage 16.2: broker failures never fail or stall an Aut
     for (const s of sensitive) expect(l).not.toContain(s);
     if (url.password) expect(l).not.toContain(`:${decodeURIComponent(url.password)}@`);
     for (const secret of ['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'JOIN_CODE_PEPPER']) expect(l).not.toContain(t.env[secret]);
-    expect([...sensitive].some((v) => /^\d{6,}$/.test(v))).toBe(true); // the scan did include one-time codes
+    expect([...sensitive].some((v) => /^\d{6,}$/.test(v))).toBe(true);
   });
 
-  it('shutdown with a stalled broker is bounded: the queued events are dropped and the app closes', async () => {
+  it('shutdown with a stalled broker is bounded, and the unpublished event stays committed (a later instance relays it)', async () => {
     proxy.freeze();
-    await requestCode(); // its publish is in flight (unconfirmed) when shutdown starts
+    const { rowId } = await requestCode();
     const t0 = Date.now();
+    const db = t.db;
+    const { rows: before } = await db.query(`SELECT "publishedAt" FROM outbox WHERE id = $1`, [rowId]);
+    expect(before[0].publishedAt).toBeNull();
     await t.close();
     closed = true;
     expect(Date.now() - t0).toBeLessThan(45_000);

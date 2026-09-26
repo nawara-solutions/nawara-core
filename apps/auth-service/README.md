@@ -22,7 +22,19 @@ npm run start:dev -w auth-service
 
 The process **refuses to start** if any secret is missing, weak or duplicated. Secrets come from the
 environment or from files (`NAME_FILE=/run/secrets/name`); see `.env.example` and the key-management
-section of the security review. `AUTH_EVENTS=off` switches off the legacy fire-and-forget events only.
+section of the security review.
+
+**Domain events (Stage 21.C.2, ADR-0052; `src/events/`):** every Auth domain event (codes, security alerts, membership notices,
+registrations) is written to Auth's transactional outbox **in the same transaction as its change** and published by the same kit relay as
+the audit evidence below (at least once; Notification de-duplicates on the event id). The former fire-and-forget publisher is gone.
+`AUTH_EVENTS=off` writes no domain-event row; committed rows are always relayed. The three code-bearing events' rows are deleted once
+published or once the code has expired (`CodeEventPurge`, migration `0011`), and a code is never logged.
+
+**Hierarchy source (Stage 21.C.2, ADR-0040; `src/hierarchy/hierarchy-reference.ts`):** `AUTH_HIERARCHY_SOURCE=local` (the default) keeps
+Auth's tables authoritative, as today. After the 21.x cutover, `organization-service` makes them a validated reference cache: a join code,
+an admin invitation or a platform assignment for an entity Auth has not seen places it by `ensure` from Organization Service (Auth's own
+full-read credential, `ORGANIZATION_SERVICE_URL` / `ORGANIZATION_SERVICE_TOKEN`), bounded and fail closed (`503 hierarchy_unavailable`).
+Login, refresh, `/auth/me`, registration, join and consume never call Organization Service.
 
 **Central audit (Stage 18.7.5 / 18.7.6, ADR-0049; `src/audit/central-audit.ts`):** Auth's 24 catalog actions write their central audit
 intent through `AuditEventWriter` into Auth's own transactional outbox (migration `0010`, the kit's outbox table exactly), in the SAME

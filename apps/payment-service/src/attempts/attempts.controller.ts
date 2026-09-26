@@ -1,6 +1,6 @@
 import { Body, Controller, Headers, HttpCode, Inject, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { RateLimitService, ServiceOrUserGuard, type CallerRequest } from '@nawara/service-kit';
+import { RateLimitService, RefuseServiceCallers, ServiceOperationGuard, ServiceOrUserGuard, type CallerRequest } from '@nawara/service-kit';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { requestContext } from '../events/payment-events.js';
@@ -24,7 +24,9 @@ export class AttemptsController {
   ) {}
 
   @Post()
-  @UseGuards(ServiceOrUserGuard)
+  // Stage 21.C.2 (ADR-0042 AD-2): no service may start or sync an attempt; the payer's (a user's) object rules apply unchanged.
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RefuseServiceCallers()
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Start a payment attempt against a provider (the payer only). Requires Idempotency-Key.' })
   @ApiResponse({ status: 201 })
@@ -57,11 +59,14 @@ export class AttemptsController {
 
   @Post(':attemptId/sync')
   @HttpCode(200)
-  @UseGuards(ServiceOrUserGuard)
+  // Stage 21.C.2 (ADR-0042 AD-2): no service may start or sync an attempt; the payer's (a user's) object rules apply unchanged.
+  @UseGuards(ServiceOrUserGuard, ServiceOperationGuard)
+  @RefuseServiceCallers()
   @ApiBearerAuth()
   @ApiOperation({ summary: "Ask the provider for the attempt's current status and apply it if valid. The client's own claim is never used." })
   @ApiResponse({ status: 200 })
   @ApiResponse({ status: 401 })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted: no service may call this route (payer only)' })
   @ApiResponse({ status: 404 })
   async sync(@Param('paymentId', new ParseUUIDPipe()) paymentId: string, @Param('attemptId', new ParseUUIDPipe()) attemptId: string, @Req() req: CallerRequest) {
     const payment = await this.payments.findById(paymentId);

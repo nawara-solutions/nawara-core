@@ -130,7 +130,7 @@ Closed on `main` at `d385299` (PRs #78–#83). Stage 14 changed no API, event pa
 | `DB_STATEMENT_TIMEOUT_MS` | 30000 | 1000–600000 | same | PostgreSQL cancels a longer statement (57014) |
 | `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 60000 | 1000–3600000 | same | PostgreSQL ends a session idle inside a transaction (25P03) |
 | `DB_QUERY_TIMEOUT_MS` (Stage 15.2) | statement timeout + 5000 | 1000–660000, must exceed `DB_STATEMENT_TIMEOUT_MS` | same | client-side deadline for a query's answer when the server or network goes silent; the connection is destroyed, never reused |
-| `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment, Auth (Stage 16.2, while `AUTH_EVENTS` is on), Notification (16.5) | bound on a publisher confirm; a timeout keeps the outbox row pending (at least once). Auth has no outbox (D19): the event is logged `event_publish_failure` and not retried |
+| `RABBITMQ_CONFIRM_TIMEOUT_MS` | 5000 | 100–60000 | Billing, Payment, Auth (its outbox relay), Notification (16.5) | bound on a publisher confirm; a timeout keeps the outbox row pending (at least once). Since Stage 21.C.2 this includes Auth's domain events |
 | `RABBITMQ_HEARTBEAT_S` (Stage 15.3) | 10 | 5–60 | Billing, Payment, Notification (16.5) | the AMQP heartbeat Core requests: a silent broker is detected, and every channel operation and close ended, within about 3 × this value whatever the broker's own heartbeat setting |
 | `WEBHOOK_RETRY_MAX_ATTEMPTS` (constant) | 10 | – | Payment | stored webhook retried at 10 s × 2ⁿ after receipt, then `failed` / `retries_exhausted` |
 | worker / relay drain (constant) | 5000 ms | – | kit `PollLoop` | bounded wait for an in-flight pass at shutdown; since Stage 15.5 one drain per worker, all started together at shutdown start |
@@ -323,7 +323,7 @@ in the sweep.)* Details: `core-validation.md` sections 13.4 and 13.8.
 | F11 | CI built only the Auth image | fixed, 14.2 (#78) |
 | F12 | No retention for technical tables (`outbox`, `inbox`, rate-limit and throttle rows, idempotency keys, `webhook_event` raw bodies) | measured and classified in Stage 15.7 (`core-validation.md` 13.7: growth per operation, safe-deletion conditions per table); still deferred: the durations need the retention / RPO / RTO decision (section 3). No cleanup is built yet |
 | F13 | Operational failures not identifiable in logs | fixed, 14.7 (#83) |
-| F14 | Auth events have no transactional outbox | deferred by design: Auth publishing stays fire-and-forget; a failure logs `event_publish_failure` and is **not** retried |
+| F14 | Auth events have no transactional outbox | **resolved in code by Stage 21.C.2** (ADR-0052 decision 4): Auth's domain events are written to its transactional outbox in each change's transaction and relayed at least once; code-bearing rows are purged once published or expired. Production still runs `AUTH_EVENTS=off` until Stage 21.x enables it |
 
 **Stage 15** validates these mechanisms under controlled failure and load; its plan, invariants and results are in
 [core-validation.md](./core-validation.md).

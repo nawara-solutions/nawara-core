@@ -59,11 +59,11 @@ describe('loadBillingConfig', () => {
     }
   });
 
-  it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4)', () => {
+  it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4, caller admission since Stage 21.C.2)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
-      'nodeEnv', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
-      'serviceName', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy',
+      'nodeEnv', 'organizationReference', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
+      'serviceName', 'servicePolicy', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy',
     ]);
   });
 
@@ -152,7 +152,60 @@ describe('loadBillingConfig', () => {
 
   it('parses service tokens through the kit (digest only, never a raw token)', () => {
     const { digest } = generateServiceToken();
-    expect(loadBillingConfig({ ...BASE, SERVICE_TOKENS: `test-caller:${digest}` }).serviceTokens).toEqual([{ caller: 'test-caller', digest }]);
+    const policy = JSON.stringify({ callers: { 'test-caller': { operations: ['invoice.read'], allowedPlatforms: [] } } });
+    expect(loadBillingConfig({ ...BASE, SERVICE_TOKENS: `test-caller:${digest}`, BILLING_SERVICE_POLICY: policy }).serviceTokens).toEqual([{ caller: 'test-caller', digest }]);
+  });
+
+  describe('BILLING_SERVICE_POLICY (Stage 21.C.2, ADR-0052; ADR-0042 A.3, Q5: no service caller is admitted in Core V1)', () => {
+    it('the approved V1 configuration: no registered caller and no policy, an explicit empty admission (every service call refused)', () => {
+      const cfg = loadBillingConfig(BASE);
+      expect(cfg.serviceTokens).toEqual([]);
+      expect(cfg.servicePolicy.size).toBe(0);
+      expect(loadBillingConfig({ ...BASE, BILLING_SERVICE_POLICY: '{"callers":{}}' }).servicePolicy.size).toBe(0);
+    });
+
+    it('a registered token without a policy entry refuses to start; so does a policy entry without a token', () => {
+      const { digest } = generateServiceToken();
+      expect(() => loadBillingConfig({ ...BASE, SERVICE_TOKENS: `test-caller:${digest}` })).toThrow(/BILLING_SERVICE_POLICY is required/);
+      expect(() => loadBillingConfig({ ...BASE, BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'product-backend': { operations: ['entitlement.read'], allowedPlatforms: [] } } }) })).toThrow(/no registered service token/);
+    });
+
+    it('operations come from Billing\'s closed vocabulary: no wildcard, no empty list, no duplicate', () => {
+      const { digest } = generateServiceToken();
+      const env = { ...BASE, SERVICE_TOKENS: `test-caller:${digest}` };
+      const policy = (entry: unknown) => JSON.stringify({ callers: { 'test-caller': entry } });
+      expect(() => loadBillingConfig({ ...env, BILLING_SERVICE_POLICY: policy({ operations: ['*'], allowedPlatforms: [] }) })).toThrow(/value other than/);
+      expect(() => loadBillingConfig({ ...env, BILLING_SERVICE_POLICY: policy({ operations: [], allowedPlatforms: [] }) })).toThrow(/non-empty/);
+      expect(() => loadBillingConfig({ ...env, BILLING_SERVICE_POLICY: policy({ operations: ['entitlement.read', 'entitlement.read'], allowedPlatforms: [] }) })).toThrow(/twice/);
+    });
+  });
+
+  describe('Organization reference (Stage 21.C.2, ADR-0052 decision 3)', () => {
+    const PROD = { ...BASE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://broker:5672', DATABASE_URL: 'postgres://billing_app:pw@db:5432/billing' };
+    const fixture = JSON.stringify([{ organizationId: 'bbbbbbbb-0000-4000-8000-000000000001', platformId: 'aaaaaaaa-0000-4000-8000-000000000001', companyId: 'cccccccc-0000-4000-8000-000000000001' }]);
+    const loadsOrRefuses = (env: NodeJS.ProcessEnv): string => {
+      try {
+        loadBillingConfig(env);
+        return 'loaded';
+      } catch (e) {
+        return (e as Error).message;
+      }
+    };
+
+    it('the fixture is impossible to enable in production', () => {
+      expect(loadsOrRefuses({ ...PROD, ORGANIZATION_REFERENCE_FIXTURE: fixture })).toMatch(/refused in production/);
+    });
+
+    it('with no caller admitted (V1), production needs no Organization reference: nothing could ever name an Organization', () => {
+      const r = loadsOrRefuses(PROD);
+      expect(r).not.toMatch(/ORGANIZATION_SERVICE_URL/);
+    });
+
+    it('once a caller is admitted, production requires Billing\'s own Organization reference credential', () => {
+      const { digest } = generateServiceToken();
+      const admitted = { ...PROD, SERVICE_TOKENS: `test-caller:${digest}`, BILLING_SERVICE_POLICY: JSON.stringify({ callers: { 'test-caller': { operations: ['entitlement.read'], allowedPlatforms: [] } } }) };
+      expect(loadsOrRefuses(admitted)).toMatch(/ORGANIZATION_SERVICE_URL and ORGANIZATION_REFERENCE_TOKEN are required in production/);
+    });
   });
 
   it('reads a secret from a mounted file (NAME_FILE) rather than the process environment', () => {

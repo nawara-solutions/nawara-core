@@ -1,6 +1,7 @@
 import { Controller, Get, Param, ParseUUIDPipe, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { ServiceTokenGuard } from '@nawara/service-kit';
+import { CallerService, ServiceTokenGuard, RequireServiceOperation, ServiceOperationGuard } from '@nawara/service-kit';
+import { OrganizationScopeService } from '../admission/organization-scope.service.js';
 import { EffectiveAccessService } from './effective-access.service.js';
 import { representEntitlement } from './entitlement.representation.js';
 
@@ -14,10 +15,11 @@ import { representEntitlement } from './entitlement.representation.js';
 @ApiTags('entitlement')
 @Controller('billing/organizations')
 export class EntitlementController {
-  constructor(private readonly effectiveAccess: EffectiveAccessService) {}
+  constructor(private readonly effectiveAccess: EffectiveAccessService, private readonly organizationScope: OrganizationScopeService) {}
 
   @Get(':organizationId/entitlement')
-  @UseGuards(ServiceTokenGuard)
+  @UseGuards(ServiceTokenGuard, ServiceOperationGuard)
+  @RequireServiceOperation('entitlement.read')
   @ApiBearerAuth()
   @ApiOperation({
     summary:
@@ -27,7 +29,12 @@ export class EntitlementController {
   })
   @ApiResponse({ status: 200, description: '{ valid: boolean, expiresAt: string | null } — the ONLY shape; never the underlying Subscription.' })
   @ApiResponse({ status: 401 })
-  async get(@Param('organizationId', new ParseUUIDPipe()) organizationId: string) {
+  @ApiResponse({ status: 403, description: 'operation_not_permitted / organization_not_permitted (unknown or outside the caller\'s Platform scope: one answer)' })
+  @ApiResponse({ status: 503, description: 'hierarchy_unavailable: the organization\'s Platform could not be verified. Treat as UNKNOWN, never as entitled' })
+  async get(@CallerService() caller: string, @Param('organizationId', new ParseUUIDPipe()) organizationId: string) {
+    // Stage 21.C.2 (ADR-0052 decision 3, Q5): the Organization is a caller-supplied path value, not a record the caller owns, so its
+    // Platform must be resolved and inside the caller's scope before any commercial state is disclosed (fails closed).
+    await this.organizationScope.assertInScope(caller, organizationId);
     const entitlement = await this.effectiveAccess.getEffectiveAccess(organizationId, new Date());
     return representEntitlement(entitlement);
   }

@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import amqp, { type ChannelModel } from 'amqplib';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
+import { formatDeadLetter } from '../src/events/dlq-tools.js';
 import { PermanentEventFailure, RabbitMqEventBus, inspectDeadLetters, replayDeadLetter, type EventEnvelope } from '../src/index.js';
 import { requireDeadQueue } from '../src/events/dlq-tools.js';
 import { describeWithEnv } from './support/env.js';
@@ -10,7 +11,7 @@ const CORRELATION = 'corr-m07-abcdef';
 const SECRET = 'S3cretCardNumber-4111';
 const envelope = (name = 'payment.cancelled'): EventEnvelope => {
   const id = randomUUID();
-  return { id, name, payload: { paymentRequestId: randomUUID(), cardNote: SECRET }, headers: { eventId: id, occurredAt: new Date().toISOString(), correlationId: CORRELATION, source: 'payment-service', version: 1 } };
+  return { id, name, payload: { paymentRequestId: randomUUID(), cardNote: SECRET, code: '482913' }, headers: { eventId: id, occurredAt: new Date().toISOString(), correlationId: CORRELATION, source: 'payment-service', version: 1 } };
 };
 const waitFor = async (cond: () => boolean | Promise<boolean>, ms = 10_000) => {
   const end = Date.now() + ms;
@@ -118,6 +119,12 @@ describeWithEnv('RabbitMQ retry, dead-letter annotations and replay (real broker
     expect(messages[0]).toMatchObject({ eventId: ev.id, eventName: ev.name, correlationId: CORRELATION, failure: 'retries_exhausted', failureError: 'TypeError', retryCount: 2, replayCount: 0 });
     expect(messages[0]!.failedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
     expect(messages[0]!.fields).toEqual({ paymentRequestId: ev.payload.paymentRequestId });
+    // Stage 21.C.2 (ADR-0052 decision 5): a field whose name marks a secret is shown as `redacted`, even when asked for by name.
+    const { messages: asked } = await inspectDeadLetters(conn, `${queue}.dead`, { fields: ['paymentRequestId', 'cardNote', 'code', 'secretKey', 'accessToken'] });
+    expect(asked[0]!.fields.paymentRequestId).toBe(ev.payload.paymentRequestId);
+    expect(asked[0]!.fields.cardNote).toBe(SECRET); // not secret-named: shown as before (fields are opt-in, by name)
+    expect(asked[0]!.fields.code).toBe('redacted');
+    expect(formatDeadLetter(asked[0]!)).not.toContain('482913');
 
     expect(notices.filter((n) => n.startsWith('event_retry_scheduled'))).toHaveLength(2);
     expect(notices.some((n) => n.startsWith('event_retry_exhausted') && n.includes(`event=${ev.id}`) && n.includes(`correlationId=${CORRELATION}`))).toBe(true);

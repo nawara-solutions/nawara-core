@@ -6,6 +6,7 @@ import {
 } from '@nawara/service-kit';
 import { AttemptsModule } from './attempts/attempts.module.js';
 import { AuthClientModule } from './auth/auth-client.module.js';
+import { CallerAdmissionModule } from './authorization/caller-admission.module.js';
 import { loadPaymentConfig } from './config/payment-config.js';
 import { PaymentConfigModule } from './config/payment-config.module.js';
 import { createEventBus } from './events/event-bus.js';
@@ -32,6 +33,7 @@ const config = loadPaymentConfig();
     ServiceAuthModule.forRoot(config.serviceTokens),
     AuthClientModule.forRoot({ baseUrl: config.authServiceUrl, timeoutMs: config.authTimeoutMs }),
     PaymentConfigModule.forRoot(config),
+    CallerAdmissionModule.forRoot(config), // Stage 21.C.2: operation policy + Organization reference (ADR-0052)
     EventsModule.forRoot({
       source: PAYMENT_SERVICE_NAME, // the same identity the audit writer is bound to
       bus: createEventBus(config),

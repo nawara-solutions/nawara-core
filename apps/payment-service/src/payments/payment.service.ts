@@ -9,6 +9,7 @@ import type { PaymentConfig } from '../config/payment-config.js';
 import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-machine.js';
 import type { PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
+import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
 
 export interface CreatePaymentResult {
   payment: PaymentRow;
@@ -35,6 +36,7 @@ export class PaymentService {
     @Inject(PAYMENT_CONFIG) private readonly config: PaymentConfig,
     @Inject(IdempotencyService) private readonly idempotency: IdempotencyService,
     @Inject(PaymentAudit) private readonly audit: PaymentAudit,
+    @Inject(OrganizationScopeService) private readonly organizationScope: OrganizationScopeService,
   ) {}
 
   /** Creates a payment, or replays an identical one (SDD sections 3.1–3.3, 6). */
@@ -61,6 +63,18 @@ export class PaymentService {
     const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
     if (expiresAt && Number.isNaN(expiresAt.getTime())) throw paymentError(400, 'invalid_payment_request', 'expiresAt is not a valid timestamp.');
     const ctx = requestContext({ type: 'service', id: producer });
+
+    if (organizationId !== null) {
+      // Stage 21.C.2 (ADR-0052 decision 3, ADR-0042 decision 5): a replay returns the record already created (and verified then) without
+      // asking Organization Service; anything new is verified BEFORE the transaction, so a refusal or an unavailable authority writes
+      // nothing. A concurrent identical create that wins the race is still handled by the unique-violation path below.
+      const { rows: prior } = await this.db.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
+      if (prior[0]) {
+        if (isIdenticalSnapshot(prior[0], producer, dto, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
+        throw paymentError(409, 'payment_request_conflict', 'A payment already exists for this paymentRequestId with a different snapshot.');
+      }
+      await this.organizationScope.assertInScope(producer, organizationId);
+    }
 
     return this.db.tx(async (q) => {
       // A savepoint, not a bare try/catch: once a statement in a transaction errors, PostgreSQL aborts the whole
