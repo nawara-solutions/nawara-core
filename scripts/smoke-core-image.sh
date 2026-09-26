@@ -97,6 +97,8 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672" # Stage 20.3: the audit relay's broker (production requires it)
       echo "SERVICE_TOKENS=smoke-ci:$(hex 32)" # proves the service-token and per-product policy configuration are parsed in production
       echo 'RELEASE_SERVICE_POLICY={"callers":{"smoke-ci":{"products":{"smoke":["release.register","release.publish"]}}}}'
+      echo "AUTH_SERVICE_URL=http://127.0.0.1:9" # Stage 20.4: owner administration configured (Auth is never contacted at startup)
+      echo "RELEASE_OPERATING_COMPANY_ID=00000000-0000-4000-8000-000000000001"
       ;;
     *)
       echo "unknown service: $service" >&2

@@ -4,10 +4,10 @@ Release management for Nawara Core ([ADR-0051](../../docs/adr/0051-release-manag
 and client compatibility, never delivery**. It is not CI/CD, a deployment engine, an artifact store or CDN, a signing service,
 authorization, entitlement or analytics. No product request path calls it synchronously.
 
-**State: Stage 20.3, CI automation.** Built on the Stage 20.2 foundation (own database, the domain schema and its invariants, persistence
-primitives):
-- CI registers and publishes releases, with a service token and a per-product policy;
-- owner withdrawal and minimum-version administration are Stage 20.4;
+**State: Stage 20.4.** Built on the Stage 20.2 foundation (own database, the domain schema and its invariants, persistence primitives):
+- CI registers and publishes releases, with a service token and a per-product policy (20.3);
+- the owner of the configured operating Company withdraws releases and changes minimum versions, with their own Auth bearer and a factor
+  step-up (20.4);
 - the public compatibility read is 20.5.
 
 ## Automation API (Stage 20.3)
@@ -43,6 +43,25 @@ The kit relay publishes the intent to RabbitMQ after commit. A broker or audit-s
 waits in the outbox.
 
 OpenAPI is at `/release/docs`, behind basic auth, and is mounted only when `SWAGGER_PASSWORD` is set.
+
+## Owner administration (Stage 20.4)
+
+Human only (ADR-0051 decision 8, ADR-0050):
+- the caller's **own** Auth bearer, verified live (`GET /auth/grants`), must be the **owner of `RELEASE_OPERATING_COMPANY_ID`**;
+- each operation needs a **factor step-up**. Its purpose is `release.withdraw` or `compatibility_policy.change`: TOTP or passkey, never
+  the secret key, obtained from `POST /auth/admin/step-up`. It is sent as `x-step-up-token`, and release-service verifies and consumes it
+  through Auth (`POST /auth/step-up/verify`).
+- Operators, members, another Company's owner and CI service tokens are refused. A service token is never forwarded to Auth.
+
+| Operation | Route | Result |
+|---|---|---|
+| Withdraw | `POST /release/admin/products/{product}/components/{component}/releases/{version}/withdraw` | `published → withdrawn`, `release.withdrawn` recorded. Already withdrawn: 200 `changed:false`. Refusals: 409 `invalid_transition` (registered, never published); 409 `would_break_minimum` (lower the minimum first) |
+| Change the minimum | `POST /release/admin/products/{product}/components/{component}/compatibility-policy` `{minimumVersion, expectedPolicyVersion}` | the next policy version is appended, `compatibility_policy.changed` recorded. The minimum must be a published, not withdrawn, stable release of the component. The same minimum: 200 `changed:false`. Refusals: 409 `policy_conflict` / `invalid_minimum` / `policy_not_applicable` (backend) |
+
+- **Preconditions** are checked before the step-up is consumed, so a refusal never spends it.
+- **A no-op** (already withdrawn; the same minimum) still requires and spends a valid step-up, as in Stage 19.2.
+- **Consumption happens in Auth**, so a mutation that fails afterwards needs a new step-up.
+- **Auth failures** fail closed: 503 `auth_timeout` / `auth_unavailable`. One `AUTH_TIMEOUT_MS` budget covers every Auth call of the request.
 
 ## Domain
 
@@ -87,8 +106,10 @@ bad input early with a bounded code.
 | `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | kit defaults | |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, – | OpenAPI behind basic auth; the password must have 16+ characters |
 
-Nothing else is configured yet. Auth verification and the owner's step-up (20.4), and the public-read cache and rate limit (20.5), arrive
-with the stages that use them.
+| `AUTH_SERVICE_URL`, `RELEASE_OPERATING_COMPANY_ID` | – | Stage 20.4, **both or neither** (the owner routes exist only with both). The URL is a plain `http(s)` origin: no credentials, query or fragment. The Company is a UUID |
+| `AUTH_TIMEOUT_MS` | 3000 (100–30000) | one Auth budget per owner request |
+
+Nothing else is configured yet. The public-read cache and rate limit arrive in 20.5.
 
 ## Run and test
 

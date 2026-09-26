@@ -43,6 +43,11 @@ export const STEP_UP_METHODS = {
   // Member account suspension / restoration (Stage 19.2, ADR-0050 decision 5): a security intervention on a whole identity, factor only.
   'account.suspend': ['totp', 'webauthn'],
   'account.restore': ['totp', 'webauthn'],
+  // Release Management administration (Stage 20.4, ADR-0051 decision 8): the verified owner of the operating Company withdraws a release or
+  // changes a component's minimum supported version. Each has its own purpose (a withdrawal proof cannot change a policy); factor only.
+  // Verified and consumed by release-service through POST /auth/step-up/verify.
+  'release.withdraw': ['totp', 'webauthn'],
+  'compatibility_policy.change': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 

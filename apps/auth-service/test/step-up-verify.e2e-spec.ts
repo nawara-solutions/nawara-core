@@ -58,4 +58,19 @@ describe('POST /auth/step-up/verify', () => {
     const good = await t.stepUpToken(owner.tokens, 'organization.create', owner.totpSecret);
     await verify(owner.tokens, 'not_a_real_purpose', good).expect(403);
   });
+
+  it('Stage 20.4: the two Release Management purposes are factor-only and not interchangeable', async () => {
+    const owner = await t.readyOwner(await t.newCompany(), `o${uniq()}@a.test`);
+    for (const purpose of ['release.withdraw', 'compatibility_policy.change']) {
+      const sk = await t.stepUp(owner.tokens, purpose, owner.totpSecret, { method: 'secret_key', secretKey: 'x'.repeat(43), code: undefined });
+      if (sk.status !== 400 || sk.body.code !== 'step_up_unsupported') throw new Error(`${purpose}: the bare secret key must be refused (${sk.status})`);
+    }
+    const withdraw = await t.stepUpToken(owner.tokens, 'release.withdraw', owner.totpSecret);
+    await verify(owner.tokens, 'compatibility_policy.change', withdraw).expect(403); // a withdrawal proof never changes a policy
+    await verify(owner.tokens, 'release.withdraw', withdraw).expect(204);
+    await verify(owner.tokens, 'release.withdraw', withdraw).expect(403); // single use
+    const change = await t.stepUpToken(owner.tokens, 'compatibility_policy.change', owner.totpSecret);
+    await verify(owner.tokens, 'release.withdraw', change).expect(403);
+    await verify(owner.tokens, 'compatibility_policy.change', change).expect(204);
+  });
 });

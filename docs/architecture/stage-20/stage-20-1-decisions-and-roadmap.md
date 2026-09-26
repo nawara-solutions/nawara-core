@@ -262,8 +262,9 @@ identifiers, and actor ids in audit evidence.
 > |---|---|
 > | 20.1 Architecture & Decisions | ✅ PASSED, merged |
 > | 20.2 Foundation & Domain | ✅ PASSED, merged: [Stage 20.2 record](./stage-20-2-service-foundation-and-domain.md) |
-> | 20.3 Registration & Lifecycle | ✅ PASSED on its branch, awaiting review: [Stage 20.3 record](./stage-20-3-registration-and-lifecycle.md) |
-> | 20.4 – 20.7 | ⏳ |
+> | 20.3 Registration & Lifecycle | ✅ PASSED, merged: [Stage 20.3 record](./stage-20-3-registration-and-lifecycle.md) |
+> | 20.4 Compatibility / Admin | ✅ PASSED on its branch, awaiting review: [Stage 20.4 record](./stage-20-4-compatibility-and-owner-administration.md) |
+> | 20.5 – 20.7 | ⏳ |
 
 The provisional sequence was challenged. Authority travels with each capability instead of sitting in one late "security" stage, and one
 combined hardening stage precedes certification.

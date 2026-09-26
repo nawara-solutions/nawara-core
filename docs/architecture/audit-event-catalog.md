@@ -93,16 +93,18 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 |---|---|---|---|---|---|---|---|---|
 | `platform_query.executed` | security | user (owner); service | none (platform) | platform_query | — | succeeded | `target`: all \| organization \| platform<br>`window_days`: integer 1–31<br>`result_count`: integer 0–100<br>`page`: first \| next<br>`filtered`: boolean<br>`organization_id`?: uuid | Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), or by a Company owner (one organization of their Company). Who, when, which organization, how broadly. |
 
-## release-service (2)
+## release-service (4)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
 | `release.registered` | administrative | service | none (platform) | release | — | succeeded | `product_id`: uuid<br>`component_id`: uuid<br>`kind`: backend \| web \| desktop \| mobile_ios \| mobile_android | Automation declares that a build of a product component exists (a new, immutable release; not yet offered to clients). |
 | `release.published` | administrative | service | none (platform) | release | — | succeeded | `product_id`: uuid<br>`component_id`: uuid<br>`kind`: backend \| web \| desktop \| mobile_ios \| mobile_android | Automation publishes a registered release: it may become the latest version that clients are offered or required to use. |
+| `release.withdrawn` | security | user (owner) | none (platform) | release | — | succeeded | `product_id`: uuid<br>`component_id`: uuid<br>`kind`: backend \| web \| desktop \| mobile_ios \| mobile_android | A published release is withdrawn: it stops being offered, and clients running it are required to update. |
+| `compatibility_policy.changed` | security | user (owner) | none (platform) | component | — | succeeded | `product_id`: uuid<br>`kind`: web \| desktop \| mobile_ios \| mobile_android<br>`policy_version`: {from, to} of integer 0–2147483647<br>`minimum_release_id`: uuid<br>`previous_minimum_release_id`?: uuid | A client component's minimum supported version changes: clients below it are required to update. |
 
 ## notification-service (0)
 
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 52 actions.**
+**Total: 54 actions.**

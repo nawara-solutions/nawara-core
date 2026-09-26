@@ -378,6 +378,10 @@ services:
       RELEASE_SERVICE_POLICY: ${RELEASE_SERVICE_POLICY:-}
       # Stage 20.3: the audit relay's broker (publishes only; consumes nothing).
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      # Stage 20.4: owner administration, only when BOTH are set (withdrawal and minimum-version changes by the verified owner of this
+      # Company, own bearer + factor step-up through Auth). Empty = the owner routes do not exist.
+      AUTH_SERVICE_URL: ${RELEASE_AUTH_SERVICE_URL:-}
+      RELEASE_OPERATING_COMPANY_ID: ${RELEASE_OPERATING_COMPANY_ID:-}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

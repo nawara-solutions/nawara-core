@@ -24,7 +24,8 @@ describe('release-service configuration', () => {
     expect(c.rabbitmqUrl).toBe(BROKER);
     expect(c.docs).toEqual({ username: 'docs', password: undefined });
     const keys = Object.keys(c);
-    for (const absent of ['authServiceUrl', 'ownerAccess', 'operatingCompanyId', 'cacheMaxAge', 'channels', 'signingKey', 'featureFlags', 'maintenance', 'billingServiceUrl']) {
+    expect(c.ownerAdmin).toBeUndefined(); // Stage 20.4: no owner routes unless configured
+    for (const absent of ['cacheMaxAge', 'channels', 'signingKey', 'featureFlags', 'maintenance', 'billingServiceUrl']) {
       expect(keys).not.toContain(absent);
     }
   });
@@ -66,5 +67,25 @@ describe('release-service configuration', () => {
     for (const [name, value] of [['DB_POOL_MAX', '0'], ['DB_POOL_MAX', '101'], ['DB_STATEMENT_TIMEOUT_MS', '10']]) {
       expect(() => loadReleaseConfig(env({ [name]: value })), `${name}=${value}`).toThrow(ConfigError);
     }
+  });
+
+  it('Stage 20.4 owner administration: Auth URL and operating Company together or neither; the URL is a plain origin; the Company a UUID', () => {
+    const company = 'C0FFEE00-0000-4000-8000-000000000001';
+    const c = loadReleaseConfig(env({ AUTH_SERVICE_URL: 'http://auth:3000', RELEASE_OPERATING_COMPANY_ID: company }));
+    expect(c.ownerAdmin).toEqual({ authServiceUrl: 'http://auth:3000', authTimeoutMs: 3000, operatingCompanyId: company.toLowerCase() });
+    expect(() => loadReleaseConfig(env({ AUTH_SERVICE_URL: 'http://auth:3000' }))).toThrow(/together/);
+    expect(() => loadReleaseConfig(env({ RELEASE_OPERATING_COMPANY_ID: company }))).toThrow(/together/);
+    expect(() => loadReleaseConfig(env({ AUTH_SERVICE_URL: 'http://auth:3000', RELEASE_OPERATING_COMPANY_ID: 'acme' }))).toThrow(/UUID/);
+    for (const bad of ['http://user:pw-not-real@auth:3000', 'http://auth:3000/?x=1', 'http://auth:3000/#f', 'ftp://auth', 'not a url']) {
+      let err: unknown;
+      try {
+        loadReleaseConfig(env({ AUTH_SERVICE_URL: bad, RELEASE_OPERATING_COMPANY_ID: company }));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, bad).toBeInstanceOf(ConfigError);
+      expect(String((err as Error).message)).not.toContain('pw-not-real');
+    }
+    expect(() => loadReleaseConfig(env({ AUTH_SERVICE_URL: 'http://auth:3000', RELEASE_OPERATING_COMPANY_ID: company, AUTH_TIMEOUT_MS: '50' }))).toThrow(ConfigError);
   });
 });

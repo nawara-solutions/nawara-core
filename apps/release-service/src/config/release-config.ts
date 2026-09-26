@@ -13,8 +13,10 @@ export const SERVICE_NAME = 'release-service';
  * - Stage 20.3: the accepted service callers (`SERVICE_TOKENS`, ADR-0033) and their per-product policy (`RELEASE_SERVICE_POLICY`,
  *   ADR-0042), the broker the audit relay publishes to, and the OpenAPI documentation (behind basic auth).
  *
- * Deliberately absent until the stage that uses it: Auth verification and the owner's step-up (20.4), the public compatibility read and
- * its rate limit / cache (20.5). Never: channels, artifacts, signing keys, stores, CDNs, feature flags, maintenance mode (ADR-0051 §12).
+ * - Stage 20.4: owner administration (`ownerAdmin`): Auth's address and time budget, and the configured operating Company whose verified
+ *   owner may withdraw releases and change minimum versions (ADR-0051 decision 8).
+ *
+ * Deliberately absent until the stage that uses it: the public compatibility read and its rate limit / cache (20.5). Never: channels, artifacts, signing keys, stores, CDNs, feature flags, maintenance mode (ADR-0051 §12).
  */
 export interface ReleaseConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `release_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -32,6 +34,12 @@ export interface ReleaseConfig extends BaseConfig {
   rabbitmqUrl?: string;
   rabbitmqConfirmTimeoutMs: number;
   rabbitmqHeartbeatS: number;
+  /**
+   * Stage 20.4 (ADR-0051 decision 8, ADR-0050): the human administration routes exist only when ALL of `AUTH_SERVICE_URL`,
+   * `RELEASE_OPERATING_COMPANY_ID` are set (a partial configuration refuses to boot). `AUTH_TIMEOUT_MS` (default 3000, 100–30000) is ONE
+   * budget shared by every Auth call of a request (owner verification, then the step-up), so a slow Auth fails the request closed.
+   */
+  ownerAdmin?: { authServiceUrl: string; authTimeoutMs: number; operatingCompanyId: string };
 }
 
 /** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
@@ -64,5 +72,34 @@ export function loadReleaseConfig(env: NodeJS.ProcessEnv = process.env): Release
     rabbitmqUrl,
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
+    ...ownerAdmin(reader),
   };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Stage 20.4: both settings or neither. Without them the owner routes are not mounted (nobody can withdraw or change a policy). */
+function ownerAdmin(reader: EnvReader): Pick<ReleaseConfig, 'ownerAdmin'> {
+  const hasUrl = reader.get('AUTH_SERVICE_URL') !== undefined;
+  const hasCompany = reader.get('RELEASE_OPERATING_COMPANY_ID') !== undefined;
+  if (!hasUrl && !hasCompany) return {};
+  if (!hasUrl || !hasCompany) throw new ConfigError('AUTH_SERVICE_URL and RELEASE_OPERATING_COMPANY_ID are required together (owner administration), or neither');
+  const company = (reader.get('RELEASE_OPERATING_COMPANY_ID') ?? '').toLowerCase();
+  if (!UUID.test(company)) throw new ConfigError('RELEASE_OPERATING_COMPANY_ID must be a Company UUID');
+  return {
+    ownerAdmin: { authServiceUrl: authServiceUrl(reader), authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3_000, min: 100, max: 30_000 }), operatingCompanyId: company },
+  };
+}
+
+/**
+ * The destination of the owner's bearer (the Stage 19.4 rule): an `http:` / `https:` origin, optionally with a base path, and nothing else.
+ * Embedded credentials, a query or a fragment are refused at startup (they would change what, or where, the bearer is sent). Never echoed.
+ */
+function authServiceUrl(reader: EnvReader): string {
+  const v = reader.url('AUTH_SERVICE_URL', ['http:', 'https:']);
+  const u = new URL(v);
+  if (u.username || u.password || u.search || u.hash || v.includes('?') || v.includes('#')) {
+    throw new ConfigError('AUTH_SERVICE_URL must be a plain http(s) origin, optionally with a path: no credentials, query or fragment');
+  }
+  return v;
 }
