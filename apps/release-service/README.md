@@ -4,11 +4,45 @@ Release management for Nawara Core ([ADR-0051](../../docs/adr/0051-release-manag
 and client compatibility, never delivery**. It is not CI/CD, a deployment engine, an artifact store or CDN, a signing service,
 authorization, entitlement or analytics. No product request path calls it synchronously.
 
-**Stage 20.2 (this state): foundation and domain only.** The service has health and readiness, its own database with the domain schema
-and its invariants, and internal persistence primitives. **There is no business HTTP route yet:**
-- CI registration and publication are Stage 20.3;
-- owner withdrawal and minimum-version administration are 20.4;
+**State: Stage 20.3, CI automation.** Built on the Stage 20.2 foundation (own database, the domain schema and its invariants, persistence
+primitives):
+- CI registers and publishes releases, with a service token and a per-product policy;
+- owner withdrawal and minimum-version administration are Stage 20.4;
 - the public compatibility read is 20.5.
+
+## Automation API (Stage 20.3)
+
+CI is a **service identity** (ADR-0033 token; ADR-0042 policy in this service). It never impersonates a human, and no human, owner or
+operator token is accepted: a user bearer is not a service token (401).
+
+| Operation | Route | Capability | Success | Retry |
+|---|---|---|---|---|
+| Register | `POST /release/products/{product}/components/{component}/releases` `{kind, version, buildId?, sourceRevision?, notesRef?}` | `release.register` for `{product}` | 201, `registered` (the component is created on first use with its kind) | same identity: 200 + `Idempotent-Replayed: true`, nothing written |
+| Publish | `POST /release/products/{product}/components/{component}/releases/{version}/publish` | `release.publish` for `{product}` | 200, `registered → published` | already published: 200 + `Idempotent-Replayed: true`, nothing written |
+
+Refusals:
+- **401:** no, malformed or unknown token.
+- **403:**
+  - `operation_not_allowed`: the caller holds the capability for no product;
+  - `product_not_allowed`: not for this product. An unknown product gives the same answer. Both are decided from configuration before
+    any lookup or body validation.
+- **400:** `validation_error`: a malformed key, kind, version, build id, revision or notes reference, or any unexpected field (an
+  environment, channel, artifact, organization, flag, status …).
+- **404:** `release_not_found` (publish only).
+- **409:**
+  - `component_kind_conflict`;
+  - `release_conflict`: the same version with a different identity, never overwritten;
+  - `invalid_transition`: a withdrawn release is never republished.
+
+Every change writes its audit intent in the **same transaction** through the kit outbox (`release.registered`, `release.published`):
+- the actor is the CI service;
+- the record is platform-level, with changes limited to identifiers and the kind;
+- an idempotent retry writes nothing.
+
+The kit relay publishes the intent to RabbitMQ after commit. A broker or audit-service outage never fails a registration; the intent
+waits in the outbox.
+
+OpenAPI is at `/release/docs`, behind basic auth, and is mounted only when `SWAGGER_PASSWORD` is set.
 
 ## Domain
 
@@ -47,14 +81,19 @@ bad input early with a bounded code.
 | `DATABASE_URL` | **required** | the runtime role `release_app`; production refuses `postgres`, `root` and `*_migrator` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | kit defaults | |
 | `MIGRATION_DATABASE_URL` | – | the migrator (`release_migrator`), read only by `npm run migrate` |
+| `SERVICE_TOKENS` | empty (nobody can call) | `<caller>:<sha256 of the token>`, at most two per caller (rotation); the caller keeps the raw token |
+| `RELEASE_SERVICE_POLICY` | required when `SERVICE_TOKENS` is set | `{"callers":{"<caller>":{"products":{"<product>":["release.register","release.publish"]}}}}`. Deny by default: every caller needs an entry, every entry a token; product keys only (no wildcard); only these two capabilities exist |
+| `RABBITMQ_URL` | required in production | the audit relay's broker (publish only; nothing is consumed). Elsewhere, absent = in-memory bus |
+| `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | kit defaults | |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, – | OpenAPI behind basic auth; the password must have 16+ characters |
 
-Nothing else is configured yet. Service tokens (20.3), Auth verification (20.4) and the public-read cache and rate limit (20.5) arrive
+Nothing else is configured yet. Auth verification and the owner's step-up (20.4), and the public-read cache and rate limit (20.5), arrive
 with the stages that use them.
 
 ## Run and test
 
 ```bash
-npm run build -w @nawara/service-kit && npm run build -w release-service
+npm run build -w @nawara/service-kit -w @nawara/audit-contract && npm run build -w release-service
 npm test -w release-service                                          # unit
 TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w release-service   # real PostgreSQL 16
 MIGRATION_DATABASE_URL=postgres://release_migrator:…@127.0.0.1:5433/release npm run migrate -w release-service

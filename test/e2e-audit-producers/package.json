@@ -1,7 +1,7 @@
 {
   "name": "@nawara/e2e-audit-producers",
   "private": true,
-  "description": "Stage 18.7: real Core producers -> their transactional outbox -> the kit relay -> a REAL RabbitMQ -> a live audit-service -> audit_record -> the audit query API. Every service runs from its own built dist/main.js as its own process (never imported: scripts/lib/checks.mjs). Needs the services built (npm run test:e2e:audit-producers builds them).",
+  "description": "Stage 18.7 (and 20.3 for release-service): real Core producers -> their transactional outbox -> the kit relay -> a REAL RabbitMQ -> a live audit-service -> audit_record -> the audit query API. Every service runs from its own built dist/main.js as its own process (never imported: scripts/lib/checks.mjs). Needs the services built (npm run test:e2e:audit-producers builds them).",
   "type": "module",
   "scripts": {
     "test:e2e": "vitest run --config ./vitest.config.ts"

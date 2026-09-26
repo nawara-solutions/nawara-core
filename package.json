@@ -12,7 +12,7 @@
     "test:repo": "node --test scripts/check-repo.test.mjs",
     "test:e2e:real-broker": "npm run build -w @nawara/service-kit -w billing-service -w payment-service -w auth-service -w notification-service && npm run test:e2e -w @nawara/e2e-real-broker",
     "test:e2e:auth-organization": "npm run build -w @nawara/service-kit -w auth-service -w organization-service && npm run test:e2e -w @nawara/e2e-auth-organization",
-    "test:e2e:audit-producers": "npm run build -w @nawara/service-kit -w @nawara/audit-contract -w audit-service -w payment-service -w billing-service -w organization-service -w file-service -w auth-service && npm run test:e2e -w @nawara/e2e-audit-producers"
+    "test:e2e:audit-producers": "npm run build -w @nawara/service-kit -w @nawara/audit-contract -w audit-service -w payment-service -w billing-service -w organization-service -w file-service -w auth-service -w release-service && npm run test:e2e -w @nawara/e2e-audit-producers"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.2",

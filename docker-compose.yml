@@ -351,9 +351,9 @@ services:
       timeout: 5s
       retries: 10
 
-  # ADR-0051. Stage 20.2: the foundation and domain only (health / readiness; its own database; /ready = database + migrations). No route
-  # besides /health and /ready yet (CI registration 20.3, owner administration 20.4, the public compatibility read 20.5). It calls no other
-  # service, and no product request path calls it.
+  # ADR-0051. Stage 20.2: the foundation and domain (health / readiness; its own database; /ready = database + migrations). Stage 20.3: CI
+  # registration and publication (service token + per-product RELEASE_SERVICE_POLICY) and their audit intent through the outbox relay.
+  # Owner administration is 20.4, the public compatibility read 20.5. It calls no other service, and no product request path calls it.
   release-service:
     profiles: [db]
     stop_grace_period: 60s
@@ -363,6 +363,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - '127.0.0.1:3007:3000'
     environment:
@@ -370,6 +372,12 @@ services:
       DATABASE_URL: postgres://release_app:${RELEASE_APP_PASSWORD:?copy .env.example to .env}@postgres:5432/release
       # Only used by `npm run migrate`, run explicitly (see this file's header comment) — never read at app startup.
       MIGRATION_DATABASE_URL: postgres://release_migrator:${RELEASE_MIGRATOR_PASSWORD:?copy .env.example to .env}@postgres:5432/release
+      # Stage 20.3: CI callers (`<caller>:<sha256 digest>`) and their per-product policy. Every caller in SERVICE_TOKENS needs an explicit
+      # entry (deny by default); empty with no tokens is the default: nothing can call.
+      SERVICE_TOKENS: ${RELEASE_SERVICE_TOKENS:-}
+      RELEASE_SERVICE_POLICY: ${RELEASE_SERVICE_POLICY:-}
+      # Stage 20.3: the audit relay's broker (publishes only; consumes nothing).
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health >/dev/null || exit 1']
       interval: 10s

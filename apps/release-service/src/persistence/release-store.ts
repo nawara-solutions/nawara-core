@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import {
-  COMPONENT_KINDS, REGISTRY_KEY,
+  BUILD_ID, COMPONENT_KINDS, NOTES_REF, REGISTRY_KEY, SOURCE_REVISION,
   type Component, type ComponentKind, type CompatibilityPolicy, type Product, type Release, type ReleaseIdentity,
 } from '../domain/model.js';
 import { isCanonicalVersion, isStableVersion } from '../domain/version.js';
@@ -9,9 +9,6 @@ import { ReleaseStoreError } from './persistence-error.js';
 
 const RELEASE_COLUMNS = `id, "componentId", version, "buildId", "sourceRevision", "notesRef", status, "registeredAt", "publishedAt", "withdrawnAt"`;
 const POLICY_COLUMNS = `"componentId", "policyVersion", "minimumVersion", "createdAt"`;
-const BUILD_ID = /^[!-~]{1,128}$/;
-const SOURCE_REVISION = /^[0-9a-f]{7,64}$/;
-const NOTES_REF = /^[!-~]{1,512}$/;
 /** SQLSTATEs of a value the schema refuses (check, not-null, malformed uuid). */
 const REFUSED = new Set(['23514', '23502', '22P02']);
 
@@ -40,8 +37,8 @@ function refused(e: unknown): never {
 }
 
 /**
- * The persistence primitives of Release Management (ADR-0051, Stage 20.2). Internal only: no HTTP route calls them before Stage 20.3.
- * Every method takes the caller's transaction client, so a later stage writes its audit intent in the SAME transaction as the change
+ * The persistence primitives of Release Management (ADR-0051, Stage 20.2). Internal: the Stage 20.3 automation routes are their only
+ * HTTP callers. Every method takes the caller's transaction client, so the audit intent is written in the SAME transaction as the change
  * (the Stage 18 rule). Every statement is parameterized. The database is the authority for every invariant (uniqueness, immutability,
  * lifecycle, append-only policy, minimum ≤ latest, SemVer shape); the checks here only refuse bad input early with a bounded code.
  */
@@ -56,15 +53,17 @@ export class ReleaseStore {
 
   // ─────────────────────────────────────────────────────────────── product / component
 
-  /** The product with this key, created if absent (idempotent: one statement, decided by the unique key). */
+  /**
+   * The product with this key, created if absent (idempotent, decided by the unique key). When a CONCURRENT transaction inserted the same
+   * key, `ON CONFLICT DO NOTHING` waits for it and then returns no row; the row it committed is visible only to a NEW statement (READ
+   * COMMITTED takes a snapshot per statement), so the read is a separate statement, never part of the insert.
+   */
   async ensureProduct(key: string, q: Queryable = this.db): Promise<Product> {
     if (!REGISTRY_KEY.test(key)) throw new ReleaseStoreError('invalid');
-    const { rows } = await q.query(
-      `WITH ins AS (INSERT INTO product (key) VALUES ($1) ON CONFLICT (key) DO NOTHING RETURNING id, key, "createdAt")
-       SELECT id, key, "createdAt" FROM ins UNION ALL SELECT id, key, "createdAt" FROM product WHERE key = $1 LIMIT 1`,
-      [key],
-    ).catch(refused);
-    return rows[0] as Product;
+    const { rows } = await q.query(`INSERT INTO product (key) VALUES ($1) ON CONFLICT (key) DO NOTHING RETURNING id, key, "createdAt"`, [key]).catch(refused);
+    const p = (rows[0] as Product | undefined) ?? (await this.findProduct(key, q));
+    if (!p) throw new ReleaseStoreError('not_found');
+    return p;
   }
 
   async findProduct(key: string, q: Queryable = this.db): Promise<Product | null> {
@@ -77,12 +76,12 @@ export class ReleaseStore {
   async ensureComponent(productId: string, key: string, kind: ComponentKind, q: Queryable = this.db): Promise<Component> {
     if (!REGISTRY_KEY.test(key) || !(COMPONENT_KINDS as readonly string[]).includes(kind)) throw new ReleaseStoreError('invalid');
     const { rows } = await q.query(
-      `WITH ins AS (INSERT INTO component ("productId", key, kind) VALUES ($1, $2, $3) ON CONFLICT ("productId", key) DO NOTHING
-                    RETURNING id, "productId", key, kind, "createdAt")
-       SELECT * FROM ins UNION ALL SELECT id, "productId", key, kind, "createdAt" FROM component WHERE "productId" = $1 AND key = $2 LIMIT 1`,
+      `INSERT INTO component ("productId", key, kind) VALUES ($1, $2, $3) ON CONFLICT ("productId", key) DO NOTHING RETURNING id, "productId", key, kind, "createdAt"`,
       [productId, key, kind],
     ).catch(refused);
-    const c = rows[0] as Component | undefined;
+    // A concurrent insert of the same component: read it in a NEW statement (see ensureProduct).
+    const c = (rows[0] as Component | undefined)
+      ?? ((await q.query(`SELECT id, "productId", key, kind, "createdAt" FROM component WHERE "productId" = $1 AND key = $2`, [productId, key]).catch(refused)).rows[0] as Component | undefined);
     if (!c) throw new ReleaseStoreError('not_found');
     if (c.kind !== kind) throw new ReleaseStoreError('conflict');
     return c;

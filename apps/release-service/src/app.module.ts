@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
 import { Global, Module, type DynamicModule } from '@nestjs/common';
-import { DbModule, HealthModule, kitMigrationsDir } from '@nawara/service-kit';
+import { DbModule, HealthModule, ServiceAuthModule, kitMigrationsDir, type EventBus } from '@nawara/service-kit';
+import { ReleaseAuditModule } from './audit/release-audit.js';
+import { AutomationModule } from './automation/automation.module.js';
 import type { ReleaseConfig } from './config/release-config.js';
 import { RELEASE_CONFIG } from './config/release-config.token.js';
 import { PersistenceModule } from './persistence/persistence.module.js';
@@ -11,6 +13,8 @@ export const releaseMigrationsDir = fileURLToPath(new URL('../db/migrations/', i
 export interface AppModuleOverrides {
   /** Tests point readiness at the migrations they applied. */
   migrationsDirs?: string[];
+  /** TEST FIXTURES ONLY: the event bus the audit relay publishes to (production builds it from RABBITMQ_URL). */
+  bus?: EventBus;
 }
 
 @Global()
@@ -26,9 +30,12 @@ class ConfigModule {
  * differently wired application than the one that ships.
  *
  * Stage 20.2 (ADR-0051): the kit's health / readiness / bounded HTTP drain, the kit database (bounded pool and deadlines; readiness
- * `database` + `migrations`; the pool closes last), the validated configuration, and the domain's persistence primitives. There is NO
- * HTTP route besides /health and /ready: registration and publication (CI) are Stage 20.3, owner administration 20.4, the public
- * compatibility read 20.5. The service calls no other service, and nothing in a product's request path calls it.
+ * `database` + `migrations`; the pool closes last), the validated configuration, and the domain's persistence primitives.
+ *
+ * Stage 20.3: service authentication (ADR-0033), the central audit intent and the kit outbox relay that publishes it (`ReleaseAuditModule`:
+ * `release.registered`, `release.published`; the only events this service produces, it consumes none), and the CI automation API
+ * (`AutomationModule`: registration and publication, per-product policy). Owner administration is 20.4, the public compatibility read
+ * 20.5. The service calls no other service (not Auth, Billing, File or Notification), and nothing in a product's request path calls it.
  */
 @Module({})
 export class AppModule {
@@ -47,8 +54,11 @@ export class AppModule {
           queryTimeoutMs: config.db.queryTimeoutMs,
           migrations: { dirs: overrides.migrationsDirs ?? [kitMigrationsDir, releaseMigrationsDir] },
         }),
+        ServiceAuthModule.forRoot(config.serviceTokens),
         ConfigModule.forRoot(config),
         PersistenceModule,
+        ReleaseAuditModule.forRoot(config, overrides.bus), // Stage 20.3: the audit intent and the kit relay (the ONE events use)
+        AutomationModule, // Stage 20.3: CI registration and publication
       ],
     };
   }

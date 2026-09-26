@@ -22,6 +22,13 @@ export type ReleaseStatus = (typeof RELEASE_STATUSES)[number];
 /** A registry key (product or component): lowercase, stable. The database checks the same shape. */
 export const REGISTRY_KEY = /^[a-z][a-z0-9-]{0,62}$/;
 
+/** A native build identity (iOS build number, Android versionCode, a CI build number): printable ASCII, no space. Never compared. */
+export const BUILD_ID = /^[!-~]{1,128}$/;
+/** A source revision: a lowercase hexadecimal commit id (abbreviated or full). Traceability only. */
+export const SOURCE_REVISION = /^[0-9a-f]{7,64}$/;
+/** A release-notes reference (a URL or document id): printable ASCII, no space. Never fetched by the service. */
+export const NOTES_REF = /^[!-~]{1,512}$/;
+
 export interface Product {
   id: string;
   key: string;

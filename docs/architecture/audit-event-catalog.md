@@ -93,9 +93,16 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 |---|---|---|---|---|---|---|---|---|
 | `platform_query.executed` | security | user (owner); service | none (platform) | platform_query | — | succeeded | `target`: all \| organization \| platform<br>`window_days`: integer 1–31<br>`result_count`: integer 0–100<br>`page`: first \| next<br>`filtered`: boolean<br>`organization_id`?: uuid | Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), or by a Company owner (one organization of their Company). Who, when, which organization, how broadly. |
 
+## release-service (2)
+
+| Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
+|---|---|---|---|---|---|---|---|---|
+| `release.registered` | administrative | service | none (platform) | release | — | succeeded | `product_id`: uuid<br>`component_id`: uuid<br>`kind`: backend \| web \| desktop \| mobile_ios \| mobile_android | Automation declares that a build of a product component exists (a new, immutable release; not yet offered to clients). |
+| `release.published` | administrative | service | none (platform) | release | — | succeeded | `product_id`: uuid<br>`component_id`: uuid<br>`kind`: backend \| web \| desktop \| mobile_ios \| mobile_android | Automation publishes a registered release: it may become the latest version that clients are offered or required to use. |
+
 ## notification-service (0)
 
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 50 actions.**
+**Total: 52 actions.**

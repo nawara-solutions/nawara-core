@@ -129,6 +129,19 @@ describeWithEnv('release-service schema invariants (real PostgreSQL, runtime rol
     expect(row).toEqual({ major: '1', minor: '0', patch: '0', prerelease: null });
   });
 
+  it('release shapes ACCEPT their valid values at the bounds (Stage 20.3, 0002: the 0001 notes-reference check could never be evaluated)', async () => {
+    const c = await component();
+    const ok = { buildId: 'b'.repeat(128), sourceRevision: 'a'.repeat(64), notesRef: 'n'.repeat(512) };
+    await app(`INSERT INTO release ("componentId", version, "buildId", "sourceRevision", "notesRef") VALUES ($1, '1.0.0', $2, $3, $4)`, [c, ok.buildId, ok.sourceRevision, ok.notesRef]);
+    await app(`INSERT INTO release ("componentId", version, "buildId", "sourceRevision", "notesRef") VALUES ($1, '1.0.1', '1', 'abcdef1', 'https://notes.example/1.0.1')`, [c]);
+    expect((await app(`SELECT count(*)::int AS n FROM release WHERE "componentId" = $1`, [c]))[0]!.n).toBe(2);
+    for (const bad of ['n'.repeat(513), '', 'has space', 'tab\there', 'é']) {
+      expect((await refused(`INSERT INTO release ("componentId", version, "notesRef") VALUES ($1, '2.0.0', $2)`, [c, bad])).constraint, JSON.stringify(bad)).toBe('release_notes_ref_shape');
+    }
+    expect((await refused(`INSERT INTO release ("componentId", version, "buildId") VALUES ($1, '2.0.0', $2)`, [c, 'b'.repeat(129)])).constraint).toBe('release_build_id_shape');
+    expect((await refused(`INSERT INTO release ("componentId", version, "sourceRevision") VALUES ($1, '2.0.0', $2)`, [c, 'a'.repeat(65)])).constraint).toBe('release_source_revision_shape');
+  });
+
   it('release: born registered; the identity never changes (version, build, revision, notes, component), whatever the status', async () => {
     const c = await component();
     expect((await refused(`INSERT INTO release ("componentId", version, status, "publishedAt") VALUES ($1, '1.0.0', 'published', now())`, [c])).code).toBe('23514');

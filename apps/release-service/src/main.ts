@@ -3,6 +3,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { JsonLogger, configureApp } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { loadReleaseConfig } from './config/release-config.js';
+import { mountDocs } from './docs/mount-docs.js';
 import { configureHttpServer } from './http/http-server.js';
 
 async function bootstrap() {
@@ -12,6 +13,7 @@ async function bootstrap() {
   // bodyParser: false lets the kit install its own bounded JSON parser (BODY_LIMIT_KB) inside configureApp: the only body parser.
   const app = await NestFactory.create<NestExpressApplication>(AppModule.register(config), { bodyParser: false, bufferLogs: true });
   configureApp(app, config, logger); // includes enableShutdownHooks(): SIGTERM stops admission, drains HTTP (bounded), then exits
+  mountDocs(app, config); // OpenAPI at /release/docs, behind basic auth, only when SWAGGER_PASSWORD is set
   configureHttpServer(app.getHttpServer(), config);
 
   await app.listen(config.port);

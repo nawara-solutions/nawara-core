@@ -8,8 +8,9 @@ import { sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
 
 /**
- * Stage 20.2: readiness depends on the database and its migrations only (release-service calls no other service); liveness never
- * depends on them; the pool closes at shutdown; there is no route besides /health and /ready.
+ * Stage 20.2: readiness depends on the database and its migrations only (release-service calls no other service, and the broker is not a
+ * readiness dependency: the outbox absorbs its outages); liveness never depends on them; the pool closes at shutdown. Stage 20.3 adds only
+ * the two automation routes.
  */
 describeWithEnv('release-service foundation: health, readiness, routes and shutdown (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
   let db: TestDatabase;
@@ -39,14 +40,18 @@ describeWithEnv('release-service foundation: health, readiness, routes and shutd
     }
   });
 
-  it('exposes no business route in Stage 20.2 (registration, administration and the compatibility read are later stages)', async () => {
+  it('exposes only the Stage 20.3 automation routes: no list, read, withdrawal, policy, compatibility or docs route (20.4 / 20.5; docs need SWAGGER_PASSWORD)', async () => {
     const t = await createTestApp({ databaseUrl: db.url });
     try {
-      for (const [method, path] of [['get', '/release'], ['get', '/release/compatibility'], ['post', '/release/releases'], ['get', '/release/docs'], ['get', '/docs']] as const) {
+      for (const [method, path] of [['get', '/release'], ['get', '/release/compatibility'], ['post', '/release/releases'], ['get', '/release/products/drive/components/web/releases'],
+        ['post', '/release/products/drive/components/web/releases/1.0.0/withdraw'], ['get', '/release/docs'], ['get', '/docs']] as const) {
         const r = await request(t.app.getHttpServer())[method](path);
         expect(r.status, `${method} ${path}`).toBe(404);
-        expect(JSON.stringify(r.body)).not.toMatch(/release_|product|component|stack/i);
+        expect(r.body).toEqual({ statusCode: 404, message: `Cannot ${method.toUpperCase()} ${path}`, error: 'Not Found', requestId: expect.any(String) }); // the framework's own answer: nothing matched
       }
+      // the automation routes exist, and refuse an unauthenticated caller before anything else
+      expect((await request(t.app.getHttpServer()).post('/release/products/drive/components/web/releases')).status).toBe(401);
+      expect((await request(t.app.getHttpServer()).post('/release/products/drive/components/web/releases/1.0.0/publish')).status).toBe(401);
     } finally {
       await t.app.close();
     }

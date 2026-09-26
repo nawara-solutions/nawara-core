@@ -95,8 +95,19 @@ describe('producer ownership (one canonical producer per action)', () => {
     expect(actionsOwnedBy('audit-service')).toEqual(['platform_query.executed']);
   });
 
+  it('release-service owns exactly its two automation actions (Stage 20.3): platform-level, a service actor only, never a user', () => {
+    expect(actionsOwnedBy('release-service')).toEqual(['release.registered', 'release.published']);
+    for (const a of actionsOwnedBy('release-service')) {
+      const e = AUDIT_CATALOG.get(a)!;
+      expect(e).toMatchObject({ category: 'administrative', organization: 'none', resource: ['release'], actors: { service: true } });
+      expect('user' in e.actors || 'system' in e.actors).toBe(false);
+      // bounded facts only: identifiers and the closed kind; no version text, build id, revision, notes or product key
+      expect(Object.keys(e.changes).sort()).toEqual(['component_id', 'kind', 'product_id']);
+    }
+  });
+
   it.each(entries)('%s: every other service is refused deterministically (producer_not_admitted)', (action, e) => {
-    const other = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service', 'notification-service', 'audit-service'];
+    const other = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service', 'notification-service', 'audit-service', 'release-service'];
     for (const source of other.filter((s) => s !== e.producer)) {
       expect(() => validateAuditPayload({ action }, source)).toThrow('producer_not_admitted');
     }
