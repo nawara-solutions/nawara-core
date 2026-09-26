@@ -3,6 +3,7 @@ import { Reflector } from '@nestjs/core';
 import type { ServiceRequest } from '@nawara/service-kit';
 import type { ReleaseConfig } from '../config/release-config.js';
 import { RELEASE_CONFIG } from '../config/release-config.token.js';
+import { ReleaseCounters } from '../ops/release-counters.js';
 import type { ReleaseCallerPolicy, ReleaseCapability } from './caller-policy.js';
 
 const REQUIRED_CAPABILITY = 'release_required_capability';
@@ -38,13 +39,18 @@ export function denialError(reason: DenialReason): HttpException {
 export class ReleasePolicyGuard implements CanActivate {
   private readonly log = new Logger('ReleaseAuthorization');
 
-  constructor(private readonly reflector: Reflector, @Inject(RELEASE_CONFIG) private readonly config: ReleaseConfig) {}
+  constructor(
+    private readonly reflector: Reflector,
+    @Inject(RELEASE_CONFIG) private readonly config: ReleaseConfig,
+    @Inject(ReleaseCounters) private readonly counters: ReleaseCounters,
+  ) {}
 
   canActivate(ctx: ExecutionContext): boolean {
     const req = ctx.switchToHttp().getRequest<ServiceRequest>();
     const capability = this.reflector.getAllAndOverride<ReleaseCapability | undefined>(REQUIRED_CAPABILITY, [ctx.getHandler(), ctx.getClass()]);
     const reason = authorizationDenial(this.config.callerPolicy, req.serviceCaller, req.params.product, capability);
     if (reason === null) return true;
+    this.counters.automation.count(capability === 'release.publish' ? 'publish' : 'register', 'denied');
     this.log.warn(`release_authorization_denied caller=${req.serviceCaller ?? 'none'} capability=${capability ?? 'none'} reason=${reason}`);
     throw denialError(reason);
   }

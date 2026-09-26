@@ -4,6 +4,7 @@ import { REGISTRY_KEY, type Component, type Release } from '../domain/model.js';
 import { isCanonicalVersion, isStableVersion } from '../domain/version.js';
 import { ReleaseStoreError } from '../persistence/persistence-error.js';
 import { ReleaseStore } from '../persistence/release-store.js';
+import { ReleaseCounters } from '../ops/release-counters.js';
 import { AuthDependencyError, OWNER_AUTHORITY, type OwnerAuthority, type ReleaseStepUpPurpose } from './owner-authority.client.js';
 import type { VerifiedOwner } from './owner.guard.js';
 
@@ -69,6 +70,7 @@ export class AdminService {
     @Inject(ReleaseStore) private readonly store: ReleaseStore,
     @Inject(ReleaseAdminAudit) private readonly audit: ReleaseAdminAudit,
     @Inject(OWNER_AUTHORITY) private readonly auth: OwnerAuthority,
+    @Inject(ReleaseCounters) private readonly counters: ReleaseCounters,
   ) {}
 
   async withdraw(owner: VerifiedOwner, product: string, componentKey: string, version: string, stepUpToken: string | undefined): Promise<WithdrawView> {
@@ -178,6 +180,7 @@ export class AdminService {
         this.outcome(operation, owner, code === 'step_up_required' ? 'step_up_denied' : status === 401 ? 'unauthenticated' : status === 404 ? 'not_found' : status === 409 ? 'conflict' : 'invalid',
           code ? `code=${code}` : undefined);
       } else {
+        this.counters.admin.count(operation, 'failed');
         this.log.error(`release_admin_failed operation=${operation} actor=${owner.userId} error=${e instanceof ReleaseStoreError ? e.code : e instanceof Error ? e.name : 'error'}`);
       }
       throw e;
@@ -186,6 +189,7 @@ export class AdminService {
 
   /** One line per decided request. Bounded fields only: the operation, the outcome class, the verified owner's id, a UUID / small integer. */
   private outcome(operation: Operation, owner: VerifiedOwner, outcome: Outcome, detail?: string): void {
+    this.counters.admin.count(operation, outcome);
     this.log.log(`release_admin operation=${operation} outcome=${outcome} actor=${owner.userId}${detail ? ` ${detail}` : ''}`);
   }
 }

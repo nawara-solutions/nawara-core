@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { hashServiceToken } from '@nawara/service-kit';
 import type { ReleaseConfig } from '../config/release-config.js';
 import { RELEASE_CONFIG } from '../config/release-config.token.js';
+import { ReleaseCounters, type AdminOutcome } from '../ops/release-counters.js';
 import { AuthDependencyError, OWNER_AUTHORITY, type OwnerAuthority } from './owner-authority.client.js';
 
 /** What the guard established for this request. The bearer is kept only for the step-up call that follows; never logged or stored. */
@@ -29,6 +30,7 @@ export class OwnerGuard implements CanActivate {
   constructor(
     @Inject(RELEASE_CONFIG) private readonly config: ReleaseConfig,
     @Inject(OWNER_AUTHORITY) private readonly auth: OwnerAuthority,
+    @Inject(ReleaseCounters) private readonly counters: ReleaseCounters,
   ) {
     this.serviceDigests = config.serviceTokens.map((t) => Buffer.from(t.digest, 'hex'));
   }
@@ -43,7 +45,8 @@ export class OwnerGuard implements CanActivate {
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest<OwnerRequest>();
     const operation = String(ctx.getHandler().name) === 'withdraw' ? 'withdraw' : 'policy_change';
-    const refuse = (outcome: string, reason: string, error: HttpException): never => {
+    const refuse = (outcome: AdminOutcome, reason: string, error: HttpException): never => {
+      this.counters.admin.count(operation, outcome);
       this.log.warn(`release_admin_denied operation=${operation} outcome=${outcome} reason=${reason}`);
       throw error;
     };

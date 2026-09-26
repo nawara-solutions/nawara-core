@@ -7,6 +7,7 @@ import { RELEASE_CONFIG } from '../config/release-config.token.js';
 import { REGISTRY_KEY } from '../domain/model.js';
 import { isCanonicalVersion } from '../domain/version.js';
 import { ReleaseStore } from '../persistence/release-store.js';
+import { clientAddress } from './client-address.js';
 import { CompatibilityCounters, type CompatibilityOutcome } from './compatibility-counters.js';
 import { COMPATIBILITY_BUCKET, COMPATIBILITY_WINDOW_S } from './compatibility-ops.js';
 import { decide, type CompatibilityState, type Decision } from './decision.js';
@@ -26,9 +27,12 @@ export function compatibilityEtag(s: CompatibilityState): string {
   return `"${createHash('sha256').update(basis).digest('base64url').slice(0, 27)}"`;
 }
 
-/** RFC 9110 If-None-Match: a list of entity tags or `*`; weak comparison (a `W/` prefix is ignored). */
+/**
+ * RFC 9110 If-None-Match: a list of entity tags or `*`; weak comparison (a `W/` prefix is ignored). Bounded by Node's 16 KiB header limit;
+ * Stage 20.6: no shorter cap, so this agrees with Express's own freshness check (which would answer 304 for a genuinely matching list).
+ */
 export function matchesIfNoneMatch(header: string | string[] | undefined, etag: string): boolean {
-  if (typeof header !== 'string' || header.length > 1024) return false;
+  if (typeof header !== 'string') return false;
   return header.split(',').map((t) => t.trim().replace(/^W\//, '')).some((t) => t === '*' || t === etag);
 }
 
@@ -36,7 +40,8 @@ export function matchesIfNoneMatch(header: string | string[] | undefined, etag: 
  * Stage 20.5 (ADR-0051 decisions 7, 10): the public compatibility read. Read-only, unauthenticated (clients may be pre-login), no user,
  * device or organization input, and no call to any other service. In order:
  * 1. the public rate limit, BEFORE any validation (malformed requests are counted too), keyed by the client address HMAC-keyed with
- *    `RELEASE_RATE_LIMIT_KEY` (the address honours TRUST_PROXY only; no request header chooses the key);
+ *    `RELEASE_RATE_LIMIT_KEY`. Stage 20.6: the address is `clientAddress` (the peer, or with TRUST_PROXY the RIGHTMOST forwarded hop;
+ *    IPv6 by /64), so no request header lets a client choose its bucket;
  * 2. input: only the `version` query parameter; a malformed or non-canonical version is `invalid_version` (400); a malformed key cannot name a
  *    component, so it is `unknown_component` (404) without a query;
  * 3. ONE statement reads the committed state (one snapshot), then `decide` (pure, deterministic).
@@ -55,7 +60,7 @@ export class CompatibilityService {
     const t0 = performance.now();
     const done = (outcome: CompatibilityOutcome) => this.counters.count(outcome, performance.now() - t0);
     try {
-      const client = createHmac('sha256', this.config.compatibility.rateLimitKey).update(req.ip ?? req.socket.remoteAddress ?? 'unknown').digest('hex');
+      const client = createHmac('sha256', this.config.compatibility.rateLimitKey).update(clientAddress(req, this.config.trustProxy)).digest('hex');
       const rule = { limit: this.config.compatibility.ratePerClient, windowSec: COMPATIBILITY_WINDOW_S };
       if (!(await this.limiter.hit(COMPATIBILITY_BUCKET, client, rule)).allowed) {
         done('rate_limited');

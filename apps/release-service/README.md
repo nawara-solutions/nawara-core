@@ -79,6 +79,23 @@ Human only (ADR-0051 decision 8, ADR-0050):
 Client behaviour (web reload, desktop updater, mobile store; fail open with the last trusted decision, a cached `required` stays binding)
 is in [the client integration guide](../../docs/architecture/release-compatibility-client-guide.md).
 
+## Operations (Stage 20.6)
+
+Each replica writes these lines every 60 s and at shutdown. Counts use closed labels only; no product, version, caller, owner or address:
+- `release_automation_snapshot`;
+- `release_admin_snapshot`;
+- `release_compatibility_snapshot`;
+- `release_outbox_snapshot` (the audit backlog: pending, oldest age, retries).
+
+At startup it writes a `release_surfaces` line. Alert rules and procedures (audit backlog, Auth outage, spent step-up, a withdrawal
+blocked by the minimum, an `unknown_release` spike, a mistyped component, rate-limit incidents, deployment order) are in
+[the runbook](../../docs/runbooks/release-service.md).
+
+**Readiness** covers only the database and migrations:
+- If Auth is down, owner administration fails closed (503) and CI and the public read keep working.
+- If the broker is down, mutations still commit with their audit intent in the outbox.
+- With `TRUST_PROXY` on, the public limit keys by the rightmost forwarded hop, and IPv6 counts by /64.
+
 ## Domain
 
 ```text
