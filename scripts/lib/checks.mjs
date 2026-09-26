@@ -125,7 +125,7 @@ export function checkSource(relPath, text) {
   const problems = [];
   if (BIDI_CONTROL.test(text) && !BIDI_ALLOWLIST.has(relPath)) problems.push(`${relPath}: contains an invisible bidirectional control character (write it as an escape)`);
   const inKit = relPath.startsWith('libs/service-kit/');
-  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file|audit)-service\/(src|db\/migrations)\//.test(relPath)
+  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file|audit|release)-service\/(src|db\/migrations)\//.test(relPath)
     || relPath.startsWith('libs/audit-contract/');
   if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {

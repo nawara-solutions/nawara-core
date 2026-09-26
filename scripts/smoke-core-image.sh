@@ -92,6 +92,9 @@ db_url() { echo "postgres://$1:$(hex 16)@127.0.0.1:5432/$2"; } # nothing listens
       echo 'AUDIT_SERVICE_POLICY={"callers":{"smoke-caller":{"operations":["read_organization"],"categories":["business"]}}}'
       echo "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672" # Stage 18.5: the ingestion broker (production config requires it)
       ;;
+    release-service)
+      echo "DATABASE_URL=$(db_url release_app release)"
+      ;;
     *)
       echo "unknown service: $service" >&2
       exit 2

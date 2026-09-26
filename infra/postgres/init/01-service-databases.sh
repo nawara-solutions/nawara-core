@@ -37,6 +37,7 @@ create_service organization "${ORGANIZATION_MIGRATOR_PASSWORD:-}" "${ORGANIZATIO
 create_service notification "${NOTIFICATION_MIGRATOR_PASSWORD:-}" "${NOTIFICATION_APP_PASSWORD:-}"
 create_service file "${FILE_MIGRATOR_PASSWORD:-}" "${FILE_APP_PASSWORD:-}"
 create_service audit "${AUDIT_MIGRATOR_PASSWORD:-}" "${AUDIT_APP_PASSWORD:-}"
+create_service release "${RELEASE_MIGRATOR_PASSWORD:-}" "${RELEASE_APP_PASSWORD:-}"
 
 # Stage 18.8 (ADR-0049 A41 / A45): audit-service's THIRD role, the retention (maintenance) role. It is neither the runtime nor the owner:
 # CONNECT and schema USAGE here; its table grants (DELETE on audit_record past a category's horizon, SELECT of id / category / recordedAt
