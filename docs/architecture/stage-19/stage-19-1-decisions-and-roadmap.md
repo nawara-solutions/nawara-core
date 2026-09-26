@@ -322,8 +322,8 @@ Auth's local audit (`auth_audit_event`), as the operator block is today. Central
 > | Substage | Status |
 > |---|---|
 > | 19.1 Architecture & Decisions | ✅ PASSED |
-> | 19.2 Owner Account Security Administration | ✅ PASSED on its branch, awaiting review: [Stage 19.2 record](./stage-19-2-owner-account-security-administration.md) |
-> | 19.3 Audit-X | ⏳ |
+> | 19.2 Owner Account Security Administration | ✅ PASSED, merged: [Stage 19.2 record](./stage-19-2-owner-account-security-administration.md) |
+> | 19.3 Audit-X | ✅ PASSED on its branch, awaiting review: [Stage 19.3 record](./stage-19-3-audit-x.md) |
 > | 19.4 Security & Privacy Hardening | ⏳ |
 > | 19.5 Operational Hardening | ⏳ |
 > | 19.6 Focused Certification & Closure | ⏳ |

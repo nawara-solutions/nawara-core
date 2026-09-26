@@ -3,7 +3,7 @@
  * Closed labels only: the scope and the outcome. Never an organization, caller, actor, resource, event or correlation id, never a
  * filter value. Recording `platform_query.executed` is not a query and is never counted here.
  */
-export const QUERY_SCOPES = ['organization', 'platform'] as const;
+export const QUERY_SCOPES = ['organization', 'platform', 'owner'] as const;
 export const QUERY_OUTCOMES = ['ok', 'denied', 'invalid', 'rate_limited', 'unavailable', 'error'] as const;
 export type QueryScopeLabel = (typeof QUERY_SCOPES)[number];
 export type QueryOutcome = (typeof QUERY_OUTCOMES)[number];

@@ -19,8 +19,9 @@ export const SERVICE_NAME = 'audit-service';
  * - Stage 18.6: the query rate limits (per 60 s window) and the optional OpenAPI credentials. The page size (≤ 100) and the time windows
  *   (92 / 31 days) are the architecture's (A66), not settings.
  *
- * Deliberately absent until the stage that uses it: retention durations and the maintenance role (18.8). There is no Auth or Organization setting at all: Audit
- * never calls them (A36).
+ * Deliberately absent until the stage that uses it: retention durations and the maintenance role (18.8). There is no Organization
+ * setting: Audit never calls it. Stage 19.3 (ADR-0050 decision 6, amending A36b for ONE read path): `AUTH_SERVICE_URL`, optional; only the
+ * Company owner's organization read calls Auth, with the owner's own bearer. Ingestion and service-token reads never do.
  */
 export interface AuditConfig extends BaseConfig {
   /** Runtime connection: the least-privilege `audit_app` role (ADR-0032), never the schema owner or a superuser. */
@@ -42,6 +43,12 @@ export interface AuditConfig extends BaseConfig {
    * (platform scope; default 30). Bounds 1–100000.
    */
   queryRates: { perCaller: number; perOrganization: number; platformPerCaller: number };
+  /**
+   * Stage 19.3 Audit-X: the owner read (`GET /audit/owner/organizations/{id}/records`) exists only when `AUTH_SERVICE_URL` (`http:` /
+   * `https:`) is set; without it the route is not mounted and Audit calls no other service. `AUDIT_OWNER_QUERY_RATE_PER_OWNER` (default 30,
+   * 1–100000): requests per verified owner per 60 s. `AUTH_TIMEOUT_MS` (default 3000, 100–30000): a slower Auth fails the read closed.
+   */
+  ownerAccess?: { authServiceUrl: string; ratePerOwner: number; authTimeoutMs: number };
   /** OpenAPI at `/audit/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
   docs: { username: string; password?: string };
 }
@@ -69,6 +76,13 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     queryRates: queryRates(reader),
+    ...(reader.get('AUTH_SERVICE_URL') === undefined ? {} : {
+      ownerAccess: {
+        authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
+        ratePerOwner: reader.int('AUDIT_OWNER_QUERY_RATE_PER_OWNER', { default: 30, min: 1, max: 100_000 }),
+        authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3_000, min: 100, max: 30_000 }),
+      },
+    }),
     docs: {
       username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
       password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),

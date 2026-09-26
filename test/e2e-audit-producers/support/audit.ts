@@ -66,7 +66,8 @@ export async function deadDepth(rabbitmqUrl: string): Promise<number> {
  * A live audit-service from its built dist (never imported), on its own database, consuming the real broker, with two query callers:
  * an organization reader and a platform reader (every category).
  */
-export async function startAudit(adminUrl: string, rabbitmqUrl: string, port: number): Promise<LiveAudit> {
+/** `extraEnv` (Stage 19.3): e.g. `AUTH_SERVICE_URL`, which mounts the Company owner's read (Audit-X). */
+export async function startAudit(adminUrl: string, rabbitmqUrl: string, port: number, extraEnv: Record<string, string> = {}): Promise<LiveAudit> {
   const db = await createTestDatabase(adminUrl, 'e2eaudit');
   await runMigrations(db.url, [kitMigrationsDir, `${AUDIT_DIR}/db/migrations/`]);
   const org = generateServiceToken();
@@ -79,6 +80,7 @@ export async function startAudit(adminUrl: string, rabbitmqUrl: string, port: nu
     RABBITMQ_URL: rabbitmqUrl,
     SERVICE_TOKENS: `org-reader:${org.digest},platform-reader:${platform.digest}`,
     AUDIT_SERVICE_POLICY: JSON.stringify({ callers: { 'org-reader': { operations: ['read_organization'], categories: ALL }, 'platform-reader': { operations: ['read_platform'], categories: ALL } } }),
+    ...extraEnv,
   };
   const live: LiveAudit = {
     db, url, service: spawnService('audit', AUDIT_DIR, env),
