@@ -3,7 +3,9 @@ import { ConfigError } from '@nawara/service-kit';
 import { SERVICE_NAME, loadReleaseConfig } from './release-config.js';
 
 const DB = 'postgres://release_app:pw-not-real@db:5432/release';
-const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...over });
+const BROKER = 'amqp://guest:guest@broker:5672';
+const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, RABBITMQ_URL: BROKER, ...over });
+const DIGEST = 'a'.repeat(64);
 
 describe('release-service configuration', () => {
   it('has one canonical identity, and production is the default environment (the safe behaviour)', () => {
@@ -15,11 +17,33 @@ describe('release-service configuration', () => {
     expect(c.databaseUrl).toBe(DB);
   });
 
-  it('carries only the foundation: no service token, Auth, audit, cache, channel, artifact, signing or feature setting (later stages / never)', () => {
-    const keys = Object.keys(loadReleaseConfig(env()));
-    for (const absent of ['serviceTokens', 'callerPolicy', 'authServiceUrl', 'ownerAccess', 'rabbitmqUrl', 'cacheMaxAge', 'channels', 'signingKey', 'featureFlags', 'maintenance']) {
+  it('Stage 20.3 adds service callers, their policy, the audit broker and the docs; still no Auth, owner, cache, channel, artifact, signing or feature setting (later stages / never)', () => {
+    const c = loadReleaseConfig(env());
+    expect(c.serviceTokens).toEqual([]); // fail closed: nobody can call
+    expect(c.callerPolicy.holds('anyone', 'release.register')).toBe(false);
+    expect(c.rabbitmqUrl).toBe(BROKER);
+    expect(c.docs).toEqual({ username: 'docs', password: undefined });
+    const keys = Object.keys(c);
+    for (const absent of ['authServiceUrl', 'ownerAccess', 'operatingCompanyId', 'cacheMaxAge', 'channels', 'signingKey', 'featureFlags', 'maintenance', 'billingServiceUrl']) {
       expect(keys).not.toContain(absent);
     }
+  });
+
+  it('production requires the broker (the committed audit intent must leave the service); development may use the in-memory bus', () => {
+    expect(() => loadReleaseConfig(env({ RABBITMQ_URL: undefined }))).toThrow(/RABBITMQ_URL is required in production/);
+    expect(() => loadReleaseConfig(env({ RABBITMQ_URL: 'http://broker' }))).toThrow(ConfigError);
+    expect(loadReleaseConfig(env({ NODE_ENV: 'development', RABBITMQ_URL: undefined })).rabbitmqUrl).toBeUndefined();
+  });
+
+  it('every registered caller needs a policy entry and every entry a registered caller (deny by default); SWAGGER_PASSWORD needs 16+ characters', () => {
+    const tokens = `drive-ci:${DIGEST}`;
+    expect(() => loadReleaseConfig(env({ SERVICE_TOKENS: tokens }))).toThrow(/RELEASE_SERVICE_POLICY is required/);
+    const c = loadReleaseConfig(env({ SERVICE_TOKENS: tokens, RELEASE_SERVICE_POLICY: JSON.stringify({ callers: { 'drive-ci': { products: { drive: ['release.register'] } } } }) }));
+    expect(c.callerPolicy.allows('drive-ci', 'drive', 'release.register')).toBe(true);
+    expect(() => loadReleaseConfig(env({ SERVICE_TOKENS: tokens, RELEASE_SERVICE_POLICY: JSON.stringify({ callers: { other: { products: { drive: ['release.register'] } } } }) })))
+      .toThrow(/no registered service token/);
+    expect(() => loadReleaseConfig(env({ SWAGGER_PASSWORD: 'short' }))).toThrow(ConfigError);
+    expect(loadReleaseConfig(env({ SWAGGER_PASSWORD: 'x'.repeat(16) })).docs.password).toBe('x'.repeat(16));
   });
 
   it('refuses a missing or invalid database URL, and a superuser or migrator login in production, never echoing the value', () => {

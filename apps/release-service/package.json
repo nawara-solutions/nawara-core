@@ -1,7 +1,7 @@
 {
   "name": "release-service",
   "version": "0.0.1",
-  "description": "Release management for Nawara Core (ADR-0051): release metadata and client compatibility, never delivery. Stage 20.2: foundation and domain.",
+  "description": "Release management for Nawara Core (ADR-0051): release metadata and client compatibility, never delivery. Stage 20.3: CI registration and publication.",
   "author": "",
   "private": true,
   "license": "UNLICENSED",
@@ -23,10 +23,12 @@
     "migrate": "node ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations"
   },
   "dependencies": {
+    "@nawara/audit-contract": "*",
     "@nawara/service-kit": "*",
     "@nestjs/common": "^12.0.1",
     "@nestjs/core": "^12.0.1",
     "@nestjs/platform-express": "^12.0.1",
+    "@nestjs/swagger": "^12.0.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "reflect-metadata": "^0.2.2",

@@ -66,6 +66,17 @@ describeWithEnv('release-service persistence primitives (real PostgreSQL, runtim
     expect(await code(store.registerRelease(identity(c.id, '1.3.0', { buildId: 'with space' })))).toBe('invalid');
   });
 
+  it('Stage 20.3: concurrent FIRST creation of one product and one component, each in its own transaction, yields one row each and every caller gets it', async () => {
+    // A concurrent insert makes `ON CONFLICT DO NOTHING` return no row; the committed row must then be read by a NEW statement.
+    const productKey = `racer-${n++}`;
+    const products = await Promise.all(Array.from({ length: 8 }, () => store.tx((q) => store.ensureProduct(productKey, q))));
+    expect(new Set(products.map((p) => p?.id)).size).toBe(1);
+    expect(products.every((p) => p?.key === productKey)).toBe(true);
+    const components = await Promise.all(Array.from({ length: 8 }, () => store.tx((q) => store.ensureComponent(products[0]!.id, 'racer-app', 'web', q))));
+    expect(new Set(components.map((c) => c?.id)).size).toBe(1);
+    expect(components.every((c) => c?.kind === 'web')).toBe(true);
+  });
+
   it('concurrent registrations of one version produce exactly one release; the rest are idempotent', async () => {
     const c = await component('mobile_android');
     const results = await Promise.all(Array.from({ length: 8 }, () => store.registerRelease(identity(c.id, '3.0.0', { buildId: '300' }))));

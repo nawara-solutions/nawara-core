@@ -14,8 +14,9 @@ import type { AuditCategory, AuditOutcome, UserKind } from './contract.js';
 /**
  * The Core services that may own catalog actions. notification-service owns none in V1 (no privileged capability exists). audit-service
  * owns exactly one (Stage 18.6): the record of a privileged platform-scope read, which it writes itself (never over the bus).
+ * release-service (Stage 20.3, ADR-0051 §9) owns its release-management actions.
  */
-export const CORE_PRODUCERS = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service', 'audit-service'] as const;
+export const CORE_PRODUCERS = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service', 'audit-service', 'release-service'] as const;
 export type CoreProducer = (typeof CORE_PRODUCERS)[number];
 
 export type ChangeType = 'code' | 'uuid' | 'boolean' | 'integer' | 'timestamp';
@@ -367,6 +368,33 @@ const SPEC = {
     organization: 'optional', resource: ['file'], subject: NO_SUBJECT, outcomes: OK,
     changes: { reason: { type: 'code', shape: 'value', required: true, values: ['digest_mismatch', 'size_mismatch', 'object_missing'] } },
     purpose: 'Stored content no longer matches its record (altered, truncated or missing): possible tampering or loss.',
+  },
+
+  // ---------------------------------------------------------------------------------------------------------------------------- release-service
+  // Stage 20.3 (ADR-0051 §9): CI automation registers and publishes releases with a narrow per-product service credential; the actor is
+  // that service, never a human. Platform-level evidence (organization `none`: a release belongs to no tenant). Written in the mutation's
+  // transaction through the outbox, only when the row actually changed (an idempotent retry writes nothing). Additive (A50).
+  // The version text is deliberately not a change fact (no free text reaches a change): the record names the release by id, and
+  // release-service is the authority for what that release is.
+  'release.registered': {
+    producer: 'release-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'none',
+    resource: ['release'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      component_id: { type: 'uuid', shape: 'value', required: true },
+      kind: { type: 'code', shape: 'value', required: true, values: ['backend', 'web', 'desktop', 'mobile_ios', 'mobile_android'] },
+    },
+    purpose: 'Automation declares that a build of a product component exists (a new, immutable release; not yet offered to clients).',
+  },
+  'release.published': {
+    producer: 'release-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'none',
+    resource: ['release'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      product_id: { type: 'uuid', shape: 'value', required: true },
+      component_id: { type: 'uuid', shape: 'value', required: true },
+      kind: { type: 'code', shape: 'value', required: true, values: ['backend', 'web', 'desktop', 'mobile_ios', 'mobile_android'] },
+    },
+    purpose: 'Automation publishes a registered release: it may become the latest version that clients are offered or required to use.',
   },
 
   // ------------------------------------------------------------------------------------------------------------------------------ audit-service

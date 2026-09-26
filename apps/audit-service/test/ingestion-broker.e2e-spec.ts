@@ -117,7 +117,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     expect(logs().some((m) => m.startsWith(`audit_event_persisted eventId=${e.id} action=membership.revoked source=auth-service`))).toBe(true);
   });
 
-  it('events of every catalog producer are admitted when their source is the action\'s owner (all 49 bus actions); audit-service\'s own action never over the bus', async () => {
+  it('events of every catalog producer are admitted when their source is the action\'s owner (all 51 bus actions; release-service since Stage 20.3); audit-service\'s own action never over the bus', async () => {
     await start();
     const events = AUDIT_ACTIONS.filter((a) => a !== 'platform_query.executed').map((a) => auditEnvelope(a));
     const self = auditEnvelope('platform_query.executed'); // source audit-service: written only by audit-service itself (18.6)
@@ -127,6 +127,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     const bySource = await sql<{ s: string; n: number }>(d.adminUrl, `SELECT "sourceService" AS s, count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[]) GROUP BY 1 ORDER BY 1`, [events.map((e) => e.id)]);
     expect(bySource).toEqual([
       { s: 'auth-service', n: 24 }, { s: 'billing-service', n: 11 }, { s: 'file-service', n: 2 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 5 },
+      { s: 'release-service', n: 2 },
     ]);
     const dead = await deadLetters(1);
     expect(dead.map((x) => [x.messageId, x.reason])).toEqual([[self.id, 'producer_not_admitted']]);
