@@ -363,6 +363,16 @@ describeWithEnv('audit query and authorization (real PostgreSQL 16)', ['TEST_DAT
       expect(await selfRecords()).toBe(before + 2);
     });
 
+    it('Stage 19.4: a platform read narrowed to ONE organization names it (organization_id); an unnarrowed or platform-level read does not', async () => {
+      const lastSelf = async () => (await sql<Record<string, any>>(d.adminUrl, `SELECT changes FROM audit_record WHERE action = 'platform_query.executed' ORDER BY id DESC LIMIT 1`))[0]!.changes;
+      await platform(PLATFORM_READER, { organizationId: B }).expect(200);
+      expect(await lastSelf()).toMatchObject({ target: 'organization', organization_id: B });
+      await platform(PLATFORM_READER).expect(200);
+      expect(await lastSelf()).not.toHaveProperty('organization_id');
+      await platform(PLATFORM_READER, { platform: 'true' }).expect(200);
+      expect(await lastSelf()).not.toHaveProperty('organization_id');
+    });
+
     it('platform-level queries find the self-audit records like any other evidence (platform=true, action filter)', async () => {
       const around = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 86_400_000).toISOString() };
       const r = await platform(PLATFORM_READER, { ...around, platform: 'true', action: 'platform_query.executed', limit: '100' }).expect(200);

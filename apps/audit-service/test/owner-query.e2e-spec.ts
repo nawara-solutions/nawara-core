@@ -46,15 +46,38 @@ const at = (minutes: number) => new Date(BASE + minutes * 60_000);
 /** A stub of Auth's two live endpoints, with failure switches. */
 function stubAuth() {
   const received: Array<{ path: string; authorization: string | undefined; headers: Record<string, unknown> }> = [];
-  const state = { mode: 'ok' as 'ok' | 'down' | 'hang' | 'malformed' | 'wrong_org', revoked: new Set<string>() };
+  type Mode = 'ok' | 'down' | 'hang' | 'malformed' | 'wrong_org' | 'redirect_same' | 'redirect_cross' | 'no_content' | 'empty' | 'oversized' | 'oversized_chunked' | 'slow_body' | 'reset';
+  const state = { mode: 'ok' as Mode, revoked: new Set<string>(), sinkUrl: '' };
+  /** Stage 19.4: where a redirect points; it records whatever reaches it (it must receive nothing). */
+  const sinkReceived: Array<{ path: string; authorization: string | undefined }> = [];
+  const sink: Server = createServer((req, res) => {
+    sinkReceived.push({ path: req.url ?? '', authorization: req.headers.authorization });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ userId: OWNER_A, kind: 'owner', companyId: COMPANY_A, id: A1 }));
+  });
   const server: Server = createServer((req, res) => {
     received.push({ path: req.url ?? '', authorization: req.headers.authorization, headers: { ...req.headers } });
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
     };
+    if (req.url?.startsWith('/redirected')) return send(200, { userId: OWNER_A, kind: 'owner', companyId: COMPANY_A, id: A1 }); // a valid-looking answer, only via a redirect
     if (state.mode === 'hang') return; // never answers: Audit's timeout must fail closed
     if (state.mode === 'down') return send(500, { message: 'Internal Server Error' });
+    if (state.mode === 'reset') return req.socket.destroy();
+    if (state.mode === 'redirect_same') { res.writeHead(302, { location: `/redirected${req.url}` }); return res.end(); }
+    if (state.mode === 'redirect_cross') { res.writeHead(307, { location: `${state.sinkUrl}${req.url}` }); return res.end(); }
+    if (state.mode === 'no_content') { res.writeHead(204); return res.end(); }
+    if (state.mode === 'empty') return send(200, {});
+    if (state.mode === 'slow_body') { res.writeHead(200, { 'content-type': 'application/json' }); return res.write('{"userId":'); } // headers, then nothing
+    const valid = { userId: OWNER_A, kind: 'owner', companyId: COMPANY_A, platformAssignments: [], organizationAdminMemberships: [], id: A1, platformId: randomUUID() };
+    if (state.mode === 'oversized') return send(200, { ...valid, padding: 'x'.repeat(20_000) });
+    if (state.mode === 'oversized_chunked') {
+      res.writeHead(200, { 'content-type': 'application/json' }); // chunked: no content-length to check up front
+      res.write(JSON.stringify(valid).slice(0, -1) + ',"padding":"');
+      for (let i = 0; i < 40; i++) res.write('x'.repeat(1024));
+      return res.end('"}');
+    }
     const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '';
     const who = state.revoked.has(token) ? undefined : TOKENS[token];
     if (!who) return send(401, { message: 'Unauthorized' });
@@ -70,7 +93,7 @@ function stubAuth() {
     }
     send(404, { message: 'Not Found' });
   });
-  return { server, received, state };
+  return { server, received, state, sink, sinkReceived };
 }
 
 describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 16)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
@@ -105,6 +128,8 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
     auth = stubAuth();
     await new Promise<void>((r) => auth.server.listen(0, '127.0.0.1', r));
     authUrl = `http://127.0.0.1:${(auth.server.address() as AddressInfo).port}`;
+    await new Promise<void>((r) => auth.sink.listen(0, '127.0.0.1', r));
+    auth.state.sinkUrl = `http://127.0.0.1:${(auth.sink.address() as AddressInfo).port}`;
     d = await provisionServiceDatabase(env.TEST_DATABASE_ADMIN_URL, 'aowner');
     await runMigrations(d.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
     t = await createTestApp({
@@ -128,6 +153,8 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
     await t?.app.close();
     await d?.drop();
     auth?.server.closeAllConnections();
+    auth?.sink.closeAllConnections();
+    await new Promise((r) => auth?.sink.close(r));
     await new Promise((r) => auth?.server.close(r));
   });
 
@@ -193,7 +220,7 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
 
     it('there is no wildcard: a malformed id is 400; organizationId / platform / companyId parameters are refused', async () => {
       for (const bad of ['*', 'all', A1.toUpperCase(), `${A1},${A2}`]) expect((await owner(encodeURIComponent(bad), 'owner-a-bearer')).status, bad).toBe(400);
-      for (const q of [{ organizationId: A2 }, { platform: 'true' }, { companyId: COMPANY_A }, { userKind: 'owner' }]) {
+      for (const q of [{ organizationId: A2 }, { platform: 'true' }, { companyId: COMPANY_A }, { userKind: 'owner' }] as Record<string, string>[]) {
         const r = await owner(A1, 'owner-a-bearer', q);
         expect(r.status, JSON.stringify(q)).toBe(400);
         expect(r.body.code).toBe('invalid_query');
@@ -328,7 +355,7 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
   });
 
   describe('Auth unavailable or unexpected: fail closed, no evidence', () => {
-    it.each(['down', 'hang', 'malformed', 'wrong_org'] as const)('%s → 503, nothing returned, nothing recorded', async (mode) => {
+    it.each(['down', 'hang', 'malformed', 'wrong_org', 'redirect_same', 'redirect_cross', 'no_content', 'empty', 'oversized', 'oversized_chunked', 'slow_body', 'reset'] as const)('%s → 503, nothing returned, nothing recorded', async (mode) => {
       const before = (await selfRecords()).length;
       auth.state.mode = mode;
       try {
@@ -339,6 +366,42 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
         auth.state.mode = 'ok';
       }
       expect((await selfRecords()).length).toBe(before);
+    });
+  });
+
+  describe('Stage 19.4: the bearer goes to the configured Auth only', () => {
+    it('a redirect (same-origin or cross-origin) is never followed: the sink and the redirected path receive nothing', async () => {
+      for (const mode of ['redirect_same', 'redirect_cross'] as const) {
+        const before = auth.received.length;
+        auth.state.mode = mode;
+        try {
+          expect((await owner(A1, 'owner-a-bearer')).status, mode).toBe(503);
+        } finally {
+          auth.state.mode = 'ok';
+        }
+        expect(auth.received.slice(before).map((x) => x.path), mode).toEqual(['/auth/grants']); // one request, the redirect not followed
+      }
+      expect(auth.sinkReceived).toEqual([]);
+    });
+
+    it('Audit calls exactly the two Auth paths, with the caller\'s own bearer, and a validated organization id only', async () => {
+      const before = auth.received.length;
+      await owner(A1, 'owner-a-bearer').expect(200);
+      expect(auth.received.slice(before).map((x) => [x.path, x.authorization])).toEqual([
+        ['/auth/grants', 'Bearer owner-a-bearer'],
+        [`/auth/admin/organizations/${A1}`, 'Bearer owner-a-bearer'],
+      ]);
+      const mid = auth.received.length;
+      await owner(encodeURIComponent('../grants'), 'owner-a-bearer').expect(400); // a path-shaped id never reaches Auth's lookup
+      expect(auth.received.slice(mid).map((x) => x.path)).toEqual(['/auth/grants']);
+    });
+
+    it('cursors: a service cursor on the owner route, an oversized cursor and a repeated parameter are refused', async () => {
+      const svc = await request(server()).get(`/audit/organizations/${A1}/records`).query({ ...WINDOW, limit: '1' }).set('authorization', `Bearer ${service.token}`);
+      expect(svc.body.nextCursor).toEqual(expect.any(String));
+      expect((await owner(A1, 'owner-a-bearer', { limit: '1', cursor: svc.body.nextCursor })).body.code).toBe('invalid_cursor');
+      expect((await owner(A1, 'owner-a-bearer', { cursor: 'A'.repeat(600) })).body.code).toBe('invalid_query');
+      expect((await owner(A1, 'owner-a-bearer', { limit: ['1', '2'] })).status).toBe(400);
     });
   });
 

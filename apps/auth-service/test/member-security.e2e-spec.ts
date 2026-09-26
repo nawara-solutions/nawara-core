@@ -377,4 +377,84 @@ describe('Owner member security administration (Stage 19.2)', () => {
       expect(JSON.stringify(await local(m.id))).not.toMatch(/@|secret|token/i);
     });
   });
+  describe('Stage 19.4 adversarial hardening', () => {
+    it('step-up: an expired proof, a proof from another session of the same owner, and one proof used by two concurrent requests', async () => {
+      const m1 = await memberA();
+      const m2 = await memberA();
+      const body = { reason: 'compromised_account' };
+      const expired = await su('account.suspend');
+      t.clock.advance(16 * 60_000); // past the 15-minute ceiling
+      await t.http.post(`/auth/admin/members/${m1.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', expired).send(body).expect(403);
+      const other = await t.ownerLogin(ownerA, ownerA.totpSecret); // a second session of the same owner
+      const foreign = await t.stepUpToken(other, 'account.suspend', ownerA.totpSecret);
+      await t.http.post(`/auth/admin/members/${m1.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', foreign).send(body).expect(403);
+      const once = await su('account.suspend');
+      const rs = await Promise.all([m1, m2].map((m) => t.http.post(`/auth/admin/members/${m.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', once).send(body).then((r) => r)));
+      expect(rs.map((r) => r.status).sort((a, b) => a - b)).toEqual([200, 403]);
+      expect([await isActive(m1.id), await isActive(m2.id)].filter((a) => !a)).toHaveLength(1);
+    });
+
+    it('a disabled owner is refused on the next request, whatever it holds', async () => {
+      const m = await memberA();
+      const token = await su('account.suspend');
+      await t.db.query(`UPDATE "user" SET "isActive"=false WHERE id=$1`, [ownerA.id]);
+      try {
+        await t.http.post(`/auth/admin/members/${m.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', token).send({ reason: 'compromised_account' }).expect(401);
+      } finally {
+        await t.db.query(`UPDATE "user" SET "isActive"=true WHERE id=$1`, [ownerA.id]);
+      }
+      expect(await isActive(m.id)).toBe(true);
+    });
+
+    it.each([
+      ['the local security record', `CREATE TRIGGER s194_refuse BEFORE INSERT ON auth_audit_event FOR EACH ROW WHEN (NEW.type = 'account.disabled' AND NEW.outcome = 'success') EXECUTE FUNCTION s194_refuse()`, 'auth_audit_event'],
+      ['the session revocation', `CREATE TRIGGER s194_refuse BEFORE UPDATE ON refresh_token FOR EACH ROW WHEN (OLD."revokedAt" IS NULL AND NEW."revokedAt" IS NOT NULL) EXECUTE FUNCTION s194_refuse()`, 'refresh_token'],
+    ])('atomicity: if %s fails, nothing commits (still active, sessions live, no evidence, step-up not burned)', async (_what, trigger, table) => {
+      const m = await memberA();
+      await login(m);
+      const token = await su('account.suspend');
+      await t.db.query(`CREATE FUNCTION s194_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 's194 refused'; END $$`);
+      await t.db.query(trigger);
+      try {
+        await t.http.post(`/auth/admin/members/${m.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', token).send({ reason: 'compromised_account' }).expect(500);
+        expect(await isActive(m.id)).toBe(true);
+        expect(await liveSessions(m.id)).toBe(1);
+        expect(await central('account.disabled', m.id)).toHaveLength(0);
+        expect(await local(m.id)).toEqual([]);
+      } finally {
+        await t.db.query(`DROP TRIGGER s194_refuse ON ${table}`);
+        await t.db.query(`DROP FUNCTION s194_refuse()`);
+      }
+      await t.http.post(`/auth/admin/members/${m.id}/suspend`).set(bearer(ownerA.tokens)).set('X-Step-Up-Token', token).send({ reason: 'compromised_account' }).expect(200);
+    });
+
+    it('responses are not cacheable', async () => {
+      const m = await memberA();
+      expect(st(await suspend(m.id), 200).headers['cache-control']).toBe('no-store');
+      expect(st(await restore(m.id), 200).headers['cache-control']).toBe('no-store');
+    });
+
+    it('reason: case, whitespace, control characters, arrays and objects cannot pass the closed set', async () => {
+      const m = await memberA();
+      for (const reason of ['Compromised_account', 'COMPROMISED_ACCOUNT', ' compromised_account', 'compromised_account ', 'compromised_account\u0000', 'compromised account',
+        'compromised_account,policy_violation', ['compromised_account'], { value: 'compromised_account' }, null, true]) {
+        st(await suspend(m.id, { reason } as Record<string, unknown>), 400);
+      }
+      expect(await isActive(m.id)).toBe(true);
+      expect(await central('account.disabled', m.id)).toHaveLength(0);
+    });
+
+    it('enumeration: unknown, cross-Company, shared and pending-only targets are indistinguishable (status, body, headers)', async () => {
+      const shared = await memberA();
+      await t.addMembership(shared.id, w.orgClinic, 'student', 'pending');
+      const targets = ['00000000-0000-4000-8000-000000000000', (await t.member(w.orgClinic, `b${uniq()}@b.test`)).id, shared.id, (await memberA('pending')).id];
+      const rs = [];
+      for (const id of targets) rs.push(await suspend(id));
+      const shape = (r: { status: number; body: unknown; headers: Record<string, string> }) => ({
+        status: r.status, body: noReqId(r.body), headers: Object.keys(r.headers).filter((h) => !['date', 'x-request-id', 'x-correlation-id', 'etag'].includes(h)).sort(),
+      });
+      for (const r of rs) expect(shape(r)).toEqual(shape(rs[0]!));
+      expect(rs[0]!.status).toBe(404);
+    });
+  });
 });

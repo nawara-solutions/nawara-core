@@ -121,7 +121,9 @@ export class AuditQueryService {
       // The read and its accountability record commit together; the response is built only after the commit (never across it).
       const rows = await this.db.tx(async (q) => {
         const found = await this.records.findPage(query, q);
-        await this.recordPlatformQuery(q, { type: 'service', id: caller }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined);
+        // Stage 19.4: a platform read narrowed to one organization names it (the privileged reader's accountability, A57).
+        const narrowed = query.scope.kind === 'platform' && query.scope.target === 'organization' ? query.scope.organizationId : undefined;
+        await this.recordPlatformQuery(q, { type: 'service', id: caller }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined, narrowed);
         return found;
       }).catch((e: unknown) => {
         if (e instanceof HttpException) throw e;

@@ -54,6 +54,32 @@ describe('audit-service configuration', () => {
     }
   });
 
+  it('Stage 19.3/19.4: owner access exists only with AUTH_SERVICE_URL; the URL, the timeout and the rate are validated at startup, never echoed', () => {
+    expect(loadAuditConfig(env()).ownerAccess).toBeUndefined();
+    expect(loadAuditConfig(env({ AUTH_SERVICE_URL: '' })).ownerAccess).toBeUndefined(); // empty is unset (the kit reader): disabled, never half-configured
+    expect(loadAuditConfig(env({ AUTH_SERVICE_URL: 'http://auth-service:3000' })).ownerAccess).toEqual({ authServiceUrl: 'http://auth-service:3000', ratePerOwner: 30, authTimeoutMs: 3000 });
+    expect(loadAuditConfig(env({ AUTH_SERVICE_URL: 'https://auth.internal/base', AUDIT_OWNER_QUERY_RATE_PER_OWNER: '5', AUTH_TIMEOUT_MS: '100' })).ownerAccess)
+      .toEqual({ authServiceUrl: 'https://auth.internal/base', ratePerOwner: 5, authTimeoutMs: 100 });
+    for (const [name, value] of [
+      ['AUTH_SERVICE_URL', 'not a url'], ['AUTH_SERVICE_URL', 'ftp://auth'], ['AUTH_SERVICE_URL', 'file:///etc/passwd'],
+      ['AUTH_SERVICE_URL', 'http://user:secret-not-real@auth'], ['AUTH_SERVICE_URL', 'http://auth?x=secret-not-real'], ['AUTH_SERVICE_URL', 'http://auth#secret-not-real'],
+    ]) {
+      let err: unknown;
+      try {
+        loadAuditConfig(env({ [name]: value }));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, `${name}=${value}`).toBeInstanceOf(ConfigError);
+      expect(String((err as Error).message)).not.toContain('secret-not-real');
+    }
+    const url = { AUTH_SERVICE_URL: 'http://auth-service:3000' };
+    for (const [name, value] of [['AUTH_TIMEOUT_MS', '0'], ['AUTH_TIMEOUT_MS', '-1'], ['AUTH_TIMEOUT_MS', '99'], ['AUTH_TIMEOUT_MS', '30001'], ['AUTH_TIMEOUT_MS', 'soon'],
+      ['AUDIT_OWNER_QUERY_RATE_PER_OWNER', '0'], ['AUDIT_OWNER_QUERY_RATE_PER_OWNER', '-5'], ['AUDIT_OWNER_QUERY_RATE_PER_OWNER', '100001'], ['AUDIT_OWNER_QUERY_RATE_PER_OWNER', '1.5']]) {
+      expect(() => loadAuditConfig(env({ ...url, [name]: value })), `${name}=${value}`).toThrow(ConfigError);
+    }
+  });
+
   it('carries the kit database limits with their bounded defaults', () => {
     expect(loadAuditConfig(env()).db).toEqual({ poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30_000, idleInTransactionTimeoutMs: 60_000, queryTimeoutMs: 35_000 });
     for (const [name, value] of [['DB_POOL_MAX', '0'], ['DB_POOL_MAX', '101'], ['DB_CONNECTION_TIMEOUT_MS', 'soon'], ['DB_STATEMENT_TIMEOUT_MS', '10'], ['DB_QUERY_TIMEOUT_MS', '1000']]) {
