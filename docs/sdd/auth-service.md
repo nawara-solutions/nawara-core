@@ -3452,7 +3452,15 @@ The refusal rolls back, so the step-up is not burned.
 **Restoration** uses the same eligibility, so an owner cannot re-enable access under another Company. It does not revive revoked
 sessions. `isActive` has no other writer for members, so restoration never undoes a different kind of disablement.
 
-**Tests.** `member-security.e2e-spec.ts` (25 tests).
+**Operation (Stage 19.5).** `MemberSecurityCounters` feeds the 60 s `auth_member_security_snapshot` line with the counts of
+{suspend, restore} × {changed, unchanged, step_up_denied, target_refused, failed}:
+- closed labels only, with no id or reason;
+- guard refusals are not counted;
+- not run by the operator CLI.
+
+Runbook: Stage 19.5 record §4.
+
+**Tests.** `member-security.e2e-spec.ts` (25 tests in Stage 19.2; 33 after Stages 19.4 and 19.5).
 
 ## Open questions
 
