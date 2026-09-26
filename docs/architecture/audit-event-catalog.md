@@ -28,8 +28,8 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `admin_invitation.created` | administrative | user (member, owner) | required | admin_invitation | — | succeeded | `authority`: owner \| org_admin | An invitation that will mint an organization administrator is issued. |
 | `admin_invitation.revoked` | administrative | user (member, owner) | required | admin_invitation | — | succeeded | `authority`: owner \| org_admin | A pending administrator invitation is withdrawn. |
 | `operator.created` | security | user (owner) | none (platform) | user | — | succeeded | — | An owner creates a platform operator account (privileged, cross-organization staff). |
-| `account.disabled` | security | user (owner) | none (platform) | user | — | succeeded | — | An owner blocks an operator account. |
-| `account.enabled` | security | user (owner) | none (platform) | user | — | succeeded | — | An owner unblocks an operator account. |
+| `account.disabled` | security | user (owner) | none (platform) | user | — | succeeded | `reason`?: compromised_account \| security_incident \| policy_violation | An owner blocks an operator account, or suspends a member account of the owner's Company (every session revoked). |
+| `account.enabled` | security | user (owner) | none (platform) | user | — | succeeded | — | An owner unblocks an operator account, or restores a suspended member account of the owner's Company. |
 | `platform_assignment.granted` | security | user (owner) | none (platform) | platform_assignment | user (required) | succeeded | `platform_id`: uuid | An operator gains authority over a platform and its organizations. |
 | `platform_assignment.revoked` | security | user (owner) | none (platform) | platform_assignment | user (required) | succeeded | `platform_id`: uuid | An operator loses authority over a platform. |
 | `owner.password_changed` | security | user (owner) | none (platform) | user | — | succeeded | — | The most privileged credential changes. |

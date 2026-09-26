@@ -317,6 +317,17 @@ Auth's local audit (`auth_audit_event`), as the operator block is today. Central
 
 ## 13. Final Stage 19 roadmap (frozen, derived from 19.1 evidence)
 
+> **Progress** (updated as substages close; the roadmap below is unchanged):
+>
+> | Substage | Status |
+> |---|---|
+> | 19.1 Architecture & Decisions | ✅ PASSED |
+> | 19.2 Owner Account Security Administration | ✅ PASSED on its branch, awaiting review: [Stage 19.2 record](./stage-19-2-owner-account-security-administration.md) |
+> | 19.3 Audit-X | ⏳ |
+> | 19.4 Security & Privacy Hardening | ⏳ |
+> | 19.5 Operational Hardening | ⏳ |
+> | 19.6 Focused Certification & Closure | ⏳ |
+
 The ordering the brief suggested was checked against the evidence and rejected where the evidence contradicts it:
 - **Foundation:** the verified-human foundation already exists (Auth's own guard; organization-service's human path).
 - **Operator step-up and capabilities:** no Stage 19 substage gives operators new sensitive authority (D4, D7), so they are **not** Stage

@@ -136,15 +136,18 @@ const SPEC = {
     resource: ['user'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'An owner creates a platform operator account (privileged, cross-organization staff).',
   },
+  // Stage 19.2 (ADR-0050 decisions 5, 6): also an owner's suspension / restoration of a MEMBER of the owner's Company. The optional
+  // `reason` is the closed D6 set: present on a member suspension, absent on the (unchanged) operator block. Additive under A50.
   'account.disabled': {
     producer: 'auth-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
-    resource: ['user'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
-    purpose: 'An owner blocks an operator account.',
+    resource: ['user'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { reason: { type: 'code', shape: 'value', required: false, values: ['compromised_account', 'security_incident', 'policy_violation'] } },
+    purpose: 'An owner blocks an operator account, or suspends a member account of the owner\'s Company (every session revoked).',
   },
   'account.enabled': {
     producer: 'auth-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
     resource: ['user'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
-    purpose: 'An owner unblocks an operator account.',
+    purpose: 'An owner unblocks an operator account, or restores a suspended member account of the owner\'s Company.',
   },
   'platform_assignment.granted': {
     producer: 'auth-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
