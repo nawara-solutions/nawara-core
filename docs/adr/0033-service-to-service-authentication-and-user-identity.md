@@ -1,6 +1,6 @@
 # 0033. Service-to-service authentication, and how services identify the end user
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-09-26, by the owner, Stage 19.1 decision D1, after the implementation was verified to conform; see the note at the end)
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 
@@ -60,3 +60,15 @@ A pointer, not a change to this decision: File Service access tickets ([ADR-0048
 deliberate case where Auth is not on the path of the call that reaches File Service. The end user is authenticated through Auth (and
 authorized by the product) **before** the product requests a ticket; the ticket redemption carries no user token, File Service never
 verifies one and never calls Auth.
+
+## Note (2026-09-26, Stage 19.1 — acceptance)
+
+Accepted by the owner under Stage 19.1 decision D1, after a conformance check of the running code against every decision above
+([Stage 19.1 record](../architecture/stage-19/stage-19-1-decisions-and-roadmap.md) §14.1). No decision changes. Two statements in the
+header block are now historical, not current: the **callee side** exists (service-kit `parseServiceTokens` / `ServiceTokenGuard`:
+`SERVICE_TOKENS=<caller>:<sha256>`, at most two per caller, constant-time comparison, one generic 401, the caller name attached), and
+auth-service no longer calls payment-service with `PAYMENT_SERVICE_TOKEN` (the dead registration license check was removed, `f1901f9`).
+User bearers are verified only by Auth (`/auth/me`, `/auth/platform-access/:platformId`, and `/auth/grants` added by ADR-0042); no
+service verifies them locally, and none forwards them anywhere except Auth. A pointer like the Stage 17.2 note: payment provider webhooks
+are authenticated by the provider's signature (payment SDD §7), never by reachability, so they satisfy "internal reachability is never
+authentication" without a user or service guard.

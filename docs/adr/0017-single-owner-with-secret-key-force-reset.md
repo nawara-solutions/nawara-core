@@ -6,6 +6,8 @@
 
 > **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): The single-owner rule is now the droppable unique index `owner_single_per_company_v1`, and `secretKeyHash`/`secretKeyIssuedAt` live on the `Owner` table rather than `User` — see ADR-0024.
 
+> **Amended by [ADR-0050](./0050-platform-administration-and-verified-human-authority.md)** (2026-09-26, Stage 19.1 R1; on the following point only; the rest of this ADR stands): the **CLI secret-key force-reset tool** decided below (`apps/auth-service/src/cli/reset-owner-secret-key.ts`) **was never implemented**, is **not part of the Core V1 recovery surface**, and is **not to be built** by Stage 19. The Core V1 owner recovery surface is what exists: secret-key rotation with a TOTP or passkey step-up (`owner.secret_key.rotate`, ADR-0025) for a leaked key, and the cool-down recovery (ADR-0027) as the extreme path. Direct database manipulation is **not** an approved operational recovery procedure. The section "CLI tool: force-resetting a possibly-compromised secret key" is kept below as history. The single-owner decision is unaffected.
+
 ## Context
 
 ADR-0009 introduced `platformId`/`adminTier` and built the entire owner/operator design on

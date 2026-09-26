@@ -3482,7 +3482,9 @@ dropped). **Tests.** `multi-membership.e2e-spec.ts` (22), `tenant-isolation.e2e-
   [ADR-0017](../adr/0017-single-owner-with-secret-key-force-reset.md), as rewritten to reflect
   ADR-0022's company-wide model:** ownership transfer and a second/standby owner are not addenda
   but a closed door — ADR-0017 decides, permanently, that the company has exactly one owner,
-  created only by this script, never joined or replaced in-band. What ADR-0017 does add is a
+  created only by this script, never joined or replaced in-band. *(2026-09-26, [ADR-0050](../adr/0050-platform-administration-and-verified-human-authority.md)
+  / Stage 19.1 R1: the reset script described below was **never implemented** and is **not part of Core V1**; a leaked key is
+  rotated in-band with a factor step-up, and the cool-down recovery is the extreme path. Kept as history.)* What ADR-0017 does add is a
   separate, purpose-built script, `apps/auth-service/src/cli/reset-owner-secret-key.ts`
   (deliberately **not** a new mode on `bootstrap-owner.ts` — see ADR-0017's Decision for why
   extending this script was rejected), for an owner who still has password access but suspects

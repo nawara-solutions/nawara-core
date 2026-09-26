@@ -1,8 +1,8 @@
 # 0041. Administrative capabilities are domain-owned, client-neutral APIs
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (**draft; not approved.** Nothing in this ADR takes effect, and nothing is implemented, until the architecture owner accepts it.)
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (2026-09-26, by the owner, Stage 19.1 decision D1, after the implementation was verified to conform; see the note at the end. The "Not decided here" items stay as written; those since decided are decided by the later ADRs the note names.)
 - **Date:** 2026-09-20
-- **Deciders:** Anwar (project owner), approval pending
+- **Deciders:** Anwar (project owner)
 
 > Related: [ADR-0040](./0040-organization-ownership-migration-decisions.md) (Proposed when this ADR was written; **Accepted 2026-09-20**; **not amended** by this ADR) and [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md) (**not modified**). The analysis is in the [administrative client model study](../architecture/stage-10/stage-10-administrative-client-model-study.md).
 
@@ -51,3 +51,14 @@ We propose **Option 4**, because it keeps every capability with the service that
 - **Harder or given up:** no shortcut of putting client-specific rules in the backend; a client that needs offline behavior must wait for an explicit, owner-approved design that fits the constraints in decision 6.
 - **Stage 10:** no change to ADR-0039 or ADR-0040 and no new blocker for Stage 10.1. If ADR-0040's interim rule keeping `/auth/me` and onboarding resolution frozen is accepted, it also covers administrative clients. "Internal only initially" for organization-service (a Stage 10.0 proposal about today's service-token API) must not be read as excluding administrative clients later.
 - **Follow-up:** the BD-4 ADR (service-token scopes, hierarchy validation, human-facing hierarchy administration) should be written on top of this rule; later ADRs for public exposure, offline and device identity when a client is chosen.
+
+## Note (2026-09-26, Stage 19.1 — acceptance)
+
+Accepted by the owner under Stage 19.1 decision D1, after a conformance check ([Stage 19.1 record](../architecture/stage-19/stage-19-1-decisions-and-roadmap.md)
+§14.1). No decision changes. Verified: every administrative capability is an API of the service that owns the state (Auth: operators,
+assignments, memberships, owner security; organization-service: Company / Platform / Organization, behind the ADR-0039 authority gate);
+no service owns administrative logic and no composition layer exists; no route gates on a client type or install identifier (the owner's
+User-Agent fingerprint is alert-only); and guardrail 7 holds, since Auth makes no synchronous call to organization-service. Since this
+ADR was written, [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) (Accepted) decided BD-4: the human
+hierarchy API is hosted by organization-service. [ADR-0050](./0050-platform-administration-and-verified-human-authority.md) builds
+platform administration on decisions 1 to 5.

@@ -72,8 +72,8 @@ client. Denials (missing, other company, not assigned) are one collapsed `404`.
 | **Secret-key recovery** | `start` (password + key) → **cool-down** (alerts; owner may cancel from a working session; nothing changes) → `complete` (recovery token + key again) → all factors/sessions revoked, key spent, **enrollment token only** → enroll a new factor → session |
 | Suspected clone of a passkey | assertion rejected, that passkey revoked, audited; if it was the only factor → recovery |
 | Factor replacement (planned) | enroll the new one (needs step-up once a factor exists), then remove the old one (step-up) |
-| Key leaked, factors intact | ADR-0017 ops CLI reset, or rotate via factor step-up; a leaked key cannot rotate itself |
-| Forgotten **password** | **not implemented** in-band (would need an out-of-band reset); ops path only |
+| Key leaked, factors intact | rotate via factor step-up (`owner.secret_key.rotate`); a leaked key cannot rotate itself. *(2026-09-26, ADR-0050 / Stage 19.1 R1: the ADR-0017 ops CLI reset was never built and is not part of Core V1.)* |
+| Forgotten **password** | **not implemented** in-band (would need an out-of-band reset). *(2026-09-26, ADR-0050: no approved ops path exists; direct database manipulation is not an approved recovery procedure. Recorded limitation, Stage 19.1 P-S4.)* |
 
 What an attacker can do holding… **password only:** reach the MFA challenge, nothing else · **key only:** nothing (password required; the key can't satisfy factor-only step-ups) · **password + key:** *start* recovery, then must stay unnoticed for the whole cool-down · **password + contact channel:** no bearer path (no email/SMS reset exists) · **a stolen live session:** cannot recover, cannot rotate the key, change the password, add/remove factors (each needs a *factor* step-up); can still act within the scope the session already has until it ends.
 
