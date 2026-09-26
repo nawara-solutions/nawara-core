@@ -13,7 +13,7 @@ import { formatDeadLetter, inspectDeadLetters, outputToken as q, replayDeadLette
  * consumer's work queue unchanged; the consumer then validates and de-duplicates it like any delivery. Exit codes for `replay`:
  * 0 consumed, 2 rejected again (still in the DLQ), 3 still pending, 4 not found in the DLQ; 1 any error.
  */
-const EXIT = { consumed: 0, rejected_again: 2, pending: 3, not_found: 4 } as const;
+const EXIT = { consumed: 0, rejected_again: 2, pending: 3, not_found: 4, not_replayable: 5 } as const;
 
 function parse(argv: string[]): { command: string; opts: Map<string, string[]> } {
   const [command, ...rest] = argv;

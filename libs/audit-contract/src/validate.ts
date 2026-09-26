@@ -9,7 +9,7 @@ import { isSecretShaped, isSensitiveKey } from './sensitive.js';
 
 type Rec = Record<string, unknown>;
 
-const TOP_LEVEL = new Set(['action', 'actor', 'organizationId', 'resource', 'subject', 'outcome', 'changes', 'causationId']);
+export const TOP_LEVEL = new Set(['action', 'actor', 'organizationId', 'resource', 'subject', 'outcome', 'changes', 'causationId']);
 /**
  * No level of a valid payload has more than 8 keys. The layer-2 scan inspects up to twice that (so a credential-named key added to a
  * complete payload is still reported as `sensitive_field`); a wider object is refused before any per-key work.
@@ -22,7 +22,7 @@ const MAX_DEPTH = 3;
  * object whose prototype was replaced (`{ __proto__: … }` in a literal) or one with a getter (which could answer differently on each
  * read) is not data and is refused.
  */
-function plainRecord(v: unknown): Rec | null {
+export function plainRecord(v: unknown): Rec | null {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
   const proto: unknown = Object.getPrototypeOf(v);
   if (proto !== Object.prototype && proto !== null) return null;
@@ -41,7 +41,7 @@ function has(o: Rec, key: string): boolean {
  * Layer 2 before any structural rule: every key at every level is checked against the sensitive-concept list, every string leaf against
  * the secret shapes, and every leaf against what JSON can carry. Depth and width are bounded first (no recursion or iteration bomb).
  */
-function scan(v: unknown, depth: number): void {
+export function scan(v: unknown, depth: number): void {
   switch (typeof v) {
     case 'string':
       if (isSecretShaped(v)) refuse('sensitive_value');

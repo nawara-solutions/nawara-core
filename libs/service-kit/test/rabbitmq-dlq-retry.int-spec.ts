@@ -283,4 +283,75 @@ describeWithEnv('RabbitMQ retry, dead-letter annotations and replay (real broker
     expect(() => requireDeadQueue('billing.payment-events')).toThrow(/dead-letter queue/);
     expect(() => requireDeadQueue('.dead')).toThrow(/dead-letter queue/);
   });
+
+  // ─────────────────────────────────────────────────────────────── Stage 18.8: an opt-in dead-letter policy (audit-service uses it)
+  const takeDead = async (queue: string) => {
+    const ch = await conn.createChannel();
+    try {
+      const m = await ch.get(`${queue}.dead`, { noAck: true });
+      if (!m) throw new Error('no dead letter');
+      return { content: m.content.toString('utf8'), headers: m.properties.headers ?? {}, messageId: m.properties.messageId, type: m.properties.type };
+    } finally {
+      await ch.close().catch(() => undefined);
+    }
+  };
+  const failing = async () => {
+    throw new PermanentEventFailure('refused_for_test');
+  };
+
+  it('Stage 18.8: a policy that says REDACTED leaves nothing of the body and only the headers it returns; the copy is marked and never replayed', async () => {
+    fresh();
+    const queue = newQueue();
+    const sub = await consumerBus({ maxRetries: 0 }).subscribe({
+      queue, bindings: ['payment.#'], handler: failing,
+      deadLetterPolicy: ({ event, failure, reason }) => {
+        expect([failure, reason, event?.headers.source]).toEqual(['permanent', 'refused_for_test', 'payment-service']);
+        return { body: 'redacted', headers: { source: 'payment-service', note: { nested: SECRET } as never } };
+      },
+    });
+    const e = envelope();
+    await publisher.publish(e);
+    await waitFor(async () => (await depth(`${queue}.dead`)) === 1);
+    const listed = (await inspectDeadLetters(conn, `${queue}.dead`)).messages[0]!;
+    expect(listed).toMatchObject({ eventId: e.id, bodyRedacted: true, failureReason: 'refused_for_test' });
+    expect((await replayDeadLetter(conn, `${queue}.dead`, e.id, { waitMs: 500 })).outcome).toBe('not_replayable');
+    const dead = await takeDead(queue);
+    expect(JSON.parse(dead.content)).toEqual({ redacted: true, failure: 'permanent', reason: 'refused_for_test', bodyBytes: Buffer.byteLength(JSON.stringify(e.payload)) });
+    expect(dead.headers).toMatchObject({ source: 'payment-service', 'x-nawara-body-redacted': 'true' });
+    expect(Object.keys(dead.headers).filter((k) => !k.startsWith('x-nawara-'))).toEqual(['source']); // no correlation, no non-scalar header
+    expect(JSON.stringify(dead)).not.toContain(SECRET);
+    expect(dead.messageId).toBe(e.id);
+    await sub.close();
+  });
+
+  it('Stage 18.8: a policy that says ORIGINAL keeps the body byte for byte (replayable) but only the headers it returns', async () => {
+    fresh();
+    const queue = newQueue();
+    let ok = false;
+    const sub = await consumerBus({ maxRetries: 0 }).subscribe({
+      queue, bindings: ['payment.#'], handler: async () => { if (!ok) throw new PermanentEventFailure('not_yet'); },
+      deadLetterPolicy: ({ event }) => ({ body: 'original', headers: { eventId: event!.id, source: event!.headers.source, occurredAt: event!.headers.occurredAt, version: 1 } }),
+    });
+    const e = envelope();
+    await publisher.publish(e);
+    await waitFor(async () => (await depth(`${queue}.dead`)) === 1);
+    const [listed] = (await inspectDeadLetters(conn, `${queue}.dead`)).messages;
+    expect(listed).toMatchObject({ eventId: e.id, bodyRedacted: false, correlationId: null }); // correlation not in the allow-list: dropped
+    ok = true;
+    expect((await replayDeadLetter(conn, `${queue}.dead`, e.id, { waitMs: 5000, pollMs: 50 })).outcome).toBe('consumed');
+    await sub.close();
+  });
+
+  it('Stage 18.8: a policy that throws redacts, with no original header (fail closed)', async () => {
+    fresh();
+    const queue = newQueue();
+    const sub = await consumerBus({ maxRetries: 0 }).subscribe({ queue, bindings: ['payment.#'], handler: failing, deadLetterPolicy: () => { throw new Error('policy bug'); } });
+    await publisher.publish(envelope());
+    await waitFor(async () => (await depth(`${queue}.dead`)) === 1);
+    const dead = await takeDead(queue);
+    expect(JSON.parse(dead.content)).toMatchObject({ redacted: true });
+    expect(Object.keys(dead.headers).every((k) => k.startsWith('x-nawara-'))).toBe(true);
+    expect(JSON.stringify(dead)).not.toContain(SECRET);
+    await sub.close();
+  });
 });

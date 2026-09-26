@@ -33,13 +33,14 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL, real 
       expect(pending.body).toEqual({ status: 'unavailable', failed: ['audit-ingestion', 'migrations'] }); // the consumer waits for the migrations
       const applied = await runMigrations(db.url, [kitMigrationsDir, auditMigrationsDir]);
       expect(applied.applied.length).toBeGreaterThan(0);
-      expect(applied.applied.filter((n) => !n.startsWith('kit_'))).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql']); // 18.3 table, 18.6 index
+      expect(applied.applied.filter((n) => !n.startsWith('kit_'))).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql']); // 18.3 table, 18.6 index, 18.8 retention
       await readyEventually(t);
       const again = await runMigrations(db.url, [kitMigrationsDir, auditMigrationsDir]);
       expect(again.applied).toEqual([]); // a re-run is a no-op
       expect(again.alreadyApplied).toEqual(applied.applied);
       // Stage 18.3: exactly one audit table (no actor, resource, organization, user or catalog table).
-      expect(await sql(db.url, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'audit%'`)).toEqual([{ table_name: 'audit_record' }]);
+      expect((await sql<{ table_name: string }>(db.url, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'audit%' ORDER BY 1`)).map((r) => r.table_name))
+        .toEqual(['audit_record', 'audit_retention_policy', 'audit_retention_run']); // Stage 18.8: the retention policy and ledger
     } finally {
       await t.app.close();
     }

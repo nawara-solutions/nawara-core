@@ -22,6 +22,8 @@ export interface DeadLetterInfo {
   retryCount: number;
   replayCount: number;
   failedAt: string | null;
+  /** Stage 18.8: the body was replaced by a redaction document (never replayable). */
+  bodyRedacted: boolean;
   /** Only the top-level payload fields the operator asked for by name, scalars only and truncated. Empty by default: payloads are not dumped. */
   fields: Record<string, string | number | boolean | null>;
 }
@@ -40,7 +42,9 @@ export type ReplayOutcome =
   /** Still queued or being retried when the window ended. */
   | 'pending'
   /** No message with that event id is in the DLQ (never dead-lettered, already replayed, or already removed). Nothing was changed. */
-  | 'not_found';
+  | 'not_found'
+  /** Stage 18.8: the dead-letter copy's body was redacted (it carries nothing to replay); it stays in the DLQ, unchanged. */
+  | 'not_replayable';
 
 export interface ReplayResult {
   outcome: ReplayOutcome;
@@ -77,6 +81,7 @@ const describe = (queue: string, position: number, msg: GetMessage | ConsumeMess
     retryCount: counter(h[HEADER.retryCount]),
     replayCount: counter(h[HEADER.replayCount]),
     failedAt: str(h[HEADER.failedAt]),
+    bodyRedacted: h[HEADER.bodyRedacted] !== undefined,
     fields,
   };
 };
@@ -157,6 +162,10 @@ export async function replayDeadLetter(conn: ChannelModel, queue: string, eventI
       ch.nackAll(true);
       return { ...base, outcome: 'not_found', replayCount: 0 };
     }
+    if (found.properties.headers?.[HEADER.bodyRedacted] !== undefined) {
+      ch.nackAll(true);
+      return { ...base, outcome: 'not_replayable', replayCount: counter(found.properties.headers?.[HEADER.replayCount]) };
+    }
     const h = withoutBrokerHistory(found.properties.headers);
     for (const k of [HEADER.failure, HEADER.failureReason, HEADER.failureError, HEADER.failedAt, HEADER.consumer]) delete h[k];
     replayCount = counter(h[HEADER.replayCount]) + 1;
@@ -213,5 +222,5 @@ export const outputToken = (v: string | number | boolean | null | undefined): st
 
 export function formatDeadLetter(m: DeadLetterInfo): string {
   const fields = Object.entries(m.fields).map(([k, v]) => ` ${outputToken(k)}=${outputToken(v)}`).join('');
-  return `dlq_message position=${m.position} event=${outputToken(m.eventId)} name=${outputToken(m.eventName)} correlationId=${outputToken(m.correlationId)} classification=${outputToken(m.failure)} reason=${outputToken(m.failureReason)} error=${outputToken(m.failureError)} retries=${m.retryCount} replays=${m.replayCount} failedAt=${outputToken(m.failedAt)}${fields}`;
+  return `dlq_message position=${m.position} event=${outputToken(m.eventId)} name=${outputToken(m.eventName)} correlationId=${outputToken(m.correlationId)} classification=${outputToken(m.failure)} reason=${outputToken(m.failureReason)} error=${outputToken(m.failureError)} retries=${m.retryCount} replays=${m.replayCount} failedAt=${outputToken(m.failedAt)}${m.bodyRedacted ? ' body=redacted' : ''}${fields}`;
 }

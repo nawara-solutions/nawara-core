@@ -71,7 +71,33 @@ ingestion route (A16: the bus is the only way in); no write, delete or search ro
 **Dead letters** (the kit tool; the broker URL only from `RABBITMQ_URL`): `nawara-dlq list --queue audit-service.audit.dead` peeks without
 consuming; after fixing the cause, `nawara-dlq replay --queue audit-service.audit.dead --event-id <id>` sends ONE message back through the
 normal path (validation, admission, idempotency, conflict detection all apply: an already-stored event is a duplicate, a conflict is
-rejected again). Never edit a dead-lettered payload. The DLQ holds a copy of each refused message (retention and access: 18.8).
+rejected again). Never edit a dead-lettered payload.
+
+**What the DLQ keeps (Stage 18.8):** a dead-letter copy keeps its original body only when every value is a grammar token (a valid event
+whose insert failed, a conflict, a refusal a catalog upgrade can reverse — replayable byte for byte). Anything else (a sensitive field or
+value, contact data, free text, an unknown field, malformed or binary input) is dead-lettered **redacted**: body replaced by
+`{"redacted":true,"failure":…,"reason":…,"bodyBytes":n}`, marked `x-nawara-body-redacted`, never replayable (`nawara-dlq replay` answers
+`not_replayable`, exit 5). Either way only the validated kit headers (`eventId`, `source`, `occurredAt`, `version`, `correlationId`) and
+the kit annotations survive; any other header a publisher attached is dropped.
+
+## Retention (18.8)
+
+The mechanism of ADR-0049 A41, with **no duration**: `audit_retention_policy` ships empty, so **nothing is ever purged** until the owner
+decides durations (P-A2). The runtime role can never delete (privileges + trigger). A separate retention role (`audit_retention`,
+provisioned by `infra/postgres/init` when `AUDIT_RETENTION_PASSWORD` is set; granted by migration `0003`) deletes only rows whose
+`recordedAt` is past their category's horizon, and can read only `id`, `category`, `recordedAt`.
+
+```bash
+# the owner (migrator) records a decided duration — a reviewed, deliberate act (P-A2); removing the row stops purging that category
+psql "$MIGRATION_DATABASE_URL" -c "INSERT INTO audit_retention_policy(category, \"retainDays\") VALUES ('<category>', <days>)
+  ON CONFLICT (category) DO UPDATE SET \"retainDays\" = EXCLUDED.\"retainDays\", \"setAt\" = now(), \"setBy\" = current_user"
+# the retention role runs the purge (a scheduler or an operator; bounded, resumable, idempotent; ledgered in audit_retention_run)
+RETENTION_DATABASE_URL=postgres://audit_retention:…@host:5432/audit npm run retention -w audit-service -- --dry-run
+RETENTION_DATABASE_URL=… npm run retention -w audit-service -- [--category <c>] [--batch-size 1000] [--max-batches 100]
+```
+
+There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: reserved, not built). The query limiter's state
+(`kit_rate_limit`, audit buckets) is purged in the background once each window ends (bounded batches; it never frees a limited caller).
 
 ## Configuration
 
@@ -117,4 +143,6 @@ by hand as `infra/postgres/init/01-service-databases.sh` does.
 | 18.4 | ✅ contract and catalog (`@nawara/audit-contract`; `toNewAuditRecord` here) |
 | 18.5 | ✅ RabbitMQ ingestion (consumer, admission, duplicates / conflicts, DLQ reasons, readiness, shutdown) |
 | 18.6 | ✅ query and authorization (organization / platform reads, cursor, rate limits, self-audited platform reads, index `0002`) |
-| 18.7 – 18.10 | producers, security / retention, operations, certification |
+| 18.7 | ✅ producer integration (Payment, Billing, Organization, File, Auth) |
+| 18.8 | ✅ security, privacy, retention (DLQ redaction, retention role and purge mechanism, limiter purge, migration `0003`) |
+| 18.9 – 18.10 | operations, certification |

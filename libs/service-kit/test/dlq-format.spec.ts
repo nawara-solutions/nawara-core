@@ -3,7 +3,7 @@ import { formatDeadLetter, outputToken, type DeadLetterInfo } from '../src/event
 
 const info = (over: Partial<DeadLetterInfo> = {}): DeadLetterInfo => ({
   position: 1, eventId: 'e-1', eventName: 'payment.cancelled', correlationId: 'corr-1', failure: 'permanent', failureReason: 'invalid_identifier',
-  failureError: 'PermanentEventFailure', retryCount: 0, replayCount: 0, failedAt: '2026-01-01T00:00:00.000Z', fields: {}, ...over,
+  failureError: 'PermanentEventFailure', retryCount: 0, replayCount: 0, failedAt: '2026-01-01T00:00:00.000Z', bodyRedacted: false, fields: {}, ...over,
 });
 
 describe('nawara-dlq output', () => {
