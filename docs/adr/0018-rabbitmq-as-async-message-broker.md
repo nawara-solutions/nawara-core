@@ -9,6 +9,10 @@
 > **Forward note (2026-09-24):** Stage 16.2 ([ADR-0046](./0046-notification-service-architecture.md) rule 17) moved Auth, the last user
 > of `@golevelup/nestjs-rabbitmq`, onto the service-kit `RabbitMqEventBus` and its canonical header envelope. No Core service uses
 > `@golevelup/nestjs-rabbitmq` any more; the exchange (`nawara.events`) and the routing-key convention (event name verbatim) are unchanged.
+
+> **Forward note (2026-09-27):** [ADR-0053](./0053-core-v1-production-rabbitmq.md) ends the "local-dev-only" deferral for production: one
+> private RabbitMQ node on the Core VPS (internal Docker network, no published port, no management UI), per-service least-privilege
+> identities, and audit-service deployed before any producer relays. The exchange and the routing-key convention are unchanged.
 - **GitHub issue:** https://github.com/nawara-solutions/nawara-core/issues/17
 
 ## Context

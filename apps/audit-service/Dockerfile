@@ -33,8 +33,10 @@ COPY --from=build /app/libs/service-kit/dist ./libs/service-kit/dist
 COPY --from=build /app/libs/audit-contract/dist ./libs/audit-contract/dist
 COPY libs/service-kit/migrations ./libs/service-kit/migrations
 COPY --from=build /app/apps/audit-service/dist ./apps/audit-service/dist
-# Schema of record travels with the image so a deploy always applies the migrations that match this code (none of its own before 18.3).
+# Schema of record + the on-server provisioning script travel with the image so a deploy always applies the migrations/script that match
+# this exact code (none of its own migrations before 18.3; the script since ADR-0053, see deploy/provision-and-deploy.sh).
 COPY apps/audit-service/db/migrations ./apps/audit-service/db/migrations
+COPY apps/audit-service/deploy ./apps/audit-service/deploy
 WORKDIR /app/apps/audit-service
 # The service only reads its own files and opens sockets: it needs no write access and no privileges (the base image's `node` user).
 USER node

@@ -169,11 +169,16 @@ Decision D3 ([ADR-0033](../adr/0033-service-to-service-authentication-and-user-i
 - **Envelope:** the payload stays the flat, documented shape each service already uses. For **new** publishers, metadata
   (`eventId`, `occurredAt`, `correlationId`, producing service) travels in **message headers**, so payloads stay
   compatible. Since Stage 16.2 Auth publishes the same canonical kit envelope through the kit bus (`eventId`, `occurredAt`,
-  `source: auth-service`, `version: 1`, `correlationId`; persistent; confirmed), still fire-and-forget and without an outbox
+  `source: auth-service`, `version: 1`, `correlationId`; persistent; confirmed)
   ([ADR-0046](../adr/0046-notification-service-architecture.md) D4, [Stage 16.2 record](./stage-16/stage-16-2-auth-event-envelope.md)).
-  Before that Auth sent the payload only, and the kit consumer dead-lettered such a message as `malformed_envelope`.
-- **Delivery today:** RabbitMQ runs only in the local `docker-compose.yml`, not in production, and events are fire-and-forget, so **no event is reliably delivered yet**.
-  A transactional outbox is the recommended fix and is out of scope here (O10).
+  Before that Auth sent the payload only, and the kit consumer dead-lettered such a message as `malformed_envelope`. Since Stage
+  21.C.2 those events go through Auth's transactional outbox rather than fire-and-forget ([ADR-0052](../adr/0052-core-v1-capability-closure.md)
+  decision 4; written only while `AUTH_EVENTS` is on).
+- **Delivery today:** every producer writes its events in the business transaction to its own transactional outbox and the kit relay
+  publishes them, at least once, with publisher confirms (audit evidence since Stage 18.7, Auth's domain events since Stage 21.C.2;
+  [ADR-0037](../adr/0037-reliable-events-outbox-inbox.md)); consumers deduplicate by `eventId`. **Production broker:**
+  [ADR-0053](../adr/0053-core-v1-production-rabbitmq.md) (one private node on the VPS, per-service identities; audit-service before
+  Auth), provisioned by `infra/rabbitmq/provision.sh`; until it is provisioned, only the local `docker-compose.yml` runs RabbitMQ.
 - **Rules:** a producer never blocks on the broker; a payload never contains a secret or a token; the only exception is
   a one-time code whose delivery *is* the event's purpose (Auth's operator working code and member contact-verification
   code today, an exception Auth's `ports.ts` does not yet reflect); consumers are idempotent by `eventId` where present.

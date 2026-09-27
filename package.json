@@ -10,6 +10,8 @@
     "prepare": "husky",
     "check:repo": "node scripts/check-repo.mjs",
     "test:repo": "node --test scripts/check-repo.test.mjs",
+    "test:deploy": "node --test scripts/deploy-tests/*.test.mjs",
+    "test:deploy:real-broker": "npm run build -w @nawara/service-kit && node --test --test-timeout=240000 scripts/deploy-tests/real-broker.mjs",
     "test:e2e:real-broker": "npm run build -w @nawara/service-kit -w @nawara/audit-contract -w billing-service -w payment-service -w auth-service -w notification-service && npm run test:e2e -w @nawara/e2e-real-broker",
     "test:e2e:auth-organization": "npm run build -w @nawara/service-kit -w @nawara/audit-contract -w auth-service -w organization-service && npm run test:e2e -w @nawara/e2e-auth-organization",
     "test:e2e:audit-producers": "npm run build -w @nawara/service-kit -w @nawara/audit-contract -w audit-service -w payment-service -w billing-service -w organization-service -w file-service -w auth-service -w release-service -w notification-service && npm run test:e2e -w @nawara/e2e-audit-producers"

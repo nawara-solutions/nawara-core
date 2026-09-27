@@ -1,0 +1,43 @@
+name: core RabbitMQ provision
+
+# Provisions / converges the Core V1 production broker on the VPS (ADR-0053) via infra/rabbitmq/provision.sh: one private RabbitMQ node
+# on the internal Core network, a named volume, no published port, no management UI, no guest, one least-privilege identity per service.
+# MANUAL (workflow_dispatch) and `main` only:  gh workflow run core-rabbitmq-provision.yml --ref main -f services="audit-service auth-service"
+# Idempotent: re-running never recreates the broker, never rotates a stored secret and never prints one. Broker secrets are generated on
+# the server and never stored in GitHub. The production order is in docs/runbooks/core-rabbitmq-production.md (audit-service before Auth).
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: Broker identities to converge (space-separated; the script refuses a service with no defined identity)
+        required: true
+        default: audit-service auth-service
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    if: github.ref == 'refs/heads/main'
+    # The same production queue as every Core deployment: never concurrent with a deploy, never cancelled once running.
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The script is not in any image: it travels base64-encoded through the SSH environment (no scp, no secret involved).
+      - name: Package the provisioning script
+        run: echo "PROVISION_B64=$(base64 -w0 infra/rabbitmq/provision.sh)" >> "$GITHUB_ENV"
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          envs: PROVISION_B64,RABBITMQ_SERVICES
+          script: |
+            set -euo pipefail
+            printf '%s' "$PROVISION_B64" | base64 -d | RABBITMQ_SERVICES="$RABBITMQ_SERVICES" bash -s
+        env:
+          RABBITMQ_SERVICES: ${{ inputs.services }}
