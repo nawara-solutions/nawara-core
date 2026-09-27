@@ -21,7 +21,10 @@ umask 077
 : "${IMAGE:?IMAGE (full image reference to deploy) is required}"
 DIR="${DEPLOY_DIR:-$HOME/nawara-core/auth-service}"
 NET="${DEPLOY_NETWORK:-deploy_edge}"
-HOST_RULE="${AUTH_HOST:-core-api.hsalem-anwar.dev}"
+HOST_RULE="${AUTH_HOST:-core-api.nawara-solutions.com}"
+# Temporary alias for the previous public hostname, served by a second router on the same service and path. AUTH_HOST_ALIAS=""
+# (set but empty) disables it; retire the default once no client uses the old hostname.
+HOST_ALIAS="${AUTH_HOST_ALIAS-core-api.hsalem-anwar.dev}"
 DB=nawara-core-auth-db
 VOL=nawara-core-auth-db-data
 APP=nawara-core-auth-service
@@ -168,6 +171,17 @@ if exists "$APP"; then
   docker rename "$APP" "$PREV"
 fi
 
+ALIAS_LABELS=()
+if [ -n "$HOST_ALIAS" ] && [ "$HOST_ALIAS" != "$HOST_RULE" ]; then
+  log "routing alias host $HOST_ALIAS to $APP (router $APP-alias)"
+  ALIAS_LABELS=(
+    --label "traefik.http.routers.$APP-alias.rule=Host(\`$HOST_ALIAS\`) && PathPrefix(\`/auth\`)"
+    --label "traefik.http.routers.$APP-alias.entrypoints=websecure"
+    --label "traefik.http.routers.$APP-alias.tls.certresolver=le"
+    --label "traefik.http.routers.$APP-alias.service=$APP"
+  )
+fi
+
 log "starting $APP from $IMAGE"
 docker run -d --name "$APP" --restart unless-stopped --stop-timeout 60 --network "$NET" --env-file "$APP_ENV" \
   --label traefik.enable=true \
@@ -175,6 +189,7 @@ docker run -d --name "$APP" --restart unless-stopped --stop-timeout 60 --network
   --label "traefik.http.routers.$APP.entrypoints=websecure" \
   --label "traefik.http.routers.$APP.tls.certresolver=le" \
   --label "traefik.http.services.$APP.loadbalancer.server.port=3000" \
+  ${ALIAS_LABELS[@]+"${ALIAS_LABELS[@]}"} \
   --health-cmd 'wget -qO- http://127.0.0.1:3000/auth/health >/dev/null || exit 1' \
   --health-interval 15s --health-timeout 5s --health-retries 3 --health-start-period 15s \
   "$IMAGE" >/dev/null

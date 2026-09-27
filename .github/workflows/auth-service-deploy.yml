@@ -1,7 +1,7 @@
 name: auth-service manual deploy
 
 # Builds the selected ref and deploys it to the VPS (PostgreSQL + auth-service behind Traefik at
-# core-api.hsalem-anwar.dev/auth) via apps/auth-service/deploy/provision-and-deploy.sh.
+# core-api.nawara-solutions.com/auth) via apps/auth-service/deploy/provision-and-deploy.sh.
 # Runs from `main` only (the job is guarded):  gh workflow run auth-service-deploy.yml --ref main
 # Secrets: the org-level DEPLOY_SSH_* (same as the main-push deploy). Application secrets are NOT
 # stored in GitHub — the script generates them on the server on first run (see the script header).
