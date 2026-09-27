@@ -79,7 +79,7 @@ jobs:
   # (secrets generated on the server, never in GitHub) and migrations are handled by
   # apps/auth-service/deploy/provision-and-deploy.sh, shipped inside the image.
   # Reuses the same DEPLOY_SSH_* secrets nawara-drive's repo has (same VPS) — must be added to this repo separately, since
-  # GitHub secrets don't cross repos. Routed at core-api.hsalem-anwar.dev/auth — a single
+  # GitHub secrets don't cross repos. Routed at core-api.nawara-solutions.com/auth — a single
   # domain shared by every nawara-core service, path-routed per service via Traefik
   # PathPrefix rules (notification-service, payment-service, ai-service can be added the
   # same way later, each with their own PathPrefix).
