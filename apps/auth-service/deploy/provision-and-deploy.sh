@@ -31,6 +31,10 @@ APP=nawara-core-auth-service
 DB_ENV="$DIR/db.env"
 APP_ENV="$DIR/.env"
 DB_IMAGE=postgres:16-alpine
+# ADR-0053: the private Core network and broker (infra/rabbitmq/provision.sh). Auth joins that network in addition to Traefik's.
+CORE_NET="${CORE_NETWORK:-nawara-core-internal}"
+BROKER="${RABBITMQ_CONTAINER:-nawara-core-rabbitmq}"
+BROKER_CLIENT="${BROKER_DIR:-$HOME/nawara-core/rabbitmq}/clients/auth-service.env"
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -41,11 +45,21 @@ ensure() { grep -q "^$2=" "$1" 2>/dev/null || { printf '%s=%s\n' "$2" "$3" >>"$1
 mkdir -p "$DIR"; chmod 700 "$DIR"
 # Stage 18.7.5: the central audit relay publishes Auth's audit evidence to RabbitMQ, and the service refuses to start in production
 # without RABBITMQ_URL (independent of AUTH_EVENTS). Checked BEFORE anything is migrated or stopped, so a missing broker can never turn
-# a deploy into an outage. Supply it once (RABBITMQ_URL=amqps://... on the deploy command, or in "$APP_ENV"); the value is never echoed.
-if [ -z "${RABBITMQ_URL:-}" ] && ! grep -q '^RABBITMQ_URL=..*' "$APP_ENV" 2>/dev/null; then
-  die "RABBITMQ_URL is not set (neither in the deploy environment nor in $APP_ENV): auth-service needs a broker for its audit relay (Stage 18.7.5); nothing was changed"
+# a deploy into an outage. Sources, first found wins and is never echoed: RABBITMQ_URL on the deploy command, "$APP_ENV", or (ADR-0053)
+# the auth-service identity the broker provisioning wrote to "$BROKER_CLIENT". There is no default and no fallback broker.
+if [ -z "${RABBITMQ_URL:-}" ] && ! grep -q '^RABBITMQ_URL=..*' "$APP_ENV" 2>/dev/null && ! grep -q '^RABBITMQ_URL=..*' "$BROKER_CLIENT" 2>/dev/null; then
+  die "RABBITMQ_URL is not set (neither in the deploy environment, nor in $APP_ENV, nor in $BROKER_CLIENT): auth-service needs a broker for its audit relay (Stage 18.7.5); nothing was changed"
 fi
 docker network inspect "$NET" >/dev/null 2>&1 || die "docker network '$NET' not found (Traefik's network); refusing to create it"
+docker network inspect "$CORE_NET" >/dev/null 2>&1 \
+  || die "docker network '$CORE_NET' not found (the private Core network of the broker); provision the broker first (infra/rabbitmq/provision.sh); nothing was changed"
+# ORDERING RULE (ADR-0053 §5). The relay publishes without `mandatory`: an audit event for which no queue is bound is CONFIRMED by the
+# broker and dropped, and the relay then marks its outbox row published. So Auth may only start once audit-service has declared and bound
+# its queue. Checked on the broker itself, before anything is migrated or stopped. Deploy audit-service first.
+BIND_EXPECTED=$(printf 'nawara.events\taudit-service.audit\taudit.#')
+bindings=$(docker exec -u rabbitmq "$BROKER" rabbitmqctl -q list_bindings -p nawara-core source_name destination_name routing_key --no-table-headers 2>/dev/null || true)
+grep -qxF "$BIND_EXPECTED" <<<"$bindings" \
+  || die "the audit queue is not bound on $BROKER (nawara.events -> audit-service.audit, audit.#) or the broker is unreachable: Auth's audit evidence would be confirmed and dropped. Deploy audit-service first; nothing was changed"
 command -v openssl >/dev/null || die "openssl is required on the server to generate secrets"
 
 # ---------------------------------------------------------------- PostgreSQL
@@ -153,6 +167,8 @@ ensure "$APP_ENV" AUTH_EVENTS off
 # Stage 18.7.5: the outbox relay's broker. Stage 21.C.2: AUTH_EVENTS=off above now means "write no domain-event rows" (the relay still
 # publishes audit evidence); enabling it in production is Stage 21.x.
 [ -n "${RABBITMQ_URL:-}" ] && ensure "$APP_ENV" RABBITMQ_URL "$RABBITMQ_URL"
+# ADR-0053: otherwise the broker-provisioned auth-service identity (least privilege: publish audit.* only). Never overwrites a value.
+if [ -f "$BROKER_CLIENT" ]; then ensure "$APP_ENV" RABBITMQ_URL "$(sed -n 's/^RABBITMQ_URL=//p' "$BROKER_CLIENT")"; fi
 ensure "$APP_ENV" WORK_TIMEZONE Africa/Tunis
 # No channel delivers verification codes yet, so it stays off in production until one exists.
 ensure "$APP_ENV" REQUIRE_CONTACT_VERIFICATION false
@@ -185,6 +201,7 @@ fi
 log "starting $APP from $IMAGE"
 docker run -d --name "$APP" --restart unless-stopped --stop-timeout 60 --network "$NET" --env-file "$APP_ENV" \
   --label traefik.enable=true \
+  --label "traefik.docker.network=$NET" \
   --label "traefik.http.routers.$APP.rule=Host(\`$HOST_RULE\`) && PathPrefix(\`/auth\`)" \
   --label "traefik.http.routers.$APP.entrypoints=websecure" \
   --label "traefik.http.routers.$APP.tls.certresolver=le" \
@@ -194,8 +211,13 @@ docker run -d --name "$APP" --restart unless-stopped --stop-timeout 60 --network
   --health-interval 15s --health-timeout 5s --health-retries 3 --health-start-period 15s \
   "$IMAGE" >/dev/null
 
+# ADR-0053: also on the private Core network to reach the broker. Traefik keeps routing over $NET (the label above), never the internal one.
+attached=""
+docker network connect "$CORE_NET" "$APP" >/dev/null 2>&1 && attached=1
+
 ok=""
-for _ in $(seq 1 30); do
+st="not attached to $CORE_NET"
+[ -n "$attached" ] && for _ in $(seq 1 30); do
   st=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$APP")
   [ "$st" = running/healthy ] && { ok=1; break; }
   [ "${st%%/*}" = running ] || break
