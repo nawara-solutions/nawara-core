@@ -9,6 +9,8 @@ export const SCRIPTS = {
   broker: join(ROOT, 'infra/rabbitmq/provision.sh'),
   audit: join(ROOT, 'apps/audit-service/deploy/provision-and-deploy.sh'),
   auth: join(ROOT, 'apps/auth-service/deploy/provision-and-deploy.sh'),
+  organization: join(ROOT, 'apps/organization-service/deploy/provision-and-deploy.sh'),
+  registerCaller: join(ROOT, 'apps/organization-service/deploy/register-caller.sh'),
 };
 const CLI = join(import.meta.dirname, 'fake-docker-cli.mjs');
 const T = '\t';
