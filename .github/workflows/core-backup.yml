@@ -1,0 +1,49 @@
+name: core database backup
+
+# Encrypted off-host backups of the cutover databases (Stage 21.x G5; ADR-0040 G5) via infra/backup/backup.sh: pg_dump -Fc inside each
+# database container, encrypted on the server to the recipient CERTIFICATE (the private key never touches the server), uploaded to
+# private S3-compatible storage, verified, 30 backup days kept. docs/runbooks/core-backup-restore.md.
+#
+# MANUAL:    gh workflow run core-backup.yml --ref main -f services="auth-service"
+# SCHEDULED: daily (D3: RPO 24 h), but ONLY once the repository variable CORE_BACKUP_SCHEDULE is set to `enabled`, after the server
+#            configuration exists (runbook §2). Merging this file enables nothing. CORE_BACKUP_SERVICES lists the scheduled services
+#            (default auth-service; add organization-service after F1).
+# The script arrives base64-encoded through the SSH environment (no scp); the S3 credentials and the certificate live on the server,
+# never in GitHub. A failed run is the failure signal (red in Actions; the server keeps backup/status/<service>.last-attempt).
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: Services to back up (space-separated; organization-service and/or auth-service)
+        required: true
+        default: auth-service
+  schedule:
+    - cron: '17 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.CORE_BACKUP_SCHEDULE == 'enabled')
+    # The production queue: never concurrent with a deployment (no dump in the middle of a migration), never cancelled once running.
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Package the backup script
+        run: echo "BACKUP_B64=$(base64 -w0 infra/backup/backup.sh)" >> "$GITHUB_ENV"
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          envs: BACKUP_B64,BACKUP_SERVICES
+          script: |
+            set -euo pipefail
+            printf '%s' "$BACKUP_B64" | base64 -d | BACKUP_SERVICES="$BACKUP_SERVICES" bash -s
+        env:
+          BACKUP_SERVICES: ${{ inputs.services || vars.CORE_BACKUP_SERVICES || 'auth-service' }}

@@ -105,7 +105,7 @@ tool. After F7, each new Platform must be added to `auth-service`'s `allowedPlat
 WP-1 (planning label) ─▶ G1 topology (this record) ─▶ F1 provisioning (deploy + declare-class fresh + provisioning caller)
 G2  migration classification (§3; gate stays)       G3  roles-before-migrations + privilege assertion (§2; certify later)
 G4  cutover monitoring and alert rules, attended (runbook §6: defined; demonstrated at G6: pending)
-G5  back up: the DB volume, db.env, roles.env, .env, callers/ (build and drill later)
+G5  encrypted off-host backup and isolated restore drill (runbook core-backup-restore; real-volume drill after F1: pending)
 G6  production-like rehearsal of F1–F7          G7  `ownership approve --reference …` (after T1, below)
 ```
 

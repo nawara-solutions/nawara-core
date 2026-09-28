@@ -1,6 +1,7 @@
 // A stateful stand-in for the `docker` CLI, used only by the deployment-script tests (never touches a Docker daemon).
 // State lives in the JSON file named by FAKE_DOCKER_STATE; every invocation is appended to `calls` (argv only; stdin is kept separately
 // in `stdin`, because psql SQL and broker passwords legitimately travel there).
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const file = process.env.FAKE_DOCKER_STATE;
@@ -82,7 +83,11 @@ function run(args) {
   }
   const image = args[i];
   const get = (f) => o.flags.filter(([k]) => k === f).map(([, v]) => v);
-  if (o.rm) exit(state.failRm?.[image] ? 1 : 0); // one-off containers (migrations): succeed unless told otherwise
+  if (image.startsWith('amazon/aws-cli')) s3(o, get, image, args.slice(i + 1));
+  if (o.rm) { // one-off containers (migrations): succeed unless told otherwise
+    if (args.slice(i + 1).some((a) => a.includes('migrate.js')) && !state.failRm?.[image]) out(`${state.drill?.migrateOutput ?? 'migrations: 0 applied, 8 already applied'}\n`);
+    exit(state.failRm?.[image] ? 1 : 0);
+  }
   const name = get('--name')[0];
   const networks = Object.fromEntries(get('--network').map((n) => [n, true]));
   if (get('--pull')[0] === 'never' && state.failRecreateOnce) { state.failRecreateOnce = false; process.stderr.write('simulated failure during recreation\n'); exit(1); }
@@ -90,6 +95,7 @@ function run(args) {
   const envFile = get('--env-file')[0];
   const env = [...(state.images?.[image]?.env ?? []), ...(envFile ? readFileSync(envFile, 'utf8').split('\n').filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l)) : [])];
   const hc = get('--health-cmd')[0];
+  state.runs = [...(state.runs ?? []), { name, image, network: get('--network')[0], env }];
   state.containers[name] = {
     id: `id-${name}-${state.calls.length}`, image, imageId: image.startsWith('sha256:') ? image : `sha256:${'0'.repeat(64)}`,
     running: true, health: healthFor(name, env),
@@ -126,6 +132,44 @@ function rabbitmqctl(args) {
   exit(0);
 }
 
+/**
+ * A private S3-compatible bucket behind `docker run --rm … amazon/aws-cli … --endpoint-url <e> s3api <op>` (infra/backup). Objects are
+ * kept in state.s3.objects["bucket/key"]; /work in the container is the host directory mounted with -v. Failure knobs: failPut
+ * (a key substring, or true), badHead (a key substring: HEAD reports the wrong size), failList, failDelete.
+ */
+function s3(o, get, image, args) {
+  const S = (state.s3 ??= { objects: {}, deleted: [], calls: [] });
+  const opt = (n) => { const k = args.indexOf(n); return k >= 0 ? args[k + 1] : undefined; };
+  const work = get('-v').map((v) => v.split(':')).find(([, d]) => d === '/work')?.[0];
+  const host = (p) => p.replace(/^\/work/, work);
+  const [op] = args.slice(args.indexOf('s3api') + 1);
+  const bucket = opt('--bucket'); const key = opt('--key');
+  const hit = (knob) => knob === true || (typeof knob === 'string' && (key ?? '').includes(knob));
+  S.calls.push({ op, key, prefix: opt('--prefix'), endpoint: opt('--endpoint-url'), envFiles: get('--env-file'), env: o.env, image, user: get('--user')[0], network: get('--network')[0] });
+  const fail = (m) => { process.stderr.write(`An error occurred (${m})\n`); exit(254); };
+  switch (op) {
+    case 'put-object': {
+      if (hit(S.failPut)) fail('InternalError');
+      const data = readFileSync(host(opt('--body')));
+      S.objects[`${bucket}/${key}`] = { data: data.toString('base64'), size: data.length, sha: createHash('sha256').update(data).digest('hex') };
+      out('{"ETag": "\\"fake\\""}\n'); exit(0); break;
+    }
+    case 'head-object': { const x = S.objects[`${bucket}/${key}`]; if (!x) fail('404'); out(`${hit(S.badHead) ? x.size - 1 : x.size}\n`); exit(0); break; }
+    case 'list-objects-v2': {
+      if (S.failList) fail('AccessDenied');
+      const keys = Object.keys(S.objects).filter((k) => k.startsWith(`${bucket}/${opt('--prefix')}`)).map((k) => k.slice(bucket.length + 1)).sort();
+      out(keys.length ? `${keys.join('\n')}\n` : 'None\n'); exit(0); break;
+    }
+    case 'delete-object': { if (S.failDelete) fail('AccessDenied'); delete S.objects[`${bucket}/${key}`]; S.deleted.push(key); exit(0); break; }
+    case 'get-object': { const x = S.objects[`${bucket}/${key}`]; if (!x) fail('NoSuchKey'); writeFileSync(host(args[args.length - 1]), Buffer.from(x.data, 'base64')); out('{}\n'); exit(0); break; }
+    default: process.stderr.write(`fake aws: unsupported ${op}\n`); exit(2);
+  }
+}
+
+/** The tables a pg_restore --list of a fake archive shows data for (infra/backup requires the cutover-critical ones). */
+const TOC_TABLES = ['schema_migrations', 'ownership_state', 'ownership_event', 'hierarchy_id_ledger', 'company', 'platform', 'organization', 'outbox', 'hierarchy_authority', 'user'];
+const FACTS = 'table|company|1\ntable|schema_migrations|8\nstructure|constraints|40\nmigrations|8|0123456789abcdef0123456789abcdef\nowner|company|x\nacl|company|x=r/x\nauthority|PREPARED|fresh|false\n';
+
 function execIn(args) {
   let i = 0;
   let user;
@@ -137,9 +181,36 @@ function execIn(args) {
   const name = args[i];
   const [prog, ...progArgs] = args.slice(i + 1);
   if (!c(name) || !c(name).running) { process.stderr.write(`Error response from daemon: No such container: ${name}\n`); exit(1); }
+  const B = state.backup ?? {}; const D = state.drill ?? {};
+  if (prog === 'pg_dump' && progArgs.includes('--version')) { out('pg_dump (PostgreSQL) 16.15\n'); exit(0); }
+  if (prog === 'pg_dump') {
+    state.dumps = [...(state.dumps ?? []), { container: name, argv: progArgs }];
+    if (B.dumpFail) { process.stderr.write('pg_dump: error: simulated\n'); exit(1); }
+    out(B.dumpEmpty ? '' : B.dumpNotCustom ? 'not an archive' : `PGDMP-fake-custom-archive-${name}-${'x'.repeat(256)}`); exit(0);
+  }
+  if (prog === 'pg_restore' && progArgs.includes('--list')) {
+    readStdin();
+    if (B.tocFail) { process.stderr.write('pg_restore: error: input file does not appear to be a valid archive\n'); exit(1); }
+    out(TOC_TABLES.filter((t) => t !== B.tocMissing).map((t, k) => `${3600 + k}; 0 ${16400 + k} TABLE DATA public ${t} owner\n`).join('')); exit(0);
+  }
+  if (prog === 'pg_restore') {
+    const data = readStdin();
+    state.restores = [...(state.restores ?? []), { container: name, argv: progArgs, at: state.calls.length - 1, bytes: data.length }];
+    exit(D.restoreFail ? 1 : 0);
+  }
+  if (prog === 'pg_isready') exit(D.dbNeverReady ? 2 : 0);
+  if (prog === 'wget') { out(D.notReady ? '' : '{"status":"ready"}'); exit(D.notReady ? 1 : 0); }
+  if (prog === 'node' && progArgs[0] === '-e') { out(`${D.apiName ?? D.knownName ?? 'Drill Synthetic Co'}\n`); exit(0); }
   if (prog === 'psql' && progArgs.includes('-c')) { // a read-only fact over the local socket
     const sql = progArgs[progArgs.indexOf('-c') + 1];
     state.queries = [...(state.queries ?? []), { container: name, at: state.calls.length - 1, sql }];
+    // infra/backup/restore-drill.sh: role attributes, schema_migrations owner/privileges, history length, known-id reads
+    if (sql.includes('rolcanlogin')) { out(`${D.roleAttrs ?? 't|f|f|f|f|f'}\n`); exit(0); }
+    if (sql.includes('relowner') && sql.includes('schema_migrations')) { out(`${D.smOwner ?? (name.includes('organization') ? 'organization_migrator' : 'auth')}\n`); exit(0); }
+    if (sql.includes("'public.schema_migrations','SELECT'")) { out(`${D.smPrivileges ?? 't|f|f|f|f'}\n`); exit(0); }
+    if (sql.includes('count(*) FROM schema_migrations')) { out(`${D.historyLength ?? 8}\n`); exit(0); }
+    if (sql.includes('FROM company WHERE id')) { out(`${D.knownName ?? 'Drill Synthetic Co'}\n`); exit(0); }
+    if (sql.includes('FROM "user" WHERE id')) { out(`${sql.match(/'([0-9a-f-]{36})'/)?.[1] ?? ''}\n`); exit(0); }
     // organization-service deploy (Stage 21.x G1): runtime-role attributes, forbidden / missing privileges, ownership phase
     if (sql.includes('rolbypassrls')) { out(`${state.org?.roleAttrs ?? 'f|f|f|f|f'}\n`); exit(0); }
     if (sql.includes('WHERE NOT has_table_privilege')) { out(`${state.org?.missing ?? ''}\n`); exit(0); }
@@ -154,6 +225,10 @@ function execIn(args) {
     const text = readStdin();
     state.stdin.push({ container: name, text, at: state.calls.length - 1 });
     if (state.failPsql) exit(3);
+    if (text.includes('-- nawara-backup-facts')) { // infra/backup facts: at backup time from state.backup, after a drill restore from state.drill
+      if (B.factsFail) exit(3);
+      out(name.startsWith('nawara-drill-') ? (D.facts ?? B.facts ?? FACTS) : (B.facts ?? FACTS)); exit(0);
+    }
     for (const m of text.matchAll(/ALTER ROLE (\w+) WITH[^;]*PASSWORD '([^']*)'/g)) {
       if (state.pg) { state.pg.roles[m[1]] ??= { super: false }; state.pg.roles[m[1]].password = m[2]; }
     }
@@ -204,7 +279,7 @@ switch (cmd) {
   case 'start': if (c(rest[0])) c(rest[0]).running = true; exit(c(rest[0]) ? 0 : 1); break;
   case 'stop': { const n = rest[rest.length - 1]; if (c(n)) c(n).running = false; exit(0); break; }
   case 'rename': state.containers[rest[1]] = c(rest[0]); delete state.containers[rest[0]]; exit(0); break;
-  case 'rm': delete state.containers[rest[rest.length - 1]]; exit(0); break;
+  case 'rm': for (const n of rest.filter((a) => !a.startsWith('-'))) delete state.containers[n]; exit(0); break;
   case 'logs': case 'ps': exit(0); break;
   default: process.stderr.write(`fake docker: unsupported command ${cmd}\n`); exit(2);
 }

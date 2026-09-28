@@ -11,6 +11,8 @@ export const SCRIPTS = {
   auth: join(ROOT, 'apps/auth-service/deploy/provision-and-deploy.sh'),
   organization: join(ROOT, 'apps/organization-service/deploy/provision-and-deploy.sh'),
   registerCaller: join(ROOT, 'apps/organization-service/deploy/register-caller.sh'),
+  backup: join(ROOT, 'infra/backup/backup.sh'),
+  restoreDrill: join(ROOT, 'infra/backup/restore-drill.sh'),
 };
 const CLI = join(import.meta.dirname, 'fake-docker-cli.mjs');
 const T = '\t';

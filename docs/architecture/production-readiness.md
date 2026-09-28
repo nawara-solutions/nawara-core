@@ -61,7 +61,10 @@ refuse a superuser, schema-owner or `*_migrator` runtime user at startup.
 
 ## 3. Backups and restore
 
-**Current state:** no backup job or procedure is documented in the repository, and no restore has ever been tested on the server.
+**Current state (Stage 21.x G5):** implemented for the two cutover databases, organization-service and auth-service
+([runbook](../runbooks/core-backup-restore.md)): `infra/backup/backup.sh`, `infra/backup/restore-drill.sh` and the `core-backup`
+workflow, certified locally. **No production backup has run and no restore has been drilled on the real volume yet** (below). The
+other Core databases are outside G5 (Audit P-A7, Release P-R7).
 
 **Local restore drill (scratch PostgreSQL 16.15; this proves the *procedure*, not production):**
 
@@ -77,9 +80,12 @@ refuse a superuser, schema-owner or `*_migrator` runtime user at startup.
 container); use a **full custom-format** dump, because a data-only dump warns about the circular foreign key on `refresh_token`;
 when comparing dumps, filter the per-dump `\restrict` line or every comparison "differs".
 
-**Proposed procedure (not implemented):** a scheduled `docker exec <db> pg_dump -Fc` per database, written outside the database volume
-and copied **off the host**, encrypted; a restore drill into a scratch database on a schedule, verified by counts and a schema diff.
-**Undecided (business input):** retention, recovery point and recovery time objectives, and where off-host copies live.
+**Procedure (implemented, Stage 21.x G5):** a daily `docker exec <db> pg_dump -Fc` per database, written outside the database volume,
+encrypted on the server to a public recipient certificate (the private key stays off the host) and copied **off the host** to private
+S3-compatible storage; a restore drill into an isolated scratch database, verified by recorded facts (counts, structure, migrations,
+owners, ACLs, authority state), `/ready` and a known-id read.
+**Decided (owner, G5):** RPO 24 h, RTO 4 h, 30 daily backups kept; S3-compatible storage (provider is configuration); client-side
+public-key encryption. **Still open:** the cadence of recurring drills after G5.
 
 **Application verification (Stage 5 hardening, completion pass — gap noted, not yet drilled):** the local drill above verifies only the
 database (row/constraint/trigger counts, schema diff) — it does not yet point a service at the restored database and confirm the
@@ -92,7 +98,8 @@ returns the pre-dump data unchanged.
 **Failure criteria:** any restore command exits non-zero; any count or diff differs; `/ready` does not return 2xx against the restored
 database; or the known-id read is missing or does not match.
 **Status:** a backup that has never been restored **on the real volume**, and never verified at the application level, is not proven;
-production remains a **BLOCKER** until that drill is done.
+production remains a **BLOCKER** until that drill is done: Auth after the tooling is merged (separately authorized), Organization after
+F1 and before G7/F6.
 
 ## 4. Migrations
 
@@ -113,9 +120,9 @@ change, state existing data, backward compatibility, migration and deploy order,
 | Deploy: fail-fast on the piped script, concurrency queue, stale trigger removed | implemented; the deploy passed under the new script; the concurrency queue itself is checked statically only |
 | Least-privilege database roles | local: implemented and verified; production (auth-service): **implemented and applied** (Stage 14.3) |
 | Required CI checks on `main` (branch protection) | **NEEDS CONFIGURATION** (repository setting; F2) |
-| Backup job and off-host copy | **NEEDS IMPLEMENTATION** |
-| Restore procedure | proven on a local scratch database only; **BLOCKER** until drilled on the real volume |
-| Retention and RPO/RTO | **NEEDS DECISION** |
+| Backup job and off-host copy | implemented for the cutover databases (G5), certified locally; **not yet configured or run in production** |
+| Restore procedure | isolated drill tool, certified locally end to end; **BLOCKER** until drilled on the real volume (Auth; Organization after F1) |
+| Retention and RPO/RTO | decided: 30 daily, RPO 24 h, RTO 4 h |
 
 ## 6. Stage 14 operational hardening: runtime limits, signals and open items
 
