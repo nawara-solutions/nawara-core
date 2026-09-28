@@ -43,15 +43,21 @@
 
 Migrations `0004` and `0005` narrow `organization_app` **only if it exists** (`IF EXISTS … THEN REVOKE`). Migrating first would silently
 leave the runtime able to write the ownership state. The deploy therefore runs: database → roles → default privileges → **migrations** →
-**privilege assertions** → service. The assertion (fail closed, before any container is started or swapped) requires:
+**migration history read-only for the runtime** → **privilege assertions** → service. The assertion (fail closed, before any container is started or swapped) requires:
 
 | Table | organization_app must NOT hold | must hold |
 |---|---|---|
 | `ownership_state`, `ownership_event`, `ownership_import_run`, `hierarchy_id_ledger` | INSERT, UPDATE, DELETE, TRUNCATE | SELECT (`ownership_state`) |
 | `company`, `platform`, `organization` | DELETE, TRUNCATE | SELECT, INSERT (`company`) |
 | `admin_actor_event` | UPDATE, DELETE, TRUNCATE | INSERT |
+| `schema_migrations` | INSERT, UPDATE, DELETE, TRUNCATE | SELECT (`/ready`) |
 
 and none of the elevated role attributes. This is the technical control **G3** certifies.
+
+The migration history is the migrator's alone. The runner creates `schema_migrations` as `organization_migrator`, so the default
+privileges would give the runtime DML on it: enough to mark a future migration as applied (the runner then skips it), null a checksum
+(no drift detection) or erase the history. After migrating, the deploy narrows it to `SELECT` for `organization_app` (as Auth's deploy
+does) and the assertion above verifies it.
 
 ## 3. Migrations (G2 classification)
 
