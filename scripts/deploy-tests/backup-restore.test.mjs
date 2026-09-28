@@ -278,11 +278,19 @@ function recoveryWorld(fromBackup, { drill = {}, containers = {} } = {}) {
   const key = join(w.home, 'key.pem'); copyFileSync(KEY, key); chmodSync(key, 0o600);
   const tmp = join(w.dir, 'tmp'); mkdirSync(tmp);
   const run = (env = {}) => w.run(SCRIPTS.restoreDrill, {
-    SERVICE: 'auth-service', STAMP: 'latest', PRIVATE_KEY_FILE: key, IMAGE, KNOWN_ID: KNOWN, BACKUP_DIR: bk, TMPDIR: tmp, DRILL_ID: 'test', ...env,
+    SERVICE: 'auth-service', STAMP: 'latest', PRIVATE_KEY_FILE: key, IMAGE, BACKUP_DIR: bk, TMPDIR: tmp, DRILL_ID: 'test',
+    ...(env.SERVICE === 'organization-service' ? { KNOWN_ID: KNOWN } : {}), ...env,
   });
   return { ...w, run, tmp, key };
 }
 const backedUp = (svc = 'auth-service', backup = {}) => { const b = backupWorld({ backup }); assert.equal(b.backup(svc).code, 0); return b; };
+/** TG-1: nothing of the drill survives: no drill container, and no volume of one (the postgres image's anonymous data volume). */
+function assertDrillGone(w) {
+  const s = w.state();
+  assert.equal(Object.keys(s.containers).filter((n) => n.startsWith('nawara-drill-')).length, 0, 'no drill container is left');
+  assert.ok(s.runs.some((x) => x.name.endsWith('-db')) ? Object.keys(s.volumes ?? {}).length === 0 : true, 'the drill database volume (restored data) is removed with its container');
+  assert.deepEqual(readdirSync(w.tmp), [], 'no decrypted file is left behind');
+}
 
 test('restore drill: an isolated drill of the latest backup — no network, roles before the restore, the release\'s migrations, every check, then removed', () => {
   const w = recoveryWorld(backedUp());
@@ -306,9 +314,14 @@ test('restore drill: an isolated drill of the latest backup — no network, role
   assert.ok(restore.at < migrate, 'the release\'s own migration runner runs after the restore');
   assert.ok(s.calls[migrate].includes(IMAGE) && s.calls[migrate].includes('container:nawara-drill-auth-service-test-db'));
   assert.match(r.out, /PASS  7 restore facts equal the backup's/);
-  assert.match(r.out, /OK  drill of auth-service \d{8}T\d{6}Z passed: 10 checks; drill containers removed; plaintext removed/);
-  assert.equal(Object.keys(s.containers).filter((n) => n.startsWith('nawara-drill-')).length, 0, 'the drill containers are removed');
-  assert.deepEqual(readdirSync(w.tmp), [], 'no decrypted file is left behind');
+  assert.match(r.out, /OK  drill of auth-service \d{8}T\d{6}Z passed: 10 checks; drill containers and their volumes removed; plaintext removed/);
+  assert.ok(Object.values(s.volumes).length === 0 && s.calls.some((a) => a[0] === 'rm' && a.includes('-v')), 'cleanup is `docker rm -f -v`');
+  assertDrillGone(w);
+  // TG-2: Auth's application-level check reads the hierarchy marker through the service's own CLI; no user row is read
+  assert.match(r.out, /PASS  application read: the service reads its hierarchy authority marker \(local\), equal to the backup source/);
+  assert.ok(s.calls.some((a) => a[0] === 'exec' && a[1] === 'nawara-drill-auth-service-test-app' && a.includes('hierarchy-status')));
+  assert.ok(!(s.queries ?? []).some((q) => q.sql.includes('"user"')), 'no user row is queried');
+  assert.doesNotMatch(r.out, /Synthetic Operator Name|contentDigest|frozen_by/, 'only the mode is used; the rest of the status is never printed');
   noLeak(w, r.out);
 });
 
@@ -317,7 +330,8 @@ test('restore drill: organization-service: the deploy\'s privilege assertion and
   const r = w.run({ SERVICE: 'organization-service', IMAGE: IMAGE.replace('auth', 'organization') });
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /PASS  the deploy's privilege assertion/);
-  assert.match(r.out, /PASS  known-id read: GET \/organization\/companies\/<KNOWN_ID> returns the restored row/);
+  assert.match(r.out, /PASS  application read: GET \/organization\/companies\/<KNOWN_ID> returns the restored row/);
+  assertDrillGone(w);
   const s = w.state();
   assert.ok(s.stdin.find((x) => x.text.includes('CREATE ROLE organization_migrator')).at < s.restores[0].at, 'roles and default privileges before the restore');
   const app = s.runs.find((x) => x.name.endsWith('-app'));
@@ -330,7 +344,9 @@ for (const [label, env, containers, reason] of [
   ['an existing drill name', {}, { 'nawara-drill-auth-service-test-db': DB_CONTAINER('x') }, /already exists: a drill always starts from nothing/],
   ['an unknown service', { SERVICE: 'billing-service' }, {}, /unknown SERVICE/],
   ['an ambiguous stamp', { STAMP: 'yesterday' }, {}, /STAMP must be/],
-  ['a known id that is not a UUID', { KNOWN_ID: "x'; DROP TABLE user; --" }, {}, /KNOWN_ID must be a lowercase UUID/],
+  ['a known id that is not a UUID (organization-service)', { SERVICE: 'organization-service', KNOWN_ID: "x'; DROP TABLE company; --" }, {}, /KNOWN_ID must be a lowercase UUID/],
+  ['organization-service without a known id', { SERVICE: 'organization-service', KNOWN_ID: '' }, {}, /KNOWN_ID is required for organization-service/],
+  ['a known id for auth-service (its check never reads a user)', { KNOWN_ID: KNOWN }, {}, /KNOWN_ID is not used for auth-service/],
   ['a drill id that could name a production container', { DRILL_ID: 'Core_DB' }, {}, /DRILL_ID must be/],
 ]) {
   test(`restore drill: refused before anything is created: ${label}`, () => {
@@ -369,13 +385,12 @@ for (const [label, drill, reason] of [
     const w = recoveryWorld(backedUp(), { drill });
     const r = w.run();
     assert.equal(r.code, 1, r.out); assert.match(r.out, reason);
-    assert.equal(Object.keys(w.state().containers).filter((n) => n.startsWith('nawara-drill-')).length, 0);
-    assert.deepEqual(readdirSync(w.tmp), []);
+    assertDrillGone(w);
   });
 }
 
 test('restore drill: a later release restores an older backup: its extra migration applies on top of the restored history', () => {
-  const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 8 already applied', historyLength: 9, facts: `${'table|company|1\ntable|schema_migrations|8\n'}structure|constraints|41\nmigrations|9|ffff\nowner|company|x\nacl|company|x=r/x\nauthority|PREPARED|fresh|false\ntable|later_table|0\n` } });
+  const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 8 already applied', historyLength: 9, facts: `${'table|company|1\ntable|schema_migrations|8\n'}structure|constraints|41\nmigrations|9|ffff\nowner|company|x\nacl|company|x=r/x\nauthority|local\ntable|later_table|0\n` } });
   const r = w.run();
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /8 already applied \(history restored\), 1 later migration\(s\) applied/);
@@ -385,6 +400,28 @@ test('restore drill: a restored history shorter than the backup\'s is refused', 
   const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 7 already applied', historyLength: 7 } });
   const r = w.run();
   assert.equal(r.code, 1); assert.match(r.out, /the restored migration history is shorter than the backup's/);
+});
+
+for (const [label, drill, reason] of [
+  ['the service reads a different hierarchy authority state than the backup source', { appMode: 'frozen' }, /the hierarchy authority state the service reads differs from the backup source/],
+  ['the service cannot read its hierarchy authority state', { statusFail: true }, /could not read its hierarchy authority state/],
+]) {
+  test(`restore drill (auth-service): fail closed when ${label}; the drill and its volume are removed`, () => {
+    const w = recoveryWorld(backedUp(), { drill });
+    const r = w.run();
+    assert.equal(r.code, 1, r.out); assert.match(r.out, reason);
+    assert.doesNotMatch(r.out, /Synthetic Operator Name/);
+    assertDrillGone(w);
+  });
+}
+
+test('restore drill: KEEP_DRILL=yes (local debugging only) keeps the containers and their volume, and says how to remove them', () => {
+  const w = recoveryWorld(backedUp());
+  const r = w.run({ KEEP_DRILL: 'yes' });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /kept WITH the restored data; remove them with: docker rm -f -v nawara-drill-auth-service-test-app nawara-drill-auth-service-test-db/);
+  assert.equal(Object.keys(w.state().volumes).length, 1);
+  assert.deepEqual(readdirSync(w.tmp), [], 'plaintext files are removed even when the containers are kept');
 });
 
 test('restore drill: the organization known-id read must match the restored row', () => {

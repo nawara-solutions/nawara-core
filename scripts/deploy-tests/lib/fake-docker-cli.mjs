@@ -96,6 +96,11 @@ function run(args) {
   const env = [...(state.images?.[image]?.env ?? []), ...(envFile ? readFileSync(envFile, 'utf8').split('\n').filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l)) : [])];
   const hc = get('--health-cmd')[0];
   state.runs = [...(state.runs ?? []), { name, image, network: get('--network')[0], env }];
+  // The postgres image declares VOLUME /var/lib/postgresql/data: without a -v for it, Docker creates an anonymous volume that only
+  // `docker rm -v` removes together with the container.
+  if (image.startsWith('postgres:') && !get('-v').some((v) => v.split(':')[1] === '/var/lib/postgresql/data')) {
+    state.volumes = { ...(state.volumes ?? {}), [`anon-${name}-${state.calls.length}`]: { anonymousOf: name } };
+  }
   state.containers[name] = {
     id: `id-${name}-${state.calls.length}`, image, imageId: image.startsWith('sha256:') ? image : `sha256:${'0'.repeat(64)}`,
     running: true, health: healthFor(name, env),
@@ -168,7 +173,9 @@ function s3(o, get, image, args) {
 
 /** The tables a pg_restore --list of a fake archive shows data for (infra/backup requires the cutover-critical ones). */
 const TOC_TABLES = ['schema_migrations', 'ownership_state', 'ownership_event', 'hierarchy_id_ledger', 'company', 'platform', 'organization', 'outbox', 'hierarchy_authority', 'user'];
-const FACTS = 'table|company|1\ntable|schema_migrations|8\nstructure|constraints|40\nmigrations|8|0123456789abcdef0123456789abcdef\nowner|company|x\nacl|company|x=r/x\nauthority|PREPARED|fresh|false\n';
+const FACTS_BASE = 'table|company|1\ntable|schema_migrations|8\nstructure|constraints|40\nmigrations|8|0123456789abcdef0123456789abcdef\nowner|company|x\nacl|company|x=r/x\n';
+/** Auth records its hierarchy marker (`hierarchy_authority.mode`); Organization its ownership state. */
+const factsFor = (name) => `${FACTS_BASE}${name.includes('auth') ? 'authority|local' : 'authority|PREPARED|fresh|false'}\n`;
 
 function execIn(args) {
   let i = 0;
@@ -200,6 +207,11 @@ function execIn(args) {
   }
   if (prog === 'pg_isready') exit(D.dbNeverReady ? 2 : 0);
   if (prog === 'wget') { out(D.notReady ? '' : '{"status":"ready"}'); exit(D.notReady ? 1 : 0); }
+  if (prog === 'node' && progArgs.includes('hierarchy-status')) { // auth-service CLI: the marker plus fields a drill must never print
+    if (D.statusFail) exit(1);
+    out(`${JSON.stringify({ mode: D.appMode ?? 'local', frozen_at: null, frozen_by: 'Synthetic Operator Name', activation_evidence: null, retired_at: null, retired_by: null, contentDigest: 'c'.repeat(64) }, null, 2)}\n`);
+    exit(0);
+  }
   if (prog === 'node' && progArgs[0] === '-e') { out(`${D.apiName ?? D.knownName ?? 'Drill Synthetic Co'}\n`); exit(0); }
   if (prog === 'psql' && progArgs.includes('-c')) { // a read-only fact over the local socket
     const sql = progArgs[progArgs.indexOf('-c') + 1];
@@ -227,7 +239,7 @@ function execIn(args) {
     if (state.failPsql) exit(3);
     if (text.includes('-- nawara-backup-facts')) { // infra/backup facts: at backup time from state.backup, after a drill restore from state.drill
       if (B.factsFail) exit(3);
-      out(name.startsWith('nawara-drill-') ? (D.facts ?? B.facts ?? FACTS) : (B.facts ?? FACTS)); exit(0);
+      out(name.startsWith('nawara-drill-') ? (D.facts ?? B.facts ?? factsFor(name)) : (B.facts ?? factsFor(name))); exit(0);
     }
     for (const m of text.matchAll(/ALTER ROLE (\w+) WITH[^;]*PASSWORD '([^']*)'/g)) {
       if (state.pg) { state.pg.roles[m[1]] ??= { super: false }; state.pg.roles[m[1]].password = m[2]; }
@@ -279,7 +291,13 @@ switch (cmd) {
   case 'start': if (c(rest[0])) c(rest[0]).running = true; exit(c(rest[0]) ? 0 : 1); break;
   case 'stop': { const n = rest[rest.length - 1]; if (c(n)) c(n).running = false; exit(0); break; }
   case 'rename': state.containers[rest[1]] = c(rest[0]); delete state.containers[rest[0]]; exit(0); break;
-  case 'rm': for (const n of rest.filter((a) => !a.startsWith('-'))) delete state.containers[n]; exit(0); break;
+  case 'rm': {
+    const names = rest.filter((a) => !a.startsWith('-'));
+    const withVolumes = rest.some((a) => a === '-v' || a === '--volumes' || (/^-[a-z]+$/.test(a) && a.includes('v')));
+    for (const n of names) delete state.containers[n];
+    if (withVolumes) for (const [v, x] of Object.entries(state.volumes ?? {})) if (names.includes(x.anonymousOf)) delete state.volumes[v];
+    exit(0); break;
+  }
   case 'logs': case 'ps': exit(0); break;
   default: process.stderr.write(`fake docker: unsupported command ${cmd}\n`); exit(2);
 }

@@ -2,7 +2,7 @@
 # Isolated restore drill for a backup made by infra/backup/backup.sh (Stage 21.x G5; production-readiness.md §3 success criteria).
 # Runs in the RECOVERY ENVIRONMENT, the only place the private key may be (D2), never against a production database:
 #
-#   SERVICE=auth-service STAMP=latest PRIVATE_KEY_FILE=… IMAGE=ghcr.io/…/nawara-core-auth-service@sha256:… KNOWN_ID=<uuid> \
+#   SERVICE=auth-service STAMP=latest PRIVATE_KEY_FILE=… IMAGE=ghcr.io/…/nawara-core-auth-service@sha256:… \
 #     BACKUP_DIR=<dir with destination.env + s3-credentials.env>   bash infra/backup/restore-drill.sh
 #   (or SOURCE_DIR=<dir holding the four downloaded objects> instead of BACKUP_DIR)
 #
@@ -19,7 +19,10 @@
 #   migrations may apply) -> the deploy's schema_migrations narrowing -> fail-closed checks: runtime role attributes,
 #   schema_migrations SELECT-only, the deploy's forbidden/required privileges (Organization), and EVERY restore fact recorded at
 #   backup time (row counts, structure, migration digest, owners, ACLs, authority state) -> the service booted in the drill
-#   namespace (never with a production broker URL) -> GET /ready -> the known-id read -> remove the drill; remove all plaintext.
+#   namespace (never with a production broker URL) -> GET /ready -> the application-level read (organization-service: the known
+#   Company through the API; auth-service: the hierarchy authority marker through the service's own CLI, compared with the value
+#   recorded at the backup source; no user row is needed or read) -> remove the drill containers AND their volumes; remove all
+#   plaintext. KEEP_DRILL=yes (local debugging only, never for G5 evidence) keeps the containers and the restored data.
 # Prints states, counts of checks and PASS/FAIL only: never a secret, a row count or a restored value.
 set -euo pipefail
 umask 077
@@ -28,7 +31,6 @@ umask 077
 : "${STAMP:?STAMP is required (the backup timestamp, e.g. 20260929T021700Z, or latest)}"
 : "${PRIVATE_KEY_FILE:?PRIVATE_KEY_FILE is required (the recovery private key, kept off the production host)}"
 : "${IMAGE:?IMAGE is required (the service image to verify with: the release that made the backup, or a later one)}"
-: "${KNOWN_ID:?KNOWN_ID is required (the id of a row written before the backup: a Company for organization-service, a user for auth-service)}"
 
 log() { printf '[restore-drill] %s\n' "$*"; }
 die() { printf '[restore-drill] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -42,12 +44,20 @@ case "$SERVICE" in
     CONFIG_ALLOWED='^(db\.env|roles\.env|\.env|callers/?|callers/[a-z-]+\.token)$' ;;
   auth-service)
     DB_NAME=auth; BOOT_USER=auth; BOOT_DB=auth; OWNER=auth; RUNTIME=auth_app
-    MIGRATE=(dist/cli/migrate.js); KNOWN_SQL='SELECT id::text FROM "user" WHERE id = '
+    MIGRATE=(dist/cli/migrate.js)
     CONFIG_ALLOWED='^(db\.env|\.env)$' ;;
   *) die "unknown SERVICE '$SERVICE' (known: organization-service auth-service)" ;;
 esac
 [[ $STAMP =~ ^([0-9]{8}T[0-9]{6}Z|latest)$ ]] || die "STAMP must be YYYYmmddTHHMMSSZ or latest"
-[[ $KNOWN_ID =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "KNOWN_ID must be a lowercase UUID"
+# The application-level read differs per service: Organization reads a known Company through its API (KNOWN_ID: a Company id written
+# before the backup); Auth reads its hierarchy authority marker (a structural singleton: no user row, no personal data), so a fresh
+# Auth database with no user at all can be drilled.
+if [ "$SERVICE" = organization-service ]; then
+  : "${KNOWN_ID:?KNOWN_ID is required for organization-service (the id of a Company written before the backup)}"
+  [[ $KNOWN_ID =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "KNOWN_ID must be a lowercase UUID"
+else
+  [ -z "${KNOWN_ID:-}" ] || die "KNOWN_ID is not used for auth-service (its application-level check reads the hierarchy authority marker); unset it"
+fi
 for c in docker openssl sha256sum tar; do command -v "$c" >/dev/null || die "$c is required"; done
 [ -f "$PRIVATE_KEY_FILE" ] || die "PRIVATE_KEY_FILE does not exist"
 [ "$(stat -c %a "$PRIVATE_KEY_FILE")" = 600 ] || [ "$(stat -c %a "$PRIVATE_KEY_FILE")" = 400 ] || die "PRIVATE_KEY_FILE must be mode 0600 or 0400"
@@ -73,7 +83,9 @@ done
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/nawara-restore-drill.XXXXXX")
 cleanup() {
-  if [ "${KEEP_DRILL:-}" != yes ]; then docker rm -f "$DAPP" "$DDB" >/dev/null 2>&1 || true; fi
+  # -v: the postgres image keeps its data in an anonymous volume; without it the restored data would outlive the drill.
+  if [ "${KEEP_DRILL:-}" != yes ]; then docker rm -f -v "$DAPP" "$DDB" >/dev/null 2>&1 || true
+  else log "KEEP_DRILL=yes: $DDB and $DAPP are kept WITH the restored data; remove them with: docker rm -f -v $DAPP $DDB"; fi
   rm -rf -- "$WORK"
 }
 trap cleanup EXIT
@@ -213,6 +225,7 @@ fi
 grep -qxF -- '-- nawara-backup-facts-results' "$WORK/facts.txt" || die "the facts file carries no results section"
 sed '/^-- nawara-backup-facts-results$/,$d' "$WORK/facts.txt" >"$WORK/facts.sql"
 sed '1,/^-- nawara-backup-facts-results$/d' "$WORK/facts.txt" >"$WORK/facts.expected"
+AUTHORITY_FACT=$(grep -m1 '^authority|' "$WORK/facts.expected" || true)
 facts_now=$(docker exec -i "$DDB" psql -X -q -At -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$DB_NAME" -f - <"$WORK/facts.sql" 2>/dev/null) || die "the restore facts could not be read"
 checked=0
 while IFS= read -r line; do
@@ -258,16 +271,21 @@ done
 [ "$ready" = '{"status":"ready"}' ] || { docker logs --tail 20 "$DAPP" 2>&1 | grep -oE '"msg":"[a-z_]+' | sort | uniq -c >&2 || true; die "GET /ready did not answer ready against the restored database"; }
 ok "GET /ready -> {\"status\":\"ready\"} (the service against the restored database, no broker)"
 
-expected=$(q "$KNOWN_SQL'$KNOWN_ID'")
-[ -n "$expected" ] || die "KNOWN_ID is not in the restored database"
 if [ "$SERVICE" = organization-service ]; then
+  expected=$(q "$KNOWN_SQL'$KNOWN_ID'")
+  [ -n "$expected" ] || die "KNOWN_ID is not in the restored database"
   got=$(docker exec "$DAPP" node -e 'fetch("http://127.0.0.1:3000/organization/companies/" + process.argv[1], { headers: { authorization: "Bearer " + process.env.DRILL_READ_TOKEN } }).then(async (r) => { if (r.status !== 200) { console.log("status=" + r.status); return; } console.log((await r.json()).name); }).catch(() => console.log("unreachable"))' "$KNOWN_ID")
   [ "$got" = "$expected" ] || die "the known-id read through the API does not match the restored row ($(grep -oE '^status=[0-9]+' <<<"$got" || echo mismatch))"
-  ok "known-id read: GET /organization/companies/<KNOWN_ID> returns the restored row (value not printed)"
+  ok "application read: GET /organization/companies/<KNOWN_ID> returns the restored row (value not printed)"
 else
-  got=$(docker exec "$DDB" psql -X -q -At -U "$RUNTIME" -d "$DB_NAME" -c "$KNOWN_SQL'$KNOWN_ID'")
-  [ "$got" = "$expected" ] || die "the known-id read as $RUNTIME does not match"
-  ok "known-id read as $RUNTIME (the runtime identity) returns the restored row (value not printed)"
+  # The service's own CLI (its configuration, its runtime identity, no broker) reads the marker; only `mode` is extracted, the rest of
+  # its output (actor names, evidence) is never printed. It must equal the value recorded at the backup SOURCE.
+  [[ $AUTHORITY_FACT =~ ^authority\|(local|frozen|org_authoritative)$ ]] || die "the backup recorded no hierarchy authority state"
+  want=${BASH_REMATCH[1]}
+  status_out=$(docker exec "$DAPP" node dist/cli/main.js hierarchy-status 2>/dev/null) || die "the service could not read its hierarchy authority state"
+  mode=$(grep -m1 -oE '"mode": "[a-z_]+"' <<<"$status_out" | cut -d'"' -f4 || true); unset status_out
+  [ "$mode" = "$want" ] || die "the hierarchy authority state the service reads differs from the backup source"
+  ok "application read: the service reads its hierarchy authority marker ($mode), equal to the backup source"
 fi
 
-log "OK  drill of $SERVICE $STAMP passed: $PASS checks; $([ "${KEEP_DRILL:-}" = yes ] && echo "containers kept: $DDB $DAPP" || echo 'drill containers removed'); plaintext removed"
+log "OK  drill of $SERVICE $STAMP passed: $PASS checks; $([ "${KEEP_DRILL:-}" = yes ] && echo "containers kept WITH restored data: $DDB $DAPP" || echo 'drill containers and their volumes removed'); plaintext removed"

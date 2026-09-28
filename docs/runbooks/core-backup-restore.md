@@ -108,11 +108,13 @@ the production host:
 ```bash
 SERVICE=auth-service STAMP=latest PRIVATE_KEY_FILE=nawara-backup-recovery-key.pem \
 IMAGE=ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:<the release that made the backup, or later> \
-KNOWN_ID=<the id of a row written before the backup> BACKUP_DIR=<dir with destination.env + read s3-credentials.env> \
+BACKUP_DIR=<dir with destination.env + read s3-credentials.env> \
   bash infra/backup/restore-drill.sh      # BACKUP_KEY_PASSPHRASE may carry the passphrase (env only, never argv)
 ```
 
-`KNOWN_ID` is a Company id (organization-service; read through the API) or a user id (auth-service; read as `auth_app`).
+For organization-service add `KNOWN_ID=<the id of a Company written before the backup>` (read through the API). auth-service takes
+no `KNOWN_ID` (refused): its application read is the hierarchy authority marker, so a fresh Auth database with no user can be drilled
+and no personal data is read.
 
 The drill creates `nawara-drill-<service>-<id>-db` with **`--network none`** (no route to a broker, Auth, Organization or the
 internet) and runs the service image in that namespace only; it refuses a production container name, an existing drill, and a
@@ -131,9 +133,13 @@ It passes only when all of these hold:
    owners, ACLs, authority state (`ownership_state` / `hierarchy_authority`);
 7. the service boots against the restored database with a drill-only configuration (production endpoints and credentials replaced;
    **never a production broker URL**, since the relay re-publishes restored pending outbox rows) and `GET /ready` answers ready;
-8. the known-id read returns the restored row.
+8. the application-level read: organization-service returns the known Company through its API; auth-service reads its hierarchy
+   authority marker through its own CLI (`hierarchy-status`; only the mode is used, nothing else is printed), and it must equal the
+   value recorded at the backup source.
 
-The drill containers and every decrypted file are removed at the end (`KEEP_DRILL=yes` keeps the containers for inspection).
+The drill containers **with their volumes** (`docker rm -f -v`: the postgres image keeps the restored data in an anonymous volume)
+and every decrypted file are removed at the end, on success and on failure. `KEEP_DRILL=yes` is for local debugging only, never for
+G5 evidence: it keeps the containers and the restored data, and prints the `docker rm -f -v` command that removes them.
 
 **Real-volume drills (D5):** Auth, once this tooling is merged, under its own authorization; Organization after F1, before G7/F6.
 Record each as G5 evidence: the date, the backup stamp, the image, the drill output (it holds no secret).
@@ -157,7 +163,7 @@ then move the needed files to the server over SSH into a 0700 directory, and del
    then delete the dump.
 6. **Redeploy** with the normal workflow: the migration runner reports the history as already applied, the deploy re-applies the
    grants and the `schema_migrations` narrowing, the privilege assertions run, and only then does the service start.
-7. **Verify** before reopening traffic: `/ready` (Organization runbook §6.1), the authority agreement (§6.2), the known-id read.
+7. **Verify** before reopening traffic: `/ready` (Organization runbook §6.1), the authority agreement (§6.2), the application-level read of §5 step 8.
 
 After the restart the relay publishes the restored pending outbox rows, including rows that had already been published after the
 backup: Audit stores each `(sourceService, eventId)` once, so they are absorbed. Writes after the backup are lost (up to the RPO).
