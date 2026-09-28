@@ -191,7 +191,8 @@ docker logs --since "$T" nawara-core-organization-service 2>&1 | grep -oE '(read
 docker exec nawara-core-organization-service node ../../libs/service-kit/dist/cli/check-outbox-lag.js --max-age-seconds "$THRESHOLD"   # the rehearsal-plan threshold, seconds; counts and ages only
 ```
 
-## 7. What G5 will cover
+## 7. Backup and restore (G5)
 
-- **G5 backup:** the `nawara-core-organization-db-data` volume, and `db.env`, `roles.env`, `.env`, `callers/`; off-host, with a
-  restore drill.
+The database and `db.env`, `roles.env`, `.env`, `callers/`, encrypted and off-host, daily: [core backup and restore
+runbook](core-backup-restore.md). Add `organization-service` to `CORE_BACKUP_SERVICES` after F1; the real-volume restore drill runs
+after F1 and before G7/F6. Never restore a pre-F6 backup after F6 (that runbook §7).
