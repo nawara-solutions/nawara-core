@@ -1,0 +1,56 @@
+name: organization-service manual deploy
+
+# Stage 21.x G1 (ADR-0040 G1): builds the selected ref and deploys organization-service to the VPS (PostgreSQL + the service on the
+# private Core network, no Traefik route, no published port) via apps/organization-service/deploy/provision-and-deploy.sh.
+# MANUAL (workflow_dispatch) and `main` only:  gh workflow run organization-service-deploy.yml --ref main
+# DEPLOYING IS NOT ACTIVATING: it never runs an ownership command, never registers a caller token (deploy/register-caller.sh, an
+# F1/F4 operator step) and never touches Auth. Requires the broker with the organization-service identity (core-rabbitmq-provision.yml)
+# and audit-service deployed. Secrets: the org-level DEPLOY_SSH_*; application secrets are generated on the server, never in GitHub.
+on:
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-organization-service
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    # The same production queue as every Core deployment: a running deployment is never cancelled; a newer request waits its turn.
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/organization-service/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE
+          script: |
+            set -euo pipefail
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            docker pull "$IMAGE"
+            docker run --rm --entrypoint cat "$IMAGE" deploy/provision-and-deploy.sh | IMAGE="$IMAGE" bash -s
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          IMAGE: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}

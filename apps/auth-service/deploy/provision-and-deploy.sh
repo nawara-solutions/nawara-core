@@ -35,6 +35,9 @@ DB_IMAGE=postgres:16-alpine
 CORE_NET="${CORE_NETWORK:-nawara-core-internal}"
 BROKER="${RABBITMQ_CONTAINER:-nawara-core-rabbitmq}"
 BROKER_CLIENT="${BROKER_DIR:-$HOME/nawara-core/rabbitmq}/clients/auth-service.env"
+# Stage 21.x G1.D: Auth's read credential at organization-service, written by that service's register-caller.sh at F4 (never here).
+ORG_CALLER_TOKEN="${ORGANIZATION_DIR:-$HOME/nawara-core/organization-service}/callers/auth-service.token"
+ORG_URL=http://nawara-core-organization-service:3000
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -173,6 +176,12 @@ ensure "$APP_ENV" AUTH_EVENTS off
 [ -n "${RABBITMQ_URL:-}" ] && ensure "$APP_ENV" RABBITMQ_URL "$RABBITMQ_URL"
 # ADR-0053: otherwise the broker-provisioned auth-service identity (least privilege: publish audit.* only). Never overwrites a value.
 if [ -f "$BROKER_CLIENT" ]; then ensure "$APP_ENV" RABBITMQ_URL "$(sed -n 's/^RABBITMQ_URL=//p' "$BROKER_CLIENT")"; fi
+# Stage 21.x G1.D: once the F4 registration exists, Auth gets organization-service's URL and its token, together (the config requires
+# the pair). This is NOT the authority switch: AUTH_HIERARCHY_SOURCE is never written here (unset = local); switching it is F6's mirror.
+if [ -s "$ORG_CALLER_TOKEN" ]; then
+  ensure "$APP_ENV" ORGANIZATION_SERVICE_URL "$ORG_URL"
+  ensure "$APP_ENV" ORGANIZATION_SERVICE_TOKEN "$(tr -d '\n' <"$ORG_CALLER_TOKEN")"
+fi
 ensure "$APP_ENV" WORK_TIMEZONE Africa/Tunis
 # No channel delivers verification codes yet, so it stays off in production until one exists.
 ensure "$APP_ENV" REQUIRE_CONTACT_VERIFICATION false

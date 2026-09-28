@@ -93,7 +93,7 @@ function run(args) {
   state.containers[name] = {
     id: `id-${name}-${state.calls.length}`, image, imageId: image.startsWith('sha256:') ? image : `sha256:${'0'.repeat(64)}`,
     running: true, health: healthFor(name, env),
-    ports: [...get('-p'), ...get('--publish')], publishAll: Boolean(o.publishAll), networks, networkMode: get('--network')[0], labels: o.labels,
+    ports: [...get('-p'), ...get('--publish'), ...(state.injectPorts?.[name] ?? [])], publishAll: Boolean(o.publishAll), networks, networkMode: get('--network')[0], labels: o.labels,
     mounts: get('-v').map((v) => { const [src, dst] = v.split(':'); return `${src}=${dst}`; }),
     mountSpecs: get('-v').map((v) => { const [src, dest, mode] = v.split(':'); return src.startsWith('/') ? { type: 'bind', source: src, dest, rw: mode !== 'ro' } : { type: 'volume', name: src, dest, rw: mode !== 'ro' }; }),
     env, restart: get('--restart')[0] ? (get('--restart')[0].includes(':') ? get('--restart')[0] : `${get('--restart')[0]}:0`) : 'no:0',
@@ -137,8 +137,14 @@ function execIn(args) {
   const name = args[i];
   const [prog, ...progArgs] = args.slice(i + 1);
   if (!c(name) || !c(name).running) { process.stderr.write(`Error response from daemon: No such container: ${name}\n`); exit(1); }
-  if (prog === 'psql' && progArgs.includes('-c')) { // a role fact over the local socket (rotate-db-credential.sh)
+  if (prog === 'psql' && progArgs.includes('-c')) { // a read-only fact over the local socket
     const sql = progArgs[progArgs.indexOf('-c') + 1];
+    state.queries = [...(state.queries ?? []), { container: name, at: state.calls.length - 1, sql }];
+    // organization-service deploy (Stage 21.x G1): runtime-role attributes, forbidden / missing privileges, ownership phase
+    if (sql.includes('rolbypassrls')) { out(`${state.org?.roleAttrs ?? 'f|f|f|f|f'}\n`); exit(0); }
+    if (sql.includes('WHERE NOT has_table_privilege')) { out(`${state.org?.missing ?? ''}\n`); exit(0); }
+    if (sql.includes('WHERE has_table_privilege')) { out(`${state.org?.forbidden ?? ''}\n`); exit(0); }
+    if (sql.includes('FROM ownership_state')) { out(`${state.org?.phase ?? 'PREPARED|undeclared'}\n`); exit(0); }
     const role = sql.match(/rolname = '([^']+)'/)?.[1];
     const r = state.pg?.roles?.[role];
     out(r ? `${r.super ? 't' : 'f'}\n` : '\n');
@@ -146,7 +152,7 @@ function execIn(args) {
   }
   if (prog === 'psql') {
     const text = readStdin();
-    state.stdin.push({ container: name, text });
+    state.stdin.push({ container: name, text, at: state.calls.length - 1 });
     if (state.failPsql) exit(3);
     for (const m of text.matchAll(/ALTER ROLE (\w+) WITH[^;]*PASSWORD '([^']*)'/g)) {
       if (state.pg) { state.pg.roles[m[1]] ??= { super: false }; state.pg.roles[m[1]].password = m[2]; }

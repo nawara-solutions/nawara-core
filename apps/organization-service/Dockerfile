@@ -32,6 +32,8 @@ COPY libs/service-kit/migrations ./libs/service-kit/migrations
 COPY --from=build /app/apps/organization-service/dist ./apps/organization-service/dist
 # Schema of record travels with the image so a deploy always applies the migrations that match this exact code.
 COPY apps/organization-service/db/migrations ./apps/organization-service/db/migrations
+# Stage 21.x G1: the on-server deploy and caller-registration scripts travel with the image (deploy/provision-and-deploy.sh).
+COPY apps/organization-service/deploy ./apps/organization-service/deploy
 WORKDIR /app/apps/organization-service
 # The service only reads its own files and opens sockets: it needs no write access and no privileges (the base image's `node` user).
 USER node
