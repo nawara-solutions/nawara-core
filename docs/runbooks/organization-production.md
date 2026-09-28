@@ -109,9 +109,89 @@ must `ensure` its Organizations.
 
 Previous containers are kept as `nawara-core-organization-service-previous-<time>`; remove them once satisfied.
 
-## 6. What G4 and G5 will cover
+## 6. Cutover monitoring and alert rules (G4)
 
-- **G4 signals:** `/health`, `/ready`, the ownership phase, Auth's `hierarchy_unavailable` / `hierarchy_anchor_mismatch`,
-  `hierarchy_source_mismatch`, the outbox relay (`outbox_relay_pass_failure`, `nawara-check-outbox-lag`).
+ADR-0040 G4: the minimum monitoring and alerting for the cutover is readiness of both services, the authority state agreeing with
+Auth's marker, a failed verification or digest mismatch, and the anchor-disagreement alert of decision 1.
+
+- **Alerting model (owner decision, Core V1).** The cutover is **attended**. The named operator running each F1–F7 step (and the G6
+  rehearsal) watches the signals below and treats every matching rule as an **immediate stop condition**. Routing alerts to a person
+  (pager, chat, mail) is not a G4 prerequisite; it may come with a later observability platform. This is the minimum model for the
+  controlled cutover, not the permanent production monitoring architecture.
+- **Monitoring detects, the operator decides, this runbook governs the action.** Nothing here writes: no command changes the
+  ownership state, Auth's marker or its configuration, and no signal triggers an automatic repair.
+- **Thresholds and log retention** are set in the G6 rehearsal plan (ADR-0040 A2.8). A rule marked *immediately* needs no threshold.
+- **Status:** defined here; **demonstrated in the G6 rehearsal: pending**.
+- Everything is read from the server (internal network, `docker exec`); organization-service stays internal only. The commands print
+  states, counts and signal names only: never a URL, password, token, header or event payload.
+
+Record `T=$(date -u +%FT%TZ)` when each step starts; the log checks below read from `$T`.
+
+### 6.1 Readiness (both services)
+
+```bash
+docker exec nawara-core-organization-service wget -qO- http://127.0.0.1:3000/ready || echo 'organization-service NOT READY'
+docker exec nawara-core-auth-service wget -qO- http://127.0.0.1:3000/ready || echo 'auth-service NOT READY'   # {"status":"ready"} each
+docker ps --filter name=nawara-core-organization-service --filter name=nawara-core-auth-service --format '{{.Names}}\t{{.Status}}'
+```
+
+`/ready` checks the database and the migrations (never the broker, never authority); `/health` is liveness only. A failing
+readiness check is named in the service log as `readiness_check_failed check=<name>` with its error class and code (no host,
+credential or message text).
+
+### 6.2 Authority agreement (Organization's state ↔ Auth's marker)
+
+```bash
+org=$(docker exec nawara-core-organization-db psql -U organization_admin -d organization -Atc "select phase from ownership_state")
+marker=$(docker exec nawara-core-auth-db psql -U auth -d auth -Atc "select mode from hierarchy_authority")
+source=$(sed -n 's/^AUTH_HIERARCHY_SOURCE=//p' "$HOME/nawara-core/auth-service/.env")
+echo "organization=$org auth_marker=$marker auth_source=${source:-local (unset)}"
+```
+
+Valid combinations on the fresh path (production is a fresh environment). F6 activates in organization-service first, then mirrors in
+Auth (the `org_authoritative` marker via `hierarchy-retire --fresh`, and `AUTH_HIERARCHY_SOURCE=organization-service` with an Auth
+redeploy); F7's `ownership retire` cites Auth's retirement.
+
+| When | `ownership_state.phase` | `hierarchy_authority.mode` | `AUTH_HIERARCHY_SOURCE` | Verdict |
+|---|---|---|---|---|
+| F1 to F5, G7 (before `ownership activate`) | `PREPARED`, `VERIFIED`, `ACTIVATABLE` | `local` | unset (`local`) | **MATCH** |
+| inside the attended F6 step, after `activate` and before the mirror is complete | `ACTIVE` | `local` or `org_authoritative` | unset or `organization-service` | **TRANSITIONAL**: expected only while the F6 step is running |
+| F6 complete, before F7 | `ACTIVE` | `org_authoritative` | `organization-service` | **MATCH** |
+| after F7 `ownership retire` | `RETIRED` | `org_authoritative` | `organization-service` | **MATCH** |
+
+**MISMATCH** is every other combination, and a TRANSITIONAL one seen outside the F6 step. For example:
+- `org_authoritative` while the phase is not `ACTIVE` or `RETIRED`;
+- `frozen` (never used on the fresh path);
+- `RETIRED` with `local`;
+- a source that disagrees with the marker once F6 is complete.
+
+A mismatch is an **alert: stop the cutover, investigate, never edit either side to make them agree.** After `activate` there is no
+authority rollback (A2.6).
+
+### 6.3 Alert rules
+
+| Signal | Level | Alert when | Operator action |
+|---|---|---|---|
+| organization-service `/ready` (§6.1), Docker health | critical | not `{"status":"ready"}` / not `healthy`, at any check of any step | stop progression; read `readiness_check_failed check=<name>`; restore the dependency (database, or migrations through the deploy workflow); continue only once ready |
+| auth-service `/ready` (§6.1), `/auth/health`, Docker health | critical | not ready / not `healthy` | same; Organization being ready says nothing about Auth |
+| authority agreement (§6.2) | critical | a MISMATCH: **immediately** | stop; run no further ownership or mirror command; keep the evidence (both rows, the event records below); investigate; after F6 escalate to the owner (no rollback exists) |
+| failed verification or digest mismatch: `ownership` exits 1; an `ownership_event` row with outcome `rejected` or `failed` (codes such as `verification_mismatch`, `nothing_to_verify`, `not_activatable`); the CLI's JSON log `ownership_import_failed` with `code: verification_mismatch` (the fresh-path `verify` logs under this name); `ownership_activation_rejected` | critical | any rejected or failed ownership operation during the cutover: **immediately** | stop; do not approve or activate; compare the expected digest with what the service holds; rerun `verify` only once the cause is understood |
+| anchor disagreement (decision 1): Auth `hierarchy_anchor_mismatch` (error level) | critical | any occurrence: **immediately** | the request already failed closed and nothing was overwritten; stop; keep the logs; investigate (a reused id or tampered data); do not proceed |
+| Auth `hierarchy_source_mismatch` (at Auth start) | critical outside F6 | any occurrence outside the F6 step | stop; the source is changed only by F6's own configuration step, never by editing the marker |
+| Auth `hierarchy_reference_unavailable reason=…` / `hierarchy_reference_denied status=…` | warning | from F4 on (Auth's `ensure`), any occurrence | check organization-service readiness and the `auth-service` caller registration (§4); retry the first touch once restored |
+| Organization `outbox_relay_pass_failure` / `outbox_publish_failure`, `nawara-check-outbox-lag` | warning | failures or a pending backlog older than the rehearsal-plan threshold | the broker is asynchronous: `/ready` stays 200 and the audit evidence waits in the outbox; restore the broker or the Audit binding; never delete outbox rows |
+
+Evidence, read-only (no payload, no evidence text):
+
+```bash
+docker exec nawara-core-organization-db psql -U organization_admin -d organization -Atc "select at, operation, outcome, from_phase, to_phase, detail->>'code' from ownership_event where outcome <> 'succeeded' order by id desc limit 10"
+docker exec nawara-core-auth-db psql -U auth -d auth -Atc "select at, operation, from_mode, to_mode from hierarchy_authority_event order by id desc limit 5"
+docker logs --since "$T" nawara-core-auth-service 2>&1 | grep -oE 'hierarchy_(anchor_mismatch|source_mismatch|reference_unavailable|reference_denied)' | sort | uniq -c
+docker logs --since "$T" nawara-core-organization-service 2>&1 | grep -oE '(readiness_check_failed check=[a-z_]+|outbox_relay_pass_failure|outbox_publish_failure)' | sort | uniq -c
+docker exec nawara-core-organization-service node ../../libs/service-kit/dist/cli/check-outbox-lag.js --max-age-seconds "$THRESHOLD"   # the rehearsal-plan threshold, seconds; counts and ages only
+```
+
+## 7. What G5 will cover
+
 - **G5 backup:** the `nawara-core-organization-db-data` volume, and `db.env`, `roles.env`, `.env`, `callers/`; off-host, with a
   restore drill.
