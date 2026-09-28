@@ -103,6 +103,59 @@ test('over-privileged on a REDEPLOY: the running service keeps running, nothing 
   assert.deepEqual(w.calls('stop'), []);
 });
 
+// ---------------------------------------------------------------- the migration history is the migrator's alone (G2/G3)
+const HISTORY_WRITES = ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'];
+
+test('the migration history is made read-only for organization_app after migrating, and asserted before the service starts', () => {
+  const w = orgWorld();
+  assert.equal(deploy(w).code, 0);
+  const s = w.state();
+  const narrow = s.stdin.find((x) => x.container === DB && x.text.includes('schema_migrations'));
+  assert.ok(narrow, 'schema_migrations is narrowed by the deploy');
+  assert.deepEqual(narrow.text.trim().split('\n'), [
+    'REVOKE ALL ON TABLE schema_migrations FROM organization_app;',
+    'GRANT SELECT ON TABLE schema_migrations TO organization_app;',
+  ], 'SELECT only (for /ready), nothing else');
+  assert.equal(s.calls[narrow.at][s.calls[narrow.at].indexOf('-d') + 1], 'organization');
+  const migrateAt = s.calls.findIndex((a) => a[0] === 'run' && a.includes('../../libs/service-kit/dist/cli/migrate.js'));
+  const forbiddenQ = s.queries.find((q) => q.sql.includes('WHERE has_table_privilege'));
+  const missingQ = s.queries.find((q) => q.sql.includes('WHERE NOT has_table_privilege'));
+  const appAt = s.calls.findIndex((a) => a[0] === 'run' && a.includes('--name') && a[a.indexOf('--name') + 1] === APP);
+  assert.ok(migrateAt < narrow.at && narrow.at < forbiddenQ.at && forbiddenQ.at < appAt,
+    'the runner creates schema_migrations, so it is narrowed after migrating, then asserted, then the service starts');
+  for (const p of HISTORY_WRITES) assert.ok(forbiddenQ.sql.includes(`('schema_migrations','${p}')`), `the assertion forbids schema_migrations ${p}`);
+  assert.ok(missingQ.sql.includes("('schema_migrations','SELECT')"), 'the assertion requires schema_migrations SELECT (/ready reads it)');
+});
+
+for (const p of HISTORY_WRITES) {
+  test(`fail closed when organization_app can ${p} schema_migrations: first deploy never starts, a redeploy never swaps`, () => {
+    const first = orgWorld();
+    first.patch((s) => { s.org = { forbidden: `schema_migrations:${p}` }; });
+    const r = deploy(first);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, new RegExp(`forbidden privileges \\(schema_migrations:${p}\\).*the running service was not touched`));
+    assert.equal(runOf(first, APP), undefined, 'no organization-service container was started');
+
+    const again = orgWorld();
+    assert.equal(deploy(again).code, 0);
+    const id = again.state().containers[APP].id;
+    again.patch((s) => { s.org = { forbidden: `schema_migrations:${p}` }; });
+    assert.notEqual(deploy(again).code, 0);
+    assert.equal(again.state().containers[APP].id, id, 'the running service is the same container');
+    assert.equal(again.state().containers[APP].running, true);
+    assert.deepEqual(again.calls('stop'), []);
+  });
+}
+
+test('fail closed when organization_app cannot read schema_migrations (/ready needs it): the service is never started', () => {
+  const w = orgWorld();
+  w.patch((s) => { s.org = { missing: 'schema_migrations:SELECT' }; });
+  const r = deploy(w);
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /lacks privileges the service needs \(schema_migrations:SELECT\)/);
+  assert.equal(runOf(w, APP), undefined);
+});
+
 // ---------------------------------------------------------------- deploying is not activating
 test('a deploy runs no ownership command, sets no activation gate, registers no caller and never touches Auth', () => {
   const w = orgWorld();

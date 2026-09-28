@@ -40,6 +40,7 @@ docker inspect -f 'ports={{len .HostConfig.PortBindings}} nets={{range $n,$_ := 
 docker exec nawara-core-organization-service wget -qO- http://127.0.0.1:3000/ready; echo
 docker exec nawara-core-organization-db psql -U organization_admin -d organization -Atc "select phase, coalesce(environment_class,'undeclared') from ownership_state"
 docker exec nawara-core-organization-db psql -U organization_admin -d organization -Atc "select has_table_privilege('organization_app','ownership_state','UPDATE'), has_table_privilege('organization_app','company','DELETE')"   # f|f
+docker exec nawara-core-organization-db psql -U organization_admin -d organization -Atc "select has_table_privilege('organization_app','schema_migrations','SELECT'), has_table_privilege('organization_app','schema_migrations','INSERT,UPDATE,DELETE,TRUNCATE')"   # t|f
 ```
 
 ## 3. The fresh path (ADR-0040 A2.5), step by step

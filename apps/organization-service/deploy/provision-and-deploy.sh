@@ -25,7 +25,8 @@
 # Database roles (ADR-0032, ADR-0040 G3; as infra/postgres/init): organization_migrator owns the database and schema, applies the
 # migrations and is the ownership CLI's login; the service runs as organization_app. The roles and their default privileges are created
 # BEFORE the migrations: 0004 and 0005 narrow organization_app only IF it exists, so migrating first would silently leave the runtime role
-# able to write the ownership state. After migrating, the privileges are ASSERTED and the deploy fails closed on any deviation.
+# able to write the ownership state. The migration history (schema_migrations) is the migrator's alone: organization_app may only read
+# it (/ready). After migrating, the privileges are ASSERTED and the deploy fails closed on any deviation.
 set -euo pipefail
 umask 077
 
@@ -130,9 +131,17 @@ docker run --rm --network "$NET" --env-file "$MIG_ENV" --entrypoint node "$IMAGE
   || die "migrations failed or were refused; the running service was not touched"
 rm -f "$MIG_ENV"
 
+# The runner creates schema_migrations as organization_migrator, so the default privileges above give organization_app DML on it. The
+# runtime only reads it (/ready); writing it could mark a future migration as applied (the runner would then skip it), null a checksum
+# (no drift detection) or erase the history. Narrowed on every deploy, as Auth's deploy does, and asserted below.
+log "making the migration history read-only for organization_app"
+printf '%s\n' 'REVOKE ALL ON TABLE schema_migrations FROM organization_app;' 'GRANT SELECT ON TABLE schema_migrations TO organization_app;' \
+  | psql_stdin organization
+
 # ---------------------------------------------------------------- 3. the runtime role's privileges, ASSERTED (fail closed)
 # Exactly what migrations 0004 and 0005 establish: the runtime may never write the ownership state or its records, never delete or
-# truncate the hierarchy, and only append to the admin actor record; it must still read the state and append the record.
+# truncate the hierarchy, and only append to the admin actor record; it must still read the state and append the record. It never writes
+# the migration history (read-only, above), which it must still read for /ready.
 log "asserting the runtime role's privileges"
 attrs=$(pg_facts postgres "SELECT concat_ws('|', rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls) FROM pg_roles WHERE rolname = 'organization_app'")
 [ "$attrs" = 'f|f|f|f|f' ] || die "organization_app has an elevated attribute (superuser, createdb, createrole, replication or bypassrls); the running service was not touched"
@@ -142,11 +151,12 @@ forbidden=$(pg_facts organization "SELECT coalesce(string_agg(t || ':' || p, ','
   ('ownership_import_run','INSERT'),('ownership_import_run','UPDATE'),('ownership_import_run','DELETE'),('ownership_import_run','TRUNCATE'),
   ('hierarchy_id_ledger','INSERT'),('hierarchy_id_ledger','UPDATE'),('hierarchy_id_ledger','DELETE'),('hierarchy_id_ledger','TRUNCATE'),
   ('company','DELETE'),('company','TRUNCATE'),('platform','DELETE'),('platform','TRUNCATE'),('organization','DELETE'),('organization','TRUNCATE'),
-  ('admin_actor_event','UPDATE'),('admin_actor_event','DELETE'),('admin_actor_event','TRUNCATE')
+  ('admin_actor_event','UPDATE'),('admin_actor_event','DELETE'),('admin_actor_event','TRUNCATE'),
+  ('schema_migrations','INSERT'),('schema_migrations','UPDATE'),('schema_migrations','DELETE'),('schema_migrations','TRUNCATE')
 ) AS v(t, p) WHERE has_table_privilege('organization_app', 'public.' || t, p)")
-[ -z "$forbidden" ] || die "organization_app holds forbidden privileges ($forbidden): the runtime could write authority state or delete the hierarchy; the running service was not touched"
+[ -z "$forbidden" ] || die "organization_app holds forbidden privileges ($forbidden): the runtime could write authority state or the migration history, or delete the hierarchy; the running service was not touched"
 missing=$(pg_facts organization "SELECT coalesce(string_agg(t || ':' || p, ',' ORDER BY t, p), '') FROM (VALUES
-  ('ownership_state','SELECT'),('admin_actor_event','INSERT'),('company','SELECT'),('company','INSERT')
+  ('ownership_state','SELECT'),('admin_actor_event','INSERT'),('company','SELECT'),('company','INSERT'),('schema_migrations','SELECT')
 ) AS v(t, p) WHERE NOT has_table_privilege('organization_app', 'public.' || t, p)")
 [ -z "$missing" ] || die "organization_app lacks privileges the service needs ($missing); the running service was not touched"
 
