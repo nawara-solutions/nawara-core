@@ -43,6 +43,10 @@ exists() { docker inspect "$1" >/dev/null 2>&1; }
 ensure() { grep -q "^$2=" "$1" 2>/dev/null || { printf '%s=%s\n' "$2" "$3" >>"$1"; log "  + $2 (new)"; }; }
 
 mkdir -p "$DIR"; chmod 700 "$DIR"
+# An interrupted credential rotation (rotate-db-credential.sh) must be finished first: this deploy re-applies db.env's
+# AUTH_APP_PASSWORD to the role, which in the middle of a rotation may not be the password .env holds.
+[ ! -e "$DIR/.rotation-journal" ] \
+  || die "an auth_app credential rotation was interrupted ($DIR/.rotation-journal): re-run auth-db-credential-rotate.yml to finish it before deploying; nothing was changed"
 # Stage 18.7.5: the central audit relay publishes Auth's audit evidence to RabbitMQ, and the service refuses to start in production
 # without RABBITMQ_URL (independent of AUTH_EVENTS). Checked BEFORE anything is migrated or stopped, so a missing broker can never turn
 # a deploy into an outage. Sources, first found wins and is never echoed: RABBITMQ_URL on the deploy command, "$APP_ENV", or (ADR-0053)
