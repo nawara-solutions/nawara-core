@@ -115,3 +115,45 @@ export function assertNothingChanged(assert, w) {
     || (a[0] === 'network' && ['create', 'connect'].includes(a[1])) || (a[0] === 'exec' && a.includes('psql')));
   assert.deepEqual(mutating, [], 'a refused preflight must not change anything');
 }
+
+export const ROTATION = join(ROOT, 'apps/auth-service/deploy/rotate-db-credential.sh');
+export const AUTH_IMAGE_ID = `sha256:${'a1'.repeat(32)}`;
+const hex = (seed) => seed.repeat(64).slice(0, 64);
+
+/**
+ * A world shaped like production before RB-2: the Auth container created by the Sept-23 deploy script (deploy_edge only, five
+ * Traefik labels, the /auth/health check, unless-stopped, stop timeout 60), its database, db.env / .env, and a simulated PostgreSQL
+ * whose auth_app password is the one all three hold. `over` tweaks any part to build a failure case.
+ */
+export function rotationWorld(over = {}) {
+  const old = over.oldPassword ?? hex('0f');
+  const w = world({
+    networks: { deploy_edge: { internal: false } },
+    images: { [AUTH_IMAGE_ID]: { env: ['NODE_ENV=production', 'PATH=/usr/local/bin:/usr/bin:/bin'], user: 'node', entrypoint: '["docker-entrypoint.sh"]', cmd: '["node","dist/main.js"]', workdir: '/app/apps/auth-service' } },
+    pg: { roles: { auth_app: { password: over.rolePassword ?? old, super: over.superuser ?? false } }, trust: over.trust ?? false },
+    containers: {},
+  });
+  const dir = join(w.home, 'nawara-core/auth-service');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const url = over.url ?? `postgres://auth_app:${over.urlPassword ?? old}@nawara-core-auth-db:5432/auth`;
+  const dbEnv = 'dbEnv' in over ? over.dbEnv : `POSTGRES_USER=auth\nPOSTGRES_DB=auth\nPOSTGRES_PASSWORD=${hex('b2')}\nAUTH_APP_PASSWORD=${over.dbEnvPassword ?? old}\n`;
+  const appEnv = 'appEnv' in over ? over.appEnv : `NODE_ENV=production\nDATABASE_URL=${url}\nJWT_SECRET=${hex('c3')}\nTRUST_PROXY=true\nAUTH_EVENTS=off\n`;
+  if (dbEnv !== null) writeFileSync(join(dir, 'db.env'), dbEnv, { mode: 0o600 });
+  if (appEnv !== null) writeFileSync(join(dir, '.env'), appEnv, { mode: 0o600 });
+  const containerEnv = over.containerEnv ?? ['NODE_ENV=production', 'PATH=/usr/local/bin:/usr/bin:/bin',
+    ...(appEnv ?? '').split('\n').filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l) && !l.startsWith('NODE_ENV='))];
+  w.patch((s) => {
+    s.containers['nawara-core-auth-db'] = { id: 'id-db', image: 'postgres:16-alpine', imageId: `sha256:${'d4'.repeat(32)}`, running: over.dbRunning ?? true, health: 'healthy', ports: [], publishAll: false, networks: { deploy_edge: true }, labels: [], mounts: [] };
+    if (!over.noApp) s.containers['nawara-core-auth-service'] = {
+      id: 'id-auth-original', image: 'ghcr.io/nawara-solutions/nawara-core-auth-service:production', imageId: AUTH_IMAGE_ID,
+      running: true, health: over.appHealth ?? 'healthy', ports: [], publishAll: false, networks: { deploy_edge: true, ...(over.extraNetworks ?? {}) }, networkMode: 'deploy_edge',
+      labels: over.labels ?? ['traefik.enable=true', 'traefik.http.routers.nawara-core-auth-service.rule=Host(`core-api.example.test`) && PathPrefix(`/auth`)',
+        'traefik.http.routers.nawara-core-auth-service.entrypoints=websecure', 'traefik.http.routers.nawara-core-auth-service.tls.certresolver=le',
+        'traefik.http.services.nawara-core-auth-service.loadbalancer.server.port=3000'],
+      labelCount: over.labelCount, env: containerEnv, restart: 'unless-stopped:0', stopTimeout: '60',
+      healthcheck: over.healthcheck === null ? undefined : { test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/auth/health >/dev/null || exit 1'], times: '15s 5s 3 15s' },
+      logDriver: 'json-file', logOpts: over.logOpts ?? ['max-file=3', 'max-size=10m'], mountSpecs: over.mountSpecs ?? [], mounts: [], extras: over.extras,
+    };
+  });
+  return { ...w, dir, old, rotate: (env = {}) => w.run(ROTATION, env) };
+}
