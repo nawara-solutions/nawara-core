@@ -487,16 +487,16 @@ SELECT pg_temp.expect_error('SUB', 'the priceId must belong to the productId (co
 
 -- lifecycle: activation, period order, grace, termination
 SELECT t_mk_subscription() AS pend \gset
-SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd <= currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
-SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd < currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-02', "currentPeriodEnd" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
-SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to grace', format($$UPDATE subscription SET status = 'grace', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-08' WHERE id = %L$$, :'pend'), '23514');
-SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to expired', format($$UPDATE subscription SET status = 'expired', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01' WHERE id = %L$$, :'pend'), '23514');
+SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd <= currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-01-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
+SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd < currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-02', "currentPeriodEnd" = '2026-01-01', "billingAnchorAt" = '2026-01-02' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
+SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to grace', format($$UPDATE subscription SET status = 'grace', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-08', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514');
+SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to expired', format($$UPDATE subscription SET status = 'expired', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514');
 -- Success-path UPDATEs pair the mutation with its history row in ONE multi-statement EXECUTE (mirrors line ~320's own
 -- "UPDATE ...; SET CONSTRAINTS ALL IMMEDIATE" pattern): every subscription mutation needs a matching `billing_transition`
 -- row at COMMIT (BI-19, deferred), so a bare UPDATE with no paired history insert would abort this whole script at the
 -- statement's own commit, outside any handler here — never something `expect_ok`/`expect_error` could turn into a clean result.
 SELECT pg_temp.expect_ok('SUB', 'pending -> active with a valid period', format($$
-  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01' WHERE id = %L;
+  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'pending', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
 SELECT pg_temp.assert_eq('SUB', 'activation advanced the revision to 1', (SELECT revision::text FROM subscription WHERE id = :'pend'), '1');
 SELECT pg_temp.expect_error('SUB', 'a self-loop is refused for any status OTHER than active (no in-place change while pending/grace/expired)',
@@ -519,7 +519,7 @@ SELECT pg_temp.expect_ok('SUB', 'active -> expired (natural expiry, no effective
   SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
 SELECT pg_temp.assert_eq('SUB', 'a naturally expired subscription has no effectiveTerminationAt', (SELECT "effectiveTerminationAt"::text FROM subscription WHERE id = :'pend'), NULL);
 SELECT pg_temp.expect_ok('SUB', 'expired -> active: a late renewal can always reactivate', format($$
-  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-03-01', "currentPeriodEnd" = '2026-04-01' WHERE id = %L;
+  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-03-01', "currentPeriodEnd" = '2026-04-01', "billingAnchorAt" = '2026-03-01' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'expired', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
 
 -- effective termination: may only SHORTEN access, and never survives past its own `expired` episode (a later
@@ -556,6 +556,75 @@ SELECT t_try_renew(:'early_sub');
 SELECT pg_temp.assert_eq('SUB', 'early renewal anchors on the ORIGINAL currentPeriodEnd', (SELECT ("currentPeriodStart" = '2026-11-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'early_sub'), 'true');
 SELECT pg_temp.assert_eq('SUB', 'early renewal extends by exactly one recurring interval', (SELECT ("currentPeriodEnd" = '2026-12-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'early_sub'), 'true');
 SELECT pg_temp.assert_eq('SUB', 'the renewal is its own auditable revision', (SELECT revision::text FROM subscription WHERE id = :'early_sub'), '2');
+
+-- billing anchor (0015, ADR-0044 B-025): a month/year cadence keeps its anchor; a short month clamps only that period end
+CREATE FUNCTION pg_temp.ends(sub uuid) RETURNS text LANGUAGE sql AS $$
+  SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || ' anchor ' || coalesce(to_char("billingAnchorAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI'), 'none')
+    FROM subscription WHERE id = sub $$;
+-- `n` early renewals (each settled well before the period it extends ends), returning every resulting period end
+CREATE FUNCTION pg_temp.renew_early(sub uuid, n int) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE out text := ''; i int;
+BEGIN
+  FOR i IN 1..n LOOP
+    PERFORM t_try_renew(sub, (SELECT "currentPeriodStart" FROM subscription WHERE id = sub));
+    out := out || CASE WHEN i > 1 THEN ' ' ELSE '' END || (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = sub);
+  END LOOP;
+  RETURN out;
+END $$;
+
+SELECT t_mk_anchored_subscription('month', 1, '2027-01-31T09:30:00Z') AS a31 \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'first activation on Jan 31 2027: the period ends Feb 28 (clamped), the anchor stays Jan 31', pg_temp.ends(:'a31'), '2027-02-28 09:30 anchor 2027-01-31 09:30');
+SELECT pg_temp.assert_eq('ANCHOR', 'Jan 31 anchor: Feb 28 -> Mar 31 (recovered) -> Apr 30 -> May 31 -> Jun 30 -> Jul 31 -> Aug 31', pg_temp.renew_early(:'a31', 6), '03-31 04-30 05-31 06-30 07-31 08-31');
+SELECT pg_temp.assert_eq('ANCHOR', 'six early renewals never move the Jan 31 anchor', pg_temp.ends(:'a31'), '2027-08-31 09:30 anchor 2027-01-31 09:30');
+
+SELECT t_mk_anchored_subscription('month', 1, '2027-01-28T09:30:00Z') AS a28 \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'Jan 28 anchor: Feb 28 -> Mar 28 -> Apr 28 (a genuine 28th stays the 28th)', pg_temp.renew_early(:'a28', 2), '03-28 04-28');
+SELECT t_mk_anchored_subscription('month', 1, '2027-01-29T09:30:00Z') AS a29 \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'Jan 29 2027 anchor: Feb 28 (clamped) -> Mar 29 -> Apr 29', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'a29') || ' ' || pg_temp.renew_early(:'a29', 2), '02-28 03-29 04-29');
+SELECT t_mk_anchored_subscription('month', 1, '2027-01-30T09:30:00Z') AS a30 \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'Jan 30 2027 anchor: Feb 28 (clamped) -> Mar 30 -> Apr 30', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'a30') || ' ' || pg_temp.renew_early(:'a30', 2), '02-28 03-30 04-30');
+SELECT t_mk_anchored_subscription('month', 1, '2028-01-31T09:30:00Z') AS aleap \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'Jan 31 2028 (leap year) anchor: Feb 29 -> Mar 31', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'aleap') || ' ' || pg_temp.renew_early(:'aleap', 1), '02-29 03-31');
+SELECT t_mk_anchored_subscription('month', 1, '2026-08-31T09:30:00Z') AS aaug \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'Aug 31 anchor across 30-day months: Sep 30 -> Oct 31 -> Nov 30 -> Dec 31', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'aaug') || ' ' || pg_temp.renew_early(:'aaug', 3), '09-30 10-31 11-30 12-31');
+
+SELECT t_mk_anchored_subscription('month', 2, '2027-01-31T09:30:00Z') AS a2m \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'every 2 months from Jan 31 2027: Mar 31 -> May 31 -> Jul 31 -> Sep 30 -> Nov 30 -> Jan 31 2028', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'a2m') || ' ' || pg_temp.renew_early(:'a2m', 4), '03-31 05-31 07-31 09-30 11-30');
+SELECT pg_temp.renew_early(:'a2m', 1);
+SELECT pg_temp.assert_eq('ANCHOR', 'every 2 months: the 31st survives two 30-day clamps', pg_temp.ends(:'a2m'), '2028-01-31 09:30 anchor 2027-01-31 09:30');
+
+SELECT t_mk_anchored_subscription('year', 1, '2028-02-29T09:30:00Z') AS aly \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'yearly from Feb 29 2028: Feb 28 2029 -> Feb 28 2030 -> Feb 28 2031 -> Feb 29 2032',
+  (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM subscription WHERE id = :'aly') || ' ' || pg_temp.renew_early(:'aly', 3), '2029-02-28 02-28 02-28 02-29');
+SELECT pg_temp.assert_eq('ANCHOR', 'the yearly Feb 29 anchor is kept through the clamped years', pg_temp.ends(:'aly'), '2032-02-29 09:30 anchor 2028-02-29 09:30');
+
+-- renewal modes, on the frozen renewal-anchor rule: exactly at the boundary is still on time; strictly after it is late
+SELECT t_mk_anchored_subscription('month', 1, '2027-01-31T09:30:00Z') AS aedge \gset
+SELECT t_try_renew(:'aedge', '2027-02-28T09:30:00Z');
+SELECT pg_temp.assert_eq('ANCHOR', 'a renewal exactly at the period end is on time: starts at Feb 28, ends Mar 31, keeps the anchor', pg_temp.ends(:'aedge'), '2027-03-31 09:30 anchor 2027-01-31 09:30');
+SELECT t_mk_anchored_subscription('month', 1, '2027-01-31T09:30:00Z') AS alate \gset
+SELECT t_try_renew(:'alate', '2027-04-12T15:00:00Z');
+SELECT pg_temp.assert_eq('ANCHOR', 'a genuinely late renewal (Apr 12, past Feb 28, no grace) starts at the settlement and RESETS the anchor to it', pg_temp.ends(:'alate'), '2027-05-12 15:00 anchor 2027-04-12 15:00');
+SELECT pg_temp.assert_eq('ANCHOR', 'after the reset the new cadence holds: May 12 -> Jun 12 -> Jul 12', pg_temp.renew_early(:'alate', 2), '06-12 07-12');
+
+SELECT t_mk_anchored_subscription('week', 2, '2027-01-31T09:30:00Z') AS awk \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'a 2-week price has no billing anchor and keeps start + interval: Feb 14 -> Feb 28 -> Mar 14', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'awk') || ' ' || pg_temp.renew_early(:'awk', 2) || ' ' || pg_temp.ends(:'awk'), '02-14 02-28 03-14 2027-03-14 09:30 anchor none');
+SELECT t_mk_anchored_subscription('day', 10, '2027-01-31T09:30:00Z') AS aday \gset
+SELECT pg_temp.assert_eq('ANCHOR', 'a 10-day price has no billing anchor and keeps start + interval: Feb 10 -> Feb 20 -> Mar 2', (SELECT to_char("currentPeriodEnd" AT TIME ZONE 'UTC', 'MM-DD') FROM subscription WHERE id = :'aday') || ' ' || pg_temp.renew_early(:'aday', 2), '02-10 02-20 03-02');
+
+-- the guard: the anchor exists exactly for non-pending month/year rows, and moves only as the start of a new period
+SELECT pg_temp.expect_error('ANCHOR', 'a pending subscription has no billing anchor', format($$INSERT INTO subscription ("organizationId", "productId", "priceId", "billingAnchorAt")
+  SELECT gen_random_uuid(), "productId", id, now() FROM price WHERE id = %L$$, t_mk_recurring_price()), '23514', 'subscription_pending_no_billing_anchor');
+SELECT pg_temp.expect_error('ANCHOR', 'a month subscription cannot be activated without its billing anchor',
+  format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2027-01-01', "currentPeriodEnd" = '2027-02-01' WHERE id = %L$$, t_mk_subscription()), '23514');
+SELECT pg_temp.expect_error('ANCHOR', 'a week subscription cannot carry a billing anchor',
+  format($$UPDATE subscription SET "currentPeriodStart" = '2027-03-01', "currentPeriodEnd" = '2027-03-15', "billingAnchorAt" = '2027-03-01' WHERE id = %L$$, :'awk'), '23514');
+SELECT pg_temp.expect_error('ANCHOR', 'the anchor cannot move without a new period (a clamp never rewrites it)',
+  format($$UPDATE subscription SET "billingAnchorAt" = '2027-02-28T09:30:00Z' WHERE id = %L$$, :'a31'), '23514');
+SELECT pg_temp.expect_error('ANCHOR', 'a new period cannot set the anchor to anything but its own start',
+  format($$UPDATE subscription SET "currentPeriodStart" = '2027-08-31T09:30:00Z', "currentPeriodEnd" = '2027-09-30T09:30:00Z', "billingAnchorAt" = '2027-02-28T09:30:00Z' WHERE id = %L$$, :'a31'), '23514');
+SELECT pg_temp.expect_error('ANCHOR', 'a month subscription cannot drop its anchor',
+  format($$UPDATE subscription SET "billingAnchorAt" = NULL WHERE id = %L$$, :'a31'), '23514');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

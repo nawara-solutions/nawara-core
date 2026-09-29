@@ -26,6 +26,16 @@ export interface RenewalBasis {
  * after `currentPeriodEnd` — so the two branches never disagree at the boundary (section 50).
  */
 export function renewalAnchor(sub: RenewalBasis, now: Date): Date {
+  return isLateRenewal(sub, now) ? now : sub.currentPeriodEnd;
+}
+
+/**
+ * A genuinely late renewal: the paid period AND any grace window have fully elapsed (`now` strictly after the access
+ * boundary), so `renewalAnchor` starts the new period at `now`. For a monthly/yearly price this also RESETS the
+ * persistent billing anchor to that instant (ADR-0044 B-025): the old cadence is not resumed after a lapse. Every other
+ * renewal (early, on time, exactly at the boundary, within grace) keeps the existing billing anchor.
+ */
+export function isLateRenewal(sub: RenewalBasis, now: Date): boolean {
   const boundary = sub.graceUntil ?? sub.currentPeriodEnd;
-  return now.getTime() <= boundary.getTime() ? sub.currentPeriodEnd : now;
+  return now.getTime() > boundary.getTime();
 }

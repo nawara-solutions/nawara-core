@@ -144,11 +144,14 @@ BEGIN
   RETURN sid;
 END $$;
 
--- pending -> active over the given period, writing its history row
+-- pending -> active over the given period, writing its history row; a month/year price's billing anchor is the
+-- activation instant (mirrors SubscriptionRepository.activate)
 CREATE FUNCTION t_activate(sub uuid, p_start timestamptz, p_end timestamptz) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE r int;
 BEGIN
-  UPDATE subscription SET status = 'active', "currentPeriodStart" = p_start, "currentPeriodEnd" = p_end WHERE id = sub RETURNING revision INTO r;
+  UPDATE subscription s SET status = 'active', "currentPeriodStart" = p_start, "currentPeriodEnd" = p_end,
+         "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN p_start END
+    FROM price p WHERE p.id = s."priceId" AND s.id = sub RETURNING s.revision INTO r;
   PERFORM t_hist('subscription', sub, 'pending', 'active', r);
 END $$;
 
@@ -160,19 +163,36 @@ BEGIN
   RETURN sid;
 END $$;
 
+-- an active subscription to a fresh `cnt` x `unit` price, first activated (and so anchored, for month/year) at p_start,
+-- its first period ending where the repository's own activation-by-settlement would put it
+CREATE FUNCTION t_mk_anchored_subscription(unit text, cnt int, p_start timestamptz) RETURNS uuid LANGUAGE plpgsql AS $$
+DECLARE pid uuid; prid uuid; sid uuid;
+BEGIN
+  INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('billing-test', 'organization', '00000000-0000-4000-8000-0000000000a1', 'sa'||substr(md5(random()::text), 1, 10), 'An anchored subscription product') RETURNING id INTO pid;
+  INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES (pid, substr(md5(random()::text), 1, 12), 'TND', 1000, 'recurring', unit, cnt) RETURNING id INTO prid;
+  INSERT INTO subscription ("organizationId", "productId", "priceId") VALUES (gen_random_uuid(), pid, prid) RETURNING id INTO sid;
+  PERFORM t_hist('subscription', sid, NULL, 'pending', 0);
+  PERFORM t_activate(sid, p_start, billing_subscription_period_end(p_start, CASE WHEN unit IN ('month', 'year') THEN p_start END, unit, cnt));
+  RETURN sid;
+END $$;
+
 -- the database half of a renewal (mirrors SubscriptionRepository.renew's anchor/period math): lock, anchor on the
--- frozen rule, extend by the price's own recurring interval, write history. Used both directly and under real
--- concurrency. Unlike the repository, it does not recompute `graceUntil` (R1: that needs a configured grace policy,
--- a TypeScript-only concept these SQL fixtures have none of) — harmless here since every fixture subscription is
--- created with `graceUntil` NULL and stays that way throughout these races.
-CREATE FUNCTION t_try_renew(sub uuid) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE row subscription%ROWTYPE; anchor timestamptz; r int;
+-- frozen rule, extend by the price's own recurring interval on the subscription's billing anchor (a genuinely late
+-- renewal resets that anchor to its own start), write history. Used both directly and under real concurrency. `at`
+-- stands in for the settlement instant (default: now()). Unlike the repository, it does not recompute `graceUntil`
+-- (R1: that needs a configured grace policy, a TypeScript-only concept these SQL fixtures have none of) — harmless here
+-- since every fixture subscription is created with `graceUntil` NULL and stays that way throughout these races.
+CREATE FUNCTION t_try_renew(sub uuid, at timestamptz DEFAULT now()) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE row subscription%ROWTYPE; late boolean; anchor timestamptz; r int;
 BEGIN
   SELECT * INTO row FROM subscription WHERE id = sub FOR UPDATE;
-  anchor := CASE WHEN now() <= coalesce(row."graceUntil", row."currentPeriodEnd") THEN row."currentPeriodEnd" ELSE now() END;
-  -- forced to UTC wall-clock arithmetic (mirrors SubscriptionRepository.renew): no DST-shifted result from the session's TimeZone
+  late := at > coalesce(row."graceUntil", row."currentPeriodEnd");
+  anchor := CASE WHEN late THEN at ELSE row."currentPeriodEnd" END;
   UPDATE subscription s SET status = 'active', "currentPeriodStart" = anchor,
-         "currentPeriodEnd" = ((anchor AT TIME ZONE 'UTC') + (p."intervalCount" || ' ' || p."intervalUnit")::interval) AT TIME ZONE 'UTC'
+         "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN late THEN anchor ELSE row."billingAnchorAt" END END,
+         "currentPeriodEnd" = billing_subscription_period_end(anchor,
+           CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN late THEN anchor ELSE row."billingAnchorAt" END END,
+           p."intervalUnit", p."intervalCount")
     FROM price p WHERE p.id = s."priceId" AND s.id = sub RETURNING s.revision INTO r;
   PERFORM t_hist('subscription', sub, row.status, 'active', r);
 END $$;

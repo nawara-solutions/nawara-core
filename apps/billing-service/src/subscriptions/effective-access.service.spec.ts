@@ -14,7 +14,7 @@ function subscriptionsWith(row: SubscriptionRow | null): { repo: SubscriptionRep
 const activeRow: SubscriptionRow = {
   id: 'sub-1', organizationId: ORG, productId: 'prod-1', priceId: 'price-1', status: 'active',
   currentPeriodStart: new Date('2026-10-01T00:00:00Z'), currentPeriodEnd: new Date('2026-11-01T00:00:00Z'),
-  graceUntil: null, cancelAtPeriodEnd: false, effectiveTerminationAt: null, revision: 1,
+  graceUntil: null, cancelAtPeriodEnd: false, effectiveTerminationAt: null, billingAnchorAt: new Date('2026-10-01T00:00:00Z'), revision: 1,
   createdAt: new Date('2026-10-01T00:00:00Z'), updatedAt: new Date('2026-10-01T00:00:00Z'),
 };
 

@@ -13,6 +13,7 @@ import type { PaymentSnapshot } from '../src/payment-integration/payment-client.
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
+import { anchorOccurrence } from './support/billing-calendar.js';
 
 const ORG = '00000000-0000-4000-8000-0000000000c1';
 const PRODUCER = 'test-producer';
@@ -20,7 +21,6 @@ const producer: Caller = { kind: 'service', service: PRODUCER };
 const ctx: TransitionContext = { actor: { type: 'service', id: PRODUCER }, cause: { type: 'request', id: 'req-1' }, correlationId: 'corr-1' };
 const paymentCtx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'evt' }, correlationId: 'corr-evt' };
 const day = 86_400_000;
-const addMonthUTC = (d: Date, n = 1): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()));
 
 /**
  * Stage 12.4: the existing Payment-event consumption path (`PaymentRequestRepository.applyPaymentEvent`, exercised
@@ -149,7 +149,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     const row = await subs.getByOrganization(organizationId);
     expect(row).toMatchObject({
       organizationId, productId: price.productId, priceId: price.priceId, status: 'active',
-      currentPeriodStart: settledAt, currentPeriodEnd: addMonthUTC(settledAt), cancelAtPeriodEnd: false,
+      currentPeriodStart: settledAt, currentPeriodEnd: anchorOccurrence(settledAt, 1), cancelAtPeriodEnd: false,
     });
     const history = (await admin.query(`SELECT "fromStatus", "toStatus", revision FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1 ORDER BY revision`, [row.id])).rows;
     expect(history).toEqual([{ fromStatus: null, toStatus: 'pending', revision: 0 }, { fromStatus: 'pending', toStatus: 'active', revision: 1 }]);
@@ -168,7 +168,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     expect(result.subscription).toBe('settled');
 
     const row = await subs.getByOrganization(organizationId);
-    expect(row).toMatchObject({ productId: price.productId, priceId: price.priceId, status: 'active', currentPeriodStart: addMonthUTC(firstSettledAt), currentPeriodEnd: addMonthUTC(firstSettledAt, 2) });
+    expect(row).toMatchObject({ productId: price.productId, priceId: price.priceId, status: 'active', currentPeriodStart: anchorOccurrence(firstSettledAt, 1), currentPeriodEnd: anchorOccurrence(firstSettledAt, 2) });
   });
 
   it('3. duplicate delivery of the SAME event has no additional commercial effect (idempotency via payment_event_receipt)', async () => {
@@ -195,7 +195,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     expect(results.every((r) => r.subscription === 'settled' || r.subscription === null)).toBe(true);
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(1); // create(0) + exactly one activation, never lost, never doubled
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(settledAt));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(settledAt, 1));
   });
 
   it('5. two genuine distinct payments both apply, stacking periods (idempotency is event-identity based, never organization-wide)', async () => {
@@ -211,7 +211,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(2); // create(0), activate(1), renew(2) — two genuine effects, not deduplicated
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(aAt, 2));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(aAt, 2));
   });
 
   it('6. amount mismatch: no Subscription effect at all, exactly like the existing financial conflict behavior', async () => {
@@ -312,7 +312,8 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.currentPeriodStart).toEqual(activated.currentPeriodEnd); // anchored on the ORIGINAL end, not on lateSettledAt
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(activated.currentPeriodEnd!));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(firstSettledAt, 2)); // the next occurrence of the first settlement's anchor
+    expect(row.billingAnchorAt).toEqual(firstSettledAt); // renewing inside grace keeps the billing anchor
   });
 
   it('11. late renewal: a payment settling AFTER the grace window has fully elapsed anchors on the authoritative settlement instant itself, with no back-charging', async () => {
@@ -329,7 +330,8 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.currentPeriodStart).toEqual(wayLateSettledAt); // anchored on settlement, not on the old (long-elapsed) boundary
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(wayLateSettledAt));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(wayLateSettledAt, 1));
+    expect(row.billingAnchorAt).toEqual(wayLateSettledAt); // genuinely late: the billing anchor restarts at the settlement (ADR-0044 B-025)
   });
 
   it('12. failure events (failed/cancelled/expired) never activate a pending Subscription and never touch an existing one\'s period or grace', async () => {
@@ -387,7 +389,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     await t.bus.publish(envelope);
 
     const row = await subs.getByOrganization(organizationId);
-    expect(row).toMatchObject({ status: 'active', currentPeriodStart: settledAt, currentPeriodEnd: addMonthUTC(settledAt) });
+    expect(row).toMatchObject({ status: 'active', currentPeriodStart: settledAt, currentPeriodEnd: anchorOccurrence(settledAt, 1) });
   });
 
   it('15. Stage 12.4 R2: the reconciliation path anchors on `snapshot.closedAt`, converging on the IDENTICAL Subscription anchor a live event for the same settlement instant would produce', async () => {
@@ -409,7 +411,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
 
     // both anchor on the SAME settledAt instant, not on Billing's own processing time (`new Date()` at call time)
     expect(reconciledRow.currentPeriodStart).toEqual(settledAt);
-    expect(reconciledRow.currentPeriodEnd).toEqual(addMonthUTC(settledAt));
+    expect(reconciledRow.currentPeriodEnd).toEqual(anchorOccurrence(settledAt, 1));
     expect(reconciledRow).toMatchObject({ status: liveRow.status, currentPeriodStart: liveRow.currentPeriodStart, currentPeriodEnd: liveRow.currentPeriodEnd });
   });
 
@@ -425,6 +427,6 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     expect(second).toMatchObject({ outcome: 'applied', firstDelivery: false });
 
     const row = await subs.getByOrganization(organizationId);
-    expect(row).toMatchObject({ currentPeriodStart: settledAt, currentPeriodEnd: addMonthUTC(settledAt) }); // no double-application
+    expect(row).toMatchObject({ currentPeriodStart: settledAt, currentPeriodEnd: anchorOccurrence(settledAt, 1) }); // no double-application
   });
 });

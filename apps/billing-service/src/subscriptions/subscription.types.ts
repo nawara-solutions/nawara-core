@@ -12,6 +12,8 @@ export interface SubscriptionRow {
   graceUntil: Date | null;
   cancelAtPeriodEnd: boolean;
   effectiveTerminationAt: Date | null;
+  /** The persistent calendar anchor of a month/year subscription (0015): NULL while pending and for a day/week price. */
+  billingAnchorAt: Date | null;
   revision: number;
   createdAt: Date;
   updatedAt: Date;

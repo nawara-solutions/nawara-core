@@ -7,6 +7,7 @@ import { billingMigrationsDir } from '../src/app.module.js';
 import type { TransitionContext } from '../src/domain/actors.js';
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
+import { monthlyPeriodEndingBy } from './support/billing-calendar.js';
 import { describeWithEnv } from './support/env.js';
 
 /**
@@ -21,7 +22,9 @@ import { describeWithEnv } from './support/env.js';
  * Every scenario anchors its Subscription periods on the REAL wall clock (`Date.now()`), not a fixed calendar date,
  * because the controller itself supplies the one authoritative `now` from `new Date()` at the HTTP boundary (section
  * 9) — there is no injectable clock to fake here, matching this repo's existing convention for other real-time-bound
- * HTTP suites.
+ * HTTP suites. Every price here is monthly, so each first period is a real anchor-cadence month
+ * (`monthlyPeriodEndingBy`, ADR-0044 B-025): it ends at the wall-clock instant a scenario needs, or at most three days
+ * earlier, and every scenario below keeps its meaning across that slack.
  */
 describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), against a real PostgreSQL', ['TEST_DATABASE_ADMIN_URL'], (env) => {
   let db: TestDatabase;
@@ -97,8 +100,8 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const end = new Date(Date.now() + 28 * day);
-    await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - 2 * day), end }, ctx);
+    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
+    await noGraceSubs.activate(organizationId, { start, end }, ctx);
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
   });
@@ -107,7 +110,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - 30 * day), end: new Date(Date.now() - hour) }, ctx);
+    await noGraceSubs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - hour)), ctx);
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(res.body).toEqual({ valid: false, expiresAt: null });
   });
@@ -116,7 +119,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    const activated = await subs.activate(organizationId, { start: new Date(Date.now() - 10 * day), end: new Date(Date.now() - hour) }, ctx); // default app: 7-day grace precomputed at activation
+    const activated = await subs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - hour)), ctx); // default app: 7-day grace precomputed at activation
     expect(activated.subscription.status).toBe('active'); // never normalized to 'grace' — no sweeper exists (section 45)
     expect(activated.subscription.graceUntil).not.toBeNull();
     const res = await getEntitlement(organizationId).expect(200);
@@ -127,7 +130,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    await subs.activate(organizationId, { start: new Date(Date.now() - 10 * day), end: new Date(Date.now() - hour) }, ctx);
+    await subs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - hour)), ctx);
     const graced = await subs.enterGrace(organizationId, ctx);
     expect(graced.subscription.status).toBe('grace');
     const res = await getEntitlement(organizationId).expect(200);
@@ -138,8 +141,8 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    // end 10 days ago; default 7-day grace => graceUntil 3 days ago, already elapsed too
-    await subs.activate(organizationId, { start: new Date(Date.now() - 20 * day), end: new Date(Date.now() - 10 * day) }, ctx);
+    // end 10 (to 13) days ago; default 7-day grace => graceUntil 3 (to 6) days ago, already elapsed too
+    await subs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - 10 * day)), ctx);
     const res = await getEntitlement(organizationId).expect(200);
     expect(res.body).toEqual({ valid: false, expiresAt: null });
   });
@@ -156,8 +159,8 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const end = new Date(Date.now() + 20 * day);
-    await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - 10 * day), end }, ctx);
+    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 20 * day));
+    await noGraceSubs.activate(organizationId, { start, end }, ctx);
 
     const before = await getEntitlementNoGrace(organizationId).expect(200);
     expect(before.body).toEqual({ valid: true, expiresAt: end.toISOString() });
@@ -171,8 +174,8 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const end = new Date(Date.now() + 28 * day);
-    await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - 2 * day), end }, ctx);
+    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
+    await noGraceSubs.activate(organizationId, { start, end }, ctx);
     await noGraceSubs.scheduleCancellation(organizationId, ctx);
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
@@ -182,8 +185,8 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const end = new Date(Date.now() + 28 * day);
-    await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - 2 * day), end }, ctx);
+    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
+    await noGraceSubs.activate(organizationId, { start, end }, ctx);
     const expired = await noGraceSubs.expire(organizationId, ctx); // a legal active->expired transition, independent of whether time has actually elapsed
     expect(expired.subscription.status).toBe('expired');
     const res = await getEntitlementNoGrace(organizationId).expect(200);
@@ -221,7 +224,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const a = await recurringPrice();
     const b = await recurringPrice();
     await noGraceSubs.create(orgA, a.productId, a.priceId, ctx);
-    await noGraceSubs.activate(orgA, { start: new Date(Date.now() - day), end: new Date(Date.now() + 29 * day) }, ctx);
+    await noGraceSubs.activate(orgA, monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)), ctx);
     await noGraceSubs.create(orgB, b.productId, b.priceId, ctx); // orgB stays pending — a different commercial state entirely
 
     const resA = await getEntitlementNoGrace(orgA).expect(200);
@@ -239,7 +242,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - day), end: new Date(Date.now() + 29 * day) }, ctx);
+    await noGraceSubs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)), ctx);
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(Object.keys(res.body).sort()).toEqual(['expiresAt', 'valid']);
   });
@@ -249,7 +252,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const activated = await noGraceSubs.activate(organizationId, { start: new Date(Date.now() - day), end: new Date(Date.now() + 29 * day) }, ctx);
+    const activated = await noGraceSubs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)), ctx);
 
     const before = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription.id])).rows[0];
     const historyBefore = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [activated.subscription.id])).rows[0].n;
