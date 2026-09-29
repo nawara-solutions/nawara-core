@@ -395,7 +395,7 @@ Billing stores **whether something bought is still valid**. It stores no product
 
 | Table | Structure [D, implemented] | Rules |
 |---|---|---|
-| `subscription` (`db/migrations/0013_subscription.sql`) | `organizationId` (**UNIQUE — one current, mutable row per organization**; no per-user row exists or is planned, B-021), `productId`, `priceId`, `status` (`pending`\|`active`\|`grace`\|`expired`), `currentPeriodStart`, `currentPeriodEnd`, `graceUntil`, `cancelAtPeriodEnd`, `effectiveTerminationAt`, `revision` | activation/renewal math: `renewalAnchor()` (B-025, resolved); grace: `SUBSCRIPTION_GRACE_DAYS` (B-020, resolved); cancellation: `cancelAtPeriodEnd` (B-022, resolved) |
+| `subscription` (`db/migrations/0013_subscription.sql`, `0015_subscription_billing_anchor.sql`) | `organizationId` (**UNIQUE — one current, mutable row per organization**; no per-user row exists or is planned, B-021), `productId`, `priceId`, `status` (`pending`\|`active`\|`grace`\|`expired`), `currentPeriodStart`, `currentPeriodEnd`, `graceUntil`, `cancelAtPeriodEnd`, `effectiveTerminationAt`, `billingAnchorAt` (month/year prices only), `revision` | activation/renewal math: `renewalAnchor()` for the start and the persistent billing anchor for the calendar end (B-025, resolved; ADR-0044 amendment); grace: `SUBSCRIPTION_GRACE_DAYS` (B-020, resolved); cancellation: `cancelAtPeriodEnd` (B-022, resolved) |
 
 There is no `organization_license` table and no `user_subscription` table anywhere in the schema (a repository test
 asserts the exact table set). Entitlement changes **only as a result of a settled Payment event**: a
@@ -404,6 +404,18 @@ Subscription, inside the same transaction as the Payment-event receipt (section 
 catalog — the invoice's own line snapshot (BI-06) already fixed the product/price at issue time, and Subscription's
 `productId`/`priceid` are copied from that settlement, not re-read live. How much time a payment buys and whether
 renewals stack from the old expiry or the payment date (B-025) is **resolved**: see `renewalAnchor()` and ADR-0044.
+For a monthly or yearly price, *where* a period ends is fixed by the subscription's persistent **billing anchor**
+(`billingAnchorAt`, ADR-0044 B-025 amendment):
+- the anchor is set by the first activation, and the first period ends on its cadence: `activate` refuses a monthly or
+  yearly first period whose end is not the anchored period end (`invalid_subscription_period`); trials, introductory and
+  prorated periods stay undecided (B-019, B-023);
+- a short month clamps only that one period end (Jan 31 → Feb 28 → Mar 31);
+- a Feb 29 anchor recovers in the next leap year;
+- `intervalCount > 1` follows the same rule;
+- only a genuinely late renewal (after the paid period and grace have fully elapsed) resets the anchor, to its
+  settlement instant.
+
+Day and week prices keep start + interval and have no anchor.
 
 ### 16.3 Status API [D, implemented — Stage 12.5]
 
@@ -506,12 +518,12 @@ States: `pending` (born state, no period yet), `active`, `grace`, `expired`. Enf
 | From | To | Caused by |
 |---|---|---|
 | (none) | `pending` | `create`: against a `recurring` price of its own product only; born with no period/grace/termination data |
-| `pending` | `active` | `activate`: sets the first period and, from `SUBSCRIPTION_GRACE_DAYS`, `graceUntil`, in the same statement |
+| `pending` | `active` | `activate`: sets the first period, the billing anchor (month/year prices: the activation instant, and the period must end on that anchor's cadence) and, from `SUBSCRIPTION_GRACE_DAYS`, `graceUntil`, in the same statement |
 | `active` | `active` | the ONE self-loop: `renew` (early/on-time/grace/late, `renewalAnchor()`) or a `cancelAtPeriodEnd` toggle — both real, auditable commercial events (`revision` bumps on every one, not only a status change) |
 | `active` | `grace` | `enterGrace`: normalizes the status label once `now` has passed `currentPeriodEnd` — it does not compute `graceUntil` (already precomputed at `activate`/`renew`) and is refused if none was configured (`subscription_grace_unavailable`) |
 | `active` \| `grace` | `expired` | `expire`, or a renewal reaching this SDD's `renewalAnchor()` late-renewal branch first re-activates from `expired` (see next row) rather than compounding through `expired` |
 | `grace` | `active` | `renew` inside the grace window (anchors on the ORIGINAL `currentPeriodEnd`, section 15/ADR-0044) |
-| `expired` | `active` | `renew` after full expiry (late renewal: anchors on the settlement instant itself, no back-charging) |
+| `expired` | `active` | `renew` after full expiry (late renewal: anchors on the settlement instant itself, no back-charging, and resets a month/year billing anchor to it) |
 
 Forbidden: `grace → grace` (a repeated payment failure cannot re-extend an already-normalized grace window); any
 in-place change while `pending`, `grace` or `expired` (only `active` has a self-loop); reversing `expired` any way

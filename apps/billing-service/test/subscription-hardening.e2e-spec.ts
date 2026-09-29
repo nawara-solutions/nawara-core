@@ -13,6 +13,7 @@ import type { PaymentSnapshot } from '../src/payment-integration/payment-client.
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
+import { anchorOccurrence } from './support/billing-calendar.js';
 
 /**
  * Stage 12.6: lifecycle/concurrency/idempotency HARDENING of the already-built Payment -> Subscription -> Entitlement
@@ -37,7 +38,6 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
   const ctx: TransitionContext = { actor: { type: 'service', id: PRODUCER }, cause: { type: 'request', id: 'req-1' }, correlationId: 'corr-1' };
   const paymentCtx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'evt' }, correlationId: 'corr-evt' };
   const day = 86_400_000;
-  const addMonthUTC = (d: Date, n = 1): Date => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()));
 
   beforeAll(async () => {
     db = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'billinghardening');
@@ -135,7 +135,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(3); // create(0) + activate(1) + renew(2) + renew(3): three genuine effects, not deduplicated
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(anchor, 3)); // Jul1 -> Aug1 -> Sep1: BOTH purchased months present, whichever transaction won the lock first
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(anchor, 3)); // Jul1 -> Aug1 -> Sep1: BOTH purchased months present, whichever transaction won the lock first
     const history = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [row.id])).rows[0].n;
     expect(history).toBe(4); // pending(0), active(1), active(2), active(3) — one transition per genuine effect, none missing, none duplicated
   });
@@ -159,7 +159,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     // anchor (not necessarily whichever has the chronologically earlier `settledAt` — the race is on lock acquisition,
     // not on the settlement timestamps); the OTHER stacks one full interval on top of THAT anchor. Either way, exactly
     // two full purchased months are present — never one lost, never a silent no-op.
-    expect([addMonthUTC(aAt, 2), addMonthUTC(bAt, 2)]).toContainEqual(row.currentPeriodEnd);
+    expect([anchorOccurrence(aAt, 2), anchorOccurrence(bAt, 2)]).toContainEqual(row.currentPeriodEnd);
   });
 
   // ============================================================================================================== C. concurrent offering conflict (section 13)
@@ -202,7 +202,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     expect((await admin.query(`SELECT count(*)::int AS n FROM payment_event_receipt WHERE "paymentRequestId" = $1`, [request.id])).rows[0].n).toBe(2);
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(1); // create(0) + exactly one activation — never doubled
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(settledAt));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(settledAt, 1));
   });
 
   it('E. reconciliation observes the settlement FIRST, the live event arrives later: no second renewal', async () => {
@@ -217,7 +217,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(1);
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(settledAt));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(settledAt, 1));
   });
 
   it('F. the live event applies FIRST, reconciliation observes the same settlement later: no second renewal', async () => {
@@ -232,7 +232,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(1);
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(settledAt));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(settledAt, 1));
   });
 
   // ============================================================================================================== G/H. lifecycle operation races (sections 28, 29)
@@ -243,9 +243,10 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     // terminate() anchors `effectiveTerminationAt` to the DATABASE's own real now() (section 31, unlike renew()/activate(),
     // which always take an explicit anchor) — the period must stay comfortably around REAL wall-clock time, not a fixed
     // calendar fixture, or the termination CHECK (`effectiveTerminationAt <= COALESCE(graceUntil, currentPeriodEnd)`) would
-    // reject it for reasons that have nothing to do with this race.
+    // reject it for reasons that have nothing to do with this race. The price is monthly, so the first period ends on the
+    // anchor cadence (ADR-0044 B-025): one anchored month after `start`.
     const start = new Date(Date.now() - day);
-    const end = new Date(Date.now() + 60 * day);
+    const end = anchorOccurrence(start, 1);
     const activated = await subs.activate(organizationId, { start, end }, ctx);
 
     const [renewResult, terminateResult] = await Promise.allSettled([subs.renew(organizationId, new Date(), ctx), subs.terminate(organizationId, ctx)]);
@@ -304,7 +305,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
 
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(3); // create(0), activate(1), and BOTH concurrent renewals(2,3)
-    expect(row.currentPeriodEnd).toEqual(addMonthUTC(anchor, 3));
+    expect(row.currentPeriodEnd).toEqual(anchorOccurrence(anchor, 3));
   });
 
   // ============================================================================================================== J. committed-read isolation (sections 45, 46)
@@ -360,7 +361,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     for (let i = 0; i < orgs.length; i++) {
       const row = await subs.getByOrganization(orgs[i]!);
       expect(row.currentPeriodStart).toEqual(settledAts[i]);
-      expect(row.currentPeriodEnd).toEqual(addMonthUTC(settledAts[i]!));
+      expect(row.currentPeriodEnd).toEqual(anchorOccurrence(settledAts[i]!, 1));
     }
   });
 });

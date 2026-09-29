@@ -5,7 +5,7 @@ import type { TransitionContext } from '../domain/actors.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { BillingConfig } from '../config/billing-config.js';
 import { billingError, notFound } from '../domain/errors.js';
-import { renewalAnchor } from '../domain/subscription-period.js';
+import { isLateRenewal, renewalAnchor } from '../domain/subscription-period.js';
 import { recordTransition } from '../domain/transitions.js';
 import type { SubscriptionRow } from './subscription.types.js';
 
@@ -66,20 +66,36 @@ export class SubscriptionRepository {
 
   /**
    * `pending -> active`: the first paid period. `end` must be strictly after `start` (the database CHECK is the
-   * unreachable backstop). Precomputes `graceUntil` (R1) from the deployment's configured grace policy — never from a
-   * caller — in the SAME statement, so it is a trustworthy timestamp from the moment the period exists, not only once
-   * some later sweeper gets around to calling `enterGrace`.
+   * unreachable backstop). For a month/year price `start` becomes the billing anchor, so `end` must be the period end
+   * that anchor gives (ADR-0044 B-025): the same `billing_subscription_period_end` every renewal uses, never a second
+   * calendar here. An off-cadence first period (a trial, an introductory or prorated period) is not a V1 concept
+   * (B-019, B-023) and is refused. A day/week price keeps its caller-supplied period. Precomputes `graceUntil` (R1)
+   * from the deployment's configured grace policy — never from a caller — in the SAME statement, so it is a
+   * trustworthy timestamp from the moment the period exists, not only once some later sweeper gets around to calling
+   * `enterGrace`.
    */
   async activate(organizationId: string, period: { start: Date; end: Date }, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     if (period.end.getTime() <= period.start.getTime()) throw billingError(400, 'invalid_subscription_period', 'currentPeriodEnd must be after currentPeriodStart.');
     return this.db.tx(async (q) => {
       const row = await this.lock(q, organizationId);
       if (row.status !== 'pending') throw billingError(409, 'invalid_subscription_transition', `A subscription that is ${row.status} cannot be activated.`);
+      const { rows: cadence } = await q.query<{ anchoredEnd: Date | null }>(
+        `SELECT CASE WHEN "intervalUnit" IN ('month', 'year')
+                  THEN billing_subscription_period_end($2::timestamptz, $2::timestamptz, "intervalUnit", "intervalCount") END AS "anchoredEnd"
+           FROM price WHERE id = $1`,
+        [row.priceId, period.start],
+      );
+      const anchoredEnd = cadence[0]!.anchoredEnd;
+      if (anchoredEnd && anchoredEnd.getTime() !== period.end.getTime()) {
+        throw billingError(400, 'invalid_subscription_period', `currentPeriodEnd must be ${anchoredEnd.toISOString()}: the first period of a monthly or yearly price ends on its billing anchor's cadence.`);
+      }
       const graceDays = this.config.subscriptionGraceDays ?? null;
+      // A month/year price's billing anchor is established here, at the activation instant (ADR-0044 B-025).
       const { rows } = await q.query<SubscriptionRow>(
-        `UPDATE subscription SET status = 'active', "currentPeriodStart" = $2, "currentPeriodEnd" = $3,
+        `UPDATE subscription s SET status = 'active', "currentPeriodStart" = $2, "currentPeriodEnd" = $3,
+                "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN $2::timestamptz END,
                 "graceUntil" = CASE WHEN $4::int IS NULL THEN NULL ELSE (($3::timestamptz AT TIME ZONE 'UTC') + ($4::int || ' days')::interval) AT TIME ZONE 'UTC' END
-           WHERE id = $1 RETURNING *`,
+           FROM price p WHERE p.id = s."priceId" AND s.id = $1 RETURNING s.*`,
         [row.id, period.start, period.end, graceDays],
       );
       const updated = rows[0]!;
@@ -102,8 +118,8 @@ export class SubscriptionRepository {
   private async renewTx(q: Queryable, organizationId: string, now: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     const row = await this.lock(q, organizationId);
     if (row.status === 'pending') throw billingError(409, 'invalid_subscription_transition', 'A pending subscription must be activated before it can be renewed.');
-    const anchor = renewalAnchor({ currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil }, now);
-    return this.rollPeriod(q, row, anchor, ctx);
+    const basis = { currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil };
+    return this.rollPeriod(q, row, renewalAnchor(basis, now), isLateRenewal(basis, now), ctx);
   }
 
   /**
@@ -112,8 +128,12 @@ export class SubscriptionRepository {
    * `renewTx` computes `anchor` via the frozen renewal-anchor rule; `applySuccessfulPayment`'s first-activation branch
    * uses the authoritative settlement instant directly as `anchor` instead (there is no prior period to anchor from).
    * Either way this is the SAME move the database allows from `pending`, `active`, `grace` or `expired` alike.
+   *
+   * `resetBillingAnchor` (the first activation, or a genuinely late renewal) makes `anchor` the new persistent billing
+   * anchor of a month/year price; otherwise the stored one is kept, so a month that clamps the anchor's day clamps only
+   * that one period end (ADR-0044 B-025). `billing_subscription_period_end` (0015) does the calendar arithmetic.
    */
-  private async rollPeriod(q: Queryable, row: SubscriptionRow, anchor: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
+  private async rollPeriod(q: Queryable, row: SubscriptionRow, anchor: Date, resetBillingAnchor: boolean, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     const graceDays = this.config.subscriptionGraceDays ?? null;
     // Calendar arithmetic (month/year/days) on a `timestamptz` is otherwise done in the SESSION's TimeZone, which
     // could shift the result across a DST boundary (section 17: server/database UTC semantics, never a local
@@ -123,14 +143,19 @@ export class SubscriptionRepository {
     // (`subscription_grace_after_period` would refuse the write outright if it ever were).
     const { rows } = await q.query<SubscriptionRow>(
       `UPDATE subscription s SET status = 'active', "currentPeriodStart" = calc."newStart", "currentPeriodEnd" = calc."newEnd",
+              "billingAnchorAt" = calc."billingAnchorAt",
               "graceUntil" = CASE WHEN $3::int IS NULL THEN NULL ELSE (calc."newEnd" AT TIME ZONE 'UTC' + ($3::int || ' days')::interval) AT TIME ZONE 'UTC' END
          FROM (
-           SELECT $2::timestamptz AS "newStart",
-                  (($2::timestamptz AT TIME ZONE 'UTC') + (p."intervalCount" || ' ' || p."intervalUnit")::interval) AT TIME ZONE 'UTC' AS "newEnd"
-             FROM price p WHERE p.id = (SELECT "priceId" FROM subscription WHERE id = $1)
+           SELECT b."newStart", b."billingAnchorAt",
+                  billing_subscription_period_end(b."newStart", b."billingAnchorAt", b."intervalUnit", b."intervalCount") AS "newEnd"
+             FROM (
+               SELECT $2::timestamptz AS "newStart", p."intervalUnit", p."intervalCount",
+                      CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN $4::boolean THEN $2::timestamptz ELSE cur."billingAnchorAt" END END AS "billingAnchorAt"
+                 FROM subscription cur JOIN price p ON p.id = cur."priceId" WHERE cur.id = $1
+             ) b
          ) calc
          WHERE s.id = $1 RETURNING s.*`,
-      [row.id, anchor, graceDays],
+      [row.id, anchor, graceDays, resetBillingAnchor],
     );
     const updated = rows[0]!;
     await this.record(q, row, updated, ctx);
@@ -154,8 +179,10 @@ export class SubscriptionRepository {
   ): Promise<SubscriptionWriteResult> {
     await this.createTx(q, params.organizationId, params.productId, params.priceId, ctx); // idempotent; conflict on offering mismatch
     const row = await this.lock(q, params.organizationId); // re-read UNDER LOCK: createTx's own "existing" read is not locked
-    const anchor = row.status === 'pending' ? params.settledAt : renewalAnchor({ currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil }, params.settledAt);
-    const result = await this.rollPeriod(q, row, anchor, ctx);
+    const basis = row.status === 'pending' ? null : { currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil };
+    const anchor = basis ? renewalAnchor(basis, params.settledAt) : params.settledAt;
+    // the first activation establishes the billing anchor; a genuinely late renewal resets it; any other renewal keeps it
+    const result = await this.rollPeriod(q, row, anchor, basis ? isLateRenewal(basis, params.settledAt) : true, ctx);
     // Stage 18.7.2: the central evidence of the ONE live activation / renewal path (a settled payment, via the Payment event consumer or the
     // reconciler), from the row locked BEFORE and the row written by this very statement (the period end is never re-derived later).
     const updated = result.subscription;

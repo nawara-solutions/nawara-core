@@ -95,6 +95,44 @@ describing a shape that does not exist.
   fully elapsed anchors on the settlement instant itself (`now` at the authoritative Payment `closedAt`) — no
   back-charging for inaccessible days. The exact edge (`now === boundary`) resolves to the early-renewal branch
   either way, so the two rules never disagree at the boundary.
+- **B-025 amendment (2026-09-29, owner decision): monthly and yearly renewals keep a persistent billing anchor.** The
+  rule above fixes *which instant* a new period starts from; this fixes *where it ends* on the calendar. Implemented
+  by `db/migrations/0015_subscription_billing_anchor.sql` (`subscription."billingAnchorAt"`,
+  `billing_subscription_period_end`) and `SubscriptionRepository.rollPeriod`.
+  1. A monthly or yearly subscription stores a **persistent billing anchor**: the instant that fixes its day of month,
+     its UTC time of day and, for a yearly price, its month. It is set by the first activation (the settlement
+     instant), and the first period ends on that anchor's cadence too: a direct `SubscriptionRepository.activate({ start,
+     end })` sets the anchor to `start` and refuses (`400 invalid_subscription_period`) any `end` other than the anchored
+     period end (`billing_subscription_period_end`, the function every renewal uses), so Jan 31 → Feb 15 is refused and
+     Jan 31 → Feb 28 is the only first monthly period from Jan 31. Day and week activations keep their caller-supplied
+     period. An off-cadence first period (a trial, an introductory or a prorated period) is not part of this decision:
+     those remain B-019 and B-023. Early renewals, on-time renewals (including `now === currentPeriodEnd`) and renewals inside
+     `graceUntil` still start at the original `currentPeriodEnd`, and **keep** the anchor.
+  2. A month that does not have the anchor's day **clamps only that occurrence** to its last day. The anchor itself
+     is never rewritten by a clamp.
+  3. A later month or year that has the anchor's day **recovers** it: Jan 31 → Feb 28 → Mar 31 → Apr 30 → May 31, and
+     Aug 31 → Sep 30 → Oct 31 → Nov 30 → Dec 31. Before this amendment each renewal added the interval to the previous,
+     possibly clamped, end, so Jan 31 → Feb 28 → Mar 28 → Apr 28 ratcheted down for good and N monthly renewals did not
+     equal one N-month purchase.
+  4. A **genuinely late** renewal is one settled after the paid period *and* any grace window have fully elapsed
+     (`now > (graceUntil ?? currentPeriodEnd)`, `isLateRenewal`). It starts at the settlement instant, as above, and
+     **resets the anchor** to that instant. The old cadence is not resumed: with an old anchor on the 31st, a
+     settlement on Apr 12 gives Apr 12 → May 12 → Jun 12 → Jul 12.
+  5. **Day and week** prices keep start + interval, unchanged. They have no calendar-month cadence and no anchor
+     (`billingAnchorAt` is NULL).
+  6. **Leap years:** a Feb 29 anchor clamps to Feb 28 in non-leap years and recovers Feb 29 in the next leap year
+     (yearly: Feb 29 2028 → Feb 28 2029 → Feb 28 2030 → Feb 28 2031 → Feb 29 2032).
+  7. **`intervalCount > 1`** follows the same rule: each period ends `intervalCount` months (× 12 for a year) after the
+     month the period starts in, on the anchor's day, clamped only in that month. Every 2 months from Jan 31 gives
+     Mar 31 → May 31 → Jul 31 → Sep 30 → Nov 30 → Jan 31.
+
+  Grace, cancellation and entitlement are unchanged: `graceUntil` is still the new period end plus
+  `SUBSCRIPTION_GRACE_DAYS`, `cancelAtPeriodEnd` still acts on the stored `currentPeriodEnd` (which may be a clamped
+  Feb 28 for a 31st anchor), and `deriveEntitlement` still reads only the stored boundaries. The anchor is stored
+  because it cannot be derived: a period ending on the 28th cannot tell a 28th anchor from a clamped 29th, 30th or
+  31st. The database guard allows it only on a non-pending monthly or yearly subscription, and only as the start of
+  the new period that establishes it. Existing rows are backfilled with their `currentPeriodStart`, a deterministic
+  fallback that cannot recover an anchor clamped before this amendment (Billing was not deployed to production).
 - **Entitlement is not persisted (confirmed, unchanged from ADR-0038's principle, corrects SDD §16.2/17.5's implied
   per-row entitlement state):** `deriveEntitlement` (`apps/billing-service/src/domain/entitlement.ts`) is a pure
   function of an already-loaded Subscription and a caller-supplied `now`; it is not a table, not a service, not

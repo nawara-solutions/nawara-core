@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renewalAnchor } from './subscription-period.js';
+import { isLateRenewal, renewalAnchor } from './subscription-period.js';
 
 const d = (s: string) => new Date(s);
 
@@ -61,5 +61,29 @@ describe('renewalAnchor (Stage 12.2 sections 22-25, 50)', () => {
       const now = d('2026-11-08T00:00:01Z');
       expect(renewalAnchor({ currentPeriodEnd: periodEnd, graceUntil }, now)).toEqual(now);
     });
+  });
+});
+
+describe('isLateRenewal: when a monthly/yearly renewal resets the billing anchor (ADR-0044 B-025)', () => {
+  const periodEnd = d('2027-02-28T09:30:00Z');
+  const graceUntil = d('2027-03-07T09:30:00Z');
+
+  it('early, exactly at the period end, and inside grace (to its last instant) are NOT late: the anchor is kept', () => {
+    expect(isLateRenewal({ currentPeriodEnd: periodEnd, graceUntil: null }, d('2027-02-01T00:00:00Z'))).toBe(false);
+    expect(isLateRenewal({ currentPeriodEnd: periodEnd, graceUntil: null }, periodEnd)).toBe(false);
+    expect(isLateRenewal({ currentPeriodEnd: periodEnd, graceUntil }, d('2027-03-03T00:00:00Z'))).toBe(false);
+    expect(isLateRenewal({ currentPeriodEnd: periodEnd, graceUntil }, graceUntil)).toBe(false);
+  });
+
+  it('strictly after the paid period (no grace) or after the grace window is late: the anchor restarts at the settlement', () => {
+    expect(isLateRenewal({ currentPeriodEnd: periodEnd, graceUntil: null }, d('2027-02-28T09:30:00.001Z'))).toBe(true);
+    expect(isLateRenewal({ currentPeriodEnd: periodEnd, graceUntil }, d('2027-03-07T09:30:00.001Z'))).toBe(true);
+  });
+
+  it('agrees with renewalAnchor exactly: late means the period starts at now, otherwise at the original period end', () => {
+    for (const [now, grace] of [[d('2027-02-01T00:00:00Z'), null], [periodEnd, null], [d('2027-04-12T15:00:00Z'), null], [d('2027-03-05T00:00:00Z'), graceUntil], [d('2027-03-08T00:00:00Z'), graceUntil]] as const) {
+      const basis = { currentPeriodEnd: periodEnd, graceUntil: grace };
+      expect(renewalAnchor(basis, now)).toEqual(isLateRenewal(basis, now) ? now : periodEnd);
+    }
   });
 });

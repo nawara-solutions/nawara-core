@@ -84,17 +84,20 @@ echo "PASS: race — payment success x$racers applied once; success vs cancel en
 
 echo "== concurrency: $racers simultaneous renewals of ONE subscription never lose purchased time"
 newdb subrenew; db="$DBNAME"; apply_all "$db"; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/fixtures.sql" >/dev/null
-sub=$(q "SELECT t_mk_active_subscription()")
-before=$(q "SELECT \"currentPeriodEnd\" FROM subscription WHERE id = '$sub'")
+# A fixed month-end cadence (never now()-relative): monthly, billing anchor Dec 31 2089 10:00 UTC, period ending Jan 31 2090.
+# Eight renewals, whatever their commit order, are eight anchor occurrences later: Feb 28 (clamped), Mar 31 (recovered), Apr 30,
+# May 31, Jun 30, Jul 31, Aug 31, Sep 30 2090 — a lost renewal is a month short, a drifting anchor a day or more short.
+sub=$(q "SELECT t_mk_active_subscription('2090-01-31T10:00:00Z')")
 run_racers "SELECT t_try_renew('$sub')"
 errs=$(cat "$outdir"/*.out | grep -ciE "error|deadlock" || true)
 rev=$(q "SELECT revision FROM subscription WHERE id = '$sub'")
-after=$(q "SELECT \"currentPeriodEnd\" FROM subscription WHERE id = '$sub'")
-expected=$(q "SELECT ((('$before'::timestamptz AT TIME ZONE 'UTC') + (\"intervalCount\" || ' ' || \"intervalUnit\")::interval * $racers) AT TIME ZONE 'UTC')::text FROM subscription s JOIN price p ON p.id = s.\"priceId\" WHERE s.id = '$sub'")
+after=$(q "SELECT to_char(\"currentPeriodEnd\" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM subscription WHERE id = '$sub'")
+anchor=$(q "SELECT to_char(\"billingAnchorAt\" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM subscription WHERE id = '$sub'")
+expected="2090-09-30 10:00"
 rm -rf "$outdir"
-[ "$errs" -eq 0 ] && [ "$rev" -eq $((1 + racers)) ] && [ "$after" = "$expected" ] \
-  || fail "concurrent renewals: errors=$errs revision=$rev (want $((1 + racers))) end=$after (want $expected) — lost update or lost time"
-echo "PASS: race — $racers concurrent renewals advanced the period by exactly $racers intervals, revision $rev, no deadlock"
+[ "$errs" -eq 0 ] && [ "$rev" -eq $((1 + racers)) ] && [ "$after" = "$expected" ] && [ "$anchor" = "2089-12-31 10:00" ] \
+  || fail "concurrent renewals: errors=$errs revision=$rev (want $((1 + racers))) end=$after (want $expected) anchor=$anchor (want 2089-12-31 10:00) — lost update, lost time or a moved anchor"
+echo "PASS: race — $racers concurrent renewals advanced the period by exactly $racers anchored intervals (end $after), revision $rev, anchor kept, no deadlock"
 
 echo "== concurrency: a renewal racing a termination on the SAME subscription ends in one consistent, auditable state"
 newdb subrace; db="$DBNAME"; apply_all "$db"; psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$here/fixtures.sql" >/dev/null
