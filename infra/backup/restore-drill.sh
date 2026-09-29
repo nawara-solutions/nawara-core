@@ -41,10 +41,12 @@ case "$SERVICE" in
   organization-service)
     DB_NAME=organization; BOOT_USER=organization_admin; BOOT_DB=postgres; OWNER=organization_migrator; RUNTIME=organization_app
     MIGRATE=(../../libs/service-kit/dist/cli/migrate.js --dir db/migrations); KNOWN_SQL='SELECT name FROM company WHERE id = '
+    MIGRATE_SUMMARY='^migrations: ([0-9]+) applied, ([0-9]+) already applied$'  # libs/service-kit/src/cli/migrate.ts
     CONFIG_ALLOWED='^(db\.env|roles\.env|\.env|callers/?|callers/[a-z-]+\.token)$' ;;
   auth-service)
     DB_NAME=auth; BOOT_USER=auth; BOOT_DB=auth; OWNER=auth; RUNTIME=auth_app
     MIGRATE=(dist/cli/migrate.js)
+    MIGRATE_SUMMARY='^migrations: ([0-9]+) applied, ([0-9]+) already applied, ([0-9]+) checksum\(s\) recorded$'  # apps/auth-service/src/cli/migrate.ts
     CONFIG_ALLOWED='^(db\.env|\.env)$' ;;
   *) die "unknown SERVICE '$SERVICE' (known: organization-service auth-service)" ;;
 esac
@@ -185,10 +187,45 @@ ok "pg_restore --exit-on-error (the container's own PostgreSQL $PG_MAJOR tooling
 
 # ---------------------------------------------------------------- 4. the release's own migrations, then the deploy's narrowing
 printf 'MIGRATION_DATABASE_URL=postgres://%s:%s@127.0.0.1:5432/%s\n' "$OWNER" "$OWNER_PASS" "$DB_NAME" >"$WORK/migrate.env"
-migrated=$(docker run --rm --network "container:$DDB" --env-file "$WORK/migrate.env" --entrypoint node "$IMAGE" "${MIGRATE[@]}" 2>&1 | grep -E '^migrations: ' || true)
-[[ $migrated =~ ^migrations:\ ([0-9]+)\ applied,\ ([0-9]+)\ already\ applied ]] || die "the image's migration runner refused the restored history"
+# The runner's own exit status decides first (never hidden behind a filter); only a successful run's summary line is then read, and
+# it must match the service's runner contract exactly. On failure the runner's text is never printed: its first
+# `migration failed:` line is matched against the kit runner's own refusal templates (libs/service-kit/src/db/migrations.ts) and
+# reported as a fixed category, plus migration file names that match the runner's file-name rule. Anything else (a PostgreSQL
+# error, a value, a URL) is only "unclassified".
+migration_failure() {
+  local line cat='' n names=() shown=() re_name='[A-Za-z0-9][A-Za-z0-9_.-]*\.sql'
+  local re_list="\\(($re_name(, $re_name)*)\\)"
+  line=$(grep -m1 -E '^migration failed: ' <<<"$1" || true); line=${line#migration failed: }
+  if [ -z "$line" ]; then echo "no reason reported"; return; fi
+  if [[ $line == 'MIGRATION_DATABASE_URL '* ]]; then echo "configuration: the runner was given no migration database URL"; return; fi
+  if [[ $line =~ ^($re_name)\ was\ modified\ after\ it\ was\ applied$ ]]; then
+    echo "history: an applied migration was modified: ${BASH_REMATCH[1]}"; return; fi
+  if [[ $line =~ ^($re_name)\ failed\ and\ was\ rolled\ back:\  ]]; then
+    echo "a later migration failed and was rolled back (database error withheld): ${BASH_REMATCH[1]}"; return; fi
+  if [[ $line =~ ^the\ database\ records\ migrations\ this\ release\ does\ not\ contain\ $re_list:\ it\ was\ migrated\ by\ a\ newer\ or\ a\ different\ release\;\ refusing\ to\ continue$ ]]; then
+    cat="history: the database records migrations this image does not contain (a newer or different release)"
+  elif [[ $line =~ ^pending\ migrations\ sort\ before\ already-applied\ ones\ $re_list:\ the\ history\ cannot\ be\ ordered\;\ refusing\ to\ continue$ ]]; then
+    cat="history: pending migrations sort before applied ones"
+  elif [[ $line =~ ^(invalid|duplicate)\ migration\ file\ name:\  || $line =~ ^$re_name\ must\ (be\ exactly\ one|not\ contain\ BEGIN/COMMIT)\  ]]; then
+    echo "image: its migration files are invalid"; return
+  elif [[ $line =~ (password\ authentication\ failed|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|Connection\ terminated|the\ database\ system\ is) ]]; then
+    echo "database: connection or login refused (details withheld)"; return
+  else echo "unclassified (details withheld)"; return; fi
+  IFS=', ' read -r -a names <<<"${BASH_REMATCH[1]}"
+  for n in "${names[@]}"; do [[ $n =~ ^$re_name$ ]] && shown+=("$n"); done
+  [ "${#shown[@]}" -le 5 ] || shown=("${shown[@]:0:5}" "+$((${#shown[@]} - 5)) more")
+  echo "$cat: ${shown[*]}"
+}
+rc=0; migrate_out=$(docker run --rm --network "container:$DDB" --env-file "$WORK/migrate.env" --entrypoint node "$IMAGE" "${MIGRATE[@]}" 2>&1) || rc=$?
+rm -f "$WORK/migrate.env"
+if [ "$rc" != 0 ]; then
+  reason=$(migration_failure "$migrate_out"); unset migrate_out
+  die "the image's migration runner refused the restored history (exit $rc): $reason"
+fi
+summary=$(grep -E '^migrations: ' <<<"$migrate_out" || true); unset migrate_out
+[[ $summary =~ $MIGRATE_SUMMARY ]] || die "the image's migration runner exited 0 without its expected summary line (unsupported output contract)"
 LATER=${BASH_REMATCH[1]}
-ok "migration runner: ${BASH_REMATCH[2]} already applied (history restored), $LATER later migration(s) applied"
+ok "migration runner: ${BASH_REMATCH[2]} already applied (history restored), $LATER later migration(s) applied${BASH_REMATCH[3]:+, ${BASH_REMATCH[3]} checksum(s) recorded}"
 if [ "$SERVICE" = auth-service ]; then
   printf '%s\n' 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO auth_app;' 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO auth_app;' | sql auth
 fi

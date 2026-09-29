@@ -378,7 +378,6 @@ for (const [label, drill, reason] of [
   ['the runtime role is elevated after the restore', { roleAttrs: 't|t|f|f|f|f' }, /auth_app is not LOGIN NOSUPERUSER/],
   ['the runtime role can write schema_migrations', { smPrivileges: 't|t|f|f|f' }, /must hold SELECT only on schema_migrations/],
   ['a restored fact differs from the backup', { facts: 'table|company|2\n' }, /a restored fact differs from the backup \(table\|company\)/],
-  ['the migration runner refuses the restored history', { migrateOutput: 'migration failed: 0004_x.sql was modified after it was applied' }, /refused the restored history/],
   ['the service never answers ready', { notReady: true }, /GET \/ready did not answer ready/],
 ]) {
   test(`restore drill: fail closed when ${label}; the drill is removed and no plaintext is left`, () => {
@@ -390,16 +389,96 @@ for (const [label, drill, reason] of [
 }
 
 test('restore drill: a later release restores an older backup: its extra migration applies on top of the restored history', () => {
-  const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 8 already applied', historyLength: 9, facts: `${'table|company|1\ntable|schema_migrations|8\n'}structure|constraints|41\nmigrations|9|ffff\nowner|company|x\nacl|company|x=r/x\nauthority|local\ntable|later_table|0\n` } });
+  const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 8 already applied, 0 checksum(s) recorded', historyLength: 9, facts: `${'table|company|1\ntable|schema_migrations|8\n'}structure|constraints|41\nmigrations|9|ffff\nowner|company|x\nacl|company|x=r/x\nauthority|local\ntable|later_table|0\n` } });
   const r = w.run();
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /8 already applied \(history restored\), 1 later migration\(s\) applied/);
 });
 
 test('restore drill: a restored history shorter than the backup\'s is refused', () => {
-  const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 7 already applied', historyLength: 7 } });
+  const w = recoveryWorld(backedUp(), { drill: { migrateOutput: 'migrations: 1 applied, 7 already applied, 0 checksum(s) recorded', historyLength: 7 } });
   const r = w.run();
   assert.equal(r.code, 1); assert.match(r.out, /the restored migration history is shorter than the backup's/);
+});
+
+// The migration step: the runner's exit status decides first; only then its summary, against each runner's exact contract.
+const ORG_DRILL = { SERVICE: 'organization-service', IMAGE: IMAGE.replace('auth', 'organization') };
+for (const [label, migrateOutput, pass] of [
+  ['the current auth-service summary', 'migrations: 0 applied, 42 already applied, 0 checksum(s) recorded', /PASS  migration runner: 42 already applied \(history restored\), 0 later migration\(s\) applied, 0 checksum\(s\) recorded/],
+  ['migrations applied after the backup', 'migrations: 2 applied, 42 already applied, 0 checksum(s) recorded', /PASS  migration runner: 42 already applied \(history restored\), 2 later migration\(s\) applied, 0 checksum\(s\) recorded/],
+  ['legacy checksums adopted (adoptLegacyChecksums)', 'migrations: 0 applied, 42 already applied, 3 checksum(s) recorded', /PASS  migration runner: 42 already applied \(history restored\), 0 later migration\(s\) applied, 3 checksum\(s\) recorded/],
+]) {
+  test(`restore drill (auth-service): the migration runner's summary is read: ${label}`, () => {
+    const w = recoveryWorld(backedUp(), { drill: { migrateOutput } });
+    const r = w.run();
+    assert.equal(r.code, 0, r.out); assert.match(r.out, pass);
+  });
+}
+
+test('restore drill (organization-service): the kit runner\'s two-count summary is its contract', () => {
+  const w = recoveryWorld(backedUp('organization-service'));
+  const r = w.run(ORG_DRILL);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /PASS  migration runner: 8 already applied \(history restored\), 0 later migration\(s\) applied\n/);
+});
+
+for (const [label, service, drill] of [
+  ['auth-service prints the kit\'s two-count summary', 'auth-service', { migrateOutput: 'migrations: 0 applied, 8 already applied' }],
+  ['organization-service prints auth-service\'s three-count summary', 'organization-service', { migrateOutput: 'migrations: 0 applied, 8 already applied, 0 checksum(s) recorded' }],
+  ['the summary has trailing text', 'auth-service', { migrateOutput: 'migrations: 0 applied, 8 already applied, 0 checksum(s) recorded, 1 skipped' }],
+  ['the summary is missing', 'auth-service', { migrateOutput: '  = 0001_init.sql (already applied)' }],
+  ['two summaries are printed', 'auth-service', { migrateOutput: 'migrations: 0 applied, 8 already applied, 0 checksum(s) recorded\nmigrations: 1 applied, 8 already applied, 0 checksum(s) recorded' }],
+  ['a count is not a number', 'auth-service', { migrateOutput: 'migrations: x applied, 8 already applied, 0 checksum(s) recorded' }],
+]) {
+  test(`restore drill: the runner exits 0 but ${label}: fail closed; the drill is removed`, () => {
+    const w = recoveryWorld(backedUp(service), { drill });
+    const r = w.run(service === 'organization-service' ? ORG_DRILL : {});
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /the image's migration runner exited 0 without its expected summary line \(unsupported output contract\)/);
+    assert.doesNotMatch(r.out, /PASS  migration runner/);
+    assertDrillGone(w);
+  });
+}
+
+for (const service of ['auth-service', 'organization-service']) {
+  test(`restore drill (${service}): a failing migration runner fails the drill with its exit status, even after a valid-looking summary`, () => {
+    const summary = service === 'auth-service' ? 'migrations: 0 applied, 8 already applied, 0 checksum(s) recorded' : 'migrations: 0 applied, 8 already applied';
+    const w = recoveryWorld(backedUp(service), { drill: { migrateExit: 1, migrateOutput: summary, migrateStderr: 'migration failed: 0004_x.sql was modified after it was applied' } });
+    const r = w.run(service === 'organization-service' ? ORG_DRILL : {});
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /the image's migration runner refused the restored history \(exit 1\): history: an applied migration was modified: 0004_x\.sql\n/);
+    assert.doesNotMatch(r.out, /PASS  migration runner|privilege assertion|GET \/ready/, 'nothing after the migration step runs');
+    assertDrillGone(w);
+  });
+}
+
+// A failing runner's text is never printed: only a fixed category, plus migration file names from the runner's own templates.
+const LEAK = ['s3cr3t-drill-pass', 'postgres://', 'person@example.test', 'Jane Row', 'drill-token-value', 'INSERT INTO'];
+for (const [label, stderr, category] of [
+  ['a later migration fails with a database error quoting a row value', 'migration failed: 0009_later.sql failed and was rolled back: duplicate key value violates unique constraint "user_email_key": (email)=(person@example.test) Jane Row', /a later migration failed and was rolled back \(database error withheld\): 0009_later\.sql$/m],
+  ['the database records migrations this image does not contain', 'migration failed: the database records migrations this release does not contain (0043_newer.sql, 0044_newer.sql): it was migrated by a newer or a different release; refusing to continue', /history: the database records migrations this image does not contain \(a newer or different release\): 0043_newer\.sql 0044_newer\.sql$/m],
+  ['pending migrations sort before applied ones', 'migration failed: pending migrations sort before already-applied ones (0003_a.sql): the history cannot be ordered; refusing to continue', /history: pending migrations sort before applied ones: 0003_a\.sql$/m],
+  ['the login is refused (the error names a connection string)', 'migration failed: password authentication failed for user "auth" at postgres://auth:s3cr3t-drill-pass@127.0.0.1:5432/auth', /database: connection or login refused \(details withheld\)$/m],
+  ['an arbitrary database error quoting SQL and values', `migration failed: invalid input syntax for type uuid: "drill-token-value" in INSERT INTO "user" VALUES ('Jane Row', 'person@example.test')`, /unclassified \(details withheld\)$/m],
+  ['a known template with a value where a file name belongs', "migration failed: the database records migrations this release does not contain (0043_newer.sql, Jane Row person@example.test): it was migrated by a newer or a different release; refusing to continue", /unclassified \(details withheld\)$/m],
+  ['a file name template wrapped around a value', 'migration failed: person@example.test was modified after it was applied', /unclassified \(details withheld\)$/m],
+]) {
+  test(`restore drill: a failing runner is reported by category only, never its text: ${label}`, () => {
+    const w = recoveryWorld(backedUp(), { drill: { migrateExit: 1, migrateOutput: '  = 0001_init.sql (already applied)', migrateStderr: stderr } });
+    const r = w.run();
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /the image's migration runner refused the restored history \(exit 1\): /); assert.match(r.out, category);
+    for (const x of LEAK) assert.ok(!r.out.includes(x), `the drill output must not contain ${x}`);
+    assert.ok(!r.out.includes('migration failed:') && !r.out.includes('0001_init.sql'), 'no raw runner line is echoed');
+    assertDrillGone(w);
+  });
+}
+
+test('restore drill: a runner that fails without a reason still fails with its exit status', () => {
+  const w = recoveryWorld(backedUp(), { drill: { migrateExit: 2, migrateOutput: '' } });
+  const r = w.run();
+  assert.equal(r.code, 1, r.out); assert.match(r.out, /refused the restored history \(exit 2\): no reason reported/);
+  assertDrillGone(w);
 });
 
 for (const [label, drill, reason] of [
