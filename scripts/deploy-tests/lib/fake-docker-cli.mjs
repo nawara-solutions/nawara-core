@@ -85,7 +85,14 @@ function run(args) {
   const get = (f) => o.flags.filter(([k]) => k === f).map(([, v]) => v);
   if (image.startsWith('amazon/aws-cli')) s3(o, get, image, args.slice(i + 1));
   if (o.rm) { // one-off containers (migrations): succeed unless told otherwise
-    if (args.slice(i + 1).some((a) => a.includes('migrate.js')) && !state.failRm?.[image]) out(`${state.drill?.migrateOutput ?? 'migrations: 0 applied, 8 already applied'}\n`);
+    const cmd = args.slice(i + 1);
+    if (cmd.some((a) => a.includes('migrate.js')) && !state.failRm?.[image]) {
+      // each runner's own summary: the kit CLI (--dir, Organization) and auth-service's CLI (adds the checksum count)
+      const D = state.drill ?? {};
+      if (D.migrateStderr) process.stderr.write(`${D.migrateStderr}\n`);
+      out(`${D.migrateOutput ?? (cmd.includes('--dir') ? 'migrations: 0 applied, 8 already applied' : 'migrations: 0 applied, 8 already applied, 0 checksum(s) recorded')}\n`);
+      if (D.migrateExit) exit(D.migrateExit); // a failing runner: its exit status, whatever it printed
+    }
     exit(state.failRm?.[image] ? 1 : 0);
   }
   const name = get('--name')[0];
