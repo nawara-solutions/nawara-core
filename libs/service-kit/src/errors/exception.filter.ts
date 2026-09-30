@@ -1,6 +1,7 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
 import type { Response } from 'express';
 import { getRequestContext } from '../context/request-context.js';
+import { describeFailure } from '../logging/failure.js';
 import type { JsonLogger } from '../logging/json-logger.js';
 
 export interface ErrorBody {
@@ -32,8 +33,10 @@ function isClientHttpError(e: unknown): e is { status?: number; statusCode?: num
  * One error shape for every Core service: Nest's `{ statusCode, message, error }` plus `requestId`.
  * A stable, machine-readable `code` is additive and optional: throw `new HttpException({ message, code }, status)`
  * and it passes through untouched; omit it and the body is unchanged from before.
- * Anything that is not an HttpException (database errors, bugs, provider failures) becomes an opaque 500: the real error
- * goes to the server log only. No stack, SQL text, constraint name or credential can reach a response.
+ * Anything that is not an HttpException (database errors, bugs, provider failures) becomes an opaque 500. No stack, SQL text,
+ * constraint name or credential can reach a response. The server log gets the failure's facts only (`describeFailure`: class,
+ * SQLSTATE or system code, failure kind; the request and correlation ids come from the logger's context), never its message: a
+ * message can name internal hosts and paths, carry SQL or constraint text, echo user input or hold a secret (Stage 22 F13).
  */
 @Catch()
 export class KitExceptionFilter implements ExceptionFilter {
@@ -58,7 +61,7 @@ export class KitExceptionFilter implements ExceptionFilter {
       body = { statusCode: status, message: STATUS_TEXT[status] ?? 'Bad Request', error: STATUS_TEXT[status] ?? 'Bad Request', requestId };
     } else {
       body = { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message: 'Internal server error', error: 'Internal Server Error', requestId };
-      this.logger.error('unhandled error', { error: exception instanceof Error ? exception.name : typeof exception, detail: exception instanceof Error ? exception.message : undefined });
+      this.logger.error('unhandled error', { failure: describeFailure(exception) });
     }
     if (!res.headersSent) res.status(body.statusCode).json(body);
   }

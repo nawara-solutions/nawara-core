@@ -1,3 +1,4 @@
+import { Controller, Get, Module, Param } from '@nestjs/common';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateServiceToken } from '../src/index.js';
@@ -67,10 +68,10 @@ describe('uniform error model', () => {
     expect(r.body).toEqual({ statusCode: 500, message: 'Internal server error', error: 'Internal Server Error', requestId: r.headers['x-request-id'] });
     const body = JSON.stringify(r.body) + JSON.stringify(r.headers);
     for (const s of ['payment_idem_uk', 'hunter2', 'postgres://', 'duplicate key', 'at ']) expect(body).not.toContain(s);
-    // the real error is in the server log, with the credential scrubbed
+    // the server log gets the failure's facts, never its message (Stage 22 F13): no SQL, constraint name, host or credential
     const logged = JSON.stringify(t.logs);
     expect(logged).toContain('unhandled error');
-    expect(logged).not.toContain('hunter2');
+    for (const s of ['payment_idem_uk', 'hunter2', 'postgres://', 'duplicate key', 'db:5432']) expect(logged).not.toContain(s);
   });
 
   it('rejects unknown and invalid body fields with a 400 (no client-supplied field is trusted)', async () => {
@@ -155,5 +156,71 @@ describe('service authentication', () => {
     const empty = await createTestApp({ tokens: [] });
     await request(empty.app.getHttpServer()).get('/probe/service').set('authorization', `Bearer ${current.token}`).expect(401);
     await empty.app.close();
+  });
+});
+
+// ── Stage 22 F13: an internal error's MESSAGE never reaches the response or the server log; its facts do ─────────────────────────────
+const F13 = {
+  host: Object.assign(new Error('connect ECONNREFUSED 10.9.8.7:5432 (host nawara-core-db-F13HOST)'), { code: 'ECONNREFUSED' }),
+  path: Object.assign(new Error("ENOENT: no such file or directory, open '/home/ubuntu/nawara-core/F13PATH/recipient.pem'"), { code: 'ENOENT' }),
+  sql: Object.assign(new Error('duplicate key value violates unique constraint "f13_idem_uk" for postgres://svc:F13URLPASS@db-F13HOST:5432/app'), { code: '23505' }),
+  input: Object.assign(new Error('invalid input syntax for type uuid: "pii-F13USER@example.test"'), { code: '22P02' }),
+  secret: new Error('login failed: password=F13PLAINSECRET for user svc'),
+  bug: new TypeError("Cannot read properties of undefined (reading 'F13PROP')"),
+  string: 'thrown-string-F13STR',
+} as const;
+const F13_SENTINELS = ['F13HOST', '10.9.8.7', 'F13PATH', '/home/ubuntu', 'f13_idem_uk', 'duplicate key', 'F13URLPASS', 'F13USER', 'F13PLAINSECRET', 'password=', 'F13PROP', 'F13STR'];
+
+@Controller('f13')
+class F13Controller {
+  @Get(':name') fail(@Param('name') name: keyof typeof F13) {
+    throw F13[name];
+  }
+}
+@Module({ controllers: [F13Controller] })
+class F13Module {}
+
+describe('Stage 22 F13: internal errors are opaque to the client and logged by their facts only', () => {
+  let f: TestApp;
+  beforeAll(async () => {
+    f = await createTestApp({ extraImports: [F13Module] });
+  });
+  afterAll(() => f.app.close());
+
+  const cases: [keyof typeof F13, string][] = [
+    ['host', 'error=Error code=ECONNREFUSED kind=network_unreachable'],
+    ['path', 'error=Error code=ENOENT'],
+    ['sql', 'error=Error code=23505'],
+    ['input', 'error=Error code=22P02'],
+    ['secret', 'error=Error'],
+    ['bug', 'error=TypeError'],
+    ['string', 'error=unknown'],
+  ];
+  it.each(cases)('%s: an opaque 500 with the request id; the log line has the facts and the ids, never the message', async (name, failure) => {
+    f.logs.length = 0;
+    const r = await request(f.app.getHttpServer()).get(`/f13/${name}`).set('x-correlation-id', `corr-f13-${name}`).expect(500);
+    expect(r.body).toEqual({ statusCode: 500, message: 'Internal server error', error: 'Internal Server Error', requestId: r.headers['x-request-id'] });
+    const raw = F13[name] instanceof Error ? (F13[name] as Error).message : String(F13[name]);
+    const response = JSON.stringify(r.body) + JSON.stringify(r.headers);
+    const logged = JSON.stringify(f.logs);
+    for (const s of [raw, ...F13_SENTINELS]) {
+      expect(response).not.toContain(s);
+      expect(logged).not.toContain(s);
+    }
+    const line = f.logs.find((l) => l.msg === 'unhandled error');
+    expect(line).toMatchObject({ level: 'error', failure, requestId: r.headers['x-request-id'], correlationId: `corr-f13-${name}` });
+    expect(line).not.toHaveProperty('detail');
+    expect(line).not.toHaveProperty('message');
+  });
+
+  it('public errors are unchanged: status, message and code reach the client, and nothing is logged as unhandled', async () => {
+    f.logs.length = 0;
+    const conflict = await request(f.app.getHttpServer()).get('/probe/conflict-with-code').expect(409);
+    expect(conflict.body).toMatchObject({ statusCode: 409, message: 'already exists', error: 'Conflict', code: 'already_exists' });
+    const invalid = await request(f.app.getHttpServer()).post('/probe/echo').set('content-type', 'application/json').send({ name: 42 }).expect(400);
+    expect(JSON.stringify(invalid.body.message)).toContain('name');
+    const gateway = await request(f.app.getHttpServer()).get('/probe/bad-gateway').expect(502);
+    expect(gateway.body).toMatchObject({ statusCode: 502, message: 'upstream provider failed', error: 'Bad Gateway' });
+    expect(f.logs.some((l) => l.msg === 'unhandled error')).toBe(false);
   });
 });
