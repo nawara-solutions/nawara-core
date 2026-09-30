@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import amqp, { type Channel, type ChannelModel, type ConsumeMessage } from 'amqplib';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { RabbitMqEventBus, type EventEnvelope } from '@nawara/service-kit';
 import { BrokerProxy } from '@nawara/service-kit/testing';
 import { DOMAIN_EVENTS } from '../src/common/ports.js';
@@ -193,7 +193,18 @@ describe.skipIf(!RABBIT)('Stage 21.C.2: a broker failure never fails an Auth req
     return { ms, rowId: rows[0].id };
   }
   // Generous windows (Stage 21.C.2): the relay's backoff ceiling is 15 s, and under a full parallel e2e run the proxy leg is slower.
-  const deliveredOnce = (id: string) => vi.waitFor(() => expect(accepted.filter((e) => e.id === id)).toHaveLength(1), { timeout: 90_000, interval: 50 });
+  // Delivered, THEN settled. The consumer can receive a message before its publisher confirm is back, and the relay records the row as
+  // published only after that confirm. The next outage must start from an empty pending queue: a row still waiting for its confirm when
+  // the proxy freezes stays pending, and the relay (oldest first, stopping at the first failure) would try it before the test's own row.
+  // Settled = published, or already deleted by the code-event purge, which removes these rows only once published (their codes do not
+  // expire within the test). A re-sent copy (at least once) may arrive after the first delivery; only the first is counted, as before.
+  const deliveredOnce = async (id: string) => {
+    await vi.waitFor(() => expect(accepted.filter((e) => e.id === id)).toHaveLength(1), { timeout: 90_000, interval: 50 });
+    await vi.waitFor(async () => {
+      const { rows } = await t.db.query(`SELECT "publishedAt" FROM outbox WHERE id = $1`, [id]);
+      expect(rows.length === 0 || rows[0].publishedAt !== null).toBe(true);
+    }, { timeout: 90_000, interval: 50 });
+  };
 
   beforeAll(async () => {
     consumerBus = new RabbitMqEventBus({ url: RABBIT!, retry: { maxRetries: 0 } });
@@ -206,6 +217,10 @@ describe.skipIf(!RABBIT)('Stage 21.C.2: a broker failure never fails an Auth req
     companyId = await t.newCompany();
     await deliveredOnce((await requestCode()).rowId); // connected and delivered through the proxy
   });
+
+  // A test that fails between freeze() and thaw() must not leave the proxy frozen: the flag survives sever()/start() and would stall
+  // every connection the next test opens. thaw() is idempotent.
+  afterEach(() => proxy?.thaw());
 
   afterAll(async () => {
     proxy?.thaw();
