@@ -28,7 +28,8 @@ async function bootstrap() {
   app.useLogger(logger);
   // CORS is off unless origins are explicitly allow-listed. Never a wildcard with credentials.
   app.enableCors(cfg.corsOrigins.length ? { origin: cfg.corsOrigins, credentials: false } : false);
-  if (cfg.trustProxy) app.getHttpAdapter().getInstance().set('trust proxy', true);
+  // Stage 22 F3: a bounded hop count read from the right (never `true`, which trusts every hop and so the client-written leftmost entry).
+  if (cfg.trustProxyHops > 0) app.getHttpAdapter().getInstance().set('trust proxy', cfg.trustProxyHops);
   app.enableShutdownHooks();
 
   const config = new DocumentBuilder()

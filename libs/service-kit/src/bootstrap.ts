@@ -16,7 +16,8 @@ import type { JsonLogger } from './logging/json-logger.js';
  */
 export function configureApp(app: NestExpressApplication, config: BaseConfig, logger: JsonLogger): NestExpressApplication {
   app.useLogger(logger);
-  if (config.trustProxy) app.set('trust proxy', true);
+  // Stage 22 F3: a bounded hop count, read from the right; never `true` (which trusts every hop, so the client-written leftmost entry).
+  if (config.trustProxyHops > 0) app.set('trust proxy', config.trustProxyHops);
   app.use(shutdownAdmission(app.get(ShutdownState)));
   app.use(requestContextMiddleware);
   app.use(helmet());

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import {
-  DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, HTTP_DRAIN_TIMEOUT_BOUNDS, RABBITMQ_HEARTBEAT_BOUNDS,
+  DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, HTTP_DRAIN_TIMEOUT_BOUNDS,
+  RABBITMQ_HEARTBEAT_BOUNDS, loadTrustProxyHops,
 } from '@nawara/service-kit';
 
 /**
@@ -104,7 +105,8 @@ export interface AppConfig {
    * The relay connects lazily and retries: a broker outage never affects a request, the rows wait in the outbox.
    */
   audit: { rabbitmqUrl?: string; confirmTimeoutMs: number; heartbeatS: number };
-  trustProxy: boolean;
+  /** Stage 22 F3: `TRUST_PROXY_HOPS` (the kit rule; the deprecated `TRUST_PROXY=true` is one hop, never every hop). */
+  trustProxyHops: number;
   corsOrigins: string[];
   baselineRateLimitPerMinute: number;
   jwt: { secret: Uint8Array; issuer: string; audience: string; accessTtlSec: number };
@@ -300,7 +302,7 @@ export function loadConfig(
     events: { enabled: eventsEnabled },
     hierarchy: loadHierarchy(env, src),
     audit: auditRelay,
-    trustProxy: env.TRUST_PROXY === 'true',
+    trustProxyHops: loadTrustProxyHops(new EnvReader(env)),
     corsOrigins,
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),
     jwt: {

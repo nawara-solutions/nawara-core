@@ -26,7 +26,7 @@ export class OnboardingController {
   ) {}
 
   private client(req: Request) {
-    return clientInfo(req, this.cfg.trustProxy);
+    return clientInfo(req, this.cfg.trustProxyHops);
   }
 
   /** public */

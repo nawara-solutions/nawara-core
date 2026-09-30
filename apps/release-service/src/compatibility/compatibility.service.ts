@@ -40,8 +40,8 @@ export function matchesIfNoneMatch(header: string | string[] | undefined, etag: 
  * Stage 20.5 (ADR-0051 decisions 7, 10): the public compatibility read. Read-only, unauthenticated (clients may be pre-login), no user,
  * device or organization input, and no call to any other service. In order:
  * 1. the public rate limit, BEFORE any validation (malformed requests are counted too), keyed by the client address HMAC-keyed with
- *    `RELEASE_RATE_LIMIT_KEY`. Stage 20.6: the address is `clientAddress` (the peer, or with TRUST_PROXY the RIGHTMOST forwarded hop;
- *    IPv6 by /64), so no request header lets a client choose its bucket;
+ *    `RELEASE_RATE_LIMIT_KEY`. Stage 20.6 / 22 F3: the address is `clientAddress` (the peer, or with TRUST_PROXY_HOPS the entry our
+ *    outermost trusted proxy appended, read from the right; IPv6 by /64), so no request header lets a client choose its bucket;
  * 2. input: only the `version` query parameter; a malformed or non-canonical version is `invalid_version` (400); a malformed key cannot name a
  *    component, so it is `unknown_component` (404) without a query;
  * 3. ONE statement reads the committed state (one snapshot), then `decide` (pure, deterministic).
@@ -60,7 +60,7 @@ export class CompatibilityService {
     const t0 = performance.now();
     const done = (outcome: CompatibilityOutcome) => this.counters.count(outcome, performance.now() - t0);
     try {
-      const client = createHmac('sha256', this.config.compatibility.rateLimitKey).update(clientAddress(req, this.config.trustProxy)).digest('hex');
+      const client = createHmac('sha256', this.config.compatibility.rateLimitKey).update(clientAddress(req, this.config.trustProxyHops)).digest('hex');
       const rule = { limit: this.config.compatibility.ratePerClient, windowSec: COMPATIBILITY_WINDOW_S };
       if (!(await this.limiter.hit(COMPATIBILITY_BUCKET, client, rule)).allowed) {
         done('rate_limited');

@@ -63,7 +63,7 @@ describe('loadBillingConfig', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
       'nodeEnv', 'organizationReference', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
-      'serviceName', 'servicePolicy', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy',
+      'serviceName', 'servicePolicy', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy', 'trustProxyHops',
     ]);
   });
 

@@ -124,6 +124,25 @@ RABBITMQ_URL=amqp://... nawara-dlq replay --queue billing.payment-events.dead --
 
 Exit code `0` consumed, `2` rejected again (it is back in the DLQ, annotated, and can be replayed again), `3` still pending when the wait ended, `4` not found in the DLQ, `1` error. `consumed` means the consumer acknowledged it: what the consumer DID with it (applied, already applied, deferred, conflict) is that consumer's own log line and record. The tool only republishes to the work queue named by the `.dead` queue, never edits a body, and the message goes through the consumer's normal validation and de-duplication: it has no way to apply anything itself. It needs the broker credentials and nothing else; there is no HTTP endpoint and no application-level authorization: the boundary is the trusted infrastructure/operator boundary around `RABBITMQ_URL`. Printed values are limited to the fixed columns above (plus `--field`), reduced to printable ASCII and cut to 128 characters, because header values are written by whoever published the message. If the same event id is in the DLQ twice, one invocation replays the first.
 
+## Client address and proxies (Stage 22 F3)
+
+`clientAddress(req, config.trustProxyHops)` is the only address a service may use for a security decision (rate limits, abuse
+controls, audit attribution); `rateLimitClientAddress` is the same address with IPv6 counted by its /64 prefix. `configureApp`
+gives Express the same bounded count (`trust proxy: <n>`, never `true`).
+
+| `TRUST_PROXY_HOPS` | The client address |
+|---|---|
+| `0` (default) | the TCP peer; `X-Forwarded-For` is ignored |
+| `n` (at most 5) | the `X-Forwarded-For` entry `n` positions from the RIGHT: the one our outermost trusted proxy appended. Entries left of it are written by the client and never count. An unusable entry falls back to the peer. |
+
+IPv4-mapped IPv6 (`::ffff:192.0.2.1`) is the IPv4 address. The deprecated `TRUST_PROXY=true` means **one** hop (never every hop) and
+applies only when `TRUST_PROXY_HOPS` is unset.
+
+**Set `n` from the documented production topology, never by guessing.** Count every reverse proxy in front of the service that
+appends to `X-Forwarded-For` AND only accepts forwarded headers from the proxy in front of it. **Over-counting lets a client-written
+entry be trusted (spoofable); under-counting resolves to a nearer trusted proxy (a shared bucket, never spoofable).** Adding a
+proxy or load balancer in front means raising `n` by one, in the same change.
+
 ## Rate limiting
 
 ```ts

@@ -134,7 +134,7 @@ The request hash is **HMAC-SHA-256** under `NOTIFICATION_REQUEST_HASH_KEY` (D25)
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` | |
 | `BODY_LIMIT_KB` | 100 | 1–10240 | |
 | `CORS_ORIGINS` | empty (off) | exact http(s) origins | no wildcard |
-| `TRUST_PROXY` | `false` | `true` / `false` | |
+| `TRUST_PROXY_HOPS` | `0` | `0`–`5` | proxies in front appending `X-Forwarded-For` (kit README); the deprecated `TRUST_PROXY=true` is one hop |
 | `HTTP_DRAIN_TIMEOUT_MS` | 5000 | 500–120000 | bound on the HTTP drain at shutdown; also `NOTIFICATION_PROVIDER_TIMEOUT_MS` < 60 s − this (SDD §8.2) |
 | `DATABASE_URL` | **required** | `postgres:` / `postgresql:` | the runtime role `notification_app`; production refuses `postgres`, `root` and `*_migrator` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | 10, 5000, 30000, 60000, statement + 5000 | the kit bounds | |

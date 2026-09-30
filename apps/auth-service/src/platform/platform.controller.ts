@@ -26,7 +26,7 @@ export class PlatformController {
   ) {}
 
   private ip(req: Request) {
-    return clientInfo(req, this.cfg.trustProxy).ip;
+    return clientInfo(req, this.cfg.trustProxyHops).ip;
   }
 
   @Get('platform-access/:platformId')

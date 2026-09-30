@@ -34,7 +34,7 @@ export class OrganizationController {
   ) {}
 
   private ip(req: Request) {
-    return clientInfo(req, this.cfg.trustProxy).ip;
+    return clientInfo(req, this.cfg.trustProxyHops).ip;
   }
   private actor(req: AuthedRequest) {
     return { userId: req.actor.userId, kind: req.actor.kind, sid: req.actor.sid };

@@ -18,6 +18,12 @@ export interface BaseConfig {
   bodyLimitKb: number;
   /** Exact http(s) origins only. Empty means CORS is off. */
   corsOrigins: string[];
+  /**
+   * Stage 22 F3: `TRUST_PROXY_HOPS`, the number of reverse proxies in front of the service that each append to `X-Forwarded-For`
+   * (0 = none: the TCP peer is the client). Read from the right by Express (a numeric `trust proxy`) and by `clientAddress`.
+   */
+  trustProxyHops: number;
+  /** `trustProxyHops > 0`. Informational only; never decides which address is trusted. */
   trustProxy: boolean;
   /** Database pool and session limits (Stage 14.4), passed to `DbModule.forRoot`. Every value is bounded; none may be "infinite". */
   db: DbRuntimeConfig;
@@ -86,9 +92,22 @@ export function parseCorsOrigins(raw: string | undefined): string[] {
   return origins;
 }
 
+/** The hop count is bounded: an unbounded or "trust everything" setting would let a client-written entry win. */
+export const TRUST_PROXY_HOPS_BOUNDS = { min: 0, max: 5 } as const;
+
+/**
+ * `TRUST_PROXY_HOPS` when set. Otherwise the deprecated boolean `TRUST_PROXY`: `true` means ONE trusted hop (the proxy directly in
+ * front of the service), never "trust every hop"; unset or `false` means none. `TRUST_PROXY_HOPS` wins when both are present.
+ */
+export function loadTrustProxyHops(reader: EnvReader): number {
+  if (reader.get('TRUST_PROXY_HOPS') !== undefined) return reader.int('TRUST_PROXY_HOPS', { default: 0, ...TRUST_PROXY_HOPS_BOUNDS });
+  return reader.bool('TRUST_PROXY', false) ? 1 : 0;
+}
+
 export function loadBaseConfig(serviceName: string, env: NodeJS.ProcessEnv = process.env, reader = new EnvReader(env)): BaseConfig {
   if (!SERVICE_NAME.test(serviceName)) throw new ConfigError('service name must be lowercase letters, digits and dashes');
   const nodeEnv = reader.oneOf('NODE_ENV', NODE_ENVS, 'production');
+  const trustProxyHops = loadTrustProxyHops(reader);
   return {
     serviceName,
     nodeEnv,
@@ -97,7 +116,8 @@ export function loadBaseConfig(serviceName: string, env: NodeJS.ProcessEnv = pro
     logLevel: reader.oneOf('LOG_LEVEL', LOG_LEVELS, 'info'),
     bodyLimitKb: reader.int('BODY_LIMIT_KB', { default: 100, min: 1, max: 10_240 }),
     corsOrigins: parseCorsOrigins(reader.get('CORS_ORIGINS')),
-    trustProxy: reader.bool('TRUST_PROXY', false),
+    trustProxyHops,
+    trustProxy: trustProxyHops > 0,
     db: loadDbRuntimeConfig(reader),
     httpDrainTimeoutMs: reader.int('HTTP_DRAIN_TIMEOUT_MS', { default: DEFAULT_HTTP_DRAIN_TIMEOUT_MS, ...HTTP_DRAIN_TIMEOUT_BOUNDS }),
   };

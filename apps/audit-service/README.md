@@ -104,7 +104,7 @@ There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: r
 | Variable | Default | Bounds | Notes |
 |---|---|---|---|
 | `NODE_ENV` | `production` | `development`, `test`, `production` | unset means production (the safe behaviour) |
-| `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY`, `HTTP_DRAIN_TIMEOUT_MS` | kit defaults (3000, info, 100, none, false, 5000) | kit bounds | the Core HTTP baseline |
+| `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS`, `HTTP_DRAIN_TIMEOUT_MS` | kit defaults (3000, info, 100, none, 0, 5000) | kit bounds | the Core HTTP baseline |
 | `DATABASE_URL` | **required** | `postgres:` / `postgresql:` | the runtime role `audit_app`; production refuses `postgres`, `root` and `*_migrator` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | 10, 5000, 30000, 60000, statement + 5000 | kit bounds (pool 1–100; query > statement) | |
 | `MIGRATION_DATABASE_URL` | – | | the migrator, read only by `npm run migrate` |
