@@ -98,7 +98,9 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       expect(ev!.name).toBe('audit.invoice.issued');
       expect(ev!.payload).toEqual({ action: 'invoice.issued', actor: { type: 'service', id: PRODUCER }, organizationId: ORG, resource: { type: 'invoice', id: inv.id }, outcome: 'succeeded' });
       expect(ev!.correlationId).toBe('corr-billing-audit');
-      for (const s of ['9876', 'TND', 'Secret Product Name', PAYER, 'total', 'amount', 'number']) expect(JSON.stringify(ev!.payload)).not.toContain(s);
+      // The invoice id is a random UUID that may itself contain a sentinel's digits: it is masked, so the scan covers everything else.
+      const scanned = JSON.stringify(ev!.payload).replaceAll(inv.id, '<invoice-id>');
+      for (const s of ['9876', 'TND', 'Secret Product Name', PAYER, 'total', 'amount', 'number']) expect(scanned).not.toContain(s);
     });
 
     it('an organization-less invoice (a user seller) records organizationId null, and its issue no longer fails', async () => {
