@@ -184,7 +184,7 @@ in `test/delivery-engine.e2e-spec.ts` on a real PostgreSQL, fake providers, loop
 | C6 terminal rows, 3 workers × 5 passes | 0 new attempts, 0 calls |
 | SKIP LOCKED | a claim with a due row locked elsewhere returns in < 1 s with the other row |
 | bounded concurrency | 12 slow calls, concurrency 3 → max in flight 3 |
-| fairness | FIFO by due time across channels: SMS created between two EMAIL batches are all sent before the later batch |
+| fairness | FIFO by due time across channels, with concurrency 3: SMS created between two EMAIL batches are all dispatched after the earlier batch and before the later one, and are sent (provider calls in flight together may start in either order) |
 | failure isolation | an EMAIL provider throwing on every call; the SMS deliveries of the same pass are `SENT` |
 | real database outage (loop running) | passes fail and log `notification_worker_pass_failure`; after reconnection the loop delivers |
 
