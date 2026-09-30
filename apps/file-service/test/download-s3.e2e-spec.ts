@@ -1,12 +1,14 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { get as httpGet } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { PassThrough } from 'node:stream';
 import { DeleteObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import request from 'supertest';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { fileMigrationsDir } from '../src/app.module.js';
+import { STORAGE_PORT, type StoragePort } from '../src/storage/storage.port.js';
 import { ALL_LOGS, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { Sql } from './support/fixtures.js';
@@ -123,15 +125,45 @@ describeWithEnv('download on the S3-compatible store (real PostgreSQL + S3 proto
   it('a client abort stops the S3 stream (the object is not read on in the background)', async () => {
     const body = Buffer.concat([SAMPLES.pdf(), randomBytes(8 * 1024 * 1024)]);
     const id = await upload(body);
-    const before = ALL_LOGS.length;
-    await fetchAll(t, await ticketPath(id), true);
-    let line: string | undefined;
-    for (let i = 0; i < 100 && !line; i++) {
-      line = ALL_LOGS.slice(before).map((x) => String(x.msg)).find((m) => m.startsWith(`file_download route=ticket outcome=aborted file=${id}`));
-      if (!line) await new Promise((r) => setTimeout(r, 20));
+    // Observed at the storage boundary, on the real S3 read (called through): the bytes read from S3 once the abort has fired, and
+    // whether the S3 body is destroyed before its end. The logged byte count is what the sockets had buffered when the close was
+    // seen, a roughly fixed amount rather than a share of the object, so it only shows that the download did not complete.
+    const storage = t.app.get<StoragePort>(STORAGE_PORT);
+    const get = storage.get.bind(storage);
+    const s3 = { readAfterAbort: 0, endedNormally: false, closed: undefined as Promise<void> | undefined };
+    const spy = vi.spyOn(storage, 'get').mockImplementation(async (key, opts) => {
+      const object = await get(key, opts);
+      const passed = new PassThrough();
+      s3.closed = new Promise((resolve) => object.body.once('close', () => {
+        s3.endedNormally = object.body.readableEnded;
+        resolve();
+      }));
+      object.body.once('error', (e) => passed.destroy(e));
+      passed.once('close', () => object.body.destroy());
+      object.body.pipe(passed);
+      // An observer on the S3 body itself (the pipe keeps its flow control): any chunk it yields after the abort is counted.
+      object.body.on('data', (chunk: Buffer) => {
+        if (opts.signal.aborted) s3.readAfterAbort += chunk.length;
+      });
+      return { ...object, body: passed };
+    });
+    try {
+      const before = ALL_LOGS.length;
+      await fetchAll(t, await ticketPath(id), true);
+      let line: string | undefined;
+      for (let i = 0; i < 100 && !line; i++) {
+        line = ALL_LOGS.slice(before).map((x) => String(x.msg)).find((m) => m.startsWith(`file_download route=ticket outcome=aborted file=${id}`));
+        if (!line) await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(line).toBeDefined();
+      expect(Number(/bytes=(\d+)/.exec(line!)![1])).toBeLessThan(body.length); // the download did not complete
+      expect(spy).toHaveBeenCalledTimes(1);
+      await s3.closed; // the S3 body's own end of life: destroyed at the abort, or (a regression) drained to its end
+      expect(s3.readAfterAbort).toBe(0);
+      expect(s3.endedNormally).toBe(false);
+    } finally {
+      spy.mockRestore();
     }
-    expect(line).toBeDefined();
-    expect(Number(/bytes=(\d+)/.exec(line!)![1])).toBeLessThan(body.length / 2);
   });
 
   it('an object missing from the bucket is 500 file_content_missing (no provider detail)', async () => {
