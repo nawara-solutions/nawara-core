@@ -212,7 +212,7 @@ describeWithEnv('release-service public compatibility decision (Stage 20.5) — 
       const rows = await sql<Row>(d.adminUrl, `SELECT bucket, key FROM kit_rate_limit WHERE bucket = 'release_compatibility'`);
       expect(rows.length).toBeGreaterThan(0);
       for (const r of rows) expect(r.key).toMatch(/^[0-9a-f]{64}$/);
-      expect(JSON.stringify(rows)).not.toMatch(/127\.0\.0\.1|::1|ffff/);
+      expect(JSON.stringify(rows)).not.toMatch(/127\.0\.0\.1|::1|::ffff:/);
     });
 
     it('logs carry no product, component, version or address; the snapshot line has closed labels only', async () => {
