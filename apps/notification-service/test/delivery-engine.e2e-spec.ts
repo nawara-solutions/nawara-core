@@ -682,15 +682,39 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
 
     it('fairness: deliveries are served oldest-due first across channels; a later backlog in one channel does not starve an earlier other', async () => {
       const a = await app({ NOTIFICATION_WORKER_BATCH_SIZE: '10' });
-      for (let i = 0; i < 15; i++) await alert({}, [{ channel: 'EMAIL', destination: EMAIL }]);
-      const smsIds = [];
+      const early: string[] = [];
+      const smsIds: string[] = [];
+      const late: string[] = [];
+      for (let i = 0; i < 15; i++) early.push(await alert({}, [{ channel: 'EMAIL', destination: EMAIL }]));
       for (let i = 0; i < 3; i++) smsIds.push(await alert({}, [{ channel: 'SMS', destination: PHONE }]));
-      for (let i = 0; i < 15; i++) await alert({}, [{ channel: 'EMAIL', destination: EMAIL }]);
-      await drain(a.app.get(DeliveryWorker), 10);
+      for (let i = 0; i < 15; i++) late.push(await alert({}, [{ channel: 'EMAIL', destination: EMAIL }]));
+      // The guarantee (SDD §8.1, §10) is the order in which due deliveries are claimed and handed to the workers, not the order in
+      // which concurrent provider calls start: each claim does its own database work before the call, so calls of neighbouring
+      // claims in flight together may start in either order. The dispatch order is observed at `processOne`, the unit of dispatch.
+      const w = a.app.get(DeliveryWorker);
+      const processOne = w.processOne.bind(w);
+      const dispatched: string[] = [];
+      let active = 0;
+      let maxActive = 0;
+      vi.spyOn(w, 'processOne').mockImplementation(async (c, r) => {
+        dispatched.push(c.id);
+        maxActive = Math.max(maxActive, ++active);
+        try {
+          return await processOne(c, r);
+        } finally {
+          active--;
+        }
+      });
+      await drain(w, 10);
       expect(calls()).toBe(33);
-      const lastSms = Math.max(...sms.calls.map((c) => c.at));
-      const lateEmails = email.calls.slice(15).map((c) => c.at);
-      expect(lateEmails.every((at) => at >= lastSms)).toBe(true);
+      expect(maxActive).toBe(3); // NOTIFICATION_WORKER_CONCURRENCY: the claims are still processed concurrently
+      const at = new Map(dispatched.map((id, i) => [id, i]));
+      expect(at.size).toBe(33);
+      const positions = async (nids: string[], channel: string) => Promise.all(nids.map(async (n) => at.get((await one(n, channel)).id)!));
+      const [e, s, l] = [await positions(early, 'EMAIL'), await positions(smsIds, 'SMS'), await positions(late, 'EMAIL')];
+      expect(Math.max(...e)).toBeLessThan(Math.min(...s)); // oldest-due first across channels
+      expect(Math.max(...s)).toBeLessThan(Math.min(...l)); // the later EMAIL backlog never goes ahead of the earlier SMS
+      for (const n of smsIds) expect(await one(n, 'SMS')).toMatchObject({ status: 'SENT' });
     });
 
     it('failure isolation: a failing EMAIL provider does not stop SMS deliveries; a poison delivery does not stop the others', async () => {
