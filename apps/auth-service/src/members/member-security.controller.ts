@@ -41,7 +41,7 @@ export class MemberSecurityController {
   @ApiResponse({ status: 403, description: 'Not an owner, or no valid step-up.' })
   @ApiResponse({ status: 404, description: 'No such member, not of your Company, or also a member under another Company — indistinguishable.' })
   suspend(@Param('id', ParseUUIDPipe) id: string, @Body() dto: SuspendMemberDto, @Req() req: AuthedRequest, @Headers('x-step-up-token') su?: string) {
-    return this.members.suspend({ userId: req.actor.userId, sid: req.actor.sid }, id, dto.reason, su, clientInfo(req, this.cfg.trustProxy).ip);
+    return this.members.suspend({ userId: req.actor.userId, sid: req.actor.sid }, id, dto.reason, su, clientInfo(req, this.cfg.trustProxyHops).ip);
   }
 
   @Post(':id/restore')
@@ -55,6 +55,6 @@ export class MemberSecurityController {
   @ApiResponse({ status: 403, description: 'Not an owner, or no valid step-up.' })
   @ApiResponse({ status: 404, description: 'No such member, not of your Company, or also a member under another Company — indistinguishable.' })
   restore(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthedRequest, @Headers('x-step-up-token') su?: string) {
-    return this.members.restore({ userId: req.actor.userId, sid: req.actor.sid }, id, su, clientInfo(req, this.cfg.trustProxy).ip);
+    return this.members.restore({ userId: req.actor.userId, sid: req.actor.sid }, id, su, clientInfo(req, this.cfg.trustProxyHops).ip);
   }
 }

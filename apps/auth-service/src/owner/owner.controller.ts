@@ -47,7 +47,7 @@ export class OwnerController {
   ) {}
 
   private client(req: Request) {
-    return clientInfo(req, this.cfg.trustProxy);
+    return clientInfo(req, this.cfg.trustProxyHops);
   }
 
   // ------------------------------------------------------------------ login (public + challenge)

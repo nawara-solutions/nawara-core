@@ -277,6 +277,9 @@ describeWithEnv('download + authorization (real PostgreSQL, filesystem store)', 
     const single = (await issue(f.id, { singleUse: true })).body.url as string;
     const restricted = JSON.parse(policy) as typeof DOWNLOAD_POLICY;
     restricted.callers['core-drive'].operations = ['upload', 'read', 'attach'];
+    // The failures above spent this client's redemption budget. Since Stage 22 F3 the client is ONE identity on every socket
+    // (`::ffff:127.0.0.1` and `127.0.0.1` alike), so the second application no longer starts with a budget of its own.
+    await s.query('DELETE FROM kit_rate_limit');
     const other = await createTestApp({ databaseUrl: db.url, tokens, policy: JSON.stringify(restricted) });
     try {
       expect((await request(other.app.getHttpServer()).get(path(single))).body.code).toBe('ticket_invalid');

@@ -25,7 +25,7 @@ export class OperatorController {
   ) {}
 
   private client(req: Request) {
-    return clientInfo(req, this.cfg.trustProxy);
+    return clientInfo(req, this.cfg.trustProxyHops);
   }
 
   @Post('login/operator/request-code')

@@ -94,7 +94,8 @@ blocked by the minimum, an `unknown_release` spike, a mistyped component, rate-l
 **Readiness** covers only the database and migrations:
 - If Auth is down, owner administration fails closed (503) and CI and the public read keep working.
 - If the broker is down, mutations still commit with their audit intent in the outbox.
-- With `TRUST_PROXY` on, the public limit keys by the rightmost forwarded hop, and IPv6 counts by /64.
+- With `TRUST_PROXY_HOPS=n`, the public limit keys by the entry our outermost trusted proxy appended (read from the right; `n=1` is the
+  rightmost hop), and IPv6 counts by /64 (the kit's `rateLimitClientAddress`).
 
 ## Domain
 
@@ -129,7 +130,7 @@ bad input early with a bounded code.
 | Variable | Default | Notes |
 |---|---|---|
 | `NODE_ENV` | `production` | unset means production |
-| `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY`, `HTTP_DRAIN_TIMEOUT_MS` | kit defaults | the Core HTTP baseline |
+| `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS`, `HTTP_DRAIN_TIMEOUT_MS` | kit defaults | the Core HTTP baseline |
 | `DATABASE_URL` | **required** | the runtime role `release_app`; production refuses `postgres`, `root` and `*_migrator` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | kit defaults | |
 | `MIGRATION_DATABASE_URL` | – | the migrator (`release_migrator`), read only by `npm run migrate` |
