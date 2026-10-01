@@ -80,7 +80,7 @@ export class PaymentReconciler {
           if (result.outcome === 'conflict') this.logger.error(`payment_reconcile_failure request=${id} correlationId=${correlationId} reason=conflict detail=${result.detail} — needs manual review`);
           if (result.outcome === 'deferred') this.logger.warn(`payment_reconcile_deferred request=${id} correlationId=${correlationId} detail=${result.detail}`);
         } catch (e) {
-          this.logger.warn(`payment_reconcile_failure request=${id} correlationId=${correlationId} reason=exception: ${e instanceof Error ? e.message : 'unknown error'}`);
+          this.logger.warn(`payment_reconcile_failure request=${id} correlationId=${correlationId} reason=exception ${describeFailure(e)}`);
         }
       }
       return { checked: stale.length, settled };
