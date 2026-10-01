@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { HttpException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { AUDIT_CATEGORIES, catalogEntry } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
-import { DbService, RateLimitService, getRequestContext, type Queryable } from '@nawara/service-kit';
+import { DbService, RateLimitService, getRequestContext, type Queryable, httpError, type MessageTexts } from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
 import { SERVICE_NAME, type AuditConfig } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
@@ -13,6 +13,7 @@ import type { CallerPolicy } from '../policy/caller-policy.js';
 import { QueryCounters, type QueryOutcome, type QueryScopeLabel } from './query-counters.js';
 import type { AuthorizedAuditQuery, QueryScope } from './query-model.js';
 import { decodeCursor, encodeCursor, parseOrganizationPath, parseQuery, queryFingerprint, type ParsedQuery } from './query-params.js';
+import { AUDIT_MESSAGES } from '../messages.js';
 
 /** One record as a reader receives it: evidence identifiers and codes only (no internal id, no display name, no enrichment). */
 export interface AuditRecordView {
@@ -51,7 +52,7 @@ const DAY_MS = 86_400_000;
 const OWNER_POLICY: CallerPolicy = { operations: new Set(), categories: new Set(AUDIT_CATEGORIES) };
 type QueryActor = { type: 'service'; id: string } | { type: 'user'; id: string; userKind: 'owner' };
 
-const forbidden = (code: string, message: string) => new HttpException({ message, code }, 403);
+const forbidden = (code: string, message: MessageTexts) => httpError(403, code, message);
 
 function view(r: PagedAuditRow): AuditRecordView {
   return {
@@ -128,7 +129,7 @@ export class AuditQueryService {
       }).catch((e: unknown) => {
         if (e instanceof HttpException) throw e;
         this.log.error(`audit_platform_query_unrecorded caller=${caller} error=${e instanceof Error ? e.name : 'Error'} — no evidence returned (fail closed)`);
-        throw new HttpException({ message: 'The query could not be recorded; no evidence is returned.', code: 'accountability_unavailable' }, 503);
+        throw httpError(503, 'accountability_unavailable', AUDIT_MESSAGES.accountabilityUnavailable);
       });
       return this.page(rows, query, caller);
     });
@@ -181,7 +182,7 @@ export class AuditQueryService {
     }).catch((e: unknown) => {
       if (e instanceof HttpException) throw e;
       this.log.error(`audit_owner_query_unrecorded error=${e instanceof Error ? e.name : 'Error'} — no evidence returned (fail closed)`);
-      throw new HttpException({ message: 'The query could not be recorded; no evidence is returned.', code: 'accountability_unavailable' }, 503);
+      throw httpError(503, 'accountability_unavailable', AUDIT_MESSAGES.accountabilityUnavailable);
     });
     return this.page(rows, query, caller);
   }
@@ -190,12 +191,12 @@ export class AuditQueryService {
   private async limitOwner(ownerId: string): Promise<void> {
     const limit = this.config.ownerAccess?.ratePerOwner ?? 1;
     const r = await this.limiter.hit('audit_query_owner', ownerId, { limit, windowSec: QUERY_WINDOW_SECONDS });
-    if (!r.allowed) throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+    if (!r.allowed) throw httpError(429, 'rate_limited', AUDIT_MESSAGES.tooManyRequests);
   }
 
   private authorize(caller: string, operation: 'read_organization' | 'read_platform'): CallerPolicy {
     const policy = this.config.callerPolicy.of(caller);
-    if (!policy || !policy.operations.has(operation)) throw forbidden('operation_not_allowed', 'Operation not allowed for this caller.');
+    if (!policy || !policy.operations.has(operation)) throw forbidden('operation_not_allowed', AUDIT_MESSAGES.operationNotAllowed);
     return policy;
   }
 
@@ -209,17 +210,17 @@ export class AuditQueryService {
           this.limiter.hit('audit_query_org_pair', `${caller}|${organizationId}`, { limit: r.perOrganization, windowSec: QUERY_WINDOW_SECONDS }),
         ];
     const results = await Promise.all(hits);
-    if (results.some((x) => !x.allowed)) throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+    if (results.some((x) => !x.allowed)) throw httpError(429, 'rate_limited', AUDIT_MESSAGES.tooManyRequests);
   }
 
   /** The request's filters, checked against the caller policy, and the server-built scope and policy bounds. */
   private authorized(caller: string, policy: CallerPolicy, scope: QueryScope, parsed: ParsedQuery): AuthorizedAuditQuery {
     const f = parsed.filters;
     const categories = [...policy.categories];
-    if (f.category !== undefined && !policy.categories.has(f.category)) throw forbidden('category_not_allowed', 'This caller may not read that category.');
-    if (f.action !== undefined && !policy.categories.has(catalogEntry(f.action)!.category)) throw forbidden('category_not_allowed', 'This caller may not read that category.');
+    if (f.category !== undefined && !policy.categories.has(f.category)) throw forbidden('category_not_allowed', AUDIT_MESSAGES.categoryNotAllowed);
+    if (f.action !== undefined && !policy.categories.has(catalogEntry(f.action)!.category)) throw forbidden('category_not_allowed', AUDIT_MESSAGES.categoryNotAllowed);
     const sources = policy.sourceServices ? [...policy.sourceServices] : undefined;
-    if (f.sourceService !== undefined && sources && !sources.includes(f.sourceService)) throw forbidden('source_not_allowed', 'This caller may not read that source service.');
+    if (f.sourceService !== undefined && sources && !sources.includes(f.sourceService)) throw forbidden('source_not_allowed', AUDIT_MESSAGES.sourceNotAllowed);
     const fingerprint = queryFingerprint(caller, scope, f, parsed.window);
     return {
       scope,
