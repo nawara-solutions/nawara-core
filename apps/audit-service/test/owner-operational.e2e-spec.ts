@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { auditMigrationsDir } from '../src/app.module.js';
 import { QueryCounters } from '../src/query/query-counters.js';
@@ -25,9 +25,22 @@ const WINDOW = { from: '2026-06-01T00:00:00Z', to: '2026-06-30T00:00:00Z' };
 const msgOf = (l: Record<string, unknown>): string => (typeof l.msg === 'string' ? l.msg : '');
 
 function stubAuth() {
-  const state = { mode: 'ok' as 'ok' | 'down' | 'hang' | 'malformed' | 'slow_each', delayMs: 0 };
+  /** `slow_each`: each answer waits `delayMs`, or `delayByPath[url]` when set. `calls`: what this Auth saw of every request (its own clock, the same process). */
+  const state = {
+    mode: 'ok' as 'ok' | 'down' | 'hang' | 'malformed' | 'slow_each',
+    delayMs: 0,
+    delayByPath: {} as Record<string, number>,
+    calls: [] as { url: string; arrived: number; answered?: number; ended?: number; aborted?: boolean }[],
+  };
   const server: Server = createServer((req, res) => {
+    const call: (typeof state.calls)[number] = { url: req.url ?? '', arrived: performance.now() };
+    state.calls.push(call);
+    res.on('close', () => {
+      call.ended = performance.now();
+      call.aborted = !res.writableFinished; // the caller gave up before this Auth answered
+    });
     const send = (status: number, body: unknown) => {
+      call.answered = performance.now(); // before the caller can have the answer
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
@@ -42,7 +55,7 @@ function stubAuth() {
       return send(404, {});
     };
     if (state.mode === 'hang') return;
-    if (state.mode === 'slow_each') return void setTimeout(answer, state.delayMs);
+    if (state.mode === 'slow_each') return void setTimeout(() => !res.destroyed && answer(), state.delayByPath[req.url ?? ''] ?? state.delayMs);
     answer();
   });
   return { server, state };
@@ -104,21 +117,37 @@ describeWithEnv('Audit-X operation (Stage 19.5, real PostgreSQL 16)', ['TEST_DAT
 
   it('ONE Auth budget per request: two calls that each fit the timeout but not together time out, and the read is bounded by it', async () => {
     counts();
+    // Each call alone fits the 400 ms budget (50 ms, 380 ms); together they never do, whatever the rate-limit write between them costs.
+    // The short first call leaves the second one most of the budget, so its share of the latency is large on any runner.
     auth.state.mode = 'slow_each';
-    auth.state.delayMs = 250; // each call < 400 ms, both > 400 ms
+    auth.state.delayByPath = { '/auth/grants': 50, [`/auth/admin/organizations/${A1}`]: 380 };
+    auth.state.calls = [];
+    let t0: number;
+    let ms: number;
     try {
-      const t0 = Date.now();
+      t0 = performance.now();
       const r = await read('owner-bearer');
-      const ms = Date.now() - t0;
+      ms = performance.now() - t0;
       expect([r.status, r.body.code]).toEqual([503, 'auth_timeout']);
       expect(ms).toBeLessThan(400 + 300); // the budget, plus scheduling slack: never 2 × the timeout
     } finally {
       auth.state.mode = 'ok';
+      auth.state.delayByPath = {};
     }
+    await vi.waitFor(() => expect(auth.state.calls[1]?.ended).toBeDefined()); // this Auth sees the aborted connection close
+    const [grants, owns, ...more] = auth.state.calls;
+    expect([grants?.url, grants?.aborted, owns?.url, owns?.aborted, more.length]).toEqual(['/auth/grants', false, `/auth/admin/organizations/${A1}`, true, 0]);
+    // ONE budget: the second call is cut at the deadline set before the first call, not 400 ms after it started.
+    expect(owns!.ended! - grants!.arrived).toBeLessThan(400 + 100);
     const s = counts();
     expect(s.counts.owner_auth_timeout).toBe(1);
     expect(s.ownerAuthLatency.count).toBe(1);
-    expect(s.ownerAuthLatency.maxMs).toBeGreaterThanOrEqual(350);
+    // The latency is the time spent waiting on Auth: both calls, the aborted one included, but not the work between them (the rate-limit
+    // write), which only the wall-clock deadline covers. So it is bounded by what this Auth saw, not by a fixed number: the first call
+    // lasted at least from its arrival to its answer, the aborted one at least from its arrival to the deadline (never before t0 + 400).
+    const minAuthMs = grants!.answered! - grants!.arrived + (t0! + 400 - owns!.arrived);
+    expect(s.ownerAuthLatency.maxMs).toBeGreaterThanOrEqual(Math.floor(minAuthMs));
+    expect(s.ownerAuthLatency.maxMs).toBeLessThanOrEqual(Math.ceil(ms!));
   });
 
   it('Auth latency is observable before it times out (count / avg / max per snapshot, no labels)', async () => {
