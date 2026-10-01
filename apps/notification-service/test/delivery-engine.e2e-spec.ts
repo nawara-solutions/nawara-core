@@ -919,17 +919,24 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
     });
 
     it('shutdown during a provider call: the call finishes and its outcome is persisted BEFORE the pool closes; queued claims are released', async () => {
-      const a = await createTestApp({ databaseUrl: db.url, tokens: TOKENS, env: { ...BASE_ENV, NOTIFICATION_WORKER_INTERVAL_MS: '100', NOTIFICATION_WORKER_CONCURRENCY: '1', NOTIFICATION_PROVIDER_TIMEOUT_MS: '2000' }, providers: { EMAIL: email, SMS: sms } });
-      every.push(a);
-      const ids = [];
-      for (let i = 0; i < 4; i++) ids.push(await alert({}, undefined, a));
+      // The scenario (4 claimed, 1 in flight, 3 queued) is established BEFORE any worker polls, so it never races the first pass:
+      // the slow provider behaviour first, then the four deliveries through `t` (whose worker is stopped), then the polling application.
       const called = deferred<void>();
       email.behavior = async (m, ctx) => {
         called.resolve();
         await sleep(600);
         return accept(m, ctx);
       };
+      const ids = [];
+      for (let i = 0; i < 4; i++) ids.push(await alert());
+      const waiting = await sql<{ id: string; status: string }>(db.url, `SELECT id, status FROM notification_delivery WHERE status IN ('PENDING', 'SENDING')`);
+      expect(waiting.map((d) => d.status)).toEqual(['PENDING', 'PENDING', 'PENDING', 'PENDING']); // exactly these four are due: nothing else can enter the claim
+      expect(email.calls).toHaveLength(0);
+      const logged = allLogs().length;
+      const a = await createTestApp({ databaseUrl: db.url, tokens: TOKENS, env: { ...BASE_ENV, NOTIFICATION_WORKER_INTERVAL_MS: '100', NOTIFICATION_WORKER_CONCURRENCY: '1', NOTIFICATION_PROVIDER_TIMEOUT_MS: '2000' }, providers: { EMAIL: email, SMS: sms } });
+      every.push(a);
       await called.promise;
+      expect(allLogs().slice(logged).some((l) => String(l.msg).includes('notification_delivery_claimed count=4'))).toBe(true); // one pass took all four
       const t0 = Date.now();
       await a.app.close();
       const took = Date.now() - t0;
