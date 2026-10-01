@@ -11,6 +11,7 @@ import { notFound, paymentError } from '../errors.js';
 import { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { representPayment } from './payment.representation.js';
 import { PaymentService } from './payment.service.js';
+import { PAYMENT_MESSAGES } from '../messages.js';
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 
@@ -83,7 +84,7 @@ export class PaymentsController {
   @ApiResponse({ status: 422, description: 'idempotency_key_reused' })
   async cancel(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string, @Headers('idempotency-key') idempotencyKey: string | undefined) {
     if (!idempotencyKey || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
-      throw paymentError(400, 'idempotency_key_required', 'A valid Idempotency-Key header is required.');
+      throw paymentError(400, 'idempotency_key_required', PAYMENT_MESSAGES.idempotencyKeyRequired);
     }
     const payment = await this.payments.findById(id);
     if (!payment) throw notFound();

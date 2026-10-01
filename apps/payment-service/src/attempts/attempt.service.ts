@@ -12,6 +12,7 @@ import { ProviderRegistry } from '../providers/provider-registry.js';
 import type { FetchStatusResult, PaymentProvider } from '../providers/provider.port.js';
 import type { AttemptRow } from './attempt.types.js';
 import type { StartAttemptDto } from './dto/start-attempt.dto.js';
+import { PAYMENT_MESSAGES } from '../messages.js';
 
 export interface StartAttemptResult {
   attempt: AttemptRow;
@@ -61,14 +62,14 @@ export class AttemptService {
         [paymentId],
       ); // database time is the only clock (SDD section 12)
       const payment = rows[0];
-      if (!payment) throw paymentError(404, 'not_found', 'Not found.');
-      if (payment.isExpired) throw paymentError(409, 'payment_expired', 'This payment has expired.');
+      if (!payment) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
+      if (payment.isExpired) throw paymentError(409, 'payment_expired', PAYMENT_MESSAGES.paymentExpired);
       // "pending" only means an open collection path in this phase (no cash exists yet): report the specific reason,
       // not the generic "not payable" (SDD section 5.1's "one open collection at a time").
-      if (payment.status === 'pending') throw paymentError(409, 'payment_has_open_attempt', 'An attempt is already open for this payment.');
-      if (payment.status !== 'created') throw paymentError(409, 'payment_not_payable', `Cannot start an attempt on a payment in status ${payment.status}.`);
+      if (payment.status === 'pending') throw paymentError(409, 'payment_has_open_attempt', PAYMENT_MESSAGES.attemptAlreadyOpen);
+      if (payment.status !== 'created') throw paymentError(409, 'payment_not_payable', PAYMENT_MESSAGES.cannotStartAttemptInStatus, { status: payment.status });
       const { rows: open } = await q.query(`SELECT 1 FROM payment_attempt WHERE "paymentId" = $1 AND status IN ('initiated','submitted','unknown')`, [paymentId]);
-      if (open.length > 0) throw paymentError(409, 'payment_has_open_attempt', 'An attempt is already open for this payment.');
+      if (open.length > 0) throw paymentError(409, 'payment_has_open_attempt', PAYMENT_MESSAGES.attemptAlreadyOpen);
       const { rows: countRows } = await q.query<{ count: number }>('SELECT count(*)::int AS count FROM payment_attempt WHERE "paymentId" = $1', [paymentId]);
       const attemptNumber = countRows[0].count + 1;
 
@@ -82,7 +83,7 @@ export class AttemptService {
 
     if (t1.replay) {
       const attempt = await this.findById(t1.attemptId);
-      if (!attempt) throw paymentError(404, 'not_found', 'Not found.');
+      if (!attempt) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
       return { attempt, replayed: true };
     }
 
@@ -127,7 +128,7 @@ export class AttemptService {
   /** Endpoint 4 (SDD section 9.1): asks the provider for the attempt's status; the client's own claim is never used. */
   async sync(attemptId: string, ctx: EventContext): Promise<AttemptRow> {
     const attempt = await this.findById(attemptId);
-    if (!attempt) throw paymentError(404, 'not_found', 'Not found.');
+    if (!attempt) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
     const provider = this.providers.get(attempt.provider);
     const ref = attempt.providerTransactionId ?? attempt.merchantReference;
     const status = await provider.fetchStatus(ref);
@@ -144,7 +145,7 @@ export class AttemptService {
   async applyStatus(attemptId: string, status: FetchStatusResult, provider: PaymentProvider, ctx: EventContext = { actor: { type: 'system', id: null }, cause: { type: 'attempt_resolver', id: null } }): Promise<AttemptRow> {
     return this.db.tx(async (q) => {
       const { rows: unlocked } = await q.query<AttemptRow>('SELECT "paymentId" FROM payment_attempt WHERE id = $1', [attemptId]);
-      if (!unlocked[0]) throw paymentError(404, 'not_found', 'Not found.');
+      if (!unlocked[0]) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
       const { rows: payRows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [unlocked[0].paymentId]);
       const payment = payRows[0];
       const { rows: attRows } = await q.query<AttemptRow>('SELECT * FROM payment_attempt WHERE id = $1 FOR UPDATE', [attemptId]);
@@ -171,14 +172,14 @@ export class AttemptService {
         if (current.status === 'succeeded') return current; // idempotent replay of the same fact
         if (Number(payment.amount) !== status.amount || payment.currency !== status.currency) {
           // FI-13: never applied silently. No new state is introduced for this — it is refused outright.
-          throw paymentError(502, 'provider_error', 'Provider-reported amount/currency does not match the payment snapshot.');
+          throw paymentError(502, 'provider_error', PAYMENT_MESSAGES.amountCurrencyMismatch);
         }
         if (payment.status === 'failed' || payment.status === 'cancelled' || payment.status === 'expired' || payment.status === 'succeeded') {
-          throw paymentError(409, 'invalid_state_transition', `Provider success conflicts with a payment that is already ${payment.status}.`);
+          throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.providerSuccessConflicts, { status: payment.status });
         }
         if (current.status === 'failed' || current.status === 'expired') {
           // Late success: accepted only if THIS failure was inferred (a guess); a provider-confirmed failure is a real conflict.
-          if (!current.failureInferred) throw paymentError(409, 'invalid_state_transition', 'Late success conflicts with a provider-confirmed failure.');
+          if (!current.failureInferred) throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.lateSuccessConflicts);
         }
         // An attempt still `initiated` (crash before T2, or a webhook that beat T2) is first moved through `unknown`: the
         // provider's success proves it reached the provider, and the state machine has no direct `initiated -> succeeded`.
@@ -194,7 +195,7 @@ export class AttemptService {
       }
 
       // status.kind === 'failed'
-      if (current.status === 'succeeded') throw paymentError(409, 'invalid_state_transition', 'Cannot fail an attempt that already succeeded.');
+      if (current.status === 'succeeded') throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.cannotFailSucceeded);
       if (current.status === 'failed' || current.status === 'expired') return current;
       const { rows } = await q.query<AttemptRow>(
         `UPDATE payment_attempt SET status = 'failed', "failureCode" = $2, "failureClass" = $3, "completedAt" = now() WHERE id = $1 RETURNING *`,

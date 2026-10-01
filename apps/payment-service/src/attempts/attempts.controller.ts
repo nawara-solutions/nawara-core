@@ -9,6 +9,7 @@ import { paymentError } from '../errors.js';
 import { PaymentService } from '../payments/payment.service.js';
 import { AttemptService } from './attempt.service.js';
 import { StartAttemptDto } from './dto/start-attempt.dto.js';
+import { PAYMENT_MESSAGES } from '../messages.js';
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 
@@ -44,10 +45,10 @@ export class AttemptsController {
     @Req() req: CallerRequest,
   ) {
     if (!idempotencyKey || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
-      throw paymentError(400, 'idempotency_key_required', 'A valid Idempotency-Key header is required.');
+      throw paymentError(400, 'idempotency_key_required', PAYMENT_MESSAGES.idempotencyKeyRequired);
     }
     const payment = await this.payments.findById(paymentId);
-    if (!payment || !req.caller) throw paymentError(404, 'not_found', 'Not found.');
+    if (!payment || !req.caller) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
     this.authorization.assertCanStartAttempt(payment, req.caller);
     const callerId = req.caller.kind === 'user' ? req.caller.identity.id : req.caller.service;
     // After authentication and authorization, so only a real payer consumes (and can exhaust) their own budget.
@@ -70,10 +71,10 @@ export class AttemptsController {
   @ApiResponse({ status: 404 })
   async sync(@Param('paymentId', new ParseUUIDPipe()) paymentId: string, @Param('attemptId', new ParseUUIDPipe()) attemptId: string, @Req() req: CallerRequest) {
     const payment = await this.payments.findById(paymentId);
-    if (!payment || !req.caller) throw paymentError(404, 'not_found', 'Not found.');
+    if (!payment || !req.caller) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
     this.authorization.assertCanSync(payment, req.caller);
     const attempt = await this.attempts.findById(attemptId);
-    if (!attempt || attempt.paymentId !== paymentId) throw paymentError(404, 'not_found', 'Not found.');
+    if (!attempt || attempt.paymentId !== paymentId) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
     const actor = req.caller.kind === 'user' ? ({ type: 'user', id: req.caller.identity.id } as const) : ({ type: 'service', id: req.caller.service } as const);
     // Stage 18.7 (G1): a user's kind comes from Auth's verified identity (its admin tier), never from the request.
     const userKind = req.caller.kind === 'user' ? (req.caller.identity.adminTier ?? 'member') : undefined;

@@ -10,6 +10,7 @@ import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-m
 import type { PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
+import { PAYMENT_MESSAGES } from '../messages.js';
 
 export interface CreatePaymentResult {
   payment: PaymentRow;
@@ -45,23 +46,23 @@ export class PaymentService {
       throw paymentError(422, 'unsupported_currency', `Currency ${dto.currency} is not supported.`);
     }
     if (dto.payer.type === dto.seller.type && dto.payer.id === dto.seller.id) {
-      throw paymentError(400, 'invalid_payment_request', 'payer and seller must differ.');
+      throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.payerSellerMustDiffer);
     }
     // An organization is identified by a uuid (the `organizationId` column is a uuid): a seller of that type whose id is
     // not one is a bad request, not a database error. Compared and stored in canonical (lower-case) form.
     let seller = dto.seller;
     let organizationId: string | null = dto.organizationId ? dto.organizationId.toLowerCase() : null;
     if (dto.seller.type === 'organization') {
-      if (!UUID.test(dto.seller.id)) throw paymentError(400, 'invalid_payment_request', 'seller.id must be a uuid when seller.type is organization.');
+      if (!UUID.test(dto.seller.id)) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.sellerIdMustBeUuid);
       seller = { type: dto.seller.type, id: dto.seller.id.toLowerCase() };
       if (organizationId && organizationId !== seller.id) {
-        throw paymentError(400, 'invalid_payment_request', 'organizationId must equal seller.id when seller.type is organization.');
+        throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.organizationIdMustEqualSeller);
       }
       organizationId = seller.id;
     }
     // The shape check in the DTO admits values such as 2026-13-45T00:00:00Z that are not instants.
     const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
-    if (expiresAt && Number.isNaN(expiresAt.getTime())) throw paymentError(400, 'invalid_payment_request', 'expiresAt is not a valid timestamp.');
+    if (expiresAt && Number.isNaN(expiresAt.getTime())) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.expiresAtInvalid);
     const ctx = requestContext({ type: 'service', id: producer });
 
     if (organizationId !== null) {
@@ -71,7 +72,7 @@ export class PaymentService {
       const { rows: prior } = await this.db.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
       if (prior[0]) {
         if (isIdenticalSnapshot(prior[0], producer, dto, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
-        throw paymentError(409, 'payment_request_conflict', 'A payment already exists for this paymentRequestId with a different snapshot.');
+        throw paymentError(409, 'payment_request_conflict', PAYMENT_MESSAGES.paymentRequestConflict);
       }
       await this.organizationScope.assertInScope(producer, organizationId);
     }
@@ -102,7 +103,7 @@ export class PaymentService {
         const { rows } = await q.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
         const existing = rows[0];
         if (isIdenticalSnapshot(existing, producer, dto, seller, organizationId, expiresAt)) return { payment: existing, replayed: true };
-        throw paymentError(409, 'payment_request_conflict', 'A payment already exists for this paymentRequestId with a different snapshot.');
+        throw paymentError(409, 'payment_request_conflict', PAYMENT_MESSAGES.paymentRequestConflict);
       }
     });
   }
@@ -133,21 +134,21 @@ export class PaymentService {
       if (reserved.replay) {
         const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [reserved.resourceId]);
         const payment = rows[0];
-        if (!payment) throw paymentError(404, 'not_found', 'Not found.');
+        if (!payment) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
         return { payment, replayed: true };
       }
 
       const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [id]);
       const payment = rows[0];
-      if (!payment) throw paymentError(404, 'not_found', 'Not found.');
+      if (!payment) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
       if (isTerminalPaymentStatus(payment.status) || !canTransitionPayment(payment.status, 'cancelled')) {
-        throw paymentError(409, 'invalid_state_transition', `Cannot cancel a payment in status ${payment.status}.`);
+        throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.cannotCancelInStatus, { status: payment.status });
       }
       const { rows: openAttempts } = await q.query(
         `SELECT 1 FROM payment_attempt WHERE "paymentId" = $1 AND status IN ('initiated','submitted','unknown')`,
         [id],
       );
-      if (openAttempts.length > 0) throw paymentError(409, 'payment_has_open_attempt', 'An attempt is still open.');
+      if (openAttempts.length > 0) throw paymentError(409, 'payment_has_open_attempt', PAYMENT_MESSAGES.attemptStillOpen);
       const { rows: updated } = await q.query<PaymentRow>(
         `UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = $1 RETURNING *`,
         [id],

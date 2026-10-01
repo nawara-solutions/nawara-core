@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import { paymentError } from '../errors.js';
+import { PAYMENT_MESSAGES } from '../messages.js';
 
 export type ReserveResult = { replay: false } | { replay: true; responseStatus: number; resourceId: string };
 
@@ -40,7 +41,7 @@ export class IdempotencyService {
       );
       const existing = rows[0];
       if (existing.requestHash !== params.requestHash) {
-        throw paymentError(422, 'idempotency_key_reused', 'This Idempotency-Key was already used with a different request.');
+        throw paymentError(422, 'idempotency_key_reused', PAYMENT_MESSAGES.idempotencyKeyReused);
       }
       return { replay: true, responseStatus: existing.responseStatus, resourceId: existing.resourceId };
     }
