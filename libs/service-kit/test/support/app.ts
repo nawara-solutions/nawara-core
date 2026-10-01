@@ -4,7 +4,7 @@ import { Test } from '@nestjs/testing';
 import { IsString } from 'class-validator';
 import {
   CallerService, HealthModule, JsonLogger, ReadinessRegistry, ServiceAuthModule, ServiceTokenGuard, configureApp, loadBaseConfig,
-  type ServiceTokenEntry,
+  type ConfigureAppOptions, type ServiceTokenEntry,
 } from '../../src/index.js';
 
 export class EchoDto {
@@ -46,7 +46,7 @@ export interface TestApp {
   logs: Record<string, any>[];
 }
 
-export async function createTestApp(opts: { tokens?: ServiceTokenEntry[]; extraImports?: any[]; env?: NodeJS.ProcessEnv } = {}): Promise<TestApp> {
+export async function createTestApp(opts: { tokens?: ServiceTokenEntry[]; extraImports?: any[]; env?: NodeJS.ProcessEnv; configure?: ConfigureAppOptions } = {}): Promise<TestApp> {
   const logs: Record<string, any>[] = [];
   const config = loadBaseConfig('probe-service', { NODE_ENV: 'production', BODY_LIMIT_KB: '1', ...opts.env });
   const logger = new JsonLogger(config.serviceName, 'debug', (l) => logs.push(JSON.parse(l)));
@@ -55,7 +55,7 @@ export async function createTestApp(opts: { tokens?: ServiceTokenEntry[]; extraI
     controllers: [ProbeController as Type<unknown>],
   }).compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false, logger: false });
-  configureApp(app, config, logger);
+  configureApp(app, config, logger, opts.configure);
   await app.listen(0, '127.0.0.1'); // a real listener: parallel supertest bursts otherwise ECONNRESET
   return { app, registry: app.get(ReadinessRegistry), logs };
 }

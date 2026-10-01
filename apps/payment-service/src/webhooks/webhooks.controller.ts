@@ -5,6 +5,12 @@ import type { Request, Response } from 'express';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import { WebhookService } from './webhook.service.js';
 
+/**
+ * ADR-0054 D12: every response of this provider-facing route keeps its exact pre-localization error rendering (no new code, no
+ * localized text, no `Content-Language` / `Vary`). Passed to `configureApp` by `main.ts` and by the test app alike.
+ */
+export const WEBHOOK_PATH_PREFIX = '/payment/webhooks/';
+
 @ApiTags('webhooks')
 @Controller('payment/webhooks')
 export class WebhooksController {

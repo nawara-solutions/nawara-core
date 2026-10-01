@@ -1,6 +1,8 @@
 import { HttpException, Logger } from '@nestjs/common';
 import { ConfigError, type EnvReader } from '../config/config.js';
 import { correlationHeaders } from '../context/request-context.js';
+import { attachLocalizedMessage } from '../errors/http-error.js';
+import { KIT_MESSAGES } from '../errors/kit-messages.js';
 
 /**
  * Stage 21.C.2 (ADR-0052 decision 3, ADR-0042 decision 5, A.3, A.5 and Amendment 2): the client side of Organization Service's reference
@@ -32,7 +34,8 @@ export const ORGANIZATION_REFERENCE = Symbol('ORGANIZATION_REFERENCE');
 /** The hierarchy authority could not answer (not yet authoritative, down, slow, or an answer that is not its answer). Nothing was changed. */
 export class HierarchyUnavailableError extends HttpException {
   constructor() {
-    super({ message: 'The organization hierarchy could not be verified; nothing was changed. Retry later.', code: 'hierarchy_unavailable' }, 503);
+    super({ message: KIT_MESSAGES.hierarchy_unavailable.en, code: 'hierarchy_unavailable' }, 503);
+    attachLocalizedMessage(this, { texts: KIT_MESSAGES.hierarchy_unavailable });
   }
 }
 

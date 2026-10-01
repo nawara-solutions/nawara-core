@@ -6,6 +6,7 @@ import { AppModule } from './app.module.js';
 import { basicAuth } from './docs/basic-auth.js';
 import { loadPaymentConfig } from './config/payment-config.js';
 import { registerRabbitmqReadiness } from './health/rabbitmq-readiness.js';
+import { WEBHOOK_PATH_PREFIX } from './webhooks/webhooks.controller.js';
 
 async function bootstrap() {
   const config = loadPaymentConfig(); // throws ConfigError (fail closed), without echoing values
@@ -14,7 +15,7 @@ async function bootstrap() {
   // rawBody: true captures the exact request bytes into req.rawBody (needed for webhook signature verification,
   // section 7 of the SDD) alongside the normal parsed body; bodyParser: false lets the kit install its own bounded one.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false, rawBody: true, bufferLogs: true });
-  configureApp(app, config, logger);
+  configureApp(app, config, logger, { errorLocalizationExcludedPaths: [WEBHOOK_PATH_PREFIX] }); // ADR-0054 D12
 
   if (config.rabbitmqUrl) registerRabbitmqReadiness(app.get(ReadinessRegistry), config.rabbitmqUrl);
 

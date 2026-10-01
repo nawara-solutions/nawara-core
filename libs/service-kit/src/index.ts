@@ -9,7 +9,10 @@ export { JsonLogger, type LogSink } from './logging/json-logger.js';
 export { redact, redactString } from './logging/redact.js';
 export { describeFailure, failureFacts, type FailureFacts, type FailureKind } from './logging/failure.js';
 
-export { KitExceptionFilter, type ErrorBody } from './errors/exception.filter.js';
+export { KitExceptionFilter, INTERNAL_ERROR_CODE, type ErrorBody, type KitExceptionFilterOptions } from './errors/exception.filter.js';
+export { httpError } from './errors/http-error.js';
+export { resolveLocale, SUPPORTED_LOCALES, DEFAULT_LOCALE, MAX_ACCEPT_LANGUAGE_LENGTH, MAX_LANGUAGE_RANGES, type Locale } from './i18n/locale.js';
+export { defineMessages, renderMessage, catalogProblems, type MessageTexts, type MessageParams, type LocalizedMessage } from './i18n/catalog.js';
 
 export { HealthModule } from './health/health.module.js';
 export { HealthController } from './health/health.controller.js';
@@ -48,7 +51,7 @@ export { RabbitMqEventBus, PublisherConfirmTimeoutError, DEFAULT_RABBITMQ_HEARTB
 export { RateLimitModule } from './rate-limit/rate-limit.module.js';
 export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';
 
-export { configureApp } from './bootstrap.js';
+export { configureApp, type ConfigureAppOptions } from './bootstrap.js';
 
 export { canonicalJson, sha256Hex, digestRows, sealSnapshot, serializeSnapshot, verifySnapshot, SnapshotError, type SealedSnapshot, type SealInput, type SnapshotRow, type VerifyResult } from './snapshot/snapshot.js';
 export { inspectDeadLetters, replayDeadLetter, type DeadLetterInfo, type Inspection, type ReplayOutcome, type ReplayResult } from './events/dlq-tools.js';

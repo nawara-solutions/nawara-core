@@ -12,6 +12,7 @@ import { loadPaymentConfig, type PaymentConfig } from '../../src/config/payment-
 import { PaymentConfigModule } from '../../src/config/payment-config.module.js';
 import { PaymentsModule } from '../../src/payments/payments.module.js';
 import { ProvidersModule } from '../../src/providers/providers.module.js';
+import { WEBHOOK_PATH_PREFIX } from '../../src/webhooks/webhooks.controller.js';
 import { WebhooksModule } from '../../src/webhooks/webhooks.module.js';
 
 /** The Platform every Organization resolves to under the default test reference (a test double, never production code). */
@@ -100,7 +101,7 @@ export async function createTestApp(opts: {
   }).compile();
 
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false, rawBody: true, logger: false });
-  configureApp(app, config, logger);
+  configureApp(app, config, logger, { errorLocalizationExcludedPaths: [WEBHOOK_PATH_PREFIX] }); // as main.ts (ADR-0054 D12)
   await app.listen(0, '127.0.0.1');
   return { app, config, registry: app.get(ReadinessRegistry), logs };
 }

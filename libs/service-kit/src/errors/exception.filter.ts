@@ -1,8 +1,12 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { getRequestContext } from '../context/request-context.js';
+import { renderMessage, type MessageTexts } from '../i18n/catalog.js';
+import { DEFAULT_LOCALE, type Locale } from '../i18n/locale.js';
 import { describeFailure } from '../logging/failure.js';
 import type { JsonLogger } from '../logging/json-logger.js';
+import { localizedMessageOf } from './http-error.js';
+import { KIT_MESSAGES, statusMessage } from './kit-messages.js';
 
 export interface ErrorBody {
   statusCode: number;
@@ -12,10 +16,30 @@ export interface ErrorBody {
   requestId?: string;
 }
 
+/** ADR-0054 behaviour of the filter. Off by default (Auth's subclass is unchanged until it adopts it, R5); `configureApp` turns it on. */
+export interface KitExceptionFilterOptions {
+  /** Localize `message` (D5), add the generic codes (D4) and the `Content-Language` / `Vary` headers (D8). */
+  localize?: boolean;
+  /**
+   * Path prefixes whose error responses keep exactly the pre-ADR-0054 rendering: no new code, no localization, no new header (D12,
+   * for example a payment provider's webhook route). Prefix match on the request path.
+   */
+  excludedPathPrefixes?: readonly string[];
+}
+
 const STATUS_TEXT: Record<number, string> = {
   400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 408: 'Request Timeout', 409: 'Conflict', 411: 'Length Required',
   413: 'Payload Too Large', 415: 'Unsupported Media Type', 422: 'Unprocessable Entity', 429: 'Too Many Requests', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable',
 };
+
+/** The opaque 500's machine code (ADR-0054 D4: `internal_error`, decided in R3). */
+export const INTERNAL_ERROR_CODE = 'internal_error';
+
+/**
+ * D4: the existing generic code of a Nest exception thrown with its DEFAULT message (`new UnauthorizedException()`), whose meaning is
+ * fixed by its status. Statuses whose generic code ADR-0054 leaves undecided (400, 503, …) get none.
+ */
+const DEFAULT_MESSAGE_CODE: Record<number, string> = { 401: 'unauthenticated', 403: 'forbidden', 404: 'not_found', 429: 'rate_limited' };
 
 function codeOf(raw: unknown): string | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
@@ -29,40 +53,92 @@ function isClientHttpError(e: unknown): e is { status?: number; statusCode?: num
   return typeof code === 'number' && code >= 400 && code < 500;
 }
 
+/** Appends `Accept-Language` to `Vary`, keeping every existing value (CORS varies on `Origin`) and never duplicating it. */
+function varyOnAcceptLanguage(res: Response): void {
+  const current = res.getHeader('Vary');
+  const values = (Array.isArray(current) ? current.join(',') : current === undefined ? '' : String(current))
+    .split(',').map((v) => v.trim()).filter(Boolean);
+  if (values.includes('*') || values.some((v) => v.toLowerCase() === 'accept-language')) return;
+  res.setHeader('Vary', [...values, 'Accept-Language'].join(', '));
+}
+
 /**
  * One error shape for every Core service: Nest's `{ statusCode, message, error }` plus `requestId`.
- * A stable, machine-readable `code` is additive and optional: throw `new HttpException({ message, code }, status)`
- * and it passes through untouched; omit it and the body is unchanged from before.
+ * A stable, machine-readable `code` is additive and optional: throw `httpError(status, code, message)` (or
+ * `new HttpException({ message, code }, status)`) and it passes through untouched; omit it and the body is unchanged from before.
  * Anything that is not an HttpException (database errors, bugs, provider failures) becomes an opaque 500. No stack, SQL text,
  * constraint name or credential can reach a response. The server log gets the failure's facts only (`describeFailure`: class,
  * SQLSTATE or system code, failure kind; the request and correlation ids come from the logger's context), never its message: a
  * message can name internal hosts and paths, carry SQL or constraint text, echo user input or hold a secret (Stage 22 F13).
+ *
+ * With `localize` (ADR-0054), classification happens FIRST and only these become localized text: a catalog message a Core thrower
+ * attached through `httpError`, a Nest exception's default status text, a middleware client error's generic text, and the opaque 500.
+ * Any other message is a Core-written English string and passes through unchanged; nothing of an unexpected error is ever rendered.
  */
 @Catch()
 export class KitExceptionFilter implements ExceptionFilter {
-  constructor(private readonly logger: JsonLogger) {}
+  private readonly localize: boolean;
+  private readonly excludedPathPrefixes: readonly string[];
+
+  constructor(private readonly logger: JsonLogger, options: KitExceptionFilterOptions = {}) {
+    this.localize = options.localize ?? false;
+    this.excludedPathPrefixes = options.excludedPathPrefixes ?? [];
+  }
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const res = host.switchToHttp().getResponse<Response>();
+    const req = host.switchToHttp().getRequest<Request | undefined>();
     const requestId = getRequestContext()?.requestId;
+    const localize = this.localize && !this.isExcluded(req);
+    const locale: Locale = localize ? (getRequestContext()?.locale ?? DEFAULT_LOCALE) : DEFAULT_LOCALE;
+    let used: Locale = DEFAULT_LOCALE;
+    const render = (texts: MessageTexts, params?: Parameters<typeof renderMessage>[2]): string => {
+      const r = renderMessage(texts, locale, params);
+      used = r.locale;
+      return r.text;
+    };
     let body: ErrorBody;
 
     if (exception instanceof HttpException) {
       const status = exception.getStatus();
       const raw = exception.getResponse();
-      const message = typeof raw === 'string' ? raw : ((raw as { message?: string | string[] }).message ?? exception.message);
-      const code = codeOf(raw);
+      let message = typeof raw === 'string' ? raw : ((raw as { message?: string | string[] }).message ?? exception.message);
+      let code = codeOf(raw);
+      if (localize) {
+        const attached = localizedMessageOf(exception);
+        const generic = statusMessage(status);
+        if (attached) message = render(attached.texts, attached.params);
+        else if (code === undefined && generic && message === STATUS_TEXT[status]) {
+          // a Nest exception thrown with its default message: the text is the status phrase, a framework constant (never caller data)
+          message = render(generic);
+          code = DEFAULT_MESSAGE_CODE[status];
+        }
+      }
       body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', ...(code ? { code } : {}), requestId };
       if (status >= 500) this.logger.error('request failed', { status, error: exception.constructor.name });
     } else if (isClientHttpError(exception)) {
       // Errors raised by Express middleware (for example body-parser: payload too large, malformed JSON) carry an HTTP status.
       // The status is honoured; the message is generic, because these messages can echo fragments of the request.
       const status = exception.status ?? exception.statusCode ?? 400;
-      body = { statusCode: status, message: STATUS_TEXT[status] ?? 'Bad Request', error: STATUS_TEXT[status] ?? 'Bad Request', requestId };
+      const text = STATUS_TEXT[status] ?? 'Bad Request';
+      const message = localize ? render(statusMessage(status) ?? KIT_MESSAGES.status_400) : text;
+      body = { statusCode: status, message, error: text, requestId };
     } else {
-      body = { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message: 'Internal server error', error: 'Internal Server Error', requestId };
+      const message = localize ? render(KIT_MESSAGES.internal_error) : 'Internal server error';
+      body = { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message, error: 'Internal Server Error', ...(localize ? { code: INTERNAL_ERROR_CODE } : {}), requestId };
       this.logger.error('unhandled error', { failure: describeFailure(exception) });
     }
-    if (!res.headersSent) res.status(body.statusCode).json(body);
+    if (res.headersSent) return;
+    if (localize) {
+      res.setHeader('Content-Language', used);
+      varyOnAcceptLanguage(res);
+    }
+    res.status(body.statusCode).json(body);
+  }
+
+  private isExcluded(req: Request | undefined): boolean {
+    if (this.excludedPathPrefixes.length === 0 || !req) return false;
+    const path = (req.originalUrl ?? req.url ?? '').split('?')[0]!;
+    return this.excludedPathPrefixes.some((p) => path.startsWith(p));
   }
 }
