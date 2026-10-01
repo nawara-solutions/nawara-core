@@ -1,4 +1,6 @@
+import type { MessageParams, MessageTexts } from '@nawara/service-kit';
 import { billingError } from './errors.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 /** What a producer asks for when it creates a price (SDD 18.1, endpoint 4; SDD 12). `pricingModel` is not an input: `flat` only. */
 export interface RawCreatePriceInput {
@@ -31,7 +33,7 @@ const OFFSET_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{
 const MAX_MINOR_UNITS = 9007199254740991n;
 const ALLOWED_TOP = new Set(['productId', 'clientReference', 'currency', 'unitAmount', 'interval', 'intervalUnit', 'intervalCount', 'effectiveFrom']);
 
-const bad = (message: string) => billingError(400, 'invalid_price_request', message);
+const bad = (message: string | MessageTexts, params?: MessageParams) => billingError(400, 'invalid_price_request', message, params);
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /**
@@ -39,32 +41,32 @@ const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typ
  * smuggle `pricingModel`, `retiredAt` or `revision`. Throws 400 `invalid_price_request`.
  */
 export function normaliseCreatePriceInput(raw: unknown): NormalisedCreatePriceInput {
-  if (!isObject(raw)) throw bad('the request must be an object');
-  for (const k of Object.keys(raw)) if (!ALLOWED_TOP.has(k)) throw bad(`unknown field: ${k}`);
+  if (!isObject(raw)) throw bad(BILLING_MESSAGES.requestMustBeObject);
+  for (const k of Object.keys(raw)) if (!ALLOWED_TOP.has(k)) throw bad(BILLING_MESSAGES.unknownField, { name: k });
 
-  if (typeof raw.productId !== 'string' || !UUID.test(raw.productId)) throw bad('productId must be a uuid');
-  if (typeof raw.clientReference !== 'string' || !CLIENT_REFERENCE.test(raw.clientReference)) throw bad('clientReference must be 1 to 128 characters of [A-Za-z0-9._:-]');
-  if (typeof raw.currency !== 'string' || !CURRENCY.test(raw.currency)) throw bad('currency must be a three-letter ISO 4217 code');
+  if (typeof raw.productId !== 'string' || !UUID.test(raw.productId)) throw bad(BILLING_MESSAGES.mustBeUuid, { field: 'productId' });
+  if (typeof raw.clientReference !== 'string' || !CLIENT_REFERENCE.test(raw.clientReference)) throw bad(BILLING_MESSAGES.clientReferencePattern);
+  if (typeof raw.currency !== 'string' || !CURRENCY.test(raw.currency)) throw bad(BILLING_MESSAGES.currencyIso);
 
-  if (typeof raw.unitAmount !== 'number' || !Number.isSafeInteger(raw.unitAmount) || raw.unitAmount < 1) throw bad('unitAmount must be a positive integer number of minor units');
+  if (typeof raw.unitAmount !== 'number' || !Number.isSafeInteger(raw.unitAmount) || raw.unitAmount < 1) throw bad(BILLING_MESSAGES.unitAmountPositive);
   const unitAmount = BigInt(raw.unitAmount);
-  if (unitAmount > MAX_MINOR_UNITS) throw bad(`unitAmount must be at most ${MAX_MINOR_UNITS}`);
+  if (unitAmount > MAX_MINOR_UNITS) throw bad(BILLING_MESSAGES.unitAmountMax, { max: String(MAX_MINOR_UNITS) });
 
-  if (raw.interval !== 'one_time' && raw.interval !== 'recurring') throw bad('interval must be one_time or recurring');
+  if (raw.interval !== 'one_time' && raw.interval !== 'recurring') throw bad(BILLING_MESSAGES.intervalValues);
   let intervalUnit: string | null = null;
   let intervalCount: number | null = null;
   if (raw.interval === 'recurring') {
-    if (typeof raw.intervalUnit !== 'string' || !INTERVAL_UNITS.includes(raw.intervalUnit)) throw bad('intervalUnit must be day, week, month or year for a recurring price');
-    if (typeof raw.intervalCount !== 'number' || !Number.isInteger(raw.intervalCount) || raw.intervalCount < 1) throw bad('intervalCount must be a positive integer for a recurring price');
+    if (typeof raw.intervalUnit !== 'string' || !INTERVAL_UNITS.includes(raw.intervalUnit)) throw bad(BILLING_MESSAGES.intervalUnitValues);
+    if (typeof raw.intervalCount !== 'number' || !Number.isInteger(raw.intervalCount) || raw.intervalCount < 1) throw bad(BILLING_MESSAGES.intervalCountPositive);
     intervalUnit = raw.intervalUnit;
     intervalCount = raw.intervalCount;
   } else if (raw.intervalUnit !== undefined || raw.intervalCount !== undefined) {
-    throw bad('a one_time price cannot carry intervalUnit or intervalCount');
+    throw bad(BILLING_MESSAGES.oneTimeNoInterval);
   }
 
-  if (typeof raw.effectiveFrom !== 'string' || !OFFSET_TIMESTAMP.test(raw.effectiveFrom)) throw bad('effectiveFrom must be an absolute timestamp with an offset');
+  if (typeof raw.effectiveFrom !== 'string' || !OFFSET_TIMESTAMP.test(raw.effectiveFrom)) throw bad(BILLING_MESSAGES.timestampWithOffset, { field: 'effectiveFrom' });
   const effectiveFrom = new Date(raw.effectiveFrom);
-  if (Number.isNaN(effectiveFrom.getTime())) throw bad('effectiveFrom must be an absolute timestamp with an offset');
+  if (Number.isNaN(effectiveFrom.getTime())) throw bad(BILLING_MESSAGES.timestampWithOffset, { field: 'effectiveFrom' });
 
   return { productId: raw.productId.toLowerCase(), clientReference: raw.clientReference, currency: raw.currency, unitAmount, interval: raw.interval, intervalUnit, intervalCount, effectiveFrom };
 }

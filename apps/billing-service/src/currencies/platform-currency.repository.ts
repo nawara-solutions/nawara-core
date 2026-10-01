@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DbService, pgCode, type Queryable } from '@nawara/service-kit';
 import { billingError } from '../domain/errors.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 export interface PlatformCurrencyRow {
   platformId: string;
@@ -35,7 +36,7 @@ export class PlatformCurrencyRepository {
 
   /** `422 unsupported_currency` (SDD 18.2) when the Platform may not use the currency for new work. */
   async assertPermitted(platformId: string, currency: string, q: Queryable = this.db): Promise<void> {
-    if (!(await this.isPermitted(platformId, currency, q))) throw billingError(422, 'unsupported_currency', 'The currency is not enabled for this platform.');
+    if (!(await this.isPermitted(platformId, currency, q))) throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotEnabledForPlatform);
   }
 
   /** Enables a currency for a Platform (creating the configuration, or re-enabling a disabled one). Idempotent: enabling an enabled currency changes nothing. */
@@ -51,7 +52,7 @@ export class PlatformCurrencyRepository {
       return rows[0]!;
     } catch (e) {
       // the foreign key to the global reference: a currency Billing does not know cannot be enabled
-      if (pgCode(e) === '23503') throw billingError(422, 'unsupported_currency', 'The currency does not exist.');
+      if (pgCode(e) === '23503') throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyDoesNotExist);
       throw e;
     }
   }
@@ -63,7 +64,7 @@ export class PlatformCurrencyRepository {
       `UPDATE platform_currency SET enabled = false WHERE "platformId" = $1 AND currency = $2 RETURNING *`,
       [platformId, currency],
     );
-    if (!rows[0]) throw billingError(404, 'not_found', 'Not found.');
+    if (!rows[0]) throw billingError(404, 'not_found', BILLING_MESSAGES.notFound);
     return rows[0];
   }
 

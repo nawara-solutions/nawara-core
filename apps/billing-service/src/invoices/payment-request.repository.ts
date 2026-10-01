@@ -13,6 +13,7 @@ import type { PaymentSnapshot } from '../payment-integration/payment-client.js';
 import { INVOICE_COLUMNS, type InvoiceRow, type PaymentRequestRow } from './invoice.types.js';
 import { recordTransition } from '../domain/transitions.js';
 import { SubscriptionRepository } from '../subscriptions/subscription.repository.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;
@@ -78,8 +79,8 @@ export class PaymentRequestRepository {
       const { rows } = await q.query<InvoiceRow>(`SELECT ${INVOICE_COLUMNS} FROM invoice WHERE id = $1 FOR UPDATE`, [invoiceId]);
       const invoice = rows[0];
       if (!invoice || relationTo(invoice, caller) === null) throw notFound();
-      if (invoice.status !== 'open') throw billingError(409, 'invoice_not_payable', 'Only an open invoice can be paid.');
-      if (invoice.payerType !== 'user') throw billingError(409, 'payment_request_not_supported', 'Only a user payer can pay an invoice for now.');
+      if (invoice.status !== 'open') throw billingError(409, 'invoice_not_payable', BILLING_MESSAGES.onlyOpenInvoicePayable);
+      if (invoice.payerType !== 'user') throw billingError(409, 'payment_request_not_supported', BILLING_MESSAGES.onlyUserPayer);
 
       const active = await q.query<PaymentRequestRow>(
         `SELECT * FROM payment_request WHERE "invoiceId" = $1 AND status = ANY($2::text[])`,
@@ -243,7 +244,7 @@ export class PaymentRequestRepository {
       );
       const row = rows[0] as (typeof rows)[number] & { invoiceOrganizationId: string | null };
       if (!row || relationTo(row, caller) === null) throw notFound();
-      if (row.status !== 'created') throw billingError(409, 'payment_request_in_flight', 'This request has already been sent; it cannot be cancelled locally.');
+      if (row.status !== 'created') throw billingError(409, 'payment_request_in_flight', BILLING_MESSAGES.requestAlreadySent);
       const { rows: updated } = await q.query<PaymentRequestRow>(`UPDATE payment_request SET status = 'cancelled' WHERE id = $1 RETURNING *`, [requestId]);
       await recordTransition(q, { entityType: 'payment_request', entityId: requestId, from: 'created', to: 'cancelled', revision: updated[0]!.revision, ctx });
       await this.audit.record(q, 'payment_request.cancelled', { organizationId: row.invoiceOrganizationId, resource: { type: 'payment_request', id: requestId }, changes: { invoice_id: row.invoiceId } }, ctx); // Stage 18.7.2
@@ -260,7 +261,7 @@ export class PaymentRequestRepository {
       );
       const row = rows[0];
       if (!row || relationTo(row, caller) === null) throw notFound();
-      if (row.status !== 'requested' || !row.paymentId) throw billingError(409, 'payment_request_in_flight', 'This request cannot be cancelled yet.');
+      if (row.status !== 'requested' || !row.paymentId) throw billingError(409, 'payment_request_in_flight', BILLING_MESSAGES.requestNotCancellableYet);
       const { rows: updated } = await q.query<PaymentRequestRow>(
         `UPDATE payment_request SET "cancelRequestedAt" = now() WHERE id = $1 AND "cancelRequestedAt" IS NULL RETURNING *`,
         [requestId],

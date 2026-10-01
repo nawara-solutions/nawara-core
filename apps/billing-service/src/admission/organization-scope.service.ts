@@ -1,11 +1,12 @@
-import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
-import { ORGANIZATION_REFERENCE, getRequestContext, type OrganizationReferenceResolver } from '@nawara/service-kit';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ORGANIZATION_REFERENCE, getRequestContext, httpError, type OrganizationReferenceResolver } from '@nawara/service-kit';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import type { BillingConfig } from '../config/billing-config.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 /** One answer for an Organization that does not exist and one outside the caller's scope: no existence oracle. */
 export const organizationNotPermitted = () =>
-  new HttpException({ message: 'The organization is not within the calling service\'s scope.', code: 'organization_not_permitted' }, 403);
+  httpError(403, 'organization_not_permitted', BILLING_MESSAGES.organizationNotPermitted);
 
 /**
  * Stage 21.C.2 (ADR-0052 decision 3; ADR-0042 decision 5, A.3, A.5): an Organization a SERVICE caller names (a create's seller or

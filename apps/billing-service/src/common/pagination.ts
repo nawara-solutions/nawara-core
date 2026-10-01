@@ -1,4 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
+import { attachLocalizedMessage } from '@nawara/service-kit';
+import { BILLING_MESSAGES } from '../messages.js';
 
 /** Cursor pagination for lists (ADR-0034): `?limit=&cursor=` returning `{ items, nextCursor }`. Sort is fixed to newest first. */
 export const DEFAULT_LIMIT = 20;
@@ -21,7 +23,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export function parseLimit(raw: unknown): number {
   if (raw === undefined || raw === null || raw === '') return DEFAULT_LIMIT;
   const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d{1,6}$/.test(raw) ? Number(raw) : NaN;
-  if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) throw new BadRequestException(`limit must be an integer from 1 to ${MAX_LIMIT}`);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) throw attachLocalizedMessage(new BadRequestException(`limit must be an integer from 1 to ${MAX_LIMIT}`), { texts: BILLING_MESSAGES.limitRange, params: { max: MAX_LIMIT } }); // code-less, as before
   return n;
 }
 
@@ -31,7 +33,7 @@ export function encodeCursor(position: CursorPosition): string {
 
 /** Strict: a cursor that is not exactly what `encodeCursor` produces is a 400 (never a 500, never trusted as SQL). */
 export function decodeCursor(raw: string): CursorPosition {
-  const bad = () => new BadRequestException('cursor is not valid');
+  const bad = () => attachLocalizedMessage(new BadRequestException('cursor is not valid'), { texts: BILLING_MESSAGES.cursorInvalid }); // code-less, as before
   if (!/^[A-Za-z0-9_-]{1,256}$/.test(raw)) throw bad();
   let parsed: unknown;
   try {

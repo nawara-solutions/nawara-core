@@ -488,6 +488,8 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       payment.whenCancel(paymentId, { kind: 'transient' });
       const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(503);
       expect(r.body.code).toBe('payment_unavailable');
+      // R6.6 / R2: the public message is Billing's fixed sentence (localized), never Payment's answer or any failure detail.
+      expect(r.body.message).toBe('Payment could not confirm the cancellation. Retry the same request.');
       expect((await requestRow(request.id)).status).toBe('requested');
       const firstStamp = (await requestRow(request.id)).cancelRequestedAt;
       payment.whenCancel(paymentId, { kind: 'cancelled' });
@@ -502,8 +504,10 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       for (const kind of ['auth_fault', 'not_found'] as const) {
         const { request, paymentId } = await requestedRow();
         payment.whenCancel(paymentId, { kind });
-        const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).expect(503);
+        const r = await asProducer.post(`/billing/payment-requests/${request.id}/cancel`).set('accept-language', 'fr').expect(503);
         expect(r.body.code).toBe('payment_unavailable');
+        // R6.6 / R2: Billing's fixed sentence in the requested language, never Payment's answer or any failure detail.
+        expect(r.body.message).toBe("Le service de paiement n'a pas pu confirmer l'annulation. Réessayez la même requête.");
       }
     });
 

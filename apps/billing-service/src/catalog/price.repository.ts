@@ -7,6 +7,7 @@ import { billingError, notFound } from '../domain/errors.js';
 import { catalogRelationTo } from '../domain/relations.js';
 import type { NormalisedCreatePriceInput } from '../domain/price-input.js';
 import type { PriceRow, PriceWithProducer } from './catalog.types.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 export interface PriceWriteResult {
   price: PriceRow;
@@ -33,7 +34,7 @@ export class PriceRepository {
    * using a price of an archived product (SDD section 11) — that is enforced at invoice creation.
    */
   async create(caller: Caller, input: NormalisedCreatePriceInput, supportedCurrencies: string[]): Promise<PriceWriteResult> {
-    if (!supportedCurrencies.includes(input.currency)) throw billingError(422, 'unsupported_currency', 'The currency is not supported.');
+    if (!supportedCurrencies.includes(input.currency)) throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotSupported);
     return this.db.tx(async (q) => {
       const product = await this.assertOwnsProduct(q, input.productId, caller);
 
@@ -58,7 +59,7 @@ export class PriceRepository {
           existing.intervalUnit === input.intervalUnit &&
           existing.intervalCount === input.intervalCount &&
           existing.effectiveFrom.getTime() === input.effectiveFrom.getTime();
-        if (!identical) throw billingError(409, 'price_conflict', 'This productId and clientReference were used with different content.');
+        if (!identical) throw billingError(409, 'price_conflict', BILLING_MESSAGES.priceConflict);
         return { price: existing, changed: false };
       }
     });

@@ -8,6 +8,7 @@ import { billingError, notFound } from '../domain/errors.js';
 import { isLateRenewal, renewalAnchor } from '../domain/subscription-period.js';
 import { recordTransition } from '../domain/transitions.js';
 import type { SubscriptionRow } from './subscription.types.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 export interface SubscriptionWriteResult {
   subscription: SubscriptionRow;
@@ -57,9 +58,9 @@ export class SubscriptionRepository {
       return { subscription: inserted, changed: true };
     }
     const existing = await this.findByOrganization(q, organizationId);
-    if (!existing) throw billingError(409, 'subscription_conflict', 'The subscription request conflicts with another request.');
+    if (!existing) throw billingError(409, 'subscription_conflict', BILLING_MESSAGES.subscriptionRequestConflict);
     if (existing.productId !== productId || existing.priceId !== priceId) {
-      throw billingError(409, 'subscription_conflict', 'This organization already has a subscription to a different product or price.');
+      throw billingError(409, 'subscription_conflict', BILLING_MESSAGES.subscriptionDifferentProduct);
     }
     return { subscription: existing, changed: false };
   }
@@ -75,10 +76,10 @@ export class SubscriptionRepository {
    * `enterGrace`.
    */
   async activate(organizationId: string, period: { start: Date; end: Date }, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    if (period.end.getTime() <= period.start.getTime()) throw billingError(400, 'invalid_subscription_period', 'currentPeriodEnd must be after currentPeriodStart.');
+    if (period.end.getTime() <= period.start.getTime()) throw billingError(400, 'invalid_subscription_period', BILLING_MESSAGES.periodEndAfterStart);
     return this.db.tx(async (q) => {
       const row = await this.lock(q, organizationId);
-      if (row.status !== 'pending') throw billingError(409, 'invalid_subscription_transition', `A subscription that is ${row.status} cannot be activated.`);
+      if (row.status !== 'pending') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.subscriptionCannotBeActivated, { status: row.status });
       const { rows: cadence } = await q.query<{ anchoredEnd: Date | null }>(
         `SELECT CASE WHEN "intervalUnit" IN ('month', 'year')
                   THEN billing_subscription_period_end($2::timestamptz, $2::timestamptz, "intervalUnit", "intervalCount") END AS "anchoredEnd"
@@ -117,7 +118,7 @@ export class SubscriptionRepository {
   /** The composable core of `renew` (Stage 12.4): callable from within an ALREADY-OPEN transaction. */
   private async renewTx(q: Queryable, organizationId: string, now: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     const row = await this.lock(q, organizationId);
-    if (row.status === 'pending') throw billingError(409, 'invalid_subscription_transition', 'A pending subscription must be activated before it can be renewed.');
+    if (row.status === 'pending') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.pendingMustBeActivated);
     const basis = { currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil };
     return this.rollPeriod(q, row, renewalAnchor(basis, now), isLateRenewal(basis, now), ctx);
   }
@@ -210,8 +211,8 @@ export class SubscriptionRepository {
   async enterGrace(organizationId: string, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     return this.db.tx(async (q) => {
       const row = await this.lock(q, organizationId);
-      if (row.status !== 'active') throw billingError(409, 'invalid_subscription_transition', `A subscription that is ${row.status} cannot enter grace.`);
-      if (row.graceUntil === null) throw billingError(409, 'subscription_grace_unavailable', 'This subscription has no grace window to enter.');
+      if (row.status !== 'active') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.subscriptionCannotEnterGrace, { status: row.status });
+      if (row.graceUntil === null) throw billingError(409, 'subscription_grace_unavailable', BILLING_MESSAGES.noGraceWindow);
       const updated = await this.update(q, row.id, '', [], 'grace');
       await this.record(q, row, updated, ctx);
       return { subscription: updated, changed: true };
@@ -222,7 +223,7 @@ export class SubscriptionRepository {
   async expire(organizationId: string, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     return this.db.tx(async (q) => {
       const row = await this.lock(q, organizationId);
-      if (row.status !== 'active' && row.status !== 'grace') throw billingError(409, 'invalid_subscription_transition', `A subscription that is ${row.status} cannot expire.`);
+      if (row.status !== 'active' && row.status !== 'grace') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.subscriptionCannotExpire, { status: row.status });
       const updated = await this.update(q, row.id, '', [], 'expired');
       await this.record(q, row, updated, ctx);
       return { subscription: updated, changed: true };
@@ -242,7 +243,7 @@ export class SubscriptionRepository {
   private async setCancellation(organizationId: string, cancelAtPeriodEnd: boolean, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     return this.db.tx(async (q) => {
       const row = await this.lock(q, organizationId);
-      if (row.status !== 'active') throw billingError(409, 'invalid_subscription_transition', `A subscription that is ${row.status} cannot change its cancellation.`);
+      if (row.status !== 'active') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.subscriptionCannotChangeCancellation, { status: row.status });
       if (row.cancelAtPeriodEnd === cancelAtPeriodEnd) return { subscription: row, changed: false };
       const updated = await this.update(q, row.id, `"cancelAtPeriodEnd" = $2`, [cancelAtPeriodEnd], 'active');
       await this.record(q, row, updated, ctx);
@@ -258,7 +259,7 @@ export class SubscriptionRepository {
   async terminate(organizationId: string, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     return this.db.tx(async (q) => {
       const row = await this.lock(q, organizationId);
-      if (row.status !== 'active' && row.status !== 'grace') throw billingError(409, 'invalid_subscription_transition', `A subscription that is ${row.status} cannot be terminated.`);
+      if (row.status !== 'active' && row.status !== 'grace') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.subscriptionCannotBeTerminated, { status: row.status });
       const { rows } = await q.query<SubscriptionRow>(
         `UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = now() WHERE id = $1 RETURNING *`,
         [row.id],
