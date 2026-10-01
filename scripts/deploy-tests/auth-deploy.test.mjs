@@ -76,6 +76,27 @@ test('happy path: broker identity into .env, AUTH_EVENTS=off, joined to the priv
   assert.ok(labels.includes('traefik.http.services.nawara-core-auth-service.loadbalancer.server.port=3000'));
 });
 
+test('WebAuthn: a new installation gets the Nawara RP and the owner admin UI origin, never the API host', () => {
+  const w = auditBound();
+  assert.equal(deploy(w, { AUTH_HOST: 'core-api.nawara-solutions.com' }).code, 0);
+  const env = envFile(w);
+  assert.match(env, /^WEBAUTHN_RP_ID=nawara-solutions\.com$/m);
+  assert.match(env, /^WEBAUTHN_ORIGINS=https:\/\/admin\.nawara-solutions\.com$/m);
+  assert.match(env, /^WEBAUTHN_RP_NAME=Nawara$/m);
+  assert.doesNotMatch(env, /^WEBAUTHN_ORIGINS=.*core-api/m, 'the API host is not a WebAuthn browser origin');
+  assert.doesNotMatch(env, /hsalem-anwar/, 'no personal-domain WebAuthn default');
+});
+
+test('WebAuthn: existing values in .env are never overwritten by a deployment (changing them is a deliberate edit)', () => {
+  const w = auditBound();
+  mkdirSync(join(w.home, 'nawara-core/auth-service'), { recursive: true });
+  writeFileSync(join(w.home, 'nawara-core/auth-service/.env'), 'WEBAUTHN_RP_ID=hsalem-anwar.dev\nWEBAUTHN_ORIGINS=https://core-api.hsalem-anwar.dev\n');
+  assert.equal(deploy(w).code, 0);
+  const env = envFile(w);
+  assert.deepEqual(env.split('\n').filter((l) => l.startsWith('WEBAUTHN_RP_ID=') || l.startsWith('WEBAUTHN_ORIGINS=')),
+    ['WEBAUTHN_RP_ID=hsalem-anwar.dev', 'WEBAUTHN_ORIGINS=https://core-api.hsalem-anwar.dev']);
+});
+
 test('an existing RABBITMQ_URL in .env is never overwritten by the broker identity', () => {
   const w = auditBound();
   mkdirSync(join(w.home, 'nawara-core/auth-service'), { recursive: true });

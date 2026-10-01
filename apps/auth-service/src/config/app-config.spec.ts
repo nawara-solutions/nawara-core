@@ -220,3 +220,40 @@ describe('HTTP drain deadline, same contract as the service-kit (Stage 15.5, F-A
     });
   });
 });
+
+describe('WebAuthn production configuration: the owner admin UI origin under the Nawara RP ID', () => {
+  const prod = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+    ...good(), NODE_ENV: 'production', DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672',
+    WEBAUTHN_RP_ID: 'nawara-solutions.com', WEBAUTHN_ORIGINS: 'https://admin.nawara-solutions.com', ...over,
+  });
+
+  it('accepts the owner decision: RP nawara-solutions.com, browser origin https://admin.nawara-solutions.com', () => {
+    expect(loadConfig(prod()).webauthn).toEqual({ rpId: 'nawara-solutions.com', rpName: 'Nawara', origins: ['https://admin.nawara-solutions.com'] });
+  });
+  it('refuses to start without an RP ID or without origins', () => {
+    expect(() => loadConfig(prod({ WEBAUTHN_RP_ID: undefined }))).toThrow(/WEBAUTHN_RP_ID and WEBAUTHN_ORIGINS are required/);
+    expect(() => loadConfig(prod({ WEBAUTHN_ORIGINS: undefined }))).toThrow(/WEBAUTHN_RP_ID and WEBAUTHN_ORIGINS are required/);
+    expect(() => loadConfig(prod({ WEBAUTHN_ORIGINS: ' , ' }))).toThrow(/WEBAUTHN_RP_ID and WEBAUTHN_ORIGINS are required/);
+  });
+  it('refuses a plain http origin', () => {
+    expect(() => loadConfig(prod({ WEBAUTHN_ORIGINS: 'http://admin.nawara-solutions.com' }))).toThrow(/https/);
+  });
+  it('refuses an origin outside the RP ID, including a look-alike suffix and a foreign RP', () => {
+    for (const [rp, origin] of [
+      ['nawara-solutions.com', 'https://evil.example'],
+      ['nawara-solutions.com', 'https://evilnawara-solutions.com'],
+      ['nawara-solutions.com', 'https://admin.nawara-solutions.com.evil.example'],
+      ['hsalem-anwar.dev', 'https://admin.nawara-solutions.com'],
+    ]) expect(() => loadConfig(prod({ WEBAUTHN_RP_ID: rp, WEBAUTHN_ORIGINS: origin })), `${rp} / ${origin}`).toThrow(/subdomain of it/);
+  });
+  it('refuses an origin that is not exact (a path or a trailing slash never matches a browser origin)', () => {
+    for (const bad of ['https://admin.nawara-solutions.com/', 'https://admin.nawara-solutions.com/login']) {
+      expect(() => loadConfig(prod({ WEBAUTHN_ORIGINS: bad })), bad).toThrow(/exact origins/);
+    }
+  });
+  it('accepts the RP host itself, and several origins under the RP when intentionally configured', () => {
+    expect(loadConfig(prod({ WEBAUTHN_ORIGINS: 'https://nawara-solutions.com' })).webauthn.origins).toEqual(['https://nawara-solutions.com']);
+    expect(loadConfig(prod({ WEBAUTHN_ORIGINS: 'https://admin.nawara-solutions.com, https://owner.admin.nawara-solutions.com' })).webauthn.origins)
+      .toEqual(['https://admin.nawara-solutions.com', 'https://owner.admin.nawara-solutions.com']);
+  });
+});

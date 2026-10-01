@@ -163,10 +163,12 @@ ensure "$APP_ENV" JOIN_CODE_PEPPER "$(b64)"
 ensure "$APP_ENV" TOTP_ENCRYPTION_KEYS "k1:$(b64)"
 ensure "$APP_ENV" TOTP_ENCRYPTION_ACTIVE_KEY_ID k1
 ensure "$APP_ENV" PAYMENT_SERVICE_TOKEN "$(openssl rand -hex 32)"
-# NOTE: WebAuthn origins are the *browser* origins that talk to this API (the admin front-end),
-# and must be edited here once that front-end is wired (https only, comma-separated).
-ensure "$APP_ENV" WEBAUTHN_RP_ID "${WEBAUTHN_RP_ID:-hsalem-anwar.dev}"
-ensure "$APP_ENV" WEBAUTHN_ORIGINS "${WEBAUTHN_ORIGINS:-https://$HOST_RULE}"
+# WebAuthn (owner passkeys). The RP ID scopes every credential; WEBAUTHN_ORIGINS are the exact https BROWSER origins that run
+# navigator.credentials.* (the owner admin UI), never this API's host. Owner decision: RP nawara-solutions.com, admin UI
+# https://admin.nawara-solutions.com. Like every value here, an existing setting is never overwritten: changing a running
+# installation is a deliberate .env edit (changing the RP ID requires passkey re-enrollment; see the README).
+ensure "$APP_ENV" WEBAUTHN_RP_ID "${WEBAUTHN_RP_ID:-nawara-solutions.com}"
+ensure "$APP_ENV" WEBAUTHN_ORIGINS "${WEBAUTHN_ORIGINS:-https://admin.nawara-solutions.com}"
 ensure "$APP_ENV" WEBAUTHN_RP_NAME Nawara
 ensure "$APP_ENV" PAYMENT_SERVICE_URL "${PAYMENT_SERVICE_URL:-http://nawara-core-payment-service:3000}"
 ensure "$APP_ENV" TRUST_PROXY true

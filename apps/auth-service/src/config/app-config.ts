@@ -171,6 +171,27 @@ function secretBytes(src: SecretSource, name: string, minBytes = 32): Buffer {
   return b;
 }
 
+/**
+ * A browser only lets a page use an RP ID equal to its own host or a registrable parent of it, and the verifier compares origins
+ * exactly: an origin outside the RP ID could never complete a ceremony. Refused at startup instead of at the first enrollment.
+ * The origin must be exact (`https://admin.example.com`, no path) and its host the RP ID or a subdomain of it (`.`-bounded, so
+ * `evilexample.com` is not under `example.com`).
+ */
+function assertOriginUnderRp(origin: string, rpId: string): void {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    throw new ConfigError('WEBAUTHN_ORIGINS entries must be exact origins such as https://admin.example.com');
+  }
+  if (url.origin !== origin) throw new ConfigError('WEBAUTHN_ORIGINS entries must be exact origins such as https://admin.example.com');
+  const host = url.hostname.toLowerCase();
+  const rp = rpId.toLowerCase();
+  if (host !== rp && !host.endsWith(`.${rp}`)) {
+    throw new ConfigError('every WEBAUTHN_ORIGINS host must be WEBAUTHN_RP_ID or a subdomain of it');
+  }
+}
+
 function rule(env: NodeJS.ProcessEnv, name: string, limit: number, windowSec: number): RateRule {
   return {
     limit: int(env, `RATE_${name}_LIMIT`, limit, 1, 1_000_000),
@@ -231,6 +252,7 @@ export function loadConfig(
   if (nodeEnv === 'production' && origins.some((o) => !o.startsWith('https://'))) {
     throw new ConfigError('WEBAUTHN_ORIGINS must be https:// origins in production');
   }
+  if (nodeEnv === 'production') for (const o of origins) assertOriginUnderRp(o, rpId);
   const databaseUrl = env.DATABASE_URL ?? '';
   if (!databaseUrl) throw new ConfigError('DATABASE_URL is required');
   let dbUrl: URL;

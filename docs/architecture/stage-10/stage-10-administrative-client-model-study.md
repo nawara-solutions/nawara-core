@@ -265,7 +265,7 @@ Generic considerations to verify when a client is chosen; **none is a decision a
 | License lease and its issuer | No | **DEFERRED** | future entitlement and licensing design (ADR-0038) |
 | Admin UI technology | No | **DEFERRED** | presentation choice |
 | Human-facing hierarchy administration: who, which credentials, which host | No | **BLOCKED** | O-13, O-14, O-15, F23 (BD-4) |
-| Client-specific origin and authenticator support (CORS, WebAuthn origins) | No | **DEFERRED** | verify when a client is chosen |
+| Client-specific origin and authenticator support (CORS, WebAuthn origins) | No | **PARTLY DECIDED** (2026-10-01, OD-9): WebAuthn for the owner admin UI; CORS open | verify when a client is chosen |
 | Constraints C1 to C8 for any future offline design | Yes (guardrails) | **PROPOSED** | keep a future design inside the server-authority model |
 
 ## 16. What remains intentionally deferred
@@ -320,7 +320,7 @@ Client technology per role; public exposure; offline for organization and for op
 | OD-6 | Device identity: need, and owner (credential in Auth versus seat in billing) | DEFERRED | nothing in Stage 10 |
 | OD-7 | Lease design, issuer, clock model, and the departure from ADR-0004's fail-closed model | DEFERRED | nothing in Stage 10 |
 | OD-8 | Shape of the authorization question between organization-service and Auth (no synchronous cycles) | DEFERRED | the human-facing hierarchy API |
-| OD-9 | Authentication factors supported per client (CORS and WebAuthn origins to be verified) | DEFERRED | client selection |
+| OD-9 | Authentication factors supported per client (CORS and WebAuthn origins to be verified) | PARTLY DECIDED (2026-10-01): owner admin client `https://admin.nawara-solutions.com`, WebAuthn RP ID `nawara-solutions.com` with that origin, API `https://core-api.nawara-solutions.com/auth` (auth-service README). CORS for that client: not yet decided | other clients' selection |
 | OD-10 | Audit requirements for administrative actions | DEFERRED | client selection, operator hardening |
 | OD-11 | Whether a gateway or composition layer is created | DEFERRED | nothing in Stage 10 |
 | OD-12 | Billing and payment administration by organization and platform staff (B-026, B-027, B-028) | DEFERRED (existing) | not client-related |
