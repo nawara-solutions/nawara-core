@@ -94,7 +94,7 @@ export class PaymentDispatcher {
             this.logger.warn(`payment_dispatch_failure request=${claim.request.id} correlationId=${claim.correlationId} reason=transient — will retry (safe by the natural key)`);
           }
         } catch (e) {
-          this.logger.warn(`payment_dispatch_failure request=${claim.request.id} correlationId=${claim.correlationId} reason=exception: ${e instanceof Error ? e.message : 'unknown error'}`);
+          this.logger.warn(`payment_dispatch_failure request=${claim.request.id} correlationId=${claim.correlationId} reason=exception ${describeFailure(e)}`);
         }
       }
       return { dispatched };
