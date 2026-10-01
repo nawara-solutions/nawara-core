@@ -20,6 +20,7 @@ import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
 import { FILE_NOT_FOUND, fileError, fileView, organizationHeader, sizeBucket, type FileView } from '../upload/upload-http.js';
 import { contentDisposition } from './content-disposition.js';
+import { FILE_MESSAGES } from '../messages.js';
 
 export interface IssuedDownloadTicket {
   ticketId: string;
@@ -31,7 +32,7 @@ export interface IssuedDownloadTicket {
 class TicketNoLongerValid extends Error {}
 class DownloadBusy extends Error {}
 
-const DOWNLOAD_BUSY = () => fileError(503, 'download_busy', 'Too many downloads in progress; retry shortly.');
+const DOWNLOAD_BUSY = () => fileError(503, 'download_busy', FILE_MESSAGES.tooManyDownloads);
 
 /**
  * Verifies what is sent against the record without holding the object (Stage 17.8): counts the bytes (a body that runs over fails as
@@ -126,7 +127,7 @@ export class DownloadService {
     assertDownloadable(file);
     const disposition = input.disposition ?? 'attachment';
     // SDD §9: `inline` only for the image allow-list, and only when the caller asks for it.
-    if (disposition === 'inline' && !file.mediaType?.startsWith('image/')) throw fileError(422, 'disposition_not_allowed', 'Only images may be served inline.');
+    if (disposition === 'inline' && !file.mediaType?.startsWith('image/')) throw fileError(422, 'disposition_not_allowed', FILE_MESSAGES.onlyImagesInline);
     const scope: FileScope = { ownerService: file.ownerService, organizationId: file.organizationId };
     for (let attempt = 0; ; attempt++) {
       const token = randomBytes(32).toString('base64url'); // 256 bits (F35), the Stage 17.5 format
@@ -140,7 +141,7 @@ export class DownloadService {
           const now = await this.files.findOwned(scope, file.id);
           if (!now) throw FILE_NOT_FOUND();
           assertDownloadable(now);
-          throw fileError(409, 'file_not_available', 'The file is not available.');
+          throw fileError(409, 'file_not_available', FILE_MESSAGES.fileNotAvailable);
         }
         this.logger.log(`file_download_ticket_issued owner=${caller} ticket=${row.id} single_use=${row.singleUse} ttl_s=${this.config.upload.downloadTicketTtlSeconds}`);
         return { ticketId: row.id, url: `${this.config.upload.publicBaseUrl}/file/t/${token}`, expiresAt: row.expiresAt.toISOString() };
@@ -155,7 +156,7 @@ export class DownloadService {
   async revokeTicket(caller: string, req: Request, ticketId: string): Promise<void> {
     const policy = this.policy(caller, 'issue_ticket');
     const organizationId = this.organization(policy, organizationHeader(req));
-    if (!(await this.tickets.revoke({ ownerService: caller, organizationId }, ticketId))) throw fileError(404, 'ticket_not_found', 'No such ticket.');
+    if (!(await this.tickets.revoke({ ownerService: caller, organizationId }, ticketId))) throw fileError(404, 'ticket_not_found', FILE_MESSAGES.noSuchTicket);
     this.logger.log(`file_ticket_revoked owner=${caller} ticket=${ticketId}`);
   }
 
@@ -237,7 +238,7 @@ export class DownloadService {
       this.logger.warn(`file_storage_inconsistent file=${file.id} reason=size_mismatch`); // never serve bytes that contradict the record
       log('size_mismatch', 0);
       await this.incidents.detected(file, 'size_mismatch'); // Stage 18.7.4: the central audit intent (once per file and reason)
-      throw fileError(500, 'file_content_missing', 'The file content is not available.');
+      throw fileError(500, 'file_content_missing', FILE_MESSAGES.contentNotAvailable);
     }
 
     res.status(200);
@@ -294,12 +295,12 @@ export class DownloadService {
         // The record says AVAILABLE but the object is gone: an integrity fault, reported (never auto-"repaired"; reconciliation is 17.7).
         this.counters.bump('integrity_object_missing');
         this.logger.warn(`file_storage_inconsistent file=${file.id} reason=object_missing`);
-        return fileError(500, 'file_content_missing', 'The file content is not available.');
+        return fileError(500, 'file_content_missing', FILE_MESSAGES.contentNotAvailable);
       }
-      if (e.code === 'storage_unavailable' || e.code === 'storage_timeout') return fileError(503, 'storage_unavailable', 'File storage is temporarily unavailable.');
-      return fileError(500, 'storage_error', 'The file could not be read.');
+      if (e.code === 'storage_unavailable' || e.code === 'storage_timeout') return fileError(503, 'storage_unavailable', FILE_MESSAGES.storageUnavailable);
+      return fileError(500, 'storage_error', FILE_MESSAGES.couldNotRead);
     }
-    return fileError(500, 'download_failed', 'The file could not be read.');
+    return fileError(500, 'download_failed', FILE_MESSAGES.couldNotRead);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────────── helpers
@@ -334,12 +335,12 @@ export class DownloadService {
 
   private policy(caller: string, operation: FileOperation): CallerPolicy {
     const policy = this.config.callerPolicy.of(caller);
-    if (!policy || !policy.operations.has(operation)) throw fileError(403, 'operation_not_allowed', 'Operation not allowed for this caller.');
+    if (!policy || !policy.operations.has(operation)) throw fileError(403, 'operation_not_allowed', FILE_MESSAGES.operationNotAllowed);
     return policy;
   }
 
   private organization(policy: CallerPolicy, organizationId: string | null): string | null {
-    if (organizationId !== null && policy.organizations === 'none') throw fileError(403, 'organization_not_allowed', 'This caller cannot act for an organization.');
+    if (organizationId !== null && policy.organizations === 'none') throw fileError(403, 'organization_not_allowed', FILE_MESSAGES.organizationNotAllowed);
     return organizationId;
   }
 }
@@ -352,6 +353,6 @@ export function downloadDeadlineMs(sizeBytes: number, baseMs: number, minBytesPe
 /** Only `AVAILABLE` files are served (SDD §5.1, §9). The owner learns why; nobody else ever reaches this check. */
 function assertDownloadable(file: FileRow): void {
   if (file.status === 'AVAILABLE') return;
-  if (file.status === 'DELETING' || file.status === 'DELETED') throw fileError(410, 'file_deleted', 'The file has been deleted.');
-  throw fileError(409, 'file_not_available', 'The file is not available.');
+  if (file.status === 'DELETING' || file.status === 'DELETED') throw fileError(410, 'file_deleted', FILE_MESSAGES.fileDeleted);
+  throw fileError(409, 'file_not_available', FILE_MESSAGES.fileNotAvailable);
 }

@@ -1,13 +1,14 @@
 import { createHmac } from 'node:crypto';
 import { HttpException, Inject, Injectable, Module } from '@nestjs/common';
 import type { Request } from 'express';
-import { RateLimitModule, RateLimitService, clientAddress } from '@nawara/service-kit';
+import { RateLimitModule, RateLimitService, clientAddress, httpError } from '@nawara/service-kit';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
 import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
+import { FILE_MESSAGES } from '../messages.js';
 
 /** One stable answer for every unusable ticket, upload or download (SDD §11.1): never which check failed. */
-export const TICKET_INVALID = () => new HttpException({ message: 'The link is not valid.', code: 'ticket_invalid' }, 404);
+export const TICKET_INVALID = () => httpError(404, 'ticket_invalid', FILE_MESSAGES.linkNotValid);
 
 /** Failed ticket redemptions per client (keyed address), per minute (F32). Upload and download share one budget. */
 const TICKET_FAILURE_BUCKET = 'file_ticket_failures';
@@ -32,7 +33,7 @@ export class RedemptionLimiter {
     const rule = { limit: this.config.upload.ticketFailureLimit, windowSec: 60 }; // the same window as FILE_LIMITER_BUCKETS' retention
     if (!(await this.limiter.peek(TICKET_FAILURE_BUCKET, client, rule)).allowed) {
       this.counters.bump('redemption_blocked');
-      throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+      throw httpError(429, 'rate_limited', FILE_MESSAGES.tooManyRequests);
     }
     return {
       invalid: async () => {

@@ -1,8 +1,9 @@
-import { HttpException, Inject, Injectable, Module } from '@nestjs/common';
-import { ConfigError, DbService, RateLimitModule, RateLimitService, type EnvReader } from '@nawara/service-kit';
+import { Inject, Injectable, Module } from '@nestjs/common';
+import { ConfigError, DbService, RateLimitModule, RateLimitService, type EnvReader, httpError } from '@nawara/service-kit';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
 import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
+import { FILE_MESSAGES } from '../messages.js';
 
 /** What a trusted caller spends (F32): service uploads, ticket issuance (upload and download tickets), service content reads. */
 export type UsageKind = 'upload' | 'ticket' | 'download';
@@ -79,7 +80,7 @@ export class UsageLimiter {
       : await this.limiter.hit(`file_${kind}_org`, `${caller}|${organizationId}`, { limit: limits.perOrganization[kind], windowSec: USAGE_WINDOW_SECONDS });
     if (!byCaller.allowed || !byOrganization.allowed) {
       this.counters.bump(`rate_limited_${kind}`);
-      throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+      throw httpError(429, 'rate_limited', FILE_MESSAGES.tooManyRequests);
     }
   }
 
