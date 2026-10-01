@@ -34,6 +34,9 @@ class L10nController {
   @Get('bare-401') bare401() {
     throw new UnauthorizedException();
   }
+  @Get('coded-401') coded401() {
+    throw new HttpException({ message: 'Unauthorized', code: 'session_expired' }, 401);
+  }
   @Get('bare-403') bare403() {
     throw new ForbiddenException();
   }
@@ -95,11 +98,11 @@ describe('language invariants (D1, D2, D5, D9)', () => {
     ['/l10n/range', 400, 'demo_range', ['Pick 1 to 5.', 'Choisissez de 1 à 5.', 'اختر من 1 إلى 5.']],
     ['/l10n/operation', 403, 'operation_not_permitted', ['This operation is not permitted for the calling service.', "Cette opération n'est pas autorisée pour le service appelant.", 'هذه العملية غير مسموح بها للخدمة المستدعية.']],
     ['/l10n/hierarchy', 503, 'hierarchy_unavailable', ['The organization hierarchy could not be verified; nothing was changed. Retry later.', "La hiérarchie de l'organisation n'a pas pu être vérifiée ; rien n'a été modifié. Réessayez plus tard.", 'تعذّر التحقق من الهيكل التنظيمي؛ لم يتم تغيير أي شيء. أعد المحاولة لاحقًا.']],
-    ['/l10n/boom', 500, 'internal_error', ['Internal server error', 'Erreur interne du serveur', 'خطأ داخلي في الخادم']],
+    ['/l10n/boom', 500, undefined, ['Internal server error', 'Erreur interne du serveur', 'خطأ داخلي في الخادم']],
   ] as const)('%s: only the message and Content-Language change across en / fr / ar', async (path, status, code, texts) => {
     const responses = await Promise.all(LOCALES.map((l) => get(path, l).expect(status)));
     for (const [i, r] of responses.entries()) {
-      expect(r.body).toEqual({ statusCode: status, message: texts[i], error: r.body.error, code, requestId: r.headers['x-request-id'] });
+      expect(r.body).toEqual({ statusCode: status, message: texts[i], error: r.body.error, ...(code ? { code } : {}), requestId: r.headers['x-request-id'] });
       expect(r.headers['content-language']).toBe(LOCALES[i]);
       expect(r.headers['x-correlation-id']).toBe('corr-l10n-0001');
       expect(r.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
@@ -130,17 +133,27 @@ describe('language invariants (D1, D2, D5, D9)', () => {
   });
 });
 
-describe('generic texts and codes (D4, D13)', () => {
+describe('generic texts; public codes exactly as thrown (R3 compatibility guard)', () => {
   it.each([
-    ['/l10n/bare-401', 401, 'unauthenticated', 'Unauthorized', 'Authentification requise'],
-    ['/l10n/bare-403', 403, 'forbidden', 'Forbidden', 'Accès refusé'],
-    ['/l10n/bare-404', 404, 'not_found', 'Not Found', 'Introuvable'],
-  ] as const)('%s: a default Nest exception gets its existing generic code and a localized status text', async (path, status, code, en, fr) => {
-    expect((await get(path).expect(status)).body).toMatchObject({ statusCode: status, message: en, code });
-    expect((await get(path, 'fr').expect(status)).body).toMatchObject({ statusCode: status, message: fr, code, error: en });
+    ['/l10n/bare-401', 401, 'Unauthorized', 'Authentification requise', 'المصادقة مطلوبة'],
+    ['/l10n/bare-403', 403, 'Forbidden', 'Accès refusé', 'الوصول مرفوض'],
+    ['/l10n/bare-404', 404, 'Not Found', 'Introuvable', 'غير موجود'],
+  ] as const)('%s: a code-less error stays code-less in en / fr / ar; only its safe status text is localized', async (path, status, en, fr, ar) => {
+    for (const [lang, text] of [[undefined, en], ['en', en], ['fr', fr], ['ar', ar]] as const) {
+      const r = await get(path, lang).expect(status);
+      expect(r.body).toEqual({ statusCode: status, message: text, error: en, requestId: r.headers['x-request-id'] });
+      expect(r.body).not.toHaveProperty('code');
+    }
   });
 
-  it('a default 503 is localized but gets no code: its generic code is not decided by ADR-0054', async () => {
+  it('an explicitly coded error keeps exactly its code in en / fr / ar (the message identity never replaces it)', async () => {
+    for (const [lang, text] of [['en', 'Unauthorized'], ['fr', 'Authentification requise'], ['ar', 'المصادقة مطلوبة']] as const) {
+      const r = await get('/l10n/coded-401', lang).expect(401);
+      expect(r.body).toEqual({ statusCode: 401, message: text, error: 'Unauthorized', code: 'session_expired', requestId: r.headers['x-request-id'] });
+    }
+  });
+
+  it('a default 503 is localized and stays code-less', async () => {
     const r = await get('/l10n/bare-503', 'fr').expect(503);
     expect(r.body).toEqual({ statusCode: 503, message: 'Service indisponible', error: 'Service Unavailable', requestId: r.headers['x-request-id'] });
   });
@@ -200,12 +213,12 @@ describe('language response headers (D8)', () => {
 });
 
 describe('Stage 22 F13 in every language (D10)', () => {
-  it.each(LOCALES)('%s: an unexpected error is an opaque, localized 500; no raw text reaches the body, headers or log', async (lang) => {
+  it.each(LOCALES)('%s: an unexpected error is an opaque, localized, code-less 500; no raw text reaches the body, headers or log', async (lang) => {
     for (const path of ['/l10n/boom', '/l10n/boom-string']) {
       t.logs.length = 0;
       const r = await get(path, lang).expect(500);
-      expect(r.body.code).toBe('internal_error');
-      expect(Object.keys(r.body).sort()).toEqual(['code', 'error', 'message', 'requestId', 'statusCode']);
+      expect(r.body).not.toHaveProperty('code'); // code-less before R3, code-less now
+      expect(Object.keys(r.body).sort()).toEqual(['error', 'message', 'requestId', 'statusCode']);
       const exposed = r.text + JSON.stringify(r.headers);
       const logged = JSON.stringify(t.logs);
       for (const s of [RAW, ...SENTINELS]) {
@@ -236,7 +249,7 @@ describe('D12: an excluded path keeps the pre-localization rendering exactly', (
 
   it('paths outside the prefix are still localized', async () => {
     const r = await request(x.app.getHttpServer()).get('/l10n/bare-404').set('accept-language', 'fr').expect(404);
-    expect(r.body).toMatchObject({ message: 'Introuvable', code: 'not_found' });
+    expect(r.body).toEqual({ statusCode: 404, message: 'Introuvable', error: 'Not Found', requestId: r.headers['x-request-id'] });
   });
 });
 
@@ -251,7 +264,7 @@ describe('the filter without options (how Auth constructs it until R5) is unchan
   });
   afterAll(() => app.close());
 
-  it('English, no generic codes, no internal_error, no language headers, whatever the request asks', async () => {
+  it('English, no language headers, codes exactly as thrown, whatever the request asks', async () => {
     const s = app.getHttpServer();
     const nf = await request(s).get('/l10n/bare-401').set('accept-language', 'fr').expect(401);
     expect(nf.body).toEqual({ statusCode: 401, message: 'Unauthorized', error: 'Unauthorized', requestId: nf.headers['x-request-id'] });

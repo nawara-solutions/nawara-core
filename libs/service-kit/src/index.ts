@@ -9,7 +9,7 @@ export { JsonLogger, type LogSink } from './logging/json-logger.js';
 export { redact, redactString } from './logging/redact.js';
 export { describeFailure, failureFacts, type FailureFacts, type FailureKind } from './logging/failure.js';
 
-export { KitExceptionFilter, INTERNAL_ERROR_CODE, type ErrorBody, type KitExceptionFilterOptions } from './errors/exception.filter.js';
+export { KitExceptionFilter, type ErrorBody, type KitExceptionFilterOptions } from './errors/exception.filter.js';
 export { httpError } from './errors/http-error.js';
 export { resolveLocale, SUPPORTED_LOCALES, DEFAULT_LOCALE, MAX_ACCEPT_LANGUAGE_LENGTH, MAX_LANGUAGE_RANGES, type Locale } from './i18n/locale.js';
 export { defineMessages, renderMessage, catalogProblems, type MessageTexts, type MessageParams, type LocalizedMessage } from './i18n/catalog.js';

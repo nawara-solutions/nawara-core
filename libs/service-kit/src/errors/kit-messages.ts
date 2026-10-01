@@ -2,10 +2,11 @@ import { defineMessages, type MessageTexts } from '../i18n/catalog.js';
 
 /**
  * ADR-0054 D13: the text of the kit's own GENERIC errors (no domain wording lives here). Every `en` text is the kit's existing English
- * message, byte for byte (D6); `kit-messages.spec.ts` pins that against the filter's status table.
+ * message, byte for byte (D6); `i18n-catalog.spec.ts` pins that. The keys are INTERNAL message identities: never a public `code`
+ * (the filter never derives a code from them).
  */
 export const KIT_MESSAGES = defineMessages({
-  internal_error: { en: 'Internal server error', fr: 'Erreur interne du serveur', ar: 'خطأ داخلي في الخادم' },
+  internal_failure: { en: 'Internal server error', fr: 'Erreur interne du serveur', ar: 'خطأ داخلي في الخادم' },
   rate_limited: { en: 'Too many requests.', fr: 'Trop de requêtes.', ar: 'عدد كبير جدًا من الطلبات.' },
   operation_not_permitted: {
     en: 'This operation is not permitted for the calling service.',

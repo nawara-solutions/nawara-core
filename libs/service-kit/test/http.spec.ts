@@ -65,7 +65,7 @@ describe('uniform error model', () => {
   it('turns an unexpected error into an opaque 500: no message, SQL, constraint name, stack or credential', async () => {
     t.logs.length = 0;
     const r = await request(t.app.getHttpServer()).get('/probe/boom').expect(500);
-    expect(r.body).toEqual({ statusCode: 500, message: 'Internal server error', error: 'Internal Server Error', code: 'internal_error', requestId: r.headers['x-request-id'] });
+    expect(r.body).toEqual({ statusCode: 500, message: 'Internal server error', error: 'Internal Server Error', requestId: r.headers['x-request-id'] });
     const body = JSON.stringify(r.body) + JSON.stringify(r.headers);
     for (const s of ['payment_idem_uk', 'hunter2', 'postgres://', 'duplicate key', 'at ']) expect(body).not.toContain(s);
     // the server log gets the failure's facts, never its message (Stage 22 F13): no SQL, constraint name, host or credential
@@ -199,7 +199,7 @@ describe('Stage 22 F13: internal errors are opaque to the client and logged by t
   it.each(cases)('%s: an opaque 500 with the request id; the log line has the facts and the ids, never the message', async (name, failure) => {
     f.logs.length = 0;
     const r = await request(f.app.getHttpServer()).get(`/f13/${name}`).set('x-correlation-id', `corr-f13-${name}`).expect(500);
-    expect(r.body).toEqual({ statusCode: 500, message: 'Internal server error', error: 'Internal Server Error', code: 'internal_error', requestId: r.headers['x-request-id'] });
+    expect(r.body).toEqual({ statusCode: 500, message: 'Internal server error', error: 'Internal Server Error', requestId: r.headers['x-request-id'] });
     const raw = F13[name] instanceof Error ? (F13[name] as Error).message : String(F13[name]);
     const response = JSON.stringify(r.body) + JSON.stringify(r.headers);
     const logged = JSON.stringify(f.logs);

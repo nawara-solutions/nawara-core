@@ -16,7 +16,7 @@ describe('kit generic catalog', () => {
       status_400: 'Bad Request', status_401: 'Unauthorized', status_403: 'Forbidden', status_404: 'Not Found', status_408: 'Request Timeout',
       status_409: 'Conflict', status_411: 'Length Required', status_413: 'Payload Too Large', status_415: 'Unsupported Media Type',
       status_422: 'Unprocessable Entity', status_429: 'Too Many Requests', status_500: 'Internal Server Error', status_502: 'Bad Gateway',
-      status_503: 'Service Unavailable', internal_error: 'Internal server error', rate_limited: 'Too many requests.',
+      status_503: 'Service Unavailable', internal_failure: 'Internal server error', rate_limited: 'Too many requests.',
       operation_not_permitted: 'This operation is not permitted for the calling service.',
       hierarchy_unavailable: 'The organization hierarchy could not be verified; nothing was changed. Retry later.',
     };

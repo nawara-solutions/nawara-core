@@ -18,7 +18,10 @@ export interface ErrorBody {
 
 /** ADR-0054 behaviour of the filter. Off by default (Auth's subclass is unchanged until it adopts it, R5); `configureApp` turns it on. */
 export interface KitExceptionFilterOptions {
-  /** Localize `message` (D5), add the generic codes (D4) and the `Content-Language` / `Vary` headers (D8). */
+  /**
+   * Localize `message` (D5) and add the `Content-Language` / `Vary` headers (D8). It never adds or changes a public `code`: a response
+   * carries a code only when its thrower supplied one (a code-less error stays code-less until its path is adopted, R4 to R6).
+   */
   localize?: boolean;
   /**
    * Path prefixes whose error responses keep exactly the pre-ADR-0054 rendering: no new code, no localization, no new header (D12,
@@ -31,15 +34,6 @@ const STATUS_TEXT: Record<number, string> = {
   400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 408: 'Request Timeout', 409: 'Conflict', 411: 'Length Required',
   413: 'Payload Too Large', 415: 'Unsupported Media Type', 422: 'Unprocessable Entity', 429: 'Too Many Requests', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable',
 };
-
-/** The opaque 500's machine code (ADR-0054 D4: `internal_error`, decided in R3). */
-export const INTERNAL_ERROR_CODE = 'internal_error';
-
-/**
- * D4: the existing generic code of a Nest exception thrown with its DEFAULT message (`new UnauthorizedException()`), whose meaning is
- * fixed by its status. Statuses whose generic code ADR-0054 leaves undecided (400, 503, …) get none.
- */
-const DEFAULT_MESSAGE_CODE: Record<number, string> = { 401: 'unauthenticated', 403: 'forbidden', 404: 'not_found', 429: 'rate_limited' };
 
 function codeOf(raw: unknown): string | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
@@ -74,6 +68,7 @@ function varyOnAcceptLanguage(res: Response): void {
  * With `localize` (ADR-0054), classification happens FIRST and only these become localized text: a catalog message a Core thrower
  * attached through `httpError`, a Nest exception's default status text, a middleware client error's generic text, and the opaque 500.
  * Any other message is a Core-written English string and passes through unchanged; nothing of an unexpected error is ever rendered.
+ * The message identity used for that is internal: it never becomes the public `code`, which is emitted exactly as the thrower set it.
  */
 @Catch()
 export class KitExceptionFilter implements ExceptionFilter {
@@ -103,15 +98,15 @@ export class KitExceptionFilter implements ExceptionFilter {
       const status = exception.getStatus();
       const raw = exception.getResponse();
       let message = typeof raw === 'string' ? raw : ((raw as { message?: string | string[] }).message ?? exception.message);
-      let code = codeOf(raw);
+      const code = codeOf(raw);
       if (localize) {
         const attached = localizedMessageOf(exception);
         const generic = statusMessage(status);
         if (attached) message = render(attached.texts, attached.params);
-        else if (code === undefined && generic && message === STATUS_TEXT[status]) {
-          // a Nest exception thrown with its default message: the text is the status phrase, a framework constant (never caller data)
+        else if (generic && message === STATUS_TEXT[status]) {
+          // the message IS the status phrase (a Nest exception's default message, or a Core thrower that used it): a framework constant,
+          // never caller data. Localized text only: the code stays exactly what the thrower set, or absent.
           message = render(generic);
-          code = DEFAULT_MESSAGE_CODE[status];
         }
       }
       body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', ...(code ? { code } : {}), requestId };
@@ -124,8 +119,8 @@ export class KitExceptionFilter implements ExceptionFilter {
       const message = localize ? render(statusMessage(status) ?? KIT_MESSAGES.status_400) : text;
       body = { statusCode: status, message, error: text, requestId };
     } else {
-      const message = localize ? render(KIT_MESSAGES.internal_error) : 'Internal server error';
-      body = { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message, error: 'Internal Server Error', ...(localize ? { code: INTERNAL_ERROR_CODE } : {}), requestId };
+      const message = localize ? render(KIT_MESSAGES.internal_failure) : 'Internal server error';
+      body = { statusCode: HttpStatus.INTERNAL_SERVER_ERROR, message, error: 'Internal Server Error', requestId };
       this.logger.error('unhandled error', { failure: describeFailure(exception) });
     }
     if (res.headersSent) return;
