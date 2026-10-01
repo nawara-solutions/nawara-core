@@ -6,6 +6,7 @@ import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.j
 import { authError, notFound } from '../errors.js';
 import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
 import { StepUpService } from '../owner/step-up.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export interface OwnerActor {
   userId: string;
@@ -69,7 +70,7 @@ export class AssignmentService {
         });
         return rows[0];
       } catch (e) {
-        if (isUniqueViolation(e, 'platform_assignment_one_active')) throw authError(409, 'assignment_conflict', 'An active assignment already exists.');
+        if (isUniqueViolation(e, 'platform_assignment_one_active')) throw authError(409, 'assignment_conflict', AUTH_MESSAGES.assignmentConflict);
         throw e;
       }
     });

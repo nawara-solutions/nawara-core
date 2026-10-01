@@ -15,10 +15,11 @@ import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { PHONE_RE, UsersService, normalizeEmail, normalizePhone } from '../users/users.service.js';
 import type { OrgActor } from './onboarding.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 /** One generic answer for every reason an invitation cannot be used. */
-export const INVITATION_INVALID = 'Invalid or expired invitation.';
-const ACCEPT_REFUSED = 'This invitation cannot be accepted.';
+export const INVITATION_INVALID = AUTH_MESSAGES.invalidInvitation;
+const ACCEPT_REFUSED = AUTH_MESSAGES.invitationNotAcceptable;
 
 export type InvitationRejection = 'malformed' | 'unknown' | 'revoked' | 'consumed' | 'expired' | 'contact_mismatch';
 
@@ -72,7 +73,7 @@ export class InvitationService {
   private contactHash(contact: { email?: string; phone?: string }): string {
     if (contact.email) return hashInviteeContact(this.cfg.secrets.joinCodePepper, `email:${normalizeEmail(contact.email)}`);
     const phone = normalizePhone(contact.phone!);
-    if (!PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
+    if (!PHONE_RE.test(phone)) throw authError(400, 'validation_error', AUTH_MESSAGES.invalidPhone);
     return hashInviteeContact(this.cfg.secrets.joinCodePepper, `phone:${phone}`);
   }
 
@@ -135,11 +136,11 @@ export class InvitationService {
   async accept(dto: { invitationCode: string; email?: string; phone?: string; password: string }, client: ClientInfo) {
     await this.throttle.hit('invitation_accept_ip', client.ip);
     await this.guardGuessing(client);
-    if (!dto.email && !dto.phone) throw authError(400, 'validation_error', 'Provide an email or a phone number.');
-    if (dto.email && dto.phone) throw authError(400, 'validation_error', 'Provide exactly one of email or phone.');
+    if (!dto.email && !dto.phone) throw authError(400, 'validation_error', AUTH_MESSAGES.provideEmailOrPhone);
+    if (dto.email && dto.phone) throw authError(400, 'validation_error', AUTH_MESSAGES.exactlyOneEmailOrPhone);
     const email = dto.email ? normalizeEmail(dto.email) : undefined;
     const phone = dto.phone ? normalizePhone(dto.phone) : undefined;
-    if (phone && !PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
+    if (phone && !PHONE_RE.test(phone)) throw authError(400, 'validation_error', AUTH_MESSAGES.invalidPhone);
     assertPasswordPolicy(dto.password);
     const contactHash = this.contactHash({ email, phone });
 
@@ -207,7 +208,7 @@ export class InvitationService {
     const { minMinutes, defaultMinutes, maxMinutes } = this.cfg.onboarding.invitation;
     const minutes = requested ?? defaultMinutes;
     if (!Number.isInteger(minutes) || minutes < minMinutes || minutes > maxMinutes) {
-      throw authError(400, 'validation_error', `expiresInMinutes must be between ${minMinutes} and ${maxMinutes}.`);
+      throw authError(400, 'validation_error', AUTH_MESSAGES.expiresInMinutesRange, { min: minMinutes, max: maxMinutes });
     }
     return minutes;
   }
@@ -249,7 +250,7 @@ export class InvitationService {
         });
         return { ...created, contactBound: !!bound, code: code.display };
       } catch (e) {
-        if (isUniqueViolation(e)) throw authError(409, 'conflict', 'Please try again.'); // a 60-bit collision is astronomically unlikely
+        if (isUniqueViolation(e)) throw authError(409, 'conflict', AUTH_MESSAGES.tryAgain); // a 60-bit collision is astronomically unlikely
         throw e;
       }
     });

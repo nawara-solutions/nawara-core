@@ -11,10 +11,11 @@ import { DbService, type Queryable } from '../db/db.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { UsersService, toIdentifier, type UserRow } from '../users/users.service.js';
 import { OperatorAvailabilityService } from './availability.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export type CodePurpose = 'confirmation' | 'login';
 export const MAX_CODE_ATTEMPTS = 5; // mirrors the DB CHECK on admin_operator_code.attemptCount
-const GENERIC = 'Invalid or expired code.';
+const GENERIC = AUTH_MESSAGES.invalidOrExpiredCode;
 
 /**
  * Operator working code (no operator password exists).

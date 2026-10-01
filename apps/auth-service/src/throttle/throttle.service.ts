@@ -3,6 +3,7 @@ import { APP_CONFIG, type AppConfig, type RateBucket } from '../config/app-confi
 import { hmacHex } from '../crypto/hmac.js';
 import { DbService } from '../db/db.service.js';
 import { authError } from '../errors.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 /**
  * Shared (Postgres-backed, so correct across instances) fixed-window rate limiter.
@@ -36,7 +37,7 @@ export class ThrottleService {
       [bucket, this.key(bucket, raw), rule.windowSec],
     );
     if (rows[0].count > rule.limit) {
-      throw authError(429, 'rate_limited', 'Too many attempts. Please try again later.');
+      throw authError(429, 'rate_limited', AUTH_MESSAGES.tooManyAttempts);
     }
   }
 

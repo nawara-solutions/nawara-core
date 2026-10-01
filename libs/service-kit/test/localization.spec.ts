@@ -275,3 +275,39 @@ describe('the filter without options (how Auth constructs it until R5) is unchan
     for (const r of [nf, cat, boom]) expect(r.headers['content-language']).toBeUndefined();
   });
 });
+
+describe('extraResponseFields: a subclass keeps its extra wire fields (ADR-0054 D11, R5)', () => {
+  class ReasonFilter extends KitExceptionFilter {
+    protected override extraResponseFields(raw: unknown): Record<string, unknown> {
+      return typeof raw === 'object' && raw !== null && 'reason' in raw ? { reason: (raw as { reason: unknown }).reason } : {};
+    }
+  }
+  @Controller('extra')
+  class ExtraController {
+    @Get('reason') reason() {
+      const e = httpError(401, 'session_ceiling_reached', DEMO.company_missing);
+      (e.getResponse() as Record<string, unknown>).reason = 'session_ceiling_reached';
+      throw e;
+    }
+  }
+  let app: NestExpressApplication;
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({ controllers: [ExtraController as Type<unknown>] }).compile();
+    app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
+    app.use(requestContextMiddleware);
+    app.useGlobalFilters(new ReasonFilter(new JsonLogger('extra', 'error', () => undefined), { localize: true }));
+    await app.listen(0, '127.0.0.1');
+  });
+  afterAll(() => app.close());
+
+  it('copies the extra field verbatim, after code and before requestId, while message is localized', async () => {
+    const r = await request(app.getHttpServer()).get('/extra/reason').set('accept-language', 'fr').expect(401);
+    expect(Object.keys(r.body)).toEqual(['statusCode', 'message', 'error', 'code', 'reason', 'requestId']);
+    expect(r.body).toMatchObject({ message: 'Société introuvable.', code: 'session_ceiling_reached', reason: 'session_ceiling_reached' });
+  });
+
+  it('the kit filter itself adds no extra field', async () => {
+    const r = await request(t.app.getHttpServer()).get('/l10n/catalog').set('accept-language', 'fr').expect(404);
+    expect(Object.keys(r.body).sort()).toEqual(['code', 'error', 'message', 'requestId', 'statusCode']);
+  });
+});

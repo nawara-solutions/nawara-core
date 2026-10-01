@@ -3,6 +3,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { authError } from '../errors.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export interface AccessClaims {
   sub: string;
@@ -36,7 +37,7 @@ export class TokenService {
     const nowS = Math.floor(this.clock.now().getTime() / 1000);
     let exp = nowS + this.cfg.jwt.accessTtlSec;
     if (sessionExpiresAt) exp = Math.min(exp, Math.floor(sessionExpiresAt.getTime() / 1000));
-    if (exp <= nowS) throw authError(401, 'session_expired', 'Session has ended.');
+    if (exp <= nowS) throw authError(401, 'session_expired', AUTH_MESSAGES.sessionEnded);
     const payload: Record<string, unknown> = { role: c.role, sid: c.sid };
     if (c.adminTier) payload.adminTier = c.adminTier;
     const accessToken = await new SignJWT(payload)
@@ -63,7 +64,7 @@ export class TokenService {
       }
       return payload as unknown as AccessClaims;
     } catch {
-      throw authError(401, 'invalid_token', 'Invalid or expired token.');
+      throw authError(401, 'invalid_token', AUTH_MESSAGES.invalidToken);
     }
   }
 }

@@ -4,6 +4,7 @@ import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService, type Queryable } from '../db/db.service.js';
 import { authError } from '../errors.js';
 import { withReferenceWrite } from './hierarchy-authority.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 /**
  * Stage 21.C.2 (ADR-0040 decisions 1 and 2, Amendment 1 A1.2; Stage 10.0 §4.5 R2c; ADR-0042 A.3 and A.5): Auth's reference-cache protocol.
@@ -27,7 +28,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PATH: Record<HierarchyKind, string> = { company: 'companies', platform: 'platforms', organization: 'organizations' };
 
 export const hierarchyUnavailable = () =>
-  authError(503, 'hierarchy_unavailable', 'The organization hierarchy could not be verified; nothing was changed. Retry later.');
+  authError(503, 'hierarchy_unavailable', AUTH_MESSAGES.hierarchyUnavailable);
 
 interface Fetched {
   company: { id: string; name: string };

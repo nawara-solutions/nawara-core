@@ -9,6 +9,7 @@ import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import type { OrgActor } from '../onboarding/onboarding.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export type MembershipStatus = 'pending' | 'active' | 'rejected' | 'revoked';
 
@@ -112,9 +113,9 @@ export class MembershipService {
       if (!m) throw notFound();
       const authority = await this.authorize(q, actor, m.organizationId);
       if (m.userId === actor.userId) throw notFound(); // nobody decides their own membership
-      if (m.status !== 'pending') throw authError(409, 'membership_already_decided', 'This request has already been decided.');
+      if (m.status !== 'pending') throw authError(409, 'membership_already_decided', AUTH_MESSAGES.requestAlreadyDecided);
       if (decision === 'approve' && this.cfg.onboarding.requireContactVerification && !m.contactVerifiedAt) {
-        throw authError(409, 'contact_not_verified', 'The applicant has not verified their contact yet.');
+        throw authError(409, 'contact_not_verified', AUTH_MESSAGES.contactNotVerified);
       }
       const now = this.clock.now();
       const { rowCount } = await q.query(
@@ -125,7 +126,7 @@ export class MembershipService {
               WHERE id=$1 AND "organizationId"=$2 AND status='pending'`,
         [membershipId, m.organizationId, now, actor.userId],
       );
-      if (rowCount !== 1) throw authError(409, 'membership_already_decided', 'This request has already been decided.');
+      if (rowCount !== 1) throw authError(409, 'membership_already_decided', AUTH_MESSAGES.requestAlreadyDecided);
       await this.audit.record({
         type: decision === 'approve' ? 'membership.approved' : 'membership.rejected', outcome: 'success',
         actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip, metadata: { organizationId: m.organizationId, authority },
@@ -166,14 +167,14 @@ export class MembershipService {
       const authority = await this.authorize(q, actor, m.organizationId);
       if (m.userId === actor.userId) throw notFound();
       if (authority === 'org_admin' && m.isOrganizationAdmin) throw notFound(); // collapsed: not yours to remove
-      if (m.status !== 'active') throw authError(409, 'membership_not_active', 'Only an active membership can be revoked.');
+      if (m.status !== 'active') throw authError(409, 'membership_not_active', AUTH_MESSAGES.onlyActiveRevocable);
       const now = this.clock.now();
       const { rowCount } = await q.query(
         `UPDATE organization_membership SET status='revoked', "revokedAt"=$3, "revokedBy"=$4, "isOrganizationAdmin"=false, "updatedAt"=$3
           WHERE id=$1 AND "organizationId"=$2 AND status='active'`,
         [membershipId, m.organizationId, now, actor.userId],
       );
-      if (rowCount !== 1) throw authError(409, 'membership_not_active', 'Only an active membership can be revoked.');
+      if (rowCount !== 1) throw authError(409, 'membership_not_active', AUTH_MESSAGES.onlyActiveRevocable);
       await this.audit.record({
         type: 'membership.revoked', outcome: 'success', actorId: actor.userId, targetId: m.userId, sessionFamilyId: actor.sid, ip,
         metadata: { organizationId: m.organizationId, authority, wasAdmin: m.isOrganizationAdmin },

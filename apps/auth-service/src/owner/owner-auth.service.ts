@@ -12,13 +12,14 @@ import { UsersService } from '../users/users.service.js';
 import { AdminDeviceService } from './admin-device.service.js';
 import { ChallengeService } from './challenge.service.js';
 import { FactorService } from './factor.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export type LoginChallengeResponse =
   | { status: 'mfa_required'; challengeToken: string; methods: Array<'totp' | 'webauthn'> }
   | { status: 'enrollment_required'; enrollmentToken: string }
   | { status: 'recovery_required' };
 
-const GENERIC = 'Verification failed.';
+const GENERIC = AUTH_MESSAGES.verificationFailed;
 
 /**
  * Owner sign-in: password (checked by AuthService) -> second factor (here) -> session.

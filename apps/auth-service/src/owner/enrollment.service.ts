@@ -11,6 +11,7 @@ import { UsersService } from '../users/users.service.js';
 import { ChallengeService } from './challenge.service.js';
 import { FactorService } from './factor.service.js';
 import { StepUpService } from './step-up.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 /**
  * Who is enrolling a factor, and how they proved the right to:
@@ -41,15 +42,15 @@ export class EnrollmentService {
 
   async fromToken(token: string): Promise<EnrollCtx> {
     const ch = await this.challenges.findByToken('enrollment', token);
-    if (!ch) throw authError(401, 'verification_failed', 'Verification failed.');
+    if (!ch) throw authError(401, 'verification_failed', AUTH_MESSAGES.verificationFailed);
     if ((await this.factors.countConfirmed(ch.ownerId)) > 0) throw authError(403, 'factor_already_enrolled', 'Forbidden');
     // A token minted before the owner's FIRST confirmed factor is a bootstrap token, and bootstrap
     // enrollment is a one-time state: once any factor has existed, only a recovery-issued token
     // (created afterwards) may enroll. This holds however the factor came to be revoked.
     const { rows } = await this.db.query(`SELECT min("confirmedAt") AS first FROM owner_auth_factor WHERE "ownerId"=$1`, [ch.ownerId]);
-    if (rows[0].first && ch.createdAt <= rows[0].first) throw authError(401, 'verification_failed', 'Verification failed.');
+    if (rows[0].first && ch.createdAt <= rows[0].first) throw authError(401, 'verification_failed', AUTH_MESSAGES.verificationFailed);
     const u = await this.users.findById(ch.ownerId);
-    if (!u?.isActive) throw authError(401, 'verification_failed', 'Verification failed.');
+    if (!u?.isActive) throw authError(401, 'verification_failed', AUTH_MESSAGES.verificationFailed);
     return { ownerId: ch.ownerId, enrollmentChallengeId: ch.id };
   }
 
@@ -80,12 +81,12 @@ export class EnrollmentService {
         const hadFactors = (await this.factors.countConfirmed(c.ownerId, q)) > 0;
         if (c.enrollmentChallengeId) {
           if (hadFactors) throw authError(403, 'factor_already_enrolled', 'Forbidden');
-          if (!(await this.challenges.consume(q, c.enrollmentChallengeId))) throw authError(401, 'verification_failed', 'Verification failed.');
+          if (!(await this.challenges.consume(q, c.enrollmentChallengeId))) throw authError(401, 'verification_failed', AUTH_MESSAGES.verificationFailed);
         } else if (hadFactors) {
           await this.stepUp.consume(q, { ownerId: c.ownerId, sid: c.sid!, purpose: 'owner.factor.enroll', token: stepUpToken });
         }
         const factorId = await confirm(q);
-        if (!factorId) throw authError(400, 'verification_failed', 'Verification failed.');
+        if (!factorId) throw authError(400, 'verification_failed', AUTH_MESSAGES.verificationFailed);
         await this.audit.record({ type: 'owner.factor.enrolled', outcome: 'success', actorId: c.ownerId, sessionFamilyId: c.sid, metadata: { method, first: !hadFactors } }, q);
         // Stage 18.7.6: the central audit intent, same transaction (factors belong to an owner row: the kind is a database fact).
         await this.central.write(q, {
@@ -124,7 +125,7 @@ export class EnrollmentService {
     await this.throttle.hit('factor_enroll_owner', c.ownerId);
     const ch = await this.challenges.findById(challengeId, 'webauthn_registration', c.ownerId);
     // The registration challenge must be bound to THIS session (or this enrollment) and is single use.
-    if (!ch || ch.sessionFamilyId !== this.bindingId(c) || !ch.webauthnChallenge) throw authError(400, 'verification_failed', 'Verification failed.');
+    if (!ch || ch.sessionFamilyId !== this.bindingId(c) || !ch.webauthnChallenge) throw authError(400, 'verification_failed', AUTH_MESSAGES.verificationFailed);
     const expected = ch.webauthnChallenge;
     try {
       return await this.finish(c, stepUpToken, async (q) => {
@@ -134,7 +135,7 @@ export class EnrollmentService {
     } catch (e) {
       if (e instanceof HttpException) throw e;
       if ((e as { status?: number }).status) throw e;
-      throw authError(400, 'verification_failed', 'Verification failed.'); // protocol verification error: no detail to the client
+      throw authError(400, 'verification_failed', AUTH_MESSAGES.verificationFailed); // protocol verification error: no detail to the client
     }
   }
 }
