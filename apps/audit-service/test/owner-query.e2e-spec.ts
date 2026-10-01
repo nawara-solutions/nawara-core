@@ -98,7 +98,10 @@ function stubAuth() {
 
 describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 16)', ['TEST_DATABASE_ADMIN_URL'], (env) => {
   let d: ProvisionedDatabase;
+  /** Authorization correctness: the production-default Auth budget, so a correct answer never depends on how fast the runner is. */
   let t: TestApp;
+  /** Timeout semantics only: the same application with a deliberately short Auth budget, so a hanging or stalled Auth is cut quickly. */
+  let shortTimeout: TestApp;
   let auth: ReturnType<typeof stubAuth>;
   let authUrl: string;
   const service = generateServiceToken();
@@ -136,8 +139,9 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
       databaseUrl: d.appUrl,
       tokens: [{ caller: 'org-reader', digest: service.digest }, { caller: 'platform-reader', digest: platformService.digest }],
       policy: JSON.stringify({ callers: { 'org-reader': { operations: ['read_organization'], categories: ['security', 'business', 'commercial', 'administrative'] }, 'platform-reader': { operations: ['read_platform'], categories: ['security', 'business', 'commercial', 'administrative'] } } }),
-      env: { AUTH_SERVICE_URL: authUrl, AUDIT_OWNER_QUERY_RATE_PER_OWNER: '1000', AUTH_TIMEOUT_MS: '300' },
+      env: { AUTH_SERVICE_URL: authUrl, AUDIT_OWNER_QUERY_RATE_PER_OWNER: '1000', AUTH_TIMEOUT_MS: '3000' },
     });
+    shortTimeout = await createTestApp({ databaseUrl: d.appUrl, env: { AUTH_SERVICE_URL: authUrl, AUDIT_OWNER_QUERY_RATE_PER_OWNER: '1000', AUTH_TIMEOUT_MS: '300' } });
     const repo = t.app.get(AuditRecordRepository);
     let m = 0;
     for (const o of [A1, A2, B1]) for (let i = 0; i < 3; i++) seeded.push(rec(o, m++, { category: i === 1 ? 'security' : 'business', action: i === 1 ? 'membership.admin_granted' : 'membership.revoked', changes: i === 1 ? null : { authority: 'owner', was_admin: false } }));
@@ -150,6 +154,7 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
     for (const r of seeded) expect((await repo.insertOnce(r)).kind).toBe('inserted');
   });
   afterAll(async () => {
+    await shortTimeout?.app.close();
     await t?.app.close();
     await d?.drop();
     auth?.server.closeAllConnections();
@@ -340,7 +345,7 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
     });
 
     it('rate limit: keyed by the VERIFIED owner (headers and organizations do not reset it; another owner is unaffected)', async () => {
-      const limited = await createTestApp({ databaseUrl: d.appUrl, env: { AUTH_SERVICE_URL: authUrl, AUDIT_OWNER_QUERY_RATE_PER_OWNER: '3', AUTH_TIMEOUT_MS: '300' } });
+      const limited = await createTestApp({ databaseUrl: d.appUrl, env: { AUTH_SERVICE_URL: authUrl, AUDIT_OWNER_QUERY_RATE_PER_OWNER: '3', AUTH_TIMEOUT_MS: '3000' } });
       try {
         const statuses: number[] = [];
         for (const [org, extra] of [[A1, {}], [A2, { 'x-owner-id': randomUUID() }], [A1, { 'x-user-id': randomUUID() }], [A2, {}]] as const) {
@@ -359,9 +364,11 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
       const before = (await selfRecords()).length;
       auth.state.mode = mode;
       try {
-        const r = await owner(A1, 'owner-a-bearer');
+        const r = await owner(A1, 'owner-a-bearer', {}, shortTimeout);
         expect(r.status).toBe(503);
         expect(r.body.items).toBeUndefined();
+        // An Auth that never answers, or stalls mid-body, is cut by the Auth budget (not by anything else giving up first).
+        if (mode === 'hang' || mode === 'slow_body') expect(r.body.code).toBe('auth_timeout');
       } finally {
         auth.state.mode = 'ok';
       }
