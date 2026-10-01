@@ -17,6 +17,7 @@ import { ActorRecordService } from './actor-record.service.js';
 import type { AuthGrantFacts, AuthGrantsClient } from './auth-grants-client.js';
 import { AUTH_GRANTS_CLIENT, HumanActor, HumanAuthGuard, HumanBearer } from './human-auth.guard.js';
 import { canCreateOrganization, canCreatePlatform, canUpdateOrganization, canUpdatePlatform } from './authorization-evaluator.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 const STEP_UP_HEADER = 'x-step-up-token';
 
@@ -67,7 +68,7 @@ export class AdminController {
   private async requireStepUp(actor: AuthGrantFacts, bearer: string, purpose: string, token: string | undefined, target: { type: 'company' | 'platform'; id: string }) {
     if (!token || !(await this.authGrants.verifyStepUp(bearer, purpose, token))) {
       await this.denied(actor, purpose, { type: target.type, id: target.id }, 'step_up_required');
-      throw organizationError(403, 'step_up_required', 'A fresh step-up is required for this operation.');
+      throw organizationError(403, 'step_up_required', ORGANIZATION_MESSAGES.stepUpRequired);
     }
   }
 
@@ -96,7 +97,7 @@ export class AdminController {
     const authority = canCreatePlatform(actor, company);
     if (!authority) {
       await this.denied(actor, 'platform.create', { type: 'company', id: company.id }, 'no_authority');
-      throw organizationError(403, 'admin_forbidden', 'Not authorized to create a platform for this company.');
+      throw organizationError(403, 'admin_forbidden', ORGANIZATION_MESSAGES.notAuthorizedCreatePlatform);
     }
     await this.requireStepUp(actor, bearer, 'platform.create', stepUpToken, { type: 'company', id: company.id });
     // The success record is written inside the mutation's transaction (`within`): both commit, or neither does.
@@ -121,7 +122,7 @@ export class AdminController {
     const authority = canUpdatePlatform(actor, current);
     if (!authority) {
       await this.denied(actor, 'platform.update', { type: 'platform', id: id }, 'no_authority');
-      throw organizationError(403, 'admin_forbidden', 'Not authorized to update this platform.');
+      throw organizationError(403, 'admin_forbidden', ORGANIZATION_MESSAGES.notAuthorizedUpdatePlatform);
     }
     const platform = await this.platforms.update(id, input, humanActor(actor), (q) =>
       this.actorRecord.record({ actor, operation: 'platform.update', targetType: 'platform', targetId: id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
@@ -154,7 +155,7 @@ export class AdminController {
     const authority = canCreateOrganization(actor, platform);
     if (!authority) {
       await this.denied(actor, 'organization.create', { type: 'platform', id: platform.id }, 'no_authority');
-      throw organizationError(403, 'admin_forbidden', 'Not authorized to create an organization on this platform.');
+      throw organizationError(403, 'admin_forbidden', ORGANIZATION_MESSAGES.notAuthorizedCreateOrganization);
     }
     await this.requireStepUp(actor, bearer, 'organization.create', stepUpToken, { type: 'platform', id: platform.id });
     const { organization, replayed } = await this.organizations.create(`user:${actor.userId}`, key, input, humanActor(actor), (q, o) =>
@@ -179,7 +180,7 @@ export class AdminController {
     const authority = canUpdateOrganization(actor, current, platform);
     if (!authority) {
       await this.denied(actor, 'organization.update', { type: 'organization', id: id }, 'no_authority');
-      throw organizationError(403, 'admin_forbidden', 'Not authorized to update this organization.');
+      throw organizationError(403, 'admin_forbidden', ORGANIZATION_MESSAGES.notAuthorizedUpdateOrganization);
     }
     const organization = await this.organizations.update(id, input, humanActor(actor), (q) =>
       this.actorRecord.record({ actor, operation: 'organization.update', targetType: 'organization', targetId: id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));

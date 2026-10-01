@@ -1,4 +1,5 @@
 import { LIMITS, failing, readObject, requiredText, requiredUuid } from './input.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 const fail = failing('invalid_platform_request');
 
@@ -21,6 +22,6 @@ export function normaliseUpdatePlatform(raw: unknown): UpdatePlatformInput {
   const body = readObject(raw, ['name'], fail, ['id', 'companyId', 'createdAt', 'updatedAt']);
   const out: UpdatePlatformInput = {};
   if ('name' in body) out.name = requiredText(body, 'name', LIMITS.name, fail);
-  if (Object.keys(out).length === 0) throw fail('at least one field must be provided');
+  if (Object.keys(out).length === 0) throw fail(ORGANIZATION_MESSAGES.atLeastOneField);
   return out;
 }

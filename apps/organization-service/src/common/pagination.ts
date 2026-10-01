@@ -1,5 +1,7 @@
+import { type MessageParams, type MessageTexts } from '@nawara/service-kit';
 import { organizationError } from '../domain/errors.js';
 import { UUID } from '../domain/input.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 /**
  * Cursor pagination for lists (ADR-0034): `?limit=&cursor=` returning `{ items, nextCursor }`, newest first, with allow-listed
@@ -28,7 +30,7 @@ export interface ListQuery {
   filters: Record<string, string>;
 }
 
-const bad = (message: string) => organizationError(400, 'invalid_query', message);
+const bad = (message: string | MessageTexts, params?: MessageParams) => organizationError(400, 'invalid_query', message, params);
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 
 export function encodeCursor(position: CursorPosition): string {
@@ -37,15 +39,15 @@ export function encodeCursor(position: CursorPosition): string {
 
 /** Strict: a cursor that is not exactly what `encodeCursor` produces is a 400 (never a 500, never trusted as SQL). */
 export function decodeCursor(raw: string): CursorPosition {
-  if (!/^[A-Za-z0-9_-]{1,256}$/.test(raw)) throw bad('cursor is not valid');
+  if (!/^[A-Za-z0-9_-]{1,256}$/.test(raw)) throw bad(ORGANIZATION_MESSAGES.cursorInvalid);
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
   } catch {
-    throw bad('cursor is not valid');
+    throw bad(ORGANIZATION_MESSAGES.cursorInvalid);
   }
   const { t, i } = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as { t?: unknown; i?: unknown };
-  if (typeof t !== 'string' || typeof i !== 'string' || !TIMESTAMP.test(t) || !UUID.test(i) || Number.isNaN(Date.parse(t))) throw bad('cursor is not valid');
+  if (typeof t !== 'string' || typeof i !== 'string' || !TIMESTAMP.test(t) || !UUID.test(i) || Number.isNaN(Date.parse(t))) throw bad(ORGANIZATION_MESSAGES.cursorInvalid);
   return { createdAt: t, id: i };
 }
 
@@ -53,7 +55,7 @@ export function decodeCursor(raw: string): CursorPosition {
 export function parseLimit(raw: unknown): number {
   if (raw === undefined || raw === '') return DEFAULT_LIMIT;
   const n = typeof raw === 'string' && /^\d{1,6}$/.test(raw) ? Number(raw) : NaN;
-  if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) throw bad(`limit must be an integer from 1 to ${MAX_LIMIT}`);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_LIMIT) throw bad(ORGANIZATION_MESSAGES.limitRange, { max: MAX_LIMIT });
   return n;
 }
 
@@ -61,14 +63,16 @@ export function parseLimit(raw: unknown): number {
 export function parseListQuery(query: Record<string, unknown>, uuidFilters: readonly string[] = []): ListQuery {
   const allowed = ['limit', 'cursor', ...uuidFilters];
   for (const [key, value] of Object.entries(query)) {
+    // ADR-0054 D10 (deferred, R6.2): this echoes an arbitrary client-supplied query key, which D10 does not cover; kept exactly as
+    // before (a plain English string, not localized) until that reflection is decided.
     if (!allowed.includes(key)) throw bad(`unknown query parameter: ${key}`);
-    if (typeof value !== 'string') throw bad(`${key} must be given once`);
+    if (typeof value !== 'string') throw bad(ORGANIZATION_MESSAGES.givenOnce, { name: key });
   }
   const filters: Record<string, string> = {};
   for (const name of uuidFilters) {
     const v = query[name];
     if (v === undefined) continue;
-    if (typeof v !== 'string' || !UUID.test(v)) throw bad(`${name} must be a uuid`);
+    if (typeof v !== 'string' || !UUID.test(v)) throw bad(ORGANIZATION_MESSAGES.mustBeUuid, { name });
     filters[name] = v.toLowerCase();
   }
   const cursor = typeof query.cursor === 'string' ? decodeCursor(query.cursor) : undefined;

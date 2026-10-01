@@ -9,6 +9,7 @@ import { notFound, organizationError } from '../domain/errors.js';
 import type { CreateOrganizationInput, UpdateOrganizationInput } from '../domain/organization-input.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { OwnershipService } from '../ownership/ownership.service.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 export interface OrganizationRow {
   id: string;
@@ -65,7 +66,7 @@ export class OrganizationRepository {
         return { organization: rows[0]!, replayed: false };
       });
     } catch (e) {
-      if (pgCode(e) === '23503' && pgConstraint(e) === 'organization_platform_fk') throw organizationError(404, 'platform_not_found', 'No such platform.');
+      if (pgCode(e) === '23503' && pgConstraint(e) === 'organization_platform_fk') throw organizationError(404, 'platform_not_found', ORGANIZATION_MESSAGES.noSuchPlatform);
       throw e;
     }
   }
