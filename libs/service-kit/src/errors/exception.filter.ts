@@ -5,7 +5,7 @@ import { renderMessage, type MessageTexts } from '../i18n/catalog.js';
 import { DEFAULT_LOCALE, type Locale } from '../i18n/locale.js';
 import { describeFailure } from '../logging/failure.js';
 import type { JsonLogger } from '../logging/json-logger.js';
-import { localizedMessageOf } from './http-error.js';
+import { localizedMessageListOf, localizedMessageOf } from './http-error.js';
 import { KIT_MESSAGES, statusMessage } from './kit-messages.js';
 
 export interface ErrorBody {
@@ -86,7 +86,7 @@ export class KitExceptionFilter implements ExceptionFilter {
     const requestId = getRequestContext()?.requestId;
     const localize = this.localize && !this.isExcluded(req);
     const locale: Locale = localize ? (getRequestContext()?.locale ?? DEFAULT_LOCALE) : DEFAULT_LOCALE;
-    let used: Locale = DEFAULT_LOCALE;
+    let used: string = DEFAULT_LOCALE; // the Content-Language value: one language, or `<locale>, en` for a partly translated list
     const render = (texts: MessageTexts, params?: Parameters<typeof renderMessage>[2]): string => {
       const r = renderMessage(texts, locale, params);
       used = r.locale;
@@ -101,8 +101,22 @@ export class KitExceptionFilter implements ExceptionFilter {
       const code = codeOf(raw);
       if (localize) {
         const attached = localizedMessageOf(exception);
+        const list = localizedMessageListOf(exception);
         const generic = statusMessage(status);
         if (attached) message = render(attached.texts, attached.params);
+        else if (list && Array.isArray(message) && list.length === message.length) {
+          // a validation list (R4): each element rendered in place, same array, same order; an unidentified element stays English
+          const english = message;
+          const langs = new Set<Locale>();
+          message = english.map((text, i) => {
+            const item = list[i];
+            if (!item) return (langs.add(DEFAULT_LOCALE), text);
+            const r = renderMessage(item.message.texts, locale, item.message.params);
+            langs.add(r.locale);
+            return `${item.prefix}${r.text}`;
+          });
+          used = langs.size <= 1 ? ([...langs][0] ?? DEFAULT_LOCALE) : [locale, DEFAULT_LOCALE].join(', ');
+        }
         else if (generic && message === STATUS_TEXT[status]) {
           // the message IS the status phrase (a Nest exception's default message, or a Core thrower that used it): a framework constant,
           // never caller data. Localized text only: the code stays exactly what the thrower set, or absent.

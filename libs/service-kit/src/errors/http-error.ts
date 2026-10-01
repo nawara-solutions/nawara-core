@@ -6,6 +6,13 @@ import { DEFAULT_LOCALE } from '../i18n/locale.js';
 // The message identity rides on the exception object under a module-private symbol: never in its response object, so it can never
 // reach a response body (Auth's filter copies extra RESPONSE fields; a symbol is not one of them).
 const LOCALIZED = Symbol('nawara.localizedMessage');
+const LOCALIZED_LIST = Symbol('nawara.localizedMessageList');
+
+/** One element of a `string[]` message (validation, R4): a verbatim prefix (Nest's nested-property path) plus a catalog message. */
+export interface LocalizedListItem {
+  readonly prefix: string;
+  readonly message: LocalizedMessage;
+}
 
 /** Attaches a catalog message to an exception the kit or a service throws deliberately (D10: only those are ever localized). */
 export function attachLocalizedMessage<E extends HttpException>(exception: E, message: LocalizedMessage): E {
@@ -15,6 +22,19 @@ export function attachLocalizedMessage<E extends HttpException>(exception: E, me
 
 export function localizedMessageOf(exception: HttpException): LocalizedMessage | undefined {
   return (exception as unknown as Record<symbol, LocalizedMessage | undefined>)[LOCALIZED];
+}
+
+/**
+ * Attaches, element by element, the catalog identity of a `string[]` message; `undefined` keeps that element's English text. The
+ * list must align with the message array (the filter ignores it otherwise).
+ */
+export function attachLocalizedMessageList<E extends HttpException>(exception: E, items: readonly (LocalizedListItem | undefined)[]): E {
+  Object.defineProperty(exception, LOCALIZED_LIST, { value: Object.freeze([...items]), enumerable: false });
+  return exception;
+}
+
+export function localizedMessageListOf(exception: HttpException): readonly (LocalizedListItem | undefined)[] | undefined {
+  return (exception as unknown as Record<symbol, readonly (LocalizedListItem | undefined)[] | undefined>)[LOCALIZED_LIST];
 }
 
 /**

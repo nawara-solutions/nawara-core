@@ -1,9 +1,9 @@
-import { ValidationPipe } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import type { BaseConfig } from './config/base-config.js';
 import { requestContextMiddleware } from './context/request-context.js';
 import { KitExceptionFilter } from './errors/exception.filter.js';
+import { LocalizedValidationPipe } from './errors/validation.pipe.js';
 import { ShutdownState, shutdownAdmission } from './health/http-drain.js';
 import type { JsonLogger } from './logging/json-logger.js';
 
@@ -30,7 +30,8 @@ export function configureApp(app: NestExpressApplication, config: BaseConfig, lo
   app.use(requestContextMiddleware);
   app.use(helmet());
   app.useBodyParser('json', { limit: `${config.bodyLimitKb}kb` });
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: false }));
+  // Nest's ValidationPipe with the same options; its failures carry `validation_error` and localizable messages (ADR-0054, R4)
+  app.useGlobalPipes(new LocalizedValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: false }));
   app.useGlobalFilters(new KitExceptionFilter(logger, { localize: true, excludedPathPrefixes: options.errorLocalizationExcludedPaths ?? [] }));
   if (config.corsOrigins.length > 0) app.enableCors({ origin: config.corsOrigins, credentials: false });
   app.enableShutdownHooks();

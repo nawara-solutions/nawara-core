@@ -11,6 +11,7 @@ export { describeFailure, failureFacts, type FailureFacts, type FailureKind } fr
 
 export { KitExceptionFilter, type ErrorBody, type KitExceptionFilterOptions } from './errors/exception.filter.js';
 export { httpError } from './errors/http-error.js';
+export { LocalizedValidationPipe, VALIDATION_ERROR_CODE } from './errors/validation.pipe.js';
 export { resolveLocale, SUPPORTED_LOCALES, DEFAULT_LOCALE, MAX_ACCEPT_LANGUAGE_LENGTH, MAX_LANGUAGE_RANGES, type Locale } from './i18n/locale.js';
 export { defineMessages, renderMessage, catalogProblems, type MessageTexts, type MessageParams, type LocalizedMessage } from './i18n/catalog.js';
 
