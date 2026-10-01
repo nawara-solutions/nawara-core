@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import { organizationError } from '../domain/errors.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 export type IdempotentOperation = 'company.create' | 'platform.create' | 'organization.create';
 export type ReserveResult = { replay: false } | { replay: true; resourceId: string };
@@ -11,7 +12,7 @@ const KEY = /^[A-Za-z0-9._:-]{8,128}$/;
 /** `Idempotency-Key` is required on every resource-creating POST (ADR-0034): these entities have no natural key to fall back on. */
 export function requireIdempotencyKey(header: string | undefined): string {
   if (typeof header !== 'string' || !KEY.test(header)) {
-    throw organizationError(400, 'idempotency_key_required', 'A valid Idempotency-Key header (8 to 128 characters of A-Z a-z 0-9 . _ : -) is required.');
+    throw organizationError(400, 'idempotency_key_required', ORGANIZATION_MESSAGES.idempotencyKeyRequired);
   }
   return header;
 }
@@ -48,7 +49,7 @@ export class IdempotencyService {
       const existing = rows[0];
       if (!existing) throw e;
       if (existing.requestHash !== p.requestHash) {
-        throw organizationError(422, 'idempotency_key_reused', 'This Idempotency-Key was already used with a different request.');
+        throw organizationError(422, 'idempotency_key_reused', ORGANIZATION_MESSAGES.idempotencyKeyReused);
       }
       return { replay: true, resourceId: existing.resourceId };
     }

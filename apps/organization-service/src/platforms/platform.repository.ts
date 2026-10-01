@@ -9,6 +9,7 @@ import { notFound, organizationError } from '../domain/errors.js';
 import type { CreatePlatformInput, UpdatePlatformInput } from '../domain/platform-input.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { OwnershipService } from '../ownership/ownership.service.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 export interface PlatformRow {
   id: string;
@@ -54,7 +55,7 @@ export class PlatformRepository {
         return { platform: rows[0]!, replayed: false };
       });
     } catch (e) {
-      if (pgCode(e) === '23503' && pgConstraint(e) === 'platform_company_fk') throw organizationError(404, 'company_not_found', 'No such company.');
+      if (pgCode(e) === '23503' && pgConstraint(e) === 'platform_company_fk') throw organizationError(404, 'company_not_found', ORGANIZATION_MESSAGES.noSuchCompany);
       throw e;
     }
   }

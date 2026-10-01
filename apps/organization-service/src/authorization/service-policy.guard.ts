@@ -1,11 +1,13 @@
-import { CanActivate, ExecutionContext, HttpException, Inject, Injectable, Logger } from '@nestjs/common';
+import { httpError } from '@nawara/service-kit';
+import { CanActivate, ExecutionContext, Inject, Injectable, Logger } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { ServiceRequest } from '@nawara/service-kit';
 import { OwnershipService } from '../ownership/ownership.service.js';
 import { REQUIRED_CAPABILITY, type ServiceScope } from './capability.js';
 import { SERVICE_POLICY, type RequiredCapability, type ServicePolicy } from './service-policy.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
-const forbidden = () => new HttpException({ message: 'Forbidden.', code: 'forbidden' }, 403);
+const forbidden = () => httpError(403, 'forbidden', ORGANIZATION_MESSAGES.forbidden);
 
 /**
  * Runs AFTER the token guard (authentication): is this caller admitted to this operation? Deny by default, and it fails closed at every
@@ -35,7 +37,7 @@ export class ServicePolicyGuard implements CanActivate {
     if (capability === 'hierarchy.reference.read' || capability === 'hierarchy.read') {
       const st = await this.ownership.state();
       const allowed = st.authoritative || (capability === 'hierarchy.read' && st.environmentClass === 'fresh');
-      if (!allowed) throw new HttpException({ message: `organization-service is not authoritative yet (phase ${st.phase}).`, code: 'not_authoritative' }, 409);
+      if (!allowed) throw httpError(409, 'not_authoritative', ORGANIZATION_MESSAGES.notAuthoritativeReads, { phase: st.phase });
     }
     req.serviceScope = { caller, capability, allowedPlatforms: this.policy.platforms(caller) };
     return true;

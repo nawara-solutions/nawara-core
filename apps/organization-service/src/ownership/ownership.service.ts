@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import { organizationError } from '../domain/errors.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 /** ADR-0040 and the migration `0004_ownership_transition.sql`. `authoritative` is true only for ACTIVE and RETIRED. */
 export const OWNERSHIP_PHASES = ['PREPARED', 'VERIFIED', 'FROZEN', 'ACTIVATABLE', 'ACTIVE', 'RETIRED'] as const;
@@ -37,7 +38,7 @@ export class OwnershipService {
       approved_by: string | null; approved_reference: string | null; approved_at: Date | null; activated_by: string | null; activated_at: Date | null;
     }>('SELECT phase, environment_class, authoritative, verified_digest, approved_by, approved_reference, approved_at, activated_by, activated_at FROM ownership_state');
     const r = rows[0];
-    if (!r) throw organizationError(503, 'not_authoritative', 'The ownership state is not initialised.');
+    if (!r) throw organizationError(503, 'not_authoritative', ORGANIZATION_MESSAGES.ownershipNotInitialised);
     return {
       phase: r.phase, environmentClass: r.environment_class, authoritative: r.authoritative, verifiedDigest: r.verified_digest,
       approvedBy: r.approved_by, approvedReference: r.approved_reference, approvedAt: r.approved_at, activatedBy: r.activated_by, activatedAt: r.activated_at,
@@ -56,6 +57,6 @@ export class OwnershipService {
       await q.query(`SELECT set_config('nawara.write_mode', 'bootstrap', true)`);
       return st;
     }
-    throw organizationError(409, 'not_authoritative', `organization-service is not authoritative yet (phase ${st.phase}): hierarchy writes are refused.`);
+    throw organizationError(409, 'not_authoritative', ORGANIZATION_MESSAGES.notAuthoritativeWrites, { phase: st.phase });
   }
 }

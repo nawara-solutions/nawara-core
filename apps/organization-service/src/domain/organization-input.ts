@@ -1,4 +1,5 @@
 import { LIMITS, failing, optionalText, readObject, requiredText, requiredUuid } from './input.js';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 
 const fail = failing('invalid_organization_request');
 
@@ -42,6 +43,6 @@ export function normaliseUpdateOrganization(raw: unknown): UpdateOrganizationInp
     const v = optionalText(body, field, LIMITS[field], fail);
     if (v !== undefined) out[field] = v;
   }
-  if (Object.keys(out).length === 0) throw fail('at least one field must be provided');
+  if (Object.keys(out).length === 0) throw fail(ORGANIZATION_MESSAGES.atLeastOneField);
   return out;
 }

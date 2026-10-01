@@ -1,4 +1,6 @@
 import type { HttpException } from '@nestjs/common';
+import type { MessageParams, MessageTexts } from '@nawara/service-kit';
+import { ORGANIZATION_MESSAGES } from '../messages.js';
 import { organizationError, type OrganizationErrorCode } from './errors.js';
 
 /**
@@ -11,17 +13,17 @@ export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 export const LIMITS = { name: 200, taxCode: 64, address: 500, phone: 32, type: 64 } as const;
 
-export type Fail = (message: string) => HttpException;
-export const failing = (code: OrganizationErrorCode): Fail => (message) => organizationError(400, code, message);
+export type Fail = (message: string | MessageTexts, params?: MessageParams) => HttpException;
+export const failing = (code: OrganizationErrorCode): Fail => (message, params) => organizationError(400, code, message, params);
 
 export const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 /** The body must be an object whose keys are all in `allowed`; `immutable` keys get an explicit message rather than "unknown". */
 export function readObject(raw: unknown, allowed: readonly string[], fail: Fail, immutable: readonly string[] = []): Record<string, unknown> {
-  if (!isObject(raw)) throw fail('the request body must be a JSON object');
+  if (!isObject(raw)) throw fail(ORGANIZATION_MESSAGES.bodyMustBeObject);
   for (const key of Object.keys(raw)) {
-    if (immutable.includes(key)) throw fail(`${key} cannot be changed`);
-    if (!allowed.includes(key)) throw fail(`unknown field: ${key}`);
+    if (immutable.includes(key)) throw fail(ORGANIZATION_MESSAGES.cannotBeChanged, { name: key });
+    if (!allowed.includes(key)) throw fail(ORGANIZATION_MESSAGES.unknownField, { name: key }); // the property NAME only (ADR-0054 D10), never its value
   }
   return raw;
 }
@@ -29,7 +31,7 @@ export function readObject(raw: unknown, allowed: readonly string[], fail: Fail,
 /** A required, non-blank string of at most `max` characters, trimmed. */
 export function requiredText(raw: Record<string, unknown>, field: string, max: number, fail: Fail): string {
   const v = raw[field];
-  if (typeof v !== 'string' || v.trim() === '' || v.trim().length > max) throw fail(`${field} must be 1 to ${max} characters`);
+  if (typeof v !== 'string' || v.trim() === '' || v.trim().length > max) throw fail(ORGANIZATION_MESSAGES.textLength, { name: field, max });
   return v.trim();
 }
 
@@ -42,6 +44,6 @@ export function optionalText(raw: Record<string, unknown>, field: string, max: n
 
 export function requiredUuid(raw: Record<string, unknown>, field: string, fail: Fail): string {
   const v = raw[field];
-  if (typeof v !== 'string' || !UUID.test(v)) throw fail(`${field} must be a uuid`);
+  if (typeof v !== 'string' || !UUID.test(v)) throw fail(ORGANIZATION_MESSAGES.mustBeUuid, { name: field });
   return v.toLowerCase();
 }
