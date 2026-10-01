@@ -1,5 +1,6 @@
 import { HttpException, UnauthorizedException } from '@nestjs/common';
-import { correlationHeaders } from '@nawara/service-kit';
+import { correlationHeaders, httpError, attachLocalizedMessage } from '@nawara/service-kit';
+import { AUDIT_MESSAGES } from '../messages.js';
 
 /** DI token of the Auth port the owner read uses (Stage 19.3). Tests inject their own. */
 export const OWNER_AUTHORITY = Symbol('OWNER_AUTHORITY');
@@ -32,7 +33,8 @@ export const MAX_AUTH_RESPONSE_BYTES = 16 * 1024;
  */
 export class AuthDependencyError extends HttpException {
   constructor(readonly failure: 'auth_timeout' | 'auth_unavailable') {
-    super({ message: 'Authorization could not be verified; no evidence is returned.', code: failure }, 503);
+    super({ message: AUDIT_MESSAGES.authorizationUnverified.en, code: failure }, 503);
+    attachLocalizedMessage(this, { texts: AUDIT_MESSAGES.authorizationUnverified });
   }
 }
 
@@ -92,7 +94,7 @@ export class HttpOwnerAuthority implements OwnerAuthority {
     }
     const b = await this.json(res, deadline);
     if (typeof b.userId !== 'string' || !UUID.test(b.userId) || (b.kind !== 'owner' && b.kind !== 'operator' && b.kind !== 'member')) throw new AuthDependencyError('auth_unavailable');
-    if (b.kind !== 'owner') throw new HttpException({ message: 'Only a Company owner may read audit evidence here.', code: 'operation_not_allowed' }, 403);
+    if (b.kind !== 'owner') throw httpError(403, 'operation_not_allowed', AUDIT_MESSAGES.ownerOnly);
     if (typeof b.companyId !== 'string' || b.companyId === '') throw new AuthDependencyError('auth_unavailable'); // an owner always has a Company
     return b.userId.toLowerCase();
   }

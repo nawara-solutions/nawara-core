@@ -2,9 +2,10 @@ import { timingSafeEqual } from 'node:crypto';
 import { Controller, Get, HttpException, Inject, Param, Req, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
-import { SERVICE_TOKENS, hashServiceToken, type ServiceTokenEntry } from '@nawara/service-kit';
+import { SERVICE_TOKENS, hashServiceToken, type ServiceTokenEntry, httpError } from '@nawara/service-kit';
 import { AuditPageDto } from '../query/query.dto.js';
 import { AuditQueryService, type AuditPage } from '../query/query.service.js';
+import { AUDIT_MESSAGES } from '../messages.js';
 
 /**
  * Stage 19.3 Audit-X (ADR-0050 decision 6): a Company owner reads the audit records of ONE organization of their own Company, with their OWN
@@ -41,7 +42,7 @@ export class OwnerAuditQueryController {
     res.setHeader('Cache-Control', 'no-store');
     const bearer = this.humanBearer(req);
     const length = Number(req.headers['content-length'] ?? 0);
-    if (length > 0 || req.headers['transfer-encoding'] !== undefined) throw new HttpException({ message: 'A read takes no request body.', code: 'unexpected_body' }, 400);
+    if (length > 0 || req.headers['transfer-encoding'] !== undefined) throw httpError(400, 'unexpected_body', AUDIT_MESSAGES.unexpectedBody);
     return this.queries.owner(bearer, organizationId, req.query);
   }
 

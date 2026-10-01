@@ -3,12 +3,13 @@ import { HttpException } from '@nestjs/common';
 import {
   ACTOR_TYPES, AUDIT_CATEGORIES, AUDIT_OUTCOMES, CORE_PRODUCERS, catalogEntry, type AuditCategory, type AuditOutcome,
 } from '@nawara/audit-contract';
-import { canonicalJson } from '@nawara/service-kit';
+import { canonicalJson, httpError, type MessageParams, type MessageTexts } from '@nawara/service-kit';
 import { DEFAULT_LIMIT, MAX_LIMIT, MAX_WINDOW_MS, type CursorPosition, type QueryFilters, type QueryScope } from './query-model.js';
+import { AUDIT_MESSAGES } from '../messages.js';
 
 /** A 400 with a stable code; the message never echoes a request value. */
-export function badRequest(code: string, message: string): HttpException {
-  return new HttpException({ message, code }, 400);
+export function badRequest(code: string, message: string | MessageTexts, params?: MessageParams): HttpException {
+  return httpError(400, code, message, params);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -35,9 +36,9 @@ export interface ParsedQuery {
 
 function instant(value: string, name: string): Date {
   const d = new Date(value);
-  if (!INSTANT.test(value) || Number.isNaN(d.getTime())) throw badRequest('invalid_query', `${name} must be a UTC instant like 2026-01-31T00:00:00Z`);
+  if (!INSTANT.test(value) || Number.isNaN(d.getTime())) throw badRequest('invalid_query', AUDIT_MESSAGES.invalidInstant, { name });
   const normalized = value.length === 20 ? `${value.slice(0, 19)}.000Z` : value;
-  if (d.toISOString() !== normalized) throw badRequest('invalid_query', `${name} is not a real instant`); // 2026-02-30 is refused, not rolled over
+  if (d.toISOString() !== normalized) throw badRequest('invalid_query', AUDIT_MESSAGES.notRealInstant, { name }); // 2026-02-30 is refused, not rolled over
   return d;
 }
 
@@ -45,8 +46,8 @@ function pair(raw: Record<string, string>, typeKey: string, idKey: string, typeO
   const t = raw[typeKey];
   const id = raw[idKey];
   if (t === undefined && id === undefined) return undefined;
-  if (t === undefined || id === undefined) throw badRequest('invalid_query', `${typeKey} and ${idKey} go together`);
-  if (!typeOk(t) || !idOk(t, id)) throw badRequest('invalid_query', `${typeKey} / ${idKey} is not valid`);
+  if (t === undefined || id === undefined) throw badRequest('invalid_query', AUDIT_MESSAGES.pairTogether, { typeKey, idKey });
+  if (!typeOk(t) || !idOk(t, id)) throw badRequest('invalid_query', AUDIT_MESSAGES.pairInvalid, { typeKey, idKey });
   return { type: t, id };
 }
 
@@ -56,49 +57,49 @@ function pair(raw: Record<string, string>, typeKey: string, idKey: string, typeO
  * (A66): the half-open window `[from, to)` on `occurredAt`, at most 92 days (organization) or 31 days (platform, and the Stage 19.3 owner read).
  */
 export function parseQuery(input: unknown, route: 'organization' | 'platform' | 'owner'): ParsedQuery {
-  if (typeof input !== 'object' || input === null) throw badRequest('invalid_query', 'invalid query string');
+  if (typeof input !== 'object' || input === null) throw badRequest('invalid_query', AUDIT_MESSAGES.invalidQueryString);
   const allowed = new Set<string>(route === 'platform' ? [...COMMON, ...PLATFORM_ONLY] : COMMON);
   const raw: Record<string, string> = {};
   for (const [k, v] of Object.entries(input)) {
-    if (!allowed.has(k)) throw badRequest('invalid_query', 'unknown query parameter');
-    if (typeof v !== 'string') throw badRequest('invalid_query', `${k} must be given once`);
-    if (v === '' || v.length > (k === 'cursor' ? 512 : MAX_VALUE_LENGTH)) throw badRequest('invalid_query', `${k} is empty or too long`);
+    if (!allowed.has(k)) throw badRequest('invalid_query', AUDIT_MESSAGES.unknownParameter);
+    if (typeof v !== 'string') throw badRequest('invalid_query', AUDIT_MESSAGES.givenOnce, { name: k });
+    if (v === '' || v.length > (k === 'cursor' ? 512 : MAX_VALUE_LENGTH)) throw badRequest('invalid_query', AUDIT_MESSAGES.emptyOrTooLong, { name: k });
     raw[k] = v;
   }
 
-  if (raw.from === undefined || raw.to === undefined) throw badRequest('invalid_query', 'from and to are required');
+  if (raw.from === undefined || raw.to === undefined) throw badRequest('invalid_query', AUDIT_MESSAGES.fromToRequired);
   const from = instant(raw.from, 'from');
   const to = instant(raw.to, 'to');
-  if (to.getTime() <= from.getTime()) throw badRequest('invalid_query', 'to must be after from');
+  if (to.getTime() <= from.getTime()) throw badRequest('invalid_query', AUDIT_MESSAGES.toAfterFrom);
   if (to.getTime() - from.getTime() > MAX_WINDOW_MS[route]) {
-    throw badRequest('window_too_large', `the time window may not exceed ${MAX_WINDOW_MS[route] / 86_400_000} days`);
+    throw badRequest('window_too_large', AUDIT_MESSAGES.windowTooLarge, { days: MAX_WINDOW_MS[route] / 86_400_000 });
   }
 
   let limit = DEFAULT_LIMIT;
   if (raw.limit !== undefined) {
-    if (!LIMIT.test(raw.limit) || Number(raw.limit) > MAX_LIMIT) throw badRequest('invalid_query', `limit must be an integer from 1 to ${MAX_LIMIT}`);
+    if (!LIMIT.test(raw.limit) || Number(raw.limit) > MAX_LIMIT) throw badRequest('invalid_query', AUDIT_MESSAGES.limitRange, { max: MAX_LIMIT });
     limit = Number(raw.limit);
   }
 
   const filters: QueryFilters = {};
   if (raw.action !== undefined) {
-    if (!catalogEntry(raw.action)) throw badRequest('invalid_query', 'action is not a cataloged action');
+    if (!catalogEntry(raw.action)) throw badRequest('invalid_query', AUDIT_MESSAGES.actionNotCataloged);
     filters.action = raw.action;
   }
   if (raw.category !== undefined) {
-    if (!(AUDIT_CATEGORIES as readonly string[]).includes(raw.category)) throw badRequest('invalid_query', 'category is not valid');
+    if (!(AUDIT_CATEGORIES as readonly string[]).includes(raw.category)) throw badRequest('invalid_query', AUDIT_MESSAGES.categoryInvalid);
     filters.category = raw.category as AuditCategory;
   }
   if (raw.outcome !== undefined) {
-    if (!(AUDIT_OUTCOMES as readonly string[]).includes(raw.outcome)) throw badRequest('invalid_query', 'outcome is not valid');
+    if (!(AUDIT_OUTCOMES as readonly string[]).includes(raw.outcome)) throw badRequest('invalid_query', AUDIT_MESSAGES.outcomeInvalid);
     filters.outcome = raw.outcome as AuditOutcome;
   }
   if (raw.sourceService !== undefined) {
-    if (!(CORE_PRODUCERS as readonly string[]).includes(raw.sourceService)) throw badRequest('invalid_query', 'sourceService is not a cataloged producer');
+    if (!(CORE_PRODUCERS as readonly string[]).includes(raw.sourceService)) throw badRequest('invalid_query', AUDIT_MESSAGES.sourceNotCataloged);
     filters.sourceService = raw.sourceService;
   }
   if (raw.correlationId !== undefined) {
-    if (!CORRELATION.test(raw.correlationId)) throw badRequest('invalid_query', 'correlationId is not valid');
+    if (!CORRELATION.test(raw.correlationId)) throw badRequest('invalid_query', AUDIT_MESSAGES.correlationInvalid);
     filters.correlationId = raw.correlationId;
   }
   const actor = pair(raw, 'actorType', 'actorId', (t) => (ACTOR_TYPES as readonly string[]).includes(t), (t, id) =>
@@ -111,9 +112,9 @@ export function parseQuery(input: unknown, route: 'organization' | 'platform' | 
 
   const parsed: ParsedQuery = { filters, window: { from, to }, limit, ...(raw.cursor !== undefined ? { cursor: raw.cursor } : {}) };
   if (route === 'platform') {
-    if (raw.organizationId !== undefined && raw.platform !== undefined) throw badRequest('invalid_query', 'organizationId and platform are exclusive');
-    if (raw.platform !== undefined && raw.platform !== 'true') throw badRequest('invalid_query', 'platform must be true when present');
-    if (raw.organizationId !== undefined && !UUID.test(raw.organizationId)) throw badRequest('invalid_query', 'organizationId is not valid');
+    if (raw.organizationId !== undefined && raw.platform !== undefined) throw badRequest('invalid_query', AUDIT_MESSAGES.organizationPlatformExclusive);
+    if (raw.platform !== undefined && raw.platform !== 'true') throw badRequest('invalid_query', AUDIT_MESSAGES.platformMustBeTrue);
+    if (raw.organizationId !== undefined && !UUID.test(raw.organizationId)) throw badRequest('invalid_query', AUDIT_MESSAGES.organizationIdInvalid);
     parsed.target = raw.organizationId !== undefined ? { kind: 'platform', target: 'organization', organizationId: raw.organizationId }
       : raw.platform !== undefined ? { kind: 'platform', target: 'platform' } : { kind: 'platform', target: 'all' };
   }
@@ -122,7 +123,7 @@ export function parseQuery(input: unknown, route: 'organization' | 'platform' | 
 
 /** The organization of an organization-scope path, strictly (lowercase UUID; not a filter: the scope). */
 export function parseOrganizationPath(value: unknown): string {
-  if (typeof value !== 'string' || !UUID.test(value)) throw badRequest('invalid_scope', 'organizationId is not valid');
+  if (typeof value !== 'string' || !UUID.test(value)) throw badRequest('invalid_scope', AUDIT_MESSAGES.organizationIdInvalid);
   return value;
 }
 
@@ -150,7 +151,7 @@ export function encodeCursor(position: CursorPosition, fingerprint: string): str
 }
 
 export function decodeCursor(raw: string, fingerprint: string): CursorPosition {
-  const bad = () => badRequest('invalid_cursor', 'cursor is not valid for this query');
+  const bad = () => badRequest('invalid_cursor', AUDIT_MESSAGES.cursorInvalid);
   if (!CURSOR.test(raw)) throw bad();
   let parsed: unknown;
   try {

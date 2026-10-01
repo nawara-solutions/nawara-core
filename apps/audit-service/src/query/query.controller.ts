@@ -1,9 +1,10 @@
-import { Controller, Get, HttpException, Inject, Param, Req, Res, UseGuards, applyDecorators } from '@nestjs/common';
+import { Controller, Get, Inject, Param, Req, Res, UseGuards, applyDecorators } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
-import { CallerService, ServiceTokenGuard } from '@nawara/service-kit';
+import { CallerService, ServiceTokenGuard, httpError } from '@nawara/service-kit';
 import { AuditPageDto } from './query.dto.js';
 import { AuditQueryService, type AuditPage } from './query.service.js';
+import { AUDIT_MESSAGES } from '../messages.js';
 
 const FILTERS: Array<[string, string]> = [
   ['from', 'required: UTC instant, inclusive (occurredAt >= from)'],
@@ -72,5 +73,5 @@ export class AuditQueryController {
 function prepare(req: Request, res: Response): void {
   res.setHeader('Cache-Control', 'no-store');
   const length = Number(req.headers['content-length'] ?? 0);
-  if (length > 0 || req.headers['transfer-encoding'] !== undefined) throw new HttpException({ message: 'A read takes no request body.', code: 'unexpected_body' }, 400);
+  if (length > 0 || req.headers['transfer-encoding'] !== undefined) throw httpError(400, 'unexpected_body', AUDIT_MESSAGES.unexpectedBody);
 }
