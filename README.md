@@ -82,7 +82,15 @@ POST https://api.nawara-solutions.com/ai/chat
 
 ## Status
 
-auth-service is implemented and deployed. billing-service and payment-service are implemented through Stage 12.7
+> **Authoritative roadmap: [`docs/CORE-ROADMAP.md`](docs/CORE-ROADMAP.md)** — read it first.
+
+- **Current: Core V1.** Implemented and partly in production (Auth, Organization, Audit); stabilization and the localization
+  refactor (ADR-0054) are active.
+- **Future: Core V2.** A planned architecture roadmap (A0–A19); **not yet implemented**.
+- **Parallel frontend: Nawara Admin** (`nawara-admin`, a separate repository) develops against real existing Core contracts and
+  explicitly mocked, provisional V2 contracts.
+
+Service detail (dated): auth-service is implemented and deployed. billing-service and payment-service are implemented through Stage 12.7
 (catalog, invoicing, settlement, Subscription/Entitlement, and a real-broker Payment→Billing integration — none of
 this is production-deployed yet). organization-service is implemented but not yet authoritative. notification-service
 is implemented and certified for V1 (Stage 16; production enablement has documented external prerequisites). ai-service

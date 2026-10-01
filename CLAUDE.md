@@ -19,6 +19,11 @@ full conventions.
 - Use `/branch`, `/commit`, `/pr` for all version-control work rather than ad-hoc git commands
   — see `CONTRIBUTING.md`.
 
+## Start here: the roadmap
+
+Read [`docs/CORE-ROADMAP.md`](docs/CORE-ROADMAP.md) before any change: it is the authority for the current Core V1 checkpoint,
+the planned Core V2 roadmap, the V1/V2 boundary and the Nawara Admin relationship.
+
 ## What this project is
 
 **Nawara Core** is the shared microservices repo for **Nawara Solutions**, an organization building multiple apps (starting with **Nawara Drive**, a driving-school platform). This repo holds services generic enough to be reused by *any* future Nawara Solutions app — not just Nawara Drive.
