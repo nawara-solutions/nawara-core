@@ -1,6 +1,7 @@
 # 0054. Error responses: a stable machine `code` and a server-localized `message` (EN / FR / AR)
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-01, Core V1 refactor R1: approved by the project owner, merged in #161. **Acceptance is a decision
+  about architecture only: nothing is implemented.** Implementation is R3 onward.)
 - **Date:** 2026-10-01
 - **Deciders:** Anwar (project owner, architecture owner)
 
