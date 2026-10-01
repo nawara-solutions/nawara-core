@@ -12,6 +12,7 @@ import type { PaymentClient } from '../payment-integration/payment-client.js';
 import { billingError } from '../domain/errors.js';
 import { representPaymentRequest } from './payment-request.representation.js';
 import { PaymentRequestRepository } from './payment-request.repository.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 /**
  * Payment requests (SDD 18.1, endpoints 13-15). Creation and read (13, 14) only ever touch Billing's own record —
@@ -119,12 +120,12 @@ export class PaymentRequestsController {
         // Billing's own request status still changes ONLY through the event/reconciliation path, never from this response.
         return representPaymentRequest(marked);
       case 'in_flight':
-        throw billingError(409, 'payment_request_in_flight', 'Payment refused the cancellation: a payment attempt or cash submission is in progress.');
+        throw billingError(409, 'payment_request_in_flight', BILLING_MESSAGES.paymentRefusedCancellation);
       default:
         this.logger[outcome.kind === 'transient' ? 'warn' : 'error'](
           `payment_cancel_unconfirmed request=${marked.id} outcome=${outcome.kind} — answered 503; the caller must retry`,
         );
-        throw billingError(503, 'payment_unavailable', 'Payment could not confirm the cancellation. Retry the same request.');
+        throw billingError(503, 'payment_unavailable', BILLING_MESSAGES.paymentCouldNotConfirm);
     }
   }
 }

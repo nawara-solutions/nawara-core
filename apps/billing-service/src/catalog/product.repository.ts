@@ -7,6 +7,7 @@ import { billingError, notFound } from '../domain/errors.js';
 import type { NormalisedCreateProductInput } from '../domain/product-input.js';
 import { catalogRelationTo } from '../domain/relations.js';
 import type { ProductRow } from './catalog.types.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 export interface ProductWriteResult {
   product: ProductRow;
@@ -64,7 +65,7 @@ export class ProductRepository {
     const existing = rows[0];
     if (!existing) throw e; // lost the race in a way that also lost the row: surface the original error
     if (existing.name !== input.name || existing.description !== input.description || existing.entitlementKind !== input.entitlementKind) {
-      throw billingError(409, 'product_conflict', 'This seller and code were used with different content.');
+      throw billingError(409, 'product_conflict', BILLING_MESSAGES.productConflict);
     }
     return { product: existing, changed: false };
   }

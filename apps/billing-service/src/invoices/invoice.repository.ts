@@ -15,6 +15,7 @@ import {
   INVOICE_COLUMNS, type InvoiceLineRow, type InvoiceListFilters, type InvoiceListRow, type InvoiceRecord, type InvoiceRow, type PriceForInvoice,
 } from './invoice.types.js';
 import { recordTransition } from '../domain/transitions.js';
+import { BILLING_MESSAGES } from '../messages.js';
 
 export interface WriteResult {
   invoice: InvoiceRecord;
@@ -46,19 +47,19 @@ export class InvoiceRepository {
       const priced = input.lines.map((l) => {
         const p = prices.get(l.priceId);
         // unknown, retired, not yet effective, archived product, or a price of ANOTHER seller: all one answer (never leaks which)
-        if (!p || !p.available || p.sellerType !== input.seller.type || p.sellerId !== input.seller.id) throw billingError(422, 'price_not_available', 'A price is not available.');
+        if (!p || !p.available || p.sellerType !== input.seller.type || p.sellerId !== input.seller.id) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
         return { line: l, price: p };
       });
       const currency = priced[0]!.price.currency;
-      if (priced.some((x) => x.price.currency !== currency)) throw billingError(422, 'price_not_available', 'All lines of an invoice must share one currency.');
-      if (!supportedCurrencies.includes(currency)) throw billingError(422, 'unsupported_currency', 'The currency is not supported.');
+      if (priced.some((x) => x.price.currency !== currency)) throw billingError(422, 'price_not_available', BILLING_MESSAGES.linesShareCurrency);
+      if (!supportedCurrencies.includes(currency)) throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotSupported);
       // Stage 12.4 R1: Billing can fulfil at most ONE recurring (Subscription) obligation per invoice — a Subscription
       // is one product/price per Organization (Stage 12.2), so a second recurring line could never be fulfilled by
       // anything Billing owns, whatever seller/organization is involved. Rejected HERE, before any PaymentRequest or
       // provider settlement exists, rather than accepted and silently left commercially unfulfilled once paid. A
       // recurring line alongside any number of one-time lines remains unambiguous and is untouched by this check.
       if (priced.filter((x) => x.price.interval === 'recurring').length > 1) {
-        throw billingError(422, 'ambiguous_subscription_obligation', 'An invoice may contain at most one recurring line.');
+        throw billingError(422, 'ambiguous_subscription_obligation', BILLING_MESSAGES.oneRecurringLine);
       }
 
       const totals = computeTotals(priced.map((x) => ({ quantity: x.line.quantity, unitAmount: fromDbAmount(x.price.unitAmount) })));
@@ -77,7 +78,7 @@ export class InvoiceRepository {
       if (!inserted) {
         // Lost a race with a concurrent identical request: the winner committed first (our INSERT waited on its uncommitted row).
         const winner = await this.findByNaturalKey(q, producer, input.invoiceRequestId);
-        if (!winner) throw billingError(409, 'invoice_request_conflict', 'The invoice request conflicts with another request.');
+        if (!winner) throw billingError(409, 'invoice_request_conflict', BILLING_MESSAGES.invoiceRequestConflict);
         return this.replay(winner, hash);
       }
 
@@ -101,7 +102,7 @@ export class InvoiceRepository {
     return this.db.tx(async (q) => {
       const row = await this.lockForCaller(q, invoiceId, caller);
       if (row.status === 'open') return { invoice: (await this.load(q, invoiceId))!, changed: false }; // state-idempotent (SDD 17.2)
-      if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', `An invoice that is ${row.status} cannot be issued.`);
+      if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', BILLING_MESSAGES.invoiceCannotBeIssued, { status: row.status });
       let snapshot;
       try {
         snapshot = buildPresentationSnapshot(presentation);
@@ -124,7 +125,7 @@ export class InvoiceRepository {
     return this.db.tx(async (q) => {
       const row = await this.lockForCaller(q, invoiceId, caller);
       if (row.status === 'void' && row.number === null) return { invoice: (await this.load(q, invoiceId))!, changed: false };
-      if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', `An invoice that is ${row.status} cannot be discarded.`);
+      if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', BILLING_MESSAGES.invoiceCannotBeDiscarded, { status: row.status });
       const { rows } = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'void', "voidReasonCode" = 'discarded' WHERE id = $1 RETURNING *`, [invoiceId]);
       await recordTransition(q, { entityType: 'invoice', entityId: invoiceId, from: 'draft', to: 'void', revision: rows[0]!.revision, ctx });
       await this.audit.record(q, 'invoice.discarded', { organizationId: rows[0]!.organizationId, resource: { type: 'invoice', id: invoiceId } }, ctx); // Stage 18.7.2
@@ -198,7 +199,7 @@ export class InvoiceRepository {
   }
 
   private replay(existing: InvoiceRecord & { requestHash: string }, hash: string): WriteResult {
-    if (existing.requestHash !== hash) throw billingError(409, 'invoice_request_conflict', 'This invoiceRequestId was used with different content.');
+    if (existing.requestHash !== hash) throw billingError(409, 'invoice_request_conflict', BILLING_MESSAGES.invoiceRequestIdReused);
     return { invoice: existing, changed: false };
   }
 
