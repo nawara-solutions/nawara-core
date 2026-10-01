@@ -74,7 +74,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service is the intended future owner of Company, Platform and Organization (mechanism deferred) | Proposed |
 | [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
 | [0033](./0033-service-to-service-authentication-and-user-identity.md) | Service-to-service authentication, and how services identify the end user | Accepted (2026-09-26, Stage 19.1 D1) |
-| [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Proposed |
+| [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Proposed (error convention amended by 0054) |
 | [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed |
 | [0036](./0036-money-parties-and-source-references.md) | Money, explicit parties and generic source references | Proposed |
 | [0037](./0037-reliable-events-outbox-inbox.md) | Reliable events: RabbitMQ with a transactional outbox and an inbox | Proposed |
@@ -94,3 +94,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0051](./0051-release-management-and-client-compatibility.md) | Release management and client compatibility: a dedicated release-service for release metadata and client compatibility, never delivery | Accepted (2026-09-26, Stage 20.1; D1–D4 approved) |
 | [0052](./0052-core-v1-capability-closure.md) | Core V1 capability closure: a shared caller-policy mechanism in the service-kit, enforced Payment and Billing admission with Organization-scope verification, durable Auth domain events through Auth's outbox | Accepted (2026-09-26, Stage 21.C.1; Q1–Q6 resolved) |
 | [0053](./0053-core-v1-production-rabbitmq.md) | Core V1 production RabbitMQ: one private node on the VPS, per-service least-privilege identities, audit-service deployed before Auth relays | Accepted (2026-09-27, RB-1 approved; RB-2) |
+| [0054](./0054-localized-error-messages-and-stable-error-codes.md) | Error responses: a stable machine `code` and a server-localized `message` (EN / FR / AR) | Proposed (2026-10-01, Core V1 refactor R1) |

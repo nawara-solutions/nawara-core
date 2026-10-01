@@ -1,8 +1,13 @@
 # 0034. A small shared service-kit library, and one set of API conventions
 
-- **Status:** Proposed
+- **Status:** Proposed (error convention amended by [ADR-0054](./0054-localized-error-messages-and-stable-error-codes.md))
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
+
+> **Forward note (2026-10-01):** the error convention below ("Errors: Nest's default `{ statusCode, message, error }` plus
+> `requestId`") is amended by [ADR-0054](./0054-localized-error-messages-and-stable-error-codes.md): the body keeps that shape, a
+> stable `code` becomes the machine contract on every shared-architecture error, and `message` may be rendered in English, French or
+> Arabic through `Accept-Language` (English by default, unchanged). Nothing else in this ADR changes.
 
 > **Refinements recorded by the [payment SDD](../sdd/payment-service.md) (2026-09-19), not yet decisions of their own:** (1) creations that have a durable business key (a payment from a payment request, a refund with a client reference) use that **natural key** for idempotency instead of the `Idempotency-Key` header, which stays for other mutating operations; (2) the error body gains an optional stable `code` field (an additive change to the kit's filter, plus a `502` status text); (3) a service's OpenAPI page is served under its routed prefix (`/payment/docs`, as `/auth/docs`), because the gateway routes only `/<prefix>`. If you disagree with any of them, revise the SDD.
 

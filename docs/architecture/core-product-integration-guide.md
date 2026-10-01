@@ -257,10 +257,46 @@ Domains differ in details (the retention of a key, which fields make a request "
 - **Language:** BCP 47 tags (`fr-TN`, `ar`, `en`) where a language is represented.
 - **Time zones:** IANA identifiers (`Africa/Tunis`).
 - **Instants:** stored and exchanged in UTC (ISO 8601, with `Z`).
-- **Localize at presentation:** a client renders localized text and local time; Notification renders its templates per locale.
+- **Local time and dates:** a client renders local time; Notification renders its templates per locale.
 - **Machine codes are stable and language-neutral:** error codes, reasons and statuses never change with the language. Never parse a
   human `message`.
-- Auth keeps no per-user locale in V1; Auth-originated messages use the platform's default locale.
+- Auth keeps no per-user locale in V1; Auth-originated **notifications** use the platform's default locale.
+
+### Error responses and language ([ADR-0054](../adr/0054-localized-error-messages-and-stable-error-codes.md))
+
+> **Changed 2026-10-01 (ADR-0054, Proposed; being implemented in the Core V1 refactor).** This replaces the earlier rule "a client
+> renders localized text": Core may now render an error's human text in English, French or Arabic itself. The rule that a client never
+> parses a `message` is unchanged.
+
+An error body keeps one shape:
+
+```json
+{ "statusCode": 404, "message": "…", "error": "Not Found", "code": "not_found", "requestId": "…" }
+```
+
+| Field | Contract |
+|---|---|
+| `code` | stable, language-neutral machine identifier, `lower_snake_case`; **the only field to branch on**. Existing codes never change in V1. |
+| `statusCode` | the HTTP status; stable. |
+| `message` | human text for display; may be localized. A `string` stays a `string`; validation errors stay a `string[]` (each element localized). |
+| `error` | the English HTTP status phrase (`"Not Found"`); **not** localized. |
+| `requestId` | the request id; the correlation id stays in the `X-Correlation-Id` header. |
+
+Auth's refresh-session-ceiling `401` also keeps its `reason` field.
+
+What a client does:
+
+- **Branch on `code`**, never on `message`, in any language. A wording change is never a behaviour change.
+- **Display `message`** if useful, or render your own text from `code`.
+- **Ask for a language** with `Accept-Language`. Supported: `en`, `fr`, `ar`; a regional tag falls back to its language
+  (`fr-FR` → `fr`, `ar-TN` → `ar`, `en-US` → `en`); q-values are honoured; anything missing, unsupported or malformed gives English.
+- **Tolerate English**: a message may be English even when you asked for another language (fallback), and a response tells you the
+  language it used in `Content-Language`. Error responses carry `Vary: Accept-Language`.
+- Without `Accept-Language`, error responses keep today's English `message` byte-for-byte.
+- **Not everything is localized:** success bodies and machine statuses (`status`, `received`, `recovery_required`, …), health and
+  readiness bodies, the shutdown `503`, the documentation basic-auth `401`, payment-provider webhook responses, WebAuthn protocol
+  values, event names and logs stay as they are.
+- Right-to-left layout of Arabic text is the client's job; Core returns plain UTF-8 text.
 
 ## 25. Security rules
 
