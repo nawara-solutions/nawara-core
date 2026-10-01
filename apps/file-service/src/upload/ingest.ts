@@ -3,7 +3,9 @@ import { pipeline, Readable, Transform, type TransformCallback } from 'node:stre
 import type { FileMediaType } from '../policy/media-types.js';
 import { isStorageError } from '../storage/storage-error.js';
 import type { StoragePort } from '../storage/storage.port.js';
+import { type MessageTexts } from '@nawara/service-kit';
 import { declaredAgrees, detectMediaType, DETECTION_WINDOW_BYTES, extensionAgrees } from './media-type.js';
+import { FILE_MESSAGES } from '../messages.js';
 
 /**
  * Why an upload did not complete. `status` is the file's terminal state (`REJECTED`: the content was refused; `FAILED`: the transfer
@@ -12,7 +14,7 @@ import { declaredAgrees, detectMediaType, DETECTION_WINDOW_BYTES, extensionAgree
 export interface UploadRefusal {
   status: 'REJECTED' | 'FAILED';
   failureCode: string;
-  http: { status: number; code: string; message: string };
+  http: { status: number; code: string; message: MessageTexts };
 }
 
 export class UploadRefused extends Error {
@@ -22,19 +24,19 @@ export class UploadRefused extends Error {
   }
 }
 
-const refuse = (status: UploadRefusal['status'], failureCode: string, httpStatus: number, code: string, message: string) =>
+const refuse = (status: UploadRefusal['status'], failureCode: string, httpStatus: number, code: string, message: MessageTexts) =>
   new UploadRefused({ status, failureCode, http: { status: httpStatus, code, message } });
 
 export const REFUSALS = {
-  tooLarge: () => refuse('REJECTED', 'file_too_large', 413, 'file_too_large', 'The file exceeds the size allowed for this upload.'),
-  unsupported: () => refuse('REJECTED', 'unsupported_media_type', 415, 'unsupported_media_type', 'The file type is not accepted.'),
-  mismatch: () => refuse('REJECTED', 'media_type_mismatch', 422, 'media_type_mismatch', 'The declared type or file name does not match the content.'),
-  checksum: () => refuse('REJECTED', 'checksum_mismatch', 422, 'checksum_mismatch', 'The content does not match the declared digest.'),
-  aborted: () => refuse('FAILED', 'client_aborted', 400, 'upload_aborted', 'The upload was interrupted.'),
-  idle: () => refuse('FAILED', 'upload_timeout', 408, 'upload_timeout', 'The upload stalled.'),
-  incomplete: () => refuse('FAILED', 'upload_incomplete', 400, 'upload_incomplete', 'The upload ended before its declared length.'),
-  storageUnavailable: (code: string) => refuse('FAILED', code, 503, 'storage_unavailable', 'File storage is temporarily unavailable.'),
-  storageFault: (code: string) => refuse('FAILED', code, 500, 'storage_error', 'The file could not be stored.'),
+  tooLarge: () => refuse('REJECTED', 'file_too_large', 413, 'file_too_large', FILE_MESSAGES.fileTooLarge),
+  unsupported: () => refuse('REJECTED', 'unsupported_media_type', 415, 'unsupported_media_type', FILE_MESSAGES.typeNotAccepted),
+  mismatch: () => refuse('REJECTED', 'media_type_mismatch', 422, 'media_type_mismatch', FILE_MESSAGES.typeOrNameMismatch),
+  checksum: () => refuse('REJECTED', 'checksum_mismatch', 422, 'checksum_mismatch', FILE_MESSAGES.digestMismatch),
+  aborted: () => refuse('FAILED', 'client_aborted', 400, 'upload_aborted', FILE_MESSAGES.uploadInterrupted),
+  idle: () => refuse('FAILED', 'upload_timeout', 408, 'upload_timeout', FILE_MESSAGES.uploadStalled),
+  incomplete: () => refuse('FAILED', 'upload_incomplete', 400, 'upload_incomplete', FILE_MESSAGES.uploadEndedEarly),
+  storageUnavailable: (code: string) => refuse('FAILED', code, 503, 'storage_unavailable', FILE_MESSAGES.storageUnavailable),
+  storageFault: (code: string) => refuse('FAILED', code, 500, 'storage_error', FILE_MESSAGES.couldNotStore),
 };
 
 export interface IngestInput {

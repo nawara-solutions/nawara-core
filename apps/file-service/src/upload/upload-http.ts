@@ -1,14 +1,15 @@
 import { createHmac } from 'node:crypto';
 import { HttpException } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
-import { canonicalJson } from '@nawara/service-kit';
+import { canonicalJson, httpError, type MessageTexts } from '@nawara/service-kit';
 import type { FileRow } from '../persistence/file.repository.js';
 import { REFUSALS, UploadRefused } from './ingest.js';
+import { FILE_MESSAGES } from '../messages.js';
 
 /** One stable error shape (the kit filter adds `statusCode`, `error`, `requestId`): a machine code, a generic message. */
-export const fileError = (status: number, code: string, message: string) => new HttpException({ message, code }, status);
+export const fileError = (status: number, code: string, message: MessageTexts): HttpException => httpError(status, code, message);
 
-export const FILE_NOT_FOUND = () => fileError(404, 'file_not_found', 'No such file.');
+export const FILE_NOT_FOUND = () => fileError(404, 'file_not_found', FILE_MESSAGES.noSuchFile);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
@@ -25,8 +26,8 @@ export function uploadRouteHeaders(_req: Request, res: Response, next: NextFunct
 /** The byte count the client commits to (SDD §7: required). A chunked body without one is `411 length_required`. */
 export function declaredLength(req: Request): number {
   const raw = req.headers['content-length'];
-  if (raw === undefined || req.headers['transfer-encoding'] !== undefined) throw fileError(411, 'length_required', 'Content-Length is required.');
-  if (!/^\d{1,15}$/.test(raw)) throw fileError(400, 'validation_error', 'Content-Length is invalid.');
+  if (raw === undefined || req.headers['transfer-encoding'] !== undefined) throw fileError(411, 'length_required', FILE_MESSAGES.contentLengthRequired);
+  if (!/^\d{1,15}$/.test(raw)) throw fileError(400, 'validation_error', FILE_MESSAGES.contentLengthInvalid);
   return Number(raw);
 }
 
@@ -34,14 +35,14 @@ export function declaredLength(req: Request): number {
 export function organizationHeader(req: Request): string | null {
   const raw = req.headers['x-organization-id'];
   if (raw === undefined || raw === '') return null;
-  if (typeof raw !== 'string' || !UUID.test(raw)) throw fileError(400, 'validation_error', 'X-Organization-Id must be a UUID.');
+  if (typeof raw !== 'string' || !UUID.test(raw)) throw fileError(400, 'validation_error', FILE_MESSAGES.organizationIdMustBeUuid);
   return raw;
 }
 
 /** `Idempotency-Key` for a service upload: required, printable, at most 255 characters (the schema's rule). */
 export function idempotencyKey(req: Request): string {
   const raw = req.headers['idempotency-key'];
-  if (typeof raw !== 'string' || !/^[\x21-\x7e]{1,255}$/.test(raw)) throw fileError(400, 'validation_error', 'Idempotency-Key is required (1-255 printable characters).');
+  if (typeof raw !== 'string' || !/^[\x21-\x7e]{1,255}$/.test(raw)) throw fileError(400, 'validation_error', FILE_MESSAGES.idempotencyKeyRequired);
   return raw;
 }
 
@@ -49,10 +50,10 @@ export function idempotencyKey(req: Request): string {
 export function contentDigest(req: Request): string | undefined {
   const raw = req.headers['content-digest'];
   if (raw === undefined) return undefined;
-  if (typeof raw !== 'string' || raw.length > 1024) throw fileError(400, 'validation_error', 'Content-Digest is invalid.');
+  if (typeof raw !== 'string' || raw.length > 1024) throw fileError(400, 'validation_error', FILE_MESSAGES.contentDigestInvalid);
   const match = /(?:^|,)\s*sha-256=:([A-Za-z0-9+/]{43}=):\s*(?:,|$)/.exec(raw);
   if (!match) {
-    if (/(?:^|,)\s*sha-256=/.test(raw)) throw fileError(400, 'validation_error', 'Content-Digest sha-256 is invalid.');
+    if (/(?:^|,)\s*sha-256=/.test(raw)) throw fileError(400, 'validation_error', FILE_MESSAGES.contentDigestSha256Invalid);
     return undefined;
   }
   return Buffer.from(match[1]!, 'base64').toString('hex');
@@ -63,7 +64,7 @@ export function attachHeader(req: Request): boolean {
   const raw = req.headers['x-attach'];
   if (raw === undefined || raw === 'false') return false;
   if (raw === 'true') return true;
-  throw fileError(400, 'validation_error', 'X-Attach must be true or false.');
+  throw fileError(400, 'validation_error', FILE_MESSAGES.attachMustBeBoolean);
 }
 
 /**
@@ -150,6 +151,7 @@ export function fileView(f: FileRow): FileView {
   };
 }
 
+/** The refusal's human message is rendered here, at the HTTP boundary, in the request's language; only `failureCode` is ever stored. */
 export const refusalError = (e: UploadRefused) => fileError(e.refusal.http.status, e.refusal.http.code, e.refusal.http.message);
 
 /** A bounded size bucket for logs (never the exact size of an identifiable file in a metric label). */

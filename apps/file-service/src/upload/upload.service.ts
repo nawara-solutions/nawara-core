@@ -22,6 +22,7 @@ import {
   attachHeader, contentDigest, declaredLength, FILE_NOT_FOUND, fileError, fileView, idempotencyKey, organizationHeader, refusalError,
   sizeBucket, uploadRequestHash, watchUpload, type FileView,
 } from './upload-http.js';
+import { FILE_MESSAGES } from '../messages.js';
 
 export interface UploadResult {
   /** `false` for a replay (the same service upload, or the retry of a completed ticket): the body was not read or stored again. */
@@ -86,8 +87,8 @@ export class UploadService {
   async issueUploadTicket(caller: string, input: { organizationId?: string | null; maxBytes: number; mediaTypes: FileMediaType[]; attach?: boolean }): Promise<IssuedUploadTicket> {
     const policy = this.policy(caller, 'issue_ticket');
     const organizationId = this.organization(policy, input.organizationId ?? null);
-    if (input.maxBytes > policy.maxBytes!) throw fileError(403, 'max_bytes_not_allowed', 'maxBytes exceeds this caller\'s limit.');
-    if (input.mediaTypes.some((t) => !policy.mediaTypes!.has(t))) throw fileError(403, 'media_type_not_allowed', 'A media type is not allowed for this caller.');
+    if (input.maxBytes > policy.maxBytes!) throw fileError(403, 'max_bytes_not_allowed', FILE_MESSAGES.maxBytesExceedsLimit);
+    if (input.mediaTypes.some((t) => !policy.mediaTypes!.has(t))) throw fileError(403, 'media_type_not_allowed', FILE_MESSAGES.mediaTypeNotAllowed);
     await this.usage.admit('ticket', caller, organizationId); // Stage 17.8 (F32): after authorization, before any write
     for (let attempt = 0; ; attempt++) {
       const token = randomBytes(32).toString('base64url'); // 256 bits from the CSPRNG (F35)
@@ -118,7 +119,7 @@ export class UploadService {
     const digest = ticketDigest(token);
     if (!digest) throw await invalid(); // not even the shape of a token: no database read
     const length = declaredLength(req);
-    if (length > this.config.maxBytes) throw fileError(413, 'file_too_large', 'The file exceeds the size allowed for this upload.');
+    if (length > this.config.maxBytes) throw fileError(413, 'file_too_large', FILE_MESSAGES.fileTooLarge);
     const { fileName, declaredType } = this.declaration(req);
     const release = this.admitUpload(); // before the claim: a busy process never consumes a ticket
     try {
@@ -145,7 +146,7 @@ export class UploadService {
         const allowed = new Set((ticket.mediaTypes ?? []).filter((t) => policy.mediaTypes?.has(t)));
         const limit = Math.min(this.config.maxBytes, policy.maxBytes ?? 0, Number(ticket.maxBytes));
         // Refused BEFORE anything is created: the transaction rolls back and the ticket stays unused (the client may retry correctly).
-        if (length > limit) throw fileError(413, 'file_too_large', 'The file exceeds the size allowed for this upload.');
+        if (length > limit) throw fileError(413, 'file_too_large', FILE_MESSAGES.fileTooLarge);
         const file = await this.files.createUploading({
           scope: { ownerService: ticket.issuedBy, organizationId: ticket.organizationId },
           originalName: fileName,
@@ -177,7 +178,7 @@ export class UploadService {
     const used = await this.tickets.findUsedUpload(digest);
     const file = used?.fileId ? await this.files.findOwned({ ownerService: used.issuedBy, organizationId: used.organizationId }, used.fileId) : undefined;
     if (file?.status === 'AVAILABLE' || file?.status === 'VERIFYING') return { created: false, file: fileView(file) };
-    if (file?.status === 'UPLOADING') throw fileError(409, 'upload_in_progress', 'This upload is already in progress.');
+    if (file?.status === 'UPLOADING') throw fileError(409, 'upload_in_progress', FILE_MESSAGES.uploadInProgress);
     throw await invalid();
   }
 
@@ -190,7 +191,7 @@ export class UploadService {
     const key = idempotencyKey(req);
     const length = declaredLength(req);
     const limit = Math.min(this.config.maxBytes, policy.maxBytes!);
-    if (length > limit) throw fileError(413, 'file_too_large', 'The file exceeds the size allowed for this upload.');
+    if (length > limit) throw fileError(413, 'file_too_large', FILE_MESSAGES.fileTooLarge);
     const { fileName, declaredType } = this.declaration(req);
     const expectedSha256 = contentDigest(req);
     const attach = attachHeader(req);
@@ -237,9 +238,9 @@ export class UploadService {
   /** Same key + same declaration → the same file (bytes not read again); a different declaration → 422; still uploading → 409. */
   private async idempotentReplay(caller: string, key: string, candidates: string[]): Promise<UploadResult> {
     const existing = await this.files.findLiveByIdempotencyKey(caller, key);
-    if (!existing) throw fileError(409, 'upload_in_progress', 'This upload is being retried; try again.'); // it just failed: retryable
-    if (!candidates.some((h) => sameHash(existing.requestHash, h))) throw fileError(422, 'idempotency_key_reused', 'This Idempotency-Key was used for a different upload.');
-    if (existing.status === 'UPLOADING') throw fileError(409, 'upload_in_progress', 'This upload is already in progress.');
+    if (!existing) throw fileError(409, 'upload_in_progress', FILE_MESSAGES.uploadBeingRetried); // it just failed: retryable
+    if (!candidates.some((h) => sameHash(existing.requestHash, h))) throw fileError(422, 'idempotency_key_reused', FILE_MESSAGES.idempotencyKeyReused);
+    if (existing.status === 'UPLOADING') throw fileError(409, 'upload_in_progress', FILE_MESSAGES.uploadInProgress);
     return { created: false, file: fileView(existing) };
   }
 
@@ -250,7 +251,7 @@ export class UploadService {
     const organizationId = this.organization(policy, organizationHeader(req));
     const outcome = await this.files.attach({ ownerService: caller, organizationId }, id);
     if (outcome.kind === 'not_found') throw FILE_NOT_FOUND(); // another owner or organization looks exactly like a missing file
-    if (outcome.kind === 'not_available') throw fileError(409, 'file_not_available', 'The file can no longer be attached.');
+    if (outcome.kind === 'not_available') throw fileError(409, 'file_not_available', FILE_MESSAGES.cannotAttach);
     return fileView(outcome.file);
   }
 
@@ -281,7 +282,7 @@ export class UploadService {
       if (!done) {
         await this.abandon(r.file, 'finalize_failed');
         log('finalize_failed');
-        throw fileError(500, 'upload_failed', 'The upload could not be completed.');
+        throw fileError(500, 'upload_failed', FILE_MESSAGES.uploadNotCompleted);
       }
       log('available', ` media=${accepted.mediaType} size=${sizeBucket(accepted.sizeBytes)}`);
       return done;
@@ -321,20 +322,20 @@ export class UploadService {
     const release = this.counters.tryEnter('upload', this.config.limits.uploadMaxInFlight); // Stage 17.9: the gauge IS the gate
     if (!release) {
       this.counters.bump('upload_busy');
-      throw fileError(503, 'upload_busy', 'Too many uploads in progress; retry shortly.');
+      throw fileError(503, 'upload_busy', FILE_MESSAGES.tooManyUploads);
     }
     return release;
   }
 
   private policy(caller: string, operation: FileOperation): CallerPolicy {
     const policy = this.config.callerPolicy.of(caller);
-    if (!policy || !policy.operations.has(operation)) throw fileError(403, 'operation_not_allowed', 'Operation not allowed for this caller.');
+    if (!policy || !policy.operations.has(operation)) throw fileError(403, 'operation_not_allowed', FILE_MESSAGES.operationNotAllowed);
     return policy;
   }
 
   /** `none`: platform files only; `request`: the caller may assert an organization (or none, for a platform file). */
   private organization(policy: CallerPolicy, organizationId: string | null): string | null {
-    if (organizationId !== null && policy.organizations === 'none') throw fileError(403, 'organization_not_allowed', 'This caller cannot act for an organization.');
+    if (organizationId !== null && policy.organizations === 'none') throw fileError(403, 'organization_not_allowed', FILE_MESSAGES.organizationNotAllowed);
     return organizationId;
   }
 
@@ -350,9 +351,9 @@ export class UploadService {
   /** The untrusted declarations: a sanitized name (`X-File-Name`, percent-encoded UTF-8) and a declared type (a hint only). */
   private declaration(req: Request): { fileName?: string; declaredType?: string } {
     const name = decodeFileNameHeader(typeof req.headers['x-file-name'] === 'string' ? req.headers['x-file-name'] : undefined);
-    if (name.malformed) throw fileError(400, 'validation_error', 'X-File-Name must be percent-encoded UTF-8.');
+    if (name.malformed) throw fileError(400, 'validation_error', FILE_MESSAGES.fileNameEncoding);
     const declaredType = declaredEssence(req.headers['content-type']);
-    if (declaredType !== undefined && !/^[\x21-\x7e]{1,255}$/.test(declaredType)) throw fileError(400, 'validation_error', 'Content-Type is invalid.');
+    if (declaredType !== undefined && !/^[\x21-\x7e]{1,255}$/.test(declaredType)) throw fileError(400, 'validation_error', FILE_MESSAGES.contentTypeInvalid);
     return { fileName: name.name, declaredType };
   }
 }
