@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FactorService } from '../src/owner/factor.service.js';
+import { WebAuthnService } from '../src/owner/webauthn.service.js';
 import { bearer, createTestApp, type TestCtx } from './helpers/app.js';
 import { SoftAuthenticator } from './helpers/authenticator.js';
 
@@ -205,5 +206,84 @@ describe('WebAuthn / passkeys: real protocol verification', () => {
     expect(row.rows[0].method).toBe('webauthn');
     expect(row.rows[0].factorId).not.toBeNull();
     void w;
+  });
+});
+
+/**
+ * The Nawara production model (owner decision): passkeys are scoped to the RP ID nawara-solutions.com and created or used by the owner
+ * admin UI at https://admin.nawara-solutions.com; the Auth API (core-api.nawara-solutions.com/auth) is not a WebAuthn origin.
+ */
+describe('WebAuthn under the Nawara production model: RP nawara-solutions.com, browser origin https://admin.nawara-solutions.com', () => {
+  const NAWARA_RP = 'nawara-solutions.com';
+  const ADMIN = 'https://admin.nawara-solutions.com';
+  let n: TestCtx;
+  beforeAll(async () => { n = await createTestApp({ WEBAUTHN_RP_ID: NAWARA_RP, WEBAUTHN_ORIGINS: ADMIN }); await n.app.listen(0); });
+  afterAll(() => n.close());
+
+  async function enroll(auth: SoftAuthenticator, bad: { origin?: string; rpId?: string } = {}) {
+    const o = await n.owner(await n.newCompany(), `nw${Math.random().toString(36).slice(2)}@a.test`);
+    const login = await n.http.post('/auth/login').send({ email: o.email, password: o.password }).expect(200);
+    const opts = await n.http.post('/auth/admin/enroll/webauthn/options').send({ enrollmentToken: login.body.enrollmentToken }).expect(200);
+    expect(opts.body.options.rp).toEqual({ id: NAWARA_RP, name: 'Nawara' });
+    const reg = await n.http.post('/auth/admin/enroll/webauthn').send({ enrollmentToken: login.body.enrollmentToken, challengeId: opts.body.challengeId, response: auth.register(opts.body.options, bad) });
+    return { o, reg };
+  }
+  async function assertLogin(o: { email: string; password: string }, auth: SoftAuthenticator, bad: { origin?: string; rpId?: string } = {}) {
+    const login = await n.http.post('/auth/login').send({ email: o.email, password: o.password }).expect(200);
+    const opts = await n.http.post('/auth/admin/login/owner/webauthn-options').send({ challengeToken: login.body.challengeToken }).expect(200);
+    expect(opts.body.rpId).toBe(NAWARA_RP);
+    return n.http.post('/auth/admin/login/owner/verify').send({ challengeToken: login.body.challengeToken, method: 'webauthn', assertion: auth.assert(opts.body, bad) });
+  }
+
+  it('registers a passkey from the admin UI and then logs in with it', async () => {
+    const auth = new SoftAuthenticator(NAWARA_RP, ADMIN);
+    const { o, reg } = await enroll(auth);
+    expect(reg.status).toBe(200);
+    const r = await assertLogin(o, auth);
+    expect(r.status).toBe(200);
+    await n.http.get('/auth/me').set(bearer(r.body)).expect(200);
+  });
+
+  it('rejects a registration from another origin (including the API host) or scoped to another RP; nothing is stored', async () => {
+    for (const bad of [{ origin: 'https://evil.example' }, { origin: 'https://core-api.nawara-solutions.com' }, { rpId: 'hsalem-anwar.dev' }]) {
+      const { o, reg } = await enroll(new SoftAuthenticator(NAWARA_RP, ADMIN), bad);
+      expect(reg.status, JSON.stringify(bad)).toBe(400);
+      expect((await n.db.query(`SELECT count(*)::int n FROM owner_auth_factor WHERE "ownerId"=$1`, [o.id])).rows[0].n).toBe(0);
+    }
+  });
+
+  it('rejects an assertion from another origin or signed for another RP', async () => {
+    const auth = new SoftAuthenticator(NAWARA_RP, ADMIN);
+    const { o, reg } = await enroll(auth);
+    expect(reg.status).toBe(200);
+    expect((await assertLogin(o, auth, { origin: 'https://evil.example' })).status).toBe(401);
+    expect((await assertLogin(o, auth, { rpId: 'evil.example' })).status).toBe(401);
+    expect((await assertLogin(o, auth)).status).toBe(200); // the genuine assertion still works afterwards
+  });
+
+  describe('RP migration controls (why an RP ID change needs passkey re-enrollment)', () => {
+    const service = (rpId: string, origins: string[]) => new WebAuthnService({ webauthn: { rpId, rpName: 'Nawara', origins } } as never);
+    async function registered(rpId: string, origin: string) {
+      const auth = new SoftAuthenticator(rpId, origin);
+      const s = service(rpId, [origin]);
+      const opts = await s.registrationOptions({ id: 'owner-1', label: 'owner' }, []);
+      return { auth, cred: await s.verifyRegistration(auth.register(opts) as never, opts.challenge) };
+    }
+    const assertWith = async (s: WebAuthnService, auth: SoftAuthenticator, cred: Awaited<ReturnType<typeof registered>>['cred'], origin?: string) => {
+      const opts = await s.authenticationOptions([cred]);
+      return s.verifyAssertion(auth.assert(opts, { origin }) as never, opts.challenge, cred);
+    };
+
+    it('M1: an origin change under the SAME RP keeps the credential valid', async () => {
+      const { auth, cred } = await registered(NAWARA_RP, ADMIN);
+      const moved = service(NAWARA_RP, [ADMIN, 'https://owner.admin.nawara-solutions.com']);
+      await expect(assertWith(moved, auth, cred, 'https://owner.admin.nawara-solutions.com')).resolves.toBe(1);
+    });
+
+    it('M2: a credential enrolled under hsalem-anwar.dev is REJECTED once the RP is nawara-solutions.com (RP ID hash mismatch)', async () => {
+      const { auth, cred } = await registered('hsalem-anwar.dev', 'https://core-api.hsalem-anwar.dev');
+      await expect(assertWith(service('hsalem-anwar.dev', ['https://core-api.hsalem-anwar.dev']), auth, cred)).resolves.toBe(1); // valid under its own RP
+      await expect(assertWith(service(NAWARA_RP, [ADMIN]), auth, cred, ADMIN)).rejects.toThrow(/RP ID hash/);
+    });
   });
 });

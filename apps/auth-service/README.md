@@ -70,6 +70,20 @@ membership grants organization access, evaluated from current rows on every requ
   only that organization. `GET /auth/me` returns `memberships[]`. The join code's audience is an opaque label on the
   membership; Auth attaches no business meaning to it.
 - `CORS_ORIGINS` must be exact http(s) origins (no `*`, no paths); anything else stops the service at startup.
+- **WebAuthn (owner passkeys).** The browser origin, the RP ID and the API host are three different things:
+
+  | | Production (owner decision) |
+  |---|---|
+  | Browser origin running `navigator.credentials.*` (`WEBAUTHN_ORIGINS`) | `https://admin.nawara-solutions.com` (the owner admin UI) |
+  | RP ID scoping every credential (`WEBAUTHN_RP_ID`) | `nawara-solutions.com` |
+  | Auth API (not a WebAuthn origin) | `https://core-api.nawara-solutions.com/auth` |
+
+  In production both settings are required, every origin must be an exact `https://` origin, and its host must be the RP ID or a
+  subdomain of it (checked at startup). The deploy script writes these values for a new installation only; an existing `.env` is
+  never overwritten. Changing an origin under the same RP ID keeps enrolled passkeys; **changing the RP ID does not** (each passkey
+  is bound to the RP ID it was created for). If passkeys exist when the RP ID changes, the owner signs in with TOTP, enrolls a new
+  passkey from the admin UI, then removes the old one; no database change is needed. TOTP, the secret key and recovery never depend
+  on these settings.
 - Auth has no commercial dependency: registration and join never check subscription, license or entitlement state,
   and Auth calls no other service to decide them. `requiresSubscription` is stored and returned as an onboarding
   hint for the app only; it carries no backend authority.
