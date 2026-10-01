@@ -182,13 +182,13 @@ describe('generic texts; public codes exactly as thrown (R3 compatibility guard)
     expect(tooLarge.body.code).toBeUndefined();
   });
 
-  it('validation keeps its current shape and English messages (R4 localizes them)', async () => {
+  it('validation keeps its string[] shape; R4 localizes each element and adds validation_error (see validation-localization.spec.ts)', async () => {
     const r = await request(t.app.getHttpServer()).post('/probe/echo').set('accept-language', 'fr').send({ name: 5, extra: 1 }).expect(400);
-    expect(Array.isArray(r.body.message)).toBe(true);
-    expect(r.body.message).toEqual(expect.arrayContaining(['property extra should not exist', 'name must be a string']));
-    expect(r.body).toMatchObject({ statusCode: 400, error: 'Bad Request' });
-    expect(r.body.code).toBeUndefined();
-    expect(r.headers['content-language']).toBe('en');
+    expect(r.body).toEqual({
+      statusCode: 400, message: ['la propriété extra ne doit pas être présente', 'name doit être une chaîne de caractères'], error: 'Bad Request',
+      code: 'validation_error', requestId: r.headers['x-request-id'],
+    });
+    expect(r.headers['content-language']).toBe('fr');
   });
 });
 
