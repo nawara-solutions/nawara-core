@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { ValidationPipe, type LoggerService, type Provider } from '@nestjs/common';
+import { type LoggerService, type Provider } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { decodeJwt } from 'jose';
 import { generateSync } from 'otplib';
 import pg from 'pg';
 import request from 'supertest';
 import { inject } from 'vitest';
-import { InMemoryEventBus, JsonLogger, requestContextMiddleware, type EventBus as KitEventBus } from '@nawara/service-kit';
+import { InMemoryEventBus, JsonLogger, LocalizedValidationPipe, requestContextMiddleware, type EventBus as KitEventBus } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
 import { AuthExceptionFilter } from '../../src/errors.js';
 import { auditEventBus } from '../../src/audit/central-audit.js';
@@ -105,7 +105,7 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
   const jsonLogs: Record<string, unknown>[] = [];
   const jsonLogger = new JsonLogger('auth-service', 'debug', (l) => jsonLogs.push(JSON.parse(l)));
   app.use(requestContextMiddleware);
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }));
+  app.useGlobalPipes(new LocalizedValidationPipe({ whitelist: true, forbidNonWhitelisted: true })); // as main.ts (ADR-0054 R5)
   app.useGlobalFilters(new AuthExceptionFilter(jsonLogger));
   app.enableShutdownHooks();
   await app.init();

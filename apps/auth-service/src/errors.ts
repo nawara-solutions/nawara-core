@@ -1,6 +1,5 @@
-import { ArgumentsHost, Catch, HttpException } from '@nestjs/common';
-import type { Response } from 'express';
-import { KitExceptionFilter, getRequestContext, type JsonLogger } from '@nawara/service-kit';
+import { Catch, type HttpException } from '@nestjs/common';
+import { KitExceptionFilter, httpError, type JsonLogger, type MessageParams, type MessageTexts } from '@nawara/service-kit';
 
 /**
  * The stable, machine-readable error codes Auth's API carries in the kit's additive `code` field
@@ -42,8 +41,12 @@ export type AuthErrorCode =
   | 'recovery_not_available'
   | 'hierarchy_unavailable';
 
-export function authError(status: number, code: AuthErrorCode, message: string): HttpException {
-  return new HttpException({ message, code }, status);
+/**
+ * An Auth API error: `{ message, code }`. `message` is an `AUTH_MESSAGES` entry (rendered in en / fr / ar by the filter, English by
+ * default, ADR-0054 R5) or a plain English string; `code` never changes with the language.
+ */
+export function authError(status: number, code: AuthErrorCode, message: string | MessageTexts, params?: MessageParams): HttpException {
+  return httpError(status, code, message, params);
 }
 
 /** The caller has no relation to the resource, or it does not exist: collapsed so existence is never leaked. */
@@ -61,46 +64,24 @@ export function forbidden(): HttpException {
   return authError(403, 'forbidden', 'Forbidden');
 }
 
-const STATUS_TEXT: Record<number, string> = {
-  400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 409: 'Conflict', 413: 'Payload Too Large',
-  422: 'Unprocessable Entity', 429: 'Too Many Requests', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable',
-};
-
-function codeOf(raw: unknown): string | undefined {
-  if (typeof raw !== 'object' || raw === null) return undefined;
-  const code = (raw as { code?: unknown }).code;
-  return typeof code === 'string' ? code : undefined;
-}
+const STANDARD_FIELDS = new Set(['statusCode', 'message', 'error', 'code', 'requestId']);
 
 /**
- * Identical to the kit's `KitExceptionFilter` (same `{statusCode, message, error, code?, requestId}` shape,
- * same opaque-500 handling for anything that is not an `HttpException`), with one narrow addition: any EXTRA
- * fields already present on an `HttpException`'s own response object pass through unchanged. The kit filter
- * reconstructs a fixed field set and would otherwise silently drop them — today that is exactly one site
- * (`auth.service.ts`'s `reason: 'session_ceiling_reached'` on the refresh-session-ceiling 401), kept for
- * wire compatibility rather than folded into `code` alone, since an existing client may already read it.
+ * The kit's `KitExceptionFilter` with ADR-0054 localization on (Core V1 refactor R5): the same `{statusCode, message, error, code?,
+ * requestId}` shape, the same opaque-500 handling, `message` rendered in the negotiated language, `Content-Language` / `Vary` on error
+ * responses. One narrow Auth addition: any EXTRA field already present on an `HttpException`'s own response object passes through
+ * unchanged, after `code` and before `requestId`. Today that is exactly one site (`auth.service.ts`'s `reason: 'session_ceiling_reached'`
+ * on the refresh-session-ceiling 401), kept for wire compatibility rather than folded into `code` alone, since an existing client may
+ * already read it. It is a machine value and is never translated.
  */
 @Catch()
 export class AuthExceptionFilter extends KitExceptionFilter {
-  constructor(private readonly authLogger: JsonLogger) {
-    super(authLogger);
+  constructor(authLogger: JsonLogger) {
+    super(authLogger, { localize: true });
   }
 
-  override catch(exception: unknown, host: ArgumentsHost): void {
-    if (!(exception instanceof HttpException)) return super.catch(exception, host);
-    const raw = exception.getResponse();
-    const extra = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
-      ? Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([k]) => !['statusCode', 'message', 'error', 'code', 'requestId'].includes(k)))
-      : {};
-    if (Object.keys(extra).length === 0) return super.catch(exception, host);
-
-    const res = host.switchToHttp().getResponse<Response>();
-    const status = exception.getStatus();
-    const message = typeof raw === 'string' ? raw : ((raw as { message?: string | string[] }).message ?? exception.message);
-    const code = codeOf(raw);
-    const requestId = getRequestContext()?.requestId;
-    const body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', ...(code ? { code } : {}), ...extra, requestId };
-    if (status >= 500) this.authLogger.error('request failed', { status, error: exception.constructor.name });
-    if (!res.headersSent) res.status(status).json(body);
+  protected override extraResponseFields(raw: unknown): Record<string, unknown> {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+    return Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([k]) => !STANDARD_FIELDS.has(k)));
   }
 }

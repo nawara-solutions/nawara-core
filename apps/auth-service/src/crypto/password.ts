@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { Injectable } from '@nestjs/common';
 import { authError } from '../errors.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 /**
  * Password hashing: bcrypt (pure-JS `bcryptjs`), cost from config (default 12, ~250 ms), salt
@@ -12,7 +13,7 @@ export const MAX_PASSWORD_BYTES = 72;
 
 export function assertPasswordPolicy(password: string): void {
   if (password.length < MIN_PASSWORD_LENGTH || Buffer.byteLength(password) > MAX_PASSWORD_BYTES || password.includes('\0')) {
-    throw authError(400, 'validation_error', `Password must be ${MIN_PASSWORD_LENGTH}-${MAX_PASSWORD_BYTES} bytes long.`);
+    throw authError(400, 'validation_error', AUTH_MESSAGES.passwordLength, { min: MIN_PASSWORD_LENGTH, max: MAX_PASSWORD_BYTES });
   }
 }
 

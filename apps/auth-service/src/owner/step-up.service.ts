@@ -10,6 +10,7 @@ import { ThrottleService } from '../throttle/throttle.service.js';
 import { ChallengeService } from './challenge.service.js';
 import { FactorService } from './factor.service.js';
 import { SecretKeyService } from './secret-key.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export type StepUpMethod = 'secret_key' | 'totp' | 'webauthn';
 
@@ -84,7 +85,7 @@ export class StepUpService {
 
   /** WebAuthn step-up needs a server challenge first; bound to this session and purpose. */
   async webauthnOptions(ownerId: string, sid: string, purpose: string, ip: string) {
-    if (!this.allowed(purpose, 'webauthn')) throw authError(400, 'step_up_unsupported', 'Unsupported step-up.');
+    if (!this.allowed(purpose, 'webauthn')) throw authError(400, 'step_up_unsupported', AUTH_MESSAGES.unsupportedStepUp);
     await this.throttle.hit('step_up_ip', ip);
     await this.throttle.hit('step_up_owner', ownerId);
     const options = await this.factors.webauthnAuthenticationOptions(ownerId);
@@ -95,12 +96,12 @@ export class StepUpService {
   }
 
   async issue(r: StepUpRequest, ip: string): Promise<{ stepUpToken: string; expiresAt: Date }> {
-    if (!this.allowed(r.purpose, r.method)) throw authError(400, 'step_up_unsupported', 'Unsupported step-up.');
+    if (!this.allowed(r.purpose, r.method)) throw authError(400, 'step_up_unsupported', AUTH_MESSAGES.unsupportedStepUp);
     await this.throttle.hit('step_up_ip', ip);
     await this.throttle.hit('step_up_owner', r.ownerId);
 
     const { rows: u } = await this.db.query(`SELECT "isActive" FROM "user" WHERE id=$1 AND kind='owner'`, [r.ownerId]);
-    if (!u[0]?.isActive) throw authError(401, 'verification_failed', 'Verification failed.');
+    if (!u[0]?.isActive) throw authError(401, 'verification_failed', AUTH_MESSAGES.verificationFailed);
 
     let factorId: string | null = null;
     let ok = false;
@@ -119,7 +120,7 @@ export class StepUpService {
     }
     if (!ok) {
       await this.audit.tryRecord({ type: 'owner.step_up', outcome: 'failure', actorId: r.ownerId, sessionFamilyId: r.sid, ip, metadata: { purpose: r.purpose, method: r.method } });
-      throw authError(401, 'verification_failed', 'Verification failed.');
+      throw authError(401, 'verification_failed', AUTH_MESSAGES.verificationFailed);
     }
     const now = this.clock.now();
     const expiresAt = new Date(now.getTime() + this.cfg.stepUp.ttlSec * 1000);
@@ -142,7 +143,7 @@ export class StepUpService {
   async consume(q: Queryable, a: { ownerId: string; sid: string; purpose: StepUpPurpose; token: string | undefined }): Promise<void> {
     const denied = async () => {
       await this.audit.tryRecord({ type: 'owner.step_up.consume', outcome: 'denied', actorId: a.ownerId, sessionFamilyId: a.sid, metadata: { purpose: a.purpose } });
-      return authError(403, 'step_up_required', 'A valid step-up verification is required for this action.');
+      return authError(403, 'step_up_required', AUTH_MESSAGES.stepUpRequired);
     };
     if (!a.token || !UUID_RE.test(a.token)) throw await denied();
     const { rows } = await q.query(

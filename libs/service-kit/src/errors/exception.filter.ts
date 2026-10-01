@@ -123,7 +123,7 @@ export class KitExceptionFilter implements ExceptionFilter {
           message = render(generic);
         }
       }
-      body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', ...(code ? { code } : {}), requestId };
+      body = { statusCode: status, message, error: STATUS_TEXT[status] ?? 'Error', ...(code ? { code } : {}), ...this.extraResponseFields(raw), requestId };
       if (status >= 500) this.logger.error('request failed', { status, error: exception.constructor.name });
     } else if (isClientHttpError(exception)) {
       // Errors raised by Express middleware (for example body-parser: payload too large, malformed JSON) carry an HTTP status.
@@ -143,6 +143,15 @@ export class KitExceptionFilter implements ExceptionFilter {
       varyOnAcceptLanguage(res);
     }
     res.status(body.statusCode).json(body);
+  }
+
+  /**
+   * Extension point for a subclass whose existing wire contract carries additional fields on a thrown HttpException's response object
+   * (Auth's `reason`, ADR-0054 D11). They are copied verbatim, after `code` and before `requestId`; never translated. The kit itself
+   * adds none.
+   */
+  protected extraResponseFields(_raw: unknown): Record<string, unknown> {
+    return {};
   }
 
   private isExcluded(req: Request | undefined): boolean {

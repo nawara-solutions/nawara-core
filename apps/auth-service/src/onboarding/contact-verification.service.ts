@@ -8,9 +8,10 @@ import { authError } from '../errors.js';
 import { randomSixDigitCode, safeEqualHex } from '../crypto/random.js';
 import { DbService } from '../db/db.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export const MAX_CONTACT_ATTEMPTS = 5; // mirrors the DB CHECK on member_contact_verification."attemptCount"
-const GENERIC = 'Invalid or expired code.';
+const GENERIC = AUTH_MESSAGES.invalidOrExpiredCode;
 
 /**
  * Proves that a member's e-mail or phone belongs to them (ADR-0028). Same construction as operator

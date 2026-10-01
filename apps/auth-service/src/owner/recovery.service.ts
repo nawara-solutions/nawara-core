@@ -15,8 +15,9 @@ import { UsersService, toIdentifier } from '../users/users.service.js';
 import { ChallengeService } from './challenge.service.js';
 import { FactorService } from './factor.service.js';
 import { SecretKeyService } from './secret-key.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
-const GENERIC = 'Recovery failed.';
+const GENERIC = AUTH_MESSAGES.recoveryFailed;
 
 /**
  * Owner recovery — the highest-risk path, so it is deliberately NOT "password + key = new factors".
@@ -126,7 +127,7 @@ export class RecoveryService {
     }
     if (now < req.availableAt) {
       await this.audit.tryRecord({ type: 'owner.recovery.complete', outcome: 'denied', actorId: req.ownerId, ip: client.ip, metadata: { reason: 'cooldown' } });
-      throw authError(403, 'recovery_not_available', `Recovery is not available until ${req.availableAt.toISOString()}.`);
+      throw authError(403, 'recovery_not_available', AUTH_MESSAGES.recoveryNotAvailableUntil, { availableAt: req.availableAt.toISOString() });
     }
     const enrollment = await this.db.tx(async (q) => {
       const { rowCount } = await q.query(`UPDATE owner_recovery_request SET status='completed', "resolvedAt"=$2 WHERE id=$1 AND status='pending'`, [req.id, now]);

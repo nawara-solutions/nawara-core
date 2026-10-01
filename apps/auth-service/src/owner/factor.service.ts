@@ -10,6 +10,7 @@ import { TotpSecretCipher } from '../crypto/totp-cipher.js';
 import { DbService, type Queryable } from '../db/db.service.js';
 import { authError, notFound } from '../errors.js';
 import { CloneSuspected, WebAuthnService, type StoredPasskey } from './webauthn.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export interface FactorSummary {
   id: string;
@@ -173,7 +174,7 @@ export class FactorService {
         [id, ownerId, c.credentialId, c.publicKey, c.signCount, c.transports, now],
       );
     } catch (e) {
-      if ((e as { code?: string }).code === '23505') throw authError(409, 'factor_already_registered', 'Credential already registered.');
+      if ((e as { code?: string }).code === '23505') throw authError(409, 'factor_already_registered', AUTH_MESSAGES.credentialAlreadyRegistered);
       throw e;
     }
     return id;
@@ -181,7 +182,7 @@ export class FactorService {
 
   async webauthnAuthenticationOptions(ownerId: string, q: Queryable = this.db) {
     const creds = await this.passkeys(ownerId, q);
-    if (creds.length === 0) throw authError(400, 'factor_unavailable', 'No passkey registered.');
+    if (creds.length === 0) throw authError(400, 'factor_unavailable', AUTH_MESSAGES.noPasskey);
     return this.webauthn.authenticationOptions(creds);
   }
 
@@ -277,7 +278,7 @@ export class FactorService {
     const target = rows.find((r) => r.id === factorId);
     if (!target) throw notFound();
     if (target.confirmed && rows.filter((r) => r.confirmed).length <= 1) {
-      throw authError(409, 'factor_required', 'You cannot remove your only authentication factor.');
+      throw authError(409, 'factor_required', AUTH_MESSAGES.onlyFactor);
     }
     await this.revoke(q, ownerId, factorId);
   }

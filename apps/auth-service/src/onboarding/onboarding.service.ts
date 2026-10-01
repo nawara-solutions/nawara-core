@@ -12,9 +12,10 @@ import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import type { UserKind } from '../users/users.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 /** One generic answer for every reason a code cannot be used (unknown, malformed, expired, revoked, exhausted). */
-export const JOIN_CODE_INVALID = 'Invalid or expired code.';
+export const JOIN_CODE_INVALID = AUTH_MESSAGES.invalidOrExpiredCode;
 
 export interface OrgActor {
   userId: string;

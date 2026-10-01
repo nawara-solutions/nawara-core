@@ -1,4 +1,5 @@
 import { HttpException, Inject, Injectable } from '@nestjs/common';
+import { attachLocalizedMessage } from '@nawara/service-kit';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClientInfo } from '../common/client-info.js';
 import { DOMAIN_EVENTS, CLOCK, type Clock, type DomainEvents } from '../common/ports.js';
@@ -13,10 +14,11 @@ import { RefreshTokenService } from '../tokens/refresh-token.service.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { UsersService, normalizeEmail, normalizePhone, PHONE_RE, toIdentifier } from '../users/users.service.js';
 import { SessionService } from './session.service.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
-const INVALID_CREDENTIALS = 'Invalid credentials.';
+const INVALID_CREDENTIALS = AUTH_MESSAGES.invalidCredentials;
 /** One answer for a bad, expired, revoked or exhausted code, so none of those reasons is revealed. */
-const REGISTRATION_REFUSED = 'Registration is not available with this code. Please contact your organization.';
+const REGISTRATION_REFUSED = AUTH_MESSAGES.registrationRefused;
 
 @Injectable()
 export class AuthService {
@@ -53,10 +55,10 @@ export class AuthService {
   async register(dto: { email?: string; phone?: string; password: string; joinCode: string }, client: ClientInfo) {
     await this.throttle.hit('register_ip', client.ip);
     await this.onboarding.guardGuessing(client);
-    if (!dto.email && !dto.phone) throw authError(400, 'validation_error', 'Provide an email or a phone number.');
+    if (!dto.email && !dto.phone) throw authError(400, 'validation_error', AUTH_MESSAGES.provideEmailOrPhone);
     const email = dto.email ? normalizeEmail(dto.email) : undefined;
     const phone = dto.phone ? normalizePhone(dto.phone) : undefined;
-    if (phone && !PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
+    if (phone && !PHONE_RE.test(phone)) throw authError(400, 'validation_error', AUTH_MESSAGES.invalidPhone);
     assertPasswordPolicy(dto.password);
 
     const found = await this.onboarding.lookup(dto.joinCode);
@@ -114,7 +116,7 @@ export class AuthService {
       try {
         status = await this.memberships.createForRegistration(q, { userId, organizationId: code.organizationId, joinCodeId: code.id, audience: code.audience, requiresApproval: code.requiresApproval });
       } catch (e) {
-        if (isUniqueViolation(e, 'membership_user_org_uk')) throw authError(409, 'membership_conflict', 'You already have a membership in this organization.'); // rolls the spent use back
+        if (isUniqueViolation(e, 'membership_user_org_uk')) throw authError(409, 'membership_conflict', AUTH_MESSAGES.membershipExists); // rolls the spent use back
         throw e;
       }
       await this.audit.record({ type: 'onboarding.join_code.used', outcome: 'success', actorId: userId, targetId: code.id, ip: client.ip, metadata: { organizationId: code.organizationId, audience: code.audience, existingAccount: true } }, q);
@@ -172,15 +174,15 @@ export class AuthService {
     const r = await this.refresh.rotate(rawToken, client.ip);
     if (!r.ok) {
       if (r.reason === 'session_ceiling_reached') {
-        throw new HttpException(
-          { reason: 'session_ceiling_reached', message: 'Your session has ended. Please request a new login code to continue.', code: 'session_ceiling_reached' },
-          401,
+        throw attachLocalizedMessage(
+          new HttpException({ reason: 'session_ceiling_reached', message: AUTH_MESSAGES.sessionCeiling.en, code: 'session_ceiling_reached' }, 401),
+          { texts: AUTH_MESSAGES.sessionCeiling },
         );
       }
-      throw authError(401, 'invalid_refresh_token', 'Invalid refresh token.');
+      throw authError(401, 'invalid_refresh_token', AUTH_MESSAGES.invalidRefreshToken);
     }
     const user = await this.users.findById(r.userId);
-    if (!user || !user.isActive) throw authError(401, 'invalid_refresh_token', 'Invalid refresh token.');
+    if (!user || !user.isActive) throw authError(401, 'invalid_refresh_token', AUTH_MESSAGES.invalidRefreshToken);
     const { accessToken, expiresIn } = await this.sessions.access(user, r.familyId, r.sessionExpiresAt);
     return { accessToken, refreshToken: r.raw, expiresIn };
   }

@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '../db/db.service.js';
 import { authError } from '../errors.js';
+import { AUTH_MESSAGES } from '../messages.js';
 
 export type UserKind = 'member' | 'owner' | 'operator';
 
@@ -27,10 +28,10 @@ export interface Identifier {
 /** Exactly one of email/phone, normalized; throws 400 otherwise. */
 export function toIdentifier(i: Identifier): { email: string } | { phone: string } {
   const hasE = !!i.email, hasP = !!i.phone;
-  if (hasE === hasP) throw authError(400, 'validation_error', 'Provide exactly one of email or phone.');
+  if (hasE === hasP) throw authError(400, 'validation_error', AUTH_MESSAGES.exactlyOneEmailOrPhone);
   if (hasE) return { email: normalizeEmail(i.email!) };
   const phone = normalizePhone(i.phone!);
-  if (!PHONE_RE.test(phone)) throw authError(400, 'validation_error', 'Invalid phone number.');
+  if (!PHONE_RE.test(phone)) throw authError(400, 'validation_error', AUTH_MESSAGES.invalidPhone);
   return { phone };
 }
 
@@ -72,7 +73,7 @@ export class UsersService {
       );
       return rows[0];
     } catch (e) {
-      if (isUniqueViolation(e)) throw authError(409, 'account_already_exists', 'An account with these details already exists.');
+      if (isUniqueViolation(e)) throw authError(409, 'account_already_exists', AUTH_MESSAGES.accountExists);
       throw e;
     }
   }
@@ -98,7 +99,7 @@ export class UsersService {
       await q.query(`INSERT INTO operator("userId","companyId") VALUES ($1,$2)`, [rows[0].id, a.companyId]);
       return rows[0];
     } catch (e) {
-      if (isUniqueViolation(e)) throw authError(409, 'account_already_exists', 'An account with these details already exists.');
+      if (isUniqueViolation(e)) throw authError(409, 'account_already_exists', AUTH_MESSAGES.accountExists);
       throw e;
     }
   }

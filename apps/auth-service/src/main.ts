@@ -1,8 +1,7 @@
-import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
-import { JsonLogger, ShutdownState, requestContextMiddleware, shutdownAdmission } from '@nawara/service-kit';
+import { JsonLogger, LocalizedValidationPipe, ShutdownState, requestContextMiddleware, shutdownAdmission } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { basicAuth } from './docs/basic-auth.js';
 import { loadConfig } from './config/app-config.js';
@@ -20,10 +19,13 @@ async function bootstrap() {
   app.use(helmet());
   // Unknown or extra properties are REJECTED (400), so a client can never smuggle assignedBy,
   // revokedBy, companyId, platformId, kind, adminTier... into a request body.
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: false }));
+  // ADR-0054 D11 (R5): the kit's LocalizedValidationPipe IS Nest's ValidationPipe with these same options; its failures keep their
+  // `message: string[]`, gain `validation_error` and are rendered in en / fr / ar by AuthExceptionFilter.
+  app.useGlobalPipes(new LocalizedValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: false }));
   // Additive only: preserves Nest's existing {statusCode, message, error} body, adds an optional `code`
   // (Stage 13.2) and `requestId`, and (the one narrow case that needs it) passes through any extra field
-  // already on the exception's own response object. Never changes status, message or route behavior.
+  // already on the exception's own response object. Never changes status or route behavior; `message` is rendered
+  // in en / fr / ar from Accept-Language (ADR-0054, R5), English by default.
   app.useGlobalFilters(new AuthExceptionFilter(logger));
   app.useLogger(logger);
   // CORS is off unless origins are explicitly allow-listed. Never a wildcard with credentials.
