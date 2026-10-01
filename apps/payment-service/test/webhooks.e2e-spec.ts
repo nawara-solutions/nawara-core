@@ -104,6 +104,11 @@ describeWithEnv('webhooks API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
 
   it('answers 404 for an unknown provider', async () => {
     await request(server()).post('/payment/webhooks/stripe').set('content-type', 'application/json').send(Buffer.from('{}')).expect(404);
+    // ADR-0054 D12: provider-facing, so its error rendering is exactly the pre-localization one, whatever the request asks
+    const r = await request(server()).post('/payment/webhooks/stripe').set('accept-language', 'fr').set('content-type', 'application/json').send(Buffer.from('{}')).expect(404);
+    expect(r.body).toEqual({ statusCode: 404, message: 'Not Found', error: 'Not Found', requestId: r.headers['x-request-id'] });
+    expect(r.headers['content-language']).toBeUndefined();
+    expect(r.headers.vary ?? '').not.toMatch(/accept-language/i);
   });
 
   it('stores a malformed body under a valid signature as failed (non-retryable), and answers 200 so the provider stops retrying', async () => {

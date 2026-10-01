@@ -1,7 +1,9 @@
-import { CanActivate, ExecutionContext, HttpException, Inject, Injectable, Logger, SetMetadata } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Inject, Injectable, Logger, SetMetadata } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigError } from '../config/config.js';
 import { getRequestContext } from '../context/request-context.js';
+import { httpError } from '../errors/http-error.js';
+import { KIT_MESSAGES } from '../errors/kit-messages.js';
 import type { ServiceTokenEntry } from './service-token.js';
 import type { ServiceRequest } from './service-token.guard.js';
 import type { CallerRequest } from './service-or-user.guard.js';
@@ -229,7 +231,7 @@ export const RequireServiceOperation = (operation: string) => SetMetadata(OPERAT
 export const RefuseServiceCallers = () => SetMetadata(OPERATION_KEY, NO_SERVICE_OPERATION);
 
 /** The 403 a service caller gets for an operation it does not hold. The same answer for every reason (no enumeration). */
-export const operationNotPermitted = () => new HttpException({ message: 'This operation is not permitted for the calling service.', code: 'operation_not_permitted' }, 403);
+export const operationNotPermitted = () => httpError(403, 'operation_not_permitted', KIT_MESSAGES.operation_not_permitted);
 
 /**
  * Runs AFTER `ServiceTokenGuard` or `ServiceOrUserGuard`. When the request authenticated as a SERVICE, the route's operation must be

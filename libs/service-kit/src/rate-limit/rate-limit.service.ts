@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
-import { HttpException, Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '../db/db.service.js';
+import { httpError } from '../errors/http-error.js';
+import { KIT_MESSAGES } from '../errors/kit-messages.js';
 
 export interface RateLimitRule {
   /** Requests allowed inside one window. */
@@ -64,7 +66,7 @@ export class RateLimitService {
   /** Same as `hit`, but throws a 429 (with the additive `code: 'rate_limited'`) when the limit is exceeded. */
   async assert(bucket: string, identifier: string, rule: RateLimitRule, q?: Queryable): Promise<void> {
     const result = await this.hit(bucket, identifier, rule, q);
-    if (!result.allowed) throw new HttpException({ message: 'Too many requests.', code: 'rate_limited' }, 429);
+    if (!result.allowed) throw httpError(429, 'rate_limited', KIT_MESSAGES.rate_limited);
   }
 
   /** Clears the counter for one identifier — for example after a successful operation that should not count against it. */
