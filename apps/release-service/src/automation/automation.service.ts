@@ -1,4 +1,5 @@
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
+import { httpError, type MessageParams, type MessageTexts } from '@nawara/service-kit';
 import { ReleaseAudit } from '../audit/release-audit.js';
 import type { ReleaseConfig } from '../config/release-config.js';
 import { RELEASE_CONFIG } from '../config/release-config.token.js';
@@ -9,10 +10,12 @@ import { ReleaseStore } from '../persistence/release-store.js';
 import { ReleaseCounters, type AutomationOutcome } from '../ops/release-counters.js';
 import type { ReleaseCapability } from '../policy/caller-policy.js';
 import { authorizationDenial, denialError } from '../policy/release-policy.guard.js';
+import { RELEASE_MESSAGES } from '../messages.js';
 
-export const releaseError = (status: number, code: string, message: string) => new HttpException({ message, code }, status);
-const RELEASE_NOT_FOUND = () => releaseError(404, 'release_not_found', 'No such release.');
-const INVALID = (what: string) => releaseError(400, 'validation_error', `${what} is invalid.`);
+export const releaseError = (status: number, code: string, message: string | MessageTexts, params?: MessageParams): HttpException => httpError(status, code, message, params);
+const RELEASE_NOT_FOUND = () => releaseError(404, 'release_not_found', RELEASE_MESSAGES.noSuchRelease);
+/** One complete catalog sentence per invalid input (never a translated frame around an English noun phrase). */
+const INVALID = (sentence: MessageTexts) => releaseError(400, 'validation_error', sentence);
 
 /** What CI declares when it registers a build. Exactly the Stage 20.2 release identity plus the component's kind; nothing else. */
 export interface RegisterReleaseInput {
@@ -84,17 +87,17 @@ export class AutomationService {
 
   async register(caller: string, product: string, componentKey: string, input: RegisterReleaseInput): Promise<AutomationResult> {
     this.authorize(caller, product, 'release.register');
-    if (!REGISTRY_KEY.test(componentKey)) return this.refuse('register', caller, 'invalid', INVALID('The component key'));
-    if (!isCanonicalVersion(input.version)) return this.refuse('register', caller, 'invalid', INVALID('The version'));
+    if (!REGISTRY_KEY.test(componentKey)) return this.refuse('register', caller, 'invalid', INVALID(RELEASE_MESSAGES.invalidComponentKey));
+    if (!isCanonicalVersion(input.version)) return this.refuse('register', caller, 'invalid', INVALID(RELEASE_MESSAGES.invalidVersion));
     try {
       const result = await this.store.tx(async (q) => {
         const p = await this.store.ensureProduct(product, q);
         const component = await this.store.ensureComponent(p.id, componentKey, input.kind, q).catch((e: unknown) => {
-          throw e instanceof ReleaseStoreError && e.code === 'conflict' ? releaseError(409, 'component_kind_conflict', 'The component exists with another kind.') : e;
+          throw e instanceof ReleaseStoreError && e.code === 'conflict' ? releaseError(409, 'component_kind_conflict', RELEASE_MESSAGES.componentKindConflict) : e;
         });
         const identity = { componentId: component.id, version: input.version, buildId: input.buildId ?? null, sourceRevision: input.sourceRevision ?? null, notesRef: input.notesRef ?? null };
         const { release, created } = await this.store.registerRelease(identity, q).catch((e: unknown) => {
-          throw e instanceof ReleaseStoreError && e.code === 'conflict' ? releaseError(409, 'release_conflict', 'This version is registered with a different identity.') : e;
+          throw e instanceof ReleaseStoreError && e.code === 'conflict' ? releaseError(409, 'release_conflict', RELEASE_MESSAGES.releaseIdentityConflict) : e;
         });
         if (created) await this.audit.registered(q, release, component, caller);
         return { release: view(product, component, release), changed: created };
@@ -108,15 +111,15 @@ export class AutomationService {
 
   async publish(caller: string, product: string, componentKey: string, version: string): Promise<AutomationResult> {
     this.authorize(caller, product, 'release.publish');
-    if (!REGISTRY_KEY.test(componentKey)) return this.refuse('publish', caller, 'invalid', INVALID('The component key'));
-    if (!isCanonicalVersion(version)) return this.refuse('publish', caller, 'invalid', INVALID('The version'));
+    if (!REGISTRY_KEY.test(componentKey)) return this.refuse('publish', caller, 'invalid', INVALID(RELEASE_MESSAGES.invalidComponentKey));
+    if (!isCanonicalVersion(version)) return this.refuse('publish', caller, 'invalid', INVALID(RELEASE_MESSAGES.invalidVersion));
     try {
       const result = await this.store.tx(async (q) => {
         const component = await this.store.findComponent(product, componentKey, q);
         const found = component ? await this.store.findRelease(component.id, version, q) : null;
         if (!component || !found) throw RELEASE_NOT_FOUND(); // unknown product, component or version: one answer
         const { release, changed } = await this.store.publishRelease(found.id, q).catch((e: unknown) => {
-          throw e instanceof ReleaseStoreError && e.code === 'invalid_transition' ? releaseError(409, 'invalid_transition', `A ${found.status} release cannot be published.`) : e;
+          throw e instanceof ReleaseStoreError && e.code === 'invalid_transition' ? releaseError(409, 'invalid_transition', RELEASE_MESSAGES.cannotPublishInStatus, { status: found.status }) : e;
         });
         if (changed) await this.audit.published(q, release, component, caller);
         return { release: view(product, component, release), changed };
@@ -151,7 +154,7 @@ export class AutomationService {
     }
     if (e instanceof ReleaseStoreError && e.code === 'invalid') {
       this.outcome(operation, caller, 'invalid');
-      return INVALID('The release');
+      return INVALID(RELEASE_MESSAGES.invalidRelease);
     }
     this.counters.automation.count(operation, 'failed');
     this.log.error(`release_automation_failed operation=${operation} caller=${caller} error=${e instanceof ReleaseStoreError ? e.code : e instanceof Error ? e.name : 'error'}`);

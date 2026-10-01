@@ -1,5 +1,6 @@
 import { HttpException, UnauthorizedException } from '@nestjs/common';
-import { correlationHeaders } from '@nawara/service-kit';
+import { correlationHeaders, httpError, attachLocalizedMessage } from '@nawara/service-kit';
+import { RELEASE_MESSAGES } from '../messages.js';
 
 /** DI token of the Auth port owner administration uses (Stage 20.4). */
 export const OWNER_AUTHORITY = Symbol('OWNER_AUTHORITY');
@@ -38,12 +39,13 @@ export const MAX_AUTH_RESPONSE_BYTES = 16 * 1024;
  */
 export class AuthDependencyError extends HttpException {
   constructor(readonly failure: 'auth_timeout' | 'auth_unavailable') {
-    super({ message: 'Authority could not be verified; nothing was changed.', code: failure }, 503);
+    super({ message: RELEASE_MESSAGES.authorityUnverified.en, code: failure }, 503);
+    attachLocalizedMessage(this, { texts: RELEASE_MESSAGES.authorityUnverified });
   }
 }
 
 export const notTheOperatingOwner = () =>
-  new HttpException({ message: 'Only the owner of the operating Company may administer releases.', code: 'operation_not_allowed' }, 403);
+  httpError(403, 'operation_not_allowed', RELEASE_MESSAGES.ownerOnly);
 
 export class HttpOwnerAuthority implements OwnerAuthority {
   constructor(private readonly opts: { baseUrl: string }) {}

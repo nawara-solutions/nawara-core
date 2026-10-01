@@ -1,10 +1,12 @@
 import { CanActivate, ExecutionContext, HttpException, Inject, Injectable, Logger, SetMetadata } from '@nestjs/common';
+import { httpError } from '@nawara/service-kit';
 import { Reflector } from '@nestjs/core';
 import type { ServiceRequest } from '@nawara/service-kit';
 import type { ReleaseConfig } from '../config/release-config.js';
 import { RELEASE_CONFIG } from '../config/release-config.token.js';
 import { ReleaseCounters } from '../ops/release-counters.js';
 import type { ReleaseCallerPolicy, ReleaseCapability } from './caller-policy.js';
+import { RELEASE_MESSAGES } from '../messages.js';
 
 const REQUIRED_CAPABILITY = 'release_required_capability';
 /** Every automation route declares the ONE capability it needs. A route that declares none is refused (deny by default). */
@@ -25,8 +27,8 @@ export function authorizationDenial(policy: ReleaseCallerPolicy, caller: string 
 }
 
 export function denialError(reason: DenialReason): HttpException {
-  if (reason === 'product_not_allowed') return new HttpException({ message: 'This caller has no authority on this product.', code: 'product_not_allowed' }, 403);
-  return new HttpException({ message: 'Operation not allowed for this caller.', code: 'operation_not_allowed' }, 403);
+  if (reason === 'product_not_allowed') return httpError(403, 'product_not_allowed', RELEASE_MESSAGES.productNotAllowed);
+  return httpError(403, 'operation_not_allowed', RELEASE_MESSAGES.operationNotAllowed);
 }
 
 /**

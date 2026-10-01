@@ -1,4 +1,5 @@
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
+import { httpError, type MessageParams, type MessageTexts } from '@nawara/service-kit';
 import { ReleaseAdminAudit } from '../audit/release-audit.js';
 import { REGISTRY_KEY, type Component, type Release } from '../domain/model.js';
 import { isCanonicalVersion, isStableVersion } from '../domain/version.js';
@@ -7,10 +8,12 @@ import { ReleaseStore } from '../persistence/release-store.js';
 import { ReleaseCounters } from '../ops/release-counters.js';
 import { AuthDependencyError, OWNER_AUTHORITY, type OwnerAuthority, type ReleaseStepUpPurpose } from './owner-authority.client.js';
 import type { VerifiedOwner } from './owner.guard.js';
+import { RELEASE_MESSAGES } from '../messages.js';
 
-export const adminError = (status: number, code: string, message: string) => new HttpException({ message, code }, status);
-const INVALID = (what: string) => adminError(400, 'validation_error', `${what} is invalid.`);
-const STEP_UP_REQUIRED = () => adminError(403, 'step_up_required', 'A valid factor step-up for this operation is required.');
+export const adminError = (status: number, code: string, message: string | MessageTexts, params?: MessageParams): HttpException => httpError(status, code, message, params);
+/** One complete catalog sentence per invalid input (never a translated frame around an English noun phrase). */
+const INVALID = (sentence: MessageTexts) => adminError(400, 'validation_error', sentence);
+const STEP_UP_REQUIRED = () => adminError(403, 'step_up_required', RELEASE_MESSAGES.stepUpRequired);
 const STEP_UP_TOKEN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_POLICY_VERSION = 2_147_483_647;
 
@@ -75,14 +78,14 @@ export class AdminService {
 
   async withdraw(owner: VerifiedOwner, product: string, componentKey: string, version: string, stepUpToken: string | undefined): Promise<WithdrawView> {
     return this.run('withdraw', owner, async () => {
-      if (!REGISTRY_KEY.test(product) || !REGISTRY_KEY.test(componentKey)) throw INVALID('The product or component key');
-      if (!isCanonicalVersion(version)) throw INVALID('The version');
+      if (!REGISTRY_KEY.test(product) || !REGISTRY_KEY.test(componentKey)) throw INVALID(RELEASE_MESSAGES.invalidProductOrComponentKey);
+      if (!isCanonicalVersion(version)) throw INVALID(RELEASE_MESSAGES.invalidVersion);
       const component = await this.store.findComponent(product, componentKey);
       const release = component ? await this.store.findRelease(component.id, version) : null;
-      if (!component || !release) throw adminError(404, 'release_not_found', 'No such release.');
+      if (!component || !release) throw adminError(404, 'release_not_found', RELEASE_MESSAGES.noSuchRelease);
       if (release.status === 'registered') {
         // ADR-0051: registered → published → withdrawn. A release never offered to clients is not withdrawn; it stays inert (never latest).
-        throw adminError(409, 'invalid_transition', 'A registered release that was never published cannot be withdrawn.');
+        throw adminError(409, 'invalid_transition', RELEASE_MESSAGES.neverPublishedCannotBeWithdrawn);
       }
       if (release.status === 'published' && (await this.store.withdrawalBreaksMinimum(component.id, release.id))) throw WOULD_BREAK_MINIMUM();
       await this.stepUp(owner, 'release.withdraw', stepUpToken);
@@ -90,7 +93,7 @@ export class AdminService {
         await this.store.lockComponent(component.id, q);
         const { release: after, changed } = await this.store.withdrawRelease(release.id, q).catch((e: unknown) => {
           if (e instanceof ReleaseStoreError && e.code === 'invariant_violation') throw WOULD_BREAK_MINIMUM();
-          if (e instanceof ReleaseStoreError && e.code === 'invalid_transition') throw adminError(409, 'invalid_transition', 'This release cannot be withdrawn.');
+          if (e instanceof ReleaseStoreError && e.code === 'invalid_transition') throw adminError(409, 'invalid_transition', RELEASE_MESSAGES.cannotBeWithdrawn);
           throw e;
         });
         if (changed) await this.audit.withdrawn(q, after, component, owner.userId);
@@ -107,15 +110,15 @@ export class AdminService {
 
   async changePolicy(owner: VerifiedOwner, product: string, componentKey: string, input: PolicyChangeInput, stepUpToken: string | undefined): Promise<PolicyView> {
     return this.run('policy_change', owner, async () => {
-      if (!REGISTRY_KEY.test(product) || !REGISTRY_KEY.test(componentKey)) throw INVALID('The product or component key');
-      if (!isCanonicalVersion(input.minimumVersion)) throw INVALID('The minimum version');
-      if (!isStableVersion(input.minimumVersion)) throw adminError(400, 'validation_error', 'A minimum version has no pre-release tag.');
+      if (!REGISTRY_KEY.test(product) || !REGISTRY_KEY.test(componentKey)) throw INVALID(RELEASE_MESSAGES.invalidProductOrComponentKey);
+      if (!isCanonicalVersion(input.minimumVersion)) throw INVALID(RELEASE_MESSAGES.invalidMinimumVersion);
+      if (!isStableVersion(input.minimumVersion)) throw adminError(400, 'validation_error', RELEASE_MESSAGES.minimumHasNoPrerelease);
       if (!Number.isSafeInteger(input.expectedPolicyVersion) || input.expectedPolicyVersion < 0 || input.expectedPolicyVersion >= MAX_POLICY_VERSION) {
-        throw INVALID('The expected policy version');
+        throw INVALID(RELEASE_MESSAGES.invalidExpectedPolicyVersion);
       }
       const component = await this.store.findComponent(product, componentKey);
-      if (!component) throw adminError(404, 'component_not_found', 'No such component.');
-      if (component.kind === 'backend') throw adminError(409, 'policy_not_applicable', 'A backend component has no compatibility policy.');
+      if (!component) throw adminError(404, 'component_not_found', RELEASE_MESSAGES.noSuchComponent);
+      if (component.kind === 'backend') throw adminError(409, 'policy_not_applicable', RELEASE_MESSAGES.backendHasNoPolicy);
       const current = await this.store.currentPolicy(component.id);
       const noop = current?.minimumVersion === input.minimumVersion;
       if (!noop) {
@@ -136,7 +139,7 @@ export class AdminService {
         const previous = now ? await this.store.findRelease(component.id, now.minimumVersion, q) : null;
         const policy = await this.store.appendPolicy(component.id, input.expectedPolicyVersion, input.minimumVersion, q).catch((e: unknown) => {
           if (e instanceof ReleaseStoreError && e.code === 'policy_conflict') throw POLICY_CONFLICT();
-          if (e instanceof ReleaseStoreError && e.code === 'invariant_violation') throw adminError(409, 'minimum_above_latest', 'The minimum would exceed the latest published release.');
+          if (e instanceof ReleaseStoreError && e.code === 'invariant_violation') throw adminError(409, 'minimum_above_latest', RELEASE_MESSAGES.minimumAboveLatest);
           throw e;
         });
         await this.audit.policyChanged(q, {
@@ -153,7 +156,7 @@ export class AdminService {
   private async minimumRelease(componentId: string, version: string, q?: Parameters<ReleaseStore['findRelease']>[2]): Promise<Release> {
     const r = await this.store.findRelease(componentId, version, q);
     if (!r || r.status !== 'published') {
-      throw adminError(409, 'invalid_minimum', 'The minimum must be a published, not withdrawn, release of this component.');
+      throw adminError(409, 'invalid_minimum', RELEASE_MESSAGES.minimumMustBePublished);
     }
     return r;
   }
@@ -195,5 +198,5 @@ export class AdminService {
 }
 
 const WOULD_BREAK_MINIMUM = () =>
-  adminError(409, 'would_break_minimum', 'Withdrawing this release would leave the minimum version above the latest release; lower the minimum first.');
-const POLICY_CONFLICT = () => adminError(409, 'policy_conflict', 'The policy changed since you read it; read it again.');
+  adminError(409, 'would_break_minimum', RELEASE_MESSAGES.wouldBreakMinimum);
+const POLICY_CONFLICT = () => adminError(409, 'policy_conflict', RELEASE_MESSAGES.policyConflict);

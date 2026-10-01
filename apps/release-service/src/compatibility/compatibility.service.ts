@@ -1,7 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { HttpException, Inject, Injectable } from '@nestjs/common';
 import type { Request } from 'express';
-import { RateLimitService } from '@nawara/service-kit';
+import { RateLimitService, httpError, type MessageTexts } from '@nawara/service-kit';
 import type { ReleaseConfig } from '../config/release-config.js';
 import { RELEASE_CONFIG } from '../config/release-config.token.js';
 import { REGISTRY_KEY } from '../domain/model.js';
@@ -11,8 +11,9 @@ import { clientAddress } from './client-address.js';
 import { CompatibilityCounters, type CompatibilityOutcome } from './compatibility-counters.js';
 import { COMPATIBILITY_BUCKET, COMPATIBILITY_WINDOW_S } from './compatibility-ops.js';
 import { decide, type CompatibilityState, type Decision } from './decision.js';
+import { RELEASE_MESSAGES } from '../messages.js';
 
-const inputError = (status: number, code: string, message: string) => new HttpException({ message, code }, status);
+const inputError = (status: number, code: string, message: MessageTexts): HttpException => httpError(status, code, message);
 
 export type CompatibilityAnswer = { kind: 'decision'; decision: Decision; etag: string } | { kind: 'not_modified'; etag: string };
 
@@ -64,31 +65,31 @@ export class CompatibilityService {
       const rule = { limit: this.config.compatibility.ratePerClient, windowSec: COMPATIBILITY_WINDOW_S };
       if (!(await this.limiter.hit(COMPATIBILITY_BUCKET, client, rule)).allowed) {
         done('rate_limited');
-        throw inputError(429, 'rate_limited', 'Too many requests.');
+        throw inputError(429, 'rate_limited', RELEASE_MESSAGES.tooManyRequests);
       }
       const keys = Object.keys(req.query);
       if (keys.some((k) => k !== 'version')) {
         done('invalid_request');
-        throw inputError(400, 'validation_error', 'Only the version query parameter is accepted.');
+        throw inputError(400, 'validation_error', RELEASE_MESSAGES.onlyVersionParameter);
       }
       const version = req.query.version;
       if (typeof version !== 'string' || !isCanonicalVersion(version)) {
         done('invalid_version');
-        throw inputError(400, 'invalid_version', 'The version is not a canonical release version.');
+        throw inputError(400, 'invalid_version', RELEASE_MESSAGES.notCanonicalVersion);
       }
       if (!REGISTRY_KEY.test(product) || !REGISTRY_KEY.test(component)) {
         done('unknown_component');
-        throw inputError(404, 'unknown_component', 'No such client component.');
+        throw inputError(404, 'unknown_component', RELEASE_MESSAGES.noSuchClientComponent);
       }
       const state = await this.store.compatibilityState(product, component, version);
       const decision = decide(version, state);
       if (decision === 'unknown_component') {
         done('unknown_component');
-        throw inputError(404, 'unknown_component', 'No such client component.');
+        throw inputError(404, 'unknown_component', RELEASE_MESSAGES.noSuchClientComponent);
       }
       if (decision === 'unknown_release' || decision === 'invalid_version') {
         done('unknown_release');
-        throw inputError(404, 'unknown_release', 'This version is not a registered release of the component.');
+        throw inputError(404, 'unknown_release', RELEASE_MESSAGES.notRegisteredRelease);
       }
       const etag = compatibilityEtag(state);
       if (matchesIfNoneMatch(req.headers['if-none-match'], etag)) {
