@@ -264,7 +264,7 @@ Domains differ in details (the retention of a key, which fields make a request "
 
 ### Error responses and language ([ADR-0054](../adr/0054-localized-error-messages-and-stable-error-codes.md))
 
-> **Changed 2026-10-01 (ADR-0054, Proposed; being implemented in the Core V1 refactor).** This replaces the earlier rule "a client
+> **Changed 2026-10-01 (ADR-0054, Accepted; being implemented in the Core V1 refactor).** This replaces the earlier rule "a client
 > renders localized text": Core may now render an error's human text in English, French or Arabic itself. The rule that a client never
 > parses a `message` is unchanged.
 
