@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-02, `main` at `c278a8c`.
+- **Last verified:** 2026-10-02, `main` at `aeb3739`.
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -98,7 +98,7 @@ R6  Remaining services                     ✅ CLOSED
 R7  Shared cleanup                         ✅ CLOSED (no material cleanup required)
 R8  Legacy/type cleanup                    ✅ CLOSED (Release error helpers narrowed to MessageTexts)
 R9  Refactor regression validation         ✅ CLOSED (merged R3–R8 state verified; negative controls detected)
-R10 Documentation + error catalog          ⏳
+R10 Documentation + error catalog          ✅ CLOSED (guide and per-service catalog index; no runtime change)
 R11 Refactor certification                 ⏳
 
 Final Core Validation (Stage 22)           🔒 ABSOLUTE LAST
@@ -106,7 +106,7 @@ Final Core Validation (Stage 22)           🔒 ABSOLUTE LAST
 
 ### Current checkpoint
 
-**R10 Documentation + error catalog** is the next Core V1 checkpoint (not started).
+**R11 Refactor certification** is the next Core V1 checkpoint (not started).
 
 ### Compatibility and safety rules for V1 work
 
@@ -315,3 +315,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | Exact API contract | the service's OpenAPI at `GET /docs` |
 | Production facts and gates | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md), [`docs/runbooks/`](runbooks/) |
 | Product integration | [`core-product-integration-guide.md`](architecture/core-product-integration-guide.md) |
+| Error localization and the per-service error-code index | [`core-error-localization.md`](architecture/core-error-localization.md) |
