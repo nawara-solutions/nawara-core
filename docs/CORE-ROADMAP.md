@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-02, `main` at `0ac6ebf`.
+- **Last verified:** 2026-10-02, `main` at `0954566`.
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -96,7 +96,7 @@ R6  Remaining services                     ✅ CLOSED
     R6.6 Billing                           ✅ CLOSED
     R6.7 Notification                      ✅ CLOSED
 R7  Shared cleanup                         ✅ CLOSED (no material cleanup required)
-R8  Legacy/type cleanup                    ⏳
+R8  Legacy/type cleanup                    ✅ CLOSED (Release error helpers narrowed to MessageTexts)
 R9  Refactor regression validation         ⏳
 R10 Documentation + error catalog          ⏳
 R11 Refactor certification                 ⏳
@@ -106,7 +106,7 @@ Final Core Validation (Stage 22)           🔒 ABSOLUTE LAST
 
 ### Current checkpoint
 
-**R8 Legacy/type cleanup** is the next Core V1 checkpoint (not started).
+**R9 Refactor regression validation** is the next Core V1 checkpoint (not started).
 
 ### Compatibility and safety rules for V1 work
 
