@@ -10,7 +10,7 @@ import { AuthDependencyError, OWNER_AUTHORITY, type OwnerAuthority, type Release
 import type { VerifiedOwner } from './owner.guard.js';
 import { RELEASE_MESSAGES } from '../messages.js';
 
-export const adminError = (status: number, code: string, message: string | MessageTexts, params?: MessageParams): HttpException => httpError(status, code, message, params);
+export const adminError = (status: number, code: string, message: MessageTexts, params?: MessageParams): HttpException => httpError(status, code, message, params);
 /** One complete catalog sentence per invalid input (never a translated frame around an English noun phrase). */
 const INVALID = (sentence: MessageTexts) => adminError(400, 'validation_error', sentence);
 const STEP_UP_REQUIRED = () => adminError(403, 'step_up_required', RELEASE_MESSAGES.stepUpRequired);

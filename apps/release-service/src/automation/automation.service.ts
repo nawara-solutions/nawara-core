@@ -12,7 +12,7 @@ import type { ReleaseCapability } from '../policy/caller-policy.js';
 import { authorizationDenial, denialError } from '../policy/release-policy.guard.js';
 import { RELEASE_MESSAGES } from '../messages.js';
 
-export const releaseError = (status: number, code: string, message: string | MessageTexts, params?: MessageParams): HttpException => httpError(status, code, message, params);
+export const releaseError = (status: number, code: string, message: MessageTexts, params?: MessageParams): HttpException => httpError(status, code, message, params);
 const RELEASE_NOT_FOUND = () => releaseError(404, 'release_not_found', RELEASE_MESSAGES.noSuchRelease);
 /** One complete catalog sentence per invalid input (never a translated frame around an English noun phrase). */
 const INVALID = (sentence: MessageTexts) => releaseError(400, 'validation_error', sentence);
