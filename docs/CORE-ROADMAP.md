@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-02, `main` at `aeb3739`.
+- **Last verified:** 2026-10-02, `main` at `cb37cc0`.
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -99,14 +99,16 @@ R7  Shared cleanup                         ✅ CLOSED (no material cleanup requi
 R8  Legacy/type cleanup                    ✅ CLOSED (Release error helpers narrowed to MessageTexts)
 R9  Refactor regression validation         ✅ CLOSED (merged R3–R8 state verified; negative controls detected)
 R10 Documentation + error catalog          ✅ CLOSED (guide and per-service catalog index; no runtime change)
-R11 Refactor certification                 ⏳
+R11 Refactor certification                 ✅ CLOSED / CERTIFIED (refactor only; Core V1 not yet complete)
 
 Final Core Validation (Stage 22)           🔒 ABSOLUTE LAST
 ```
 
 ### Current checkpoint
 
-**R11 Refactor certification** is the next Core V1 checkpoint (not started).
+The Core V1 refactor (R0–R11) is closed and certified ([certification record](architecture/core-v1-refactor-certification.md)).
+**Core V1 is not complete:** the remaining work is the production ownership cutover (G6, then G7, F6 and F7; see
+[Production context](#production-context)), and Final Core Validation stays last.
 
 ### Compatibility and safety rules for V1 work
 
@@ -316,3 +318,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | Production facts and gates | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md), [`docs/runbooks/`](runbooks/) |
 | Product integration | [`core-product-integration-guide.md`](architecture/core-product-integration-guide.md) |
 | Error localization and the per-service error-code index | [`core-error-localization.md`](architecture/core-error-localization.md) |
+| Core V1 refactor certification (R11) | [`core-v1-refactor-certification.md`](architecture/core-v1-refactor-certification.md) |
