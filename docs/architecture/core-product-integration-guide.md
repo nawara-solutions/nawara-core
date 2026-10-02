@@ -264,9 +264,9 @@ Domains differ in details (the retention of a key, which fields make a request "
 
 ### Error responses and language ([ADR-0054](../adr/0054-localized-error-messages-and-stable-error-codes.md))
 
-> **Changed 2026-10-01 (ADR-0054, Accepted; being implemented in the Core V1 refactor).** This replaces the earlier rule "a client
-> renders localized text": Core may now render an error's human text in English, French or Arabic itself. The rule that a client never
-> parses a `message` is unchanged.
+> **Changed 2026-10-01 (ADR-0054; implemented in every Core service by the Core V1 refactor).** This replaces the earlier rule "a
+> client renders localized text": Core renders an error's human text in English, French or Arabic itself. The rule that a client never
+> parses a `message` is unchanged. Developers: see [Core error localization](core-error-localization.md).
 
 An error body keeps one shape:
 
@@ -289,9 +289,12 @@ What a client does:
 - **Branch on `code`**, never on `message`, in any language. A wording change is never a behaviour change.
 - **Display `message`** if useful, or render your own text from `code`.
 - **Ask for a language** with `Accept-Language`. Supported: `en`, `fr`, `ar`; a regional tag falls back to its language
-  (`fr-FR` → `fr`, `ar-TN` → `ar`, `en-US` → `en`); q-values are honoured; anything missing, unsupported or malformed gives English.
+  (`fr-FR` → `fr`, `ar-TN` → `ar`, `en-US` → `en`); q-values are honoured and `q=0` excludes a language; `*`, and anything missing,
+  unsupported or malformed, gives English.
 - **Tolerate English**: a message may be English even when you asked for another language (fallback), and a response tells you the
   language it used in `Content-Language`. Error responses carry `Vary: Accept-Language`.
+- **A list can mix languages:** a few validation elements that carry a client-supplied value stay English, so one `string[]` message
+  may contain translated and English elements; `Content-Language` then names both (for example `fr, en`).
 - Without `Accept-Language`, error responses keep today's English `message` byte-for-byte.
 - **Not everything is localized:** success bodies and machine statuses (`status`, `received`, `recovery_required`, …), health and
   readiness bodies, the shutdown `503`, the documentation basic-auth `401`, payment-provider webhook responses, WebAuthn protocol
