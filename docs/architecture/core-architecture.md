@@ -47,12 +47,16 @@ Company
 | **payment-service** | How was it paid, by which method, and what is the payment state? | payment, attempt, method, provider transaction, cash workflow, refund, webhooks, idempotency, reconciliation | what is owed; the ledger; entitlements | yes | **implemented through Stage 12.7**: settlement, attempts, the `test` provider, webhooks, resolver/expiry sweeper, transactional outbox, real RabbitMQ publishing (proven end-to-end into billing-service's Subscription, Stage 12.7) |
 | **accounting-service** | What accounting effect did this have? | chart of accounts, journal, entries and lines, ledger, fiscal periods, tax, reports | payments and invoices as a source of truth | yes | to build (finance stages) |
 | **ai-service** | How do services use AI? | provider abstraction, model config, usage, quotas, cost, safety | product AI workflows | yes (later) | 8-line FastAPI, `/health` only |
-| **file-service** | Where is this file and who may read it? | file metadata, ownership, access control, lifecycle, storage port, limits, checksums | business meaning and document relationships (products own them); binaries are never stored in PostgreSQL | yes | designed (Stage 17.1: [ADR-0048](../adr/0048-file-service-architecture.md), [SDD](../sdd/file-service.md)); to build (17.2–17.10) |
+| **file-service** | Where is this file and who may read it? | file metadata, ownership, access control, lifecycle, storage port, limits, checksums | business meaning and document relationships (products own them); binaries are never stored in PostgreSQL | yes | designed (Stage 17.1: [ADR-0048](../adr/0048-file-service-architecture.md), [SDD](../sdd/file-service.md)); **implemented and certified (Stages 17.2–17.10)**; not in production; the storage provider (O2) is still open |
 | **audit-service** | What happened, who did it, when? | append-only accountability records of cataloged security / business actions, idempotent ingestion, tenant-safe query, retention | Auth's **local** security audit (stays in Auth); any domain's history of record (`billing_transition`, File lifecycle, Notification delivery); application logs | yes | designed (Stage 18.1: [ADR-0049](../adr/0049-audit-trail-architecture.md), [SDD](../sdd/audit-service.md)); foundation (18.2), append-only persistence (18.3), the shared contract / catalog (18.4, `libs/audit-contract`) RabbitMQ ingestion (18.5), the query / authorization reads (18.6) and every Core producer's integration (18.7: Payment, Billing, Organization, File, Auth) and the privacy / retention mechanisms (18.8: DLQ redaction, retention role with no duration yet, limiter purge) and operational hardening (18.9) built; **certified and closed (18.10)**, production prerequisites P-A1–P-A8 open |
 | **release-service** | Which versions of a product's components exist, and must this client version update? | Product (a release-registry key), Component (`backend`, `web`, `desktop`, `mobile_ios`, `mobile_android`), immutable Release (`registered → published → withdrawn`), append-only CompatibilityPolicy (minimum ≤ latest) ([ADR-0051](../adr/0051-release-management-and-client-compatibility.md)) | deployment, environments, artifacts and binaries, signing keys, store / CDN publication, channels, feature flags, entitlement, authorization, per-user analytics | yes | **CI registration and publication (Stage 20.3)** on the Stage 20.2 schema and invariants: service token + per-product `RELEASE_SERVICE_POLICY` (`release.register`, `release.publish`), idempotent on (component, version), audit `release.registered` / `release.published` through the outbox. **Owner administration (Stage 20.4)**: the verified owner of the configured operating Company, own bearer checked live through Auth plus a factor step-up, withdraws releases and changes minimum versions (append-only), audit `release.withdrawn` / `compatibility_policy.changed`. **Public compatibility decision (Stage 20.5)**: `GET …/compatibility?version=` → `update` = required / available / none, unauthenticated, rate-limited per keyed client address, `max-age` + strong ETag, no identity or tracking ([client guide](./release-compatibility-client-guide.md)) |
 | **location-service** | Where is this place? | geocoding, reverse geocoding, distance, generic zones, provider port | product routing and assignment | none yet | to build (later, skeleton) |
 | **search-service** | How do I find things quickly? | derived index, query, reindex | source of truth (the owner stays authoritative) | none yet (derived) | to build (later, skeleton) |
 | **analytics-service** | What is happening across Nawara? | async event ingestion, aggregates, reporting | any synchronous dependency | none yet | to build (later, skeleton) |
+
+**Later services are not a V2 commitment.** `accounting-service`, `location-service`, `search-service`, `analytics-service` and a
+major `ai-service` build-out are **FUTURE / IDEA / REQUIRES SEPARATE SCOPE DECISION** (owner decision, V2-A; see the
+[roadmap](../CORE-ROADMAP.md#core-v2-future--planned)). Their rows above describe intended boundaries, not planned work.
 
 **Services deliberately not created:** `user-service`, `role-service`, `permission-service`, `membership-service`, `invoice-service`,
 `cash-service`, `tax-service`, `ledger-service`, `wallet-service`, `subscription-service`, `organization-payment-service`, and
@@ -240,7 +244,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | E1 | Entitlement is owned by billing-service | **confirmed and implemented** (ADR-0038's ownership principle; ADR-0044 for the final, built shape — one Subscription per Organization, not a separate organization-license/user-subscription split) |
 | E2 | RabbitMQ with a transactional outbox (producers) and inbox (consumers) for the financial services | **confirmed** (ADR-0037) |
 | E3 | Order: docs, service-kit, finance foundations, billing, payment, entitlement, accounting; organization-service and the other skeletons later; settlement waits for business/legal input | **confirmed** |
-| E4 | One matrix CI workflow (typecheck, lint, tests, Docker build without push) for new services and auth-service; no deploy workflow or server provisioning yet | **confirmed** |
+| E4 | One matrix CI workflow (typecheck, lint, tests, Docker build without push) for new services and auth-service; no deploy workflow or server provisioning yet | **confirmed** (as decided on 2026-09-19; production deploy workflows and server provisioning were added later, see [production-readiness.md](./production-readiness.md)) |
 
 | # | Open decision (nothing pulled in until decided) | Foundation ships |
 |---|---|---|
@@ -253,7 +257,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | O7 | Notification providers | **decided (Stage 16.8):** Twilio for SMS ([ADR-0019](../adr/0019-twilio-as-sms-gateway-provider.md), accepted), Resend for email ([ADR-0047](../adr/0047-resend-as-the-email-provider.md)); architecture [ADR-0046](../adr/0046-notification-service-architecture.md) accepted (Stage 16.9) |
 | O8 | Auth ⇄ payment cycle (and its repointing to billing) | documented risk |
 | O9 | **Decided, 2026-09-20:** Auth keeps a validated non-authoritative reference cache and organization-service is the validator for service requests ([ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1). Original text: How Auth references Company, Platform and Organization once organization-service exists (and who validates organization → platform → company for non-user requests) | **decided** (ADR-0040 Accepted; ADR-0042 Amendment 1); lifecycle semantics (BD-5) remain open |
-| O10 | Reliable event delivery (outbox) and asymmetric token signing | out of scope |
+| O10 | Reliable event delivery (outbox) and asymmetric token signing | outbox: **implemented** in the service-kit (ADR-0037 mechanism; Auth's domain events since ADR-0052); asymmetric signing: **open** (P-S6; Core V2 A14) |
 
 ## 12. Risks
 
@@ -261,5 +265,11 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
   reference mechanism is **decided** (O9: a validated non-authoritative reference cache in Auth, [ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1; organization-service as the validator of service requests, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1); lifecycle semantics stay undecided and must not be improvised, and production readiness is gated by ADR-0040 decision 7.
 - **Every service asks Auth live.** Auth becomes a hot dependency for every request; a slow Auth slows everything.
   Mitigation later (caching with a short TTL) needs an explicit revocation decision.
-- **No CI runs any suite,** for any service. This is the largest gap before production use.
-- **Events are not delivered yet** (no broker, no outbox).
+- **Automatic Auth deployment.** A merge to `main` touching Auth, `libs/service-kit`, the package files or the Auth image workflow
+  redeploys production Auth with no human step, and `main` has no protection. Accepted direction (not implemented): build on merge,
+  deploy an exact digest only on explicit owner authorization ([V2-A record](./core-v2-a-baseline-and-change-safety.md) §6).
+- **Shared-library coupling.** Every service ships the service-kit, so a kit change is a change to every service (and, today, a
+  production Auth deployment).
+
+*Resolved since this document was written:* Core CI now runs every TypeScript service's suites (`core-ci.yml`; ai-service is not
+covered), and events are delivered through the service-kit outbox and RabbitMQ (in production for the Auth → Audit relay).

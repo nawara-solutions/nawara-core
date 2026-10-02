@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-02, `main` at `cb37cc0`.
+- **Last verified:** 2026-10-02, `main` at `f07fbe0` (V2-A baseline).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -21,14 +21,17 @@ Before making changes:
 7. Preserve V1 compatibility (status, `code`, response shape, events) unless the owner explicitly authorizes a change.
 8. Treat Nawara Admin mocks as provisional contracts, never as Core contracts.
 9. Every production mutation needs its own explicit owner authorization.
-10. Final Core Validation is the **last** V1 validation campaign. Do not run it as part of any other task.
+10. Final Core Validation is the **absolute last** full Core validation (see [Final Core Validation](#final-core-validation)). Do not
+    run it as part of any other task.
+11. Every Core V2 work item carries a G6 label (🟢 / 🟡 / 🔴 / ⚪, see [G6](#g6-production-like-rehearsal)). A 🔴 item stops V2
+    work until the production track has run.
 
 ```text
 NAWARA CORE
 │
 ├── CORE V1   CURRENT / REAL       implemented, partly in production; stabilization and refactor active
 │
-└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; NOT YET IMPLEMENTED
+└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; V2-A baseline formalized; NOT YET IMPLEMENTED
 ```
 
 ---
@@ -47,6 +50,8 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 | Implemented, not in production | billing-service, payment-service, notification-service, file-service, release-service |
 | Starter only | ai-service |
 | Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
+| Auth deployment | **automatic**: a merge to `main` touching Auth, `libs/service-kit`, the package files or the Auth image workflow redeploys production Auth. Seven such deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6) |
+| `main` protection | **none** (no branch protection, no ruleset); the accepted policy is V2-A.3, not applied |
 | Evidence record | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md) (production facts, gates, digests) |
 
 Production facts change only through authorized checkpoints; re-verify against the cutover record and the
@@ -68,8 +73,29 @@ for example:
 Whatever the host, the plan's isolation rules apply (no production credentials, network path or backup destination; see the plan
 §6.1 and the cutover record §6).
 
-**What G6 blocks:** G7, F6, F7, the backup schedule and the pre-G7 backups (cutover record §7), and Final Core Validation.
-**What G6 does not block:** Core V1 refactor work, Core V2 planning, and Nawara Admin development.
+**What G6 blocks:** G7, F6, F7, the backup schedule and the pre-G7 backups (cutover record §7), every Core V2 item labelled 🔴, the
+production activation of 🟡 items that depend on the cutover, and Final Core Validation.
+**What G6 does not block:** Core V2 development of 🟢 and 🟡 items, and Nawara Admin development.
+
+**G6 is a dependency gate, not a calendar phase** (owner decision, V2-A). It is deferred: not cancelled, not waived, not passed.
+Every Core V2 work item carries one label:
+
+| Label | Meaning |
+|---|---|
+| 🟢 G6-INDEPENDENT | developed, validated and (when separately authorized) released without G6, F6 or F7 |
+| 🟡 DEVELOPMENT ALLOWED / PRODUCTION GATED | built and certified locally; production activation waits for the cutover or another deferred gate |
+| 🔴 REQUIRES G6/F6/F7 FIRST | needs the post-F6/F7 ownership state: **STOP** and resume the production track |
+| ⚪ UNKNOWN | needs evidence before it is classified |
+
+When the first 🔴 item is reached, the production track resumes, in this order and never shortened:
+
+```text
+refresh the G6 baseline → G6 → fresh pre-G7 Auth + Organization backup → verify → enable the required backup schedule
+→ G7 → F6 → F7 → fresh post-F7 backup → verify → open the remaining callers and gates
+```
+
+The refresh re-establishes every production fact G6 depends on (images and digests, migrations, PostgreSQL, RabbitMQ, retained
+containers, artifact pinning, deployment automation) for the system as it is then, including whatever Core V2 changed.
 
 ### Core V1 refactor (localization and stabilization)
 
@@ -110,20 +136,29 @@ The Core V1 refactor (R0–R11) is closed and certified ([certification record](
 **Core V1 is not complete:** the remaining work is the production ownership cutover (G6, then G7, F6 and F7; see
 [Production context](#production-context)), and Final Core Validation stays last.
 
+Core V2 has started with **V2-A, baseline and change safety** ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md)):
+V2.0 discovery and the V2-A design are accepted, and V2-A.1 (this documentation) formalizes them. V2-A.2 (the Auth deployment
+transition) and V2-A.3 (the `main` ruleset) each need their own owner authorization. No V2 implementation has started.
+
 ### Compatibility and safety rules for V1 work
 
 - Existing public contracts are preserved: HTTP status, `code`, response shape, event payloads, success bodies. Existing code-less
   errors stay code-less. Default English stays byte-identical.
 - No breaking redesign inside V1. A change that would break a contract stops and goes to the owner.
 - No production action (deploy, restart, `.env`, secrets, migrations, container changes) without a separate explicit authorization.
-  Merging to `main` can auto-deploy Auth (`auth-service-docker-build.yml`); know a change's workflow impact before it merges.
+  Merging to `main` **auto-deploys Auth to production** (`auth-service-docker-build.yml`) when it touches `apps/auth-service/**`,
+  `libs/service-kit/**`, `package.json`, `package-lock.json` or that workflow file; know a change's workflow impact before it merges.
+  Until V2-A.2 is done, no V2 change on those paths merges without the owner treating the merge as a production deployment.
 
 ### Final Core Validation
 
-Final Core Validation (Stage 22) is intentionally the **final** Core V1 validation campaign: the expensive, platform-wide run that
-happens once the planned V1 work is complete (the refactor through R11, and the gates that block it). It is **not** re-run after
-each service or checkpoint. Each checkpoint gets its own focused validation instead: its tests, negative controls, risk-based
-regression and CI.
+Final Core Validation (Stage 22) is the **absolute last** full Core validation: the expensive, platform-wide run that happens
+**once**, only after the planned Core/platform work (including Core V2's committed scope), the required production gates (G6, G7,
+F6, F7 and what follows them) and the appropriate V2 capability certifications are complete (owner decision, V2-A). Earlier records
+that place it at the end of Core V1 or immediately after the cutover are historical and are superseded by this decision.
+
+It is **not** re-run after each service, checkpoint or V2 phase. Each checkpoint gets its own focused validation instead: its tests,
+negative controls, risk-based regression and CI (the [V2 validation protocol](architecture/core-v2-a-baseline-and-change-safety.md#8-v2-per-capability-validation-protocol)).
 
 ---
 
@@ -135,28 +170,45 @@ regression and CI.
 Core V2 is the next platform architecture. It may redesign contracts deliberately, but only through explicit design documents
 (ADR/ADD/SDD/TDD) and a migration plan, never by drift.
 
-| Stage | Scope (planned) |
-|---|---|
-| **A0 Baseline** | the certified V1 baseline: service versions, API compatibility, deployment topology, infrastructure assumptions |
-| **A1 Architecture** | service boundaries; standard bootstrap and service-kit adoption; Auth convergence; common request context; compatibility and migration strategy |
-| **A2 Configuration & Secrets** | typed and validated configuration; environment separation; secret lifecycle and rotation; deployment contracts |
-| **A3 Messaging** | broker conventions; event envelopes and versioning; retry, DLQ, idempotency; producer and consumer conventions; real-broker certification |
-| **A4 Authentication** | sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service authentication, account lifecycle and security |
-| **A5 Organization** | companies and organizations, memberships, ownership, invitations, organization lifecycle, the Auth–Organization interaction |
-| **A6 Authorization** | roles, permissions, policy evaluation, caller and service policies, ownership-aware authorization, cross-service enforcement |
-| **A7 Audit** | event schema, accountability, producers, retention and querying, correlation, cross-service coverage |
-| **A8 Notification** | templates, content localization, channels, delivery lifecycle, retries and fairness, preferences, observability, product contracts |
-| **A9 File** | upload and download, authorization, metadata, limits, storage abstraction, failure handling, cleanup and lifecycle, security |
-| **A10 Billing** | plans, subscriptions, billing entities, lifecycle and state, invoices and records, reconciliation, product integration |
-| **A11 Payment** | provider architecture, webhooks, idempotency, reconciliation, failures, security, the Billing–Payment interaction |
-| **A12 Observability** | logs, metrics, tracing, correlation, dashboards, health, alerts, redaction and privacy |
-| **A13 Backup / Disaster Recovery** | automation, off-server storage, integrity, retention, restore automation and rehearsal, runbooks, RPO/RTO |
-| **A14 Security** | Auth/Authz, service authentication, secrets, rate limits, proxy trust, input handling, F13 (opaque internal errors), dependencies and supply chain, security regression |
-| **A15 Developer / Platform Experience** | service templates, shared libraries, local environment, testing and CI conventions, documentation, generators, localization conventions |
-| **A16 Product Integration** | for Nawara School, Nawara Drive and future products: API contracts, authentication, authorization, organization/tenant context, files, notifications, billing and payment, audit |
-| **A17 Product Readiness** | end-to-end product workflows, failure paths, onboarding, permissions, operations, deployment readiness |
-| **A18 Performance** | load testing, bottlenecks, database and broker behaviour, connection pools, caching, scaling, capacity and load balancing |
-| **A19 Release Certification** | final V2 certification across architecture, services, security, integration, observability, DR, performance, product readiness, documentation and CI |
+| Stage | Scope (planned) | G6 label |
+|---|---|---|
+| **A0 Baseline** | the certified V1 baseline: service versions, API compatibility, deployment topology, infrastructure assumptions | 🟢 |
+| **A1 Architecture** | service boundaries; standard bootstrap and service-kit adoption; Auth convergence; common request context; compatibility and migration strategy | 🟢 |
+| **A2 Configuration & Secrets** | typed and validated configuration; environment separation; secret lifecycle and rotation; deployment contracts | 🟢 |
+| **A3 Messaging** | broker conventions; event envelopes and versioning; retry, DLQ, idempotency; producer and consumer conventions; real-broker certification | 🟢 / 🟡 production |
+| **A4 Authentication** | sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service authentication, account lifecycle and security | 🟢 |
+| **A5 Organization** | companies and organizations, memberships, ownership, invitations, organization lifecycle, the Auth–Organization interaction | 🔴 (design 🟡) |
+| **A6 Authorization** | roles, permissions, policy evaluation, caller and service policies, ownership-aware authorization, cross-service enforcement | 🟡 |
+| **A7 Audit** | event schema, accountability, producers, retention and querying, correlation, cross-service coverage | 🟢 |
+| **A8 Notification** | templates, content localization, channels, delivery lifecycle, retries and fairness, preferences, observability, product contracts | 🟡 |
+| **A9 File** | upload and download, authorization, metadata, limits, storage abstraction, failure handling, cleanup and lifecycle, security | 🟢 |
+| **A10 Billing** | plans, subscriptions, billing entities, lifecycle and state, invoices and records, reconciliation, product integration | 🟡 |
+| **A11 Payment** | provider architecture, webhooks, idempotency, reconciliation, failures, security, the Billing–Payment interaction | 🟡 |
+| **A12 Observability** | logs, metrics, tracing, correlation, dashboards, health, alerts, redaction and privacy | 🟢 |
+| **A13 Backup / Disaster Recovery** | automation, off-server storage, integrity, retention, restore automation and rehearsal, runbooks, RPO/RTO | 🟢 / 🟡 schedule |
+| **A14 Security** | Auth/Authz, service authentication, secrets, rate limits, proxy trust, input handling, F13 (opaque internal errors), dependencies and supply chain, security regression | 🟢 |
+| **A15 Developer / Platform Experience** | service templates, shared libraries, local environment, testing and CI conventions, documentation, generators, localization conventions | 🟢 |
+| **A16 Product Integration** | for Nawara School, Nawara Drive and future products: API contracts, authentication, authorization, organization/tenant context, files, notifications, billing and payment, audit | 🟡 / 🔴 |
+| **A17 Product Readiness** | end-to-end product workflows, failure paths, onboarding, permissions, operations, deployment readiness | 🔴 |
+| **A18 Performance** | load testing, bottlenecks, database and broker behaviour, connection pools, caching, scaling, capacity and load balancing | 🟢 local / ⚪ production |
+| **A19 Release Certification** | final V2 certification across architecture, services, security, integration, observability, DR, performance, product readiness, documentation and CI | 🔴 |
+
+The G6 labels are defined under [G6](#g6-production-like-rehearsal); the reasons are in the
+[V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §4. A0 includes **V2-A.2** (the Auth deployment transition:
+a merge builds an immutable image, and production is deployed only by an explicit, owner-authorized deployment of an exact digest)
+and **V2-A.3** (the `main` ruleset); neither is applied yet. The items left open by the retired 21.R1/21.R2 umbrella are placed in
+A1, A3, A6, A12, A13, A14, A15 and A16 by the [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §5.
+
+**Ordering.** Stages are numbered by theme, not by order. Work is sequenced by dependency: A0 first; foundations (A1, A2, A3, A15)
+before the services that adopt them; 🟢 and 🟡 work continues while G6 is deferred; the first 🔴 item stops V2 work until the
+production track has run. Every capability is certified on its own by the
+[V2 validation protocol](architecture/core-v2-a-baseline-and-change-safety.md#8-v2-per-capability-validation-protocol); A19 certifies
+V2, and Final Core Validation follows it, last.
+
+**Outside committed V2 scope: FUTURE / IDEA / REQUIRES SEPARATE SCOPE DECISION.** `accounting-service`, `location-service`,
+`search-service`, `analytics-service` and a major `ai-service` build-out. They appear in
+[`core-architecture.md`](architecture/core-architecture.md) as later services; that is not a V2 commitment. CI hygiene for the
+existing ai-service scaffold is A15 work and does not commit AI implementation to V2.
 
 ---
 
@@ -319,3 +371,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | Product integration | [`core-product-integration-guide.md`](architecture/core-product-integration-guide.md) |
 | Error localization and the per-service error-code index | [`core-error-localization.md`](architecture/core-error-localization.md) |
 | Core V1 refactor certification (R11) | [`core-v1-refactor-certification.md`](architecture/core-v1-refactor-certification.md) |
+| Core V2 baseline, G6 labels, V2 scope, 21.R1/21.R2 disposition, deployment and `main` risks, V2 validation protocol | [`core-v2-a-baseline-and-change-safety.md`](architecture/core-v2-a-baseline-and-change-safety.md) |

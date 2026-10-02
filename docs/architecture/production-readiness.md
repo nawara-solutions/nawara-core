@@ -1,6 +1,6 @@
 # Production readiness: CI/CD, database roles, backups and migrations
 
-- **Status:** Proposed; facts checked on 2026-09-19 against the repository and a local scratch PostgreSQL. Updated after the CI / deployment-safety change: see [service-foundations.md](./service-foundations.md). Updated at the Stage 14 closure (2026-09-23, `main` at `d385299`): sections 1, 2, 4, 5 and the new section 6.
+- **Status:** Proposed; facts checked on 2026-09-19 against the repository and a local scratch PostgreSQL. Updated after the CI / deployment-safety change: see [service-foundations.md](./service-foundations.md). Updated at the Stage 14 closure (2026-09-23, `main` at `d385299`): sections 1, 2, 4, 5 and the new section 6. Updated at V2-A (2026-10-02, `main` at `f07fbe0`): section 1 (deployment and merge protection), section 3 (restore status) and section 5.
 - **Scope:** what exists, what the Core requires (CI/CD, least-privilege database access, tested backups, safe migrations), and what
   is done versus not. Nothing here changes production. Related: [core-architecture.md](./core-architecture.md),
   [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md), the auth security review (`docs/security/`).
@@ -12,10 +12,10 @@
 | Item | State |
 |---|---|
 | Formatting, lint, typecheck, unit, integration or migration checks in CI | at the time of the first assessment **none**; since PR #39 `core-ci.yml` runs lint, typecheck, unit, integration and build (not formatting) |
-| Docker build | `auth-service-docker-build.yml`: on pull requests it builds **and pushes** a `:develop` image; on push to `main` it builds, pushes `:production` and `:latest`, then deploys |
+| Docker build | `auth-service-docker-build.yml`: on pull requests it builds **and pushes** a `:develop` image; on push to `main` it builds, pushes `:production` and `:latest`, then deploys. **Still true on 2026-10-02:** a merge touching `apps/auth-service/**`, `libs/service-kit/**`, `package.json`, `package-lock.json` or this workflow redeploys production Auth with no human step. Accepted direction, not implemented (V2-A.2): build an immutable image on merge; deploy an exact digest only on explicit owner authorization ([V2-A record](./core-v2-a-baseline-and-change-safety.md) §6) |
 | Deploy | SSH to the VPS (`appleboy/ssh-action@v1`), runs `deploy/provision-and-deploy.sh`. Failure handling comes from `set -euo pipefail` in the remote script and in the provisioning script. (An earlier `script_stop: true` was **not** protection: it is not an input of `appleboy/ssh-action@v1`, GitHub reported it as unexpected, and it has been removed.) |
-| Other services | no deploy workflow. Since Stage 14.2 Core CI builds all four Core images (`core image (<service>)`) and smoke-checks each with production configuration (`scripts/smoke-core-image.sh`: non-root, `/health` 200 and stable, `/ready` wired); only auth-service is deployed |
-| Merge protection | **none** (checked 2026-09-23): `main` has no branch protection and no ruleset, so the checks above are not *required*. A repository setting, not code (Stage 14 finding F2) |
+| Other services | no deploy workflow. Since Stage 14.2 Core CI builds all four Core images (`core image (<service>)`) and smoke-checks each with production configuration (`scripts/smoke-core-image.sh`: non-root, `/health` 200 and stable, `/ready` wired); only auth-service is deployed. **Since then (2026-10-02):** manual, `main`-only deploy workflows exist for organization-service and audit-service, plus manual RabbitMQ provisioning, backup and Auth credential rotation, all on the same production queue; the manual deploys rebuild `main` at dispatch time (a new digest each time). Release, File, Payment, Billing and Notification have no deploy path |
+| Merge protection | **none** (checked 2026-09-23, and again 2026-10-02): `main` has no branch protection and no ruleset, so the checks above are not *required*. A repository setting, not code (Stage 14 finding F2). Proposed policy, not applied (V2-A.3): a repository ruleset requiring a pull request and the Core CI checks, no force push, no deletion, administrator bypass limited to pull requests ([V2-A record](./core-v2-a-baseline-and-change-safety.md) §6.2) |
 
 **Gaps in the existing deploy (three, confirmed by reading the workflow):**
 1. The SSH step runs `docker run ... cat deploy/provision-and-deploy.sh | IMAGE=... bash -s` **without `pipefail`**: if the `docker run`
@@ -36,7 +36,7 @@ image publication, the automatic deployment and the manual one; the stale trigge
 deployment job passed (about 1m10s), the remote script ran under `set -euo pipefail` on the server, migrations `0001`–`0007` were
 reported already applied, the new container became healthy, and `GET /auth/health` returned HTTP 200 afterwards.
 **Still not verified:** the concurrency queue under two simultaneous deployments (only one has run, so queuing and never-cancelling are
-checked statically only) and the manual deploy workflow (never run).
+checked statically only) and the manual deploy workflow (never run). *Later:* the manual Auth deploy has since run (for example run `36699283208`, F4-M3, 2026-09-30).
 
 **Implemented CI (`core-ci.yml`, matrix per workspace, PostgreSQL and RabbitMQ service containers):** lint, typecheck, unit tests, integration
 tests, migration apply-from-scratch and rollback checks where a down migration exists, build, and simple architecture checks (no
@@ -99,7 +99,9 @@ returns the pre-dump data unchanged.
 database; or the known-id read is missing or does not match.
 **Status:** a backup that has never been restored **on the real volume**, and never verified at the application level, is not proven;
 production remains a **BLOCKER** until that drill is done: Auth after the tooling is merged (separately authorized), Organization after
-F1 and before G7/F6.
+F1 and before G7/F6. **Later status (2026-10-02):** both drills are done and certified (Auth stamp `20260929T103715Z`; Organization
+stamp `20260929T225442Z`, 11/11), so this blocker is closed for Auth and Organization; other databases (Audit P-A7, and the services
+not yet in production) are not covered ([cutover record](./stage-21/stage-21-x-cutover-record.md) §3.2).
 
 ## 4. Migrations
 
@@ -119,9 +121,9 @@ change, state existing data, backward compatibility, migration and deploy order,
 | CI that runs lint, typecheck, tests, build (not formatting) | implemented and **verified on GitHub** (6 of 6 jobs passed) |
 | Deploy: fail-fast on the piped script, concurrency queue, stale trigger removed | implemented; the deploy passed under the new script; the concurrency queue itself is checked statically only |
 | Least-privilege database roles | local: implemented and verified; production (auth-service): **implemented and applied** (Stage 14.3) |
-| Required CI checks on `main` (branch protection) | **NEEDS CONFIGURATION** (repository setting; F2) |
-| Backup job and off-host copy | implemented for the cutover databases (G5), certified locally; **not yet configured or run in production** |
-| Restore procedure | isolated drill tool, certified locally end to end; **BLOCKER** until drilled on the real volume (Auth; Organization after F1) |
+| Required CI checks on `main` (branch protection) | **NEEDS CONFIGURATION** (repository setting; F2); policy proposed as V2-A.3, not applied |
+| Backup job and off-host copy | implemented for the cutover databases (G5); manual production backups of Auth and Organization **executed and certified** (2026-09-29); the daily schedule (`CORE_BACKUP_SCHEDULE`) is **not enabled** and stays blocked by G6 |
+| Restore procedure | isolated drill tool, certified locally end to end; real-volume drills **certified** for Auth and Organization; other databases not covered |
 | Retention and RPO/RTO | decided: 30 daily, RPO 24 h, RTO 4 h |
 
 ## 6. Stage 14 operational hardening: runtime limits, signals and open items

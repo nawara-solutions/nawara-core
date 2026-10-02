@@ -3,6 +3,8 @@
 - **Status:** RECORD — evidence of steps already executed, and the current gate status as of 2026-09-30. This record authorizes
   nothing: every further production step is a separate, reviewed and authorized checkpoint.
 - **Scope:** ADR-0040 fresh path (A2.5, F1–F7) and gates G1–G7, plus the Stage 21.x T1 relay gate.
+- **Later status:** a dated later-status note is appended as [§10](#10-later-status-note-2026-10-02-v2-a). Sections 1–9 are
+  unchanged and remain the record as of 2026-09-30.
 - **Related:** [ADR-0040](../../adr/0040-organization-ownership-migration-decisions.md),
   [G1 topology](stage-21-x-g1-organization-topology.md), [G6 rehearsal plan](stage-21-x-g6-rehearsal-plan.md),
   [organization-production runbook](../../runbooks/organization-production.md),
@@ -250,3 +252,27 @@ No workflow was changed, and nothing was rebuilt or redeployed.
 - A pre-F6 Organization backup is never restored after F6 (`core-backup-restore.md` §7).
 - The GitHub production deploy workflows are never used for the G6 rehearsal.
 - **Stage 22 Final Core Validation remains the absolute last full Core validation.**
+
+## 10. Later-status note (2026-10-02, V2-A)
+
+This note is appended after the record was written. It does not change any fact above: §1–§9 remain the certified state as of
+2026-09-30. Source: the [V2-A record](../core-v2-a-baseline-and-change-safety.md).
+
+- **Auth image drift.** The Auth image in §2 and §5 (`sha256:e6279588…a7ee`, built at `9e29c763`) was the certified running image
+  at that checkpoint. Afterwards, seven merges to `main` that touched the automatic deployment paths of
+  `auth-service-docker-build.yml` (`093e3ee`, `b20bbab`, `08475a5`, `52160a2`, `fe5d106`, `fd8c743`, `97f78cb`) each completed its
+  `build-production` and `deploy-production` jobs successfully, the last on 2026-10-02T07:38Z. Production Auth therefore no longer
+  runs the digest recorded above. The digest it runs has **not** been verified on the server; it must be established read-only
+  before G6 resumes.
+- **§8 scope.** §8 lists only the manual deploy workflows. The automatic Auth path above also deploys production on merge, so the
+  open image-pinning decision covers it too. The accepted future direction (V2-A) is: a merge builds an immutable image, and production
+  is deployed only by an explicit, owner-authorized deployment of an exact digest. It is not implemented (V2-A.2 needs its own
+  authorization), and adopting it as the §8 answer remains an owner decision.
+- **Organization and audit-service.** Not redeployed since §2 and §5. `main` now contains their localization changes (Core V1
+  refactor R6.1, R6.2), which production does not run. Whether to redeploy them before G6 is an owner decision for the G6 refresh.
+- **Migrations.** No migration changed after `9e29c763`; the §5 migration fingerprints still describe the schemas.
+- **G6 status.** Unchanged: **DEFERRED**, not cancelled, waived or passed. Before G6 resumes, the refresh re-establishes the §5 parity
+  targets (images and digests, migrations, PostgreSQL, RabbitMQ topology, retained containers, artifact pinning, deployment
+  automation) for the system as it is then. §7's order is unchanged; G7, F6 and F7 remain locked.
+- **Stage 22.** Final Core Validation remains the absolute last full Core validation. By owner decision (V2-A) it runs after the planned
+  Core/platform work, including Core V2, and after the required production gates; not immediately after F7.

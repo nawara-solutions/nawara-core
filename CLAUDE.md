@@ -22,7 +22,16 @@ full conventions.
 ## Start here: the roadmap
 
 Read [`docs/CORE-ROADMAP.md`](docs/CORE-ROADMAP.md) before any change: it is the authority for the current Core V1 checkpoint,
-the planned Core V2 roadmap, the V1/V2 boundary and the Nawara Admin relationship.
+the planned Core V2 roadmap, the V1/V2 boundary and the Nawara Admin relationship. Core V2 baseline, G6 labels, scope and the V2
+validation protocol: [`docs/architecture/core-v2-a-baseline-and-change-safety.md`](docs/architecture/core-v2-a-baseline-and-change-safety.md).
+
+## Production safety: automatic Auth deployment
+
+A merge to `main` touching `apps/auth-service/**`, `libs/service-kit/**`, `package.json`, `package-lock.json` or
+`.github/workflows/auth-service-docker-build.yml` **automatically redeploys production Auth** (no human step), and `main` has no
+branch protection. Treat such a merge as a production deployment until the accepted transition (V2-A.2: build on merge, deploy an
+exact digest only on explicit owner authorization) is implemented. G6 is deferred; G7, F6 and F7 are locked; Final Core Validation is
+the absolute last full validation and is never run as part of another task.
 
 ## What this project is
 
@@ -35,15 +44,21 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
 ## Services in this repo
 
 1. **auth-service** (NestJS/TypeScript) — registration, login, JWT + refresh tokens, role-based access control. Generic `User` concept only — no app-specific roles baked in beyond a generic `role: string`.
-2. **notification-service** (NestJS/TypeScript) — dispatches push (FCM), SMS, and email based on generic events (`{userId, channel, template, data}`). No knowledge of what triggered the notification.
-3. **payment-service** (NestJS/TypeScript) — payment processing only: how money was paid and the payment state (payments, attempts, cash workflow, refunds, webhooks). Gateway adapters (Flouci, Konnect, Paymee, Stripe) live behind a common interface so adding a gateway doesn't touch business logic. It is not the billing or accounting system (see below). Currently a starter; redesigned in `docs/architecture/financial-architecture.md`.
-4. **ai-service** (Python/FastAPI) — generic LLM-backed chat/Q&A/content-generation service. Each calling app supplies its own prompt config and knowledge base reference; this service has no built-in domain knowledge.
+2. **notification-service** (NestJS/TypeScript) — dispatches notifications based on generic events (`{userId, channel, template, data}`). No knowledge of what triggered the notification. Implemented and certified for email (Resend) and SMS (Twilio); push (FCM) is not built. Not in production.
+3. **payment-service** (NestJS/TypeScript) — payment processing only: how money was paid and the payment state (payments, attempts, cash workflow, refunds, webhooks). Gateway adapters (Flouci, Konnect, Paymee, Stripe) live behind a common interface so adding a gateway doesn't touch business logic. It is not the billing or accounting system (see below). Implemented (attempts, webhooks, outbox, reconciliation) with only the `test` provider; no real gateway adapter exists yet. Design: `docs/architecture/financial-architecture.md`. Not in production.
+4. **ai-service** (Python/FastAPI) — generic LLM-backed chat/Q&A/content-generation service. Each calling app supplies its own prompt config and knowledge base reference; this service has no built-in domain knowledge. **Today a scaffold only** (FastAPI `/health`); a build-out is FUTURE / IDEA, not committed V2 scope.
 
 **`organization-service`** (NestJS/TypeScript) — Company, Platform, Organization. **Implemented (ADR-0039 Stage 9; ownership and service-authorization mechanisms in Stage 10.1) but NOT yet authoritative:** auth-service still owns these entities, and authority is activated only by an explicit, gated operation that has not been performed anywhere (see `apps/organization-service/README.md` and `docs/architecture/stage-10/stage-10-1-implementation.md`). Service-token API with an explicit per-caller policy; never owns users or membership.
 
 **`release-service`** (NestJS/TypeScript) — release metadata and client compatibility for any Nawara product (ADR-0051): Product, Component (`backend | web | desktop | mobile_ios | mobile_android`), immutable Release (`registered → published → withdrawn`), append-only CompatibilityPolicy. Never delivery: not CI/CD, a deployment engine, an artifact store, a signer, authorization, entitlement or analytics. **Stage 20.3: CI automation only** on the Stage 20.2 domain: a service token plus a per-product `RELEASE_SERVICE_POLICY` (`release.register`, `release.publish`) registers and publishes releases, idempotently, with audit intent in the same transaction. **Stage 20.4:** the owner of the configured operating Company (own Auth bearer, verified live, plus a factor step-up consumed through Auth) withdraws releases and changes minimum versions; no operator route. **Stage 20.5:** a public, read-only compatibility decision (`update` = required / available / none) for web, desktop, iOS and Android clients: no identity, rate-limited, short-lived cache with an ETag; it never updates, reloads or deploys anything.
 
-**Planned services (design only, nothing built yet; see `docs/architecture/core-architecture.md` and `docs/architecture/financial-architecture.md`):** `billing-service` (what is owed: invoices, prices, entitlements), `accounting-service` (double-entry ledger, tax), `file-service`, `audit-service`, `location-service`, `search-service`, `analytics-service`. Do **not** create user, membership, role, permission, invoice, cash, tax, ledger, wallet or subscription services.
+**`billing-service`** (NestJS/TypeScript) — what is owed: products, prices, invoices, payment requests, and the organization-scoped Subscription and its derived Entitlement (ADR-0044). Implemented; service-token API only; not in production.
+
+**`file-service`** (NestJS/TypeScript) — file metadata, ownership, access control and lifecycle behind a storage port (ADR-0048). Implemented and certified; storage provider still open (O2); not in production.
+
+**`audit-service`** (NestJS/TypeScript) — append-only accountability records ingested from Core producers over RabbitMQ (ADR-0049). Implemented, certified and in production (the Auth → Audit relay).
+
+**Later services (FUTURE / IDEA / REQUIRES SEPARATE SCOPE DECISION; not committed V2 scope; see `docs/architecture/core-architecture.md` and `docs/architecture/financial-architecture.md`):** `accounting-service` (double-entry ledger, tax), `location-service`, `search-service`, `analytics-service`. Do **not** create user, membership, role, permission, invoice, cash, tax, ledger, wallet or subscription services.
 
 ## Architecture principles
 
@@ -61,7 +76,8 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
   `@ApiProperty`. FastAPI's `ai-service` gets this for free at the same path with no extra setup.
 - Python service: FastAPI, typed with Pydantic models.
 - `libs/service-kit` holds **technical infrastructure only** shared by Core services (configuration, logging, request ids, errors, health, service authentication, database and migrations, outbox/inbox). It must never contain business logic; `npm run check:repo` enforces part of this.
-- Shared code that's safe to publish to consuming apps (DTOs, types) goes in `libs/shared-types` — but remember, consuming *services in this repo* can import libs; external apps (Nawara Drive) still only talk over HTTP, never via these libs directly.
+- `libs/audit-contract` holds the shared audit event contract and catalog used by Core producers and audit-service. There is no `libs/shared-types`. Services in this repo can import libs; external apps (Nawara Drive) only talk over HTTP, never via these libs directly.
+- Services consume `libs/service-kit` and `libs/audit-contract` through their built `dist/`: after changing either, build the libraries before running dependent tests. Stale `dist/` is never valid evidence.
 - Each service has its own `docker-compose` entry and its own database/migrations.
 
 ## Consumers
