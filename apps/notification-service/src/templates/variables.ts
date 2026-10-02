@@ -96,16 +96,24 @@ function valueProblem(spec: VariableSpec, v: unknown): string | undefined {
  * coerced. Problems name the variable only, never its value (a value can be a one-time code).
  */
 export function validateVariableValues(schema: VariableSchema, values: Record<string, unknown>): string[] {
-  const errors: string[] = [];
+  return variableValueProblems(schema, values).map((p) => p.text);
+}
+
+/**
+ * The same problems, in the same order, each with where its name comes from: `template` (the version's own schema, server-defined) or
+ * `data` (a key of the caller's free-form `data` object). The API localizes the first only (ADR-0054 D10).
+ */
+export function variableValueProblems(schema: VariableSchema, values: Record<string, unknown>): { text: string; source: 'template' | 'data' }[] {
+  const errors: { text: string; source: 'template' | 'data' }[] = [];
   for (const [name, spec] of Object.entries(schema)) {
     const v = values[name];
     if (v === undefined || v === null) {
-      if (spec.required) errors.push(`${name}: is required`);
+      if (spec.required) errors.push({ text: `${name}: is required`, source: 'template' });
       continue;
     }
     const problem = valueProblem(spec, v);
-    if (problem) errors.push(`${name}: ${problem}`);
+    if (problem) errors.push({ text: `${name}: ${problem}`, source: 'template' });
   }
-  for (const name of Object.keys(values)) if (!(name in schema)) errors.push(`${name}: is not a variable of this template`);
+  for (const name of Object.keys(values)) if (!(name in schema)) errors.push({ text: `${name}: is not a variable of this template`, source: 'data' });
   return errors;
 }

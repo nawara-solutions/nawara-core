@@ -1,4 +1,6 @@
+import type { LocalizedListItem, MessageParams, MessageTexts } from '@nawara/service-kit';
 import { LOCALE_SHAPE } from '../config/notification-config.js';
+import { NOTIFICATION_MESSAGES as M } from '../messages.js';
 import { TEMPLATE_KEY } from '../templates/catalog.js';
 import { API_CHANNELS, type ApiChannel } from './caller-policy.js';
 
@@ -30,38 +32,52 @@ const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isInstant = (v: unknown): v is string => typeof v === 'string' && ISO_UTC.test(v) && !Number.isNaN(Date.parse(v));
 
-export function parseSendRequest(body: unknown): { value: SendRequest } | { problems: string[] } {
-  if (!isObject(body)) return { problems: ['the body must be a JSON object'] };
+/** A refused request: the English problems exactly as before, and, aligned with them, each one's catalog identity (ADR-0054). */
+export interface SendRequestProblems {
+  problems: string[];
+  localized: LocalizedListItem[];
+}
+
+export function parseSendRequest(body: unknown): { value: SendRequest } | SendRequestProblems {
   const problems: string[] = [];
-  for (const k of Object.keys(body)) if (!TOP.has(k)) problems.push(`${k.slice(0, 40)}: is not a field of this request`);
-  if (typeof body.template !== 'string' || !TEMPLATE_KEY.test(body.template) || body.template.length > 128) problems.push('template: must be a template key');
+  const localized: LocalizedListItem[] = [];
+  const problem = (english: string, texts: MessageTexts, params?: MessageParams) => {
+    problems.push(english);
+    localized.push({ prefix: '', message: { texts, ...(params ? { params } : {}) } });
+  };
+  if (!isObject(body)) {
+    problem('the body must be a JSON object', M.bodyMustBeObject);
+    return { problems, localized };
+  }
+  for (const k of Object.keys(body)) if (!TOP.has(k)) problem(`${k.slice(0, 40)}: is not a field of this request`, M.notAField, { name: k.slice(0, 40) });
+  if (typeof body.template !== 'string' || !TEMPLATE_KEY.test(body.template) || body.template.length > 128) problem('template: must be a template key', M.templateKey);
   if (body.organizationId !== undefined && body.organizationId !== null && !(typeof body.organizationId === 'string' && UUID.test(body.organizationId))) {
-    problems.push('organizationId: must be a uuid or null');
+    problem('organizationId: must be a uuid or null', M.organizationId);
   }
   if (body.recipient !== undefined && body.recipient !== null) {
     const r = body.recipient;
     if (!isObject(r) || Object.keys(r).some((k) => k !== 'type' && k !== 'id') || typeof r.type !== 'string' || !RECIPIENT_TYPE.test(r.type)
       || typeof r.id !== 'string' || r.id.length < 1 || r.id.length > 128) {
-      problems.push('recipient: must be {"type", "id"} (a lowercase type, an id of 1-128 characters)');
+      problem('recipient: must be {"type", "id"} (a lowercase type, an id of 1-128 characters)', M.recipient);
     }
   }
   if (body.locale !== undefined && body.locale !== null && !(typeof body.locale === 'string' && LOCALE_SHAPE.test(body.locale) && body.locale.length <= 35)) {
-    problems.push('locale: must be a BCP 47 locale');
+    problem('locale: must be a BCP 47 locale', M.locale);
   }
   if (!Array.isArray(body.channels) || body.channels.length < 1 || body.channels.length > API_CHANNELS.length) {
-    problems.push(`channels: must list 1-${API_CHANNELS.length} channels`);
+    problem(`channels: must list 1-${API_CHANNELS.length} channels`, M.channelsCount, { max: API_CHANNELS.length });
   } else {
     body.channels.forEach((c, i) => {
       if (!isObject(c) || Object.keys(c).some((k) => k !== 'channel' && k !== 'destination') || !(API_CHANNELS as readonly unknown[]).includes(c.channel)
         || typeof c.destination !== 'string' || c.destination.length < 1 || c.destination.length > 320) {
-        problems.push(`channels[${i}]: must be {"channel": ${API_CHANNELS.join(' | ')}, "destination": a string of 1-320 characters}`);
+        problem(`channels[${i}]: must be {"channel": ${API_CHANNELS.join(' | ')}, "destination": a string of 1-320 characters}`, M.channelItem, { index: i, channels: API_CHANNELS.join(' | ') });
       }
     });
   }
-  if (body.data !== undefined && !isObject(body.data)) problems.push('data: must be an object');
-  if (body.scheduledAt !== undefined && body.scheduledAt !== null && !isInstant(body.scheduledAt)) problems.push('scheduledAt: must be an ISO 8601 UTC date-time');
-  if (body.expiresAt !== undefined && body.expiresAt !== null && !isInstant(body.expiresAt)) problems.push('expiresAt: must be an ISO 8601 UTC date-time');
-  if (problems.length > 0) return { problems };
+  if (body.data !== undefined && !isObject(body.data)) problem('data: must be an object', M.dataObject);
+  if (body.scheduledAt !== undefined && body.scheduledAt !== null && !isInstant(body.scheduledAt)) problem('scheduledAt: must be an ISO 8601 UTC date-time', M.utcDateTime, { field: 'scheduledAt' });
+  if (body.expiresAt !== undefined && body.expiresAt !== null && !isInstant(body.expiresAt)) problem('expiresAt: must be an ISO 8601 UTC date-time', M.utcDateTime, { field: 'expiresAt' });
+  if (problems.length > 0) return { problems, localized };
   return {
     value: {
       template: body.template as string,
