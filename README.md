@@ -84,8 +84,8 @@ POST https://api.nawara-solutions.com/ai/chat
 
 > **Authoritative roadmap: [`docs/CORE-ROADMAP.md`](docs/CORE-ROADMAP.md)** — read it first.
 
-- **Current: Core V1.** Implemented and partly in production (Auth, Organization, Audit); stabilization and the localization
-  refactor (ADR-0054) are active.
+- **Current: Core V1.** Implemented and partly in production (Auth, Organization, Audit). Error messages are localized in English,
+  French and Arabic in every service (ADR-0054; see [Core error localization](docs/architecture/core-error-localization.md)).
 - **Future: Core V2.** A planned architecture roadmap (A0–A19); **not yet implemented**.
 - **Parallel frontend: Nawara Admin** (`nawara-admin`, a separate repository) develops against real existing Core contracts and
   explicitly mocked, provisional V2 contracts.
