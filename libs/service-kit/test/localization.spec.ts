@@ -7,7 +7,8 @@ import type { Response } from 'express';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  HierarchyUnavailableError, JsonLogger, KitExceptionFilter, defineMessages, httpError, operationNotPermitted, requestContextMiddleware,
+  HierarchyUnavailableError, JsonLogger, KitExceptionFilter, attachLocalizedMessageList, defineMessages, httpError, operationNotPermitted, requestContextMiddleware,
+  type LocalizedListItem,
 } from '../src/index.js';
 import { createTestApp, type TestApp } from './support/app.js';
 
@@ -67,6 +68,11 @@ class L10nController {
   @Get('vary') vary(@Res({ passthrough: true }) res: Response) {
     res.setHeader('Vary', 'accept-language');
     throw new NotFoundException();
+  }
+  @Get('list') list() {
+    // A service's own `string[]` problems, through the PUBLIC entry point: one element per item, the second kept as English (no identity).
+    const items: (LocalizedListItem | undefined)[] = [{ prefix: 'lines[0].', message: { texts: DEMO.range, params: { min: 1, max: 5 } } }, undefined];
+    throw attachLocalizedMessageList(new HttpException({ message: ['lines[0].Pick 1 to 5.', 'extra: is not a field'], code: 'validation_error' }, 400), items);
   }
   @Get('ok') ok() {
     return { ok: true };
@@ -189,6 +195,18 @@ describe('generic texts; public codes exactly as thrown (R3 compatibility guard)
       code: 'validation_error', requestId: r.headers['x-request-id'],
     });
     expect(r.headers['content-language']).toBe('fr');
+  });
+});
+
+describe('a service list message through the public API (attachLocalizedMessageList)', () => {
+  it('renders each identified element in place, keeps an unidentified one English, and reports the languages used', async () => {
+    const en = await get('/l10n/list').expect(400);
+    expect(en.body).toEqual({ statusCode: 400, message: ['lines[0].Pick 1 to 5.', 'extra: is not a field'], error: 'Bad Request', code: 'validation_error', requestId: en.headers['x-request-id'] });
+    expect(en.headers['content-language']).toBe('en');
+    const fr = await get('/l10n/list', 'fr').expect(400);
+    expect(fr.body.message).toEqual(['lines[0].Choisissez de 1 à 5.', 'extra: is not a field']);
+    expect(fr.body.code).toBe('validation_error');
+    expect(fr.headers['content-language']).toBe('fr, en');
   });
 });
 
