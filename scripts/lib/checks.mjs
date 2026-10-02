@@ -12,6 +12,20 @@ function triggerBranches(doc, event) {
   return t && typeof t === 'object' ? asArray(t.branches) : [];
 }
 
+/** The events a workflow runs on, whatever form `on:` takes (a name, a list of names or a map). */
+function triggerNames(doc) {
+  const on = doc?.on ?? doc?.true;
+  if (typeof on === 'string') return [on];
+  if (Array.isArray(on)) return on.map(String);
+  return on && typeof on === 'object' ? Object.keys(on) : [];
+}
+
+/** V2-A.2: events that run without an explicit human decision to change production. A production SSH job never runs on them. */
+const AUTOMATIC_EVENTS = ['push', 'pull_request', 'pull_request_target', 'workflow_run'];
+/** V2-A.2: mutable pointers a merge must never move (they are frozen and deprecated; the digest is the deployment authority). */
+const MUTABLE_PRODUCTION_TAG = /:(production|latest)\b/;
+const INPUT_INTERPOLATION = /\$\{\{\s*(inputs|github\.event\.inputs)\./;
+
 function firstCommandLine(script) {
   return String(script ?? '')
     .split('\n')
@@ -34,14 +48,30 @@ export function checkWorkflowSafety(fileName, text) {
   const jobs = doc?.jobs ?? {};
   let deploys = false;
 
+  const triggers = triggerNames(doc);
+  const automatic = triggers.filter((t) => AUTOMATIC_EVENTS.includes(t));
+
   for (const [jobId, job] of Object.entries(jobs)) {
     const steps = asArray(job.steps);
     const where = `${fileName} job "${jobId}"`;
+    for (const step of steps) {
+      const shell = [step.run, step.with?.script].filter((v) => v !== undefined).map(String).join('\n');
+      if (INPUT_INTERPOLATION.test(shell)) problems.push(`${where}: a workflow input is interpolated into a shell script (pass it through env and validate it)`);
+      if (triggers.includes('push')) {
+        const tags = String(step.uses ?? '').startsWith('docker/build-push-action') ? String(step.with?.tags ?? '') : '';
+        if (MUTABLE_PRODUCTION_TAG.test(tags) || MUTABLE_PRODUCTION_TAG.test(String(step.run ?? ''))) {
+          problems.push(`${where}: a push-triggered workflow must not publish or move :production or :latest (V2-A.2: build an immutable sha- image; the digest is the deployment authority)`);
+        }
+      }
+    }
     const ssh = steps.filter((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
     const pushesProdTag = steps.some((s) => String(s.uses ?? '').startsWith('docker/build-push-action') && String(s.with?.tags ?? '').includes(':production'));
 
     if (ssh.length > 0) {
       deploys = true;
+      if (automatic.length > 0) {
+        problems.push(`${where}: a production SSH job must only run on workflow_dispatch or schedule, never automatically (found: ${automatic.join(', ')})`);
+      }
       for (const step of ssh) {
         const first = firstCommandLine(step.with?.script);
         if ('script_stop' in (step.with ?? {})) problems.push(`${where}: "script_stop" is not an input of appleboy/ssh-action@v1 and is silently ignored; failure handling comes from "set -euo pipefail"`);
@@ -62,6 +92,69 @@ export function checkWorkflowSafety(fileName, text) {
     const branches = triggerBranches(doc, 'push');
     const stale = branches.filter((b) => b !== 'main');
     if (stale.length > 0) problems.push(`${fileName}: a deployment workflow must not trigger on branches other than main (found: ${stale.join(', ')})`);
+  }
+  return problems;
+}
+
+const DIGEST_PATTERN = '^sha256:[0-9a-f]{64}$';
+const BUILDS = /\bdocker\s+(buildx\s+)?build\b|\bbuildx\s+bake\b/;
+
+/**
+ * V2-A.2: a digest deployment workflow deploys ONE EXACT, ALREADY-BUILT image of `repository` and never builds. It runs only on an
+ * explicit dispatch with a digest and a typed confirmation; the digest is validated before any network step, resolved and checked
+ * (existence, revision label, ancestry of main) before the SSH step, and the SSH step deploys exactly IMAGE_NAME@digest.
+ */
+export function checkDigestDeploy(fileName, text, repository) {
+  const problems = [];
+  const doc = parse(text);
+  const triggers = triggerNames(doc);
+  if (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch') problems.push(`${fileName}: a digest deployment must run on workflow_dispatch only (found: ${triggers.join(', ') || 'nothing'})`);
+  const on = doc?.on ?? doc?.true;
+  const inputs = on?.workflow_dispatch?.inputs ?? {};
+  for (const name of ['digest', 'confirm']) {
+    if (inputs[name]?.required !== true) problems.push(`${fileName}: the "${name}" input must exist and be required`);
+  }
+  const imageName = String(doc?.env?.IMAGE_NAME ?? '');
+  if (!imageName.startsWith('ghcr.io/') || !imageName.endsWith(`/${repository}`)) problems.push(`${fileName}: IMAGE_NAME must be fixed to the ${repository} repository (got "${imageName}")`);
+  if (doc?.permissions?.packages === 'write') problems.push(`${fileName}: a digest deployment must not have packages: write`);
+
+  const jobs = Object.entries(doc?.jobs ?? {});
+  const deployJobs = jobs.filter(([, job]) => asArray(job.steps).some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action')));
+  if (deployJobs.length !== 1) problems.push(`${fileName}: exactly one job must deploy over SSH (found ${deployJobs.length})`);
+
+  for (const [jobId, job] of jobs) {
+    const where = `${fileName} job "${jobId}"`;
+    for (const step of asArray(job.steps)) {
+      if (String(step.uses ?? '').startsWith('docker/build-push-action') || BUILDS.test(String(step.run ?? ''))) {
+        problems.push(`${where}: a digest deployment must never build an image (it deploys an existing artifact)`);
+      }
+    }
+    if (job.permissions?.packages === 'write') problems.push(`${where}: a digest deployment must not have packages: write`);
+  }
+
+  for (const [jobId, job] of deployJobs) {
+    const where = `${fileName} job "${jobId}"`;
+    const guard = String(job.if ?? '');
+    if (!guard.includes('refs/heads/main')) problems.push(`${where}: must be restricted to refs/heads/main`);
+    if (!/inputs\.confirm\s*==\s*'[^']+'/.test(guard)) problems.push(`${where}: must require the typed confirmation input`);
+    if (job.permissions?.packages !== 'read') problems.push(`${where}: packages permission must be exactly read`);
+    const steps = asArray(job.steps);
+    const sshAt = steps.findIndex((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
+    const fromDigestInput = (s) => Object.values(s.env ?? {}).some((v) => /^\$\{\{\s*inputs\.digest\s*\}\}$/.test(String(v).trim()));
+    const validateAt = steps.findIndex((s) => String(s.run ?? '').includes(DIGEST_PATTERN) && fromDigestInput(s));
+    const verifyAt = steps.findIndex((s) => /imagetools inspect/.test(String(s.run ?? '')) && /org\.opencontainers\.image\.revision/.test(String(s.run ?? ''))
+      && /merge-base --is-ancestor/.test(String(s.run ?? '')));
+    const loginAt = steps.findIndex((s) => String(s.uses ?? '').startsWith('docker/login-action'));
+    if (validateAt < 0 || (loginAt >= 0 && validateAt > loginAt) || validateAt > sshAt) {
+      problems.push(`${where}: the digest must be validated against ${DIGEST_PATTERN} (from env) before any registry or SSH step`);
+    }
+    if (verifyAt < 0 || verifyAt > sshAt || verifyAt < validateAt) {
+      problems.push(`${where}: the artifact must be resolved and its revision label checked as an ancestor of main after validation and before the SSH step`);
+    }
+    const image = String(steps[sshAt]?.env?.IMAGE ?? '').trim();
+    if (!/^\$\{\{\s*env\.IMAGE_NAME\s*\}\}@\$\{\{\s*inputs\.digest\s*\}\}$/.test(image)) {
+      problems.push(`${where}: the SSH step must deploy exactly \${{ env.IMAGE_NAME }}@\${{ inputs.digest }} (got "${image}")`);
+    }
   }
   return problems;
 }

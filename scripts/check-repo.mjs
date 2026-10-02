@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkAuthErrorCoverage, checkCiCoverage, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkAuthErrorCoverage, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -18,10 +18,20 @@ function* walk(dir) {
 }
 
 const wfDir = join(root, '.github/workflows');
+// V2-A.2: production deployments that take an exact, already-built image digest (the image repository each may deploy).
+const DIGEST_DEPLOYMENTS = { 'auth-service-deploy.yml': 'nawara-core-auth-service' };
 for (const f of readdirSync(wfDir).filter((n) => n.endsWith('.yml'))) {
   const text = readFileSync(join(wfDir, f), 'utf8');
   problems.push(...checkWorkflowSafety(f, text));
   if (f === 'core-ci.yml') problems.push(...checkCiCoverage(f, text));
+  if (DIGEST_DEPLOYMENTS[f]) problems.push(...checkDigestDeploy(f, text, DIGEST_DEPLOYMENTS[f]));
+}
+for (const f of Object.keys(DIGEST_DEPLOYMENTS)) {
+  try {
+    readFileSync(join(wfDir, f));
+  } catch {
+    problems.push(`${f} (a digest deployment) is missing`);
+  }
 }
 try {
   readFileSync(join(wfDir, 'core-ci.yml'));

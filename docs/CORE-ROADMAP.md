@@ -50,7 +50,7 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 | Implemented, not in production | billing-service, payment-service, notification-service, file-service, release-service |
 | Starter only | ai-service |
 | Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
-| Auth deployment | **automatic**: a merge to `main` touching Auth, `libs/service-kit`, the package files or the Auth image workflow redeploys production Auth. Seven such deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6) |
+| Auth deployment | **build ≠ deploy** (V2-A.2): a merge touching Auth, `libs/service-kit`, the package files or the Auth image workflow only builds a revision-labelled image; production changes only by an explicit, owner-authorized deployment of an exact index digest ([runbook](runbooks/auth-service-deploy.md)). Before V2-A.2, seven automatic deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6) |
 | `main` protection | **none** (no branch protection, no ruleset); the accepted policy is V2-A.3, not applied |
 | Evidence record | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md) (production facts, gates, digests) |
 
@@ -137,8 +137,9 @@ The Core V1 refactor (R0–R11) is closed and certified ([certification record](
 [Production context](#production-context)), and Final Core Validation stays last.
 
 Core V2 has started with **V2-A, baseline and change safety** ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md)):
-V2.0 discovery and the V2-A design are accepted, and V2-A.1 (this documentation) formalizes them. V2-A.2 (the Auth deployment
-transition) and V2-A.3 (the `main` ruleset) each need their own owner authorization. No V2 implementation has started.
+V2.0 discovery and the V2-A design are accepted, and V2-A.1 formalizes them. V2-A.2 makes the Auth deployment explicit (build on
+merge, deploy an exact index digest only on owner authorization; [runbook](runbooks/auth-service-deploy.md)). V2-A.3 (the `main`
+ruleset, and the `production` environment) needs its own owner authorization.
 
 ### Compatibility and safety rules for V1 work
 
@@ -146,9 +147,10 @@ transition) and V2-A.3 (the `main` ruleset) each need their own owner authorizat
   errors stay code-less. Default English stays byte-identical.
 - No breaking redesign inside V1. A change that would break a contract stops and goes to the owner.
 - No production action (deploy, restart, `.env`, secrets, migrations, container changes) without a separate explicit authorization.
-  Merging to `main` **auto-deploys Auth to production** (`auth-service-docker-build.yml`) when it touches `apps/auth-service/**`,
-  `libs/service-kit/**`, `package.json`, `package-lock.json` or that workflow file; know a change's workflow impact before it merges.
-  Until V2-A.2 is done, no V2 change on those paths merges without the owner treating the merge as a production deployment.
+  Since V2-A.2, merging to `main` on the Auth paths (`apps/auth-service/**`, `libs/service-kit/**`, `package.json`,
+  `package-lock.json`, `auth-service-docker-build.yml`) **builds** an Auth image and never deploys it; deploying an exact index digest
+  is a separate, owner-authorized production mutation ([runbook](runbooks/auth-service-deploy.md)). Organization and audit-service
+  deployments are manual and still rebuild `main` at dispatch; know a change's workflow impact before it merges.
 
 ### Final Core Validation
 

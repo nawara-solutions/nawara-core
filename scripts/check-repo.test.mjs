@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiCoverage, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { readFileSync } from 'node:fs';
+import { PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
-const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = "push:\n    branches: [main]" } = {}) => `
+const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:' } = {}) => `
 name: d
 on:
   ${push}
@@ -78,6 +79,129 @@ jobs:
             ghcr.io/x/y:production
 `;
   assert.match(checkWorkflowSafety('b.yml', wf).join(), /publishes the :production image/);
+});
+
+// ---------------------------------------------------------------------------------------------------- V2-A.2: build ≠ deploy
+const workflow = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
+const BUILD = workflow('auth-service-docker-build.yml');
+const DEPLOY = workflow('auth-service-deploy.yml');
+const AUTH = 'nawara-core-auth-service';
+const swap = (text, from, to) => {
+  assert.ok(text.includes(from), `fixture drift: "${from}" not found`);
+  return text.replace(from, to);
+};
+
+test('A: an SSH deployment on push (or any automatic event) is refused; dispatch and schedule are allowed', () => {
+  for (const event of ['push:\n    branches: [main]', 'pull_request:\n    branches: [main]', 'workflow_run:\n    workflows: [x]']) {
+    assert.match(checkWorkflowSafety('d.yml', deploy({ push: event })).join(), /must only run on workflow_dispatch or schedule, never automatically/);
+  }
+  assert.deepEqual(checkWorkflowSafety('d.yml', deploy({ push: 'schedule:\n    - cron: "0 2 * * *"' })), []);
+});
+
+test('A: the real Auth image workflow builds only; re-adding an automatic deploy job is refused', () => {
+  assert.deepEqual(checkWorkflowSafety('auth-service-docker-build.yml', BUILD), []);
+  const deployJob = `
+  deploy-production:
+    needs: build-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: ${PRODUCTION_GROUP}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          script: |
+            set -euo pipefail
+            docker pull "$IMAGE"
+`;
+  assert.match(checkWorkflowSafety('b.yml', BUILD + deployJob).join(), /never automatically \(found: pull_request, push\)/);
+});
+
+test('B/C: a push-triggered workflow may not publish or move :production or :latest', () => {
+  for (const tag of ['production', 'latest']) {
+    const tagged = swap(BUILD, 'tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}', `tags: |\n            \${{ env.IMAGE_NAME }}:sha-\${{ github.sha }}\n            \${{ env.IMAGE_NAME }}:${tag}`);
+    assert.match(checkWorkflowSafety('b.yml', tagged).join(), /must not publish or move :production or :latest/);
+    const retag = swap(BUILD, '          set -euo pipefail\n          [[ "$DIGEST"', `          set -euo pipefail\n          docker buildx imagetools create -t "$IMAGE_NAME:${tag}" "$IMAGE_NAME@$DIGEST"\n          [[ "$DIGEST"`);
+    assert.match(checkWorkflowSafety('b.yml', retag).join(), /must not publish or move :production or :latest/);
+  }
+});
+
+test('H: a workflow input interpolated into a shell script is refused (any workflow)', () => {
+  assert.match(checkWorkflowSafety('d.yml', deploy({ script: 'set -euo pipefail\ndocker pull "x@${{ inputs.digest }}"' })).join(), /input is interpolated into a shell script/);
+  const run = swap(DEPLOY, '[[ "$DIGEST" =~', '[[ "${{ inputs.digest }}" =~');
+  assert.match(checkWorkflowSafety('d.yml', run).join(), /input is interpolated into a shell script/);
+});
+
+test('the real digest deployment passes every rule', () => {
+  assert.deepEqual(checkWorkflowSafety('auth-service-deploy.yml', DEPLOY), []);
+  assert.deepEqual(checkDigestDeploy('auth-service-deploy.yml', DEPLOY, AUTH), []);
+});
+
+test('D: a digest deployment that builds (rebuilding main) is refused', () => {
+  const buildStep = `      - uses: docker/build-push-action@v7
+        with:
+          push: true
+          tags: \${{ env.IMAGE_NAME }}:sha-\${{ github.sha }}
+      - uses: appleboy/ssh-action@v1`;
+  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '      - uses: appleboy/ssh-action@v1', buildStep), AUTH).join(), /must never build an image/);
+  for (const cmd of ['docker build -t x .', 'docker buildx build --push .']) {
+    const bad = swap(DEPLOY, '          docker buildx imagetools inspect "$REF" >/dev/null', `          ${cmd}\n          docker buildx imagetools inspect "$REF" >/dev/null`);
+    assert.match(checkDigestDeploy('d.yml', bad, AUTH).join(), /must never build an image/);
+  }
+});
+
+test('E: removing or loosening the digest validation, or moving it after the registry login, is refused', () => {
+  const loose = swap(DEPLOY, '^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must', '^sha256:.+$ ]] || { echo "refused: the digest must');
+  assert.match(checkDigestDeploy('d.yml', loose, AUTH).join(), /must be validated against/);
+  const late = swap(swap(DEPLOY, `      - name: validate the digest
+        env:
+          DIGEST: \${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
+`, ''), '      - uses: appleboy/ssh-action@v1', `      - name: validate the digest
+        env:
+          DIGEST: \${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+      - uses: appleboy/ssh-action@v1`);
+  assert.match(checkDigestDeploy('d.yml', late, AUTH).join(), /validated .* before any registry or SSH step/);
+});
+
+test('F: deploying anything but exactly IMAGE_NAME@digest is refused', () => {
+  for (const image of ['${{ env.IMAGE_NAME }}:production', '${{ env.IMAGE_NAME }}:sha-${{ github.sha }}', 'ghcr.io/other/repo@${{ inputs.digest }}', '${{ steps.verify.outputs.ref }}']) {
+    const bad = swap(DEPLOY, 'IMAGE: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}', `IMAGE: ${image}`);
+    assert.match(checkDigestDeploy('d.yml', bad, AUTH).join(), /must deploy exactly/);
+  }
+  const foreign = swap(DEPLOY, 'IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-auth-service', 'IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-organization-service');
+  assert.match(checkDigestDeploy('d.yml', foreign, AUTH).join(), /IMAGE_NAME must be fixed to the nawara-core-auth-service repository/);
+});
+
+test('F: dropping the artifact verification (existence, revision label, ancestry) is refused', () => {
+  const noAncestry = swap(DEPLOY, '          git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }\n', '');
+  assert.match(checkDigestDeploy('d.yml', noAncestry, AUTH).join(), /revision label checked as an ancestor of main/);
+});
+
+test('G: the digest deployment keeps the production queue, never cancels, main only, typed confirmation, read-only packages', () => {
+  const noQueue = swap(DEPLOY, `    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+`, '');
+  assert.match(checkWorkflowSafety('d.yml', noQueue).join(), /has no concurrency group/);
+  assert.match(checkWorkflowSafety('d.yml', swap(DEPLOY, '      cancel-in-progress: false\n', '      cancel-in-progress: true\n')).join(), /cancel-in-progress must be explicitly false/);
+  const noConfirm = swap(DEPLOY, " && inputs.confirm == 'deploy auth-service'", '');
+  assert.match(checkDigestDeploy('d.yml', noConfirm, AUTH).join(), /typed confirmation/);
+  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '      packages: read', '      packages: write'), AUTH).join(), /packages/);
+  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '  workflow_dispatch:\n', '  push:\n    branches: [main]\n  workflow_dispatch:\n'), AUTH).join(), /workflow_dispatch only/);
+  const optional = swap(DEPLOY, 'sha256:<64 hex>, from a build-image run summary)"\n        required: true', 'sha256:<64 hex>, from a build-image run summary)"\n        required: false');
+  assert.match(checkDigestDeploy('d.yml', optional, AUTH).join(), /"digest" input must exist and be required/);
+});
+
+test('I: the digest deployment keeps set -euo pipefail and no secret in the remote script', () => {
+  assert.match(checkWorkflowSafety('d.yml', swap(DEPLOY, '            set -euo pipefail\n            trap', '            trap')).join(), /must start with "set -euo pipefail"/);
+  assert.match(checkWorkflowSafety('d.yml', swap(DEPLOY, 'docker login ghcr.io -u "$GITHUB_ACTOR"', 'docker login ghcr.io -u ${{ secrets.DEPLOY_SSH_USER }}')).join(), /secret is interpolated/);
 });
 
 test('CI coverage: every claimed check must be an actual step', () => {

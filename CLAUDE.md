@@ -25,13 +25,14 @@ Read [`docs/CORE-ROADMAP.md`](docs/CORE-ROADMAP.md) before any change: it is the
 the planned Core V2 roadmap, the V1/V2 boundary and the Nawara Admin relationship. Core V2 baseline, G6 labels, scope and the V2
 validation protocol: [`docs/architecture/core-v2-a-baseline-and-change-safety.md`](docs/architecture/core-v2-a-baseline-and-change-safety.md).
 
-## Production safety: automatic Auth deployment
+## Production safety: Auth build ≠ deploy
 
-A merge to `main` touching `apps/auth-service/**`, `libs/service-kit/**`, `package.json`, `package-lock.json` or
-`.github/workflows/auth-service-docker-build.yml` **automatically redeploys production Auth** (no human step), and `main` has no
-branch protection. Treat such a merge as a production deployment until the accepted transition (V2-A.2: build on merge, deploy an
-exact digest only on explicit owner authorization) is implemented. G6 is deferred; G7, F6 and F7 are locked; Final Core Validation is
-the absolute last full validation and is never run as part of another task.
+Since V2-A.2, a merge to `main` touching `apps/auth-service/**`, `libs/service-kit/**`, `package.json`, `package-lock.json` or
+`.github/workflows/auth-service-docker-build.yml` **builds** a revision-labelled Auth image (`sha-<commit>`, index digest in the run
+summary) and **never deploys**. Production Auth changes only through an explicit, owner-authorized `auth-service-deploy.yml` run that
+deploys an exact index digest (`docs/runbooks/auth-service-deploy.md`); `:production` and `:latest` are frozen and deprecated. Never
+dispatch a deployment without that authorization. `main` still has no branch protection (V2-A.3). G6 is deferred; G7, F6 and F7 are
+locked; Final Core Validation is the absolute last full validation and is never run as part of another task.
 
 ## What this project is
 
