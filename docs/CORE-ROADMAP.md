@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-01, `main` at `8628616`.
+- **Last verified:** 2026-10-02, `main` at `0ac6ebf`.
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -86,16 +86,16 @@ R2  Billing safe logging                   ✅ CLOSED
 R3  Shared localization foundation         ✅ CLOSED
 R4  Validation localization                ✅ CLOSED
 R5  Auth localization adoption             ✅ CLOSED
-R6  Remaining services                     🔵 ACTIVE
+R6  Remaining services                     ✅ CLOSED
     R6.1 Audit                             ✅ CLOSED
     R6.2 Organization                      ✅ CLOSED
     R6.3 Release                           ✅ CLOSED
          └─ Audit timing-test stabilization ✅ CLOSED
-    R6.4 File                              ⏳ NEXT
-    R6.5 Payment                           ⏳
-    R6.6 Billing                           ⏳
-    R6.7 Notification                      ⏳
-R7  Shared cleanup                         ⏳
+    R6.4 File                              ✅ CLOSED
+    R6.5 Payment                           ✅ CLOSED
+    R6.6 Billing                           ✅ CLOSED
+    R6.7 Notification                      ✅ CLOSED
+R7  Shared cleanup                         ✅ CLOSED (no material cleanup required)
 R8  Legacy/type cleanup                    ⏳
 R9  Refactor regression validation         ⏳
 R10 Documentation + error catalog          ⏳
@@ -106,7 +106,7 @@ Final Core Validation (Stage 22)           🔒 ABSOLUTE LAST
 
 ### Current checkpoint
 
-**R6.4 File localization adoption** is the next Core V1 implementation checkpoint.
+**R8 Legacy/type cleanup** is the next Core V1 checkpoint (not started).
 
 ### Compatibility and safety rules for V1 work
 
