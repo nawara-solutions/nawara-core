@@ -1,16 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
-import { DbService, RateLimitService, getRequestContext, type Queryable } from '@nawara/service-kit';
+import {
+  DbService, RateLimitService, attachLocalizedMessageList, getRequestContext, httpError, type LocalizedListItem, type MessageParams, type MessageTexts, type Queryable,
+} from '@nawara/service-kit';
 import { NOTIFICATION_CONFIG } from '../config/notification-config.token.js';
 import type { NotificationConfig } from '../config/notification-config.js';
 import { isValidDestination } from '../intake/destination.js';
 import { IntentCore, type PublishedVersion } from '../intake/intent-core.js';
-import { validateVariableValues } from '../templates/variables.js';
+import { NOTIFICATION_MESSAGES as M } from '../messages.js';
+import { variableValueProblems } from '../templates/variables.js';
 import { matchesRequestHash, requestHash } from './request-hash.js';
 import { IDEMPOTENCY_KEY, parseSendRequest } from './send-request.js';
 
-const fail = (status: number, code: string, message: string | string[]): never => {
-  throw new HttpException({ message, code }, status);
+/** A `message: string[]` refusal: the English problems exactly as before and, aligned with them, each one's catalog identity (an
+ * `undefined` identity keeps that element English, D10). */
+interface ProblemList {
+  problems: string[];
+  localized: readonly (LocalizedListItem | undefined)[];
+}
+const isList = (m: MessageTexts | ProblemList): m is ProblemList => 'problems' in m;
+/** ADR-0054: one public error shape, `{ message, code }`; the kit filter renders the negotiated language. */
+const fail = (status: number, code: string, message: MessageTexts | ProblemList, params?: MessageParams): never => {
+  if (isList(message)) throw attachLocalizedMessageList(new HttpException({ message: message.problems, code }, status), message.localized);
+  throw httpError(status, code, message, params);
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CORRELATION = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -57,45 +69,54 @@ export class NotificationApiService {
   ) {}
 
   async send(caller: string, idempotencyKey: string | undefined, body: unknown): Promise<AcceptedResponse> {
-    if (idempotencyKey === undefined || idempotencyKey === '') fail(400, 'idempotency_key_required', 'The Idempotency-Key header is required.');
-    if (!IDEMPOTENCY_KEY.test(idempotencyKey!)) fail(400, 'validation_error', ['Idempotency-Key: must be 8-128 characters of letters, digits and . _ : -']);
+    if (idempotencyKey === undefined || idempotencyKey === '') fail(400, 'idempotency_key_required', M.idempotencyKeyRequired);
+    if (!IDEMPOTENCY_KEY.test(idempotencyKey!)) fail(400, 'validation_error', { problems: ['Idempotency-Key: must be 8-128 characters of letters, digits and . _ : -'], localized: [{ prefix: '', message: { texts: M.idempotencyKeyFormat } }] });
     const parsed = parseSendRequest(body);
-    if ('problems' in parsed) return fail(400, 'validation_error', parsed.problems);
+    if ('problems' in parsed) return fail(400, 'validation_error', parsed);
     const req = parsed.value;
 
     const policy = this.config.callerPolicy.of(caller);
-    if (!policy || !policy.templates.has(req.template)) return this.refuse(caller, 403, 'template_not_allowed', 'This caller may not use this template.');
-    if (req.channels.some((c) => !policy.channels.has(c.channel))) return this.refuse(caller, 403, 'channel_not_allowed', 'This caller may not use this channel.');
-    if (req.organizationId !== null && policy.organizations !== 'request') return this.refuse(caller, 403, 'organization_not_allowed', 'This caller may not address an organization.');
+    if (!policy || !policy.templates.has(req.template)) return this.refuse(caller, 403, 'template_not_allowed', M.templateNotAllowed);
+    if (req.channels.some((c) => !policy.channels.has(c.channel))) return this.refuse(caller, 403, 'channel_not_allowed', M.channelNotAllowed);
+    if (req.organizationId !== null && policy.organizations !== 'request') return this.refuse(caller, 403, 'organization_not_allowed', M.organizationNotAllowed);
     await this.limits.assert('notif_api_caller', caller, { limit: this.config.apiIntakeLimitPerMinute, windowSec: 60 });
 
     const hash = requestHash(this.config.requestHashKey, body);
     const existing = await this.findApiIntent(this.db, caller, idempotencyKey!);
     if (existing) return this.replayOrConflict(caller, existing, body);
 
-    if (new Set(req.channels.map((c) => c.channel)).size !== req.channels.length) return this.refuse(caller, 422, 'duplicate_channel', 'A channel is listed twice: one delivery per channel.');
+    if (new Set(req.channels.map((c) => c.channel)).size !== req.channels.length) return this.refuse(caller, 422, 'duplicate_channel', M.duplicateChannel);
     const now = Date.now();
     const scheduled = req.scheduledAt ? Date.parse(req.scheduledAt) : null;
     const expires = req.expiresAt ? Date.parse(req.expiresAt) : null;
     if (scheduled !== null && (scheduled <= now || scheduled > now + this.config.maxScheduleAheadSec * 1000)) {
-      return this.refuse(caller, 422, 'schedule_out_of_range', `scheduledAt must be in the future and at most ${this.config.maxScheduleAheadSec} s ahead.`);
+      return this.refuse(caller, 422, 'schedule_out_of_range', M.scheduledAtRange, { max: this.config.maxScheduleAheadSec });
     }
     if (expires !== null && (expires <= now || (scheduled !== null && expires <= scheduled))) {
-      return this.refuse(caller, 422, 'schedule_out_of_range', 'expiresAt must be in the future and after scheduledAt.');
+      return this.refuse(caller, 422, 'schedule_out_of_range', M.expiresAtRange);
     }
 
     const versions: Array<{ channel: 'EMAIL' | 'SMS'; destination: string; version: PublishedVersion }> = [];
     for (const c of req.channels) {
       const version = await this.core.activeVersion(req.template, c.channel, req.locale);
-      if (!version) return this.refuse(caller, 404, 'unknown_template', 'No published version of this template exists for this channel.');
+      if (!version) return this.refuse(caller, 404, 'unknown_template', M.unknownTemplate);
       versions.push({ ...c, version });
     }
     for (const v of versions) {
-      const invalid = validateVariableValues(v.version.variables, req.data);
-      if (invalid.length > 0) return this.refuse(caller, 422, 'invalid_template_data', invalid.map((e) => e.split(':')[0]).map((n) => `${n}: is invalid`));
+      const invalid = variableValueProblems(v.version.variables, req.data);
+      if (invalid.length > 0) {
+        // The English stays exactly as before. Only a name the template itself defines is localized: a key of the caller's free-form
+        // `data` (an unknown variable) stays English (ADR-0054 D10), decided by where the name comes from, never by its text.
+        const names = invalid.map((e) => e.text.split(':')[0]);
+        return this.refuse(caller, 422, 'invalid_template_data', {
+          problems: names.map((n) => `${n}: is invalid`),
+          localized: invalid.map((e, i) => (e.source === 'template' ? { prefix: '', message: { texts: M.variableInvalid, params: { name: names[i]! } } } : undefined)),
+        });
+      }
     }
     const bad = versions.filter((v) => !isValidDestination(v.channel, v.destination)).map((v) => v.channel);
-    if (bad.length > 0) return this.refuse(caller, 422, 'invalid_destination', `The ${bad.join(' and ')} destination is not valid (SMS: E.164 such as +21620000000; EMAIL: an address).`);
+    if (bad.length === 1) return this.refuse(caller, 422, 'invalid_destination', M.invalidDestinationOne, { channel: bad[0]! });
+    if (bad.length > 1) return this.refuse(caller, 422, 'invalid_destination', M.invalidDestinationTwo, { first: bad[0]!, second: bad[1]! }); // at most two channels
 
     const notificationId = randomUUID();
     const { data, secrets } = this.core.split(versions[0].version.variables, req.data);
@@ -128,7 +149,7 @@ export class NotificationApiService {
   }
 
   async get(caller: string, id: string): Promise<NotificationView> {
-    return (await this.view(this.db, caller, id)) ?? fail(404, 'notification_not_found', 'Notification not found.');
+    return (await this.view(this.db, caller, id)) ?? fail(404, 'notification_not_found', M.notificationNotFound);
   }
 
   /**
@@ -137,7 +158,7 @@ export class NotificationApiService {
    * pending ones ARE cancelled). Repeating it, or cancelling a notification whose deliveries are all terminal, changes nothing and is `200`.
    */
   async cancel(caller: string, id: string): Promise<NotificationView> {
-    if (!UUID.test(id)) fail(404, 'notification_not_found', 'Notification not found.');
+    if (!UUID.test(id)) fail(404, 'notification_not_found', M.notificationNotFound);
     const outcome = await this.db.tx(async (q) => {
       const own = await q.query(`SELECT 1 FROM notification WHERE id = $1 AND "sourceService" = $2 FOR UPDATE`, [id, caller]);
       if (own.rowCount === 0) return undefined;
@@ -151,10 +172,10 @@ export class NotificationApiService {
       );
       return { cancelled: cancelled.rowCount ?? 0, sending: rows.filter((r) => r.status === 'SENDING').length, view: await this.view(q, caller, id) };
     });
-    if (!outcome) return fail(404, 'notification_not_found', 'Notification not found.');
+    if (!outcome) return fail(404, 'notification_not_found', M.notificationNotFound);
     this.log.log(`notification_cancelled caller=${caller} notificationId=${id} cancelledDeliveries=${outcome.cancelled} inProgress=${outcome.sending}`);
     if (outcome.sending > 0) {
-      fail(409, 'delivery_in_progress', `${outcome.cancelled} pending deliveries were cancelled; ${outcome.sending} already being sent cannot be recalled.`);
+      fail(409, 'delivery_in_progress', M.deliveryInProgress, { cancelled: outcome.cancelled, sending: outcome.sending });
     }
     return outcome.view!;
   }
@@ -170,7 +191,7 @@ export class NotificationApiService {
   /** The original `202` for the same request (rebuilt from the rows: always `accepted` / PENDING, as first answered), else a conflict. */
   private async replayOrConflict(caller: string, existing: { id: string; requestHash: string }, body: unknown): Promise<AcceptedResponse> {
     if (!matchesRequestHash(existing.requestHash, [this.config.requestHashKey, ...this.config.requestHashPreviousKeys], body)) {
-      return this.refuse(caller, 422, 'idempotency_key_reused', 'This Idempotency-Key was already used with a different request.');
+      return this.refuse(caller, 422, 'idempotency_key_reused', M.idempotencyKeyReused);
     }
     const { rows } = await this.db.query<{ id: string; channel: string }>(`SELECT id, channel FROM notification_delivery WHERE "notificationId" = $1 ORDER BY channel`, [existing.id]);
     this.log.log(`notification_api_replayed caller=${caller} notificationId=${existing.id}`);
@@ -207,8 +228,8 @@ export class NotificationApiService {
     };
   }
 
-  private refuse(caller: string, status: number, code: string, message: string | string[]): never {
+  private refuse(caller: string, status: number, code: string, message: MessageTexts | ProblemList, params?: MessageParams): never {
     this.log.warn(`notification_api_rejected caller=${caller} status=${status} code=${code}`);
-    return fail(status, code, message);
+    return fail(status, code, message, params);
   }
 }
