@@ -265,11 +265,11 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
   reference mechanism is **decided** (O9: a validated non-authoritative reference cache in Auth, [ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1; organization-service as the validator of service requests, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1); lifecycle semantics stay undecided and must not be improvised, and production readiness is gated by ADR-0040 decision 7.
 - **Every service asks Auth live.** Auth becomes a hot dependency for every request; a slow Auth slows everything.
   Mitigation later (caching with a short TTL) needs an explicit revocation decision.
-- **Automatic Auth deployment.** A merge to `main` touching Auth, `libs/service-kit`, the package files or the Auth image workflow
-  redeploys production Auth with no human step, and `main` has no protection. Accepted direction (not implemented): build on merge,
-  deploy an exact digest only on explicit owner authorization ([V2-A record](./core-v2-a-baseline-and-change-safety.md) §6).
-- **Shared-library coupling.** Every service ships the service-kit, so a kit change is a change to every service (and, today, a
-  production Auth deployment).
+- **Unprotected `main`.** `main` has no branch protection or ruleset (V2-A.3). Since V2-A.2 a merge no longer deploys Auth: it builds a
+  revision-labelled image, and production changes only by an explicit, owner-authorized deployment of an exact index digest
+  ([runbook](../runbooks/auth-service-deploy.md)).
+- **Shared-library coupling.** Every service ships the service-kit, so a kit change is a change to every service (and to the next Auth
+  image built on merge).
 
 *Resolved since this document was written:* Core CI now runs every TypeScript service's suites (`core-ci.yml`; ai-service is not
 covered), and events are delivered through the service-kit outbox and RabbitMQ (in production for the Auth → Audit relay).

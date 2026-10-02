@@ -235,3 +235,23 @@ certify the capability in a short record (evidence, negative controls, what was 
 
 **Not part of the protocol:** Final Core Validation (it is absolute last, §3); re-running certified R0–R11 campaigns, restore
 drills or production checkpoints. A 🟡 capability is certified locally; its production activation is a separate, gated checkpoint.
+
+## 9. Later status: V2-A.2 (Auth deployment transition)
+
+Appended; §1–§8 remain the V2-A record. V2-A.2 implements §6.2 for Auth with the owner decisions OD-1 to OD-7:
+
+- **Build ≠ deploy.** On a push to `main` on the Auth paths, `build-image` builds once, pushes `:sha-<commit>` labelled
+  `org.opencontainers.image.revision=<commit>`, records the **index digest** in the run summary and stops (no SSH, no deployment). It
+  is not in the `production-deploy-core-api` queue (OD-7).
+- **Tags (OD-1, OD-2).** `:production` and `:latest` are no longer published; existing tags are frozen, deprecated and not deleted;
+  nothing moves `:production` after a deployment. The index digest is the deployment authority (OD-6).
+- **Deployment.** `auth-service-deploy.yml` is `workflow_dispatch` only, requires `digest` and the typed confirmation
+  `deploy auth-service` (OD-5, an interim safeguard, not a reviewer gate), validates the digest before any network step, resolves it in
+  the auth-service repository, requires a revision label that is an ancestor of `main` (OD-3, OD-4), never builds, and deploys exactly
+  `IMAGE_NAME@digest` in the production queue with `cancel-in-progress: false`.
+- **Enforcement.** Repository checks refuse an SSH job on an automatic event, `:production`/`:latest` in a push-triggered workflow, a
+  workflow input interpolated into a shell script, and any digest-deployment drift (`scripts/lib/checks.mjs`); the deploy tests
+  execute the workflow's real validation and verification steps and the digest form of the deploy script.
+- **Procedure, transition preconditions (P1–P5, including the read-only VPS check for consumers of the mutable tags) and post-merge
+  expectations:** [auth-service deploy runbook](../runbooks/auth-service-deploy.md).
+- **Unchanged:** the `main` ruleset and the `production` environment (V2-A.3); Organization and audit-service deployments.

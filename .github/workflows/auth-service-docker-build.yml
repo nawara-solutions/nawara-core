@@ -45,18 +45,18 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:develop
 
-  build-production:
+  # BUILD ONLY (V2-A.2): a merge to main builds one revision-labelled image, records its index digest and STOPS. It never deploys,
+  # never touches the server and never moves :production or :latest (both are frozen and deprecated). Production changes only through
+  # an explicit, owner-authorized auth-service-deploy.yml run that deploys an exact digest built here. This job is deliberately NOT in
+  # the production-deploy-core-api queue: it changes nothing in production and must never supersede a pending production operation.
+  build-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # Production deployments and the :production image tag share ONE queue across every workflow. A running deployment is
-    # NEVER cancelled (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group:
-    # if a third request arrives, the older waiting one is superseded by it (its commit is included in the newer main).
-    concurrency:
-      group: production-deploy-core-api
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -65,49 +65,32 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: apps/auth-service/Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:production
-            ${{ env.IMAGE_NAME }}:latest
-
-  # Deploys :production to the same VPS nawara-drive uses, over SSH, routed through the
-  # existing Traefik proxy on the deploy_edge network. The container's PostgreSQL, env file
-  # (secrets generated on the server, never in GitHub) and migrations are handled by
-  # apps/auth-service/deploy/provision-and-deploy.sh, shipped inside the image.
-  # Reuses the same DEPLOY_SSH_* secrets nawara-drive's repo has (same VPS) — must be added to this repo separately, since
-  # GitHub secrets don't cross repos. Routed at core-api.nawara-solutions.com/auth — a single
-  # domain shared by every nawara-core service, path-routed per service via Traefik
-  # PathPrefix rules (notification-service, payment-service, ai-service can be added the
-  # same way later, each with their own PathPrefix).
-  deploy-production:
-    needs: build-production
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # Production deployments and the :production image tag share ONE queue across every workflow. A running deployment is
-    # NEVER cancelled (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group:
-    # if a third request arrives, the older waiting one is superseded by it (its commit is included in the newer main).
-    concurrency:
-      group: production-deploy-core-api
-      cancel-in-progress: false
-    runs-on: ubuntu-latest
-    steps:
-      - uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_SSH_HOST }}
-          username: ${{ secrets.DEPLOY_SSH_USER }}
-          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
-          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
-          envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE
-          script: |
-            set -euo pipefail
-            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
-            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-            docker pull "$IMAGE"
-            docker run --rm --entrypoint cat "$IMAGE" deploy/provision-and-deploy.sh | IMAGE="$IMAGE" bash -s
+          # Provenance stays on, so the push is an image INDEX and outputs.digest is the INDEX digest: the deployment authority.
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: record the artifact (not deployed)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          IMAGE: ${{ env.IMAGE_NAME }}:production
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "the build reported no index digest" >&2; exit 1; }
+          {
+            echo "### auth-service image built (NOT deployed)"
+            echo ""
+            echo "- revision: \`$GITHUB_SHA\`"
+            echo "- tag: \`$TAG\`"
+            echo "- index digest: \`$DIGEST\`"
+            echo ""
+            echo "Production is unchanged. Deploying this exact artifact needs an explicit, owner-authorized run of auth-service-deploy.yml:"
+            echo ""
+            echo "\`gh workflow run auth-service-deploy.yml --ref main -f digest=$DIGEST -f confirm='deploy auth-service'\`"
+          } >>"$GITHUB_STEP_SUMMARY"

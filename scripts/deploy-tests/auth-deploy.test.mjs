@@ -130,3 +130,42 @@ test('secret-safe: no generated secret (database, JWT, peppers, broker) in the o
     assert.ok(!argv.includes(s), 'a secret was passed on a command line');
   }
 });
+
+// V2-A.2: the manual deployment passes an exact INDEX digest reference (IMAGE_NAME@sha256:…), never a tag. The script must use exactly
+// that reference for the migrations and for the new container, and keep its ordering: migrations first, the running service untouched
+// until they succeed, the previous container retained.
+const DIGEST_IMAGE = `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:${'ab12'.repeat(16)}`;
+
+test('digest deployment: migrations and the new container use exactly IMAGE_NAME@digest; migrations run before the swap', () => {
+  const w = auditBound();
+  assert.equal(deploy(w).code, 0);
+  const before = w.state().calls.length;
+  const r = deploy(w, { IMAGE: DIGEST_IMAGE });
+  assert.equal(r.code, 0, r.out);
+  const calls = w.state().calls.slice(before);
+  const runs = calls.filter((a) => a[0] === 'run');
+  const images = runs.map((a) => a.find((x) => x.includes('nawara-core-auth-service@') || x.includes('nawara-core-auth-service:'))).filter(Boolean);
+  assert.deepEqual([...new Set(images)], [DIGEST_IMAGE], 'no tag and no other image is ever run');
+  const migrateAt = calls.findIndex((a) => a[0] === 'run' && a.includes('dist/cli/migrate.js'));
+  const stopAt = calls.findIndex((a) => a[0] === 'stop' && a.includes(APP));
+  assert.ok(migrateAt >= 0 && stopAt > migrateAt, 'migrations run before the running service is stopped');
+  assert.equal(runOf(w, APP).image, DIGEST_IMAGE);
+  assert.ok(Object.keys(w.state().containers).some((n) => n.startsWith(`${APP}-previous-`)), 'the previous container is retained');
+});
+
+test('digest deployment: a failed migration stops the deploy before the running service is touched', () => {
+  const w = auditBound();
+  assert.equal(deploy(w).code, 0);
+  const running = w.state().containers[APP].id;
+  w.patch((s) => { s.failRm = { ...(s.failRm ?? {}), [DIGEST_IMAGE]: true }; });
+  const before = w.state().calls.length;
+  const r = deploy(w, { IMAGE: DIGEST_IMAGE });
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /migrations failed or were refused; the running service was not touched/);
+  const after = w.state().calls.slice(before);
+  // (the database container may be started: it is ensured before the migrations; the application is never touched)
+  assert.deepEqual(after.filter((a) => (['stop', 'rename', 'start'].includes(a[0]) && a.includes(APP)) || (a[0] === 'run' && a.includes('-d'))), [],
+    'the application container is not stopped, renamed, replaced or started');
+  assert.equal(w.state().containers[APP].id, running);
+  assert.equal(w.state().containers[APP].running, true);
+});

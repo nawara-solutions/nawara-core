@@ -1,46 +1,80 @@
 name: auth-service manual deploy
 
-# Builds the selected ref and deploys it to the VPS (PostgreSQL + auth-service behind Traefik at
-# core-api.nawara-solutions.com/auth) via apps/auth-service/deploy/provision-and-deploy.sh.
-# Runs from `main` only (the job is guarded):  gh workflow run auth-service-deploy.yml --ref main
-# Secrets: the org-level DEPLOY_SSH_* (same as the main-push deploy). Application secrets are NOT
-# stored in GitHub — the script generates them on the server on first run (see the script header).
-
-# MANUAL redeploy of auth-service (workflow_dispatch only): builds the current commit of `main` and deploys it. It shares the
-# production concurrency queue with the automatic deployment in auth-service-docker-build.yml, so the two can never race.
+# Deploys ONE EXACT, ALREADY-BUILT auth-service image to the VPS (PostgreSQL + auth-service behind Traefik at
+# core-api.nawara-solutions.com/auth) via apps/auth-service/deploy/provision-and-deploy.sh, which runs from that same image.
+# It NEVER builds (V2-A.2): the image comes from a build-image run of auth-service-docker-build.yml, identified by its INDEX digest
+# (shown in that run's summary). Deploying is an explicit, owner-authorized production mutation:
+#   gh workflow run auth-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy auth-service'
+# The typed confirmation is an interim safeguard only; it is NOT a reviewer gate (no `production` environment exists yet, V2-A.3).
+# The artifact must exist in the auth-service repository, carry an org.opencontainers.image.revision label, and that revision must be
+# an ancestor of main (an earlier labelled main artifact may be redeployed; PR builds and unlabelled legacy images are refused).
+# Secrets: the org-level DEPLOY_SSH_*. Application secrets are NOT stored in GitHub — the script generates them on the server.
+# It shares the production concurrency queue with every Core production operation, so they can never race.
 on:
   workflow_dispatch:
+    inputs:
+      digest:
+        description: "auth-service image INDEX digest to deploy (sha256:<64 hex>, from a build-image run summary)"
+        required: true
+        type: string
+      confirm:
+        description: "Type exactly: deploy auth-service"
+        required: true
+        type: string
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-auth-service
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/main'
-    # Production deployments and the :production image tag share ONE queue across every workflow. A running deployment is
-    # NEVER cancelled (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group:
-    # if a third request arrives, the older waiting one is superseded by it (its commit is included in the newer main).
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy auth-service'
+    # Production deployments share ONE queue across every workflow. A running deployment is NEVER cancelled
+    # (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group.
     concurrency:
       group: production-deploy-core-api
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read
     steps:
+      # Full history only for the ancestry check below; nothing is built from this checkout.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Pure input validation, before any network access: the digest reaches the shell only through the environment.
+      - name: validate the digest
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: apps/auth-service/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+      # Read-only: the digest must exist in the auth-service repository and be a revision-labelled artifact built from main.
+      - name: verify the artifact
+        env:
+          REF: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$REF" >/dev/null || { echo "refused: $REF does not exist in the auth-service repository" >&2; exit 1; }
+          image=$(docker buildx imagetools inspect "$REF" --format '{{json .Image}}')
+          # A single-platform index yields the image config itself; a multi-platform one a map keyed by platform.
+          rev=$(jq -r 'if has("config") then (.config.Labels["org.opencontainers.image.revision"] // "")
+                       else (.["linux/amd64"].config.Labels["org.opencontainers.image.revision"] // "") end' <<<"$image")
+          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: no org.opencontainers.image.revision label (not a build-image artifact)" >&2; exit 1; }
+          git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }
+          {
+            echo "### auth-service deployment"
+            echo ""
+            echo "- index digest: \`${REF##*@}\`"
+            echo "- revision: \`$rev\`"
+            echo "- main at dispatch: \`$GITHUB_SHA\`"
+          } >>"$GITHUB_STEP_SUMMARY"
       - uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
@@ -57,4 +91,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          IMAGE: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          # EXACTLY the selected digest: never a tag, never a rebuild.
+          IMAGE: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}
