@@ -9,6 +9,7 @@
     [ADR-0042](../../adr/0042-service-token-scopes-and-administrative-authorization.md) **Amendment 3** (Q1); the ADR index rows for
     0042 and 0052.
 - **Full Core Validation: NOT RUN.**
+- **Later status (2026-10-02, V2-A):** see the note at the end of §20. The record above is unchanged.
 
 ## 0. Progress
 
@@ -768,3 +769,10 @@ No earlier mutation campaign is repeated.
        Focused regression/security     ⏳
 22     Final Core Validation           ⏳ (only after the cutover is complete and verified)
 ```
+
+**Later-status note (2026-10-02, V2-A).** Appended; the roadmap above is the record as of 2026-09-26. The 21.R1 / 21.R2 umbrella is
+**retired**: [the V2-A record](../core-v2-a-baseline-and-change-safety.md) §5 gives every known item's disposition (F3, F13 and S21-7
+closed; S21-3 superseded by the R5 error-filter adoption; S21-4, S21-5, the optional caller-policy migration and the remaining
+quality items moved into Core V2 areas; the items without evidence kept explicitly UNKNOWN). Stage 22 Final Core Validation no
+longer follows the cutover directly: by owner decision it is the absolute last full Core validation, after the planned Core/platform
+work (including Core V2) and the required production gates.
