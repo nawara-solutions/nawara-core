@@ -255,3 +255,19 @@ Appended; §1–§8 remain the V2-A record. V2-A.2 implements §6.2 for Auth wit
 - **Procedure, transition preconditions (P1–P5, including the read-only VPS check for consumers of the mutable tags) and post-merge
   expectations:** [auth-service deploy runbook](../runbooks/auth-service-deploy.md).
 - **Unchanged:** the `main` ruleset and the `production` environment (V2-A.3); Organization and audit-service deployments.
+
+## 10. Later status: V2-A.1 closed, V2-A.2 certified (2026-10-03)
+
+Appended. V2-A.1 is closed and V2-A.2 is certified: [V2-A.2 certification record](core-v2-a-2-certification.md). V2-A.3 (§6.2: the
+`main` ruleset and the `production` environment) is next and not started.
+
+- **§1 and §7, production Auth digest.** The digest left unresolved in §1 is now observed (owner, read-only, 2026-10-02): production
+  Auth runs `sha256:26164d42b5d225b756a450e976e0e23c1142f49be6eb68ff9fad177cb1e05eaf`, the image of the last automatic deployment
+  (`97f78cb`). It is a legacy image without a revision label. The G6 refresh still re-establishes every production fact at the time
+  it runs.
+- **§6.2, the V2-A.2 requirements.** The transition was one workflow-only merge (PR #187). The merge happened before the queue check,
+  the competing-merge check, the VPS consumer check and the PR CI result were verified; all were established afterwards, and production
+  was not changed. The certification record keeps that history.
+- **§5, A15.** One more timer-dependent test is a hardening candidate: the overlap precondition of notification-service's
+  "two deliveries of one intent finishing at the same moment" test (certification record §7).
+- **Unchanged:** G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.

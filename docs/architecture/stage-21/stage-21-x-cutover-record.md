@@ -3,8 +3,8 @@
 - **Status:** RECORD — evidence of steps already executed, and the current gate status as of 2026-09-30. This record authorizes
   nothing: every further production step is a separate, reviewed and authorized checkpoint.
 - **Scope:** ADR-0040 fresh path (A2.5, F1–F7) and gates G1–G7, plus the Stage 21.x T1 relay gate.
-- **Later status:** a dated later-status note is appended as [§10](#10-later-status-note-2026-10-02-v2-a). Sections 1–9 are
-  unchanged and remain the record as of 2026-09-30.
+- **Later status:** dated later-status notes are appended as [§10](#10-later-status-note-2026-10-02-v2-a) and
+  [§11](#11-later-status-note-2026-10-03-v2-a2). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
 - **Related:** [ADR-0040](../../adr/0040-organization-ownership-migration-decisions.md),
   [G1 topology](stage-21-x-g1-organization-topology.md), [G6 rehearsal plan](stage-21-x-g6-rehearsal-plan.md),
   [organization-production runbook](../../runbooks/organization-production.md),
@@ -276,3 +276,17 @@ This note is appended after the record was written. It does not change any fact 
   automation) for the system as it is then. §7's order is unchanged; G7, F6 and F7 remain locked.
 - **Stage 22.** Final Core Validation remains the absolute last full Core validation. By owner decision (V2-A) it runs after the planned
   Core/platform work, including Core V2, and after the required production gates; not immediately after F7.
+
+## 11. Later-status note (2026-10-03, V2-A.2)
+
+Appended; §1–§10 are unchanged. Source: the [V2-A.2 certification record](../core-v2-a-2-certification.md).
+
+- **Auth deployment.** Since PR #187 (`7295e8e`, 2026-10-02T23:35:56Z) a merge to `main` only builds an Auth image; production Auth
+  changes only by an explicit, owner-authorized deployment of an exact index digest. The automatic path described in §10 no longer
+  exists. Organization and audit-service deployments are unchanged, so the §8 decision stays open for them; adopting digest deployment
+  as the §8 answer remains an owner decision.
+- **Running Auth image (observed, not a certified parity target).** On 2026-10-02 the owner observed, read-only, production Auth running
+  `sha256:26164d42b5d225b756a450e976e0e23c1142f49be6eb68ff9fad177cb1e05eaf` (container started 2026-10-02T07:38:13Z, healthy,
+  configured as `:production`): the image of the last automatic deployment (`97f78cb`), not the §2 and §5 digest. The G6 refresh
+  re-establishes the parity targets when it runs.
+- **G6, G7, F6, F7, Stage 22.** Unchanged: G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.

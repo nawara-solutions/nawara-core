@@ -59,6 +59,10 @@ artifact validation. The workflow deliberately does not reference `environment:`
 
 ## 4. The transition merge (one time)
 
+> **Later status (2026-10-03).** The transition merged as PR #187 (`7295e8e`) and is certified. The merge preceded the verification
+> of P1, P2, P4 and P5, which were established afterwards; production Auth was not changed. The history is in the
+> [V2-A.2 certification record](../architecture/core-v2-a-2-certification.md). The text below is kept as written.
+
 ### 4.1 Mandatory pre-merge checks (all required; the owner merges manually)
 
 | # | Check | How |
