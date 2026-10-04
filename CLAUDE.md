@@ -29,7 +29,8 @@ validation protocol: [`docs/architecture/core-v2-a-baseline-and-change-safety.md
 
 Since V2-A.2, a merge to `main` touching `apps/auth-service/**`, `libs/service-kit/**`, `package.json`, `package-lock.json` or
 `.github/workflows/auth-service-docker-build.yml` **builds** a revision-labelled Auth image (`sha-<commit>`, index digest in the run
-summary) and **never deploys**. Production Auth changes only through an explicit, owner-authorized `auth-service-deploy.yml` run that
+summary) and **never deploys**; since V2 A0 organization-service and audit-service follow the same model (`<service>-image.yml` builds,
+`<service>-deploy.yml` deploys an exact digest; `docs/runbooks/digest-deployments.md`). Production Auth changes only through an explicit, owner-authorized `auth-service-deploy.yml` run that
 deploys an exact index digest (`docs/runbooks/auth-service-deploy.md`); `:production` and `:latest` are frozen and deprecated. Never
 dispatch a deployment without that authorization. `main` is protected by a repository ruleset (V2-A.3 / A3.3): every change needs a
 pull request with a green `core-ci-passed` check on an up-to-date branch; direct pushes, force pushes and deletion are blocked. Never

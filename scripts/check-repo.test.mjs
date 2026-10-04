@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
@@ -369,6 +369,116 @@ test('core-ci-passed: the REAL deciding step passes only when every needed job s
   }
   assert.notEqual(decide({}).status, 0, 'an empty needs context was accepted');
   assert.notEqual(spawnSync('bash', ['-c', step.run], { env: { PATH: process.env.PATH, NEEDS: 'not json' }, encoding: 'utf8' }).status, 0);
+});
+
+// --------------------------------------------------------------------------------- V2 A0: immutable builds, digest deployments
+const IMAGE_BUILD_FILES = {
+  'auth-service-docker-build.yml': { repository: 'nawara-core-auth-service', app: 'auth-service' },
+  'organization-service-image.yml': { repository: 'nawara-core-organization-service', app: 'organization-service' },
+  'audit-service-image.yml': { repository: 'nawara-core-audit-service', app: 'audit-service' },
+};
+const DEPLOY_FILES = {
+  'auth-service-deploy.yml': ['nawara-core-auth-service', 'deploy auth-service'],
+  'organization-service-deploy.yml': ['nawara-core-organization-service', 'deploy organization-service'],
+  'audit-service-deploy.yml': ['nawara-core-audit-service', 'deploy audit-service'],
+};
+const ORG_IMAGE = workflow('organization-service-image.yml');
+const ORG_IMAGE_CFG = IMAGE_BUILD_FILES['organization-service-image.yml'];
+
+test('A0: the three real image builds satisfy the immutable-build contract (Auth develop job included)', () => {
+  for (const [name, cfg] of Object.entries(IMAGE_BUILD_FILES)) {
+    assert.deepEqual(checkImageBuild(name, workflow(name), cfg), [], name);
+    assert.deepEqual(checkWorkflowSafety(name, workflow(name)), [], name);
+  }
+});
+
+test('A0: every image input is a trigger path, including libs/audit-contract, .dockerignore and the workflow itself', () => {
+  for (const [name, cfg] of Object.entries(IMAGE_BUILD_FILES)) {
+    for (const input of ["      - 'libs/audit-contract/**'\n", "      - '.dockerignore'\n", `      - '.github/workflows/${name}'\n`, `      - 'apps/${cfg.app}/**'\n`]) {
+      const text = workflow(name);
+      const idx = text.indexOf(input, text.indexOf('  push:'));
+      assert.ok(idx > 0, `${name}: ${input.trim()} not in push paths`);
+      const without = text.slice(0, idx) + text.slice(idx + input.length);
+      assert.match(checkImageBuild(name, without, cfg).join(), /push paths must include every image input/, `${name} ${input.trim()}`);
+    }
+  }
+});
+
+test('A0: the image build publishes only the immutable sha tag, with both labels and a validated digest', () => {
+  const C = ORG_IMAGE_CFG;
+  for (const tag of ['latest', 'production', 'main']) {
+    const bad = swap(ORG_IMAGE, 'tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}', `tags: \${{ env.IMAGE_NAME }}:${tag}`);
+    assert.match(checkImageBuild('o.yml', bad, C).join(), /the only tag must be/, tag);
+  }
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '            org.opencontainers.image.revision=${{ github.sha }}\n', ''), C).join(), /revision=\$\{\{ github\.sha \}\} is required/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, 'org.opencontainers.image.revision=${{ github.sha }}', 'org.opencontainers.image.revision=main'), C).join(), /revision=\$\{\{ github\.sha \}\} is required/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '            org.opencontainers.image.source=', '            org.example.source='), C).join(), /image\.source is required/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '      - id: build\n', '      - id: image\n'), C).join(), /must have id: build/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '[[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]', '[[ -n "$DIGEST" ]]'), C).join(), /must be captured and validated/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '/nawara-core-organization-service\n', '/nawara-core-auth-service\n'), C).join(), /IMAGE_NAME must be/);
+});
+
+test('A0: an image build never deploys (no environment, credentials, SSH or production queue) and runs only on push to main', () => {
+  const C = ORG_IMAGE_CFG;
+  const withEnv = swap(ORG_IMAGE, '  build-image:\n', '  build-image:\n    environment: production\n');
+  assert.match(checkImageBuild('o.yml', withEnv, C).join(), /must not declare an environment/);
+  const creds = swap(ORG_IMAGE, '          TAG: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n', '          TAG: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n          H: ${{ secrets.DEPLOY_SSH_HOST }}\n');
+  assert.match(checkImageBuild('o.yml', creds, C).join(), /must not use production SSH or the DEPLOY_SSH_\* credentials/);
+  const ssh = ORG_IMAGE + "      - uses: appleboy/ssh-action@v1\n        with:\n          script: |\n            set -euo pipefail\n            true\n";
+  assert.match(checkImageBuild('o.yml', ssh, C).join(), /must not use production SSH/);
+  const queued = swap(ORG_IMAGE, '  build-image:\n', `  build-image:\n    concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false\n`);
+  assert.match(checkImageBuild('o.yml', queued, C).join(), /must not join the production queue/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '    branches: [main]\n', '    branches: [main, develop]\n'), C).join(), /push to main only/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, 'on:\n  push:\n', 'on:\n  workflow_dispatch:\n  push:\n'), C).join(), /not on workflow_dispatch/);
+});
+
+test('A0: a non-build-image job stays pull_request-only and never publishes sha-, :production or :latest (Auth build-develop)', () => {
+  const AUTH_BUILD = workflow('auth-service-docker-build.yml');
+  const C = IMAGE_BUILD_FILES['auth-service-docker-build.yml'];
+  assert.match(checkImageBuild('a.yml', swap(AUTH_BUILD, '          tags: ${{ env.IMAGE_NAME }}:develop', '          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}'), C).join(), /only build-image publishes the immutable sha- tag/);
+  assert.match(checkImageBuild('a.yml', swap(AUTH_BUILD, "  build-develop:\n    if: github.event_name == 'pull_request'\n", "  build-develop:\n    if: github.event_name == 'push'\n"), C).join(), /must be pull_request-only/);
+});
+
+test('A0: Organization and Audit deploy exactly a verified digest (same contract as Auth)', () => {
+  for (const [name, [repository, phrase]] of Object.entries(DEPLOY_FILES)) {
+    const text = workflow(name);
+    assert.deepEqual(checkDigestDeploy(name, text, repository), [], name);
+    assert.deepEqual(checkTypedConfirmation(name, text, phrase), [], name);
+    assert.deepEqual(checkWorkflowSafety(name, text), [], name);
+  }
+  const ORG = workflow('organization-service-deploy.yml');
+  const rebuild = swap(ORG, '      - uses: appleboy/ssh-action@v1', '      - uses: docker/build-push-action@v7\n        with:\n          push: true\n          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n      - uses: appleboy/ssh-action@v1');
+  assert.match(checkDigestDeploy('o.yml', rebuild, 'nawara-core-organization-service').join(), /must never build an image/);
+  assert.match(checkDigestDeploy('o.yml', ORG, 'nawara-core-audit-service').join(), /IMAGE_NAME must be fixed to the nawara-core-audit-service repository/);
+  // verify's confirmation is enforced by the digest-deploy contract; deploy's (the production job) by the typed-confirmation contract
+  const noConfirmVerify = swap(ORG, " && inputs.confirm == 'deploy organization-service'", '');
+  assert.match(checkDigestDeploy('o.yml', noConfirmVerify, 'nawara-core-organization-service').join(), /job "verify": must require the typed confirmation/);
+  const deployIf = "  deploy:\n    needs: verify\n    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy organization-service'\n";
+  const noConfirmDeploy = swap(ORG, deployIf, "  deploy:\n    needs: verify\n    if: github.ref == 'refs/heads/main'\n");
+  assert.match(checkTypedConfirmation('o.yml', noConfirmDeploy, 'deploy organization-service').join(), /job "deploy": must require the typed confirmation/);
+  assert.match(checkTypedConfirmation('o.yml', ORG, 'deploy audit-service').join(), /must require the typed confirmation \(inputs\.confirm == 'deploy audit-service'\)/);
+});
+
+test('A0.3 (D9): every digest deployment refuses a revision that is not a literal commit SHA before the ancestry check', () => {
+  const LABEL_CHECK = '          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: no org.opencontainers.image.revision label (not a build-image artifact)" >&2; exit 1; }\n';
+  for (const [name, [repository]] of Object.entries(DEPLOY_FILES)) {
+    const text = workflow(name);
+    assert.deepEqual(checkDigestDeploy(name, text, repository), [], name);
+    // D9: the label is still extracted (the label name stays in the step) and the ancestry check stays, but the format check is gone
+    const removed = swap(text, LABEL_CHECK, '');
+    assert.ok(removed.includes('org.opencontainers.image.revision') && removed.includes('merge-base --is-ancestor'), name);
+    assert.match(checkDigestDeploy(name, removed, repository).join(), /must be refused unless it matches \^\[0-9a-f\]\{40\}\$/, `${name}: D9`);
+    // weakened variants: a looser pattern, no refusal, or the check placed after the ancestry check
+    for (const weaker of [
+      LABEL_CHECK.replace('{40}', '+'),
+      LABEL_CHECK.replace(' >&2; exit 1; }', ' >&2; }'),
+    ]) {
+      assert.match(checkDigestDeploy(name, swap(text, LABEL_CHECK, weaker), repository).join(), /must be refused unless it matches/, `${name}: weaker`);
+    }
+    const ANC = '          git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }\n';
+    const after = swap(swap(text, LABEL_CHECK, ''), ANC, ANC + LABEL_CHECK);
+    assert.match(checkDigestDeploy(name, after, repository).join(), /before the ancestry check/, `${name}: order`);
+  }
 });
 
 test('CI coverage: every claimed check must be an actual step', () => {

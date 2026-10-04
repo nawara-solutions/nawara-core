@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-04, `main` at `946a578` (V2-A.3: A3.2 and A3.3 done).
+- **Last verified:** 2026-10-04, `main` at `0db30c7` (V2-A.3: A3.1–A3.5 done; V2 A0 in progress).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -50,6 +50,7 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 | Implemented, not in production | billing-service, payment-service, notification-service, file-service, release-service |
 | Starter only | ai-service |
 | Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
+| Organization and Audit deployment | **by exact index digest** (V2 A0): a merge only builds a revision-labelled image; a deployment verifies and deploys a selected digest after approval, never rebuilding. Production still runs their legacy images, which the new workflows refuse ([runbook](runbooks/digest-deployments.md)) |
 | Auth deployment | **build ≠ deploy** (V2-A.2): a merge touching Auth, `libs/service-kit`, the package files or the Auth image workflow only builds a revision-labelled image; production changes only by an explicit, owner-authorized deployment of an exact index digest ([runbook](runbooks/auth-service-deploy.md)). Before V2-A.2, seven automatic deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6); it was observed on 2026-10-02 running the legacy image `sha256:26164d42…5eaf`, unchanged by the V2-A.2 merge ([certification record](architecture/core-v2-a-2-certification.md) §6) |
 | `main` protection | **repository ruleset `main` active** (V2-A.3 / A3.3): pull request required (0 approvals, sole maintainer), required check `core-ci-passed` on an up-to-date branch, conversation resolution, no force push, no deletion; administrator bypass on pull requests only ([record](architecture/core-v2-a-3-ci-and-ruleset.md)) |
 | Production credentials and approval | the protected `production` environment (A3.4: owner as required reviewer, administrator bypass off, `main` only) holds the four `DEPLOY_SSH_*` credentials; **every production SSH job waits for its approval** and is dispatch-only (A3.5). Backups are manual only (no schedule). **Until A3.7** the organization-level `DEPLOY_SSH_*` secrets still exist and are readable by a workflow that does not declare the environment ([record](architecture/core-v2-a-3-ci-and-ruleset.md)) |
@@ -160,9 +161,11 @@ Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
 V2.0 discovery and the V2-A design are accepted. V2-A.1 formalized them, and V2-A.2 made the Auth deployment explicit (build on
 merge, deploy an exact index digest only on owner authorization; [runbook](runbooks/auth-service-deploy.md)). Both are certified in
 the [V2-A.2 certification record](architecture/core-v2-a-2-certification.md), which also records what stays open: no digest
-deployment has been performed yet, and production still runs a legacy image. V2-A.3 has added the stable `core-ci-passed` check and
-the `main` ruleset ([record](architecture/core-v2-a-3-ci-and-ruleset.md)); there is still no deployment reviewer gate, and the production credentials are not yet scoped
-to an environment. Every change to `main` now goes through a pull request with a green `core-ci-passed`.
+deployment has been performed yet, and production still runs a legacy image. V2-A.3 has added the stable `core-ci-passed` check, the `main` ruleset,
+the protected `production` environment and its approval on every production SSH job ([record](architecture/core-v2-a-3-ci-and-ruleset.md));
+the organization-level credentials still coexist until A3.7. Every change to `main` goes through a pull request with a green
+`core-ci-passed`. **V2 A0** extends exact-digest deployment to organization-service and audit-service ([record](architecture/core-v2-a0-immutable-deployments.md)); no
+digest deployment of them has been performed.
 
 ### Compatibility and safety rules for V1 work
 
@@ -221,7 +224,7 @@ Core V2 is the next platform architecture. It may redesign contracts deliberatel
 The G6 labels are defined under [G6](#g6-production-like-rehearsal); the reasons are in the
 [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §4. A0 includes **V2-A.2** (the Auth deployment transition:
 a merge builds an immutable image, and production is deployed only by an explicit, owner-authorized deployment of an exact digest)
-and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is in progress: the ruleset is active, the environment is not started ([record](architecture/core-v2-a-3-ci-and-ruleset.md)). The items left open by the retired 21.R1/21.R2 umbrella are placed in
+and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is in progress: A3.1 to A3.5 are done (ruleset, environment, gating), A3.6 and A3.7 are deferred ([record](architecture/core-v2-a-3-ci-and-ruleset.md)). **A0 (Organization and Audit immutable-digest deployment)** follows the Auth model ([record](architecture/core-v2-a0-immutable-deployments.md)). The items left open by the retired 21.R1/21.R2 umbrella are placed in
 A1, A3, A6, A12, A13, A14, A15 and A16 by the [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §5.
 
 **Ordering.** Stages are numbered by theme, not by order. Work is sequenced by dependency: A0 first; foundations (A1, A2, A3, A15)
@@ -399,3 +402,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | Core V2 baseline, G6 labels, V2 scope, 21.R1/21.R2 disposition, deployment and `main` risks, V2 validation protocol | [`core-v2-a-baseline-and-change-safety.md`](architecture/core-v2-a-baseline-and-change-safety.md) |
 | V2-A.1 closure and V2-A.2 certification (Auth build ≠ deploy; gate history; production evidence) | [`core-v2-a-2-certification.md`](architecture/core-v2-a-2-certification.md) |
 | V2-A.3 A3.1 to A3.3: owner decisions, the `core-ci-passed` check, the `main` ruleset | [`core-v2-a-3-ci-and-ruleset.md`](architecture/core-v2-a-3-ci-and-ruleset.md) |
+| V2 A0: Organization and Audit immutable-digest deployment; generic build and deploy guards | [`core-v2-a0-immutable-deployments.md`](architecture/core-v2-a0-immutable-deployments.md) |

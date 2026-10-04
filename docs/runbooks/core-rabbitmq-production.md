@@ -19,13 +19,17 @@ Operational procedure for the Core V1 production broker and the services that de
 | Step | What | How | Done when |
 |---|---|---|---|
 | 1 | Provision the broker and the `audit-service` + `auth-service` identities | `gh workflow run core-rabbitmq-provision.yml --ref main -f services="audit-service auth-service"` | log ends `OK  nawara-core-rabbitmq is ready`; §2 checks pass |
-| 2 | Deploy audit-service (database, migrations, private container) | `gh workflow run audit-service-deploy.yml --ref main` | log ends `OK ... audit-service.audit is declared, bound to audit.# and consumed`; §3 checks pass |
+| 2 | Deploy audit-service (database, migrations, private container) | `gh workflow run audit-service-deploy.yml --ref main` (as executed; today: by digest, see below) | log ends `OK ... audit-service.audit is declared, bound to audit.# and consumed`; §3 checks pass |
 | 3 | Deploy auth-service (joins the private network; takes its identity from the broker) | `gh workflow run auth-service-deploy.yml --ref main` | log ends `OK  nawara-core-auth-service is running/healthy`; §4 checks pass |
 | 4 | Certify `core-api.nawara-solutions.com` (and the temporary alias) | the domain certification | both hosts reach `/auth/health` |
 
 **Since V2-A.3 / A3.5:** each of these workflows waits for the `production` environment approval before its production job starts
-(see the [Auth deploy runbook](auth-service-deploy.md) §2, **Approval**). The table above is the first-introduction order as executed;
-today Auth is deployed by exact index digest (`-f digest=… -f confirm='deploy auth-service'`, [runbook](auth-service-deploy.md)).
+(see the [Auth deploy runbook](auth-service-deploy.md) §2, **Approval**). The table above is the first-introduction order as executed.
+**Today (V2 A0)** audit-service and auth-service are deployed by exact index digest, never rebuilt at dispatch:
+`gh workflow run audit-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy audit-service'` (and
+`-f confirm='deploy auth-service'` for Auth), per the [digest deployment runbook](digest-deployments.md). The broker-topology
+precondition, the order (audit-service before auth-service) and audit-service's `/ready` health gate (database, migrations, broker,
+ingestion consumer) are unchanged.
 
 The order is enforced, not only documented: audit-service's deploy fails unless its queue, dead-letter topology, consumer and binding
 exist on the broker, and Auth's deploy refuses (before migrating or stopping anything) unless the binding exists. Why: the relay publishes

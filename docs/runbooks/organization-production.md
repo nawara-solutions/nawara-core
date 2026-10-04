@@ -24,15 +24,17 @@ beyond what the deploy asserts; rotate a caller token by deleting its file; rest
 
 ## 2. Deploy (G1; the deployment part of F1)
 
+**By exact digest (V2 A0).** A merge to `main` that changes an input of the image only builds it (`organization-service-image.yml`:
+`sha-<commit>`, revision label, index digest in the run summary). Deploying selects one such digest:
+
 ```bash
-gh workflow run organization-service-deploy.yml --ref main
+gh workflow run organization-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy organization-service'
 ```
 
-**Approval (V2-A.3 / A3.5).** The production job of this workflow (`deploy`; it builds `main` after the approval) is bound to the protected GitHub environment `production`. After the
-dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
-does the job start and receive the production SSH credentials (environment secrets). The reviewer is the owner; GitHub does not
-prevent self-approval here, so this is a deliberate second owner action, not independent review. **Reject** (or cancel) a run you no
-longer want instead of leaving it waiting: whether a waiting run holds the `production-deploy-core-api` queue has not been observed yet.
+`verify` checks the digest, the organization-service repository, the revision label and its ancestry of `main` (unlabelled legacy
+images, including the one production runs, are refused); `deploy` then **waits for the `production` approval**, and nothing is built.
+Procedure, approval, migrations and rollback: [digest deployment runbook](digest-deployments.md). The migrations run from that exact
+image before the running service is touched, are forward-only, and are not undone by a container rollback.
 
 Done when the log ends `OK  nawara-core-organization-service is running/healthy on nawara-core-internal; ownership phase PREPARED,
 environment class undeclared (deploying never changes it)`. The deploy creates the database, the roles **before** migrating, applies the

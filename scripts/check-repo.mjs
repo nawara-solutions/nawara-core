@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -19,17 +19,33 @@ function* walk(dir) {
 
 const wfDir = join(root, '.github/workflows');
 // V2-A.2: production deployments that take an exact, already-built image digest (the image repository each may deploy).
-const DIGEST_DEPLOYMENTS = { 'auth-service-deploy.yml': 'nawara-core-auth-service' };
+const DIGEST_DEPLOYMENTS = {
+  'auth-service-deploy.yml': 'nawara-core-auth-service',
+  'organization-service-deploy.yml': 'nawara-core-organization-service',
+  'audit-service-deploy.yml': 'nawara-core-audit-service',
+};
+// V2 A0: immutable image builds (workflow → the image repository and the service it builds).
+const IMAGE_BUILDS = {
+  'auth-service-docker-build.yml': { repository: 'nawara-core-auth-service', app: 'auth-service' },
+  'organization-service-image.yml': { repository: 'nawara-core-organization-service', app: 'organization-service' },
+  'audit-service-image.yml': { repository: 'nawara-core-audit-service', app: 'audit-service' },
+};
 // V2-A.3 (A3.5): production operations that must keep their typed confirmation (workflow → the exact phrase).
-const CONFIRMED_OPERATIONS = { 'auth-service-deploy.yml': 'deploy auth-service', 'auth-db-credential-rotate.yml': 'rotate auth_app' };
+const CONFIRMED_OPERATIONS = {
+  'auth-service-deploy.yml': 'deploy auth-service',
+  'organization-service-deploy.yml': 'deploy organization-service',
+  'audit-service-deploy.yml': 'deploy audit-service',
+  'auth-db-credential-rotate.yml': 'rotate auth_app',
+};
 for (const f of readdirSync(wfDir).filter((n) => n.endsWith('.yml'))) {
   const text = readFileSync(join(wfDir, f), 'utf8');
   problems.push(...checkWorkflowSafety(f, text));
   if (f === 'core-ci.yml') problems.push(...checkCiCoverage(f, text), ...checkCiAggregate(f, text));
   if (DIGEST_DEPLOYMENTS[f]) problems.push(...checkDigestDeploy(f, text, DIGEST_DEPLOYMENTS[f]));
   if (CONFIRMED_OPERATIONS[f]) problems.push(...checkTypedConfirmation(f, text, CONFIRMED_OPERATIONS[f]));
+  if (IMAGE_BUILDS[f]) problems.push(...checkImageBuild(f, text, IMAGE_BUILDS[f]));
 }
-for (const f of [...Object.keys(DIGEST_DEPLOYMENTS), ...Object.keys(CONFIRMED_OPERATIONS)]) {
+for (const f of new Set([...Object.keys(DIGEST_DEPLOYMENTS), ...Object.keys(CONFIRMED_OPERATIONS), ...Object.keys(IMAGE_BUILDS)])) {
   try {
     readFileSync(join(wfDir, f));
   } catch {

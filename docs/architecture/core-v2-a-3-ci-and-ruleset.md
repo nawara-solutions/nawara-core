@@ -3,7 +3,7 @@
 - **Status:** RECORD of V2-A.3 steps A3.1 (design and owner decisions), A3.2 (the `core-ci-passed` check) and A3.3 (the `main`
   ruleset), written 2026-10-04. **V2-A.3 is not complete and is not certified by this record:** A3.4 and A3.5 are not started, A3.6
   and A3.7 are deferred, and the first pull-request-level observation of the ruleset is recorded separately (§5). It authorizes
-  nothing further.
+  nothing further. **Later status:** A3.4 and A3.5 were completed afterwards; see the appended [§7](#7-later-status-a34-and-a35-2026-10-04).
 - **Scope:** GitHub control-plane protection of `main`. No application, deployment or production change.
 - **Related:** [roadmap](../CORE-ROADMAP.md), [V2-A record](core-v2-a-baseline-and-change-safety.md) §6,
   [V2-A.2 certification](core-v2-a-2-certification.md), [production readiness](production-readiness.md) (finding F2).

@@ -1,44 +1,108 @@
 name: organization-service manual deploy
 
-# Stage 21.x G1 (ADR-0040 G1): builds the selected ref and deploys organization-service to the VPS (PostgreSQL + the service on the
-# private Core network, no Traefik route, no published port) via apps/organization-service/deploy/provision-and-deploy.sh.
-# MANUAL (workflow_dispatch) and `main` only:  gh workflow run organization-service-deploy.yml --ref main
-# DEPLOYING IS NOT ACTIVATING: it never runs an ownership command, never registers a caller token (deploy/register-caller.sh, an
-# F1/F4 operator step) and never touches Auth. Requires the broker with the organization-service identity (core-rabbitmq-provision.yml)
-# and audit-service deployed. Secrets: the org-level DEPLOY_SSH_*; application secrets are generated on the server, never in GitHub.
+# organization-service: PostgreSQL + the service on the private Core network, no Traefik route, no published port, via
+# apps/organization-service/deploy/provision-and-deploy.sh (Stage 21.x G1, ADR-0040 G1). DEPLOYING IS NOT ACTIVATING: it never runs an
+# ownership command, never registers a caller token (deploy/register-caller.sh, an F1/F4 operator step) and never touches Auth.
+# Requires the broker with the organization-service identity (core-rabbitmq-provision.yml) and audit-service deployed.
+# Deploys ONE EXACT, ALREADY-BUILT organization-service image (V2 A0): the image comes from a build-image run of organization-service-image.yml, identified by its
+# INDEX digest (shown in that run's summary). It NEVER builds. Deploying is an explicit, owner-authorized production mutation:
+#   gh workflow run organization-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy organization-service'
+# Two jobs, as for auth-service (docs/runbooks/digest-deployments.md):
+#   verify  no environment, no production credentials: validates the digest, and the artifact must exist in the organization-service
+#           repository, carry an org.opencontainers.image.revision label, and that revision must be an ancestor of main (an earlier
+#           labelled main artifact may be redeployed; unlabelled legacy images, including those built before A0, are refused).
+#   deploy  needs verify; bound to the protected `production` environment, so it WAITS for a required reviewer's approval and only
+#           then receives the production SSH credentials (environment secrets). It deploys exactly IMAGE_NAME@digest; the deploy
+#           script and the migrations then run FROM that image. The deploy job shares the production concurrency queue.
 on:
   workflow_dispatch:
+    inputs:
+      digest:
+        description: "organization-service image INDEX digest to deploy (sha256:<64 hex>, from a build-image run summary)"
+        required: true
+        type: string
+      confirm:
+        description: "Type exactly: deploy organization-service"
+        required: true
+        type: string
 
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-organization-service
 
 jobs:
-  deploy:
-    if: github.ref == 'refs/heads/main'
-    # V2-A.3 / A3.5: the protected environment. A required reviewer approves before this job starts; DEPLOY_SSH_* are its secrets.
-    environment: production
-    # The same production queue as every Core deployment: a running deployment is never cancelled; a newer request waits its turn.
-    concurrency:
-      group: production-deploy-core-api
-      cancel-in-progress: false
+  # Before any approval and without any production credential: a malformed or unverifiable digest is refused here, so nobody is ever
+  # asked to approve it, and waiting for verification never holds the production queue.
+  verify:
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy organization-service'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read
+    outputs:
+      revision: ${{ steps.artifact.outputs.revision }}
     steps:
+      # Full history only for the ancestry check below; nothing is built from this checkout.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Pure input validation, before any network access: the digest reaches the shell only through the environment.
+      - name: validate the digest
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: apps/organization-service/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+      # Read-only: the digest must exist in the organization-service repository and be a revision-labelled artifact built from main.
+      - id: artifact
+        name: verify the artifact
+        env:
+          REF: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$REF" >/dev/null || { echo "refused: $REF does not exist in the organization-service repository" >&2; exit 1; }
+          image=$(docker buildx imagetools inspect "$REF" --format '{{json .Image}}')
+          # A single-platform index yields the image config itself; a multi-platform one a map keyed by platform.
+          rev=$(jq -r 'if has("config") then (.config.Labels["org.opencontainers.image.revision"] // "")
+                       else (.["linux/amd64"].config.Labels["org.opencontainers.image.revision"] // "") end' <<<"$image")
+          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: no org.opencontainers.image.revision label (not a build-image artifact)" >&2; exit 1; }
+          git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }
+          echo "revision=$rev" >>"$GITHUB_OUTPUT"
+          {
+            echo "### organization-service deployment (verified; awaiting production approval)"
+            echo ""
+            echo "- index digest: \`${REF##*@}\`"
+            echo "- revision: \`$rev\`"
+            echo "- main at dispatch: \`$GITHUB_SHA\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy organization-service'
+    # The protected environment: a required reviewer approves before this job starts; its DEPLOY_SSH_* are environment secrets.
+    environment: production
+    # Production deployments share ONE queue across every workflow. A running deployment is NEVER cancelled
+    # (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group.
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # Defence in depth: the same input, re-checked locally before the production step (no network).
+      - name: validate the digest
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
       - uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
@@ -55,4 +119,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          IMAGE: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          # EXACTLY the selected (and verified) digest: never a tag, never a rebuild.
+          IMAGE: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}

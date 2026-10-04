@@ -7,8 +7,11 @@ on:
       - 'apps/auth-service/**'
       # The image builds and ships @nawara/service-kit (Stage 13.2 dependency): a kit change changes the Auth image.
       - 'libs/service-kit/**'
+      # The image also builds and ships @nawara/audit-contract; .dockerignore defines the build context (V2 A0).
+      - 'libs/audit-contract/**'
       - 'package.json'
       - 'package-lock.json'
+      - '.dockerignore'
       - '.github/workflows/auth-service-docker-build.yml'
   push:
     branches: [main]
@@ -16,8 +19,11 @@ on:
       - 'apps/auth-service/**'
       # The image builds and ships @nawara/service-kit (Stage 13.2 dependency): a kit change changes the Auth image.
       - 'libs/service-kit/**'
+      # The image also builds and ships @nawara/audit-contract; .dockerignore defines the build context (V2 A0).
+      - 'libs/audit-contract/**'
       - 'package.json'
       - 'package-lock.json'
+      - '.dockerignore'
       - '.github/workflows/auth-service-docker-build.yml'
 
 env:

@@ -4,6 +4,9 @@
   §6 and the V2-A.2 owner decisions OD-1 to OD-7.
 - **Scope:** how an auth-service image is built, how it reaches production, and the one-time transition from automatic deployment.
   Organization and audit-service deployments are unchanged (they still rebuild `main` at dispatch).
+- **Later status (V2 A0):** organization-service and audit-service now follow the same model. The shared procedure for all three
+  services is the [digest deployment runbook](digest-deployments.md); this runbook keeps the auth-service specifics and the V2-A.2
+  transition history.
 
 ## 1. Build ≠ deploy
 

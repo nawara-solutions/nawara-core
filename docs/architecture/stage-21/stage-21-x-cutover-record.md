@@ -4,7 +4,8 @@
   nothing: every further production step is a separate, reviewed and authorized checkpoint.
 - **Scope:** ADR-0040 fresh path (A2.5, F1–F7) and gates G1–G7, plus the Stage 21.x T1 relay gate.
 - **Later status:** dated later-status notes are appended as [§10](#10-later-status-note-2026-10-02-v2-a),
-  [§11](#11-later-status-note-2026-10-03-v2-a2) and [§12](#12-later-status-note-2026-10-04-v2-a3--a35). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
+  [§11](#11-later-status-note-2026-10-03-v2-a2), [§12](#12-later-status-note-2026-10-04-v2-a3--a35) and
+  [§13](#13-later-status-note-2026-10-04-v2-a0). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
 - **Related:** [ADR-0040](../../adr/0040-organization-ownership-migration-decisions.md),
   [G1 topology](stage-21-x-g1-organization-topology.md), [G6 rehearsal plan](stage-21-x-g6-rehearsal-plan.md),
   [organization-production runbook](../../runbooks/organization-production.md),
@@ -305,3 +306,18 @@ Appended; §1–§11 are unchanged and keep the procedure as it was planned.
   (such as the ownership commands of G7, F6 and F7) are not affected. The G6 refresh must include the ruleset, the environment, where the production credentials live
   (environment secrets, with the organization secrets until V2-A.3 / A3.7) and this approval procedure.
 - **Unchanged:** G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.
+
+## 13. Later-status note (2026-10-04, V2 A0)
+
+Appended; §1–§12 are unchanged. Source: the [V2 A0 record](../core-v2-a0-immutable-deployments.md).
+
+| §8 aspect | Status |
+|---|---|
+| Architectural question (exact image identity for organization-service and audit-service) | **answered** by V2 A0 (owner decision D5) |
+| Mechanism (build once on merge; verify → deploy an exact index digest; repository guards) | **implemented** by V2 A0; certified once A0 is merged and verified |
+| First labelled organization-service and audit-service artifacts | **pending** the build-only runs triggered by the A0 merge |
+| Exact digests for the G6 rehearsal and for production | **deferred** to the refreshed G6 baseline |
+| A production digest deployment | a **separate**, owner-authorized production action (V2-A.3 / A3.6) |
+
+Production still runs the organization-service and audit-service images of §2 and §5; they carry no revision label and the new deploy
+workflows refuse them. G6 stays deferred; G7, F6 and F7 locked; Final Core Validation absolute last.
