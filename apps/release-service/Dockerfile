@@ -5,7 +5,7 @@
 # contract @nawara/audit-contract, built here: only their dist travels to the runtime image). The Audit / File image pattern. The migrations (the kit's and the service's own) travel with the image; they are
 # applied by the explicit `npm run migrate` step as the migrator role, never at startup and never with the runtime credentials.
 
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY libs/service-kit/package.json libs/service-kit/package.json
@@ -19,7 +19,7 @@ RUN npm run build -w @nawara/audit-contract
 COPY apps/release-service apps/release-service
 RUN npm run build --workspace=release-service
 
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
 # Production is the default; configuration comes from the environment at run time (nothing secret is baked into the image).
 ENV NODE_ENV=production

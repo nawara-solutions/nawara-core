@@ -34,10 +34,10 @@ jobs:
       cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Package the backup script
         run: echo "BACKUP_B64=$(base64 -w0 infra/backup/backup.sh)" >> "$GITHUB_ENV"
-      - uses: appleboy/ssh-action@v1
+      - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}

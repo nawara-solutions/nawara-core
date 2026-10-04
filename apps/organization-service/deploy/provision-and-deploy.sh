@@ -42,7 +42,7 @@ APP=nawara-core-organization-service
 DB_ENV="$DIR/db.env"
 ROLES_ENV="$DIR/roles.env"
 APP_ENV="$DIR/.env"
-DB_IMAGE=postgres:16-alpine
+DB_IMAGE=postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
 
 log() { printf '[deploy] %s\n' "$*"; }
 die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }

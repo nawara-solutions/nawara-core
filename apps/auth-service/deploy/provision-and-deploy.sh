@@ -30,7 +30,7 @@ VOL=nawara-core-auth-db-data
 APP=nawara-core-auth-service
 DB_ENV="$DIR/db.env"
 APP_ENV="$DIR/.env"
-DB_IMAGE=postgres:16-alpine
+DB_IMAGE=postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
 # ADR-0053: the private Core network and broker (infra/rabbitmq/provision.sh). Auth joins that network in addition to Traefik's.
 CORE_NET="${CORE_NETWORK:-nawara-core-internal}"
 BROKER="${RABBITMQ_CONTAINER:-nawara-core-rabbitmq}"

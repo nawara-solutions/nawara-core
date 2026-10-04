@@ -1,4 +1,5 @@
 // Static checks the repository enforces on itself. Pure functions (text in, problems out) so they are unit-testable.
+import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 
 /** Every production deployment path and the production image tag share ONE queue, so they can never race each other. */
@@ -178,8 +179,9 @@ export function checkImageBuild(fileName, text, { repository, app }) {
     const missing = required.filter((r) => !paths.includes(r));
     if (missing.length > 0) problems.push(`${fileName}: push paths must include every image input (missing: ${missing.join(', ')})`);
   }
-  const unexpected = triggerNames(doc).filter((t) => !['push', 'pull_request'].includes(t));
-  if (unexpected.length > 0) problems.push(`${fileName}: an image build runs only on push (and pull_request for a non-production build), not on ${unexpected.join(', ')}`);
+  // V2 A14 (D3): a pull request never publishes; only a push to main does.
+  const unexpected = triggerNames(doc).filter((t) => t !== 'push');
+  if (unexpected.length > 0) problems.push(`${fileName}: an image build runs only on push to main, never on ${unexpected.join(', ')} (pull requests are validated by Core CI without publishing)`);
   const imageName = String(doc?.env?.IMAGE_NAME ?? '');
   if (imageName !== `ghcr.io/\${{ github.repository_owner }}/${repository}`) problems.push(`${fileName}: IMAGE_NAME must be ghcr.io/\${{ github.repository_owner }}/${repository} (got "${imageName}")`);
 
@@ -191,9 +193,8 @@ export function checkImageBuild(fileName, text, { repository, app }) {
     if (usesSsh(asArray(job.steps)) || PRODUCTION_CREDENTIAL.test(JSON.stringify(job))) problems.push(`${where}: an image build must not use production SSH or the DEPLOY_SSH_* credentials`);
     if (job.concurrency?.group === PRODUCTION_GROUP || doc?.concurrency?.group === PRODUCTION_GROUP) problems.push(`${where}: an image build must not join the production queue`);
     if (job.permissions?.packages === 'write' && !pushStep(job)) problems.push(`${where}: packages: write only on a job that builds and pushes an image`);
-    if (jobId === 'build-image') continue;
-    if (!String(job.if ?? '').includes("github.event_name == 'pull_request'")) problems.push(`${where}: a job other than build-image must be pull_request-only`);
-    if (/:sha-|:production\b|:latest\b/.test(String(pushStep(job)?.with?.tags ?? ''))) problems.push(`${where}: only build-image publishes the immutable sha- tag; never :production or :latest`);
+    if (jobId !== 'build-image') problems.push(`${where}: an image workflow has exactly one job, build-image (V2 A14: no pull-request build publishes)`);
+    if (jobId !== 'build-image' && (job.permissions?.['id-token'] === 'write' || job.permissions?.attestations === 'write')) problems.push(`${where}: only build-image may sign attestations`);
   }
 
   const build = jobs['build-image'];
@@ -213,17 +214,137 @@ export function checkImageBuild(fileName, text, { repository, app }) {
   const recorded = steps.slice(buildAt + 1).some((st) => Object.values(st.env ?? {}).some((v) => /^\$\{\{\s*steps\.build\.outputs\.digest\s*\}\}$/.test(String(v).trim()))
     && String(st.run ?? '').includes(DIGEST_PATTERN));
   if (!recorded) problems.push(`${where}: the index digest (steps.build.outputs.digest) must be captured and validated against ${DIGEST_PATTERN} after the build`);
+  // V2 A14: full BuildKit provenance and an SPDX SBOM from a digest-pinned generator (both inside the index the attestation covers).
+  if (String(step.with?.provenance ?? '').trim() !== 'mode=max') problems.push(`${where}: the build-push step must set provenance: mode=max`);
+  if (String(step.with?.attests ?? '').trim() !== SBOM_ATTEST) problems.push(`${where}: the build-push step must set exactly attests: ${SBOM_ATTEST} (the frozen SBOM generator; got "${String(step.with?.attests ?? '').trim()}")`);
+  // V2 A14: the trusted provenance: a GitHub artifact attestation for the exact index digest, after the build, pushed next to the image.
+  const attestAt = steps.findIndex((st) => String(st.uses ?? '').startsWith('actions/attest-build-provenance@'));
+  const attest = steps[attestAt];
+  if (!attest || attestAt < buildAt) {
+    problems.push(`${where}: an actions/attest-build-provenance step must attest the image after the build`);
+  } else {
+    if (String(attest.with?.['subject-name'] ?? '').trim() !== '${{ env.IMAGE_NAME }}') problems.push(`${where}: the attestation subject-name must be exactly \${{ env.IMAGE_NAME }} (no tag)`);
+    if (String(attest.with?.['subject-digest'] ?? '').trim() !== '${{ steps.build.outputs.digest }}') problems.push(`${where}: the attestation subject-digest must be exactly \${{ steps.build.outputs.digest }} (the index digest)`);
+    if (attest.with?.['push-to-registry'] !== true) problems.push(`${where}: the attestation must be pushed to the registry (push-to-registry: true)`);
+  }
+  const perms = build.permissions ?? {};
+  if (perms['id-token'] !== 'write' || perms.attestations !== 'write') problems.push(`${where}: build-image needs id-token: write and attestations: write (the attestation) at job level`);
+  for (const k of ['id-token', 'attestations', 'packages']) if (doc?.permissions?.[k] === 'write') problems.push(`${fileName}: ${k}: write must be granted to build-image only, never at workflow level`);
+  return problems;
+}
+
+// V2 A14.2a: THE SBOM generator: one frozen identity (name, version and digest), the same for every image build. It runs inside the
+// build with the build context, so "something pinned" is not enough: changing it is a reviewed change of this constant.
+export const SBOM_GENERATOR = 'docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9';
+const SBOM_ATTEST = `type=sbom,generator=${SBOM_GENERATOR}`;
+/**
+ * V2 A14: the verify step must prove the trusted provenance of the exact digest: `gh attestation verify oci://$REF` pinned to this
+ * repository, the service's own image workflow (the signer), refs/heads/main, the label's commit (same variable as the literal-SHA and
+ * ancestry checks, between them), the SLSA v1 predicate and GitHub-hosted runners; refused on failure; then a jq re-check of the
+ * certificate and the signed subject. No caller-supplied bundle, trusted root or looser identity; no `|| true`.
+ */
+const ATTESTATION_REPO = 'nawara-solutions/nawara-core';
+function attestationProblems(where, step, run, revisionCheck, ancestry, signerWorkflow) {
+  const problems = [];
+  const wf = signerWorkflow ?? '<the service image workflow>';
+  if (String(step.env?.REF ?? '').trim() !== '${{ env.IMAGE_NAME }}@${{ inputs.digest }}') problems.push(`${where}: REF must be exactly \${{ env.IMAGE_NAME }}@\${{ inputs.digest }} (the provenance is verified for that exact digest)`);
+  if (!/^\$\{\{\s*github\.token\s*\}\}$/.test(String(step.env?.GH_TOKEN ?? '').trim())) problems.push(`${where}: GH_TOKEN must be \${{ github.token }} for gh attestation verify`);
+  const at = run.indexOf('gh attestation verify');
+  if (at < 0) return [...problems, `${where}: the provenance must be verified with gh attestation verify (no attestation check: refused)`];
+  // The command is the `$(gh attestation verify …)` substitution; its refusal must follow it directly (not some later `|| {`).
+  const close = run.indexOf(')', at);
+  const cmd = close < 0 ? run.slice(at) : run.slice(at, close + 1);
+  const flags = [
+    ['the exact digest', /gh attestation verify\s+"oci:\/\/\$REF"/],
+    [`--repo ${ATTESTATION_REPO}`, new RegExp(`--repo ${ATTESTATION_REPO.replace('/', '\\/')}(\\s|$)`)],
+    [`--signer-workflow ${ATTESTATION_REPO}/.github/workflows/${wf}`, new RegExp(`--signer-workflow ${ATTESTATION_REPO.replace('/', '\\/')}\\/\\.github\\/workflows\\/${String(wf).replace(/[.]/g, '\\.')}(\\s|$)`)],
+    ['--source-ref refs/heads/main', /--source-ref refs\/heads\/main(\s|$)/],
+    ['--predicate-type https://slsa.dev/provenance/v1', /--predicate-type https:\/\/slsa\.dev\/provenance\/v1(\s|$)/],
+    ['--deny-self-hosted-runners', /--deny-self-hosted-runners(\s|$)/],
+    ['--format json', /--format json(\s|\)|$)/],
+  ];
+  for (const [name, re] of flags) if (!re.test(cmd)) problems.push(`${where}: gh attestation verify must use ${name}`);
+  const source = /--source-digest\s+"\$([A-Za-z_]\w*)"/.exec(cmd);
+  if (!source || !revisionCheck || source[1] !== revisionCheck[1]) problems.push(`${where}: gh attestation verify must bind --source-digest to the checked revision variable`);
+  if (revisionCheck && ancestry && !(revisionCheck.index < at && at < ancestry.index)) problems.push(`${where}: the provenance must be verified after the literal-SHA check and before the ancestry check`);
+  if (/--bundle|--custom-trusted-root|--cert-identity-regex|--no-public-good|--owner\b/.test(cmd)) problems.push(`${where}: gh attestation verify must not take a caller-supplied bundle, trusted root or looser identity`);
+  if (close < 0 || !/^\s*\\?\s*\|\|\s*\{[^}]*\bexit 1\b/.test(run.slice(close + 1))) problems.push(`${where}: a failed gh attestation verify must refuse (|| { …; exit 1; })`);
+  const jqAt = run.indexOf('jq -e', at);
+  // The jq program ends where it reads the verified output (<<<"$verified"); its refusal must follow directly.
+  const fed = jqAt < 0 ? -1 : run.indexOf('<<<"$verified"', jqAt);
+  const jqEnd = fed < 0 ? -1 : fed + '<<<"$verified"'.length;
+  const jq = jqAt < 0 ? '' : run.slice(jqAt, jqEnd < 0 ? undefined : jqEnd);
+  const signer = `https://github.com/${ATTESTATION_REPO}/.github/workflows/${wf}@refs/heads/main`;
+  const jqNeeds = [
+    ['the signed subject digest', /index\(\$d\)/], ['the digest argument', /--arg d "\$\{REF##\*@sha256:\}"/],
+    ['the signer', /\$c\.buildSignerURI == \$signer/], ['the signer argument', new RegExp(`--arg signer "${signer.replace(/[.]/g, '\\.').replace(/\//g, '\\/')}"`)],
+    ['the source repository', new RegExp(`\\$c\\.sourceRepositoryURI == "https:\\/\\/github\\.com\\/${ATTESTATION_REPO.replace('/', '\\/')}"`)],
+    ['the source ref', /\$c\.sourceRepositoryRef == "refs\/heads\/main"/], ['the source commit', /\$c\.sourceRepositoryDigest == \$rev/],
+    ['the runner', /\$c\.runnerEnvironment == "github-hosted"/], ['the predicate', /predicateType == "https:\/\/slsa\.dev\/provenance\/v1"/],
+    ['at least one verified result', /length >= 1/],
+  ];
+  if (!jq) problems.push(`${where}: the verified provenance must be re-checked with jq -e`);
+  else {
+    for (const [name, re] of jqNeeds) if (!re.test(jq)) problems.push(`${where}: the jq re-check must check ${name}`);
+    if (jqEnd < 0 || !/^\s*(>\s*\/dev\/null)?\s*\\?\s*\|\|\s*\{[^}]*\bexit 1\b/.test(run.slice(jqEnd))) problems.push(`${where}: a failed jq re-check must refuse (|| { …; exit 1; })`);
+    if (ancestry && jqAt > ancestry.index) problems.push(`${where}: the jq re-check must run before the ancestry check`);
+  }
   return problems;
 }
 
 const BUILDS = /\bdocker\s+(buildx\s+)?build\b|\bbuildx\s+bake\b/;
 
 /**
+ * V2 A14.2a (D4, strict cutover): the canonical `verify` job (scripts/lib/digest-deploy-verify.yml). A shape check cannot prove that no
+ * success path skips the trust checks (an early `exit 0`, an allow-listed digest, a bypass variable, a shadowing `gh()` function, a
+ * conditional around the call, `continue-on-error`, a step `if`, `defaults.run.shell`, BASH_ENV through $GITHUB_ENV, …), so the job must
+ * EQUAL the reviewed canonical one: the whole job (condition, runner, permissions, outputs, every step with every key) and every trust
+ * script byte for byte. The only normalization: an action's commit SHA (checkActionPins keeps every reference a full SHA with its exact
+ * release comment), so a reviewed Dependabot SHA bump does not need a template edit.
+ */
+const CANONICAL_VERIFY_TEMPLATE = readFileSync(new URL('./digest-deploy-verify.yml', import.meta.url), 'utf8');
+function canonicalVerifyJob(service, signerWorkflow) {
+  return parse(CANONICAL_VERIFY_TEMPLATE.replaceAll('<SIGNER>', signerWorkflow).replaceAll('<SERVICE>', service));
+}
+const normalizePins = (v, key) => (Array.isArray(v) ? v.map((x) => normalizePins(x))
+  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, normalizePins(x, k)]))
+  : key === 'uses' && typeof v === 'string' ? v.replace(/@[0-9a-f]{40}$/, '@<full commit sha>') : v);
+/** The first path where `actual` differs from `expected` (key order ignored), or null. */
+function firstDifference(expected, actual, path = '') {
+  if (expected === actual) return null;
+  if (typeof expected !== typeof actual || expected === null || actual === null || typeof expected !== 'object' || Array.isArray(expected) !== Array.isArray(actual)) {
+    return path || '(root)';
+  }
+  const keys = new Set([...Object.keys(expected), ...Object.keys(actual)]);
+  for (const k of keys) {
+    const d = firstDifference(expected[k], actual[k], Array.isArray(expected) ? `${path}[${k}]` : `${path}.${k}`);
+    if (d) return d;
+  }
+  return null;
+}
+function canonicalVerifyProblems(fileName, doc, repository, signerWorkflow) {
+  const service = String(repository).replace(/^nawara-core-/, '');
+  if (!signerWorkflow) return [`${fileName}: no signer workflow is known for ${repository}: the canonical verify job cannot be checked (refused)`];
+  const expected = canonicalVerifyJob(service, signerWorkflow);
+  const problems = [];
+  const diff = firstDifference(normalizePins(expected), normalizePins(doc?.jobs?.verify));
+  if (diff) problems.push(`${fileName} job "verify": must equal the canonical verify job (scripts/lib/digest-deploy-verify.yml) exactly; differs at verify${diff} (no bypass, no allow-list, no early success: D4)`);
+  const deploy = doc?.jobs?.deploy;
+  if (deploy && String(deploy.if ?? '') !== String(expected.if)) problems.push(`${fileName} job "deploy": its condition must be exactly "${expected.if}" (no always(), failure(), !cancelled() or other path that runs without a successful verify)`);
+  if (deploy && JSON.stringify(asArray(deploy.needs)) !== '["verify"]') problems.push(`${fileName} job "deploy": must need exactly the "verify" job`);
+  // Workflow-wide settings reach the verify scripts too: a default shell, or an environment such as BASH_ENV, would change them.
+  if (doc?.defaults !== undefined) problems.push(`${fileName}: a digest deployment must not set workflow-level defaults (they would change how the verify scripts run)`);
+  const env = Object.keys(doc?.env ?? {});
+  if (env.length !== 1 || env[0] !== 'IMAGE_NAME') problems.push(`${fileName}: the workflow-level env must be exactly IMAGE_NAME (got: ${env.join(', ') || 'nothing'})`);
+  return problems;
+}
+
+/**
  * V2-A.2: a digest deployment workflow deploys ONE EXACT, ALREADY-BUILT image of `repository` and never builds. It runs only on an
  * explicit dispatch with a digest and a typed confirmation; the digest is validated before any network step, resolved and checked
  * (existence, revision label, ancestry of main) before the SSH step, and the SSH step deploys exactly IMAGE_NAME@digest.
  */
-export function checkDigestDeploy(fileName, text, repository) {
+export function checkDigestDeploy(fileName, text, repository, { signerWorkflow } = {}) {
   const problems = [];
   const doc = parse(text);
   const triggers = triggerNames(doc);
@@ -289,7 +410,13 @@ export function checkDigestDeploy(fileName, text, repository) {
       if (!revisionCheck || !ancestry || revisionCheck[1] !== ancestry[1] || revisionCheck.index > ancestry.index) {
         problems.push(`${where}: the extracted revision must be refused unless it matches ${REVISION_PATTERN} (a literal commit SHA), before the ancestry check on the same variable`);
       }
+      problems.push(...attestationProblems(where, steps[verifyAt], run, revisionCheck, ancestry, signerWorkflow));
     }
+    if (verify.permissions?.attestations !== 'read') problems.push(`${where}: needs attestations: read (gh attestation verify) and nothing more`);
+  }
+  problems.push(...canonicalVerifyProblems(fileName, doc, repository, signerWorkflow));
+  for (const [jobId, job] of jobs) {
+    if (job.permissions?.['id-token'] || job.permissions?.attestations === 'write') problems.push(`${fileName} job "${jobId}": a deployment never signs (no id-token, no attestations: write)`);
   }
 
   for (const [jobId, job] of deployJobs) {
@@ -312,6 +439,61 @@ export function checkDigestDeploy(fileName, text, repository) {
 
 /** CI must actually run what it claims: every check below has to appear as a step of the matrix job. */
 /** V2-A.3 (A3.2): the stable aggregate check of Core CI, the one check a `main` ruleset requires. */
+/**
+ * V2 A14 (D2): every external action is pinned to a full 40-hex commit SHA with its exact release as a comment
+ * (`owner/repo@<sha> # vX.Y.Z`). Local `./` actions are allowed. No exceptions.
+ */
+const PINNED_ACTION = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/;
+export function checkActionPins(fileName, text) {
+  const problems = [];
+  const doc = parse(text);
+  const refs = [];
+  for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+    if (job?.uses) refs.push([jobId, String(job.uses)]);
+    for (const st of asArray(job?.steps)) if (st?.uses !== undefined) refs.push([jobId, String(st.uses)]);
+  }
+  const lines = text.split('\n');
+  for (const [jobId, ref] of refs) {
+    if (ref.startsWith('./')) continue;
+    const where = `${fileName} job "${jobId}"`;
+    if (!PINNED_ACTION.test(ref)) { problems.push(`${where}: ${ref} must be pinned to a full 40-hex commit SHA (no tag, branch or short SHA)`); continue; }
+    const commented = lines.filter((l) => new RegExp(`uses:\\s*${ref.replace(/[.]/g, '\\.').replace(/\//g, '\\/')}\\s+#\\s*v\\d+\\.\\d+\\.\\d+\\s*$`).test(l)).length;
+    const total = lines.filter((l) => new RegExp(`uses:\\s*${ref.replace(/[.]/g, '\\.').replace(/\//g, '\\/')}(\\s|$)`).test(l)).length;
+    if (commented !== total || total === 0) problems.push(`${where}: ${ref} must carry its exact release as a comment (# vX.Y.Z)`);
+  }
+  return problems;
+}
+
+/**
+ * V2 A14: the production base images are pinned as tag@sha256:<digest> and identical everywhere: every FROM of the application
+ * Dockerfiles (`dockerfiles`: path → text) and the DB_IMAGE of the production deploy scripts (`deployScripts`: path → text).
+ */
+const PINNED_IMAGE = /^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$/;
+export function checkImagePins(dockerfiles, deployScripts) {
+  const problems = [];
+  const froms = new Set();
+  for (const [path, text] of Object.entries(dockerfiles)) {
+    const lines = text.split('\n').filter((l) => /^FROM\s/i.test(l));
+    if (lines.length === 0) problems.push(`${path}: no FROM line`);
+    for (const l of lines) {
+      const image = l.trim().split(/\s+/)[1] ?? '';
+      if (!PINNED_IMAGE.test(image)) problems.push(`${path}: FROM ${image} must be pinned as <image>:<tag>@sha256:<64 hex>`);
+      froms.add(image);
+    }
+  }
+  if (froms.size > 1) problems.push(`application Dockerfiles must all use the same pinned base image (found: ${[...froms].join(', ')})`);
+  if ([...froms].some((i) => !i.startsWith('node:22-alpine@'))) problems.push('application Dockerfiles must use the pinned node:22-alpine base');
+  const dbs = new Set();
+  for (const [path, text] of Object.entries(deployScripts)) {
+    const m = /^DB_IMAGE=(\S*)$/m.exec(text);
+    if (!m) { problems.push(`${path}: no DB_IMAGE`); continue; }
+    if (!PINNED_IMAGE.test(m[1]) || !m[1].startsWith('postgres:')) problems.push(`${path}: DB_IMAGE=${m[1]} must be a pinned postgres:<tag>@sha256:<64 hex>`);
+    dbs.add(m[1]);
+  }
+  if (dbs.size > 1) problems.push(`the production deploy scripts must all use the same pinned PostgreSQL image (found: ${[...dbs].join(', ')})`);
+  return problems;
+}
+
 export const CI_AGGREGATE = 'core-ci-passed';
 const AGGREGATE_RESULT_RULE = 'all(.[]; .result == "success")';
 
