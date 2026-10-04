@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-04, `main` at `0db30c7` (V2-A.3: A3.1–A3.5 done; V2 A0 in progress).
+- **Last verified:** 2026-10-04, `main` at `4979407` (V2-A.3: A3.1–A3.5 done; V2 A0 certified).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -164,8 +164,9 @@ the [V2-A.2 certification record](architecture/core-v2-a-2-certification.md), wh
 deployment has been performed yet, and production still runs a legacy image. V2-A.3 has added the stable `core-ci-passed` check, the `main` ruleset,
 the protected `production` environment and its approval on every production SSH job ([record](architecture/core-v2-a-3-ci-and-ruleset.md));
 the organization-level credentials still coexist until A3.7. Every change to `main` goes through a pull request with a green
-`core-ci-passed`. **V2 A0** extends exact-digest deployment to organization-service and audit-service ([record](architecture/core-v2-a0-immutable-deployments.md)); no
-digest deployment of them has been performed.
+`core-ci-passed`. **V2 A0** extends exact-digest deployment to organization-service and audit-service and is certified
+([record](architecture/core-v2-a0-immutable-deployments.md): PR #192, first labelled artifacts of all three services built on the
+merge); no digest deployment of any of them has been performed (built ≠ deployed; the first one is A3.6, deferred).
 
 ### Compatibility and safety rules for V1 work
 
@@ -224,7 +225,7 @@ Core V2 is the next platform architecture. It may redesign contracts deliberatel
 The G6 labels are defined under [G6](#g6-production-like-rehearsal); the reasons are in the
 [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §4. A0 includes **V2-A.2** (the Auth deployment transition:
 a merge builds an immutable image, and production is deployed only by an explicit, owner-authorized deployment of an exact digest)
-and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is in progress: A3.1 to A3.5 are done (ruleset, environment, gating), A3.6 and A3.7 are deferred ([record](architecture/core-v2-a-3-ci-and-ruleset.md)). **A0 (Organization and Audit immutable-digest deployment)** follows the Auth model ([record](architecture/core-v2-a0-immutable-deployments.md)). The items left open by the retired 21.R1/21.R2 umbrella are placed in
+and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is in progress: A3.1 to A3.5 are done (ruleset, environment, gating), A3.6 and A3.7 are deferred ([record](architecture/core-v2-a-3-ci-and-ruleset.md)). **A0 (Organization and Audit immutable-digest deployment)** follows the Auth model and is certified, with no production deployment ([record](architecture/core-v2-a0-immutable-deployments.md)). The items left open by the retired 21.R1/21.R2 umbrella are placed in
 A1, A3, A6, A12, A13, A14, A15 and A16 by the [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §5.
 
 **Ordering.** Stages are numbered by theme, not by order. Work is sequenced by dependency: A0 first; foundations (A1, A2, A3, A15)
