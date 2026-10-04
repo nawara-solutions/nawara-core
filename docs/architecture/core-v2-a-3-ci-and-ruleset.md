@@ -147,3 +147,39 @@ and belongs in the A3.8 certification, not here.
 - **No digest deployment has been performed** ([V2-A.2 certification](core-v2-a-2-certification.md) §8).
 - **G6** stays deferred; its refresh must include the ruleset, and later the environment and where the credentials live.
 - **Final Core Validation** stays absolute last.
+
+## 7. Later status: A3.4 and A3.5 (2026-10-04)
+
+Appended; §1–§6 remain the record as written. §5's pull-request-level observation was made on PR #190 (blocked while `core-ci-passed`
+was pending, clean once it succeeded, no approval required, merged through the normal path with every rule passing and no bypass); it
+is carried into the A3.8 certification.
+
+**A3.4: the `production` environment** (id `23422013679`). Required reviewer: the owner (`User`, id `32715188`), one approval suffices;
+`prevent_self_review: false` (a sole maintainer must be able to approve); no wait timer; deployment branches: the explicit branch policy
+`main` only (not "protected branches only"); administrator bypass **off** (`can_admins_bypass: false`: GitHub's API does not document
+this setting, so the owner switched it off in the UI and it was read back). Environment secrets, entered by the owner and verified by
+name only: `DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_SSH_PASSWORD`, `DEPLOY_SSH_PORT` (`DEPLOY_SSH_KEY` deliberately absent). Their
+values have not been proven against the server (A3.6, deferred).
+
+**A3.5: production workflow gating.** Every production SSH job is bound to `production` and is dispatch-only:
+
+| Workflow → job | Change |
+|---|---|
+| `auth-service-deploy.yml` | split into `verify` (no environment, no production credentials: digest validation, artifact existence, revision label, ancestry of `main`) and `deploy` (`needs: verify`, `environment: production`, re-checks the digest, deploys exactly `IMAGE_NAME@digest`, no build, production queue). Typed confirmation and `main` guard on both |
+| `organization-service-deploy.yml` → `deploy`, `audit-service-deploy.yml` → `deploy` | `environment: production` (approval before the build; immutable digest deployment stays separate V2 work) |
+| `core-rabbitmq-provision.yml` → `provision`, `auth-db-credential-rotate.yml` → `rotate` | `environment: production` (rotation keeps its typed confirmation) |
+| `core-backup.yml` → `backup` | owner decision **B1**: the schedule is removed (dispatch only) and the job is bound to `production`. Scheduled backups return through a separately reviewed `production-backup` environment and job (not created); enabling them stays G6-gated. `CORE_BACKUP_SCHEDULE` and `CORE_BACKUP_SERVICES` are no longer read |
+
+Repository checks (`scripts/lib/checks.mjs`) now refuse: a job using production SSH or `DEPLOY_SSH_*` (any spelling, or all secrets
+at once) without an approved literal environment (allow-list: `production`; `production-backup` is not listed until it exists); an
+expression or unknown environment name; a `production` job in a workflow with any trigger other than `workflow_dispatch` (so no
+schedule, push or pull request); and any drift of the Auth split (missing or bypassed `verify`, an environment or production credential
+on `verify`, a deploy job that is not `deploy`, not bound to `production` or not needing `verify`).
+
+**Not observed yet** (documented GitHub behaviour only): a sole owner approving their own run; whether a run waiting for approval holds
+the `production-deploy-core-api` queue; environment secrets taking precedence over the same-named organization secrets. They are to be
+observed at the first separately authorized production action (A3.6 is the natural one); no test workflow was added for them.
+
+**Still open:** until **A3.7** the organization-level `DEPLOY_SSH_*` secrets remain readable by any workflow run in this repository that
+does not declare the environment, including a workflow pushed on a feature branch (the ruleset protects `main` only and the repository
+checks report rather than prevent). **A3.6** (production proof) and **A3.7** stay deferred; A3.8 certification has not started.

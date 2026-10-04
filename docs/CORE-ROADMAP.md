@@ -52,7 +52,7 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 | Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
 | Auth deployment | **build ≠ deploy** (V2-A.2): a merge touching Auth, `libs/service-kit`, the package files or the Auth image workflow only builds a revision-labelled image; production changes only by an explicit, owner-authorized deployment of an exact index digest ([runbook](runbooks/auth-service-deploy.md)). Before V2-A.2, seven automatic deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6); it was observed on 2026-10-02 running the legacy image `sha256:26164d42…5eaf`, unchanged by the V2-A.2 merge ([certification record](architecture/core-v2-a-2-certification.md) §6) |
 | `main` protection | **repository ruleset `main` active** (V2-A.3 / A3.3): pull request required (0 approvals, sole maintainer), required check `core-ci-passed` on an up-to-date branch, conversation resolution, no force push, no deletion; administrator bypass on pull requests only ([record](architecture/core-v2-a-3-ci-and-ruleset.md)) |
-| Production credentials | organization secrets readable by any workflow run in this repository; **no `production` environment yet** (A3.4 to A3.7 not done) |
+| Production credentials and approval | the protected `production` environment (A3.4: owner as required reviewer, administrator bypass off, `main` only) holds the four `DEPLOY_SSH_*` credentials; **every production SSH job waits for its approval** and is dispatch-only (A3.5). Backups are manual only (no schedule). **Until A3.7** the organization-level `DEPLOY_SSH_*` secrets still exist and are readable by a workflow that does not declare the environment ([record](architecture/core-v2-a-3-ci-and-ruleset.md)) |
 | Evidence record | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md) (production facts, gates, digests) |
 
 Production facts change only through authorized checkpoints; re-verify against the cutover record and the
@@ -147,8 +147,8 @@ V2-A  Baseline and change safety
     A3.1  design and owner decisions           ✅
     A3.2  core-ci-passed aggregate check       ✅ verified on main
     A3.3  main ruleset                         ✅ active; verified by API readback (first PR behaviour recorded separately)
-    A3.4  production environment               not started
-    A3.5  environment on production SSH jobs   not started
+    A3.4  production environment               ✅ created and verified (secrets entered by the owner; not yet used)
+    A3.5  environment on production SSH jobs   ✅ implemented: all six bound to `production` (Auth verify → deploy; backup manual only)
     A3.6  production access proof              ⏸ deferred
     A3.7  organization-secret restriction      ⏸ deferred
     A3.8  certification                        not started

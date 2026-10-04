@@ -11,7 +11,8 @@ import { parse } from 'yaml';
 import { ROOT } from './lib/harness.mjs';
 
 const workflow = parse(readFileSync(join(ROOT, '.github/workflows/auth-service-deploy.yml'), 'utf8'));
-const steps = workflow.jobs.deploy.steps;
+// V2-A.3 (A3.5): validation and artifact verification run in the `verify` job, before the production approval.
+const steps = workflow.jobs.verify.steps;
 const stepRun = (name) => {
   const step = steps.find((s) => s.name === name);
   assert.ok(step?.run, `step "${name}" not found in auth-service-deploy.yml`);
@@ -26,6 +27,11 @@ function bash(script, env, cwd = tmpdir()) {
   const r = spawnSync('bash', ['-c', script], { cwd, env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
+
+test('the deploy job re-checks the digest with the very same validation before its SSH step', () => {
+  const recheck = workflow.jobs.deploy.steps.find((s) => s.name === 'validate the digest');
+  assert.equal(recheck?.run, VALIDATE);
+});
 
 test('digest validation accepts exactly sha256:<64 lowercase hex>', () => {
   assert.equal(bash(VALIDATE, { DIGEST: digest('0a') }).code, 0);
@@ -81,8 +87,9 @@ function verify(images, ref) {
   const h = history();
   const bin = fakeDocker(typeof images === 'function' ? images(h) : images);
   const summary = join(h.dir, 'summary.md');
-  const r = bash(VERIFY, { PATH: `${bin}:${process.env.PATH}`, REF: ref, GITHUB_SHA: h.head, GITHUB_STEP_SUMMARY: summary }, h.dir);
-  return { ...r, h, summary: existsSync(summary) ? readFileSync(summary, 'utf8') : '' };
+  const output = join(h.dir, 'output.txt');
+  const r = bash(VERIFY, { PATH: `${bin}:${process.env.PATH}`, REF: ref, GITHUB_SHA: h.head, GITHUB_STEP_SUMMARY: summary, GITHUB_OUTPUT: output }, h.dir);
+  return { ...r, h, summary: existsSync(summary) ? readFileSync(summary, 'utf8') : '', output: existsSync(output) ? readFileSync(output, 'utf8') : '' };
 }
 
 test('artifact verification accepts a revision-labelled image whose revision is the current main', () => {
@@ -90,6 +97,7 @@ test('artifact verification accepts a revision-labelled image whose revision is 
   assert.equal(r.code, 0, r.out);
   assert.match(r.summary, new RegExp(`index digest: \`${digest('1b')}\``));
   assert.match(r.summary, new RegExp(`revision: \`${r.h.head}\``));
+  assert.equal(r.output, `revision=${r.h.head}\n`, 'the only output handed to the deploy job is the verified revision');
 });
 
 test('artifact verification accepts an EARLIER main artifact (rollback to a labelled main build, OD-4)', () => {

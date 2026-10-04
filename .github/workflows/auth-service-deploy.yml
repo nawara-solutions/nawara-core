@@ -5,11 +5,14 @@ name: auth-service manual deploy
 # It NEVER builds (V2-A.2): the image comes from a build-image run of auth-service-docker-build.yml, identified by its INDEX digest
 # (shown in that run's summary). Deploying is an explicit, owner-authorized production mutation:
 #   gh workflow run auth-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy auth-service'
-# The typed confirmation is an interim safeguard only; it is NOT a reviewer gate (no `production` environment exists yet, V2-A.3).
-# The artifact must exist in the auth-service repository, carry an org.opencontainers.image.revision label, and that revision must be
-# an ancestor of main (an earlier labelled main artifact may be redeployed; PR builds and unlabelled legacy images are refused).
-# Secrets: the org-level DEPLOY_SSH_*. Application secrets are NOT stored in GitHub — the script generates them on the server.
-# It shares the production concurrency queue with every Core production operation, so they can never race.
+# Two jobs (V2-A.3 / A3.5):
+#   verify  no environment, no production credentials: validates the digest, and the artifact must exist in the auth-service
+#           repository, carry an org.opencontainers.image.revision label, and that revision must be an ancestor of main (an earlier
+#           labelled main artifact may be redeployed; PR builds and unlabelled legacy images are refused).
+#   deploy  needs verify; bound to the protected `production` environment, so it WAITS for a required reviewer's approval and only
+#           then receives the production SSH credentials (environment secrets). It deploys exactly IMAGE_NAME@digest.
+# The typed confirmation stays as an additional safeguard. Application secrets are NOT stored in GitHub — the script generates them on
+# the server. The deploy job shares the production concurrency queue with every Core production operation, so they can never race.
 on:
   workflow_dispatch:
     inputs:
@@ -26,17 +29,16 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-auth-service
 
 jobs:
-  deploy:
+  # Before any approval and without any production credential: a malformed or unverifiable digest is refused here, so nobody is ever
+  # asked to approve it, and waiting for verification never holds the production queue.
+  verify:
     if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy auth-service'
-    # Production deployments share ONE queue across every workflow. A running deployment is NEVER cancelled
-    # (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group.
-    concurrency:
-      group: production-deploy-core-api
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
+    outputs:
+      revision: ${{ steps.artifact.outputs.revision }}
     steps:
       # Full history only for the ancestry check below; nothing is built from this checkout.
       - uses: actions/checkout@v7
@@ -56,7 +58,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # Read-only: the digest must exist in the auth-service repository and be a revision-labelled artifact built from main.
-      - name: verify the artifact
+      - id: artifact
+        name: verify the artifact
         env:
           REF: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}
         run: |
@@ -68,13 +71,37 @@ jobs:
                        else (.["linux/amd64"].config.Labels["org.opencontainers.image.revision"] // "") end' <<<"$image")
           [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: no org.opencontainers.image.revision label (not a build-image artifact)" >&2; exit 1; }
           git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }
+          echo "revision=$rev" >>"$GITHUB_OUTPUT"
           {
-            echo "### auth-service deployment"
+            echo "### auth-service deployment (verified; awaiting production approval)"
             echo ""
             echo "- index digest: \`${REF##*@}\`"
             echo "- revision: \`$rev\`"
             echo "- main at dispatch: \`$GITHUB_SHA\`"
           } >>"$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy auth-service'
+    # The protected environment: a required reviewer approves before this job starts; its DEPLOY_SSH_* are environment secrets.
+    environment: production
+    # Production deployments share ONE queue across every workflow. A running deployment is NEVER cancelled
+    # (cancel-in-progress: false); a newer request waits its turn. GitHub keeps at most one waiting run per group.
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # Defence in depth: the same input, re-checked locally before the production step (no network).
+      - name: validate the digest
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
       - uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
@@ -91,5 +118,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          # EXACTLY the selected digest: never a tag, never a rebuild.
+          # EXACTLY the selected (and verified) digest: never a tag, never a rebuild.
           IMAGE: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}

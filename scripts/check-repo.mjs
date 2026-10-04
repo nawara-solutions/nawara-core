@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -20,17 +20,20 @@ function* walk(dir) {
 const wfDir = join(root, '.github/workflows');
 // V2-A.2: production deployments that take an exact, already-built image digest (the image repository each may deploy).
 const DIGEST_DEPLOYMENTS = { 'auth-service-deploy.yml': 'nawara-core-auth-service' };
+// V2-A.3 (A3.5): production operations that must keep their typed confirmation (workflow → the exact phrase).
+const CONFIRMED_OPERATIONS = { 'auth-service-deploy.yml': 'deploy auth-service', 'auth-db-credential-rotate.yml': 'rotate auth_app' };
 for (const f of readdirSync(wfDir).filter((n) => n.endsWith('.yml'))) {
   const text = readFileSync(join(wfDir, f), 'utf8');
   problems.push(...checkWorkflowSafety(f, text));
   if (f === 'core-ci.yml') problems.push(...checkCiCoverage(f, text), ...checkCiAggregate(f, text));
   if (DIGEST_DEPLOYMENTS[f]) problems.push(...checkDigestDeploy(f, text, DIGEST_DEPLOYMENTS[f]));
+  if (CONFIRMED_OPERATIONS[f]) problems.push(...checkTypedConfirmation(f, text, CONFIRMED_OPERATIONS[f]));
 }
-for (const f of Object.keys(DIGEST_DEPLOYMENTS)) {
+for (const f of [...Object.keys(DIGEST_DEPLOYMENTS), ...Object.keys(CONFIRMED_OPERATIONS)]) {
   try {
     readFileSync(join(wfDir, f));
   } catch {
-    problems.push(`${f} (a digest deployment) is missing`);
+    problems.push(`${f} (a protected production workflow) is missing`);
   }
 }
 try {

@@ -224,3 +224,12 @@ and repo digests, log configuration, restart policy, health check, networks and 
 bindings and queues; and three guard checks (Organization `VERIFIED|fresh|false|<digest>`, Auth marker `local`,
 `AUTH_EVENTS=off`). Prepared block: sha256 `ef4c28c338a6027880f2ca99345eac708a48342d37cf7eaca09e7a7d46299715`. Its output fixes
 the version parity targets of §4.
+
+## Later-status note (2026-10-04, V2-A.3 / A3.5)
+
+Appended; the plan above is unchanged. Step 12 of §12 ("Enable the daily production backup schedule: `CORE_BACKUP_SCHEDULE=enabled`")
+describes a mechanism that no longer exists on current `main`: `core-backup.yml` is dispatch-only and bound to the protected `production`
+environment. Scheduled backups return through a future, separately reviewed `production-backup` environment and job; that step is to be
+carried out through that design when the time comes, and stays after G6 as planned. The steps that run through GitHub workflows (the backups of
+steps 10 and 16, and the service redeploys within F6 and F7) now each need a `production` environment approval; commands the operator
+runs on the server are not affected. The G6 refresh must take this into account.
