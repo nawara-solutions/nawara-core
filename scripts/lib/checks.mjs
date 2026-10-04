@@ -160,6 +160,64 @@ export function checkDigestDeploy(fileName, text, repository) {
 }
 
 /** CI must actually run what it claims: every check below has to appear as a step of the matrix job. */
+/** V2-A.3 (A3.2): the stable aggregate check of Core CI, the one check a `main` ruleset requires. */
+export const CI_AGGREGATE = 'core-ci-passed';
+const AGGREGATE_RESULT_RULE = 'all(.[]; .result == "success")';
+
+/**
+ * The aggregate must exist under its stable id and name, need EVERY other job of the workflow, always run (a skipped required check
+ * counts as passed), and succeed only when every needed job succeeded. The workflow must report on every pull request to main: no
+ * path filter. Nothing may turn a failure into a success (continue-on-error).
+ */
+export function checkCiAggregate(fileName, text) {
+  const problems = [];
+  const doc = parse(text);
+  const jobs = doc?.jobs ?? {};
+  const on = doc?.on ?? doc?.true;
+  const pr = on && typeof on === 'object' && !Array.isArray(on) ? on.pull_request : undefined;
+  if (pr === undefined && !(Array.isArray(on) ? on.includes('pull_request') : on === 'pull_request')) {
+    problems.push(`${fileName}: must run on pull_request (the required check would never report)`);
+  } else if (pr && typeof pr === 'object') {
+    for (const filter of ['paths', 'paths-ignore']) {
+      if (filter in pr) problems.push(`${fileName}: pull_request must have no ${filter} filter (${CI_AGGREGATE} must report on every pull request, including documentation-only ones)`);
+    }
+    if ('branches' in pr && !asArray(pr.branches).includes('main')) problems.push(`${fileName}: pull_request must cover main`);
+    if ('branches-ignore' in pr) problems.push(`${fileName}: pull_request must not ignore branches`);
+  }
+
+  const job = jobs[CI_AGGREGATE];
+  if (!job) return [...problems, `${fileName}: the aggregate job "${CI_AGGREGATE}" is missing`];
+  const where = `${fileName} job "${CI_AGGREGATE}"`;
+  if (job.name !== CI_AGGREGATE) problems.push(`${where}: its name must be exactly "${CI_AGGREGATE}" (the stable required-check name)`);
+  if ('strategy' in job) problems.push(`${where}: must not be a matrix (its check name must stay stable)`);
+  const condition = String(job.if ?? '').replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim();
+  if (condition !== 'always()') problems.push(`${where}: must have "if: always()" (a skipped required check counts as passed)`);
+  if ('continue-on-error' in job) problems.push(`${where}: must not set continue-on-error`);
+
+  const others = Object.keys(jobs).filter((id) => id !== CI_AGGREGATE);
+  const needs = asArray(job.needs).map(String);
+  const missing = others.filter((id) => !needs.includes(id));
+  if (missing.length > 0) problems.push(`${where}: must need every other job (missing: ${missing.join(', ')})`);
+  const unknown = needs.filter((id) => !others.includes(id));
+  if (unknown.length > 0) problems.push(`${where}: needs unknown jobs (${unknown.join(', ')})`);
+
+  const steps = asArray(job.steps);
+  const verdict = steps.filter((s) => String(s.run ?? '').includes(AGGREGATE_RESULT_RULE));
+  const fromNeeds = (s) => Object.values(s.env ?? {}).some((v) => /^\$\{\{\s*toJSON\(needs\)\s*\}\}$/.test(String(v).trim()));
+  if (verdict.length !== 1 || !fromNeeds(verdict[0])) {
+    problems.push(`${where}: exactly one step must decide from toJSON(needs) with jq '${AGGREGATE_RESULT_RULE}'`);
+  } else if (firstCommandLine(verdict[0].run) !== 'set -euo pipefail') {
+    problems.push(`${where}: the deciding step must start with "set -euo pipefail"`);
+  }
+  if (steps.some((s) => 'continue-on-error' in s || 'if' in s)) problems.push(`${where}: its steps must not be conditional or continue on error`);
+  if (steps.some((s) => /\|\|\s*(true|:)\s*$/m.test(String(s.run ?? '')))) problems.push(`${where}: a step swallows its failure ("|| true")`);
+
+  for (const id of others) {
+    if ('continue-on-error' in (jobs[id] ?? {})) problems.push(`${fileName} job "${id}": must not set continue-on-error (it would report success to ${CI_AGGREGATE} after failing)`);
+  }
+  return problems;
+}
+
 export function checkCiCoverage(fileName, text) {
   const problems = [];
   const doc = parse(text);

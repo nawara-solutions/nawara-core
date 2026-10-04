@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { parse } from 'yaml';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:' } = {}) => `
 name: d
@@ -202,6 +204,80 @@ test('G: the digest deployment keeps the production queue, never cancels, main o
 test('I: the digest deployment keeps set -euo pipefail and no secret in the remote script', () => {
   assert.match(checkWorkflowSafety('d.yml', swap(DEPLOY, '            set -euo pipefail\n            trap', '            trap')).join(), /must start with "set -euo pipefail"/);
   assert.match(checkWorkflowSafety('d.yml', swap(DEPLOY, 'docker login ghcr.io -u "$GITHUB_ACTOR"', 'docker login ghcr.io -u ${{ secrets.DEPLOY_SSH_USER }}')).join(), /secret is interpolated/);
+});
+
+// ------------------------------------------------------------------------------ V2-A.3 (A3.2): the stable aggregate check
+const CORE_CI = workflow('core-ci.yml');
+const NEEDS_LINE = '    needs: [repo-checks, node, images, infra, e2e-real-broker, e2e-auth-organization, e2e-shared-platform]\n';
+
+test('core-ci-passed: the real Core CI workflow has the aggregate, needing every other job', () => {
+  assert.deepEqual(checkCiAggregate('core-ci.yml', CORE_CI), []);
+  const jobs = parse(CORE_CI).jobs;
+  assert.deepEqual([...jobs[CI_AGGREGATE].needs].sort(), Object.keys(jobs).filter((id) => id !== CI_AGGREGATE).sort());
+  assert.equal(jobs[CI_AGGREGATE].name, 'core-ci-passed');
+});
+
+test('core-ci-passed: removing the aggregate, renaming it or making it a matrix is refused', () => {
+  const without = CORE_CI.slice(0, CORE_CI.indexOf('  core-ci-passed:\n'));
+  assert.match(checkCiAggregate('core-ci.yml', without).join(), /aggregate job "core-ci-passed" is missing/);
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    name: core-ci-passed\n', '    name: all green\n')).join(), /name must be exactly "core-ci-passed"/);
+  const matrix = swap(CORE_CI, '    name: core-ci-passed\n', '    name: core-ci-passed\n    strategy:\n      matrix:\n        n: [1, 2]\n');
+  assert.match(checkCiAggregate('core-ci.yml', matrix).join(), /must not be a matrix/);
+});
+
+test('core-ci-passed: dropping any needed job, or adding a job it does not need, is refused', () => {
+  for (const id of ['repo-checks', 'node', 'images', 'infra', 'e2e-real-broker', 'e2e-auth-organization', 'e2e-shared-platform']) {
+    const dropped = swap(CORE_CI, NEEDS_LINE, NEEDS_LINE.replace(new RegExp(`${id}(, )?`), '').replace(', ]', ']'));
+    assert.match(checkCiAggregate('core-ci.yml', dropped).join(), new RegExp(`missing: ${id}`), id);
+  }
+  const added = swap(CORE_CI, '  core-ci-passed:\n', '  new-suite:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n\n  core-ci-passed:\n');
+  assert.match(checkCiAggregate('core-ci.yml', added).join(), /missing: new-suite/);
+});
+
+test('core-ci-passed: it must always run (a skipped required check counts as passed)', () => {
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    if: always()\n', '')).join(), /must have "if: always\(\)"/);
+  for (const weaker of ['success()', '!cancelled()', "always() && github.event_name == 'push'"]) {
+    assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    if: always()\n', `    if: ${weaker}\n`)).join(), /must have "if: always\(\)"/, weaker);
+  }
+  assert.deepEqual(checkCiAggregate('core-ci.yml', swap(CORE_CI, '    if: always()\n', '    if: ${{ always() }}\n')), []);
+});
+
+test('core-ci-passed: weakening the verdict is refused', () => {
+  const RULE = `all(.[]; .result == "success")`;
+  for (const weaker of ['any(.[]; .result == "success")', 'all(.[]; .result != "failure")', 'all(.[]; .result == "success" or .result == "skipped")']) {
+    assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, RULE, weaker)).join(), /exactly one step must decide/, weaker);
+  }
+  const swallowed = swap(CORE_CI, `|| { echo "core-ci-passed: at least one Core CI job did not succeed" >&2; exit 1; }`, '|| true');
+  assert.match(checkCiAggregate('core-ci.yml', swallowed).join(), /swallows its failure/);
+  const soft = swap(CORE_CI, '      - name: every Core CI job succeeded\n', '      - name: every Core CI job succeeded\n        continue-on-error: true\n');
+  assert.match(checkCiAggregate('core-ci.yml', soft).join(), /must not be conditional or continue on error/);
+  const softJob = swap(CORE_CI, '  infra:\n', '  infra:\n    continue-on-error: true\n');
+  assert.match(checkCiAggregate('core-ci.yml', softJob).join(), /job "infra": must not set continue-on-error/);
+  const otherSource = swap(CORE_CI, 'NEEDS: ${{ toJSON(needs) }}', 'NEEDS: ${{ toJSON(needs.node) }}');
+  assert.match(checkCiAggregate('core-ci.yml', otherSource).join(), /exactly one step must decide/);
+});
+
+test('core-ci-passed: Core CI must report on every pull request to main (no path filter)', () => {
+  for (const filter of ["    paths:\n      - 'apps/**'\n", "    paths-ignore:\n      - 'docs/**'\n"]) {
+    const filtered = swap(CORE_CI, '  pull_request:\n    branches: [main]\n', `  pull_request:\n    branches: [main]\n${filter}`);
+    assert.match(checkCiAggregate('core-ci.yml', filtered).join(), /must have no paths(-ignore)? filter/);
+  }
+  assert.match(checkCiAggregate('core-ci.yml', swap(CORE_CI, '  pull_request:\n    branches: [main]\n', '')).join(), /must run on pull_request/);
+});
+
+test('core-ci-passed: the REAL deciding step passes only when every needed job succeeded', () => {
+  const step = parse(CORE_CI).jobs[CI_AGGREGATE].steps.find((s) => s.name === 'every Core CI job succeeded');
+  const ids = parse(CORE_CI).jobs[CI_AGGREGATE].needs;
+  const decide = (results) => spawnSync('bash', ['-c', step.run], { env: { PATH: process.env.PATH, NEEDS: JSON.stringify(results) }, encoding: 'utf8' });
+  const all = (result, over = {}) => Object.fromEntries(ids.map((id) => [id, { result: over[id] ?? result, outputs: {} }]));
+  const green = decide(all('success'));
+  assert.equal(green.status, 0, green.stderr);
+  for (const id of ids) assert.match(green.stdout, new RegExp(`^${id}: success$`, 'm'));
+  for (const bad of ['failure', 'cancelled', 'skipped']) {
+    for (const id of ids) assert.notEqual(decide(all('success', { [id]: bad })).status, 0, `${id}=${bad} was accepted`);
+  }
+  assert.notEqual(decide({}).status, 0, 'an empty needs context was accepted');
+  assert.notEqual(spawnSync('bash', ['-c', step.run], { env: { PATH: process.env.PATH, NEEDS: 'not json' }, encoding: 'utf8' }).status, 0);
 });
 
 test('CI coverage: every claimed check must be an actual step', () => {

@@ -297,3 +297,23 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: build (kit, contract, every service) and run the shared-platform suites
         run: npm run test:e2e:audit-producers
+
+  # V2-A.3 (A3.2): the ONE stable check a `main` ruleset can require. Matrix check names change when the matrix changes; this name
+  # does not. It needs EVERY other job of this workflow (`npm run check:repo` refuses a job missing here) and always runs, because a
+  # required check that is SKIPPED counts as passed: without `if: always()` a failed dependency would skip this job and unblock the
+  # merge. It succeeds only when every needed job succeeded; failed, cancelled and skipped are all refused. This workflow has no
+  # path filter, so the check also reports on documentation-only pull requests.
+  core-ci-passed:
+    name: core-ci-passed
+    if: always()
+    needs: [repo-checks, node, images, infra, e2e-real-broker, e2e-auth-organization, e2e-shared-platform]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every Core CI job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null \
+            || { echo "core-ci-passed: at least one Core CI job did not succeed" >&2; exit 1; }
