@@ -1,8 +1,9 @@
 # Core V2 A0: immutable-digest deployment for organization-service and audit-service
 
-- **Status:** RECORD of the A0 design and implementation (A0.0 discovery, A0.1 design freeze, A0.2 implementation), written
-  2026-10-04. Certification (with the first build evidence, §7) is a later step. **It performs and authorizes no production
-  deployment.**
+- **Status:** **CERTIFIED** (2026-10-04, A0.8): the immutable build and exact-digest deployment mechanism for auth-service,
+  organization-service and audit-service, merged by PR #192 (`4979407`), with the post-merge evidence of §7 and the certification
+  scope of §8. Record of A0.0 discovery to A0.8 certification. **It performs and authorizes no production deployment: BUILT ≠
+  DEPLOYED.**
 - **Scope:** A0-A only: the immutable artifact and deployment model of organization-service and audit-service, a correctness fix to
   the auth-service build triggers, and generic repository guards. Platform release provenance (A0-B: service versions, release
   manifests, deployment history, promotion) is separate, later work.
@@ -87,15 +88,81 @@ untouched; successful migrations are forward-only; a container rollback does not
 - **No production deployment** is part of A0. The first organization-service or audit-service digest deployment ships current `main`
   (including the Core V1 refactor's localization changes) and is a separate, owner-authorized production action; it would also be the
   first observation of the `production` approval path (V2-A.3 / A3.6).
-- **Cutover §8.** The architectural question is answered by A0 and the mechanism is implemented. The first labelled artifacts are proven
-  by the build-only runs of the merge (§7). Selecting the exact digests for the G6 rehearsal and for production is deferred to the
-  refreshed G6 baseline. G6 is not complete.
-- **Status unchanged by A0:** A0 is implemented, not certified (certification needs the merge and the §7 evidence); the first
+- **Cutover §8.** The architectural artifact-pinning question is closed by A0 for auth-service, organization-service and audit-service:
+  immutable, revision- and source-labelled artifacts with exact index digests exist (§7), a deployment selects one reviewed artifact by
+  digest, and organization-service and audit-service no longer rebuild at deployment. **Closing the §8 mechanism is not completing the
+  production cutover.** The digests of §7 are evidence, not a selection: a future G6 refreshes the production baseline and selects the
+  exact digests appropriate at that time. G6 is not complete.
+- **Status unchanged by A0:** A0 is certified (§8), and nothing else advances: A3.1 to A3.5 are closed; the first
   organization-service and audit-service digest deployment belongs to A3.6, which stays deferred; A3.7 stays deferred; A3.8 is not
   certified; G6 is deferred; G7, F6 and F7 stay locked; Final Core Validation is the absolute last.
 
-## 7. First build evidence
+## 7. Evidence (A0.3 validation, A0.5 to A0.7 merge and first builds)
 
-*To be recorded after the merge (A0.7): for each of organization-service, audit-service and auth-service (whose workflow file changes),
-the run id, the source commit, the `sha-<commit>` tag, the index digest, the revision label read back read-only, and the absence of any
-SSH step, `production` approval request or deployment.*
+**Pre-merge validation (A0.3, A0.4).** `check:repo` passed; `test:repo` 50/50; `test:deploy` 211/211, 0 skipped. Negative-control
+campaign on real files: 45 mutations, 49 expected validator detections, 49 observed, 0 missed; all 23 files restored exactly (SHA-256
+and mode). The final diff, security and scope review passed.
+
+**Merge.** PR #192 (*V2 A0: immutable Organization and Audit deployments*), head `99ca6e322e2e4fa3b5050abe9ecc0407eff34acb`, merged by
+the owner at 2026-10-04T16:45:22Z as `4979407e1af1adc1a6a7c94d3e157a62a31ee534`.
+
+| Run | Id (attempt 1) | Result |
+|---|---|---|
+| PR Core CI | 37217517849 | 24/24 jobs; `core-ci-passed` success |
+| PR auth-service Docker build | 37217517850 | `build-develop` success (`:develop`, not deployable); `build-image` skipped. No organization-service or audit-service image build and no deploy workflow ran on the pull request |
+| Post-merge Core CI (push, `main`, `4979407`) | 37217937398 | 24/24 jobs; `core-ci-passed` success |
+| auth-service image (push, `main`, `4979407`) | 37217937389 | `build-image` success; `build-develop` skipped |
+| organization-service image (push, `main`, `4979407`) | 37217937390 | `build-image` success |
+| audit-service image (push, `main`, `4979407`) | 37217937392 | `build-image` success |
+
+**First labelled artifacts** (tag `sha-4979407e1af1adc1a6a7c94d3e157a62a31ee534` in each repository under `ghcr.io/nawara-solutions/`):
+
+| Service | Repository | Index digest |
+|---|---|---|
+| auth-service | `nawara-core-auth-service` | `sha256:0bd9d84acd7df14e9ab62c8229365b4f9e28d90a4e8ff863e9c41fee74feace8` |
+| organization-service | `nawara-core-organization-service` | `sha256:96bf973615887ff70837e4da5528635b918774eda86465641d0edfa920353c32` |
+| audit-service | `nawara-core-audit-service` | `sha256:37a5a92bf7beccb4fd38c4b8a758163806312b7cbe79b00d6025ed82cf142f2a` |
+
+Read back read-only from the registry for all three: the index fetched by `repository@digest` hashes to the reported digest; the `sha-`
+tag resolves to it; the shape is an OCI image index with `linux/amd64` and a provenance attestation manifest; the `linux/amd64` config
+carries `org.opencontainers.image.revision=4979407e1af1adc1a6a7c94d3e157a62a31ee534` and
+`org.opencontainers.image.source=https://github.com/nawara-solutions/nawara-core`. Static deploy-verifier compatibility passes (fixed
+repository, valid digest, literal 40-hex revision equal to the merge, an ancestor of `main`). No `:production` or `:latest` was created
+for organization-service or audit-service; auth-service's frozen `:production` and `:latest` still point to the legacy `26164d42…5eaf`.
+
+**No automatic production deployment.** The merge triggered only Core CI and the three image builds (no SSH step); no deploy, broker,
+rotation or backup workflow ran; the repository has 0 deployment records (0 for `production`).
+
+| A0.7 checklist | |
+|---|---|
+| PR merged; PR CI green; post-merge Core CI green | ✅ |
+| natural Auth, Organization and Audit immutable builds green | ✅ |
+| `sha-` tags observed; exact index digests recorded; digest and tag agree | ✅ |
+| revision and source labels read back | ✅ |
+| zero automatic production deployment | ✅ (12/12 items) |
+
+## 8. Certification
+
+**Certified (A0.8):** the immutable build and exact-digest deployment mechanism of auth-service, organization-service and audit-service:
+
+```text
+merge to main → build-only sha-<commit> artifact → index digest + OCI revision/source labels
+             → separate dispatch of <service>-deploy.yml → read-only verify (repository, digest, literal 40-hex revision, ancestor of main)
+             → protected production environment: typed confirmation + approval → deploy exactly IMAGE_NAME@digest
+```
+
+In particular: organization-service and audit-service no longer rebuild at deployment; building is separated from production
+deployment; build and verify jobs cannot cross the production SSH boundary; deployment is dispatch-only, from a fixed repository, with a
+strict digest and a literal-SHA revision that is an ancestor of `main`; production deployments stay serialized in one queue; and no
+automatic production deployment followed the A0 merge.
+
+**Not meant by this certification:** that any of these artifacts was deployed, that production has been cut over, or that A3.6, A3.7,
+A3.8, G6, G7, F6, F7 or the Final Core Validation passed. Production still runs the legacy, unlabelled images (§6). The first
+exact-digest production deployment is a separate, explicitly authorized production action (A3.6). **BUILT ≠ DEPLOYED.**
+
+**Open observations (not blockers; first observed during A3.6):**
+
+- No deployment `verify` job has yet run against these artifacts, so the shape that
+  `docker buildx imagetools inspect --format '{{json .Image}}'` returns for this real provenance-on index has not been observed in the
+  workflow. The verifier's `jq` handles both the image-config and the platform-keyed shape, and static compatibility passed.
+- Whether a run waiting for the `production` approval holds the `production-deploy-core-api` queue has not been observed.
