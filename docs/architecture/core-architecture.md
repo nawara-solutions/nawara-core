@@ -267,8 +267,10 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
   Mitigation later (caching with a short TTL) needs an explicit revocation decision.
 - **Production credentials outside an environment.** `main` is protected by a repository ruleset since V2-A.3 / A3.3 (pull request and
   a green `core-ci-passed` required; [record](./core-v2-a-3-ci-and-ruleset.md)), and since V2-A.2 a merge no longer deploys Auth
-  ([runbook](../runbooks/auth-service-deploy.md)). But the production SSH credentials are organization secrets readable by any
-  workflow run in this repository, on any branch, and no `production` environment exists yet (A3.4 to A3.7).
+  ([runbook](../runbooks/auth-service-deploy.md)); since V2 A0 the same holds for organization-service and audit-service, which deploy
+  by exact digest ([runbook](../runbooks/digest-deployments.md)). Every production SSH job waits for approval of the protected
+  `production` environment, which holds the production SSH credentials (A3.4, A3.5). But until A3.7 the same credentials also exist as
+  organization secrets, readable by any workflow run in this repository that does not declare the environment, on any branch.
 - **Shared-library coupling.** Every service ships the service-kit, so a kit change is a change to every service (and to the next Auth
   image built on merge).
 

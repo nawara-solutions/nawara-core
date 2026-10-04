@@ -1,0 +1,72 @@
+name: organization-service image
+
+# BUILD ONLY (V2 A0): a merge to main that changes an input of the organization-service image builds ONE revision-labelled image, records its
+# INDEX digest and STOPS. It never deploys, never touches the server, never uses the production environment or its credentials, and
+# is not in the production-deploy-core-api queue. Production changes only through an explicit, owner-authorized run of
+# organization-service-deploy.yml that deploys an exact digest built here (docs/runbooks/digest-deployments.md).
+# The paths are every input of the image: the service, the two libraries built inside it, the npm workspace manifests, the build
+# context filter and this workflow. There is deliberately no pull_request trigger: Core CI already builds and smoke-checks this image
+# on every pull request without pushing it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/organization-service/**'
+      # The image builds and ships @nawara/service-kit (including its migrations) and @nawara/audit-contract.
+      - 'libs/service-kit/**'
+      - 'libs/audit-contract/**'
+      - 'package.json'
+      - 'package-lock.json'
+      # The Docker build context filter.
+      - '.dockerignore'
+      - '.github/workflows/organization-service-image.yml'
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-organization-service
+
+jobs:
+  build-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/organization-service/Dockerfile
+          push: true
+          # Provenance stays on, so the push is an image INDEX and outputs.digest is the INDEX digest: the deployment authority.
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: record the artifact (not deployed)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "the build reported no index digest" >&2; exit 1; }
+          {
+            echo "### organization-service image built (NOT deployed)"
+            echo ""
+            echo "- revision: \`$GITHUB_SHA\`"
+            echo "- tag: \`$TAG\`"
+            echo "- index digest: \`$DIGEST\`"
+            echo ""
+            echo "Production is unchanged. Deploying this exact artifact needs an explicit, owner-authorized run of organization-service-deploy.yml:"
+            echo ""
+            echo "\`gh workflow run organization-service-deploy.yml --ref main -f digest=$DIGEST -f confirm='deploy organization-service'\`"
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -149,6 +149,73 @@ export function checkTypedConfirmation(fileName, text, phrase) {
 }
 
 const DIGEST_PATTERN = '^sha256:[0-9a-f]{64}$';
+/** V2 A0.3: the revision label of a digest deployment must be a literal 40-hex commit SHA, refused otherwise, before the ancestry check. */
+const REVISION_PATTERN = '^[0-9a-f]{40}$';
+const REVISION_CHECK = /\[\[\s*"\$([A-Za-z_]\w*)"\s*=~\s*\^\[0-9a-f\]\{40\}\$\s*\]\]\s*\|\|[^\n]*\bexit 1\b/;
+const ANCESTRY_CHECK = /git merge-base --is-ancestor\s+"\$([A-Za-z_]\w*)"\s+HEAD/;
+/** Inputs of every Core service image besides the service itself: the libraries built inside it, the workspace manifests, the context. */
+const SHARED_IMAGE_INPUTS = ['libs/service-kit/**', 'libs/audit-contract/**', 'package.json', 'package-lock.json', '.dockerignore'];
+
+/**
+ * V2 A0: an immutable image build. On a push to main (only), job `build-image` builds the service image once, pushes exactly
+ * `IMAGE_NAME:sha-<commit>` with the revision and source labels, and captures and validates the INDEX digest. No job of the workflow
+ * may use a production environment, the production SSH credentials, SSH or the production queue: building never deploys. Any other
+ * job (auth-service's `build-develop`) is pull_request-only and never publishes a `sha-`, `:production` or `:latest` tag. The trigger
+ * paths must cover every input of the image, including the workflow itself.
+ */
+export function checkImageBuild(fileName, text, { repository, app }) {
+  const problems = [];
+  const doc = parse(text);
+  const on = doc?.on ?? doc?.true;
+  const push = on && typeof on === 'object' ? on.push : undefined;
+  if (!push || typeof push !== 'object') {
+    problems.push(`${fileName}: an image build must run on push to main`);
+  } else {
+    const branches = asArray(push.branches).map(String);
+    if (branches.length !== 1 || branches[0] !== 'main') problems.push(`${fileName}: an image build must run on push to main only (got: ${branches.join(', ') || 'no branch filter'})`);
+    const paths = asArray(push.paths).map(String);
+    const required = [`apps/${app}/**`, ...SHARED_IMAGE_INPUTS, `.github/workflows/${fileName}`];
+    const missing = required.filter((r) => !paths.includes(r));
+    if (missing.length > 0) problems.push(`${fileName}: push paths must include every image input (missing: ${missing.join(', ')})`);
+  }
+  const unexpected = triggerNames(doc).filter((t) => !['push', 'pull_request'].includes(t));
+  if (unexpected.length > 0) problems.push(`${fileName}: an image build runs only on push (and pull_request for a non-production build), not on ${unexpected.join(', ')}`);
+  const imageName = String(doc?.env?.IMAGE_NAME ?? '');
+  if (imageName !== `ghcr.io/\${{ github.repository_owner }}/${repository}`) problems.push(`${fileName}: IMAGE_NAME must be ghcr.io/\${{ github.repository_owner }}/${repository} (got "${imageName}")`);
+
+  const jobs = doc?.jobs ?? {};
+  const pushStep = (job) => asArray(job?.steps).find((st) => String(st.uses ?? '').startsWith('docker/build-push-action'));
+  for (const [jobId, job] of Object.entries(jobs)) {
+    const where = `${fileName} job "${jobId}"`;
+    if (environmentOf(job) !== undefined) problems.push(`${where}: an image build must not declare an environment (building never deploys)`);
+    if (usesSsh(asArray(job.steps)) || PRODUCTION_CREDENTIAL.test(JSON.stringify(job))) problems.push(`${where}: an image build must not use production SSH or the DEPLOY_SSH_* credentials`);
+    if (job.concurrency?.group === PRODUCTION_GROUP || doc?.concurrency?.group === PRODUCTION_GROUP) problems.push(`${where}: an image build must not join the production queue`);
+    if (job.permissions?.packages === 'write' && !pushStep(job)) problems.push(`${where}: packages: write only on a job that builds and pushes an image`);
+    if (jobId === 'build-image') continue;
+    if (!String(job.if ?? '').includes("github.event_name == 'pull_request'")) problems.push(`${where}: a job other than build-image must be pull_request-only`);
+    if (/:sha-|:production\b|:latest\b/.test(String(pushStep(job)?.with?.tags ?? ''))) problems.push(`${where}: only build-image publishes the immutable sha- tag; never :production or :latest`);
+  }
+
+  const build = jobs['build-image'];
+  if (!build) return [...problems, `${fileName}: the "build-image" job is missing`];
+  const where = `${fileName} job "build-image"`;
+  const guard = String(build.if ?? '');
+  if (!guard.includes("github.event_name == 'push'") || !guard.includes('refs/heads/main')) problems.push(`${where}: must be restricted to a push to refs/heads/main`);
+  const steps = asArray(build.steps);
+  const buildAt = steps.findIndex((st) => String(st.uses ?? '').startsWith('docker/build-push-action'));
+  const step = steps[buildAt];
+  if (!step) return [...problems, `${where}: no docker/build-push-action step`];
+  if (step.id !== 'build') problems.push(`${where}: the build-push step must have id: build (its digest output is the deployment authority)`);
+  if (String(step.with?.tags ?? '').trim() !== '${{ env.IMAGE_NAME }}:sha-${{ github.sha }}') problems.push(`${where}: the only tag must be \${{ env.IMAGE_NAME }}:sha-\${{ github.sha }} (got "${String(step.with?.tags ?? '').trim()}")`);
+  const labels = String(step.with?.labels ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!labels.includes('org.opencontainers.image.revision=${{ github.sha }}')) problems.push(`${where}: the label org.opencontainers.image.revision=\${{ github.sha }} is required (deployments verify it)`);
+  if (!labels.some((l) => l.startsWith('org.opencontainers.image.source='))) problems.push(`${where}: the label org.opencontainers.image.source is required`);
+  const recorded = steps.slice(buildAt + 1).some((st) => Object.values(st.env ?? {}).some((v) => /^\$\{\{\s*steps\.build\.outputs\.digest\s*\}\}$/.test(String(v).trim()))
+    && String(st.run ?? '').includes(DIGEST_PATTERN));
+  if (!recorded) problems.push(`${where}: the index digest (steps.build.outputs.digest) must be captured and validated against ${DIGEST_PATTERN} after the build`);
+  return problems;
+}
+
 const BUILDS = /\bdocker\s+(buildx\s+)?build\b|\bbuildx\s+bake\b/;
 
 /**
@@ -213,6 +280,15 @@ export function checkDigestDeploy(fileName, text, repository) {
     }
     if (verifyAt < 0 || verifyAt < validateAt) {
       problems.push(`${where}: the artifact must be resolved and its revision label checked as an ancestor of main, after validation`);
+    } else {
+      // The extracted revision must be refused unless it is a literal commit SHA BEFORE the ancestry check: otherwise a label such as
+      // `main` (a ref git resolves) would pass `merge-base --is-ancestor` (V2 A0.3, control D9).
+      const run = String(steps[verifyAt].run);
+      const revisionCheck = REVISION_CHECK.exec(run);
+      const ancestry = ANCESTRY_CHECK.exec(run);
+      if (!revisionCheck || !ancestry || revisionCheck[1] !== ancestry[1] || revisionCheck.index > ancestry.index) {
+        problems.push(`${where}: the extracted revision must be refused unless it matches ${REVISION_PATTERN} (a literal commit SHA), before the ancestry check on the same variable`);
+      }
     }
   }
 

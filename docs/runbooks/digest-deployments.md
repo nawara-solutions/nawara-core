@@ -1,0 +1,83 @@
+# Core service deployment by exact digest (auth-service, organization-service, audit-service)
+
+- **Status:** current procedure for every Core service deployed to production from this repository (V2-A.2 for auth-service, V2 A0
+  for organization-service and audit-service). Service-specific preconditions stay in each service's runbook:
+  [auth-service](auth-service-deploy.md), [organization-service](organization-production.md) §2,
+  [audit-service and the broker order](core-rabbitmq-production.md) §1.
+- **Design:** [V2 A0 record](../architecture/core-v2-a0-immutable-deployments.md); history of the Auth transition:
+  [V2-A.2 certification](../architecture/core-v2-a-2-certification.md).
+
+## 1. Build ≠ deploy
+
+```text
+merge to main that changes an input of the image (the service, libs/service-kit, libs/audit-contract, package.json,
+package-lock.json, .dockerignore or the image workflow itself)
+   └─ <service> image workflow, job build-image (no environment, no production credentials, no SSH, not in the production queue)
+        build once → push ghcr.io/<owner>/nawara-core-<service>:sha-<full commit>
+        labels org.opencontainers.image.revision=<commit>, org.opencontainers.image.source=<repository>
+        → the run summary records: revision, sha tag, INDEX digest
+        ⇒ STOP. Nothing is deployed. Production is unchanged.
+
+explicit, owner-authorized production mutation
+   └─ <service>-deploy.yml (workflow_dispatch, main only, typed confirmation)
+        job verify  (no environment, no production credentials)
+            validate the digest → resolve <IMAGE_NAME>@<digest> in the service's own repository
+            → revision label present → revision is an ancestor of main
+        job deploy  (needs verify; environment `production`: WAITS for the required reviewer's approval;
+                     production-deploy-core-api queue, cancel-in-progress: false)
+            re-check the digest → SSH: pull exactly <IMAGE_NAME>@<digest> → run that image's provision-and-deploy.sh. Nothing is built.
+```
+
+| Service | Image workflow | Deploy workflow | Confirmation |
+|---|---|---|---|
+| auth-service | `auth-service-docker-build.yml` | `auth-service-deploy.yml` | `deploy auth-service` |
+| organization-service | `organization-service-image.yml` | `organization-service-deploy.yml` | `deploy organization-service` |
+| audit-service | `audit-service-image.yml` | `audit-service-deploy.yml` | `deploy audit-service` |
+
+- **The INDEX digest is the deployment authority.** Provenance stays on, so each push is an image index; the run summary shows its
+  digest. `sha-<commit>` is a human-readable handle only.
+- **Repository checks** (`npm run check:repo`) refuse an image workflow that deploys, uses the production environment or credentials,
+  publishes anything but `sha-<commit>`, lacks the labels or the digest check, or misses an image input in its trigger paths; and a
+  deploy workflow that builds, deploys anything but `IMAGE_NAME@digest`, skips `verify`, or loses its confirmation.
+
+## 2. Deploying an artifact (a production mutation: authorize each time)
+
+1. Take the index digest from the summary of the image workflow run of the `main` commit to deploy (an earlier labelled `main`
+   artifact may be selected).
+2. Dispatch, for example:
+
+   ```bash
+   gh workflow run organization-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy organization-service'
+   ```
+
+3. `verify` refuses, before any approval and before any SSH: a malformed digest; a digest that is not in **this service's** repository;
+   an image without the revision label (every image built before the service's immutable build, including what production runs today:
+   see §4); a revision that is not an ancestor of `main`. A confirmation other than the exact phrase skips both jobs.
+4. **Approve** the `deploy` job when it waits for the `production` environment (the run → **Review deployments** → `production` →
+   **Approve and deploy**). The reviewer is the owner; GitHub does not prevent self-approval here, so this is a deliberate second owner
+   action, not independent review. **Reject** (or cancel) a run you no longer want instead of leaving it waiting: whether a waiting run
+   holds the `production-deploy-core-api` queue has not been observed yet.
+5. The server side is the service's unchanged `provision-and-deploy.sh`, streamed **from that same image**, with the service's own
+   pre-checks (see its runbook).
+
+## 3. Migrations and rollback
+
+- The migrations run **from the selected exact image (digest)**, as the service's migrator role, **before** the running service is
+  replaced.
+- A failed or refused migration **leaves the running service untouched** (the deploy stops).
+- Successful migrations are **forward-only**.
+- If the new container does not become healthy it is removed and the previous container (kept as `<service>-previous-<timestamp>`) is
+  renamed back and started. **A container rollback does not undo database migrations.**
+
+## 4. Legacy images
+
+Images built before a service's immutable build carry no revision label, so the deploy workflow refuses them. This includes the images
+production runs today (auth-service since the last automatic deployment; organization-service and audit-service since their last
+rebuild-at-dispatch deployments). The running containers are not touched until a separately authorized deployment; returning to a
+legacy image uses the retained-container procedure, never the workflow.
+
+## 5. First build evidence
+
+The first image of each service is built naturally by the merge that introduces (or changes) its image workflow. Record: the run id,
+the source commit, the `sha-<commit>` tag, the index digest from the summary, a read-only `docker buildx imagetools inspect` of
+`<IMAGE_NAME>@<digest>` showing the revision label, and that no SSH step, `production` approval request or deployment occurred.
