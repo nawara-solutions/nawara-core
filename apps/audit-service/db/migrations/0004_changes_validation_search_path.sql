@@ -1,0 +1,11 @@
+-- V2 A13.3a: a backup of a non-empty audit database must restore. audit_changes_valid() (0001) is the CHECK of audit_record.changes and
+-- calls audit_change_scalar_valid() by its unqualified name. pg_restore loads data with search_path = '', and PostgreSQL inlines this
+-- IMMUTABLE SQL function when the constraint is prepared for COPY, so the inner call did not resolve and every restore of a database
+-- holding a record failed (`function audit_change_scalar_valid(jsonb) does not exist`), whatever the rows contained.
+--
+-- Fixing the function's own search_path makes the call resolve wherever it is evaluated (restore, migration, runtime), with the same
+-- validation as before: the function body, the constraint, the triggers, the privileges and the records are unchanged. 0001 is not
+-- edited (applied migrations are immutable; their checksums are recorded). `public, pg_temp` as in Organization's migration 0004: public
+-- is the migrator's schema (owner audit_migrator; the runtime holds USAGE only, PUBLIC nothing, so no other role can create a shadowing
+-- object), and pg_temp is listed LAST so a temporary object can never shadow the public function (the runtime holds no TEMP anyway).
+ALTER FUNCTION audit_changes_valid(jsonb) SET search_path = public, pg_temp;

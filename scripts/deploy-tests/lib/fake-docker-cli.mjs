@@ -46,7 +46,7 @@ function inspectContainer(fmt, name) {
     ['{{.Id}}', () => x.id],
     // --- rotate-db-credential.sh
     ['{{.Image}}', () => x.imageId],
-    ['{{.HostConfig.NetworkMode}}', () => x.networkMode ?? nets[0]],
+    ['{{.HostConfig.NetworkMode}}', () => state.drill?.networkModeOf?.[name] ?? x.networkMode ?? nets[0]],
     ['{{range $n, $_ := .NetworkSettings.Networks}}{{$n}}{{"\\n"}}{{end}}', () => nets.map((n) => `${n}\n`).join('')],
     ['{{range $k, $v := .Config.Labels}}{{$k}}={{$v}}{{"\\n"}}{{end}}', () => sortedLabels(x).map((l) => `${l}\n`).join('')],
     ['{{if .Config.Labels}}{{len .Config.Labels}}{{else}}0{{end}}', () => String(x.labelCount ?? x.labels.length)],
@@ -139,6 +139,7 @@ function rabbitmqctl(args) {
     case 'set_topic_permissions': { const p = params.filter((x, k) => x !== '-p' && params[k - 1] !== '-p'); b.topic[p[0]] = { exchange: p[1], write: p[2], read: p[3] }; break; }
     case 'list_bindings': out(b.bindings); break;
     case 'list_queues': out(b.queues); break;
+    case 'list_consumers': out(state.drill?.consumers ?? 'audit-service.audit\n'); break;
     default: process.stderr.write(`fake rabbitmqctl: unsupported ${sub}\n`); exit(2);
   }
   exit(0);
@@ -179,10 +180,16 @@ function s3(o, get, image, args) {
 }
 
 /** The tables a pg_restore --list of a fake archive shows data for (infra/backup requires the cutover-critical ones). */
-const TOC_TABLES = ['schema_migrations', 'ownership_state', 'ownership_event', 'hierarchy_id_ledger', 'company', 'platform', 'organization', 'outbox', 'hierarchy_authority', 'user'];
+const TOC_TABLES = ['schema_migrations', 'ownership_state', 'ownership_event', 'hierarchy_id_ledger', 'company', 'platform', 'organization', 'outbox', 'hierarchy_authority', 'user',
+  'audit_record', 'audit_retention_policy', 'audit_retention_run', 'inbox'];
 const FACTS_BASE = 'table|company|1\ntable|schema_migrations|8\nstructure|constraints|40\nmigrations|8|0123456789abcdef0123456789abcdef\nowner|company|x\nacl|company|x=r/x\n';
-/** Auth records its hierarchy marker (`hierarchy_authority.mode`); Organization its ownership state. */
-const factsFor = (name) => `${FACTS_BASE}${name.includes('auth') ? 'authority|local' : 'authority|PREPARED|fresh|false'}\n`;
+/** Auth records its hierarchy marker (`hierarchy_authority.mode`); Organization its ownership state; Audit its integrity facts (V2 A13). */
+export const AUDIT_KNOWN = 'known|auth-service|0b8b7c39-0000-4000-8000-000000000001|2026-10-01T10:00:00.123Z';
+const AUDIT_FACTS = ['trigger|audit_record|audit_record_stamp|O', 'trigger|outbox|outbox_immutable|O', 'funcacl|audit_grant_retention|audit_migrator|audit_migrator=X/audit_migrator',
+  'defacl|audit_migrator|r|audit_app=arwd/audit_migrator', 'nspacl|public|audit_migrator|audit_migrator=UC/audit_migrator audit_app=U/audit_migrator',
+  'audit_digest|1|0123456789abcdef0123456789abcdef', AUDIT_KNOWN].join('\n');
+const factsFor = (name) => (name.includes('audit') ? `${FACTS_BASE}${AUDIT_FACTS}\n`
+  : `${FACTS_BASE}${name.includes('auth') ? 'authority|local' : 'authority|PREPARED|fresh|false'}\n`);
 
 function execIn(args) {
   let i = 0;
@@ -212,12 +219,20 @@ function execIn(args) {
     state.restores = [...(state.restores ?? []), { container: name, argv: progArgs, at: state.calls.length - 1, bytes: data.length }];
     exit(D.restoreFail ? 1 : 0);
   }
-  if (prog === 'pg_isready') exit(D.dbNeverReady ? 2 : 0);
+  if (prog === 'pg_isready') { // D.initServerOnly: the image's temporary init server: the socket answers, TCP loopback does not (yet)
+    state.readinessProbes = [...(state.readinessProbes ?? []), progArgs];
+    if (D.dbNeverReady) exit(2);
+    exit(D.initServerOnly && !(progArgs.includes('-h') && progArgs[progArgs.indexOf('-h') + 1] === '127.0.0.1') ? 0 : D.initServerOnly ? 2 : 0);
+  }
   if (prog === 'wget') { out(D.notReady ? '' : '{"status":"ready"}'); exit(D.notReady ? 1 : 0); }
   if (prog === 'node' && progArgs.includes('hierarchy-status')) { // auth-service CLI: the marker plus fields a drill must never print
     if (D.statusFail) exit(1);
     out(`${JSON.stringify({ mode: D.appMode ?? 'local', frozen_at: null, frozen_by: 'Synthetic Operator Name', activation_evidence: null, retired_at: null, retired_by: null, contentDigest: 'c'.repeat(64) }, null, 2)}\n`);
     exit(0);
+  }
+  if (prog === 'node' && progArgs[0] === '-e' && progArgs[1].includes('/audit/platform/records')) { // the Audit drill's known-record read
+    state.auditReads = [...(state.auditReads ?? []), { container: name, args: progArgs.slice(2) }];
+    out(`${D.auditRead ?? 'match'}\n`); exit(0);
   }
   if (prog === 'node' && progArgs[0] === '-e') { out(`${D.apiName ?? D.knownName ?? 'Drill Synthetic Co'}\n`); exit(0); }
   if (prog === 'psql' && progArgs.includes('-c')) { // a read-only fact over the local socket
@@ -225,15 +240,26 @@ function execIn(args) {
     state.queries = [...(state.queries ?? []), { container: name, at: state.calls.length - 1, sql }];
     // infra/backup/restore-drill.sh: role attributes, schema_migrations owner/privileges, history length, known-id reads
     if (sql.includes('rolcanlogin')) { out(`${D.roleAttrs ?? 't|f|f|f|f|f'}\n`); exit(0); }
-    if (sql.includes('relowner') && sql.includes('schema_migrations')) { out(`${D.smOwner ?? (name.includes('organization') ? 'organization_migrator' : 'auth')}\n`); exit(0); }
+    // the Audit drill (V2 A13): the source's schema_migrations writes (O3-B notice) and the append-only triggers' state
+    if (sql.includes('source-history')) { out(`${D.sourceWrites ?? ''}\n`); exit(0); }
+    if (sql.includes("t.tgenabled = 'O'")) { out(`${D.triggersEnabled ?? 6}\n`); exit(0); }
+    if (sql.includes('relowner') && sql.includes('schema_migrations')) { out(`${D.smOwner ?? (name.includes('organization') ? 'organization_migrator' : name.includes('audit') ? 'audit_migrator' : 'auth')}\n`); exit(0); }
     if (sql.includes("'public.schema_migrations','SELECT'")) { out(`${D.smPrivileges ?? 't|f|f|f|f'}\n`); exit(0); }
+    // infra/backup (V2 A13.4a): a required migration applied at the backup source? (backup.missingMigration: no; historyUnreadable: error)
+    if (sql.includes("FROM schema_migrations WHERE name = '")) {
+      state.migrationChecks = [...(state.migrationChecks ?? []), { container: name, at: state.calls.length - 1, sql }];
+      if (B.historyUnreadable) { process.stderr.write('ERROR:  relation "schema_migrations" does not exist\n'); exit(1); }
+      out(`${B.missingMigration ? 0 : 1}\n`); exit(0);
+    }
     if (sql.includes('count(*) FROM schema_migrations')) { out(`${D.historyLength ?? 8}\n`); exit(0); }
     if (sql.includes('FROM company WHERE id')) { out(`${D.knownName ?? 'Drill Synthetic Co'}\n`); exit(0); }
     if (sql.includes('FROM "user" WHERE id')) { out(`${sql.match(/'([0-9a-f-]{36})'/)?.[1] ?? ''}\n`); exit(0); }
-    // organization-service deploy (Stage 21.x G1): runtime-role attributes, forbidden / missing privileges, ownership phase
-    if (sql.includes('rolbypassrls')) { out(`${state.org?.roleAttrs ?? 'f|f|f|f|f'}\n`); exit(0); }
-    if (sql.includes('WHERE NOT has_table_privilege')) { out(`${state.org?.missing ?? ''}\n`); exit(0); }
-    if (sql.includes('WHERE has_table_privilege')) { out(`${state.org?.forbidden ?? ''}\n`); exit(0); }
+    // organization-service and audit-service deploys (Stage 21.x G1, V2 A13): runtime-role attributes, forbidden / missing privileges,
+    // ownership phase (each database its own knobs: state.org, state.audit)
+    const P = name.includes('audit') ? state.audit : state.org;
+    if (sql.includes('rolbypassrls')) { out(`${P?.roleAttrs ?? 'f|f|f|f|f'}\n`); exit(0); }
+    if (sql.includes('WHERE NOT has_table_privilege')) { out(`${P?.missing ?? ''}\n`); exit(0); }
+    if (sql.includes('WHERE has_table_privilege')) { out(`${P?.forbidden ?? ''}\n`); exit(0); }
     if (sql.includes('FROM ownership_state')) { out(`${state.org?.phase ?? 'PREPARED|undeclared'}\n`); exit(0); }
     const role = sql.match(/rolname = '([^']+)'/)?.[1];
     const r = state.pg?.roles?.[role];
@@ -244,6 +270,10 @@ function execIn(args) {
     const text = readStdin();
     state.stdin.push({ container: name, text, at: state.calls.length - 1 });
     if (state.failPsql) exit(3);
+    if (text.includes('-- nawara-drill-controls')) { // the Audit drill's rolled-back controls: a knob names the control that was not refused
+      if (D.controlFail) { process.stderr.write(`ERROR:  nawara-control ${D.controlFail} failed (not refused)\nCONTEXT:  SQL statement "UPDATE audit_record SET outcome = 'secret-row-value'"\n`); exit(3); }
+      exit(0);
+    }
     if (text.includes('-- nawara-backup-facts')) { // infra/backup facts: at backup time from state.backup, after a drill restore from state.drill
       if (B.factsFail) exit(3);
       out(name.startsWith('nawara-drill-') ? (D.facts ?? B.facts ?? factsFor(name)) : (B.facts ?? factsFor(name))); exit(0);
@@ -264,7 +294,7 @@ function execIn(args) {
     out(`${user}|${r?.super ? 'true' : 'false'}\n`);
     exit(0);
   }
-  if (prog === 'rabbitmq-diagnostics') { if (user !== 'rabbitmq') state.rootCli = true; exit(state.broker.ready ? 0 : 69); }
+  if (prog === 'rabbitmq-diagnostics') { if (user !== 'rabbitmq') state.rootCli = true; exit(state.broker.ready && !D.mqNeverReady ? 0 : 69); }
   if (prog === 'rabbitmqctl') { if (user !== 'rabbitmq') state.rootCli = true; rabbitmqctl(progArgs); }
   exit(0);
 }

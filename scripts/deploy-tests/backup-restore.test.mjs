@@ -26,24 +26,28 @@ const PREFIX = 'nawara-core/prod';
 const BUCKET = 'nawara-backups-test';
 const hex = (seed) => seed.repeat(64).slice(0, 48);
 const SECRETS = {
-  pg: hex('a1'), app: hex('b2'), jwt: hex('c3'), broker: hex('d4'), migr: hex('e5'), orgApp: hex('f6'), token: hex('17'),
+  pg: hex('a1'), app: hex('b2'), jwt: hex('c3'), broker: hex('d4'), migr: hex('e5'), orgApp: hex('f6'), token: hex('17'), auditApp: hex('39'),
   awsId: 'AKIAFAKEBACKUPTEST01', awsSecret: hex('28'),
 };
 const DB_CONTAINER = (n) => ({ id: `id-${n}`, image: 'postgres:16-alpine', running: true, health: 'healthy', ports: [], publishAll: false, networks: {}, labels: [], mounts: [] });
 const write = (p, text, mode = 0o600) => { writeFileSync(p, text, { mode }); chmodSync(p, mode); };
 
 /** The production server: both databases, the services' secret files, and a configured backup destination. */
-function backupWorld({ dbs = ['nawara-core-auth-db', 'nawara-core-organization-db'], dest = {}, creds, recipient = CERT, s3 = {}, backup = {} } = {}) {
+function backupWorld({ dbs = ['nawara-core-auth-db', 'nawara-core-organization-db', 'nawara-core-audit-db'], dest = {}, creds, recipient = CERT, s3 = {}, backup = {} } = {}) {
   const w = world({ containers: Object.fromEntries(dbs.map((n) => [n, DB_CONTAINER(n)])), s3: { objects: {}, deleted: [], calls: [], ...s3 }, backup });
   const nc = join(w.home, 'nawara-core');
-  const auth = join(nc, 'auth-service'); const org = join(nc, 'organization-service'); const bk = join(nc, 'backup');
-  for (const d of [nc, auth, org, bk]) mkdirSync(d, { recursive: true, mode: 0o700 });
+  const auth = join(nc, 'auth-service'); const org = join(nc, 'organization-service'); const audit = join(nc, 'audit-service'); const bk = join(nc, 'backup');
+  for (const d of [nc, auth, org, audit, bk]) mkdirSync(d, { recursive: true, mode: 0o700 });
   write(join(auth, 'db.env'), `POSTGRES_USER=auth\nPOSTGRES_DB=auth\nPOSTGRES_PASSWORD=${SECRETS.pg}\nAUTH_APP_PASSWORD=${SECRETS.app}\n`);
   write(join(auth, '.env'), `NODE_ENV=production\nDATABASE_URL=postgres://auth_app:${SECRETS.app}@nawara-core-auth-db:5432/auth\nJWT_SECRET=${SECRETS.jwt}\nRABBITMQ_URL=amqp://auth-service:${SECRETS.broker}@nawara-core-rabbitmq:5672/nawara-core\nPAYMENT_SERVICE_URL=http://nawara-core-payment-service:3000\n`);
   write(join(org, 'db.env'), `POSTGRES_USER=organization_admin\nPOSTGRES_DB=postgres\nPOSTGRES_PASSWORD=${SECRETS.pg}\n`);
   write(join(org, 'roles.env'), `ORGANIZATION_MIGRATOR_PASSWORD=${SECRETS.migr}\nORGANIZATION_APP_PASSWORD=${SECRETS.orgApp}\n`);
   write(join(org, '.env'), `NODE_ENV=production\nDATABASE_URL=postgres://organization_app:${SECRETS.orgApp}@nawara-core-organization-db:5432/organization\nRABBITMQ_URL=amqp://organization-service:${SECRETS.broker}@nawara-core-rabbitmq:5672/nawara-core\n`);
   mkdirSync(join(org, 'callers'), { mode: 0o700 }); write(join(org, 'callers', 'provisioning.token'), `${SECRETS.token}\n`);
+  // V2 A13: audit-service's state, as its deploy writes it (no SERVICE_TOKENS / AUDIT_SERVICE_POLICY: reads are denied by default)
+  write(join(audit, 'db.env'), `POSTGRES_USER=audit_admin\nPOSTGRES_DB=postgres\nPOSTGRES_PASSWORD=${SECRETS.pg}\n`);
+  write(join(audit, 'roles.env'), `AUDIT_MIGRATOR_PASSWORD=${SECRETS.migr}\nAUDIT_APP_PASSWORD=${SECRETS.auditApp}\n`);
+  write(join(audit, '.env'), `NODE_ENV=production\nDATABASE_URL=postgres://audit_app:${SECRETS.auditApp}@nawara-core-audit-db:5432/audit\nRABBITMQ_URL=amqp://audit-service:${SECRETS.broker}@nawara-core-rabbitmq:5672/nawara-core\n`);
   const d = { BACKUP_S3_ENDPOINT: 'https://objects.example.test', BACKUP_S3_BUCKET: BUCKET, BACKUP_S3_REGION: 'test-region-1', BACKUP_S3_PREFIX: PREFIX, ...dest };
   write(join(bk, 'destination.env'), Object.entries(d).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}\n`).join(''));
   write(join(bk, 's3-credentials.env'), creds ?? `AWS_ACCESS_KEY_ID=${SECRETS.awsId}\nAWS_SECRET_ACCESS_KEY=${SECRETS.awsSecret}\n`);
@@ -218,11 +222,11 @@ test('backup: a credentials file readable by others is refused', () => {
 
 // ---------------------------------------------------------------- retention (D3: 30 daily backups), confined to the prefix
 const obj = (data = 'x') => ({ data: Buffer.from(data).toString('base64'), size: data.length, sha: '0'.repeat(64) });
-function seeded(days, extra = {}) {
+function seeded(days, extra = {}, svc = 'auth-service') {
   const objects = {};
   for (let d = 0; d < days; d++) {
     const day = new Date(Date.UTC(2026, 0, 1) + d * 86400000).toISOString().slice(0, 10).replace(/-/g, '');
-    for (const ext of ['db.dump.cms', 'facts.cms', 'config.tar.cms', 'manifest']) objects[`${BUCKET}/${PREFIX}/auth-service/auth-service-${day}T021700Z.${ext}`] = obj();
+    for (const ext of ['db.dump.cms', 'facts.cms', 'config.tar.cms', 'manifest']) objects[`${BUCKET}/${PREFIX}/${svc}/${svc}-${day}T021700Z.${ext}`] = obj();
   }
   for (const k of Object.keys(extra)) objects[`${BUCKET}/${k}`] = obj();
   return objects;
@@ -514,4 +518,337 @@ test('restore drill: the organization privilege assertion is the deploy\'s (a fo
   w.patch((s) => { s.org = { forbidden: 'ownership_state:UPDATE' }; });
   const r = w.run({ SERVICE: 'organization-service' });
   assert.equal(r.code, 1); assert.match(r.out, /organization_app holds forbidden privileges after the restore \(ownership_state:UPDATE\)/);
+});
+
+// ================================================================ V2 A13: audit-service (the append-only evidence store)
+const AUDIT_IMAGE = `ghcr.io/nawara-solutions/nawara-core-audit-service@sha256:${'cd'.repeat(32)}`;
+const AUDIT_DRILL = { SERVICE: 'audit-service', IMAGE: AUDIT_IMAGE };
+const MQ_IMAGE = 'rabbitmq:3.13.7-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc';
+const AUDIT_KNOWN = ['auth-service', '0b8b7c39-0000-4000-8000-000000000001', '2026-10-01T10:00:00.123Z'];
+const factsOf = (w, svc) => {
+  const key = keysOf(w).find((k) => k.includes(`/${svc}/`) && k.endsWith('.facts.cms'));
+  const tmp = mkdtempSync(join(tmpdir(), 'nawara-a13-dec-'));
+  try { return decrypt(w, key, tmp).toString(); } finally { rmSync(tmp, { recursive: true, force: true }); }
+};
+const sha256 = (t) => execFileSync('sha256sum', { input: t, encoding: 'utf8' }).slice(0, 64);
+
+test('A13 backup: audit-service dumps as audit_migrator inside nawara-core-audit-db; secret files, Audit integrity facts, the shared outbox fact', () => {
+  const w = backupWorld();
+  const r = w.backup('audit-service');
+  assert.equal(r.code, 0, r.out);
+  const s = w.state();
+  assert.deepEqual(s.dumps.map((d) => [d.container, d.argv]), [['nawara-core-audit-db', ['-U', 'audit_migrator', '-d', 'audit', '-Fc']]], 'the owner reads everything (audit_app cannot read the retention tables)');
+  const keys = keysOf(w);
+  assert.equal(keys.length, 4);
+  assert.ok(keys.every((k) => k.startsWith(`${PREFIX}/audit-service/audit-service-`)));
+  assert.match(puts(w).at(-1), /\.manifest$/, 'the manifest last');
+  const key = keys.find((k) => k.endsWith('.config.tar.cms'));
+  const tmp = mkdtempSync(join(tmpdir(), 'nawara-a13-dec-'));
+  try {
+    writeFileSync(join(tmp, 'c.tar'), decrypt(w, key, tmp));
+    const listing = execFileSync('tar', ['-tvf', join(tmp, 'c.tar')], { encoding: 'utf8' });
+    for (const f of ['db\\.env', 'roles\\.env', '\\.env']) assert.match(listing, new RegExp(`^-rw------- .* ${f}$`, 'm'));
+    assert.equal(listing.trim().split('\n').length, 3, 'exactly db.env, roles.env and .env');
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+  const facts = factsOf(w, 'audit-service');
+  const [sql] = facts.split('-- nawara-backup-facts-results\n');
+  assert.match(sql, /SELECT 'outbox\|' \|\| count\(\*\)/, 'the shared outbox fact is kept (the kit baseline gives Audit an outbox)');
+  for (const f of ["'trigger|'", "'funcacl|'", "'defacl|'", "'nspacl|public|'", "'audit_digest|'", "'known|'"]) assert.ok(sql.includes(f), `Audit integrity fact ${f}`);
+  assert.match(sql, /extract\(epoch FROM "recordedAt"\)/, 'the record digest covers the database clock');
+  assert.match(sql, /date_trunc\('milliseconds', "occurredAt" AT TIME ZONE 'UTC'\), 'YYYY-MM-DD"T"HH24:MI:SS\.MS"Z"'/, 'the known instant is millisecond-precise (the API\'s from/to grammar; found by the A13.2 real-PostgreSQL smoke)');
+  assert.doesNotMatch(sql, /hierarchy_authority|ownership_state/, 'no other service\'s authority marker');
+  assert.match(status(w, 'audit-service', 'last-attempt'), /^result=succeeded$/m);
+  assert.deepEqual(workLeft(w), []);
+  noLeak(w, r.out + JSON.stringify(s.calls) + status(w, 'audit-service', 'last-success'));
+});
+
+test('A13 regression: the Auth and Organization facts SQL equals the certified tooling except the A13.3b canonical ACL fact (pinned hashes)', () => {
+  const w = backupWorld();
+  assert.equal(w.backup('auth-service organization-service').code, 0);
+  const golden = {
+    // origin/main 16539b5 had 723475830e5f… (auth) and ca1375eb474e… (organization); the only difference is the acl| fact (A13.3b)
+    'auth-service': '8d15946631b62f313bee903e41f22ddc5baa02220eeb474461748da9c110b287',
+    'organization-service': 'baa054298172754abf62a83c2a9a7b729d3c0b6d6ad11faa33ed9881e44bf70c',
+  };
+  for (const [svc, hash] of Object.entries(golden)) {
+    const [sql] = factsOf(w, svc).split('-- nawara-backup-facts-results\n');
+    assert.equal(sha256(sql), hash, `${svc}: facts SQL unchanged`);
+  }
+  assert.deepEqual(w.state().dumps.map((d) => d.argv), [['-U', 'auth_app', '-d', 'auth', '-Fc'], ['-U', 'organization_migrator', '-d', 'organization', '-Fc']]);
+});
+
+for (const table of ['schema_migrations', 'audit_record', 'audit_retention_policy', 'audit_retention_run', 'outbox', 'inbox']) {
+  test(`A13 backup: fail closed when the archive has no data section for ${table} (REQUIRED_DATA); nothing is uploaded`, () => {
+    const w = backupWorld({ backup: { tocMissing: table } });
+    const r = w.backup('audit-service');
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, new RegExp(`the archive holds no data for table ${table}; nothing was uploaded`));
+    assert.deepEqual(puts(w), []); assert.deepEqual(workLeft(w), []);
+    assert.match(status(w, 'audit-service', 'last-attempt'), /^result=failed\nstage=verify$/m);
+  });
+}
+
+test('A13 backup: kit_rate_limit (ephemeral counters) is facts-only: the backup does not require its data section', () => {
+  const script = readFileSync(SCRIPTS.backup, 'utf8');
+  const line = script.match(/REQUIRED_DATA="schema_migrations audit_record[^"]*"/)[0];
+  assert.doesNotMatch(line, /kit_rate_limit/);
+  assert.equal(backupWorld({ backup: { tocMissing: 'kit_rate_limit' } }).backup('audit-service').code, 0);
+});
+
+test('A13 backup: a missing roles.env fails audit-service at preflight; nothing is dumped for it', () => {
+  const w = backupWorld();
+  rmSync(join(w.home, 'nawara-core', 'audit-service', 'roles.env'));
+  const r = w.backup('audit-service');
+  assert.equal(r.code, 1);
+  assert.match(r.out, /audit-service\/roles\.env is missing; nothing was backed up/);
+  assert.equal(w.state().dumps, undefined);
+});
+
+test('A13 backup: partial failure: a missing audit database fails audit-service only; auth-service is still backed up (exit 1)', () => {
+  const w = backupWorld({ dbs: ['nawara-core-auth-db'] });
+  const r = w.backup('auth-service audit-service');
+  assert.equal(r.code, 1);
+  assert.match(r.out, /audit-service: database container nawara-core-audit-db not found/);
+  assert.equal(keysOf(w).filter((k) => k.includes('/auth-service/')).length, 4);
+  assert.match(status(w, 'audit-service', 'last-attempt'), /^result=failed\nstage=preflight$/m);
+  assert.match(status(w, 'auth-service', 'last-attempt'), /^result=succeeded$/m);
+});
+
+test('A13 backup: the allow-list names audit-service; an unknown service is still refused before anything is dumped', () => {
+  const w = backupWorld();
+  const r = w.backup('billing-service');
+  assert.equal(r.code, 1);
+  assert.match(r.out, /unknown service 'billing-service' \(known: organization-service auth-service audit-service\)/);
+  assert.equal(w.state().dumps, undefined);
+});
+
+test('A13 retention: 35 Audit backup days keep the newest 30; Auth and Organization objects and look-alikes are never touched', () => {
+  const others = { ...seeded(3, {}, 'auth-service'), ...seeded(3, {}, 'organization-service') };
+  const extra = { [`${PREFIX}/audit-service-evil/audit-service-20260101T021700Z.manifest`]: 1, [`${PREFIX}/audit-service/audit-service-20260101T021700Z.manifest.bak`]: 1 };
+  const w = backupWorld({ s3: { objects: { ...seeded(35, extra, 'audit-service'), ...others } } });
+  const r = w.backup('audit-service');
+  assert.equal(r.code, 0, r.out);
+  const deleted = w.state().s3.deleted;
+  assert.equal(deleted.length, 6 * 4);
+  for (const k of deleted) assert.match(k, new RegExp(`^${PREFIX}/audit-service/audit-service-2026010[1-6]T021700Z\\.(db\\.dump\\.cms|config\\.tar\\.cms|facts\\.cms|manifest)$`));
+  const left = keysOf(w);
+  for (const k of [...Object.keys(others).map((x) => x.slice(BUCKET.length + 1)), ...Object.keys(extra)]) assert.ok(left.includes(k), `never touched: ${k}`);
+});
+
+// ---------------------------------------------------------------- A13 restore drill
+test('A13 restore drill: audit-service: isolated database and disposable broker, facts before narrowing, assertion, controls, real /ready, known-record read', () => {
+  const w = recoveryWorld(backedUp('audit-service'));
+  const r = w.run(AUDIT_DRILL);
+  assert.equal(r.code, 0, r.out);
+  const s = w.state();
+  const DDB = 'nawara-drill-audit-service-test-db'; const DMQ = 'nawara-drill-audit-service-test-mq'; const DAPP = 'nawara-drill-audit-service-test-app';
+  const db = s.runs.find((x) => x.name === DDB); const mq = s.runs.find((x) => x.name === DMQ); const app = s.runs.find((x) => x.name === DAPP);
+  assert.equal(db.network, 'none', 'the drill database has no network at all');
+  assert.equal(mq.network, `container:${DDB}`, 'the broker shares only the drill namespace');
+  assert.equal(mq.image, MQ_IMAGE, 'the production broker\'s pinned image, nothing else of production');
+  assert.ok(mq.env.includes('RABBITMQ_NODENAME=rabbit@localhost') && mq.env.includes('RABBITMQ_DEFAULT_VHOST=nawara-core') && mq.env.includes('RABBITMQ_DEFAULT_USER=drill'));
+  assert.equal(app.network, `container:${DDB}`);
+  assert.equal(app.image, AUDIT_IMAGE);
+  const url = app.env.filter((e) => e.startsWith('RABBITMQ_URL='));
+  assert.equal(url.length, 1); assert.match(url[0], /^RABBITMQ_URL=amqp:\/\/drill:[0-9a-f]{48}@127\.0\.0\.1:5672\/nawara-core$/, 'the disposable broker only');
+  assert.ok(!app.env.some((e) => e.includes('nawara-core-rabbitmq') || e.includes(SECRETS.broker) || e.includes(SECRETS.auditApp)), 'no production endpoint or credential');
+  assert.ok(app.env.some((e) => /^SERVICE_TOKENS=drill-reader:[0-9a-f]{64}$/.test(e)), 'a drill-only read credential');
+  assert.ok(app.env.includes('AUDIT_SERVICE_POLICY={"callers":{"drill-reader":{"operations":["read_platform"],"categories":["security","business","commercial","administrative"]}}}'));
+  assert.ok(!s.calls.some((a) => a[0] === 'exec' && a.includes(DMQ) && !a.includes('rabbitmq')), 'the broker CLI always runs as the rabbitmq user');
+  assert.notEqual(s.rootCli, true);
+  // order: roles -> restore -> migrations -> facts (source state) -> narrowing -> assertion -> controls -> broker -> service -> consumer -> read
+  const at = (pred) => s.calls.findIndex(pred);
+  const stdinAt = (needle) => s.stdin.find((x) => x.container === DDB && x.text.includes(needle))?.at;
+  const roles = stdinAt('CREATE ROLE audit_migrator'); const restore = s.restores[0].at;
+  const migrate = at((a) => a[0] === 'run' && a.includes('--rm') && a.includes('../../libs/service-kit/dist/cli/migrate.js'));
+  const facts = s.stdin.filter((x) => x.container === DDB && x.text.includes('-- nawara-backup-facts')).map((x) => x.at)[0];
+  const narrow = stdinAt('REVOKE ALL ON TABLE schema_migrations FROM audit_app;');
+  const forbiddenQ = s.queries.find((q) => q.container === DDB && q.sql.includes('WHERE has_table_privilege')).at;
+  const controls = stdinAt('-- nawara-drill-controls');
+  const mqRun = at((a) => a[0] === 'run' && a.includes(DMQ)); const appRun = at((a) => a[0] === 'run' && a.includes(DAPP));
+  const consumers = at((a) => a[0] === 'exec' && a.includes('list_consumers'));
+  assert.ok(roles < restore && restore < migrate && migrate < facts && facts < narrow && narrow < forbiddenQ && forbiddenQ < controls
+    && controls < mqRun && mqRun < appRun && appRun < consumers, 'the frozen A13.1 order');
+  const ctl = s.stdin.find((x) => x.text.includes('-- nawara-drill-controls')).text;
+  for (const n of ['N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8', 'N9a', 'N9b', 'N9c', 'N10']) assert.ok(ctl.includes(`refused('${n}'`), `control ${n}`);
+  assert.match(ctl, /SET LOCAL ROLE audit_app;[\s\S]*"recordedAt"[\s\S]*2000-01-01T00:00:00Z[\s\S]*ERRCODE = 'NWRA1'/, 'P1 is inside a rolled-back block');
+  assert.deepEqual(s.auditReads[0].args, [AUDIT_KNOWN[2], AUDIT_KNOWN[0], AUDIT_KNOWN[1]], 'the newest record recorded at backup time is read back (instant, source, eventId)');
+  for (const p of [/PASS  disposable drill broker ready in the drill namespace/, /PASS  the deploy's privilege assertion/, /PASS  append-only and privilege controls: 12 refusals/,
+    /PASS  GET \/ready -> \{"status":"ready"\} \(the real contract: the restored database, its migrations, the drill broker and the ingestion consumer\)/,
+    /PASS  the ingestion consumer is attached to the disposable drill broker/, /PASS  application read: GET \/audit\/platform\/records returns the newest record/,
+    /PASS  \d+ restore facts equal the backup's \(row counts, structure, migration history, owners, ACLs, append-only triggers/,
+    /DRILL_RESULT service=audit-service stamp=\d{8}T\d{6}Z checks=\d+ duration_s=\d+$/m]) assert.match(r.out, p);
+  assert.doesNotMatch(r.out, /NOTICE/, 'a narrowed source raises no O3-B notice');
+  assertDrillGone(w);
+  noLeak(w, r.out);
+});
+
+test('A13 restore drill: a backup source still at O3-B is reported (NOTICE), and the intended state is applied and asserted', () => {
+  const w = recoveryWorld(backedUp('audit-service'), { drill: { sourceWrites: 'INSERT,UPDATE,DELETE' } });
+  const r = w.run(AUDIT_DRILL);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /NOTICE {2}backup source: audit_app could INSERT,UPDATE,DELETE schema_migrations \(O3-B present at the source\)/);
+  assert.match(r.out, /PASS  audit_app: LOGIN NOSUPERUSER .* runtime SELECT only/);
+});
+
+for (const [label, drill, reason] of [
+  ['a control is not refused (N2: the append-only trigger)', { controlFail: 'N2' }, /an append-only or privilege control was not refused as expected \(nawara-control N2\)/],
+  ['the database clock does not stamp recordedAt (P1)', { controlFail: 'P1' }, /\(nawara-control P1\)/],
+  ['an append-only trigger is missing or disabled (P2)', { triggersEnabled: 5 }, /append-only and immutability triggers are not all present and enabled after the restore \(P2\)/],
+  ['the disposable broker never becomes ready', { mqNeverReady: true }, /the disposable drill broker did not become ready/],
+  ['the broker is not confined to the drill namespace', { networkModeOf: { 'nawara-drill-audit-service-test-mq': 'bridge' } }, /the drill broker is not confined to the drill namespace/],
+  ['the service is not confined to the drill namespace', { networkModeOf: { 'nawara-drill-audit-service-test-app': 'nawara-core-internal' } }, /the drill service is not confined to the drill namespace/],
+  ['the service never answers ready (real /ready)', { notReady: true }, /GET \/ready did not answer ready/],
+  ['the ingestion consumer is not on the drill broker', { consumers: '' }, /the ingestion consumer is not attached to the disposable drill broker/],
+  ['the known record read through the API does not match', { auditRead: 'mismatch' }, /the known record read through the API does not match the record recorded at backup time \(mismatch\)/],
+  ['the drill reader is refused', { auditRead: 'status=403' }, /does not match the record recorded at backup time \(status=403\)/],
+  ['a restored fact differs from the backup', { facts: 'table|company|1\n' }, /a restored fact differs from the backup/],
+]) {
+  test(`A13 restore drill: fail closed when ${label}; every drill container and its volume is removed`, () => {
+    const w = recoveryWorld(backedUp('audit-service'), { drill });
+    const r = w.run(AUDIT_DRILL);
+    assert.equal(r.code, 1, r.out); assert.match(r.out, reason);
+    assert.doesNotMatch(r.out, /secret-row-value|CONTEXT:/, 'a failing control prints its name, never its statement or a value');
+    assertDrillGone(w);
+    noLeak(w, r.out);
+  });
+}
+
+test('A13 restore drill: the deploy\'s privilege assertion applies after the restore (audit_app able to write the history fails the drill)', () => {
+  const w = recoveryWorld(backedUp('audit-service'));
+  w.patch((s) => { s.audit = { forbidden: 'schema_migrations:INSERT' }; });
+  const r = w.run(AUDIT_DRILL);
+  assert.equal(r.code, 1); assert.match(r.out, /audit_app holds forbidden privileges after the restore \(schema_migrations:INSERT\)/);
+  assertDrillGone(w);
+});
+
+test('A13 restore drill: a backup with no audit record to read back (known|none) is refused before any control or service', () => {
+  const b = backupWorld({ backup: { facts: 'table|audit_record|0\nmigrations|6|0123456789abcdef0123456789abcdef\nknown|none\n' } });
+  assert.equal(b.backup('audit-service').code, 0);
+  const w = recoveryWorld(b, { drill: { facts: 'table|audit_record|0\nmigrations|6|0123456789abcdef0123456789abcdef\nknown|none\n' } });
+  const r = w.run(AUDIT_DRILL);
+  assert.equal(r.code, 1, r.out); assert.match(r.out, /the backup recorded no audit record to read back/);
+  assert.ok(!w.state().stdin.some((x) => x.text.includes('-- nawara-drill-controls')), 'no control ran');
+  assertDrillGone(w);
+});
+
+for (const [label, env, containers, reason] of [
+  ['a Docker host running the production audit database', {}, { 'nawara-core-audit-db': DB_CONTAINER('nawara-core-audit-db') }, /runs nawara-core-audit-db: a drill belongs in the recovery environment/],
+  ['an existing drill broker', {}, { 'nawara-drill-audit-service-test-mq': DB_CONTAINER('x') }, /nawara-drill-audit-service-test-mq already exists/],
+  ['a known id for audit-service (its record comes from the backup)', { KNOWN_ID: KNOWN }, {}, /KNOWN_ID is not used for audit-service/],
+]) {
+  test(`A13 restore drill: refused before anything is created: ${label}`, () => {
+    const w = recoveryWorld(backedUp('audit-service'), { containers });
+    const r = w.run({ ...AUDIT_DRILL, ...env });
+    assert.equal(r.code, 1, r.out); assert.match(r.out, reason);
+    assert.equal((w.state().runs ?? []).length, 0, 'no container was created');
+  });
+}
+
+test('A13 restore drill: KEEP_DRILL=yes keeps the database, the broker and the service, and says how to remove all three', () => {
+  const w = recoveryWorld(backedUp('audit-service'));
+  const r = w.run({ ...AUDIT_DRILL, KEEP_DRILL: 'yes' });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /remove them with: docker rm -f -v nawara-drill-audit-service-test-app nawara-drill-audit-service-test-mq nawara-drill-audit-service-test-db/);
+  assert.equal(Object.keys(w.state().containers).filter((n) => n.startsWith('nawara-drill-')).length, 3);
+  assert.deepEqual(readdirSync(w.tmp), [], 'plaintext files are removed even when the containers are kept');
+});
+
+// ---------------------------------------------------------------- A13.3b: the canonical ACL fact and the TCP readiness probe
+test('A13.3b: the acl| fact is canonical: a NULL (default) ACL is written out with acldefault() of the right object type; real ACLs as stored', () => {
+  const w = backupWorld();
+  assert.equal(w.backup('auth-service organization-service audit-service').code, 0);
+  for (const svc of ['auth-service', 'organization-service', 'audit-service']) {
+    const [sql] = factsOf(w, svc).split('-- nawara-backup-facts-results\n');
+    const line = sql.split('\n').find((l) => l.startsWith("SELECT 'acl|'"));
+    assert.equal(line, `SELECT 'acl|' || c.relname || '|' || array_to_string(coalesce(c.relacl, acldefault(CASE c.relkind WHEN 'S' THEN 's'::"char" ELSE 'r'::"char" END, c.relowner)), ' ')`,
+      `${svc}: stored ACL when present, else the default ACL of the object's own type (sequence 's', table 'r')`);
+    assert.match(sql, /c\.relkind IN \('r', 'S'\)/, 'tables and sequences only, as before');
+    assert.doesNotMatch(sql, /coalesce\(array_to_string\(c\.relacl, ' '\), ''\)/, 'the raw form (NULL written as empty) is gone');
+  }
+});
+
+test('A13.3b: the drill waits for PostgreSQL over TCP loopback; the socket-only init server is not accepted (fail closed)', () => {
+  const ok = recoveryWorld(backedUp());
+  assert.equal(ok.run().code, 0);
+  const probes = ok.state().readinessProbes;
+  assert.ok(probes.length > 0 && probes.every((a) => a[0] === '-h' && a[1] === '127.0.0.1' && a.includes('-U') && a.includes('-d') && a.includes('-q')), 'every probe is pg_isready -h 127.0.0.1 -U <user> -d <db> -q');
+  const init = recoveryWorld(backedUp(), { drill: { initServerOnly: true } });
+  const r = init.run();
+  assert.equal(r.code, 1, r.out); assert.match(r.out, /the drill database did not start/);
+  assert.equal(init.state().restores, undefined, 'nothing is restored into a database that is not the final server');
+  assertDrillGone(init);
+});
+
+test('A13.3b: a drill database that never becomes ready fails closed (no restore; the drill is removed)', () => {
+  const w = recoveryWorld(backedUp('audit-service'), { drill: { dbNeverReady: true } });
+  const r = w.run(AUDIT_DRILL);
+  assert.equal(r.code, 1, r.out); assert.match(r.out, /the drill database did not start/);
+  assert.equal(w.state().restores, undefined);
+  assertDrillGone(w);
+});
+
+// ---------------------------------------------------------------- A13.4a (M1): an Audit backup requires migration 0004 at the source
+const REQUIRED_AUDIT_MIGRATION = '0004_changes_validation_search_path.sql';
+
+test('A13.4a: audit-service checks that 0004 is applied, as audit_migrator, before anything is dumped; then backs up normally', () => {
+  const w = backupWorld();
+  const r = w.backup('audit-service');
+  assert.equal(r.code, 0, r.out);
+  const s = w.state();
+  assert.equal(s.migrationChecks.length, 1);
+  const check = s.migrationChecks[0];
+  assert.equal(check.container, 'nawara-core-audit-db');
+  assert.equal(check.sql, `SELECT count(*) FROM schema_migrations WHERE name = '${REQUIRED_AUDIT_MIGRATION}'`, 'the exact migration, a constant of the target');
+  const argv = s.calls[check.at];
+  assert.deepEqual(argv.slice(argv.indexOf('-U'), argv.indexOf('-U') + 4), ['-U', 'audit_migrator', '-d', 'audit']);
+  const dumpAt = s.calls.findIndex((a) => a[0] === 'exec' && a.includes('pg_dump') && !a.includes('--version'));
+  assert.ok(check.at < dumpAt, 'the prerequisite is checked before pg_dump');
+  assert.equal(keysOf(w).length, 4);
+  assert.match(status(w, 'audit-service', 'last-attempt'), /^result=succeeded$/m);
+});
+
+for (const [label, backup, reason] of [
+  ['0004 is not applied', { missingMigration: true }, new RegExp(`required migration ${REQUIRED_AUDIT_MIGRATION.replace(/\./g, '\\.')} is not applied in audit \\(deploy it first\\); nothing was backed up`)],
+  ['the migration history cannot be read', { historyUnreadable: true }, /the migration history of audit could not be read; nothing was backed up/],
+]) {
+  test(`A13.4a: fail closed when ${label}: no dump, no encryption, no upload, no manifest, no success status (preflight)`, () => {
+    const w = backupWorld({ backup });
+    const r = w.backup('audit-service');
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, reason);
+    const s = w.state();
+    assert.equal(s.dumps, undefined, 'pg_dump never ran');
+    assert.equal(s.s3.calls.length, 0, 'nothing reached the bucket (no object, no manifest)');
+    assert.deepEqual(workLeft(w), [], 'no work directory, so nothing was encrypted');
+    assert.match(status(w, 'audit-service', 'last-attempt'), /^result=failed\nstage=preflight$/m);
+    assert.equal(existsSync(join(w.bk, 'status', 'audit-service.last-success')), false, 'no success status');
+    noLeak(w, r.out);
+  });
+}
+
+test('A13.4a: Auth and Organization run no migration prerequisite; a refused Audit backup does not stop them (exit 1)', () => {
+  const w = backupWorld({ backup: { missingMigration: true } });
+  const r = w.backup('auth-service organization-service audit-service');
+  assert.equal(r.code, 1, r.out);
+  const s = w.state();
+  assert.deepEqual(s.migrationChecks.map((c) => c.container), ['nawara-core-audit-db'], 'only audit-service is checked');
+  assert.deepEqual(s.dumps.map((d) => d.container), ['nawara-core-auth-db', 'nawara-core-organization-db'], 'Auth and Organization are dumped as before');
+  for (const svc of ['auth-service', 'organization-service']) assert.equal(keysOf(w).filter((k) => k.includes(`/${svc}/`)).length, 4);
+  assert.equal(keysOf(w).filter((k) => k.includes('/audit-service/')).length, 0);
+});
+
+test('A13.4a: the prerequisite cannot be bypassed or redirected: a caller REQUIRED_MIGRATION is ignored; look-alike service names are refused', () => {
+  const w = backupWorld();
+  assert.equal(w.backup('audit-service', { REQUIRED_MIGRATION: '0001_audit_record.sql' }).code, 0);
+  assert.equal(w.state().migrationChecks[0].sql, `SELECT count(*) FROM schema_migrations WHERE name = '${REQUIRED_AUDIT_MIGRATION}'`);
+  const a = backupWorld();
+  assert.equal(a.backup('auth-service', { REQUIRED_MIGRATION: '0001_audit_record.sql' }).code, 0);
+  assert.equal(a.state().migrationChecks, undefined, 'a caller value never makes Auth run a check');
+  for (const svc of ['audit-service;true', 'Audit-Service', 'audit', "audit-service'"]) {
+    const x = backupWorld();
+    const r = x.backup(svc);
+    assert.equal(r.code, 1); assert.match(r.out, /unknown service/);
+    assert.equal(x.state().dumps, undefined); assert.equal(x.state().migrationChecks, undefined);
+  }
 });

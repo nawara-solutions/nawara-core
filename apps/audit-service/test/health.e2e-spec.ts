@@ -33,7 +33,7 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL, real 
       expect(pending.body).toEqual({ status: 'unavailable', failed: ['audit-ingestion', 'migrations'] }); // the consumer waits for the migrations
       const applied = await runMigrations(db.url, [kitMigrationsDir, auditMigrationsDir]);
       expect(applied.applied.length).toBeGreaterThan(0);
-      expect(applied.applied.filter((n) => !n.startsWith('kit_'))).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql']); // 18.3 table, 18.6 index, 18.8 retention
+      expect(applied.applied.filter((n) => !n.startsWith('kit_'))).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql']); // 18.3 table, 18.6 index, 18.8 retention, A13.3a search_path
       await readyEventually(t);
       const again = await runMigrations(db.url, [kitMigrationsDir, auditMigrationsDir]);
       expect(again.applied).toEqual([]); // a re-run is a no-op
