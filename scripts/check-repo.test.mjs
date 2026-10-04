@@ -3,15 +3,16 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
-const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:' } = {}) => `
+const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
 on:
   ${push}
 jobs:
   deploy:
     ${guard}
+    ${environment}
     ${concurrency}
     runs-on: ubuntu-latest
     steps:
@@ -93,11 +94,11 @@ const swap = (text, from, to) => {
   return text.replace(from, to);
 };
 
-test('A: an SSH deployment on push (or any automatic event) is refused; dispatch and schedule are allowed', () => {
+test('A: an SSH deployment on push (or any automatic event) is refused; a scheduled one too (A3.5: it would wait for approval)', () => {
   for (const event of ['push:\n    branches: [main]', 'pull_request:\n    branches: [main]', 'workflow_run:\n    workflows: [x]']) {
     assert.match(checkWorkflowSafety('d.yml', deploy({ push: event })).join(), /must only run on workflow_dispatch or schedule, never automatically/);
   }
-  assert.deepEqual(checkWorkflowSafety('d.yml', deploy({ push: 'schedule:\n    - cron: "0 2 * * *"' })), []);
+  assert.match(checkWorkflowSafety('d.yml', deploy({ push: 'schedule:\n    - cron: "0 2 * * *"' })).join(), /must be in a workflow_dispatch-only workflow/);
 });
 
 test('A: the real Auth image workflow builds only; re-adding an automatic deploy job is refused', () => {
@@ -154,22 +155,112 @@ test('D: a digest deployment that builds (rebuilding main) is refused', () => {
 });
 
 test('E: removing or loosening the digest validation, or moving it after the registry login, is refused', () => {
-  const loose = swap(DEPLOY, '^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must', '^sha256:.+$ ]] || { echo "refused: the digest must');
-  assert.match(checkDigestDeploy('d.yml', loose, AUTH).join(), /must be validated against/);
-  const late = swap(swap(DEPLOY, `      - name: validate the digest
+  const VALIDATE = `      - name: validate the digest
         env:
           DIGEST: \${{ inputs.digest }}
         run: |
           set -euo pipefail
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
-`, ''), '      - uses: appleboy/ssh-action@v1', `      - name: validate the digest
+`;
+  // verify's validation (the first occurrence) loosened, then deploy's re-validation loosened
+  const loose = swap(DEPLOY, '^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must', '^sha256:.+$ ]] || { echo "refused: the digest must');
+  assert.match(checkDigestDeploy('d.yml', loose, AUTH).join(), /job "verify": the digest must be validated against/);
+  const looseDeploy = DEPLOY.slice(0, DEPLOY.lastIndexOf(VALIDATE)) + VALIDATE.replace('{64}', '+') + DEPLOY.slice(DEPLOY.lastIndexOf(VALIDATE) + VALIDATE.length);
+  assert.match(checkDigestDeploy('d.yml', looseDeploy, AUTH).join(), /job "deploy": the digest must be re-validated/);
+  // verify's validation moved after the registry login
+  const late = swap(swap(DEPLOY, VALIDATE, ''), '      - uses: docker/login-action@v4\n', `      - uses: docker/login-action@v4\n${VALIDATE}`);
+  assert.match(checkDigestDeploy('d.yml', late, AUTH).join(), /job "verify": the digest must be validated .* before any registry step/);
+});
+
+// ---------------------------------------------------------------- V2-A.3 (A3.5): production SSH only inside a protected environment
+test('A3.5: every job using production SSH or DEPLOY_SSH_* must declare an approved literal environment', () => {
+  assert.match(checkWorkflowSafety('d.yml', deploy({ environment: '' })).join(), /must declare a protected environment \(production\)/);
+  assert.match(checkWorkflowSafety('d.yml', deploy({ environment: 'environment: staging' })).join(), /"staging" is not an approved production environment/);
+  assert.match(checkWorkflowSafety('d.yml', deploy({ environment: "environment: ${{ inputs.target }}" })).join(), /must be a literal name, never an expression/);
+  assert.match(checkWorkflowSafety('d.yml', deploy({ environment: 'environment: production-backup' })).join(), /not an approved production environment/);
+  assert.deepEqual(checkWorkflowSafety('d.yml', deploy({ environment: 'environment:\n      name: production' })), []);
+  for (const use of ['${{ secrets.DEPLOY_SSH_HOST }}', "${{ secrets['DEPLOY_SSH_USER'] }}", '${{ secrets["DEPLOY_SSH_PORT"] }}', '${{ toJSON(secrets) }}']) {
+    const consumer = `
+name: c
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "$H"
         env:
-          DIGEST: \${{ inputs.digest }}
-        run: |
-          set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-      - uses: appleboy/ssh-action@v1`);
-  assert.match(checkDigestDeploy('d.yml', late, AUTH).join(), /validated .* before any registry or SSH step/);
+          H: ${use}
+`;
+    assert.match(checkWorkflowSafety('c.yml', consumer).join(), /must declare a protected environment/, use);
+  }
+});
+
+test('A3.5: a production-environment job only behind an explicit dispatch (never push, pull_request or a schedule)', () => {
+  for (const event of ['schedule:\n    - cron: "17 2 * * *"', 'push:\n    branches: [main]']) {
+    const both = deploy({ push: `workflow_dispatch:\n  ${event}` });
+    assert.match(checkWorkflowSafety('d.yml', both).join(), /must be in a workflow_dispatch-only workflow/, event);
+  }
+});
+
+const PRODUCTION_WORKFLOWS = ['auth-service-deploy.yml', 'organization-service-deploy.yml', 'audit-service-deploy.yml', 'core-rabbitmq-provision.yml', 'auth-db-credential-rotate.yml', 'core-backup.yml'];
+
+test('A3.5: the six real production workflows are gated by the production environment, dispatch-only', () => {
+  for (const name of PRODUCTION_WORKFLOWS) {
+    const text = workflow(name);
+    assert.deepEqual(checkWorkflowSafety(name, text), [], name);
+    const doc = parse(text);
+    assert.deepEqual(Object.keys(doc.on), ['workflow_dispatch'], name);
+    const sshJobs = Object.entries(doc.jobs).filter(([, j]) => (j.steps ?? []).some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action')));
+    assert.equal(sshJobs.length, 1, name);
+    assert.equal(sshJobs[0][1].environment, 'production', name);
+  }
+});
+
+test('A3.5: removing the environment from any real production workflow is refused', () => {
+  for (const name of PRODUCTION_WORKFLOWS) {
+    const text = workflow(name);
+    const without = text.replace(/\n {4}environment: production\n/, '\n');
+    assert.notEqual(without, text, name);
+    assert.match(checkWorkflowSafety(name, without).join(), /must declare a protected environment/, name);
+  }
+});
+
+test('A3.5: core-backup is manual only (B1): re-adding its schedule is refused', () => {
+  const BACKUP = workflow('core-backup.yml');
+  const scheduled = swap(BACKUP, '        default: auth-service\n', "        default: auth-service\n  schedule:\n    - cron: '17 2 * * *'\n");
+  assert.match(checkWorkflowSafety('core-backup.yml', scheduled).join(), /must be in a workflow_dispatch-only workflow/);
+});
+
+test('A3.5: typed confirmations of the real production operations are kept', () => {
+  const ROTATE = workflow('auth-db-credential-rotate.yml');
+  assert.deepEqual(checkTypedConfirmation('auth-db-credential-rotate.yml', ROTATE, 'rotate auth_app'), []);
+  assert.deepEqual(checkTypedConfirmation('auth-service-deploy.yml', DEPLOY, 'deploy auth-service'), []);
+  const dropped = swap(ROTATE, " && inputs.confirm == 'rotate auth_app'", '');
+  assert.match(checkTypedConfirmation('r.yml', dropped, 'rotate auth_app').join(), /job "rotate": must require the typed confirmation/);
+  const changed = swap(ROTATE, "inputs.confirm == 'rotate auth_app'", "inputs.confirm == 'yes'");
+  assert.match(checkTypedConfirmation('r.yml', changed, 'rotate auth_app').join(), /must require the typed confirmation/);
+  const optional = swap(ROTATE, '        required: true\n', '        required: false\n');
+  assert.match(checkTypedConfirmation('r.yml', optional, 'rotate auth_app').join(), /"confirm" input must exist and be required/);
+});
+
+test('A3.5: the Auth verify/deploy split is enforced', () => {
+  assert.deepEqual(checkDigestDeploy('auth-service-deploy.yml', DEPLOY, AUTH), []);
+  const noEnv = swap(DEPLOY, '    environment: production\n', '');
+  assert.match(checkDigestDeploy('d.yml', noEnv, AUTH).join(), /must be bound to the "production" environment/);
+  const onVerify = swap(swap(DEPLOY, '    environment: production\n', ''), '  verify:\n    if:', '  verify:\n    environment: production\n    if:');
+  const msgs = checkDigestDeploy('d.yml', onVerify, AUTH).join();
+  assert.match(msgs, /job "verify": must not declare an environment/);
+  assert.match(msgs, /job "deploy": must be bound to the "production" environment/);
+  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '    needs: verify\n', ''), AUTH).join(), /must need the "verify" job/);
+  const verifyGone = DEPLOY.replace(/\n {2}verify:\n[\s\S]*?\n {2}deploy:\n/, '\n  deploy:\n');
+  assert.match(checkDigestDeploy('d.yml', verifyGone, AUTH).join(), /the "verify" job is missing/);
+  const sshOnVerify = swap(DEPLOY, '      - id: artifact\n', '      - run: echo "$H"\n        env:\n          H: ${{ secrets.DEPLOY_SSH_HOST }}\n      - id: artifact\n');
+  assert.match(checkDigestDeploy('d.yml', sshOnVerify, AUTH).join(), /job "verify": must not use production SSH or the DEPLOY_SSH_\* credentials/);
+  const renamed = swap(swap(DEPLOY, '\n  deploy:\n    needs: verify\n', '\n  ship:\n    needs: verify\n'), 'jobs:\n', 'jobs:\n');
+  assert.match(checkDigestDeploy('d.yml', renamed, AUTH).join(), /the SSH job must be "deploy"/);
+  const noConfirmVerify = DEPLOY.replace("  verify:\n    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy auth-service'\n", "  verify:\n    if: github.ref == 'refs/heads/main'\n");
+  assert.match(checkDigestDeploy('d.yml', noConfirmVerify, AUTH).join(), /job "verify": must require the typed confirmation/);
 });
 
 test('F: deploying anything but exactly IMAGE_NAME@digest is refused', () => {

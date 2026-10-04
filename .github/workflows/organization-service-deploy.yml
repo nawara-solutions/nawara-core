@@ -15,6 +15,8 @@ env:
 jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
+    # V2-A.3 / A3.5: the protected environment. A required reviewer approves before this job starts; DEPLOY_SSH_* are its secrets.
+    environment: production
     # The same production queue as every Core deployment: a running deployment is never cancelled; a newer request waits its turn.
     concurrency:
       group: production-deploy-core-api

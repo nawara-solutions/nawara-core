@@ -25,6 +25,22 @@ const AUTOMATIC_EVENTS = ['push', 'pull_request', 'pull_request_target', 'workfl
 /** V2-A.2: mutable pointers a merge must never move (they are frozen and deprecated; the digest is the deployment authority). */
 const MUTABLE_PRODUCTION_TAG = /:(production|latest)\b/;
 const INPUT_INTERPOLATION = /\$\{\{\s*(inputs|github\.event\.inputs)\./;
+/**
+ * V2-A.3 (A3.5): the GitHub environments a production job may declare. Each is a protected environment that holds the production SSH
+ * credentials. `production-backup` (a future scheduled-backup environment) is deliberately NOT listed: it does not exist yet.
+ */
+export const PRODUCTION_ENVIRONMENTS = ['production'];
+/** A use of the production SSH credentials, in any spelling, or of every secret at once. */
+const PRODUCTION_CREDENTIAL = /secrets\s*(?:\.\s*|\[\s*\\?['"])DEPLOY_SSH_|toJSON\(\s*secrets\s*\)/;
+
+const usesSsh = (steps) => steps.some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
+
+/** The environment a job declares (`environment: name` or `environment: {name}`), as written. */
+function environmentOf(job) {
+  const env = job?.environment;
+  if (env === undefined || env === null) return undefined;
+  return typeof env === 'object' ? String(env.name ?? '') : String(env);
+}
 
 function firstCommandLine(script) {
   return String(script ?? '')
@@ -67,6 +83,23 @@ export function checkWorkflowSafety(fileName, text) {
     const ssh = steps.filter((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
     const pushesProdTag = steps.some((s) => String(s.uses ?? '').startsWith('docker/build-push-action') && String(s.with?.tags ?? '').includes(':production'));
 
+    // V2-A.3 (A3.5): production credentials and production SSH only inside an approved, protected environment, and a protected
+    // environment only behind an explicit dispatch (never push, pull_request, workflow_run or a schedule waiting for approval).
+    const environment = environmentOf(job);
+    const usesProduction = usesSsh(steps) || PRODUCTION_CREDENTIAL.test(JSON.stringify(job));
+    if (usesProduction) {
+      if (environment === undefined) {
+        problems.push(`${where}: a job using production SSH or the DEPLOY_SSH_* credentials must declare a protected environment (${PRODUCTION_ENVIRONMENTS.join(', ')})`);
+      } else if (environment.includes('${{')) {
+        problems.push(`${where}: the environment must be a literal name, never an expression (got "${environment}")`);
+      } else if (!PRODUCTION_ENVIRONMENTS.includes(environment)) {
+        problems.push(`${where}: environment "${environment}" is not an approved production environment (${PRODUCTION_ENVIRONMENTS.join(', ')})`);
+      }
+    }
+    if (environment !== undefined && PRODUCTION_ENVIRONMENTS.includes(environment) && (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch')) {
+      problems.push(`${where}: a job bound to the "${environment}" environment must be in a workflow_dispatch-only workflow (found: ${triggers.join(', ') || 'nothing'}); a scheduled or automatic run would wait for manual approval`);
+    }
+
     if (ssh.length > 0) {
       deploys = true;
       if (automatic.length > 0) {
@@ -96,6 +129,25 @@ export function checkWorkflowSafety(fileName, text) {
   return problems;
 }
 
+/**
+ * V2-A.3 (A3.5): a production operation that requires a typed confirmation keeps it. The workflow must require a `confirm` input, and
+ * every job using production SSH or bound to a production environment must test `inputs.confirm == '<phrase>'` with exactly that phrase.
+ */
+export function checkTypedConfirmation(fileName, text, phrase) {
+  const problems = [];
+  const doc = parse(text);
+  const on = doc?.on ?? doc?.true;
+  if (on?.workflow_dispatch?.inputs?.confirm?.required !== true) problems.push(`${fileName}: the "confirm" input must exist and be required`);
+  const expected = `inputs.confirm == '${phrase}'`;
+  for (const [jobId, job] of Object.entries(doc?.jobs ?? {})) {
+    const production = usesSsh(asArray(job.steps)) || PRODUCTION_ENVIRONMENTS.includes(environmentOf(job) ?? '');
+    if (production && !String(job.if ?? '').includes(expected)) {
+      problems.push(`${fileName} job "${jobId}": must require the typed confirmation (${expected})`);
+    }
+  }
+  return problems;
+}
+
 const DIGEST_PATTERN = '^sha256:[0-9a-f]{64}$';
 const BUILDS = /\bdocker\s+(buildx\s+)?build\b|\bbuildx\s+bake\b/;
 
@@ -119,7 +171,7 @@ export function checkDigestDeploy(fileName, text, repository) {
   if (doc?.permissions?.packages === 'write') problems.push(`${fileName}: a digest deployment must not have packages: write`);
 
   const jobs = Object.entries(doc?.jobs ?? {});
-  const deployJobs = jobs.filter(([, job]) => asArray(job.steps).some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action')));
+  const deployJobs = jobs.filter(([, job]) => usesSsh(asArray(job.steps)));
   if (deployJobs.length !== 1) problems.push(`${fileName}: exactly one job must deploy over SSH (found ${deployJobs.length})`);
 
   for (const [jobId, job] of jobs) {
@@ -132,25 +184,48 @@ export function checkDigestDeploy(fileName, text, repository) {
     if (job.permissions?.packages === 'write') problems.push(`${where}: a digest deployment must not have packages: write`);
   }
 
-  for (const [jobId, job] of deployJobs) {
-    const where = `${fileName} job "${jobId}"`;
+  const fromDigestInput = (s) => Object.values(s.env ?? {}).some((v) => /^\$\{\{\s*inputs\.digest\s*\}\}$/.test(String(v).trim()));
+  const isValidation = (s) => String(s.run ?? '').includes(DIGEST_PATTERN) && fromDigestInput(s);
+  const isVerification = (s) => /imagetools inspect/.test(String(s.run ?? '')) && /org\.opencontainers\.image\.revision/.test(String(s.run ?? ''))
+    && /merge-base --is-ancestor/.test(String(s.run ?? ''));
+  const guarded = (where, job) => {
     const guard = String(job.if ?? '');
     if (!guard.includes('refs/heads/main')) problems.push(`${where}: must be restricted to refs/heads/main`);
     if (!/inputs\.confirm\s*==\s*'[^']+'/.test(guard)) problems.push(`${where}: must require the typed confirmation input`);
     if (job.permissions?.packages !== 'read') problems.push(`${where}: packages permission must be exactly read`);
+  };
+
+  // V2-A.3 (A3.5): verify (no environment, no production credentials) → approval → deploy (the protected environment, SSH only).
+  const verify = (doc?.jobs ?? {}).verify;
+  if (!verify) {
+    problems.push(`${fileName}: the "verify" job is missing (validation and artifact verification run before the production approval)`);
+  } else {
+    const where = `${fileName} job "verify"`;
+    guarded(where, verify);
+    if (environmentOf(verify) !== undefined) problems.push(`${where}: must not declare an environment (it runs before the production approval, without production credentials)`);
+    if (usesSsh(asArray(verify.steps)) || PRODUCTION_CREDENTIAL.test(JSON.stringify(verify))) problems.push(`${where}: must not use production SSH or the DEPLOY_SSH_* credentials`);
+    const steps = asArray(verify.steps);
+    const validateAt = steps.findIndex(isValidation);
+    const verifyAt = steps.findIndex(isVerification);
+    const loginAt = steps.findIndex((s) => String(s.uses ?? '').startsWith('docker/login-action'));
+    if (validateAt < 0 || (loginAt >= 0 && validateAt > loginAt)) {
+      problems.push(`${where}: the digest must be validated against ${DIGEST_PATTERN} (from env) before any registry step`);
+    }
+    if (verifyAt < 0 || verifyAt < validateAt) {
+      problems.push(`${where}: the artifact must be resolved and its revision label checked as an ancestor of main, after validation`);
+    }
+  }
+
+  for (const [jobId, job] of deployJobs) {
+    const where = `${fileName} job "${jobId}"`;
+    if (jobId !== 'deploy') problems.push(`${where}: the SSH job must be "deploy"`);
+    guarded(where, job);
+    if (environmentOf(job) !== 'production') problems.push(`${where}: must be bound to the "production" environment (got "${environmentOf(job) ?? 'none'}")`);
+    if (!asArray(job.needs).map(String).includes('verify')) problems.push(`${where}: must need the "verify" job (nothing is approved or deployed before verification)`);
     const steps = asArray(job.steps);
     const sshAt = steps.findIndex((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
-    const fromDigestInput = (s) => Object.values(s.env ?? {}).some((v) => /^\$\{\{\s*inputs\.digest\s*\}\}$/.test(String(v).trim()));
-    const validateAt = steps.findIndex((s) => String(s.run ?? '').includes(DIGEST_PATTERN) && fromDigestInput(s));
-    const verifyAt = steps.findIndex((s) => /imagetools inspect/.test(String(s.run ?? '')) && /org\.opencontainers\.image\.revision/.test(String(s.run ?? ''))
-      && /merge-base --is-ancestor/.test(String(s.run ?? '')));
-    const loginAt = steps.findIndex((s) => String(s.uses ?? '').startsWith('docker/login-action'));
-    if (validateAt < 0 || (loginAt >= 0 && validateAt > loginAt) || validateAt > sshAt) {
-      problems.push(`${where}: the digest must be validated against ${DIGEST_PATTERN} (from env) before any registry or SSH step`);
-    }
-    if (verifyAt < 0 || verifyAt > sshAt || verifyAt < validateAt) {
-      problems.push(`${where}: the artifact must be resolved and its revision label checked as an ancestor of main after validation and before the SSH step`);
-    }
+    const validateAt = steps.findIndex(isValidation);
+    if (validateAt < 0 || validateAt > sshAt) problems.push(`${where}: the digest must be re-validated against ${DIGEST_PATTERN} (from env) before the SSH step`);
     const image = String(steps[sshAt]?.env?.IMAGE ?? '').trim();
     if (!/^\$\{\{\s*env\.IMAGE_NAME\s*\}\}@\$\{\{\s*inputs\.digest\s*\}\}$/.test(image)) {
       problems.push(`${where}: the SSH step must deploy exactly \${{ env.IMAGE_NAME }}@\${{ inputs.digest }} (got "${image}")`);

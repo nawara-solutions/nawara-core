@@ -16,9 +16,12 @@ or .github/workflows/auth-service-docker-build.yml
         ⇒ STOP. No SSH, no deployment, :production and :latest are not touched. Production is unchanged.
 
 explicit, owner-authorized production mutation
-   └─ auth-service-deploy.yml (workflow_dispatch, main only, production-deploy-core-api queue, cancel-in-progress: false)
-        validate the digest → resolve <IMAGE_NAME>@<digest> → revision label present and an ancestor of main
-        → SSH: pull exactly <IMAGE_NAME>@<digest> → run that image's provision-and-deploy.sh. Nothing is built.
+   └─ auth-service-deploy.yml (workflow_dispatch, main only, typed confirmation)
+        job verify  (no environment, no production credentials)
+            validate the digest → resolve <IMAGE_NAME>@<digest> → revision label present and an ancestor of main
+        job deploy  (needs verify; environment `production`: WAITS for the required reviewer's approval;
+                     production-deploy-core-api queue, cancel-in-progress: false)
+            re-check the digest → SSH: pull exactly <IMAGE_NAME>@<digest> → run that image's provision-and-deploy.sh. Nothing is built.
 ```
 
 - **The INDEX digest is the deployment authority.** `docker/build-push-action` keeps provenance, so the push is an image index and its
@@ -38,16 +41,23 @@ explicit, owner-authorized production mutation
    gh workflow run auth-service-deploy.yml --ref main -f digest=sha256:<64 hex> -f confirm='deploy auth-service'
    ```
 
-3. The run refuses, before any SSH: a malformed digest; a digest not in the auth-service repository; an image without the revision label
+3. Approve the `deploy` job when it waits for the `production` environment (see **Approval** below).
+4. The run refuses, before any approval and before any SSH (in `verify`): a malformed digest; a digest not in the auth-service repository; an image without the revision label
    (every image built before V2-A.2, OD-3); a revision that is not an ancestor of `main` (pull-request builds such as `:develop`); a
    confirmation other than exactly `deploy auth-service` (the job is skipped).
-4. The server side is the unchanged `provision-and-deploy.sh` from that same image: its pre-checks (rotation journal, broker, networks,
+5. The server side is the unchanged `provision-and-deploy.sh` from that same image: its pre-checks (rotation journal, broker, networks,
    the ADR-0053 audit-binding ordering rule), migrations before the running service is touched, the previous container retained as
    `nawara-core-auth-service-previous-<timestamp>`, and the health gate that restores the previous container on failure.
 
-**The typed confirmation is not a reviewer gate.** Until a `production` GitHub environment with a required reviewer exists (V2-A.3 or a
-separate settings checkpoint), the only controls are write access to the repository, the `main` guard, the confirmation and the
-artifact validation. The workflow deliberately does not reference `environment:` (referencing a missing environment would create one).
+**Approval (V2-A.3 / A3.5).** The production job of this workflow is bound to the protected GitHub environment `production`. After the
+dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
+does the job start and receive the production SSH credentials (environment secrets). The reviewer is the owner; GitHub does not
+prevent self-approval here, so this is a deliberate second owner action, not independent review. **Reject** (or cancel) a run you no
+longer want instead of leaving it waiting: whether a waiting run holds the `production-deploy-core-api` queue has not been observed yet.
+
+The typed confirmation, the `main` guard and the artifact validation stay as independent layers. *Before V2-A.3 / A3.5 there was no
+reviewer gate and the deployment was one job.* **Known limitation until A3.7:** the organization-level `DEPLOY_SSH_*` secrets still
+exist and are readable by a workflow that does not declare the environment.
 
 ## 3. Rollback
 

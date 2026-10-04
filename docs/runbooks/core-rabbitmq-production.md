@@ -23,6 +23,10 @@ Operational procedure for the Core V1 production broker and the services that de
 | 3 | Deploy auth-service (joins the private network; takes its identity from the broker) | `gh workflow run auth-service-deploy.yml --ref main` | log ends `OK  nawara-core-auth-service is running/healthy`; §4 checks pass |
 | 4 | Certify `core-api.nawara-solutions.com` (and the temporary alias) | the domain certification | both hosts reach `/auth/health` |
 
+**Since V2-A.3 / A3.5:** each of these workflows waits for the `production` environment approval before its production job starts
+(see the [Auth deploy runbook](auth-service-deploy.md) §2, **Approval**). The table above is the first-introduction order as executed;
+today Auth is deployed by exact index digest (`-f digest=… -f confirm='deploy auth-service'`, [runbook](auth-service-deploy.md)).
+
 The order is enforced, not only documented: audit-service's deploy fails unless its queue, dead-letter topology, consumer and binding
 exist on the broker, and Auth's deploy refuses (before migrating or stopping anything) unless the binding exists. Why: the relay publishes
 without `mandatory`, so an `audit.*` event with no bound queue is confirmed by the broker and dropped (ADR-0053, Context).

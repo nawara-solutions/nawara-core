@@ -28,6 +28,12 @@ beyond what the deploy asserts; rotate a caller token by deleting its file; rest
 gh workflow run organization-service-deploy.yml --ref main
 ```
 
+**Approval (V2-A.3 / A3.5).** The production job of this workflow (`deploy`; it builds `main` after the approval) is bound to the protected GitHub environment `production`. After the
+dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
+does the job start and receive the production SSH credentials (environment secrets). The reviewer is the owner; GitHub does not
+prevent self-approval here, so this is a deliberate second owner action, not independent review. **Reject** (or cancel) a run you no
+longer want instead of leaving it waiting: whether a waiting run holds the `production-deploy-core-api` queue has not been observed yet.
+
 Done when the log ends `OK  nawara-core-organization-service is running/healthy on nawara-core-internal; ownership phase PREPARED,
 environment class undeclared (deploying never changes it)`. The deploy creates the database, the roles **before** migrating, applies the
 migrations as `organization_migrator`, **asserts** the runtime role's privileges (fail closed), and starts the private service.
@@ -194,5 +200,6 @@ docker exec nawara-core-organization-service node ../../libs/service-kit/dist/cl
 ## 7. Backup and restore (G5)
 
 The database and `db.env`, `roles.env`, `.env`, `callers/`, encrypted and off-host, daily: [core backup and restore
-runbook](core-backup-restore.md). Add `organization-service` to `CORE_BACKUP_SERVICES` after F1; the real-volume restore drill runs
+runbook](core-backup-restore.md). Back it up by manual dispatch (`-f services="organization-service auth-service"`; since V2-A.3 / A3.5
+there is no schedule and `CORE_BACKUP_SERVICES` is not read); the real-volume restore drill runs
 after F1 and before G7/F6. Never restore a pre-F6 backup after F6 (that runbook §7).

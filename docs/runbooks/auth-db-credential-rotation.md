@@ -52,6 +52,12 @@ gh workflow run auth-db-credential-rotate.yml --ref main -f confirm="rotate auth
 gh run watch "$(gh run list --workflow auth-db-credential-rotate.yml -L 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
+**Approval (V2-A.3 / A3.5).** The production job of this workflow (`rotate`) is bound to the protected GitHub environment `production`. After the
+dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
+does the job start and receive the production SSH credentials (environment secrets). The reviewer is the owner; GitHub does not
+prevent self-approval here, so this is a deliberate second owner action, not independent review. **Reject** (or cancel) a run you no
+longer want instead of leaving it waiting: whether a waiting run holds the `production-deploy-core-api` queue has not been observed yet.
+
 Success ends with:
 
 ```

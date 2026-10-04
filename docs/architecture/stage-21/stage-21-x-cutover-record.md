@@ -3,8 +3,8 @@
 - **Status:** RECORD — evidence of steps already executed, and the current gate status as of 2026-09-30. This record authorizes
   nothing: every further production step is a separate, reviewed and authorized checkpoint.
 - **Scope:** ADR-0040 fresh path (A2.5, F1–F7) and gates G1–G7, plus the Stage 21.x T1 relay gate.
-- **Later status:** dated later-status notes are appended as [§10](#10-later-status-note-2026-10-02-v2-a) and
-  [§11](#11-later-status-note-2026-10-03-v2-a2). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
+- **Later status:** dated later-status notes are appended as [§10](#10-later-status-note-2026-10-02-v2-a),
+  [§11](#11-later-status-note-2026-10-03-v2-a2) and [§12](#12-later-status-note-2026-10-04-v2-a3--a35). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
 - **Related:** [ADR-0040](../../adr/0040-organization-ownership-migration-decisions.md),
   [G1 topology](stage-21-x-g1-organization-topology.md), [G6 rehearsal plan](stage-21-x-g6-rehearsal-plan.md),
   [organization-production runbook](../../runbooks/organization-production.md),
@@ -290,3 +290,18 @@ Appended; §1–§10 are unchanged. Source: the [V2-A.2 certification record](..
   configured as `:production`): the image of the last automatic deployment (`97f78cb`), not the §2 and §5 digest. The G6 refresh
   re-establishes the parity targets when it runs.
 - **G6, G7, F6, F7, Stage 22.** Unchanged: G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.
+
+## 12. Later-status note (2026-10-04, V2-A.3 / A3.5)
+
+Appended; §1–§11 are unchanged and keep the procedure as it was planned.
+
+- **Backup schedule (§3.2, §7).** On current `main` the daily backup schedule is no longer enabled by the repository variable
+  `CORE_BACKUP_SCHEDULE`: `core-backup.yml` is dispatch-only and its job waits for approval of the protected `production` environment
+  (owner decision B1). Scheduled backups return through a future, separately reviewed `production-backup` environment and job; the
+  step "Enable `CORE_BACKUP_SCHEDULE`" of §7 is therefore to be read as "enable scheduled backups through that design", and remains
+  **BLOCKED BY G6**. The manual pre-G7 and post-F7 backups now each need a `production` approval.
+- **Production steps after G6.** The steps that run through GitHub workflows (the backups, and the service redeploys of F6 and F7) now
+  run through jobs bound to the `production` environment (reviewer approval, `main` only); commands the operator runs on the server
+  (such as the ownership commands of G7, F6 and F7) are not affected. The G6 refresh must include the ruleset, the environment, where the production credentials live
+  (environment secrets, with the organization secrets until V2-A.3 / A3.7) and this approval procedure.
+- **Unchanged:** G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.

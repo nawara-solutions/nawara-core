@@ -8,6 +8,9 @@ cutover (Stage 21.x G5; ADR-0040 G5; [production-readiness.md](../architecture/p
 - **Never** print, paste or copy a credential, the private key, a decrypted file or a restored value into a ticket, a workflow input
   or a command line. The tools print names, sizes, sha256 digests and PASS/FAIL only.
 - **Monitoring detects, the operator decides, this runbook governs the action.** Nothing here restores automatically.
+- **Manual only since V2-A.3 / A3.5 (owner decision B1).** `core-backup.yml` has no schedule; each run is dispatched and then approved
+  through the protected `production` environment. Scheduled backups return later through a separately reviewed `production-backup`
+  environment and job (they do not exist); enabling them stays G6-gated.
 - A backup that has never been restored is not a backup: G5 is met only with the drills of §5 (ADR-0040 G5: a documented procedure
   is not a verified restore).
 
@@ -49,16 +52,24 @@ recipient.pem        the recipient certificate
 The script refuses a plain-http endpoint, an empty or climbing prefix, a credentials file not 0600, a missing certificate, and **any
 private key under that directory**.
 
-**Schedule:** after a successful manual run (§3), set the repository variables `CORE_BACKUP_SCHEDULE=enabled` and
-`CORE_BACKUP_SERVICES` (`auth-service` now; `organization-service auth-service` after F1). Until then the daily trigger
-(`17 2 * * *` UTC) does nothing. GitHub may delay a scheduled run, and disables schedules in a repository without activity for 60
-days: the staleness rule of §4 catches both.
+**Schedule (current state, V2-A.3 / A3.5).** There is **no** scheduled backup. The workflow is dispatch-only and its job is bound to
+the `production` environment, whose reviewer approval would make a nightly run wait. The former mechanism (set
+`CORE_BACKUP_SCHEDULE=enabled` and `CORE_BACKUP_SERVICES`, daily at `17 2 * * *` UTC) is removed and the two variables are no longer
+read. A schedule returns only through a separately reviewed change: a `production-backup` environment (no interactive reviewer, `main`
+only, its own credentials) and a scheduled job bound to it. Enabling it stays G6-gated. Until then the RPO is met only by manual runs,
+and the staleness rule of §4 is the reminder.
 
 ## 3. Backup
 
 ```bash
 gh workflow run core-backup.yml --ref main -f services="auth-service"
 ```
+
+**Approval (V2-A.3 / A3.5).** The production job of this workflow (`backup`) is bound to the protected GitHub environment `production`. After the
+dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
+does the job start and receive the production SSH credentials (environment secrets). The reviewer is the owner; GitHub does not
+prevent self-approval here, so this is a deliberate second owner action, not independent review. **Reject** (or cancel) a run you no
+longer want instead of leaving it waiting: whether a waiting run holds the `production-deploy-core-api` queue has not been observed yet.
 
 Per service, a run succeeds only when every step does, in this order: `pg_dump -Fc` **inside the database container** (its own
 PostgreSQL major; a newer client's dump does not restore on an older server) over the local socket as the least-privileged identity
@@ -92,7 +103,7 @@ and retention failed (the new backup is intact).
 |---|---|---|
 | the `core backup` workflow run | failed (exit 1) | read the log (it names the stage: preflight, dump, verify, facts, config, encrypt, upload); fix; run again manually |
 | the same | exit 3 (retention failed) | the backup is good; fix the bucket permission or listing; old backups are only kept longer |
-| `backup/status/<service>.last-success` `stamp=` | older than **24 h** (the RPO) | a missed or failed run: run §3 now, then find why the schedule did not |
+| `backup/status/<service>.last-success` `stamp=` | older than **24 h** (the RPO) | a missed or failed run: run §3 now (there is no schedule since V2-A.3 / A3.5; see §2) |
 | `backup/status/<service>.last-attempt` | `result=failed` | as the first row |
 | a restore drill (§5) | any FAIL | the backups are **not** recoverable until fixed: stop any cutover step that depends on G5 |
 

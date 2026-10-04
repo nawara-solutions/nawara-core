@@ -33,7 +33,9 @@ summary) and **never deploys**. Production Auth changes only through an explicit
 deploys an exact index digest (`docs/runbooks/auth-service-deploy.md`); `:production` and `:latest` are frozen and deprecated. Never
 dispatch a deployment without that authorization. `main` is protected by a repository ruleset (V2-A.3 / A3.3): every change needs a
 pull request with a green `core-ci-passed` check on an up-to-date branch; direct pushes, force pushes and deletion are blocked. Never
-edit, disable or bypass the ruleset without explicit owner authorization. G6 is deferred; G7, F6 and F7 are
+edit, disable or bypass the ruleset without explicit owner authorization. Every production SSH workflow (deploys, broker provisioning,
+credential rotation, backup) is dispatch-only and waits for approval of the protected `production` environment (V2-A.3 / A3.5); never
+approve or dispatch one without owner authorization, and never add a production SSH job without that environment. G6 is deferred; G7, F6 and F7 are
 locked; Final Core Validation is the absolute last full validation and is never run as part of another task.
 
 ## What this project is
