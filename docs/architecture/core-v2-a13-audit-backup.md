@@ -1,9 +1,10 @@
 # Core V2 A13: audit-service backup and restore coverage
 
-- **Status:** RECORD of A13.0 discovery, the owner decisions O1–O6, the O3 production inspection, the A13.1 design freeze and the
-  A13.2 local implementation, written 2026-10-04. **Implemented locally; not merged, not certified.** No production Audit backup,
-  restore drill, privilege correction or recovery has been performed. Local validation (A13.3) and the production-gated proofs (§8) are
-  later steps.
+- **Status:** **CERTIFIED — LOCAL TOOLING + CI** (2026-10-04, §9): merged by PR #194 (`96e3aaf`). Record of A13.0 discovery, the owner
+  decisions O1–O6, the O3 production inspection, the A13.1 design freeze, the A13.2 implementation, the A13.3–A13.3b local proof and the
+  A13.4/A13.4a security review. **Production Audit backup coverage is NOT operational:** no production Audit deployment, backup, restore
+  drill or privilege correction has been performed, and the first production Audit backup is blocked until migration 0004 is deployed
+  (§8, §9). BUILT ≠ DEPLOYED.
 - **Scope:** add audit-service to the existing Core backup and restore tooling (Stage 21.x G5, [runbook](../runbooks/core-backup-restore.md))
   without changing the certified Auth and Organization behaviour, and correct the confirmed Audit `schema_migrations` privilege defect
   in the repository.
@@ -154,6 +155,12 @@ that a caller cannot redirect or bypass it, and that removing or weakening it is
 
 ## 8. Not done here (each separately authorized)
 
+The required future order, none of it performed: A13 tooling certified → a separately authorized Audit immutable-digest deployment →
+migration 0004 applied → the O3-B `schema_migrations` narrowing and assertion → deployment health, `/ready` and consumer verified → only
+then the first production Audit backup (`backup.sh` refuses it before) → its verification → a separately authorized production
+real-volume Audit restore drill. A3.6 stays deferred.
+
+
 | Item | Gate |
 |---|---|
 | A13.3 local validation campaign (full suites, negative controls, the local end-to-end Audit drill with the real image, local RTO) | local, next |
@@ -165,3 +172,33 @@ that a caller cannot redirect or bypass it, and that removing or weakening it is
 
 A3.6 and A3.7 stay deferred; A3.8 is not certified; G6 is deferred; G7, F6 and F7 stay locked; Final Core Validation is the absolute
 last.
+
+## 9. Certification (local tooling + CI)
+
+**Certified:** the A13 implementation and its local and CI evidence. **Not certified (production-gated):** see the table below.
+
+| Evidence | Identifier | Result |
+|---|---|---|
+| Implementation | PR #194, head `c540627904263f8046cb8cbe6ee77dfc3fb7e80d`, merge `96e3aaf722859478d3dd25848f1db81f56ae9d83` | merged by the owner, 2026-10-04 |
+| PR Core CI | run 37231246351, attempt 1 | 24/24 passed |
+| Post-merge Core CI | run 37231831988, attempt 1 | 24/24 passed, `core-ci-passed` passed |
+| Post-merge Audit image | run 37231832018 | success: `ghcr.io/nawara-solutions/nawara-core-audit-service:sha-96e3aaf722859478d3dd25848f1db81f56ae9d83`, index digest `sha256:436b0797f62054399895066d4c13f3e39447a69c6e3636d4a54b9fdcaf4e54c0` (contains 0004 and the O3-B deploy correction). **BUILT ≠ DEPLOYED** |
+
+**Local proof (§4, §4A, §7, M1):** the Audit backup target and restore drill; the real PostgreSQL dump and restore proof; migration 0004;
+the O3-B narrowing and assertion; the canonical ACL fact; the TCP readiness probe; the migration-0004 backup prerequisite; and two
+complete local Audit drills with the repository scripts (the disposable RabbitMQ, the real `/ready`, the consumer, the known-record
+read). Final validation: `test:repo` 50/50; `test:deploy` 261/261; `backup-restore.test.mjs` 111/111; the A13.3 negative controls (62
+attempted, 60 detected, B15 and R5 analysed as redundant-layer gaps, 0 restoration failures); the M1 controls 5/5; Case 1 (O3-B source)
+and Case 2 (narrowed source) each 14 checks and 48 facts. The local drill duration, about 90–98 s, is **not** a production RTO.
+
+**Security review (A13.4, A13.4a):** 0 BLOCKER, 0 HIGH, 0 MEDIUM (M1 fixed). Open LOW findings, non-blocking: L1, the real PostgreSQL
+and full Audit E2E proofs are local evidence, not CI; L3, the analysed B15 and R5 mutation gaps. (L2 was resolved in A13.4a.)
+
+| Not certified here (production-gated) | Gate |
+|---|---|
+| a production Audit deployment; 0004 and the O3-B correction applied in production | a separately authorized Audit digest deployment (A3.6-class) |
+| the first production Audit backup | **blocked**: `backup.sh` refuses it until `0004_changes_validation_search_path.sql` is in production `schema_migrations` |
+| a production Audit restore drill; a production RTO | separately authorized, after the first backup |
+| an operational 24 h RPO | G6-gated scheduling; the RPO stays a target |
+
+A3.6 and A3.7 stay deferred; A3.8 is not certified; G6 is deferred; G7, F6 and F7 stay locked; Final Core Validation is the absolute last.
