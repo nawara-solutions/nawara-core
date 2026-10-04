@@ -4,7 +4,7 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-03, `main` at `7295e8e` (V2-A.2 certified).
+- **Last verified:** 2026-10-04, `main` at `946a578` (V2-A.3: A3.2 and A3.3 done).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -31,7 +31,7 @@ NAWARA CORE
 │
 ├── CORE V1   CURRENT / REAL       implemented, partly in production; stabilization and refactor active
 │
-└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; V2-A.1 and V2-A.2 certified, V2-A.3 next; services NOT YET IMPLEMENTED
+└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; V2-A.1 and V2-A.2 certified, V2-A.3 in progress; services NOT YET IMPLEMENTED
 ```
 
 ---
@@ -51,7 +51,8 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 | Starter only | ai-service |
 | Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
 | Auth deployment | **build ≠ deploy** (V2-A.2): a merge touching Auth, `libs/service-kit`, the package files or the Auth image workflow only builds a revision-labelled image; production changes only by an explicit, owner-authorized deployment of an exact index digest ([runbook](runbooks/auth-service-deploy.md)). Before V2-A.2, seven automatic deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6); it was observed on 2026-10-02 running the legacy image `sha256:26164d42…5eaf`, unchanged by the V2-A.2 merge ([certification record](architecture/core-v2-a-2-certification.md) §6) |
-| `main` protection | **none** (no branch protection, no ruleset); the accepted policy is V2-A.3, not applied |
+| `main` protection | **repository ruleset `main` active** (V2-A.3 / A3.3): pull request required (0 approvals, sole maintainer), required check `core-ci-passed` on an up-to-date branch, conversation resolution, no force push, no deletion; administrator bypass on pull requests only ([record](architecture/core-v2-a-3-ci-and-ruleset.md)) |
+| Production credentials | organization secrets readable by any workflow run in this repository; **no `production` environment yet** (A3.4 to A3.7 not done) |
 | Evidence record | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md) (production facts, gates, digests) |
 
 Production facts change only through authorized checkpoints; re-verify against the cutover record and the
@@ -142,7 +143,15 @@ Core V2 has started with **V2-A, baseline and change safety** ([V2-A record](arc
 V2-A  Baseline and change safety
   V2-A.1  Documentation formalization          ✅ CLOSED / CERTIFIED
   V2-A.2  Auth deployment safety transition    ✅ CLOSED / CERTIFIED (build ≠ deploy; no production deployment performed)
-  V2-A.3  main ruleset, production environment ⏭ NEXT (not started; needs its own owner authorization)
+  V2-A.3  main ruleset, production environment 🔄 IN PROGRESS (not certified)
+    A3.1  design and owner decisions           ✅
+    A3.2  core-ci-passed aggregate check       ✅ verified on main
+    A3.3  main ruleset                         ✅ active; verified by API readback (first PR behaviour recorded separately)
+    A3.4  production environment               not started
+    A3.5  environment on production SSH jobs   not started
+    A3.6  production access proof              ⏸ deferred
+    A3.7  organization-secret restriction      ⏸ deferred
+    A3.8  certification                        not started
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -151,7 +160,9 @@ Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
 V2.0 discovery and the V2-A design are accepted. V2-A.1 formalized them, and V2-A.2 made the Auth deployment explicit (build on
 merge, deploy an exact index digest only on owner authorization; [runbook](runbooks/auth-service-deploy.md)). Both are certified in
 the [V2-A.2 certification record](architecture/core-v2-a-2-certification.md), which also records what stays open: no digest
-deployment has been performed yet, production still runs a legacy image, and there is no reviewer gate until V2-A.3.
+deployment has been performed yet, and production still runs a legacy image. V2-A.3 has added the stable `core-ci-passed` check and
+the `main` ruleset ([record](architecture/core-v2-a-3-ci-and-ruleset.md)); there is still no deployment reviewer gate, and the production credentials are not yet scoped
+to an environment. Every change to `main` now goes through a pull request with a green `core-ci-passed`.
 
 ### Compatibility and safety rules for V1 work
 
@@ -210,7 +221,7 @@ Core V2 is the next platform architecture. It may redesign contracts deliberatel
 The G6 labels are defined under [G6](#g6-production-like-rehearsal); the reasons are in the
 [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §4. A0 includes **V2-A.2** (the Auth deployment transition:
 a merge builds an immutable image, and production is deployed only by an explicit, owner-authorized deployment of an exact digest)
-and **V2-A.3** (the `main` ruleset). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is next and not applied. The items left open by the retired 21.R1/21.R2 umbrella are placed in
+and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is in progress: the ruleset is active, the environment is not started ([record](architecture/core-v2-a-3-ci-and-ruleset.md)). The items left open by the retired 21.R1/21.R2 umbrella are placed in
 A1, A3, A6, A12, A13, A14, A15 and A16 by the [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §5.
 
 **Ordering.** Stages are numbered by theme, not by order. Work is sequenced by dependency: A0 first; foundations (A1, A2, A3, A15)
@@ -387,3 +398,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | Core V1 refactor certification (R11) | [`core-v1-refactor-certification.md`](architecture/core-v1-refactor-certification.md) |
 | Core V2 baseline, G6 labels, V2 scope, 21.R1/21.R2 disposition, deployment and `main` risks, V2 validation protocol | [`core-v2-a-baseline-and-change-safety.md`](architecture/core-v2-a-baseline-and-change-safety.md) |
 | V2-A.1 closure and V2-A.2 certification (Auth build ≠ deploy; gate history; production evidence) | [`core-v2-a-2-certification.md`](architecture/core-v2-a-2-certification.md) |
+| V2-A.3 A3.1 to A3.3: owner decisions, the `core-ci-passed` check, the `main` ruleset | [`core-v2-a-3-ci-and-ruleset.md`](architecture/core-v2-a-3-ci-and-ruleset.md) |

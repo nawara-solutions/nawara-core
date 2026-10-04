@@ -265,9 +265,10 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
   reference mechanism is **decided** (O9: a validated non-authoritative reference cache in Auth, [ADR-0040](../adr/0040-organization-ownership-migration-decisions.md) Amendment 1; organization-service as the validator of service requests, [ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1); lifecycle semantics stay undecided and must not be improvised, and production readiness is gated by ADR-0040 decision 7.
 - **Every service asks Auth live.** Auth becomes a hot dependency for every request; a slow Auth slows everything.
   Mitigation later (caching with a short TTL) needs an explicit revocation decision.
-- **Unprotected `main`.** `main` has no branch protection or ruleset (V2-A.3). Since V2-A.2 a merge no longer deploys Auth: it builds a
-  revision-labelled image, and production changes only by an explicit, owner-authorized deployment of an exact index digest
-  ([runbook](../runbooks/auth-service-deploy.md)).
+- **Production credentials outside an environment.** `main` is protected by a repository ruleset since V2-A.3 / A3.3 (pull request and
+  a green `core-ci-passed` required; [record](./core-v2-a-3-ci-and-ruleset.md)), and since V2-A.2 a merge no longer deploys Auth
+  ([runbook](../runbooks/auth-service-deploy.md)). But the production SSH credentials are organization secrets readable by any
+  workflow run in this repository, on any branch, and no `production` environment exists yet (A3.4 to A3.7).
 - **Shared-library coupling.** Every service ships the service-kit, so a kit change is a change to every service (and to the next Auth
   image built on merge).
 
