@@ -31,7 +31,9 @@ Since V2-A.2, a merge to `main` touching `apps/auth-service/**`, `libs/service-k
 `.github/workflows/auth-service-docker-build.yml` **builds** a revision-labelled Auth image (`sha-<commit>`, index digest in the run
 summary) and **never deploys**. Production Auth changes only through an explicit, owner-authorized `auth-service-deploy.yml` run that
 deploys an exact index digest (`docs/runbooks/auth-service-deploy.md`); `:production` and `:latest` are frozen and deprecated. Never
-dispatch a deployment without that authorization. `main` still has no branch protection (V2-A.3). G6 is deferred; G7, F6 and F7 are
+dispatch a deployment without that authorization. `main` is protected by a repository ruleset (V2-A.3 / A3.3): every change needs a
+pull request with a green `core-ci-passed` check on an up-to-date branch; direct pushes, force pushes and deletion are blocked. Never
+edit, disable or bypass the ruleset without explicit owner authorization. G6 is deferred; G7, F6 and F7 are
 locked; Final Core Validation is the absolute last full validation and is never run as part of another task.
 
 ## What this project is

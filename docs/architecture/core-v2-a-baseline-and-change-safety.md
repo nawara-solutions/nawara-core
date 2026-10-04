@@ -271,3 +271,16 @@ Appended. V2-A.1 is closed and V2-A.2 is certified: [V2-A.2 certification record
 - **§5, A15.** One more timer-dependent test is a hardening candidate: the overlap precondition of notification-service's
   "two deliveries of one intent finishing at the same moment" test (certification record §7).
 - **Unchanged:** G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.
+
+## 11. Later status: V2-A.3 in progress (2026-10-04)
+
+Appended. [V2-A.3 record (A3.1 to A3.3)](core-v2-a-3-ci-and-ruleset.md).
+
+- **§6.2, `main` policy.** Implemented as repository ruleset `main` (id `24453879`, active): pull request required with zero approvals,
+  the single required check `core-ci-passed` (the Core CI aggregate adopted here as "later, if adopted") on an up-to-date branch,
+  conversation resolution, no force push, no deletion, administrator bypass limited to pull requests. Verified by API readback.
+- **§6.2, `production` environment.** Not started. The design was widened (owner decisions D-1 to D-5): the production credentials are
+  organization secrets readable by any workflow run in this repository, so the environment must cover every production SSH workflow
+  and the organization secrets must later be restricted; the production-access proof and that restriction are deferred.
+- **§7.** "V2-A.3 authorization (`main` ruleset)" is done; "Creating a protected `production` environment" remains open.
+- **Unchanged:** G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.

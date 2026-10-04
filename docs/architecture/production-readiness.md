@@ -1,6 +1,6 @@
 # Production readiness: CI/CD, database roles, backups and migrations
 
-- **Status:** Proposed; facts checked on 2026-09-19 against the repository and a local scratch PostgreSQL. Updated after the CI / deployment-safety change: see [service-foundations.md](./service-foundations.md). Updated at the Stage 14 closure (2026-09-23, `main` at `d385299`): sections 1, 2, 4, 5 and the new section 6. Updated at V2-A (2026-10-02, `main` at `f07fbe0`): section 1 (deployment and merge protection), section 3 (restore status) and section 5.
+- **Status:** Proposed; facts checked on 2026-09-19 against the repository and a local scratch PostgreSQL. Updated after the CI / deployment-safety change: see [service-foundations.md](./service-foundations.md). Updated at the Stage 14 closure (2026-09-23, `main` at `d385299`): sections 1, 2, 4, 5 and the new section 6. Updated at V2-A (2026-10-02, `main` at `f07fbe0`): section 1 (deployment and merge protection), section 3 (restore status) and section 5. Updated at V2-A.3 (2026-10-04): merge protection and F2.
 - **Scope:** what exists, what the Core requires (CI/CD, least-privilege database access, tested backups, safe migrations), and what
   is done versus not. Nothing here changes production. Related: [core-architecture.md](./core-architecture.md),
   [ADR-0032](../adr/0032-database-per-service-on-a-shared-server.md), the auth security review (`docs/security/`).
@@ -15,7 +15,7 @@
 | Docker build | `auth-service-docker-build.yml`: on pull requests it builds **and pushes** a `:develop` image; on push to `main` it built, pushed `:production` and `:latest`, then deployed (true until V2-A.2: seven automatic production deployments followed the cutover record's certified revision). **Since V2-A.2:** on push to `main` the `build-image` job builds once, pushes `:sha-<commit>` with the `org.opencontainers.image.revision` label, records the **index digest** in the run summary and stops: no SSH, no deployment, no `:production` or `:latest` (both frozen and deprecated). It is not in the production queue ([runbook](../runbooks/auth-service-deploy.md)) |
 | Deploy | Since V2-A.2, Auth is deployed only by `auth-service-deploy.yml` (`workflow_dispatch`, `main` only, typed confirmation `deploy auth-service`): it validates the index digest, resolves `IMAGE_NAME@digest`, requires the revision label to be an ancestor of `main`, never builds, and deploys exactly that digest. SSH to the VPS (`appleboy/ssh-action@v1`), runs `deploy/provision-and-deploy.sh`. Failure handling comes from `set -euo pipefail` in the remote script and in the provisioning script. (An earlier `script_stop: true` was **not** protection: it is not an input of `appleboy/ssh-action@v1`, GitHub reported it as unexpected, and it has been removed.) |
 | Other services | no deploy workflow. Since Stage 14.2 Core CI builds all four Core images (`core image (<service>)`) and smoke-checks each with production configuration (`scripts/smoke-core-image.sh`: non-root, `/health` 200 and stable, `/ready` wired); only auth-service is deployed. **Since then (2026-10-02):** manual, `main`-only deploy workflows exist for organization-service and audit-service, plus manual RabbitMQ provisioning, backup and Auth credential rotation, all on the same production queue; the manual deploys rebuild `main` at dispatch time (a new digest each time). Release, File, Payment, Billing and Notification have no deploy path |
-| Merge protection | **none** (checked 2026-09-23, and again 2026-10-02): `main` has no branch protection and no ruleset, so the checks above are not *required*. A repository setting, not code (Stage 14 finding F2). Proposed policy, not applied (V2-A.3): a repository ruleset requiring a pull request and the Core CI checks, no force push, no deletion, administrator bypass limited to pull requests ([V2-A record](./core-v2-a-baseline-and-change-safety.md) §6.2) |
+| Merge protection | **repository ruleset `main` active since 2026-10-04** (V2-A.3 / A3.3, [record](./core-v2-a-3-ci-and-ruleset.md)): pull request required with 0 approvals, required check `core-ci-passed` (the Core CI aggregate) on an up-to-date branch, conversation resolution, no force push, no deletion, administrator bypass on pull requests only. Before that (checked 2026-09-23 and 2026-10-02) `main` had no branch protection and no ruleset (Stage 14 finding F2) |
 
 **Gaps in the existing deploy (three, confirmed by reading the workflow):**
 1. The SSH step runs `docker run ... cat deploy/provision-and-deploy.sh | IMAGE=... bash -s` **without `pipefail`**: if the `docker run`
@@ -121,7 +121,7 @@ change, state existing data, backward compatibility, migration and deploy order,
 | CI that runs lint, typecheck, tests, build (not formatting) | implemented and **verified on GitHub** (6 of 6 jobs passed) |
 | Deploy: fail-fast on the piped script, concurrency queue, stale trigger removed | implemented; the deploy passed under the new script; the concurrency queue itself is checked statically only |
 | Least-privilege database roles | local: implemented and verified; production (auth-service): **implemented and applied** (Stage 14.3) |
-| Required CI checks on `main` (branch protection) | **NEEDS CONFIGURATION** (repository setting; F2); policy proposed as V2-A.3, not applied |
+| Required CI checks on `main` (branch protection) | **configured** (V2-A.3 / A3.3): the `main` ruleset requires `core-ci-passed`; F2 closed |
 | Backup job and off-host copy | implemented for the cutover databases (G5); manual production backups of Auth and Organization **executed and certified** (2026-09-29); the daily schedule (`CORE_BACKUP_SCHEDULE`) is **not enabled** and stays blocked by G6 |
 | Restore procedure | isolated drill tool, certified locally end to end; real-volume drills **certified** for Auth and Organization; other databases not covered |
 | Retention and RPO/RTO | decided: 30 daily, RPO 24 h, RTO 4 h |
@@ -320,7 +320,7 @@ in the sweep.)* Details: `core-validation.md` sections 13.4 and 13.8.
 | # | Finding | Resolution |
 |---|---|---|
 | F1 | Auth production image did not build | fixed, 14.2 (#78) |
-| F2 | CI checks not required on `main` | **open**: repository setting |
+| F2 | CI checks not required on `main` | **closed** (2026-10-04): the `main` ruleset requires the `core-ci-passed` aggregate ([record](./core-v2-a-3-ci-and-ruleset.md)) |
 | F3 | Auth ran as the database superuser | fixed, 14.3 (#79); applied in production |
 | F4 | Unbounded publisher confirm | fixed, 14.6 (#82) |
 | F5 | Incomplete database time limits | fixed, 14.4 (#80) |
