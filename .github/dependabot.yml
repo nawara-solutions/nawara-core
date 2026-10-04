@@ -1,0 +1,17 @@
+# V2 A14 (D5): version-update pull requests, reviewed and merged by hand like any other change (no auto-merge). GitHub Actions stay
+# pinned by full commit SHA (check:repo); Dependabot bumps the SHA and its version comment together. Base-image digests (node, postgres)
+# are not updated here: they are reviewed and bumped manually.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5

@@ -1,0 +1,75 @@
+# V2 A14.2a: THE canonical `verify` job of every digest deployment workflow (auth-, organization-, audit-service-deploy.yml).
+# check:repo requires each workflow's verify job to equal this mapping exactly, with <SERVICE> (e.g. audit-service) and <SIGNER> (its
+# image workflow) substituted: no added, removed or changed step, key, condition, environment or line of the trust script. That is the
+# structural form of D4: there is no successful path out of `verify` (and so to the production approval and the deployment) that does
+# not pass the literal-SHA, provenance (gh attestation verify), jq identity and ancestry checks, in that order. Comments outside a
+# `run:` script are not compared; the scripts are compared byte for byte. Changing the verifier means changing this file, reviewed.
+if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy <SERVICE>'
+runs-on: ubuntu-latest
+permissions:
+  contents: read
+  packages: read
+  # V2 A14: gh attestation verify reads this repository's attestations API (attestations:read, read-only).
+  attestations: read
+outputs:
+  revision: ${{ steps.artifact.outputs.revision }}
+steps:
+  # Full history only for the ancestry check below; nothing is built from this checkout.
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    with:
+      fetch-depth: 0
+  # Pure input validation, before any network access: the digest reaches the shell only through the environment.
+  - name: validate the digest
+    env:
+      DIGEST: ${{ inputs.digest }}
+    run: |
+      set -euo pipefail
+      [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must be sha256:<64 lowercase hex>" >&2; exit 1; }
+  - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+  - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+    with:
+      registry: ghcr.io
+      username: ${{ github.actor }}
+      password: ${{ secrets.GITHUB_TOKEN }}
+  # Read-only: the digest must exist in the <SERVICE> repository and be a revision-labelled artifact built from main.
+  - id: artifact
+    name: verify the artifact
+    env:
+      REF: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}
+      GH_TOKEN: ${{ github.token }}
+    run: |
+      set -euo pipefail
+      docker buildx imagetools inspect "$REF" >/dev/null || { echo "refused: $REF does not exist in the <SERVICE> repository" >&2; exit 1; }
+      image=$(docker buildx imagetools inspect "$REF" --format '{{json .Image}}')
+      # A single-platform index yields the image config itself; a multi-platform one a map keyed by platform.
+      rev=$(jq -r 'if has("config") then (.config.Labels["org.opencontainers.image.revision"] // "")
+                   else (.["linux/amd64"].config.Labels["org.opencontainers.image.revision"] // "") end' <<<"$image")
+      [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: no org.opencontainers.image.revision label (not a build-image artifact)" >&2; exit 1; }
+      # V2 A14: the trusted provenance of THIS digest. The label is only an assertion: the signed (keyless) attestation must prove the
+      # exact digest was built by <SIGNER> on refs/heads/main at that same commit, on a GitHub-hosted runner. No attestation, another
+      # repository, workflow, ref or commit, another digest, or an unavailable service: refused (no bypass, no legacy exception).
+      verified=$(gh attestation verify "oci://$REF" --repo nawara-solutions/nawara-core \
+        --signer-workflow nawara-solutions/nawara-core/.github/workflows/<SIGNER> \
+        --source-ref refs/heads/main --source-digest "$rev" \
+        --predicate-type https://slsa.dev/provenance/v1 --deny-self-hosted-runners --format json) \
+        || { echo "refused: no trusted build provenance for $REF (built by <SIGNER> on refs/heads/main at $rev)" >&2; exit 1; }
+      # Defence in depth over gh's own checks, on the fields gh documents as unforgeable (the certificate) and the signed subject.
+      jq -e --arg d "${REF##*@sha256:}" --arg rev "$rev" \
+        --arg signer "https://github.com/nawara-solutions/nawara-core/.github/workflows/<SIGNER>@refs/heads/main" '
+        type == "array" and length >= 1 and all(.[];
+          .verificationResult.statement.predicateType == "https://slsa.dev/provenance/v1"
+          and ([.verificationResult.statement.subject[]?.digest.sha256] | index($d) != null)
+          and (.verificationResult.signature.certificate as $c
+            | $c.buildSignerURI == $signer and $c.sourceRepositoryURI == "https://github.com/nawara-solutions/nawara-core"
+            and $c.sourceRepositoryRef == "refs/heads/main" and $c.sourceRepositoryDigest == $rev
+            and $c.runnerEnvironment == "github-hosted"))' <<<"$verified" >/dev/null \
+        || { echo "refused: the verified provenance does not describe $REF as required" >&2; exit 1; }
+      git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }
+      echo "revision=$rev" >>"$GITHUB_OUTPUT"
+      {
+        echo "### <SERVICE> deployment (verified; awaiting production approval)"
+        echo ""
+        echo "- index digest: \`${REF##*@}\`"
+        echo "- revision: \`$rev\` (provenance verified: <SIGNER>@refs/heads/main)"
+        echo "- main at dispatch: \`$GITHUB_SHA\`"
+      } >>"$GITHUB_STEP_SUMMARY"

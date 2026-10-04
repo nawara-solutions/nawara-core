@@ -15,6 +15,8 @@ package-lock.json, .dockerignore or the image workflow itself)
    └─ <service> image workflow, job build-image (no environment, no production credentials, no SSH, not in the production queue)
         build once → push ghcr.io/<owner>/nawara-core-<service>:sha-<full commit>
         labels org.opencontainers.image.revision=<commit>, org.opencontainers.image.source=<repository>
+        an SPDX SBOM and SLSA provenance inside the index (V2 A14)
+        → a GitHub artifact attestation signed for that exact INDEX digest by this workflow on refs/heads/main (V2 A14)
         → the run summary records: revision, sha tag, INDEX digest
         ⇒ STOP. Nothing is deployed. Production is unchanged.
 
@@ -22,7 +24,8 @@ explicit, owner-authorized production mutation
    └─ <service>-deploy.yml (workflow_dispatch, main only, typed confirmation)
         job verify  (no environment, no production credentials)
             validate the digest → resolve <IMAGE_NAME>@<digest> in the service's own repository
-            → revision label present → revision is an ancestor of main
+            → revision label is a literal commit SHA → gh attestation verify: the trusted provenance of this exact digest, signed by
+              the service's image workflow on refs/heads/main at that commit (V2 A14) → revision is an ancestor of main
         job deploy  (needs verify; environment `production`: WAITS for the required reviewer's approval;
                      production-deploy-core-api queue, cancel-in-progress: false)
             re-check the digest → SSH: pull exactly <IMAGE_NAME>@<digest> → run that image's provision-and-deploy.sh. Nothing is built.
@@ -52,7 +55,11 @@ explicit, owner-authorized production mutation
 
 3. `verify` refuses, before any approval and before any SSH: a malformed digest; a digest that is not in **this service's** repository;
    an image without the revision label (every image built before the service's immutable build, including what production runs today:
-   see §4); a revision that is not an ancestor of `main`. A confirmation other than the exact phrase skips both jobs.
+   see §4); **since V2 A14, an image without the trusted provenance** (no attestation, or one from another repository, workflow, ref or
+   commit, or for another digest; every image built before A14 is unattested and therefore refused, with no exception); a revision that
+   is not an ancestor of `main`. A confirmation other than the exact phrase skips both jobs.
+   To check an artifact yourself (read-only): `gh attestation verify oci://<IMAGE_NAME>@<digest> --repo nawara-solutions/nawara-core
+   --signer-workflow nawara-solutions/nawara-core/.github/workflows/<service image workflow> --source-ref refs/heads/main`.
 4. **Approve** the `deploy` job when it waits for the `production` environment (the run → **Review deployments** → `production` →
    **Approve and deploy**). The reviewer is the owner; GitHub does not prevent self-approval here, so this is a deliberate second owner
    action, not independent review. **Reject** (or cancel) a run you no longer want instead of leaving it waiting: whether a waiting run
@@ -71,7 +78,9 @@ explicit, owner-authorized production mutation
 
 ## 4. Legacy images
 
-Images built before a service's immutable build carry no revision label, so the deploy workflow refuses them. This includes the images
+Images built before a service's immutable build carry no revision label, and every image built before V2 A14 carries no trusted
+provenance attestation (V2 A14 D4, strict cutover), so the deploy workflow refuses them. Only an image built after the A14 merge is
+deployable. This includes the images
 production runs today (auth-service since the last automatic deployment; organization-service and audit-service since their last
 rebuild-at-dispatch deployments). The running containers are not touched until a separately authorized deployment; returning to a
 legacy image uses the retained-container procedure, never the workflow.

@@ -169,7 +169,9 @@ the organization-level credentials still coexist until A3.7. Every change to `ma
 merge); no digest deployment of any of them has been performed (built ≠ deployed; the first one is A3.6, deferred). **V2 A13** (Audit
 backup and restore coverage) is certified for its tooling, local proof and CI (PR #194, [record](architecture/core-v2-a13-audit-backup.md)
 §9); production Audit backup and restore evidence is **not** complete: no production Audit backup or drill has been performed, the first
-one is blocked until an authorized Audit deployment applies migration 0004, and scheduled backups stay G6-gated.
+one is blocked until an authorized Audit deployment applies migration 0004, and scheduled backups stay G6-gated. **V2 A14** (supply chain
+and build provenance) is implemented locally ([record](architecture/core-v2-a14-supply-chain.md)): not yet merged, not proven with real
+attestations, its GitHub settings not enabled; once active, only post-A14 attested images can be deployed.
 
 ### Compatibility and safety rules for V1 work
 
@@ -407,4 +409,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2-A.1 closure and V2-A.2 certification (Auth build ≠ deploy; gate history; production evidence) | [`core-v2-a-2-certification.md`](architecture/core-v2-a-2-certification.md) |
 | V2-A.3 A3.1 to A3.3: owner decisions, the `core-ci-passed` check, the `main` ruleset | [`core-v2-a-3-ci-and-ruleset.md`](architecture/core-v2-a-3-ci-and-ruleset.md) |
 | V2 A0: Organization and Audit immutable-digest deployment; generic build and deploy guards | [`core-v2-a0-immutable-deployments.md`](architecture/core-v2-a0-immutable-deployments.md) |
+| V2 A14: supply chain and build provenance (SHA-pinned actions, pinned bases, SBOM, GitHub artifact attestations, attestation-verifying deploys) | [`core-v2-a14-supply-chain.md`](architecture/core-v2-a14-supply-chain.md) |
 | V2 A13: Audit backup and restore coverage (O1–O6, the O3-B privilege finding, design, evidence) | [`core-v2-a13-audit-backup.md`](architecture/core-v2-a13-audit-backup.md) |

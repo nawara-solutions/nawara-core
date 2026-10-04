@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -41,7 +41,12 @@ for (const f of readdirSync(wfDir).filter((n) => n.endsWith('.yml'))) {
   const text = readFileSync(join(wfDir, f), 'utf8');
   problems.push(...checkWorkflowSafety(f, text));
   if (f === 'core-ci.yml') problems.push(...checkCiCoverage(f, text), ...checkCiAggregate(f, text));
-  if (DIGEST_DEPLOYMENTS[f]) problems.push(...checkDigestDeploy(f, text, DIGEST_DEPLOYMENTS[f]));
+  problems.push(...checkActionPins(f, text));
+  if (DIGEST_DEPLOYMENTS[f]) {
+    // V2 A14: the provenance signer of a deployment is the image workflow of the same repository.
+    const signerWorkflow = Object.keys(IMAGE_BUILDS).find((w) => IMAGE_BUILDS[w].repository === DIGEST_DEPLOYMENTS[f]);
+    problems.push(...checkDigestDeploy(f, text, DIGEST_DEPLOYMENTS[f], { signerWorkflow }));
+  }
   if (CONFIRMED_OPERATIONS[f]) problems.push(...checkTypedConfirmation(f, text, CONFIRMED_OPERATIONS[f]));
   if (IMAGE_BUILDS[f]) problems.push(...checkImageBuild(f, text, IMAGE_BUILDS[f]));
 }
@@ -51,6 +56,16 @@ for (const f of new Set([...Object.keys(DIGEST_DEPLOYMENTS), ...Object.keys(CONF
   } catch {
     problems.push(`${f} (a protected production workflow) is missing`);
   }
+}
+// V2 A14: pinned base images (every application Dockerfile; the production PostgreSQL of the three deployed services).
+{
+  const dockerfiles = {};
+  for (const app of readdirSync(join(root, 'apps'))) {
+    try { dockerfiles[`apps/${app}/Dockerfile`] = readFileSync(join(root, 'apps', app, 'Dockerfile'), 'utf8'); } catch { /* no image (ai-service) */ }
+  }
+  const deployScripts = Object.fromEntries(['auth-service', 'organization-service', 'audit-service']
+    .map((svc) => [`apps/${svc}/deploy/provision-and-deploy.sh`, readFileSync(join(root, 'apps', svc, 'deploy/provision-and-deploy.sh'), 'utf8')]));
+  problems.push(...checkImagePins(dockerfiles, deployScripts));
 }
 try {
   readFileSync(join(wfDir, 'core-ci.yml'));

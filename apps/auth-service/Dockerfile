@@ -5,7 +5,7 @@
 # dependencies, including the shared @nawara/service-kit package since Stage 13.2).
 # See .github/workflows/auth-service-docker-build.yml for the build invocation.
 
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY libs/service-kit/package.json libs/service-kit/package.json
@@ -19,7 +19,7 @@ RUN npm run build -w @nawara/audit-contract
 COPY apps/auth-service apps/auth-service
 RUN npm run build --workspace=auth-service
 
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./

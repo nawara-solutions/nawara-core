@@ -3,7 +3,7 @@
 # Built with repo-root context (npm workspaces monorepo: organization-service has no lockfile of its own; the workspace root's
 # package.json/package-lock.json is required to resolve its dependencies, including the shared @nawara/service-kit package).
 
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY libs/service-kit/package.json libs/service-kit/package.json
@@ -17,7 +17,7 @@ RUN npm run build -w @nawara/audit-contract
 COPY apps/organization-service apps/organization-service
 RUN npm run build --workspace=organization-service
 
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 WORKDIR /app
 # Production is the default; configuration comes from the environment at run time (nothing secret is baked into the image).
 ENV NODE_ENV=production

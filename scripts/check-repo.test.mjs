@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR } from './lib/checks.mjs';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
@@ -88,6 +88,9 @@ jobs:
 const workflow = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
 const BUILD = workflow('auth-service-docker-build.yml');
 const DEPLOY = workflow('auth-service-deploy.yml');
+// V2 A14: the provenance signer of each deployment (as scripts/check-repo.mjs derives it from IMAGE_BUILDS).
+const SIGNER = { 'nawara-core-auth-service': 'auth-service-docker-build.yml', 'nawara-core-organization-service': 'organization-service-image.yml', 'nawara-core-audit-service': 'audit-service-image.yml' };
+const checkDigestDeployFor = (f, t, r) => checkDigestDeploy(f, t, r, { signerWorkflow: SIGNER[r] });
 const AUTH = 'nawara-core-auth-service';
 const swap = (text, from, to) => {
   assert.ok(text.includes(from), `fixture drift: "${from}" not found`);
@@ -118,7 +121,7 @@ test('A: the real Auth image workflow builds only; re-adding an automatic deploy
             set -euo pipefail
             docker pull "$IMAGE"
 `;
-  assert.match(checkWorkflowSafety('b.yml', BUILD + deployJob).join(), /never automatically \(found: pull_request, push\)/);
+  assert.match(checkWorkflowSafety('b.yml', BUILD + deployJob).join(), /never automatically \(found: push\)/); // V2 A14: the Auth image workflow is push-only
 });
 
 test('B/C: a push-triggered workflow may not publish or move :production or :latest', () => {
@@ -138,7 +141,7 @@ test('H: a workflow input interpolated into a shell script is refused (any workf
 
 test('the real digest deployment passes every rule', () => {
   assert.deepEqual(checkWorkflowSafety('auth-service-deploy.yml', DEPLOY), []);
-  assert.deepEqual(checkDigestDeploy('auth-service-deploy.yml', DEPLOY, AUTH), []);
+  assert.deepEqual(checkDigestDeployFor('auth-service-deploy.yml', DEPLOY, AUTH), []);
 });
 
 test('D: a digest deployment that builds (rebuilding main) is refused', () => {
@@ -147,10 +150,10 @@ test('D: a digest deployment that builds (rebuilding main) is refused', () => {
           push: true
           tags: \${{ env.IMAGE_NAME }}:sha-\${{ github.sha }}
       - uses: appleboy/ssh-action@v1`;
-  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '      - uses: appleboy/ssh-action@v1', buildStep), AUTH).join(), /must never build an image/);
+  assert.match(checkDigestDeployFor('d.yml', swap(DEPLOY, '      - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5', buildStep), AUTH).join(), /must never build an image/);
   for (const cmd of ['docker build -t x .', 'docker buildx build --push .']) {
     const bad = swap(DEPLOY, '          docker buildx imagetools inspect "$REF" >/dev/null', `          ${cmd}\n          docker buildx imagetools inspect "$REF" >/dev/null`);
-    assert.match(checkDigestDeploy('d.yml', bad, AUTH).join(), /must never build an image/);
+    assert.match(checkDigestDeployFor('d.yml', bad, AUTH).join(), /must never build an image/);
   }
 });
 
@@ -164,12 +167,12 @@ test('E: removing or loosening the digest validation, or moving it after the reg
 `;
   // verify's validation (the first occurrence) loosened, then deploy's re-validation loosened
   const loose = swap(DEPLOY, '^sha256:[0-9a-f]{64}$ ]] || { echo "refused: the digest must', '^sha256:.+$ ]] || { echo "refused: the digest must');
-  assert.match(checkDigestDeploy('d.yml', loose, AUTH).join(), /job "verify": the digest must be validated against/);
+  assert.match(checkDigestDeployFor('d.yml', loose, AUTH).join(), /job "verify": the digest must be validated against/);
   const looseDeploy = DEPLOY.slice(0, DEPLOY.lastIndexOf(VALIDATE)) + VALIDATE.replace('{64}', '+') + DEPLOY.slice(DEPLOY.lastIndexOf(VALIDATE) + VALIDATE.length);
-  assert.match(checkDigestDeploy('d.yml', looseDeploy, AUTH).join(), /job "deploy": the digest must be re-validated/);
+  assert.match(checkDigestDeployFor('d.yml', looseDeploy, AUTH).join(), /job "deploy": the digest must be re-validated/);
   // verify's validation moved after the registry login
-  const late = swap(swap(DEPLOY, VALIDATE, ''), '      - uses: docker/login-action@v4\n', `      - uses: docker/login-action@v4\n${VALIDATE}`);
-  assert.match(checkDigestDeploy('d.yml', late, AUTH).join(), /job "verify": the digest must be validated .* before any registry step/);
+  const late = swap(swap(DEPLOY, VALIDATE, ''), '      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0\n', `      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0\n${VALIDATE}`);
+  assert.match(checkDigestDeployFor('d.yml', late, AUTH).join(), /job "verify": the digest must be validated .* before any registry step/);
 });
 
 // ---------------------------------------------------------------- V2-A.3 (A3.5): production SSH only inside a protected environment
@@ -245,36 +248,36 @@ test('A3.5: typed confirmations of the real production operations are kept', () 
 });
 
 test('A3.5: the Auth verify/deploy split is enforced', () => {
-  assert.deepEqual(checkDigestDeploy('auth-service-deploy.yml', DEPLOY, AUTH), []);
+  assert.deepEqual(checkDigestDeployFor('auth-service-deploy.yml', DEPLOY, AUTH), []);
   const noEnv = swap(DEPLOY, '    environment: production\n', '');
-  assert.match(checkDigestDeploy('d.yml', noEnv, AUTH).join(), /must be bound to the "production" environment/);
+  assert.match(checkDigestDeployFor('d.yml', noEnv, AUTH).join(), /must be bound to the "production" environment/);
   const onVerify = swap(swap(DEPLOY, '    environment: production\n', ''), '  verify:\n    if:', '  verify:\n    environment: production\n    if:');
-  const msgs = checkDigestDeploy('d.yml', onVerify, AUTH).join();
+  const msgs = checkDigestDeployFor('d.yml', onVerify, AUTH).join();
   assert.match(msgs, /job "verify": must not declare an environment/);
   assert.match(msgs, /job "deploy": must be bound to the "production" environment/);
-  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '    needs: verify\n', ''), AUTH).join(), /must need the "verify" job/);
+  assert.match(checkDigestDeployFor('d.yml', swap(DEPLOY, '    needs: verify\n', ''), AUTH).join(), /must need the "verify" job/);
   const verifyGone = DEPLOY.replace(/\n {2}verify:\n[\s\S]*?\n {2}deploy:\n/, '\n  deploy:\n');
-  assert.match(checkDigestDeploy('d.yml', verifyGone, AUTH).join(), /the "verify" job is missing/);
+  assert.match(checkDigestDeployFor('d.yml', verifyGone, AUTH).join(), /the "verify" job is missing/);
   const sshOnVerify = swap(DEPLOY, '      - id: artifact\n', '      - run: echo "$H"\n        env:\n          H: ${{ secrets.DEPLOY_SSH_HOST }}\n      - id: artifact\n');
-  assert.match(checkDigestDeploy('d.yml', sshOnVerify, AUTH).join(), /job "verify": must not use production SSH or the DEPLOY_SSH_\* credentials/);
+  assert.match(checkDigestDeployFor('d.yml', sshOnVerify, AUTH).join(), /job "verify": must not use production SSH or the DEPLOY_SSH_\* credentials/);
   const renamed = swap(swap(DEPLOY, '\n  deploy:\n    needs: verify\n', '\n  ship:\n    needs: verify\n'), 'jobs:\n', 'jobs:\n');
-  assert.match(checkDigestDeploy('d.yml', renamed, AUTH).join(), /the SSH job must be "deploy"/);
+  assert.match(checkDigestDeployFor('d.yml', renamed, AUTH).join(), /the SSH job must be "deploy"/);
   const noConfirmVerify = DEPLOY.replace("  verify:\n    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy auth-service'\n", "  verify:\n    if: github.ref == 'refs/heads/main'\n");
-  assert.match(checkDigestDeploy('d.yml', noConfirmVerify, AUTH).join(), /job "verify": must require the typed confirmation/);
+  assert.match(checkDigestDeployFor('d.yml', noConfirmVerify, AUTH).join(), /job "verify": must require the typed confirmation/);
 });
 
 test('F: deploying anything but exactly IMAGE_NAME@digest is refused', () => {
   for (const image of ['${{ env.IMAGE_NAME }}:production', '${{ env.IMAGE_NAME }}:sha-${{ github.sha }}', 'ghcr.io/other/repo@${{ inputs.digest }}', '${{ steps.verify.outputs.ref }}']) {
     const bad = swap(DEPLOY, 'IMAGE: ${{ env.IMAGE_NAME }}@${{ inputs.digest }}', `IMAGE: ${image}`);
-    assert.match(checkDigestDeploy('d.yml', bad, AUTH).join(), /must deploy exactly/);
+    assert.match(checkDigestDeployFor('d.yml', bad, AUTH).join(), /must deploy exactly/);
   }
   const foreign = swap(DEPLOY, 'IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-auth-service', 'IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/nawara-core-organization-service');
-  assert.match(checkDigestDeploy('d.yml', foreign, AUTH).join(), /IMAGE_NAME must be fixed to the nawara-core-auth-service repository/);
+  assert.match(checkDigestDeployFor('d.yml', foreign, AUTH).join(), /IMAGE_NAME must be fixed to the nawara-core-auth-service repository/);
 });
 
 test('F: dropping the artifact verification (existence, revision label, ancestry) is refused', () => {
   const noAncestry = swap(DEPLOY, '          git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }\n', '');
-  assert.match(checkDigestDeploy('d.yml', noAncestry, AUTH).join(), /revision label checked as an ancestor of main/);
+  assert.match(checkDigestDeployFor('d.yml', noAncestry, AUTH).join(), /revision label checked as an ancestor of main/);
 });
 
 test('G: the digest deployment keeps the production queue, never cancels, main only, typed confirmation, read-only packages', () => {
@@ -285,11 +288,11 @@ test('G: the digest deployment keeps the production queue, never cancels, main o
   assert.match(checkWorkflowSafety('d.yml', noQueue).join(), /has no concurrency group/);
   assert.match(checkWorkflowSafety('d.yml', swap(DEPLOY, '      cancel-in-progress: false\n', '      cancel-in-progress: true\n')).join(), /cancel-in-progress must be explicitly false/);
   const noConfirm = swap(DEPLOY, " && inputs.confirm == 'deploy auth-service'", '');
-  assert.match(checkDigestDeploy('d.yml', noConfirm, AUTH).join(), /typed confirmation/);
-  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '      packages: read', '      packages: write'), AUTH).join(), /packages/);
-  assert.match(checkDigestDeploy('d.yml', swap(DEPLOY, '  workflow_dispatch:\n', '  push:\n    branches: [main]\n  workflow_dispatch:\n'), AUTH).join(), /workflow_dispatch only/);
+  assert.match(checkDigestDeployFor('d.yml', noConfirm, AUTH).join(), /typed confirmation/);
+  assert.match(checkDigestDeployFor('d.yml', swap(DEPLOY, '      packages: read', '      packages: write'), AUTH).join(), /packages/);
+  assert.match(checkDigestDeployFor('d.yml', swap(DEPLOY, '  workflow_dispatch:\n', '  push:\n    branches: [main]\n  workflow_dispatch:\n'), AUTH).join(), /workflow_dispatch only/);
   const optional = swap(DEPLOY, 'sha256:<64 hex>, from a build-image run summary)"\n        required: true', 'sha256:<64 hex>, from a build-image run summary)"\n        required: false');
-  assert.match(checkDigestDeploy('d.yml', optional, AUTH).join(), /"digest" input must exist and be required/);
+  assert.match(checkDigestDeployFor('d.yml', optional, AUTH).join(), /"digest" input must exist and be required/);
 });
 
 test('I: the digest deployment keeps set -euo pipefail and no secret in the remote script', () => {
@@ -385,7 +388,7 @@ const DEPLOY_FILES = {
 const ORG_IMAGE = workflow('organization-service-image.yml');
 const ORG_IMAGE_CFG = IMAGE_BUILD_FILES['organization-service-image.yml'];
 
-test('A0: the three real image builds satisfy the immutable-build contract (Auth develop job included)', () => {
+test('A0/A14: the three real image builds satisfy the immutable-build contract (push-only; provenance, SBOM, attestation)', () => {
   for (const [name, cfg] of Object.entries(IMAGE_BUILD_FILES)) {
     assert.deepEqual(checkImageBuild(name, workflow(name), cfg), [], name);
     assert.deepEqual(checkWorkflowSafety(name, workflow(name)), [], name);
@@ -429,30 +432,34 @@ test('A0: an image build never deploys (no environment, credentials, SSH or prod
   const queued = swap(ORG_IMAGE, '  build-image:\n', `  build-image:\n    concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false\n`);
   assert.match(checkImageBuild('o.yml', queued, C).join(), /must not join the production queue/);
   assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, '    branches: [main]\n', '    branches: [main, develop]\n'), C).join(), /push to main only/);
-  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, 'on:\n  push:\n', 'on:\n  workflow_dispatch:\n  push:\n'), C).join(), /not on workflow_dispatch/);
+  assert.match(checkImageBuild('o.yml', swap(ORG_IMAGE, 'on:\n  push:\n', 'on:\n  workflow_dispatch:\n  push:\n'), C).join(), /never on workflow_dispatch/);
 });
 
-test('A0: a non-build-image job stays pull_request-only and never publishes sha-, :production or :latest (Auth build-develop)', () => {
+test('A14 (D3): the Auth image workflow never publishes from a pull request: a PR trigger or a second (develop) job is refused', () => {
   const AUTH_BUILD = workflow('auth-service-docker-build.yml');
   const C = IMAGE_BUILD_FILES['auth-service-docker-build.yml'];
-  assert.match(checkImageBuild('a.yml', swap(AUTH_BUILD, '          tags: ${{ env.IMAGE_NAME }}:develop', '          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}'), C).join(), /only build-image publishes the immutable sha- tag/);
-  assert.match(checkImageBuild('a.yml', swap(AUTH_BUILD, "  build-develop:\n    if: github.event_name == 'pull_request'\n", "  build-develop:\n    if: github.event_name == 'push'\n"), C).join(), /must be pull_request-only/);
+  assert.doesNotMatch(AUTH_BUILD, /pull_request|build-develop|:develop/, 'no PR publication path remains');
+  const prTrigger = swap(AUTH_BUILD, 'on:\n  push:\n', "on:\n  pull_request:\n    branches: [main]\n  push:\n");
+  assert.match(checkImageBuild('a.yml', prTrigger, C).join(), /never on pull_request/);
+  const developJob = swap(AUTH_BUILD, 'jobs:\n', `jobs:\n  build-develop:\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      packages: write\n    steps:\n      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0\n        with:\n          push: true\n          tags: \${{ env.IMAGE_NAME }}:develop\n`);
+  const msgs = checkImageBuild('a.yml', developJob, C).join();
+  assert.match(msgs, /exactly one job, build-image/);
 });
 
 test('A0: Organization and Audit deploy exactly a verified digest (same contract as Auth)', () => {
   for (const [name, [repository, phrase]] of Object.entries(DEPLOY_FILES)) {
     const text = workflow(name);
-    assert.deepEqual(checkDigestDeploy(name, text, repository), [], name);
+    assert.deepEqual(checkDigestDeployFor(name, text, repository), [], name);
     assert.deepEqual(checkTypedConfirmation(name, text, phrase), [], name);
     assert.deepEqual(checkWorkflowSafety(name, text), [], name);
   }
   const ORG = workflow('organization-service-deploy.yml');
-  const rebuild = swap(ORG, '      - uses: appleboy/ssh-action@v1', '      - uses: docker/build-push-action@v7\n        with:\n          push: true\n          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n      - uses: appleboy/ssh-action@v1');
-  assert.match(checkDigestDeploy('o.yml', rebuild, 'nawara-core-organization-service').join(), /must never build an image/);
-  assert.match(checkDigestDeploy('o.yml', ORG, 'nawara-core-audit-service').join(), /IMAGE_NAME must be fixed to the nawara-core-audit-service repository/);
+  const rebuild = swap(ORG, '      - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5', '      - uses: docker/build-push-action@v7\n        with:\n          push: true\n          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n      - uses: appleboy/ssh-action@v1');
+  assert.match(checkDigestDeployFor('o.yml', rebuild, 'nawara-core-organization-service').join(), /must never build an image/);
+  assert.match(checkDigestDeployFor('o.yml', ORG, 'nawara-core-audit-service').join(), /IMAGE_NAME must be fixed to the nawara-core-audit-service repository/);
   // verify's confirmation is enforced by the digest-deploy contract; deploy's (the production job) by the typed-confirmation contract
   const noConfirmVerify = swap(ORG, " && inputs.confirm == 'deploy organization-service'", '');
-  assert.match(checkDigestDeploy('o.yml', noConfirmVerify, 'nawara-core-organization-service').join(), /job "verify": must require the typed confirmation/);
+  assert.match(checkDigestDeployFor('o.yml', noConfirmVerify, 'nawara-core-organization-service').join(), /job "verify": must require the typed confirmation/);
   const deployIf = "  deploy:\n    needs: verify\n    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy organization-service'\n";
   const noConfirmDeploy = swap(ORG, deployIf, "  deploy:\n    needs: verify\n    if: github.ref == 'refs/heads/main'\n");
   assert.match(checkTypedConfirmation('o.yml', noConfirmDeploy, 'deploy organization-service').join(), /job "deploy": must require the typed confirmation/);
@@ -463,21 +470,21 @@ test('A0.3 (D9): every digest deployment refuses a revision that is not a litera
   const LABEL_CHECK = '          [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: no org.opencontainers.image.revision label (not a build-image artifact)" >&2; exit 1; }\n';
   for (const [name, [repository]] of Object.entries(DEPLOY_FILES)) {
     const text = workflow(name);
-    assert.deepEqual(checkDigestDeploy(name, text, repository), [], name);
+    assert.deepEqual(checkDigestDeployFor(name, text, repository), [], name);
     // D9: the label is still extracted (the label name stays in the step) and the ancestry check stays, but the format check is gone
     const removed = swap(text, LABEL_CHECK, '');
     assert.ok(removed.includes('org.opencontainers.image.revision') && removed.includes('merge-base --is-ancestor'), name);
-    assert.match(checkDigestDeploy(name, removed, repository).join(), /must be refused unless it matches \^\[0-9a-f\]\{40\}\$/, `${name}: D9`);
+    assert.match(checkDigestDeployFor(name, removed, repository).join(), /must be refused unless it matches \^\[0-9a-f\]\{40\}\$/, `${name}: D9`);
     // weakened variants: a looser pattern, no refusal, or the check placed after the ancestry check
     for (const weaker of [
       LABEL_CHECK.replace('{40}', '+'),
       LABEL_CHECK.replace(' >&2; exit 1; }', ' >&2; }'),
     ]) {
-      assert.match(checkDigestDeploy(name, swap(text, LABEL_CHECK, weaker), repository).join(), /must be refused unless it matches/, `${name}: weaker`);
+      assert.match(checkDigestDeployFor(name, swap(text, LABEL_CHECK, weaker), repository).join(), /must be refused unless it matches/, `${name}: weaker`);
     }
     const ANC = '          git merge-base --is-ancestor "$rev" HEAD || { echo "refused: revision $rev is not an ancestor of main" >&2; exit 1; }\n';
     const after = swap(swap(text, LABEL_CHECK, ''), ANC, ANC + LABEL_CHECK);
-    assert.match(checkDigestDeploy(name, after, repository).join(), /before the ancestry check/, `${name}: order`);
+    assert.match(checkDigestDeployFor(name, after, repository).join(), /before the ancestry check/, `${name}: order`);
   }
 });
 
@@ -589,3 +596,210 @@ test('Stage 21.C.2: only the reference-cache protocol may open Auth\'s hierarchy
   assert.equal(checkSource('apps/auth-service/src/cli/owner-tools.ts', "await q.query(`SELECT set_config('nawara.reference_write', 'on', true)`);").length, 1);
 });
 
+
+// ================================================================================ V2 A14: supply chain and provenance
+const ALL_WORKFLOWS = ['audit-service-deploy.yml', 'audit-service-image.yml', 'auth-db-credential-rotate.yml', 'auth-service-deploy.yml', 'auth-service-docker-build.yml',
+  'core-backup.yml', 'core-ci.yml', 'core-rabbitmq-provision.yml', 'organization-service-deploy.yml', 'organization-service-image.yml'];
+const CHECKOUT_PIN = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1';
+
+test('A14 (D2): every external action in every workflow is pinned to a full SHA with its exact release comment', () => {
+  for (const name of ALL_WORKFLOWS) assert.deepEqual(checkActionPins(name, workflow(name)), [], name);
+  const local = "jobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/local\n";
+  assert.deepEqual(checkActionPins('l.yml', local), [], 'a local ./ action is allowed');
+});
+
+test('A14 (D2): a major tag, version tag, branch, short SHA or missing version comment is refused', () => {
+  const CI = workflow('core-ci.yml');
+  for (const [label, to, re] of [
+    ['major tag', 'actions/checkout@v7', /must be pinned to a full 40-hex commit SHA/],
+    ['version tag', 'actions/checkout@v7.0.1', /must be pinned to a full 40-hex commit SHA/],
+    ['branch', 'actions/checkout@main', /must be pinned to a full 40-hex commit SHA/],
+    ['short SHA', 'actions/checkout@3d3c42e # v7.0.1', /must be pinned to a full 40-hex commit SHA/],
+    ['no version comment', 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', /must carry its exact release as a comment/],
+    ['a vague comment', 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7', /must carry its exact release as a comment/],
+  ]) {
+    const i = CI.indexOf(CHECKOUT_PIN);
+    const bad = CI.slice(0, i) + to + CI.slice(i + CHECKOUT_PIN.length);
+    assert.match(checkActionPins('core-ci.yml', bad).join(), re, label);
+  }
+});
+
+const NODE_PIN = 'node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402';
+const PG_PIN = 'postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea';
+const DOCKERFILES = Object.fromEntries(['audit', 'auth', 'billing', 'file', 'notification', 'organization', 'payment', 'release']
+  .map((s) => [`apps/${s}-service/Dockerfile`, readFileSync(new URL(`../apps/${s}-service/Dockerfile`, import.meta.url), 'utf8')]));
+const DEPLOY_SCRIPTS = Object.fromEntries(['auth', 'organization', 'audit']
+  .map((s) => [`apps/${s}-service/deploy/provision-and-deploy.sh`, readFileSync(new URL(`../apps/${s}-service/deploy/provision-and-deploy.sh`, import.meta.url), 'utf8')]));
+const withFile = (set, path, fn) => ({ ...set, [path]: fn(set[path]) });
+
+test('A14: the eight application Dockerfiles use the same pinned Node base; the three production PostgreSQL images are pinned and equal', () => {
+  assert.deepEqual(checkImagePins(DOCKERFILES, DEPLOY_SCRIPTS), []);
+  for (const text of Object.values(DOCKERFILES)) for (const l of text.split('\n').filter((x) => x.startsWith('FROM '))) assert.ok(l.includes(NODE_PIN), l);
+  for (const text of Object.values(DEPLOY_SCRIPTS)) assert.match(text, new RegExp(`^DB_IMAGE=${PG_PIN.replace(/[.]/g, '\\.')}$`, 'm'));
+});
+
+test('A14: a floating or inconsistent Node base, or a floating or inconsistent production PostgreSQL image, is refused', () => {
+  const F = 'apps/auth-service/Dockerfile'; const D = 'apps/audit-service/deploy/provision-and-deploy.sh';
+  assert.match(checkImagePins(withFile(DOCKERFILES, F, (t) => t.replace(NODE_PIN, 'node:22-alpine')), DEPLOY_SCRIPTS).join(), /must be pinned as <image>:<tag>@sha256/);
+  assert.match(checkImagePins(withFile(DOCKERFILES, F, (t) => t.replace(NODE_PIN, `node:22-alpine@sha256:${'1'.repeat(64)}`)), DEPLOY_SCRIPTS).join(), /must all use the same pinned base image/);
+  assert.match(checkImagePins(withFile(DOCKERFILES, F, (t) => t.replaceAll(NODE_PIN, `node:24-alpine@sha256:${'1'.repeat(64)}`)), DEPLOY_SCRIPTS).join(), /same pinned base image|pinned node:22-alpine/);
+  assert.match(checkImagePins(DOCKERFILES, withFile(DEPLOY_SCRIPTS, D, (t) => t.replace(PG_PIN, 'postgres:16-alpine'))).join(), /must be a pinned postgres/);
+  assert.match(checkImagePins(DOCKERFILES, withFile(DEPLOY_SCRIPTS, D, (t) => t.replace(PG_PIN, `postgres:16-alpine@sha256:${'2'.repeat(64)}`))).join(), /must all use the same pinned PostgreSQL image/);
+  assert.match(checkImagePins(DOCKERFILES, withFile(DEPLOY_SCRIPTS, D, (t) => t.replace(/^DB_IMAGE=.*$/m, ''))).join(), /no DB_IMAGE/);
+});
+
+const SBOM_LINE = '          attests: type=sbom,generator=docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9\n';
+test('A14: each image build has provenance mode=max, a pinned SBOM generator and a GitHub attestation of the exact index digest', () => {
+  for (const [name, cfg] of Object.entries(IMAGE_BUILD_FILES)) {
+    const text = workflow(name);
+    assert.deepEqual(checkImageBuild(name, text, cfg), [], name);
+    for (const [label, from, to, re] of [
+      ['SBOM removed', SBOM_LINE, '', /attests: type=sbom/],
+      ['SBOM generator unpinned', SBOM_LINE, '          attests: type=sbom,generator=docker/buildkit-syft-scanner:stable-1\n', /attests: type=sbom/],
+      ['plain sbom', SBOM_LINE, '          sbom: true\n', /attests: type=sbom/],
+      ['provenance removed', '          provenance: mode=max\n', '', /provenance: mode=max/],
+      ['provenance weakened', '          provenance: mode=max\n', '          provenance: mode=min\n', /provenance: mode=max/],
+      ['attestation removed', '        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0\n', '        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2\n', /attest-build-provenance step must attest/],
+      ['subject name with a tag', '          subject-name: ${{ env.IMAGE_NAME }}\n', '          subject-name: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n', /subject-name must be exactly/],
+      ['subject digest changed', '          subject-digest: ${{ steps.build.outputs.digest }}\n', '          subject-digest: ${{ inputs.digest }}\n', /subject-digest must be exactly/],
+      ['not pushed to the registry', '          push-to-registry: true\n', '          push-to-registry: false\n', /pushed to the registry/],
+      ['id-token removed', '      id-token: write\n', '', /needs id-token: write and attestations: write/],
+      ['attestations removed', '      attestations: write\n', '', /needs id-token: write and attestations: write/],
+    ]) assert.match(checkImageBuild(name, swap(text, from, to), cfg).join(), re, `${name}: ${label}`);
+  }
+  const atTop = swap(ORG_IMAGE, 'env:\n', 'permissions:\n  id-token: write\nenv:\n');
+  assert.match(checkImageBuild('organization-service-image.yml', atTop, ORG_IMAGE_CFG).join(), /id-token: write must be granted to build-image only/);
+});
+
+test('A14: the deploy verifier requires the exact attestation identity; removing or loosening any part is refused', () => {
+  for (const [name, [repository]] of Object.entries(DEPLOY_FILES)) {
+    const text = workflow(name); const wf = SIGNER[repository];
+    assert.deepEqual(checkDigestDeployFor(name, text, repository), [], name);
+    const cases = [
+      ['verify removed', /          verified=\$\(gh attestation verify[\s\S]*?exit 1; \}\n/, '', /gh attestation verify|bind --source-digest/],
+      ['wrong repository', '--repo nawara-solutions/nawara-core \\', '--repo nawara-solutions/other \\', /--repo nawara-solutions\/nawara-core/],
+      ['wrong signer workflow', `--signer-workflow nawara-solutions/nawara-core/.github/workflows/${wf} \\`, '--signer-workflow nawara-solutions/nawara-core/.github/workflows/core-ci.yml \\', /--signer-workflow/],
+      ['wrong source ref', '--source-ref refs/heads/main --source-digest', '--source-ref refs/heads/develop --source-digest', /--source-ref refs\/heads\/main/],
+      ['source digest missing', ' --source-digest "$rev" \\', ' \\', /bind --source-digest/],
+      ['source digest another variable', '--source-digest "$rev"', '--source-digest "$other"', /bind --source-digest/],
+      ['wrong predicate', '--predicate-type https://slsa.dev/provenance/v1 --deny', '--predicate-type https://spdx.dev/Document --deny', /--predicate-type https:\/\/slsa\.dev\/provenance\/v1/],
+      ['self-hosted allowed', ' --deny-self-hosted-runners', '', /--deny-self-hosted-runners/],
+      ['not the exact digest', 'gh attestation verify "oci://$REF"', 'gh attestation verify "oci://$IMAGE_NAME:latest"', /the exact digest/],
+      ['caller bundle', '--format json) \\', '--format json --bundle "$BUNDLE") \\', /caller-supplied bundle/],
+      ['failure ignored', /\|\| \{ echo "refused: no trusted build provenance[^\n]*\n/, '|| true\n', /a failed gh attestation verify must refuse/],
+      ['jq re-check removed', /          # Defence in depth[\s\S]*?does not describe \$REF as required" >&2; exit 1; \}\n/, '', /re-checked with jq -e/],
+      ['jq failure ignored', /\|\| \{ echo "refused: the verified provenance[^\n]*\n/, '|| true\n', /a failed jq re-check must refuse/],
+      ['jq signer loosened', '$c.buildSignerURI == $signer and ', '', /check the signer/],
+      ['jq subject unchecked', ' and ([.verificationResult.statement.subject[]?.digest.sha256] | index($d) != null)', '', /signed subject digest/],
+      ['attestations: read removed', '      attestations: read\n', '', /needs attestations: read/],
+      ['GH_TOKEN removed', '          GH_TOKEN: ${{ github.token }}\n', '', /GH_TOKEN must be/],
+    ];
+    for (const [label, from, to, re] of cases) {
+      const bad = from instanceof RegExp ? text.replace(from, to) : swap(text, from, to);
+      assert.notEqual(bad, text, `${name}: ${label} (fixture)`);
+      assert.match(checkDigestDeployFor(name, bad, repository).join(), re, `${name}: ${label}`);
+    }
+    const anc = text.match(/          git merge-base --is-ancestor[^\n]*\n/)[0];
+    const moved = swap(text, anc, '').replace('          verified=$(gh attestation verify', `${anc}          verified=$(gh attestation verify`);
+    assert.match(checkDigestDeployFor(name, moved, repository).join(), /after the literal-SHA check and before the ancestry check/, `${name}: verify after ancestry`);
+    const signs = swap(text, '      attestations: read\n', '      attestations: write\n      id-token: write\n');
+    assert.match(checkDigestDeployFor(name, signs, repository).join(), /a deployment never signs/, `${name}: signing permissions`);
+  }
+});
+
+// ================================================================================ V2 A14.2a: strict-cutover bypasses (C1), SBOM generator (C2)
+const GH_LINE = '          verified=$(gh attestation verify';
+const before = (text, lines) => swap(text, GH_LINE, `${lines}\n${GH_LINE}`);
+const CANON = /must equal the canonical verify job/;
+
+test('A14.2a C1: the approved verifier of each service is accepted (C1-T7)', () => {
+  for (const [name, [repository]] of Object.entries(DEPLOY_FILES)) assert.deepEqual(checkDigestDeployFor(name, workflow(name), repository), [], name);
+});
+
+test('A14.2a C1: no early success, allow-list, bypass variable or alternative path before the trust checks (C1-T1..T6 and beyond)', () => {
+  for (const [name, [repository]] of Object.entries(DEPLOY_FILES)) {
+    const text = workflow(name);
+    const cases = [
+      // C1-T1..T6 (the A14.3 V27/V28 shapes and their generalizations)
+      ['C1-T1 legacy digest allow-list', before(text, '          if [ "${REF##*@}" = "sha256:436b0797f62054399895066d4c13f3e39447a69c6e3636d4a54b9fdcaf4e54c0" ]; then\n            echo "revision=$rev" >>"$GITHUB_OUTPUT"\n            exit 0\n          fi'), CANON],
+      ['C1-T2 bypass variable', before(text, '          if [ "${SKIP_PROVENANCE:-}" = "1" ]; then\n            echo "revision=$rev" >>"$GITHUB_OUTPUT"\n            exit 0\n          fi'), CANON],
+      ['C1-T2 bypass variable (another name)', before(text, '          [ -z "${ALLOW_UNATTESTED:-}" ] || exit 0'), CANON],
+      ['C1-T3 unconditional exit 0', before(text, '          exit 0'), CANON],
+      ['C1-T3 bare exit', before(text, '          exit'), CANON],
+      ['C1-T4 return from a function', before(text, '          check() { return 0; }\n          check && { echo "revision=$rev" >>"$GITHUB_OUTPUT"; }'), CANON],
+      ['C1-T5 early GITHUB_OUTPUT write', before(text, '          echo "revision=$rev" >>"$GITHUB_OUTPUT"'), CANON],
+      ['C1-T6 exec', before(text, '          exec true'), CANON],
+      // the same invariant, shapes no string blacklist would catch (all missed before A14.2a)
+      ['gh shadowed by a function', before(text, '          gh() { echo "[]"; }'), CANON],
+      ['jq shadowed by a function', before(text, '          jq() { return 0; }'), CANON],
+      ['PATH changed before gh', before(text, '          PATH="$RUNNER_TEMP/bin:$PATH"'), CANON],
+      ['the gh call made conditional', swap(text, GH_LINE, '          [ -n "${X:-}" ] && verified=$(gh attestation verify'), CANON],
+      ['set +e', before(text, '          set +e'), CANON],
+      ['the artifact step skipped (if)', swap(text, '      - id: artifact\n', "      - id: artifact\n        if: inputs.digest != 'sha256:x'\n"), CANON],
+      ['the artifact step allowed to fail', swap(text, '      - id: artifact\n', '      - id: artifact\n        continue-on-error: true\n'), CANON],
+      ['the artifact step shell replaced', swap(text, '      - id: artifact\n', '      - id: artifact\n        shell: bash --noprofile --norc {0} || true\n'), CANON],
+      ['the verify job allowed to fail', swap(text, '    outputs:\n      revision:', '    continue-on-error: true\n    outputs:\n      revision:'), CANON],
+      ['BASH_ENV injected by an earlier step', swap(text, 'exit 1; }\n      - uses: docker/setup-buildx', 'exit 1; }\n          echo "BASH_ENV=/tmp/x" >>"$GITHUB_ENV"\n      - uses: docker/setup-buildx'), CANON],
+      ['an extra step in verify', swap(text, '      - id: artifact\n', '      - run: echo "revision=0000000000000000000000000000000000000000" >>"$GITHUB_OUTPUT"\n      - id: artifact\n'), CANON],
+      ['the job output taken from another step', swap(text, 'revision: ${{ steps.artifact.outputs.revision }}', 'revision: ${{ inputs.digest }}'), CANON],
+      ['deploy runs whatever verify did (always())', swap(text, '    needs: verify\n    if: ', '    needs: verify\n    if: always() && '), /its condition must be exactly/],
+      ['deploy runs unless cancelled', swap(text, '    needs: verify\n    if: ', '    needs: verify\n    if: ${{ !cancelled() }} && '), /its condition must be exactly/],
+      ['workflow-level default shell', swap(text, '\nenv:\n', '\ndefaults:\n  run:\n    shell: bash {0}\nenv:\n'), /must not set workflow-level defaults/],
+      ['workflow-level BASH_ENV', swap(text, '\nenv:\n', '\nenv:\n  BASH_ENV: /tmp/x\n'), /workflow-level env must be exactly IMAGE_NAME/],
+      // preserved A14 detectors (A14.3 V2, V3b, V17 and identity changes) still fire, now alongside the canonical check
+      ['|| true after gh', text.replace(/\|\| \{ echo "refused: no trusted build provenance[^\n]*/, '|| true'), /a failed gh attestation verify must refuse/],
+      ['real suppression inside the substitution (V3b)', swap(text, ' --format json) \\', ' --format json; true) \\'), CANON],
+      ['|| true after jq', text.replace(/\|\| \{ echo "refused: the verified provenance[^\n]*/, '|| true'), /a failed jq re-check must refuse/],
+      ['identity changed', swap(text, '--source-ref refs/heads/main --source-digest', '--source-ref refs/heads/develop --source-digest'), /--source-ref refs\/heads\/main/],
+      ['identity check removed', swap(text, ' and $c.sourceRepositoryDigest == $rev', ''), /the source commit/],
+    ];
+    for (const [label, bad, re] of cases) {
+      assert.notEqual(bad, text, `${name}: ${label} (fixture)`);
+      const problems = checkDigestDeployFor(name, bad, repository).join('\n');
+      assert.match(problems, re, `${name}: ${label}`);
+    }
+    // A reviewed Dependabot SHA bump of an action in verify stays acceptable to the canonical check (checkActionPins still requires a full SHA).
+    const bumped = swap(text, 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1', `actions/checkout@${'a'.repeat(40)} # v7.0.2`);
+    assert.doesNotMatch(checkDigestDeployFor(name, bumped, repository).join(), CANON, `${name}: action SHA bump`);
+    assert.match(checkDigestDeployFor(name, swap(text, 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1', 'actions/checkout@v7'), repository).join(), CANON, `${name}: unpinned action in verify`);
+  }
+});
+
+test('A14.2a C1: the verifier of one service cannot be swapped in for another (the canonical job binds service and signer)', () => {
+  const auth = workflow('auth-service-deploy.yml');
+  const orgVerify = workflow('organization-service-deploy.yml').match(/\n  verify:\n[\s\S]*?\n  deploy:\n/)[0];
+  const mixed = auth.replace(/\n  verify:\n[\s\S]*?\n  deploy:\n/, orgVerify);
+  assert.notEqual(mixed, auth);
+  assert.match(checkDigestDeployFor('auth-service-deploy.yml', mixed, 'nawara-core-auth-service').join(), CANON);
+});
+
+const GENERATOR = 'docker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9';
+test('A14.2a C2: the SBOM generator is the exact frozen identity in Auth, Organization and Audit (C2-T1, C2-T7)', () => {
+  assert.equal(SBOM_GENERATOR, GENERATOR);
+  for (const [name, cfg] of Object.entries(IMAGE_BUILD_FILES)) {
+    assert.ok(workflow(name).includes(`attests: type=sbom,generator=${GENERATOR}\n`), name);
+    assert.deepEqual(checkImageBuild(name, workflow(name), cfg), [], name);
+  }
+});
+
+test('A14.2a C2: another digest, another generator, a floating or missing generator, or one diverging service is refused (C2-T2..T6)', () => {
+  const SBOM = /must set exactly attests: type=sbom,generator=docker\/buildkit-syft-scanner:1\.12\.0@sha256:ae4f3b55/;
+  for (const [name, cfg] of Object.entries(IMAGE_BUILD_FILES)) {
+    const text = workflow(name);
+    for (const [label, to] of [
+      ['C2-T2 same generator and version, another valid-looking digest', `docker/buildkit-syft-scanner:1.12.0@sha256:${'5'.repeat(64)}`],
+      ['C2-T2 one hex digit changed', GENERATOR.slice(0, -1) + (GENERATOR.endsWith('9') ? '8' : '9')],
+      ['C2-T3 another generator, pinned', `docker/buildkit-syft-scanner-fork:1.12.0@sha256:${'6'.repeat(64)}`],
+      ['C2-T3 another registry, same digest', `ghcr.io/attacker/buildkit-syft-scanner:1.12.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9`],
+      ['another version, same digest', `docker/buildkit-syft-scanner:1.13.0@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9`],
+      ['C2-T4 floating tag', 'docker/buildkit-syft-scanner:stable-1'],
+      ['C2-T4 digest without the tag', 'docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'],
+    ]) assert.match(checkImageBuild(name, swap(text, GENERATOR, to), cfg).join(), SBOM, `${name}: ${label}`);
+    assert.match(checkImageBuild(name, swap(text, `attests: type=sbom,generator=${GENERATOR}`, 'attests: type=sbom'), cfg).join(), SBOM, `${name}: C2-T5 generator omitted`);
+    assert.match(checkImageBuild(name, swap(text, `          attests: type=sbom,generator=${GENERATOR}\n`, ''), cfg).join(), SBOM, `${name}: C2-T5 SBOM omitted`);
+  }
+  // C2-T6: only one service diverges; the other two stay accepted, the diverging one is refused.
+  const results = Object.entries(IMAGE_BUILD_FILES).map(([name, cfg]) => checkImageBuild(name, name === 'organization-service-image.yml'
+    ? swap(workflow(name), GENERATOR, `docker/buildkit-syft-scanner:1.12.0@sha256:${'7'.repeat(64)}`) : workflow(name), cfg));
+  assert.deepEqual(results.map((p) => p.length > 0), Object.keys(IMAGE_BUILD_FILES).map((n) => n === 'organization-service-image.yml'));
+});
