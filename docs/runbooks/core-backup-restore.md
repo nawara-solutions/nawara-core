@@ -1,7 +1,8 @@
 # Core database backup and restore runbook
 
 Encrypted off-host backups, isolated restore drills and production recovery for the two databases of the Organization authority
-cutover (Stage 21.x G5; ADR-0040 G5; [production-readiness.md](../architecture/production-readiness.md) §3). Tooling:
+cutover (Stage 21.x G5; ADR-0040 G5; [production-readiness.md](../architecture/production-readiness.md) §3) and, since V2 A13, for the
+audit-service evidence store ([A13 record](../architecture/core-v2-a13-audit-backup.md)). Tooling:
 `infra/backup/backup.sh` (on the server), `infra/backup/restore-drill.sh` (in the recovery environment),
 `.github/workflows/core-backup.yml`.
 
@@ -21,10 +22,15 @@ cutover (Stage 21.x G5; ADR-0040 G5; [production-readiness.md](../architecture/p
 | D1 off-host | private **S3-compatible** object storage; the provider is operational configuration (no provider is built in) |
 | D2 encryption | **client-side public-key**: the server encrypts to a recipient certificate; the private key lives only in off-host custody. A compromise of the server, or of the bucket and its credentials, alone exposes no plaintext |
 | D3 targets | **RPO 24 h** (daily backup), **RTO 4 h**, **30 daily** backups kept. No PITR/WAL archiving (optional later) |
-| D4 scope | the cutover databases: **organization-service** and **auth-service** only |
+| D4 scope | the cutover databases: **organization-service** and **auth-service**; extended by V2 A13 to **audit-service** (append-only evidence) |
 | D5 drills | Auth real-volume drill after this tooling is merged (separate authorization); Organization real-volume drill **after F1, before G7/F6** |
 
-Not decided here: the cadence of recurring drills after G5 (production-readiness §3 asks for a scheduled drill; the owner sets it).
+Not decided here: the cadence of recurring drills after G5 (production-readiness §3 asks for a scheduled drill; the owner sets it; for
+Audit it is deferred to the G6 production-operations work, A13 O6).
+
+**Audit (V2 A13, O2).** Audit inherits the Core target of RPO 24 h / RTO 4 h / 30 daily backup days. While backups remain manually
+triggered (§2), the 24 h RPO is a **target, not an operationally guaranteed objective**: it is met only when someone runs §3 every day.
+A measured local drill duration and a later production-gated drill duration are recorded separately; neither is the other.
 
 ## 2. One-time setup (each step a separate, approved production change)
 
@@ -63,7 +69,16 @@ and the staleness rule of §4 is the reminder.
 
 ```bash
 gh workflow run core-backup.yml --ref main -f services="auth-service"
+gh workflow run core-backup.yml --ref main -f services="audit-service"   # V2 A13; a production action: authorize each run
 ```
+
+**audit-service prerequisite (V2 A13.4a).** An Audit backup requires the migration `0004_changes_validation_search_path.sql` to be
+applied in the target database: without it a backup of a non-empty Audit database cannot be restored with `pg_restore`. `backup.sh`
+checks it first and **refuses** the Audit backup (stage `preflight`: no dump, no upload, no manifest, no success status) while it is
+missing. The first production Audit backup therefore must not run before an authorized Audit deployment has applied 0004, in this order:
+A13 merged → a separately authorized Audit digest deployment (applies 0004, narrows and asserts `schema_migrations`) → deployment health
+verified → only then the first production Audit backup → its verification → a separately authorized real-volume Audit restore drill.
+The 24 h RPO stays a target, not an operationally guaranteed objective, while backups are manually triggered.
 
 **Approval (V2-A.3 / A3.5).** The production job of this workflow (`backup`) is bound to the protected GitHub environment `production`. After the
 dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
@@ -73,10 +88,13 @@ longer want instead of leaving it waiting: whether a waiting run holds the `prod
 
 Per service, a run succeeds only when every step does, in this order: `pg_dump -Fc` **inside the database container** (its own
 PostgreSQL major; a newer client's dump does not restore on an older server) over the local socket as the least-privileged identity
-that reads everything (`organization_migrator`, the non-superuser owner; `auth_app`, read-only use, no privilege added) ->
-non-empty custom-format archive -> `pg_restore --list` reads it and it holds the data of the cutover-critical tables -> the restore
-facts (row counts, structure, migration digest, outbox counts, owners, ACLs, authority state) and the secret files (`db.env`,
-`roles.env`, `.env`, `callers/`; tar, modes kept) -> each encrypted with `openssl cms` (AES-256, to the certificate) -> uploaded ->
+that reads everything (`organization_migrator` and `audit_migrator`, the non-superuser owners; `auth_app`, read-only use, no privilege
+added) -> non-empty custom-format archive -> `pg_restore --list` reads it and it holds the data of the cutover-critical tables (Audit:
+`schema_migrations`, `audit_record`, `audit_retention_policy`, `audit_retention_run`, `outbox`, `inbox`; a data section exists even
+for an empty table) -> the restore facts (row counts, structure, migration digest, outbox counts, owners, ACLs, authority state; for
+Audit instead of an authority state: the append-only triggers and their state, function and default ACLs, the schema ACL, a digest of
+every record's identity and clocks, and the newest record as the known record) and the secret files (`db.env`, `roles.env`, `.env`,
+`callers/`; tar, modes kept) -> each encrypted with `openssl cms` (AES-256, to the certificate) -> uploaded ->
 HEAD reports each object's exact size -> the plaintext manifest, **last**. Then retention.
 
 Objects, per run: `<prefix>/<service>/<service>-<YYYYmmddTHHMMSSZ>.{db.dump.cms,facts.cms,config.tar.cms,manifest}`. The manifest
@@ -108,7 +126,7 @@ and retention failed (the new backup is intact).
 | a restore drill (§5) | any FAIL | the backups are **not** recoverable until fixed: stop any cutover step that depends on G5 |
 
 ```bash
-for s in auth-service organization-service; do [ -f ~/nawara-core/backup/status/$s.last-success ] && sed -n 's/^stamp=/'"$s"' last success: /p' ~/nawara-core/backup/status/$s.last-success; done
+for s in auth-service organization-service audit-service; do [ -f ~/nawara-core/backup/status/$s.last-success ] && sed -n 's/^stamp=/'"$s"' last success: /p' ~/nawara-core/backup/status/$s.last-success; done
 ```
 
 ## 5. Restore drill (isolated; the G5 evidence)
@@ -155,7 +173,39 @@ G5 evidence: it keeps the containers and the restored data, and prints the `dock
 **Real-volume drills (D5):** Auth, once this tooling is merged, under its own authorization; Organization after F1, before G7/F6.
 Record each as G5 evidence: the date, the backup stamp, the image, the drill output (it holds no secret).
 
+### 5A. audit-service drill (V2 A13)
+
+```bash
+SERVICE=audit-service STAMP=latest PRIVATE_KEY_FILE=nawara-backup-recovery-key.pem \
+IMAGE=ghcr.io/nawara-solutions/nawara-core-audit-service@sha256:<the release that made the backup, or later> \
+BACKUP_DIR=<dir with destination.env + read s3-credentials.env> \
+  bash infra/backup/restore-drill.sh      # no KNOWN_ID: the known record is the one recorded at backup time
+```
+
+Audit's `/ready` requires a broker and its ingestion consumer, so the drill adds a **disposable broker** in the drill database's own
+namespace (`nawara-drill-audit-service-<id>-mq`, `--network container:<drill db>`: loopback only, no route, no DNS; the production
+broker's pinned image; a drill-only vhost user). Additionally to the checks of §5:
+
+1. the facts are compared **before** the deploy's `schema_migrations` narrowing, so they prove equality with the backup source as it
+   was; if the source still let `audit_app` write the migration history (O3-B), the drill prints a `NOTICE` and continues: the intended
+   state is then applied and the deploy's own privilege assertion must pass;
+2. the append-only triggers are present and enabled, and the controls are refused: `audit_app` UPDATE on `audit_record`; the owner's
+   UPDATE, DELETE and TRUNCATE on `audit_record` and `audit_retention_run`; an `outbox` event rewrite; `audit_app` INSERT, UPDATE,
+   DELETE on `schema_migrations`; `audit_app` running the retention grant helper; and a supplied `recordedAt` is replaced by the
+   database clock. These are **LOCAL / DISPOSABLE RESTORE MUTATION** against the drill's own database, every one rolled back; they are
+   never run against production;
+3. the database and the broker have no network, and the broker and the service share only the drill database's namespace (checked);
+   the service's `RABBITMQ_URL` is exactly the drill broker's;
+4. the real `GET /ready` passes and the ingestion consumer is attached to the drill broker;
+5. the application read: `GET /audit/platform/records` with a drill-only reader (`SERVICE_TOKENS` / `AUDIT_SERVICE_POLICY`
+   `read_platform`, written only into the drill's own environment file) returns the newest record recorded at backup time.
+
+The drill ends with a secret-free `DRILL_RESULT service=… stamp=… checks=… duration_s=…` line (the measured duration is the drill's RTO
+evidence). The broker, the service and the database are removed with their volumes; `KEEP_DRILL=yes` keeps all three.
+
 ## 6. Production recovery (RTO 4 h)
+
+**This section is for organization-service and auth-service. audit-service is never recovered this way: see §6A.**
 
 Never ad hoc. The same order as the drill, with the normal deploy doing the last steps. Decrypt only in the recovery environment,
 then move the needed files to the server over SSH into a 0700 directory, and delete them after use.
@@ -179,6 +229,29 @@ then move the needed files to the server over SSH into a 0700 directory, and del
 After the restart the relay publishes the restored pending outbox rows, including rows that had already been published after the
 backup: Audit stores each `(sourceService, eventId)` once, so they are absorbed. Writes after the backup are lost (up to the RPO).
 
+## 6A. audit-service recovery (V2 A13, O5): never drop the live evidence
+
+Audit holds append-only evidence that may have been written after the backup and may not be reproducible. The live database is
+**never** dropped and replaced by a backup. The procedure, each step an explicit operator action:
+
+1. **Contain:** stop `nawara-core-audit-service` (ingestion stops; the broker keeps queuing `audit.#` in the durable
+   `audit-service.audit`). Do not touch `nawara-core-audit-db` or its volume.
+2. **Restore into a new, isolated database:** the drill of §5A (recovery environment) or a new database container and volume; never
+   the live one.
+3. **Verify:** every §5A check.
+4. **Establish the gap:** if the live database is readable, compare it with the restored one (record ids and `(sourceService, eventId)`
+   after the backup point).
+5. **Reconcile what is available:** records still in a readable live database (copy procedure: **not implemented**, owner decision);
+   messages still queued in `audit-service.audit` / `.retry` (delivered after cutover; `(sourceService, eventId)` uniqueness absorbs
+   duplicates); dead-lettered messages (the kit's DLQ replay tools). Re-emitting producers' already-published outbox rows is **not
+   implemented** (owner decision).
+6. **Explicit operator decision** on what is accepted as lost.
+7. **Controlled cutover:** the exact repointing procedure (the deploy names `nawara-core-audit-db`) is a later design and proof item.
+8. **Verify after cutover:** `/ready`, the consumer attached, the queue draining.
+
+Evidence acknowledged by the broker into data that is lost cannot be re-delivered: the 24 h RPO bounds what a backup restores, not
+what can be reconstructed. Restoring a backup is necessary for Audit recovery, never sufficient on its own.
+
 ## 7. The authority boundary (ADR-0040 A2.6)
 
 - **Before F6:** restoring the inactive Organization environment is recovery inside preparation, not an ownership rollback. Verify
@@ -201,3 +274,8 @@ backup: Audit stores each `(sourceService, eventId)` once, so they are absorbed.
   Auth images): both backups encrypted, uploaded and verified, retention enforced against a real S3 API, the source databases
   removed, then both drills passed (Organization 11 checks, 50 facts; Auth 10 checks, 95 facts); the restored pending outbox row
   stayed pending with no network.
+- V2 A13 (audit-service): the same test file covers the Audit backup (owner dump, REQUIRED_DATA, integrity facts, three-service
+  retention, partial failure), byte-identical Auth and Organization facts SQL, and the Audit drill (order, isolation, disposable broker,
+  O3-B notice, assertion, controls, consumer, known-record read, cleanup); `audit-deploy.test.mjs` covers the deploy's
+  `schema_migrations` narrowing and assertion. The local end-to-end Audit drill is A13.3 evidence (the
+  [A13 record](../architecture/core-v2-a13-audit-backup.md)).

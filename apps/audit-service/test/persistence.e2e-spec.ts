@@ -64,13 +64,13 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── migrations and the catalog
 
-  it('an 18.2 foundation database upgrades to the current schema (0001, 18.6\'s 0002 index, 18.8\'s 0003 retention), then re-runs as a no-op', async () => {
+  it('an 18.2 foundation database upgrades to the current schema (0001, 18.6\'s 0002 index, 18.8\'s 0003 retention, A13.3a\'s 0004 search_path), then re-runs as a no-op', async () => {
     const up = await provisionServiceDatabase(env.TEST_DATABASE_ADMIN_URL, 'auu');
     try {
       const foundation = await runMigrations(up.migratorUrl, [kitMigrationsDir]); // the 18.2 state: the kit baseline, no audit migration
       expect(foundation.applied.every((n) => n.startsWith('kit_'))).toBe(true);
       const upgrade = await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
-      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql']);
+      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql']);
       expect((await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]);
       const grants = await sql<{ p: string }>(up.adminUrl, `SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'audit_record' AND grantee = $1 ORDER BY 1`, [up.app]);
       expect(grants.map((g) => g.p)).toEqual(['INSERT', 'SELECT']);
@@ -441,6 +441,33 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
       expect((await repo.insertOnce(r, q)).kind).toBe('inserted');
     });
     expect(await repo.findBySourceAndEventId(r.sourceService, r.eventId)).toBeDefined();
+  });
+
+  // ─────────────────────────────────────────────────────────────────── V2 A13.3a: a backup of a non-empty database restores
+
+  it('the changes CHECK resolves with an empty search_path (how pg_restore loads data): valid changes load, invalid ones are still refused', async () => {
+    const [cfg] = await sql<{ c: string | null; owner: string }>(d.adminUrl,
+      `SELECT array_to_string(proconfig, ',') AS c, pg_get_userbyid(proowner) AS owner FROM pg_proc WHERE oid = 'public.audit_changes_valid(jsonb)'::regprocedure`);
+    expect(cfg).toEqual({ c: 'search_path=public, pg_temp', owner: d.migrator });
+    // A pg_restore session: search_path = '' and the data loaded by the schema owner with the CHECK active. Before 0004 the inner
+    // audit_change_scalar_valid() call did not resolve here and every restore of a database holding a record failed.
+    const c = new pg.Client({ connectionString: d.migratorUrl });
+    await c.connect();
+    try {
+      await c.query(`SELECT pg_catalog.set_config('search_path', '', false)`);
+      await c.query('BEGIN');
+      const insert = (eventId: string, changes: string) => c.query(
+        `INSERT INTO public.audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "resourceType", "resourceId", outcome, changes, "occurredAt")
+         VALUES ($1, 'organization-service', 'membership.revoked', 'business', 1, 'service', 'organization-service', 'membership', $2, 'succeeded', $3::jsonb, now())`,
+        [eventId, MEMBERSHIP, changes]);
+      await insert(randomUUID(), '{"status":{"from":"active","to":"revoked"}}');
+      await c.query('SAVEPOINT invalid');
+      await expect(insert(randomUUID(), '{"Bad Key":1}')).rejects.toMatchObject({ code: '23514', constraint: 'audit_record_changes_valid' });
+      await c.query('ROLLBACK TO SAVEPOINT invalid');
+    } finally {
+      await c.query('ROLLBACK').catch(() => undefined);
+      await c.end();
+    }
   });
 
   it('20 concurrent deliveries of one event (through the pool): exactly one row; every other call resolves as a duplicate of it', async () => {

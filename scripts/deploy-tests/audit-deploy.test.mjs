@@ -173,3 +173,81 @@ test('digest deployment: a failed migration stops the deploy before the running 
     'the application container is not stopped, renamed, replaced or started');
   assert.equal(w.state().containers[APP].id, running);
 });
+
+// V2 A13 (O3-B): the migration history is the migrator's alone. The runner creates schema_migrations as audit_migrator, so the default
+// privileges give audit_app DML on it; the deploy narrows it to SELECT after migrating and asserts the runtime role before any start.
+const HISTORY_WRITES = ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'];
+
+test('the migration history is made read-only for audit_app after migrating, and asserted before the service starts', () => {
+  const w = ready();
+  assert.equal(deploy(w).code, 0);
+  const s = w.state();
+  const narrow = s.stdin.find((x) => x.container === DB && x.text.includes('schema_migrations'));
+  assert.ok(narrow, 'schema_migrations is narrowed by the deploy');
+  assert.deepEqual(narrow.text.trim().split('\n'), [
+    'REVOKE ALL ON TABLE schema_migrations FROM audit_app;',
+    'GRANT SELECT ON TABLE schema_migrations TO audit_app;',
+  ], 'SELECT only (for /ready), nothing else');
+  assert.equal(s.calls[narrow.at][s.calls[narrow.at].indexOf('-d') + 1], 'audit');
+  const migrate = s.calls.findIndex((a) => a[0] === 'run' && a.includes('../../libs/service-kit/dist/cli/migrate.js'));
+  assert.match(s.calls.find((a) => a[0] === 'run' && a.includes('--rm')).join(' '), /--env-file \S+\/\.migrate\.\S+ --entrypoint node/);
+  const attrsQ = s.queries.find((q) => q.sql.includes('rolbypassrls'));
+  const forbiddenQ = s.queries.find((q) => q.sql.includes('WHERE has_table_privilege'));
+  const missingQ = s.queries.find((q) => q.sql.includes('WHERE NOT has_table_privilege'));
+  const appAt = s.calls.findIndex((a) => a[0] === 'run' && a.includes('--name') && a[a.indexOf('--name') + 1] === APP);
+  assert.ok(migrate < narrow.at && narrow.at < attrsQ.at && attrsQ.at < forbiddenQ.at && forbiddenQ.at < missingQ.at && missingQ.at < appAt,
+    'migrate, then narrow, then assert, then (only then) start the service');
+  for (const p of HISTORY_WRITES) assert.ok(forbiddenQ.sql.includes(`('schema_migrations','${p}')`), `the assertion forbids schema_migrations ${p}`);
+  for (const p of ['UPDATE', 'DELETE', 'TRUNCATE']) assert.ok(forbiddenQ.sql.includes(`('audit_record','${p}')`), `the assertion forbids audit_record ${p}`);
+  for (const t of ['audit_retention_run', 'audit_retention_policy']) for (const p of HISTORY_WRITES) assert.ok(forbiddenQ.sql.includes(`('${t}','${p}')`), `the assertion forbids ${t} ${p}`);
+  for (const f of ['audit_grant_retention(regrole)', 'audit_restrict_to_append_only(regclass)']) assert.ok(forbiddenQ.sql.includes(`('${f}')`) && forbiddenQ.sql.includes('has_function_privilege'), `the assertion forbids EXECUTE on ${f}`);
+  for (const r of ["('schema_migrations','SELECT')", "('audit_record','SELECT')", "('audit_record','INSERT')"]) assert.ok(missingQ.sql.includes(r), `the assertion requires ${r}`);
+  assert.ok(!s.stdin.some((x) => /ALTER DEFAULT PRIVILEGES[^;]*REVOKE/i.test(x.text)), 'the general default privileges are not changed');
+});
+
+test('migrations still run as audit_migrator (the owner), never as the runtime role', () => {
+  const w = ready();
+  assert.equal(deploy(w).code, 0);
+  const sql = w.state().stdin.filter((s) => s.container === DB).map((s) => s.text).join('\n');
+  assert.match(sql, /CREATE DATABASE audit OWNER audit_migrator/);
+  const migrate = w.calls('run', '--rm').at(-1);
+  assert.ok(migrate.includes('--entrypoint') && migrate.includes('node'));
+  assert.ok(!JSON.stringify(migrate).includes('audit_app'), 'the migration runner is not handed the runtime identity');
+});
+
+for (const p of HISTORY_WRITES) {
+  test(`fail closed when audit_app can ${p} schema_migrations: a first deploy never starts, a redeploy never swaps`, () => {
+    const first = ready();
+    first.patch((s) => { s.audit = { forbidden: `schema_migrations:${p}` }; });
+    const r = deploy(first);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, new RegExp(`forbidden privileges \\(schema_migrations:${p}\\).*the running service was not touched`));
+    assert.equal(runOf(first, APP), undefined, 'no audit-service container was started');
+
+    const again = ready();
+    assert.equal(deploy(again).code, 0);
+    const id = again.state().containers[APP].id;
+    again.patch((s) => { s.audit = { forbidden: `schema_migrations:${p}` }; });
+    assert.notEqual(deploy(again).code, 0);
+    assert.equal(again.state().containers[APP].id, id, 'the running container is untouched');
+    assert.equal(again.state().containers[APP].running, true);
+    assert.deepEqual(again.calls('stop'), []);
+  });
+}
+
+for (const [label, audit, reason] of [
+  ['audit_app can run the retention grant helper', { forbidden: 'audit_grant_retention(regrole):EXECUTE' }, /forbidden privileges \(audit_grant_retention\(regrole\):EXECUTE\)/],
+  ['audit_app can rewrite evidence', { forbidden: 'audit_record:UPDATE' }, /forbidden privileges \(audit_record:UPDATE\)/],
+  ['audit_app can no longer read the migration history (/ready)', { missing: 'schema_migrations:SELECT' }, /lacks privileges the service needs \(schema_migrations:SELECT\)/],
+  ['audit_app has an elevated attribute', { roleAttrs: 't|f|f|f|f' }, /audit_app has an elevated attribute/],
+]) {
+  test(`fail closed when ${label}: the service is never started`, () => {
+    const w = ready();
+    w.patch((s) => { s.audit = audit; });
+    const r = deploy(w);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, reason);
+    assert.match(r.out, /the running service was not touched/);
+    assert.equal(runOf(w, APP), undefined);
+  });
+}

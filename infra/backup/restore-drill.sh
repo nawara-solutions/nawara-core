@@ -24,10 +24,15 @@
 #   recorded at the backup source; no user row is needed or read) -> remove the drill containers AND their volumes; remove all
 #   plaintext. KEEP_DRILL=yes (local debugging only, never for G5 evidence) keeps the containers and the restored data.
 # Prints states, counts of checks and PASS/FAIL only: never a secret, a row count or a restored value.
+# audit-service (V2 A13) adds, in the same namespace: a DISPOSABLE broker (the production broker's pinned image, a drill-only user, never a
+# production broker) so the real /ready (database, migrations, broker, ingestion consumer) can pass; facts compared BEFORE the deploy's
+# schema_migrations narrowing (a source still at O3-B is reported); the deploy's privilege assertion; append-only and privilege controls
+# (LOCAL / DISPOSABLE RESTORE MUTATION, rolled back); and the newest record recorded at backup time read back through the platform API
+# with a drill-only reader. Audit production recovery never drops the live database: docs/runbooks/core-backup-restore.md §6A.
 set -euo pipefail
 umask 077
 
-: "${SERVICE:?SERVICE is required (organization-service | auth-service)}"
+: "${SERVICE:?SERVICE is required (organization-service | auth-service | audit-service)}"
 : "${STAMP:?STAMP is required (the backup timestamp, e.g. 20260929T021700Z, or latest)}"
 : "${PRIVATE_KEY_FILE:?PRIVATE_KEY_FILE is required (the recovery private key, kept off the production host)}"
 : "${IMAGE:?IMAGE is required (the service image to verify with: the release that made the backup, or a later one)}"
@@ -48,8 +53,18 @@ case "$SERVICE" in
     MIGRATE=(dist/cli/migrate.js)
     MIGRATE_SUMMARY='^migrations: ([0-9]+) applied, ([0-9]+) already applied, ([0-9]+) checksum\(s\) recorded$'  # apps/auth-service/src/cli/migrate.ts
     CONFIG_ALLOWED='^(db\.env|\.env)$' ;;
-  *) die "unknown SERVICE '$SERVICE' (known: organization-service auth-service)" ;;
+  audit-service)
+    # V2 A13: the append-only evidence store. Its /ready needs a broker and the ingestion consumer, so the drill adds a DISPOSABLE broker
+    # in the same no-network namespace (never a production one), and reads back the newest record recorded at backup time.
+    DB_NAME=audit; BOOT_USER=audit_admin; BOOT_DB=postgres; OWNER=audit_migrator; RUNTIME=audit_app
+    MIGRATE=(../../libs/service-kit/dist/cli/migrate.js --dir db/migrations)
+    MIGRATE_SUMMARY='^migrations: ([0-9]+) applied, ([0-9]+) already applied$'  # libs/service-kit/src/cli/migrate.ts
+    CONFIG_ALLOWED='^(db\.env|roles\.env|\.env)$' ;;
+  *) die "unknown SERVICE '$SERVICE' (known: organization-service auth-service audit-service)" ;;
 esac
+# The disposable drill broker: the production broker's pinned image (infra/rabbitmq/provision.sh), nothing else of production.
+MQ_IMAGE='rabbitmq:3.13.7-alpine@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc'
+MQ_VHOST=nawara-core
 [[ $STAMP =~ ^([0-9]{8}T[0-9]{6}Z|latest)$ ]] || die "STAMP must be YYYYmmddTHHMMSSZ or latest"
 # The application-level read differs per service: Organization reads a known Company through its API (KNOWN_ID: a Company id written
 # before the backup); Auth reads its hierarchy authority marker (a structural singleton: no user row, no personal data), so a fresh
@@ -57,8 +72,10 @@ esac
 if [ "$SERVICE" = organization-service ]; then
   : "${KNOWN_ID:?KNOWN_ID is required for organization-service (the id of a Company written before the backup)}"
   [[ $KNOWN_ID =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "KNOWN_ID must be a lowercase UUID"
-else
+elif [ "$SERVICE" = auth-service ]; then
   [ -z "${KNOWN_ID:-}" ] || die "KNOWN_ID is not used for auth-service (its application-level check reads the hierarchy authority marker); unset it"
+else
+  [ -z "${KNOWN_ID:-}" ] || die "KNOWN_ID is not used for audit-service (its application-level check reads back the record recorded at backup time); unset it"
 fi
 for c in docker openssl sha256sum tar; do command -v "$c" >/dev/null || die "$c is required"; done
 [ -f "$PRIVATE_KEY_FILE" ] || die "PRIVATE_KEY_FILE does not exist"
@@ -70,15 +87,17 @@ else
 fi
 
 # ---------------------------------------------------------------- the target: never production, never ambiguous
-for prod in nawara-core-organization-db nawara-core-auth-db; do
+for prod in nawara-core-organization-db nawara-core-auth-db nawara-core-audit-db; do
   if docker inspect "$prod" >/dev/null 2>&1 && [ "${RESTORE_ON_PRODUCTION_HOST:-}" != yes ]; then
     die "this Docker host runs $prod: a drill belongs in the recovery environment (the private key stays off the production host); set RESTORE_ON_PRODUCTION_HOST=yes only for an approved on-host drill"
   fi
 done
 DRILL_ID="${DRILL_ID:-$(date -u +%Y%m%d%H%M%S)}"
 [[ $DRILL_ID =~ ^[a-z0-9-]{1,32}$ ]] || die "DRILL_ID must be [a-z0-9-]{1,32}"
-DDB="nawara-drill-$SERVICE-$DRILL_ID-db"; DAPP="nawara-drill-$SERVICE-$DRILL_ID-app"
-for n in "$DDB" "$DAPP"; do
+DDB="nawara-drill-$SERVICE-$DRILL_ID-db"; DAPP="nawara-drill-$SERVICE-$DRILL_ID-app"; DMQ="nawara-drill-$SERVICE-$DRILL_ID-mq"
+DRILL_CONTAINERS=("$DAPP" "$DDB")
+[ "$SERVICE" != audit-service ] || DRILL_CONTAINERS=("$DAPP" "$DMQ" "$DDB")
+for n in "${DRILL_CONTAINERS[@]}"; do
   case "$n" in nawara-core-*) die "refusing a production container name ($n)" ;; esac
   ! docker inspect "$n" >/dev/null 2>&1 || die "$n already exists: a drill always starts from nothing (choose another DRILL_ID)"
 done
@@ -86,10 +105,11 @@ done
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/nawara-restore-drill.XXXXXX")
 cleanup() {
   # -v: the postgres image keeps its data in an anonymous volume; without it the restored data would outlive the drill.
-  if [ "${KEEP_DRILL:-}" != yes ]; then docker rm -f -v "$DAPP" "$DDB" >/dev/null 2>&1 || true
-  else log "KEEP_DRILL=yes: $DDB and $DAPP are kept WITH the restored data; remove them with: docker rm -f -v $DAPP $DDB"; fi
+  if [ "${KEEP_DRILL:-}" != yes ]; then docker rm -f -v "${DRILL_CONTAINERS[@]}" >/dev/null 2>&1 || true
+  else log "KEEP_DRILL=yes: ${DRILL_CONTAINERS[*]} are kept WITH the restored data; remove them with: docker rm -f -v ${DRILL_CONTAINERS[*]}"; fi
   rm -rf -- "$WORK"
 }
+STARTED=$SECONDS
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 1. the backup set (downloaded, then checked before decryption)
@@ -159,8 +179,10 @@ secret() { openssl rand -hex 24; }
 BOOT_PASS=$(secret); OWNER_PASS=$(secret); RUNTIME_PASS=$(secret)
 printf 'POSTGRES_USER=%s\nPOSTGRES_PASSWORD=%s\nPOSTGRES_DB=%s\n' "$BOOT_USER" "$BOOT_PASS" "$BOOT_DB" >"$WORK/db.env"
 docker run -d --name "$DDB" --network none --env-file "$WORK/db.env" "postgres:$PG_MAJOR-alpine" >/dev/null
-for _ in $(seq 1 60); do docker exec "$DDB" pg_isready -U "$BOOT_USER" -d "$BOOT_DB" -q >/dev/null 2>&1 && break; sleep 1; done
-docker exec "$DDB" pg_isready -U "$BOOT_USER" -d "$BOOT_DB" -q >/dev/null 2>&1 || die "the drill database did not start"
+# Over TCP loopback (V2 A13.3b): the image's temporary init server listens on the socket only and is stopped and restarted before the
+# final server, so a socket probe can pass during init and the next step hit the restart.
+for _ in $(seq 1 60); do docker exec "$DDB" pg_isready -h 127.0.0.1 -U "$BOOT_USER" -d "$BOOT_DB" -q >/dev/null 2>&1 && break; sleep 1; done
+docker exec "$DDB" pg_isready -h 127.0.0.1 -U "$BOOT_USER" -d "$BOOT_DB" -q >/dev/null 2>&1 || die "the drill database did not start"
 sql() { docker exec -i "$DDB" psql -X -q -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$1" -f - >/dev/null; }
 q() { docker exec "$DDB" psql -X -q -At -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$DB_NAME" -c "$1"; }
 ROLE_ATTRS='LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
@@ -173,6 +195,15 @@ if [ "$SERVICE" = organization-service ]; then
   printf '%s\n' 'REVOKE ALL ON SCHEMA public FROM PUBLIC;' 'ALTER SCHEMA public OWNER TO organization_migrator;' 'GRANT USAGE ON SCHEMA public TO organization_app;' \
     'ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO organization_app;' \
     'ALTER DEFAULT PRIVILEGES FOR ROLE organization_migrator IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO organization_app;' | sql organization
+elif [ "$SERVICE" = audit-service ]; then
+  # As apps/audit-service/deploy/provision-and-deploy.sh: roles, database, schema owner, default privileges (never ON ALL TABLES).
+  printf '%s\n' "CREATE ROLE audit_migrator WITH $ROLE_ATTRS PASSWORD '$OWNER_PASS';" \
+    "CREATE ROLE audit_app WITH $ROLE_ATTRS PASSWORD '$RUNTIME_PASS';" \
+    'CREATE DATABASE audit OWNER audit_migrator;' 'REVOKE ALL ON DATABASE audit FROM PUBLIC;' \
+    'GRANT CONNECT ON DATABASE audit TO audit_app;' | sql postgres
+  printf '%s\n' 'REVOKE ALL ON SCHEMA public FROM PUBLIC;' 'ALTER SCHEMA public OWNER TO audit_migrator;' 'GRANT USAGE ON SCHEMA public TO audit_app;' \
+    'ALTER DEFAULT PRIVILEGES FOR ROLE audit_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO audit_app;' \
+    'ALTER DEFAULT PRIVILEGES FOR ROLE audit_migrator IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO audit_app;' | sql audit
 else
   # auth: the bootstrap owner is the image's POSTGRES_USER (as production); auth_app must exist before the restore (its grants).
   printf '%s\n' "CREATE ROLE auth_app WITH $ROLE_ATTRS PASSWORD '$RUNTIME_PASS';" | sql auth
@@ -229,6 +260,103 @@ ok "migration runner: ${BASH_REMATCH[2]} already applied (history restored), $LA
 if [ "$SERVICE" = auth-service ]; then
   printf '%s\n' 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO auth_app;' 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO auth_app;' | sql auth
 fi
+
+# The append-only and privilege controls of an audit-service drill (V2 A13): LOCAL / DISPOSABLE RESTORE MUTATION. They run only against the
+# drill's own restored database (this script refuses a production host), each inside a block that is rolled back.
+controls_sql() {
+  cat <<'SQL'
+-- nawara-drill-controls: LOCAL / DISPOSABLE RESTORE MUTATION (every block is rolled back)
+CREATE FUNCTION pg_temp.refused(code text, as_role text, stmts text[], expected text) RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE s text;
+BEGIN
+  BEGIN
+    EXECUTE format('SET LOCAL ROLE %I', as_role);
+    FOREACH s IN ARRAY stmts LOOP EXECUTE s; END LOOP;
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM NOT LIKE expected THEN RAISE EXCEPTION 'nawara-control % failed (refused for another reason)', code; END IF;
+    RETURN;
+  END;
+  RAISE EXCEPTION 'nawara-control % failed (not refused)', code;
+END $f$;
+DO $c$
+DECLARE
+  r text := (SELECT max(id)::text FROM audit_record);
+  run_row text := $s$INSERT INTO audit_retention_run (category, "retainDays", cutoff, deleted) VALUES ('security', 1, now(), 1)$s$;
+  stamped timestamptz;
+BEGIN
+  PERFORM pg_temp.refused('N1', 'audit_app', ARRAY['UPDATE audit_record SET outcome = outcome WHERE id = ' || r], 'permission denied%');
+  PERFORM pg_temp.refused('N2', 'audit_migrator', ARRAY['UPDATE audit_record SET outcome = outcome WHERE id = ' || r], '%append-only%');
+  PERFORM pg_temp.refused('N3', 'audit_migrator', ARRAY['DELETE FROM audit_retention_policy', 'DELETE FROM audit_record WHERE id = ' || r], '%append-only%');
+  PERFORM pg_temp.refused('N4', 'audit_migrator', ARRAY['TRUNCATE audit_record'], '%append-only%');
+  PERFORM pg_temp.refused('N5', 'audit_migrator', ARRAY[run_row, 'UPDATE audit_retention_run SET deleted = deleted + 1'], '%append-only%');
+  PERFORM pg_temp.refused('N6', 'audit_migrator', ARRAY[run_row, 'DELETE FROM audit_retention_run'], '%append-only%');
+  PERFORM pg_temp.refused('N7', 'audit_migrator', ARRAY['TRUNCATE audit_retention_run'], '%append-only%');
+  PERFORM pg_temp.refused('N8', 'audit_app', ARRAY[
+    $s$INSERT INTO outbox (id, name, payload) VALUES ('00000000-0000-4000-8000-0000000d4111', 'drill.control_checked', '{}')$s$,
+    $s$UPDATE outbox SET name = 'drill.control_changed' WHERE id = '00000000-0000-4000-8000-0000000d4111'$s$], '%immutable%');
+  PERFORM pg_temp.refused('N9a', 'audit_app', ARRAY[$s$INSERT INTO schema_migrations (name) VALUES ('9999_drill_control.sql')$s$], 'permission denied%');
+  PERFORM pg_temp.refused('N9b', 'audit_app', ARRAY['UPDATE schema_migrations SET name = name'], 'permission denied%');
+  PERFORM pg_temp.refused('N9c', 'audit_app', ARRAY['DELETE FROM schema_migrations'], 'permission denied%');
+  PERFORM pg_temp.refused('N10', 'audit_app', ARRAY[$s$SELECT audit_grant_retention('audit_app')$s$], 'permission denied%');
+  -- P1: the database clock: a supplied recordedAt is replaced by the transaction timestamp (a copy of the newest record, new eventId).
+  BEGIN
+    SET LOCAL ROLE audit_app;
+    INSERT INTO audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId",
+        "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt")
+      SELECT '00000000-0000-4000-8000-0000000d4112', "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind",
+        "organizationId", "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt",
+        '2000-01-01T00:00:00Z'
+        FROM audit_record WHERE id = r::bigint
+      RETURNING "recordedAt" INTO stamped;
+    IF stamped IS DISTINCT FROM now() THEN RAISE EXCEPTION 'nawara-control P1 failed (recordedAt not stamped by the database)'; END IF;
+    RAISE EXCEPTION USING ERRCODE = 'NWRA1', MESSAGE = 'rolled back';
+  EXCEPTION WHEN SQLSTATE 'NWRA1' THEN NULL;
+  END;
+END $c$;
+SQL
+}
+
+# Every fact recorded at backup time must hold after the restore. Later migrations may only ADD tables (and change the migration
+# digest); then the history must still contain the backup's migrations.
+compare_facts() {
+  grep -qxF -- '-- nawara-backup-facts-results' "$WORK/facts.txt" || die "the facts file carries no results section"
+  sed '/^-- nawara-backup-facts-results$/,$d' "$WORK/facts.txt" >"$WORK/facts.sql"
+  sed '1,/^-- nawara-backup-facts-results$/d' "$WORK/facts.txt" >"$WORK/facts.expected"
+  AUTHORITY_FACT=$(grep -m1 '^authority|' "$WORK/facts.expected" || true)
+  KNOWN_FACT=$(grep -m1 '^known|' "$WORK/facts.expected" || true)
+  facts_now=$(docker exec -i "$DDB" psql -X -q -At -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$DB_NAME" -f - <"$WORK/facts.sql" 2>/dev/null) || die "the restore facts could not be read"
+  checked=0
+  while IFS= read -r line; do
+    case "$line" in
+      migrations\|*)
+        if [ "$LATER" = 0 ]; then grep -qxF -- "$line" <<<"$facts_now" || die "the migration history differs from the backup"
+        else [ "$(q 'SELECT count(*) FROM schema_migrations')" -ge "$(cut -d'|' -f2 <<<"$line")" ] || die "the restored migration history is shorter than the backup's"; fi ;;
+      structure\|*) [ "$LATER" != 0 ] || grep -qxF -- "$line" <<<"$facts_now" || die "the restored structure differs from the backup (${line%|*})" ;;
+      *) grep -qxF -- "$line" <<<"$facts_now" || die "a restored fact differs from the backup ($(cut -d'|' -f1-2 <<<"$line"))" ;;
+    esac
+    checked=$((checked + 1))
+  done <"$WORK/facts.expected"
+  rm -f "$WORK/facts.txt" "$WORK/facts.expected" "$WORK/facts.sql"
+  if [ "$SERVICE" = audit-service ]; then
+    ok "$checked restore facts equal the backup's (row counts, structure, migration history, owners, ACLs, append-only triggers, function and default ACLs, record digest)"
+  else
+    ok "$checked restore facts equal the backup's (row counts, structure, migration history, owners, ACLs, authority state)"
+  fi
+}
+
+if [ "$SERVICE" = audit-service ]; then
+  # V2 A13: Audit's facts are compared BEFORE the narrowing below, so they prove the restore equals the backup SOURCE as it was (its
+  # ACLs included). The intended secure state is then applied and asserted; a source that still let audit_app write the migration history
+  # (O3-B) is reported, never silently normalized.
+  compare_facts
+  [[ $KNOWN_FACT =~ ^known\|([a-z][a-z0-9-]{1,62})\|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\|([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z)$ ]] \
+    || die "the backup recorded no audit record to read back (known record missing or malformed)"
+  KNOWN_SOURCE=${BASH_REMATCH[1]}; KNOWN_EVENT=${BASH_REMATCH[2]}; KNOWN_AT=${BASH_REMATCH[3]}
+  source_writes=$(q "SELECT concat_ws(',', CASE WHEN has_table_privilege('audit_app','public.schema_migrations','INSERT') THEN 'INSERT' END, CASE WHEN has_table_privilege('audit_app','public.schema_migrations','UPDATE') THEN 'UPDATE' END, CASE WHEN has_table_privilege('audit_app','public.schema_migrations','DELETE') THEN 'DELETE' END, CASE WHEN has_table_privilege('audit_app','public.schema_migrations','TRUNCATE') THEN 'TRUNCATE' END) /* source-history */")
+  if [ -n "$source_writes" ]; then
+    log "  NOTICE  backup source: audit_app could $source_writes schema_migrations (O3-B present at the source); the drill applies and asserts the intended state"
+  fi
+fi
 printf '%s\n' "REVOKE ALL ON TABLE schema_migrations FROM $RUNTIME;" "GRANT SELECT ON TABLE schema_migrations TO $RUNTIME;" | sql "$DB_NAME"
 
 # ---------------------------------------------------------------- 5. fail-closed verification
@@ -257,36 +385,83 @@ if [ "$SERVICE" = organization-service ]; then
   ok "the deploy's privilege assertion (forbidden none, required present)"
 fi
 
-# Every fact recorded at backup time must hold after the restore. Later migrations may only ADD tables (and change the migration
-# digest); then the history must still contain the backup's migrations.
-grep -qxF -- '-- nawara-backup-facts-results' "$WORK/facts.txt" || die "the facts file carries no results section"
-sed '/^-- nawara-backup-facts-results$/,$d' "$WORK/facts.txt" >"$WORK/facts.sql"
-sed '1,/^-- nawara-backup-facts-results$/d' "$WORK/facts.txt" >"$WORK/facts.expected"
-AUTHORITY_FACT=$(grep -m1 '^authority|' "$WORK/facts.expected" || true)
-facts_now=$(docker exec -i "$DDB" psql -X -q -At -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$DB_NAME" -f - <"$WORK/facts.sql" 2>/dev/null) || die "the restore facts could not be read"
-checked=0
-while IFS= read -r line; do
-  case "$line" in
-    migrations\|*)
-      if [ "$LATER" = 0 ]; then grep -qxF -- "$line" <<<"$facts_now" || die "the migration history differs from the backup"
-      else [ "$(q 'SELECT count(*) FROM schema_migrations')" -ge "$(cut -d'|' -f2 <<<"$line")" ] || die "the restored migration history is shorter than the backup's"; fi ;;
-    structure\|*) [ "$LATER" != 0 ] || grep -qxF -- "$line" <<<"$facts_now" || die "the restored structure differs from the backup (${line%|*})" ;;
-    *) grep -qxF -- "$line" <<<"$facts_now" || die "a restored fact differs from the backup ($(cut -d'|' -f1-2 <<<"$line"))" ;;
-  esac
-  checked=$((checked + 1))
-done <"$WORK/facts.expected"
-rm -f "$WORK/facts.txt" "$WORK/facts.expected" "$WORK/facts.sql"
-ok "$checked restore facts equal the backup's (row counts, structure, migration history, owners, ACLs, authority state)"
+if [ "$SERVICE" != audit-service ]; then
+  compare_facts
+else
+  # The deploy's own fail-closed privilege assertion (apps/audit-service/deploy/provision-and-deploy.sh), unchanged.
+  forbidden=$(q "SELECT coalesce(string_agg(x, ',' ORDER BY x), '') FROM (
+  SELECT t || ':' || p AS x FROM (VALUES
+    ('schema_migrations','INSERT'),('schema_migrations','UPDATE'),('schema_migrations','DELETE'),('schema_migrations','TRUNCATE'),
+    ('audit_record','UPDATE'),('audit_record','DELETE'),('audit_record','TRUNCATE'),
+    ('audit_retention_run','INSERT'),('audit_retention_run','UPDATE'),('audit_retention_run','DELETE'),('audit_retention_run','TRUNCATE'),
+    ('audit_retention_policy','INSERT'),('audit_retention_policy','UPDATE'),('audit_retention_policy','DELETE'),('audit_retention_policy','TRUNCATE')
+  ) AS v(t, p) WHERE has_table_privilege('audit_app', 'public.' || t, p)
+  UNION ALL
+  SELECT f || ':EXECUTE' FROM (VALUES ('audit_grant_retention(regrole)'),('audit_restrict_to_append_only(regclass)')) AS g(f)
+   WHERE has_function_privilege('audit_app', 'public.' || f, 'EXECUTE')
+) AS forbidden_privileges")
+  [ -z "$forbidden" ] || die "audit_app holds forbidden privileges after the restore ($forbidden)"
+  missing=$(q "SELECT coalesce(string_agg(t || ':' || p, ',' ORDER BY t, p), '') FROM (VALUES
+  ('schema_migrations','SELECT'),('audit_record','SELECT'),('audit_record','INSERT')
+) AS v(t, p) WHERE NOT has_table_privilege('audit_app', 'public.' || t, p)")
+  [ -z "$missing" ] || die "audit_app lacks required privileges after the restore ($missing)"
+  ok "the deploy's privilege assertion (forbidden none, required present)"
+
+  # The append-only and privilege controls: LOCAL / DISPOSABLE RESTORE MUTATION, against this drill's own restored database only, every
+  # statement inside a block that is rolled back. Never a production mutation: this script refuses a production host above. Each control
+  # must be REFUSED for the stated reason (the error text is matched, never printed); P1 must show the database clock replacing a
+  # supplied recordedAt. A control that unexpectedly succeeds stops the drill and names the control, never a value.
+  enabled=$(q "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid WHERE c.relnamespace = 'public'::regnamespace AND t.tgenabled = 'O'
+    AND (c.relname, t.tgname) IN (('audit_record','audit_record_stamp'),('audit_record','audit_record_no_update_delete'),('audit_record','audit_record_no_truncate'),
+      ('audit_retention_run','audit_retention_run_no_update_delete'),('audit_retention_run','audit_retention_run_no_truncate'),('outbox','outbox_immutable'))")
+  [ "$enabled" = 6 ] || die "the append-only and immutability triggers are not all present and enabled after the restore (P2)"
+  controls_err=$(controls_sql | docker exec -i "$DDB" psql -X -q -v ON_ERROR_STOP=1 -U "$BOOT_USER" -d "$DB_NAME" -f - 2>&1 >/dev/null) \
+    || die "an append-only or privilege control was not refused as expected ($(grep -m1 -oE 'nawara-control [NP][0-9]+[a-z]?' <<<"$controls_err" || echo 'unidentified control'))"
+  unset controls_err
+  ok "append-only and privilege controls: 12 refusals (N1-N10) and the database clock (P1), all rolled back; triggers present and enabled (P2)"
+fi
 
 # ---------------------------------------------------------------- 6. the application, in the drill namespace only
 # The restored .env with every network-facing value replaced: the drill namespace has no route anyway (network none), and no
 # production broker URL is ever handed to the drill (the relay would re-publish restored pending rows).
+if [ "$SERVICE" = audit-service ]; then
+  # O1: Audit's /ready needs a broker and its ingestion consumer, so the drill adds a DISPOSABLE broker in the drill database's own network
+  # namespace (network none: loopback only, no route, no DNS). It is never a production broker: the production broker's pinned image, a
+  # fresh node, a drill-only vhost user and password generated here. The CLI always runs as `rabbitmq` (a root CLI before the node has
+  # written its Erlang cookie makes the node exit, infra/rabbitmq/provision.sh).
+  MQ_PASS=$(secret)
+  printf 'RABBITMQ_NODENAME=rabbit@localhost\nRABBITMQ_DEFAULT_USER=drill\nRABBITMQ_DEFAULT_PASS=%s\nRABBITMQ_DEFAULT_VHOST=%s\n' "$MQ_PASS" "$MQ_VHOST" >"$WORK/mq.env"
+  docker run -d --name "$DMQ" --network "container:$DDB" --env-file "$WORK/mq.env" "$MQ_IMAGE" >/dev/null
+  rm -f "$WORK/mq.env"
+  mq_ready=""
+  for _ in $(seq 1 60); do
+    if docker exec -u rabbitmq "$DMQ" rabbitmq-diagnostics -q check_running >/dev/null 2>&1 \
+      && docker exec -u rabbitmq "$DMQ" rabbitmq-diagnostics -q check_port_connectivity >/dev/null 2>&1; then mq_ready=1; break; fi
+    [ "$(docker inspect -f '{{.State.Running}}' "$DMQ" 2>/dev/null)" = true ] || break
+    sleep 2
+  done
+  [ -n "$mq_ready" ] || die "the disposable drill broker did not become ready"
+  # Isolation, proven before the service starts: the database has no network at all, and the broker only shares its namespace.
+  DDB_ID=$(docker inspect -f '{{.Id}}' "$DDB")
+  [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$DDB")" = none ] || die "the drill database is not on --network none; refusing"
+  case "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$DMQ")" in "container:$DDB" | "container:$DDB_ID") ;; *) die "the drill broker is not confined to the drill namespace; refusing" ;; esac
+  ok "disposable drill broker ready in the drill namespace (no network; a drill-only vhost user; never a production broker)"
+fi
+
 mkdir -m 700 "$WORK/config"; tar -C "$WORK/config" -xpf "$WORK/config.tar"; rm -f "$WORK/config.tar"
 DRILL_TOKEN=$(secret)
 {
-  grep -vE '^(DATABASE_URL|RABBITMQ_URL|AUTH_SERVICE_URL|ORGANIZATION_SERVICE_URL|ORGANIZATION_SERVICE_TOKEN|PAYMENT_SERVICE_URL|SERVICE_TOKENS|SERVICE_POLICY|PORT)=' "$WORK/config/.env" || true
+  if [ "$SERVICE" = audit-service ]; then
+    grep -vE '^(DATABASE_URL|RABBITMQ_URL|AUTH_SERVICE_URL|SERVICE_TOKENS|AUDIT_SERVICE_POLICY|SWAGGER_PASSWORD|PORT)=' "$WORK/config/.env" || true
+  else
+    grep -vE '^(DATABASE_URL|RABBITMQ_URL|AUTH_SERVICE_URL|ORGANIZATION_SERVICE_URL|ORGANIZATION_SERVICE_TOKEN|PAYMENT_SERVICE_URL|SERVICE_TOKENS|SERVICE_POLICY|PORT)=' "$WORK/config/.env" || true
+  fi
   printf 'DATABASE_URL=postgres://%s:%s@127.0.0.1:5432/%s\n' "$RUNTIME" "$RUNTIME_PASS" "$DB_NAME"
-  printf 'RABBITMQ_URL=amqp://127.0.0.1:1/drill\n'   # unreachable (no network, port 1); carries no credential
+  if [ "$SERVICE" = audit-service ]; then
+    printf 'RABBITMQ_URL=amqp://drill:%s@127.0.0.1:5672/%s\n' "$MQ_PASS" "$MQ_VHOST"   # the disposable drill broker only
+  else
+    printf 'RABBITMQ_URL=amqp://127.0.0.1:1/drill\n'   # unreachable (no network, port 1); carries no credential
+  fi
   # Outbound service URLs keep their presence (configuration validation) but point nowhere; a real token is never reused.
   grep -q '^PAYMENT_SERVICE_URL=' "$WORK/config/.env" && printf 'PAYMENT_SERVICE_URL=http://127.0.0.1:1\n'
   grep -q '^ORGANIZATION_SERVICE_URL=' "$WORK/config/.env" && printf 'ORGANIZATION_SERVICE_URL=http://127.0.0.1:1\nORGANIZATION_SERVICE_TOKEN=%s\n' "$(secret)"
@@ -295,10 +470,24 @@ DRILL_TOKEN=$(secret)
     printf 'SERVICE_TOKENS=drill-reader:%s\n' "$(printf '%s' "$DRILL_TOKEN" | sha256sum | cut -d' ' -f1)"
     printf '%s\n' 'SERVICE_POLICY={"callers":{"drill-reader":{"capabilities":["hierarchy.read"],"allowedPlatforms":[]}}}'
   fi
+  if [ "$SERVICE" = audit-service ]; then
+    # O4: a drill-only reader that exists only in this file (production's .env is never written): its token is generated here, and its
+    # policy is the existing AUDIT_SERVICE_POLICY mechanism (read_platform, every category).
+    printf 'DRILL_READ_TOKEN=%s\n' "$DRILL_TOKEN"
+    printf 'SERVICE_TOKENS=drill-reader:%s\n' "$(printf '%s' "$DRILL_TOKEN" | sha256sum | cut -d' ' -f1)"
+    printf '%s\n' 'AUDIT_SERVICE_POLICY={"callers":{"drill-reader":{"operations":["read_platform"],"categories":["security","business","commercial","administrative"]}}}'
+  fi
 } >"$WORK/app.env"
 rm -rf "$WORK/config"
 grep -q 'nawara-core-rabbitmq' "$WORK/app.env" && die "a production broker address reached the drill environment; refusing"
+if [ "$SERVICE" = audit-service ]; then
+  [ "$(grep -c '^RABBITMQ_URL=' "$WORK/app.env")" = 1 ] && grep -qxF "RABBITMQ_URL=amqp://drill:$MQ_PASS@127.0.0.1:5672/$MQ_VHOST" "$WORK/app.env" \
+    || die "the drill service would not be pointed at the disposable drill broker only; refusing"
+fi
 docker run -d --name "$DAPP" --network "container:$DDB" --env-file "$WORK/app.env" "$IMAGE" >/dev/null
+if [ "$SERVICE" = audit-service ]; then
+  case "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$DAPP")" in "container:$DDB" | "container:$DDB_ID") ;; *) die "the drill service is not confined to the drill namespace; refusing" ;; esac
+fi
 ready=""
 for _ in $(seq 1 60); do
   ready=$(docker exec "$DAPP" wget -qO- http://127.0.0.1:3000/ready 2>/dev/null || true)
@@ -306,7 +495,15 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [ "$ready" = '{"status":"ready"}' ] || { docker logs --tail 20 "$DAPP" 2>&1 | grep -oE '"msg":"[a-z_]+' | sort | uniq -c >&2 || true; die "GET /ready did not answer ready against the restored database"; }
-ok "GET /ready -> {\"status\":\"ready\"} (the service against the restored database, no broker)"
+if [ "$SERVICE" = audit-service ]; then
+  ok "GET /ready -> {\"status\":\"ready\"} (the real contract: the restored database, its migrations, the drill broker and the ingestion consumer)"
+  # The consumer Audit attached is on the DISPOSABLE broker: the only broker its namespace can reach.
+  consumers=$(docker exec -u rabbitmq "$DMQ" rabbitmqctl -q list_consumers -p "$MQ_VHOST" queue_name --no-table-headers 2>/dev/null || true)
+  grep -qx 'audit-service.audit' <<<"$consumers" || die "the ingestion consumer is not attached to the disposable drill broker"
+  ok "the ingestion consumer is attached to the disposable drill broker (audit-service.audit)"
+else
+  ok "GET /ready -> {\"status\":\"ready\"} (the service against the restored database, no broker)"
+fi
 
 if [ "$SERVICE" = organization-service ]; then
   expected=$(q "$KNOWN_SQL'$KNOWN_ID'")
@@ -314,6 +511,16 @@ if [ "$SERVICE" = organization-service ]; then
   got=$(docker exec "$DAPP" node -e 'fetch("http://127.0.0.1:3000/organization/companies/" + process.argv[1], { headers: { authorization: "Bearer " + process.env.DRILL_READ_TOKEN } }).then(async (r) => { if (r.status !== 200) { console.log("status=" + r.status); return; } console.log((await r.json()).name); }).catch(() => console.log("unreachable"))' "$KNOWN_ID")
   [ "$got" = "$expected" ] || die "the known-id read through the API does not match the restored row ($(grep -oE '^status=[0-9]+' <<<"$got" || echo mismatch))"
   ok "application read: GET /organization/companies/<KNOWN_ID> returns the restored row (value not printed)"
+elif [ "$SERVICE" = audit-service ]; then
+  # O4: the newest record recorded at the backup SOURCE, read back through the service's own platform read with the drill-only reader:
+  # the window is that record's millisecond, and the record must be returned with its eventId and sourceService. Nothing is printed.
+  got=$(docker exec "$DAPP" node -e 'const [, at, src, ev] = process.argv; const to = new Date(Date.parse(at) + 1).toISOString();
+fetch("http://127.0.0.1:3000/audit/platform/records?limit=100&from=" + encodeURIComponent(at) + "&to=" + encodeURIComponent(to), { headers: { authorization: "Bearer " + process.env.DRILL_READ_TOKEN } })
+  .then(async (r) => { if (r.status !== 200) { console.log("status=" + r.status); return; } const b = await r.json();
+    console.log((b.items || []).some((i) => i.eventId === ev && i.sourceService === src && new Date(i.occurredAt).toISOString() === at) ? "match" : "mismatch"); })
+  .catch(() => console.log("unreachable"))' "$KNOWN_AT" "$KNOWN_SOURCE" "$KNOWN_EVENT")
+  [ "$got" = match ] || die "the known record read through the API does not match the record recorded at backup time ($(grep -oE '^status=[0-9]+' <<<"$got" || echo mismatch))"
+  ok "application read: GET /audit/platform/records returns the newest record recorded at backup time (drill-only reader; values not printed)"
 else
   # The service's own CLI (its configuration, its runtime identity, no broker) reads the marker; only `mode` is extracted, the rest of
   # its output (actor names, evidence) is never printed. It must equal the value recorded at the backup SOURCE.
@@ -325,4 +532,7 @@ else
   ok "application read: the service reads its hierarchy authority marker ($mode), equal to the backup source"
 fi
 
-log "OK  drill of $SERVICE $STAMP passed: $PASS checks; $([ "${KEEP_DRILL:-}" = yes ] && echo "containers kept WITH restored data: $DDB $DAPP" || echo 'drill containers and their volumes removed'); plaintext removed"
+KEPT="$DDB $DAPP"; [ "$SERVICE" != audit-service ] || KEPT="$DDB $DMQ $DAPP"
+log "OK  drill of $SERVICE $STAMP passed: $PASS checks; $([ "${KEEP_DRILL:-}" = yes ] && echo "containers kept WITH restored data: $KEPT" || echo 'drill containers and their volumes removed'); plaintext removed"
+# A secret-free summary for the evidence record (and a later status signal): the measured drill duration is the local RTO evidence.
+log "DRILL_RESULT service=$SERVICE stamp=$STAMP checks=$PASS duration_s=$((SECONDS - STARTED))"

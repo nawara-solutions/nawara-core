@@ -92,6 +92,7 @@ MIG_PASS=$(sed -n 's/^AUDIT_MIGRATOR_PASSWORD=//p' "$ROLES_ENV")
 APP_PASS=$(sed -n 's/^AUDIT_APP_PASSWORD=//p' "$ROLES_ENV")
 # The script itself arrives on stdin (`bash -s`), so SQL is piped to psql explicitly; passwords travel in that SQL, never on a command line.
 psql_stdin() { docker exec -i "$DB" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$1" -f -; }
+pg_facts() { docker exec "$DB" psql -q -v ON_ERROR_STOP=1 -At -U "$PGUSER" -d "$1" -c "$2"; }
 
 # ---------------------------------------------------------------- database and roles (re-applied every deploy; idempotent)
 log "ensuring the audit database and its roles (audit_migrator owns, audit_app runs)"
@@ -127,6 +128,38 @@ printf 'MIGRATION_DATABASE_URL=postgres://audit_migrator:%s@%s:5432/audit\n' "$M
 docker run --rm --network "$NET" --env-file "$MIG_ENV" --entrypoint node "$IMAGE" ../../libs/service-kit/dist/cli/migrate.js --dir db/migrations \
   || die "migrations failed or were refused; the running service was not touched"
 rm -f "$MIG_ENV"
+
+# V2 A13 (O3-B): the runner creates schema_migrations as audit_migrator, so the default privileges above give audit_app DML on it. The
+# runtime only reads it (/ready); writing it could mark a future migration as applied, null a checksum or erase the history. Narrowed on
+# every deploy (idempotent), as Auth's and Organization's deploys do; the general default privileges stay as they are (the runtime needs
+# them on inbox, outbox and kit_rate_limit).
+log "making the migration history read-only for audit_app"
+printf '%s\n' 'REVOKE ALL ON TABLE schema_migrations FROM audit_app;' 'GRANT SELECT ON TABLE schema_migrations TO audit_app;' \
+  | psql_stdin audit
+
+# ---------------------------------------------------------------- the runtime role's privileges, ASSERTED (fail closed)
+# The runtime never writes the migration history, never rewrites or removes evidence (migrations 0001 and 0003 make audit_record and
+# audit_retention_run append-only and audit_retention_policy owner-only) and never runs the owner's privilege helpers. It must still read
+# the history (/ready) and read and append audit records.
+log "asserting the runtime role's privileges"
+attrs=$(pg_facts postgres "SELECT concat_ws('|', rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls) FROM pg_roles WHERE rolname = 'audit_app'")
+[ "$attrs" = 'f|f|f|f|f' ] || die "audit_app has an elevated attribute (superuser, createdb, createrole, replication or bypassrls); the running service was not touched"
+forbidden=$(pg_facts audit "SELECT coalesce(string_agg(x, ',' ORDER BY x), '') FROM (
+  SELECT t || ':' || p AS x FROM (VALUES
+    ('schema_migrations','INSERT'),('schema_migrations','UPDATE'),('schema_migrations','DELETE'),('schema_migrations','TRUNCATE'),
+    ('audit_record','UPDATE'),('audit_record','DELETE'),('audit_record','TRUNCATE'),
+    ('audit_retention_run','INSERT'),('audit_retention_run','UPDATE'),('audit_retention_run','DELETE'),('audit_retention_run','TRUNCATE'),
+    ('audit_retention_policy','INSERT'),('audit_retention_policy','UPDATE'),('audit_retention_policy','DELETE'),('audit_retention_policy','TRUNCATE')
+  ) AS v(t, p) WHERE has_table_privilege('audit_app', 'public.' || t, p)
+  UNION ALL
+  SELECT f || ':EXECUTE' FROM (VALUES ('audit_grant_retention(regrole)'),('audit_restrict_to_append_only(regclass)')) AS g(f)
+   WHERE has_function_privilege('audit_app', 'public.' || f, 'EXECUTE')
+) AS forbidden_privileges")
+[ -z "$forbidden" ] || die "audit_app holds forbidden privileges ($forbidden): the runtime could write the migration history or rewrite evidence; the running service was not touched"
+missing=$(pg_facts audit "SELECT coalesce(string_agg(t || ':' || p, ',' ORDER BY t, p), '') FROM (VALUES
+  ('schema_migrations','SELECT'),('audit_record','SELECT'),('audit_record','INSERT')
+) AS v(t, p) WHERE NOT has_table_privilege('audit_app', 'public.' || t, p)")
+[ -z "$missing" ] || die "audit_app lacks privileges the service needs ($missing); the running service was not touched"
 
 # ---------------------------------------------------------------- application environment
 log "ensuring $APP_ENV (existing values are never overwritten)"

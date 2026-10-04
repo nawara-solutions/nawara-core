@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       services:
-        description: Services to back up (space-separated; organization-service and/or auth-service)
+        description: Services to back up (space-separated; any of organization-service, auth-service, audit-service)
         required: true
         default: auth-service
 
