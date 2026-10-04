@@ -167,8 +167,9 @@ the organization-level credentials still coexist until A3.7. Every change to `ma
 `core-ci-passed`. **V2 A0** extends exact-digest deployment to organization-service and audit-service and is certified
 ([record](architecture/core-v2-a0-immutable-deployments.md): PR #192, first labelled artifacts of all three services built on the
 merge); no digest deployment of any of them has been performed (built ≠ deployed; the first one is A3.6, deferred). **V2 A13** (Audit
-backup and restore coverage) is in local implementation ([record](architecture/core-v2-a13-audit-backup.md)): no production Audit backup
-or drill has been performed, and scheduled backups stay G6-gated.
+backup and restore coverage) is certified for its tooling, local proof and CI (PR #194, [record](architecture/core-v2-a13-audit-backup.md)
+§9); production Audit backup and restore evidence is **not** complete: no production Audit backup or drill has been performed, the first
+one is blocked until an authorized Audit deployment applies migration 0004, and scheduled backups stay G6-gated.
 
 ### Compatibility and safety rules for V1 work
 
