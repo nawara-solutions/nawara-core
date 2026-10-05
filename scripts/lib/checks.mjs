@@ -1,5 +1,6 @@
 // Static checks the repository enforces on itself. Pure functions (text in, problems out) so they are unit-testable.
 import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import { parse } from 'yaml';
 
 /** Every production deployment path and the production image tag share ONE queue, so they can never race each other. */
@@ -605,6 +606,78 @@ function checkAuditContractDirection(relPath, spec) {
   return problems;
 }
 
+/**
+ * V2 A12.2 (A12.2a: syntax-aware): the metrics client library (prom-client, or its successor @prometheus-io/client) is referenced ONLY
+ * by the kit's metrics module, so every metric goes through BoundedMetrics and its closed label policy; a raw constructor elsewhere
+ * could label a series with an identifier, a token or free text.
+ *
+ * The source is PARSED (the TypeScript compiler API, already a workspace dependency), never regex-stripped, so a string or template
+ * that merely looks like a comment ("a//b", "apps/*\/src") can neither hide an import nor create one. A reference is a STATIC module
+ * specifier (a string or a template literal without substitutions, escapes decoded) in: an import or export declaration, an import
+ * type, `import x = require()`, a dynamic `import()`, `require()`, `module.require()`, `require.resolve()`, or a function obtained from
+ * `createRequire(...)` (called directly or through a variable). Comments, ordinary strings and lookalike packages are not references.
+ * A fully computed specifier, an npm alias in package metadata or a relative path into the kit's source cannot be decided statically:
+ * those stay with owner review (the A14.4 trust boundary).
+ */
+const METRICS_CLIENT = /^(?:prom-client|@prometheus-io\/client)(?:\/|$)/;
+export const METRICS_CLIENT_HOME = 'libs/service-kit/src/metrics/';
+const PARSED = /\.(?:[cm]?[jt]s|tsx|jsx)$/;
+
+const staticSpecifier = (node) => (node && ts.isStringLiteralLike(node) ? node.text : undefined);
+const unwrap = (node) => (node && ts.isParenthesizedExpression(node) ? unwrap(node.expression) : node);
+const calleeName = (node) => {
+  const n = unwrap(node);
+  if (ts.isIdentifier(n)) return n.text;
+  if (ts.isPropertyAccessExpression(n)) return n.name.text;
+  return undefined;
+};
+const isCreateRequireCall = (node) => {
+  const n = unwrap(node);
+  return !!n && ts.isCallExpression(n) && calleeName(n.expression) === 'createRequire';
+};
+
+/** The static metrics-client module specifiers a source file references (empty when none). */
+export function metricsClientReferences(relPath, text) {
+  const kind = /\.[cm]?ts$|\.tsx$/.test(relPath) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
+  const sf = ts.createSourceFile(relPath, text, ts.ScriptTarget.Latest, true, kind);
+  const requireAliases = new Set();
+  const collect = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && isCreateRequireCall(node.initializer)) requireAliases.add(node.name.text);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(node.left) && isCreateRequireCall(node.right)) requireAliases.add(node.left.text);
+    ts.forEachChild(node, collect);
+  };
+  collect(sf);
+
+  const specifiers = [];
+  const visit = (node) => {
+    let spec;
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) spec = staticSpecifier(node.moduleSpecifier);
+    else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) spec = staticSpecifier(node.moduleReference.expression);
+    else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) spec = staticSpecifier(node.argument.literal);
+    else if (ts.isCallExpression(node)) {
+      const callee = unwrap(node.expression);
+      const loads =
+        callee.kind === ts.SyntaxKind.ImportKeyword // import('x')
+        || (ts.isIdentifier(callee) && (callee.text === 'require' || requireAliases.has(callee.text))) // require('x'), r('x')
+        || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'require') // module.require('x')
+        || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'resolve' && ['require', ...requireAliases].includes(calleeName(callee.expression) ?? '')) // require.resolve('x')
+        || isCreateRequireCall(callee); // createRequire(url)('x')
+      if (loads) spec = staticSpecifier(node.arguments[0]);
+    }
+    if (spec !== undefined && METRICS_CLIENT.test(spec)) specifiers.push(spec);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return specifiers;
+}
+
+export function checkMetricsClientImport(relPath, text) {
+  if (relPath.startsWith(METRICS_CLIENT_HOME) || !PARSED.test(relPath) || relPath.endsWith('.d.ts')) return [];
+  return metricsClientReferences(relPath, text).length > 0
+    ? [`${relPath}: imports the metrics client library; only ${METRICS_CLIENT_HOME} may (create metrics through the kit's BoundedMetrics)`]
+    : [];
+}
+
 /** No product concepts in Core services or the kit; no financial-domain declarations in the kit; no cross-service source imports. */
 export function checkSource(relPath, text) {
   const problems = [];
@@ -630,6 +703,7 @@ export function checkSource(relPath, text) {
     if (other && other !== app) problems.push(`${relPath}: imports another service's source (${spec}); services talk over APIs and events only`);
     problems.push(...checkAuditContractDirection(relPath, spec));
   }
+  problems.push(...checkMetricsClientImport(relPath, text));
   return problems;
 }
 

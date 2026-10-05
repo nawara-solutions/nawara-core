@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
-import { JsonLogger, LocalizedValidationPipe, ShutdownState, requestContextMiddleware, shutdownAdmission } from '@nawara/service-kit';
+import { JsonLogger, LocalizedValidationPipe, ShutdownState, installMetrics, requestContextMiddleware, shutdownAdmission } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { basicAuth } from './docs/basic-auth.js';
 import { loadConfig } from './config/app-config.js';
@@ -16,6 +16,9 @@ async function bootstrap() {
   app.use(shutdownAdmission(app.get(ShutdownState)));
   // Request/correlation id first, so every log line and error response from this point on can carry it.
   app.use(requestContextMiddleware);
+  // V2 A12.2: the kit's HTTP metrics and separate metrics listener, at the same point configureApp installs them in the other services
+  // (auth-service builds its pipeline itself). Nothing at all while METRICS_ENABLED is off (the default); /auth/health is unchanged.
+  installMetrics(app, { serviceName: 'auth-service', metrics: cfg.metrics }, logger);
   app.use(helmet());
   // Unknown or extra properties are REJECTED (400), so a client can never smuggle assignedBy,
   // revokedBy, companyId, platformId, kind, adminTier... into a request body.

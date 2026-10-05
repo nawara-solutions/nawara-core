@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import {
   DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, HTTP_DRAIN_TIMEOUT_BOUNDS,
-  RABBITMQ_HEARTBEAT_BOUNDS, loadTrustProxyHops,
+  RABBITMQ_HEARTBEAT_BOUNDS, loadMetricsConfig, loadTrustProxyHops, type MetricsConfig,
 } from '@nawara/service-kit';
 
 /**
@@ -108,6 +108,8 @@ export interface AppConfig {
   /** Stage 22 F3: `TRUST_PROXY_HOPS` (the kit rule; the deprecated `TRUST_PROXY=true` is one hop, never every hop). */
   trustProxyHops: number;
   corsOrigins: string[];
+  /** V2 A12.2: METRICS_ENABLED (off), METRICS_HOST (loopback), METRICS_PORT (9464, never PORT); the kit's rule. */
+  metrics: MetricsConfig;
   baselineRateLimitPerMinute: number;
   jwt: { secret: Uint8Array; issuer: string; audience: string; accessTtlSec: number };
   refreshTtlSec: number;
@@ -309,9 +311,10 @@ export function loadConfig(
   const queryTimeoutMs = int(env, 'DB_QUERY_TIMEOUT_MS', statementTimeoutMs + DB_QUERY_TIMEOUT_MARGIN_MS, DB_QUERY_TIMEOUT_BOUNDS.min, DB_QUERY_TIMEOUT_BOUNDS.max);
   if (queryTimeoutMs <= statementTimeoutMs) throw new ConfigError('DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS');
 
+  const port = int(env, 'PORT', 3000, 1, 65_535);
   return {
     env: nodeEnv,
-    port: int(env, 'PORT', 3000, 1, 65_535),
+    port,
     databaseUrl,
     db: {
       poolMax: int(env, 'DB_POOL_MAX', 10, 1, 100),
@@ -326,6 +329,7 @@ export function loadConfig(
     audit: auditRelay,
     trustProxyHops: loadTrustProxyHops(new EnvReader(env)),
     corsOrigins,
+    metrics: loadMetricsConfig(new EnvReader(env), port, nodeEnv),
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),
     jwt: {
       secret: new Uint8Array(jwtSecret),

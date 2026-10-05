@@ -26,7 +26,9 @@ describe('loadOrganizationConfig', () => {
 
   it('carries ONLY what this service uses: no outbound service token, no currencies (nothing to price); the broker only for the audit relay (Stage 18.7.3); the one bounded Auth dependency is the human-admin module\'s grant-facts/step-up client (ADR-0042 decision 6)', () => {
     expect(Object.keys(loadOrganizationConfig(BASE)).sort()).toEqual([
-      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel', 'nodeEnv', 'port',
+      'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
+      'metrics', // V2 A12.2: the kit's metrics listener settings (off by default), used by configureApp
+      'nodeEnv', 'port',
       'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'serviceName', 'servicePolicyRaw', 'serviceTokens', 'trustProxy', 'trustProxyHops',
     ]);
   });

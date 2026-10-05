@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR } from './lib/checks.mjs';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
+import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
@@ -506,6 +507,105 @@ jobs:
   assert.deepEqual(checkCiCoverage('core-ci.yml', full), []);
   assert.match(checkCiCoverage('core-ci.yml', full.replace('      - run: npm run typecheck -w x\n', '')).join(), /no step runs typecheck/);
   assert.match(checkCiCoverage('core-ci.yml', full.replace('permissions:\n  contents: read\n', '')).join(), /permissions/);
+});
+
+test('V2 A12.2: only the kit metrics module may import the metrics client library', () => {
+  const home = 'libs/service-kit/src/metrics/prom.ts';
+  for (const spec of ["export { Counter } from 'prom-client';", "import client from 'prom-client';", "import { Registry } from '@prometheus-io/client';"]) {
+    assert.deepEqual(checkMetricsClientImport(home, spec), [], spec);
+    assert.deepEqual(checkSource('libs/service-kit/src/metrics/metrics.ts', spec), [], spec);
+  }
+  const refused = [
+    "import { Counter } from 'prom-client';",
+    "import client from \"prom-client\";",
+    "import 'prom-client';",
+    "const c = await import('prom-client');",
+    "const c = require('prom-client');",
+    "import { Histogram } from 'prom-client/lib/histogram';",
+    "import { Registry } from '@prometheus-io/client';",
+    "export { Gauge } from 'prom-client';",
+  ];
+  for (const where of ['libs/service-kit/src/bootstrap.ts', 'libs/service-kit/src/health/x.ts', 'libs/service-kit/test/x.spec.ts', 'apps/auth-service/src/main.ts', 'apps/billing-service/test/x.e2e-spec.ts', 'libs/audit-contract/src/x.ts']) {
+    for (const spec of refused) {
+      assert.match(checkMetricsClientImport(where, spec).join(), /imports the metrics client library/, `${where}: ${spec}`);
+      assert.match(checkSource(where, spec).join(), /imports the metrics client library/, `${where}: ${spec}`);
+    }
+  }
+  // not an import: a comment, a string, a lookalike package
+  for (const text of ["// import { Counter } from 'prom-client';", "/* require('prom-client') */", "const s = 'prom-client is replaced';", "import x from 'prom-client-extra';", "import x from 'my-prom-client';"]) {
+    assert.deepEqual(checkMetricsClientImport('apps/auth-service/src/main.ts', text), [], text);
+  }
+});
+
+test('V2 A12.2a: the metrics-client guard is syntax-aware (security review H-1)', () => {
+  const where = 'apps/billing-service/src/x.ts';
+  const refused = {
+    'default': "import x from 'prom-client';",
+    'named': "import { Counter } from 'prom-client';",
+    'namespace': "import * as x from 'prom-client';",
+    'side effect': "import 'prom-client';",
+    'type only': "import type { Registry } from 'prom-client';",
+    'export star': "export * from 'prom-client';",
+    'export named': "export { Counter } from 'prom-client';",
+    'require': "const p = require('prom-client');",
+    'require template, spaced': 'const p = require (`prom-client`);',
+    'module.require': "const p = module.require('prom-client');",
+    'dynamic import': "const p = await import('prom-client');",
+    'dynamic import template, spaced': 'const p = await import (`prom-client`);',
+    'dynamic import template': 'const p = await import(`prom-client`);',
+    'require template': 'const p = require(`prom-client`);',
+    'subpath': "import h from 'prom-client/lib/histogram.js';",
+    'successor': "import { Registry } from '@prometheus-io/client';",
+    'successor subpath': "const r = require('@prometheus-io/client/lib/registry');",
+    'createRequire, direct': "import { createRequire } from 'node:module';\nconst p = createRequire(import.meta.url)('prom-client');",
+    'createRequire, through a variable': "import { createRequire } from 'node:module';\nconst r = createRequire(import.meta.url);\nconst p = r(`prom-client`);",
+    'require.resolve': "const where = require.resolve('prom-client');",
+    'import x = require()': "import p = require('prom-client');",
+    'import type node': "type R = import('prom-client').Registry;",
+    'escaped specifier': "const p = require('prom\\u002dclient');",
+    'multiline': "import {\n  Counter,\n  Gauge,\n}\nfrom\n  'prom-client';",
+    'comments around': "/* metrics */ import { Counter } from /* x */ 'prom-client'; // y",
+    '"//" inside a string before it': "const s = \"a//b\"; import { Counter } from 'prom-client';",
+    "'//' and `//` inside strings": "const a = 'x//y', b = `u//v`; const p = require('prom-client');",
+    'glob-like strings around it': "const a = 'apps/*/src';\nimport { Counter } from 'prom-client';\nconst b = 'lib/**/x';",
+    'comment-like template around it': "const a = `/*`;\nconst p = await import('prom-client');\nconst b = `*/`;",
+  };
+  for (const [label, text] of Object.entries(refused)) {
+    for (const file of [where, 'libs/service-kit/test/x.spec.ts', 'scripts/x.mjs'.replace('scripts/', 'libs/service-kit/src/'), 'apps/auth-service/src/main.js']) {
+      assert.match(checkMetricsClientImport(file, text).join(), /imports the metrics client library/, `${label} in ${file}`);
+    }
+    assert.match(checkSource(where, text).join(), /imports the metrics client library/, label);
+  }
+  const allowed = {
+    'line comment': "// import { Counter } from 'prom-client';",
+    'block comment': "/* const p = require('prom-client'); */",
+    'JSDoc mention': "/** Uses prom-client through the kit only. */\nexport const x = 1;",
+    'plain string': "const s = 'prom-client';",
+    'string in an ordinary call': "console.log('prom-client is replaced by @prometheus-io/client');",
+    'template string': 'const s = `prom-client`;',
+    'lookalikes': "import x from 'prom-client-extra'; import y from 'my-prom-client'; const z = require('@prometheus-io/clientele');",
+    'unrelated createRequire use': "import { createRequire } from 'node:module';\nconst r = createRequire(import.meta.url);\nconst pg = r('pg');",
+  };
+  for (const [label, text] of Object.entries(allowed)) assert.deepEqual(checkMetricsClientImport(where, text), [], label);
+  assert.deepEqual(checkMetricsClientImport('libs/service-kit/src/metrics/prom.ts', refused.named), []);
+  assert.deepEqual(checkMetricsClientImport('apps/billing-service/db/migrations/0001_x.sql', "-- from 'prom-client'"), []);
+  assert.deepEqual(metricsClientReferences(where, refused['createRequire, through a variable']), ['prom-client']);
+  // Documented owner-review boundary (not statically decidable): a fully computed specifier.
+  assert.deepEqual(checkMetricsClientImport(where, "const n = 'prom-' + 'client'; await import(n);"), []);
+});
+
+test('V2 A12.2a: auth-service installs the metrics foundation right after its request-context middleware (security review P4)', () => {
+  const text = readFileSync(new URL('../apps/auth-service/src/main.ts', import.meta.url), 'utf8');
+  const sf = ts.createSourceFile('main.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const fn = sf.statements.find((st) => ts.isFunctionDeclaration(st) && st.name?.text === 'bootstrap');
+  assert.ok(fn?.body, 'bootstrap() exists');
+  const calls = fn.body.statements.filter(ts.isExpressionStatement).map((st) => st.expression.getText(sf).replace(/\s+/g, ' '));
+  const at = (prefix) => calls.findIndex((c) => c.startsWith(prefix));
+  const ctx = at('app.use(requestContextMiddleware)');
+  const metrics = at("installMetrics(app, { serviceName: 'auth-service', metrics: cfg.metrics }, logger)");
+  assert.ok(ctx >= 0 && metrics === ctx + 1, `installMetrics directly after app.use(requestContextMiddleware): ${calls.join(' | ')}`);
+  assert.equal(calls[metrics + 1], 'app.use(helmet())');
+  assert.ok(at('app.use(shutdownAdmission(') < ctx, 'shutdown admission still first');
 });
 
 test('architecture: product terms, financial declarations and cross-service imports are refused', () => {

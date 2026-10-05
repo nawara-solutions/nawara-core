@@ -1,4 +1,5 @@
 import { DynamicModule, Global, Module } from '@nestjs/common';
+import { MetricsHost } from '../metrics/metrics-host.js';
 import { HealthController } from './health.controller.js';
 import { DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_OPTIONS, HttpDrain, ShutdownState } from './http-drain.js';
 import { ReadinessRegistry } from './readiness.registry.js';
@@ -18,8 +19,9 @@ export class HealthModule {
         { provide: ReadinessRegistry, useFactory: (state: ShutdownState) => new ReadinessRegistry(opts.checkTimeoutMs, undefined, () => state.draining), inject: [ShutdownState] },
         ShutdownNotice,
         HttpDrain,
+        MetricsHost, // V2 A12.2: holds the metrics installed by installMetrics (nothing while METRICS_ENABLED is off)
       ],
-      exports: [ReadinessRegistry, ShutdownState],
+      exports: [ReadinessRegistry, ShutdownState, MetricsHost],
     };
   }
 }

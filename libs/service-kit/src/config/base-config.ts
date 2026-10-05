@@ -1,4 +1,5 @@
 import { DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS } from '../health/http-drain.js';
+import { loadMetricsConfig, type MetricsConfig } from '../metrics/metrics-config.js';
 import { ConfigError, EnvReader } from './config.js';
 
 export const NODE_ENVS = ['development', 'test', 'production'] as const;
@@ -32,6 +33,8 @@ export interface BaseConfig {
    * connection is closed (default 5000, 500-120000). Passed to `HealthModule.forRoot`.
    */
   httpDrainTimeoutMs: number;
+  /** V2 A12.2: `METRICS_ENABLED` / `METRICS_HOST` / `METRICS_PORT`; off by default, loopback by default. */
+  metrics: MetricsConfig;
 }
 
 export interface DbRuntimeConfig {
@@ -108,11 +111,12 @@ export function loadBaseConfig(serviceName: string, env: NodeJS.ProcessEnv = pro
   if (!SERVICE_NAME.test(serviceName)) throw new ConfigError('service name must be lowercase letters, digits and dashes');
   const nodeEnv = reader.oneOf('NODE_ENV', NODE_ENVS, 'production');
   const trustProxyHops = loadTrustProxyHops(reader);
+  const port = reader.int('PORT', { default: 3000, min: 1, max: 65535 });
   return {
     serviceName,
     nodeEnv,
     isProduction: nodeEnv === 'production',
-    port: reader.int('PORT', { default: 3000, min: 1, max: 65535 }),
+    port,
     logLevel: reader.oneOf('LOG_LEVEL', LOG_LEVELS, 'info'),
     bodyLimitKb: reader.int('BODY_LIMIT_KB', { default: 100, min: 1, max: 10_240 }),
     corsOrigins: parseCorsOrigins(reader.get('CORS_ORIGINS')),
@@ -120,5 +124,6 @@ export function loadBaseConfig(serviceName: string, env: NodeJS.ProcessEnv = pro
     trustProxy: trustProxyHops > 0,
     db: loadDbRuntimeConfig(reader),
     httpDrainTimeoutMs: reader.int('HTTP_DRAIN_TIMEOUT_MS', { default: DEFAULT_HTTP_DRAIN_TIMEOUT_MS, ...HTTP_DRAIN_TIMEOUT_BOUNDS }),
+    metrics: loadMetricsConfig(reader, port, nodeEnv),
   };
 }

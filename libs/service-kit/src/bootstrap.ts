@@ -6,6 +6,7 @@ import { KitExceptionFilter } from './errors/exception.filter.js';
 import { LocalizedValidationPipe } from './errors/validation.pipe.js';
 import { ShutdownState, shutdownAdmission } from './health/http-drain.js';
 import type { JsonLogger } from './logging/json-logger.js';
+import { installMetrics } from './metrics/install.js';
 
 /**
  * Applies the shared HTTP baseline to a Nest Express application, which must be created with `{ bodyParser: false }`
@@ -28,6 +29,8 @@ export function configureApp(app: NestExpressApplication, config: BaseConfig, lo
   if (config.trustProxyHops > 0) app.set('trust proxy', config.trustProxyHops);
   app.use(shutdownAdmission(app.get(ShutdownState)));
   app.use(requestContextMiddleware);
+  // V2 A12.2: HTTP metrics and the separate metrics listener; nothing at all while METRICS_ENABLED is off (the default).
+  installMetrics(app, config, logger);
   app.use(helmet());
   app.useBodyParser('json', { limit: `${config.bodyLimitKb}kb` });
   // Nest's ValidationPipe with the same options; its failures carry `validation_error` and localizable messages (ADR-0054, R4)
