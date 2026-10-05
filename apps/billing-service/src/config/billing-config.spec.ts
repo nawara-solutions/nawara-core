@@ -62,6 +62,7 @@ describe('loadBillingConfig', () => {
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4, caller admission since Stage 21.C.2)', () => {
     expect(Object.keys(loadBillingConfig(BASE)).sort()).toEqual([
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
+      'metrics', // V2 A12.2: the kit's metrics listener settings (off by default), used by configureApp
       'nodeEnv', 'organizationReference', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
       'serviceName', 'servicePolicy', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy', 'trustProxyHops',
     ]);

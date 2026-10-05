@@ -18,7 +18,7 @@ export { defineMessages, renderMessage, catalogProblems, type MessageTexts, type
 export { HealthModule } from './health/health.module.js';
 export { HealthController } from './health/health.controller.js';
 export { DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS, HttpDrain, ShutdownState, shutdownAdmission } from './health/http-drain.js';
-export { ReadinessRegistry, ReadinessCheckTimeout, type ReadinessCheck, type ReadinessResult, type ReadinessLog } from './health/readiness.registry.js';
+export { ReadinessRegistry, ReadinessCheckTimeout, type ReadinessCheck, type ReadinessResult, type ReadinessLog, type ReadinessObservation, type ReadinessObserver } from './health/readiness.registry.js';
 
 export { hashServiceToken, generateServiceToken, parseServiceTokens, MAX_TOKENS_PER_CALLER, type ServiceTokenEntry } from './service-auth/service-token.js';
 export { ServiceTokenGuard, CallerService, SERVICE_TOKENS, type ServiceRequest } from './service-auth/service-token.guard.js';
@@ -53,6 +53,13 @@ export { RateLimitModule } from './rate-limit/rate-limit.module.js';
 export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';
 
 export { configureApp, type ConfigureAppOptions } from './bootstrap.js';
+// V2 A12.2: the metrics foundation (bounded registry, closed labels, separate listener). Off unless METRICS_ENABLED=true.
+export { installMetrics, type MetricsInstallConfig } from './metrics/install.js';
+export { loadMetricsConfig, DEFAULT_METRICS_HOST, DEFAULT_METRICS_PORT, type MetricsConfig } from './metrics/metrics-config.js';
+export { MetricsHost } from './metrics/metrics-host.js';
+export type { BoundedMetrics, CounterHandle, GaugeHandle, HistogramHandle, HistogramDefinition, Labels, MetricDefinition } from './metrics/metrics.js';
+// V2 A12.2a: closedSet is the only public label factory; growingSet and lazyClosedSet stay internal to the metrics module.
+export { LABEL_NAMES, OTHER, UNMATCHED, closedSet, isForbiddenLabelName, type LabelName, type LabelSet } from './metrics/label-policy.js';
 
 export { canonicalJson, sha256Hex, digestRows, sealSnapshot, serializeSnapshot, verifySnapshot, SnapshotError, type SealedSnapshot, type SealInput, type SnapshotRow, type VerifyResult } from './snapshot/snapshot.js';
 export { inspectDeadLetters, replayDeadLetter, type DeadLetterInfo, type Inspection, type ReplayOutcome, type ReplayResult } from './events/dlq-tools.js';
