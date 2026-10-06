@@ -1,7 +1,7 @@
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { generateServiceToken, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
+import { JsonLogger, generateServiceToken, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { billingMigrationsDir } from '../src/app.module.js';
 import type { Caller, TransitionContext } from '../src/domain/actors.js';
@@ -202,6 +202,24 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       const callsBefore = payment.createCalls.filter((c) => c.paymentRequestId === request.id).length;
       await dispatcher.dispatchOnce(60_000, 50); // a rejected request is no longer `created`/stale-`sending`: never re-claimed
       expect(payment.createCalls.filter((c) => c.paymentRequestId === request.id)).toHaveLength(callsBefore);
+    });
+
+    it('V2 A12.4.5: Payment\'s rejection code reaches the log only as a bounded code token; ids stay; the outcome is unchanged', async () => {
+      const lines: Record<string, unknown>[] = [];
+      t.app.useLogger(new JsonLogger('billing-service', 'debug', (l) => lines.push(JSON.parse(l))));
+      const marker = `SECRET-${Math.random().toString(36).slice(2)}`;
+      const hostile = await requests.createForInvoice((await openInvoice()).id, producer, ctx);
+      payment.whenCreate(hostile.request.id, { kind: 'rejected', code: `bad\n{"level":"info"} email=payer@private.example token=${marker}` });
+      const valid = await requests.createForInvoice((await openInvoice()).id, producer, ctx);
+      payment.whenCreate(valid.request.id, { kind: 'rejected', code: 'invalid_payment_request' });
+
+      await dispatcher.dispatchOnce(60_000, 50);
+      expect((await requestRow(hostile.request.id)).status).toBe('rejected'); // business outcome unchanged
+      expect((await requestRow(valid.request.id)).status).toBe('rejected');
+      const rejected = lines.filter((l) => String(l.msg).startsWith('payment_dispatch_rejected'));
+      expect(rejected.find((l) => String(l.msg).includes(hostile.request.id))?.msg).toContain('code=[invalid]');
+      expect(rejected.find((l) => String(l.msg).includes(valid.request.id))?.msg).toContain(`correlationId=${ctx.correlationId} code=invalid_payment_request`);
+      expect(JSON.stringify(lines)).not.toMatch(new RegExp(`${marker}|private\\.example|"level":"info"\\}`));
     });
 
     it('a transient failure leaves the request `sending`; the NEXT pass retries the IDENTICAL request (same natural key), never a new one', async () => {

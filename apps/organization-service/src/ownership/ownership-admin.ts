@@ -28,6 +28,10 @@ export interface AdminContext {
   /** The service's NODE_ENV, recorded on every event. */
   environment: string;
   correlationId: string;
+  /**
+   * Operational log. V2 A12.4.5: the operator's `--actor` (a person's name, schema 0004) is evidence for `ownership_event` only, never a
+   * log field: the line and the event row share the run's correlation id.
+   */
   log: (event: OwnershipLogEvent, fields: Record<string, unknown>) => void;
   /** `activate` in a production environment additionally requires this deliberate, run-time gate. */
   productionActivationEnabled?: boolean;
@@ -99,7 +103,7 @@ export class OwnershipAdmin {
     }
     await this.db.query('UPDATE ownership_state SET environment_class = $1', [cls]);
     await this.record({ operation: 'declare-class', actor, outcome: 'succeeded', from: 'PREPARED', to: 'PREPARED', detail: { environmentClass: cls } });
-    this.ctx.log('ownership_transition_recorded', { operation: 'declare-class', environmentClass: cls, actor });
+    this.ctx.log('ownership_transition_recorded', { operation: 'declare-class', environmentClass: cls });
   }
 
   /** Verifies a snapshot file WITHOUT touching the database. */
@@ -112,7 +116,7 @@ export class OwnershipAdmin {
     }
     const v = validateHierarchySnapshot(parsed);
     if (!v.ok) throw new OwnershipError('snapshot_invalid', v.errors.join('; '));
-    this.ctx.log('ownership_snapshot_verified', { actor, snapshotDigest: v.value.snapshot.digests.whole, content: v.value.content, counts: v.value.snapshot.counts, frozen: v.value.snapshot.frozen });
+    this.ctx.log('ownership_snapshot_verified', { snapshotDigest: v.value.snapshot.digests.whole, content: v.value.content, counts: v.value.snapshot.counts, frozen: v.value.snapshot.frozen });
     return v.value;
   }
 
@@ -126,7 +130,7 @@ export class OwnershipAdmin {
       v = this.verifySnapshotText(actor, text);
     } catch (e) {
       const err = e as OwnershipError;
-      this.ctx.log('ownership_import_failed', { actor, errorCode: err.code });
+      this.ctx.log('ownership_import_failed', { errorCode: err.code });
       return this.reject('import', actor, err.code, err.message);
     }
     const digest = v.snapshot.digests.whole;
@@ -135,7 +139,7 @@ export class OwnershipAdmin {
     if (!PRE_ACTIVATION_IMPORTABLE.includes(st0.phase)) return this.reject('import', actor, 'import_after_approval', `imports are refused in phase ${st0.phase}; roll back to PREPARED first`, { digest });
     if (st0.phase === 'FROZEN' && !v.snapshot.frozen) return this.reject('import', actor, 'stale_import_after_freeze', 'the environment is FROZEN: only a snapshot taken under the freeze can be imported', { digest });
 
-    this.ctx.log('ownership_import_started', { actor, snapshotDigest: digest, frozen: v.snapshot.frozen, counts: v.snapshot.counts });
+    this.ctx.log('ownership_import_started', { snapshotDigest: digest, frozen: v.snapshot.frozen, counts: v.snapshot.counts });
     try {
       return await this.db.tx(async (q) => {
         const st = await this.state(q, true);
@@ -179,12 +183,12 @@ export class OwnershipAdmin {
           phase = 'FROZEN';
         }
         await this.record({ operation: 'import', actor, outcome: 'succeeded', from: st.phase, to: phase, digest, detail: { inserted, skipped, final: v.snapshot.frozen } }, q);
-        this.ctx.log('ownership_import_succeeded', { actor, snapshotDigest: digest, inserted, skipped, from: st.phase, to: phase });
+        this.ctx.log('ownership_import_succeeded', { snapshotDigest: digest, inserted, skipped, from: st.phase, to: phase });
         return { inserted, skipped, phase };
       });
     } catch (e) {
       const err = e instanceof OwnershipError ? e : new OwnershipError('import_failed', (e as Error).message);
-      this.ctx.log('ownership_import_failed', { actor, snapshotDigest: digest, errorCode: err.code });
+      this.ctx.log('ownership_import_failed', { snapshotDigest: digest, errorCode: err.code });
       return this.reject('import', actor, err.code, err.message, { digest });
     }
   }
@@ -194,7 +198,7 @@ export class OwnershipAdmin {
     const st = await this.state();
     const now = await this.contentDigestNow();
     if (now !== expected) {
-      this.ctx.log('ownership_import_failed', { actor, errorCode: 'verification_mismatch' });
+      this.ctx.log('ownership_import_failed', { errorCode: 'verification_mismatch' });
       return this.reject('verify', actor, 'verification_mismatch', 'the content digest does not equal the expected digest', { digest: now });
     }
     let phase = st.phase;
@@ -205,7 +209,7 @@ export class OwnershipAdmin {
       phase = 'VERIFIED';
     }
     await this.record({ operation: 'verify', actor, outcome: 'succeeded', from: st.phase, to: phase, digest: now });
-    this.ctx.log('ownership_snapshot_verified', { actor, content: now, phase });
+    this.ctx.log('ownership_snapshot_verified', { content: now, phase });
     return { phase, contentDigest: now };
   }
 
@@ -217,15 +221,15 @@ export class OwnershipAdmin {
     if (!reference.trim()) return this.reject('approve', actor, 'reference_required', 'the approval must cite the recorded rehearsal or approval reference');
     await this.db.query(`UPDATE ownership_state SET phase = 'ACTIVATABLE', approved_by = $1, approved_reference = $2, approved_at = now()`, [actor, reference]);
     await this.record({ operation: 'approve', actor, outcome: 'succeeded', from: st.phase, to: 'ACTIVATABLE', digest: st.verified_digest, detail: { reference } });
-    this.ctx.log('ownership_transition_recorded', { operation: 'approve', actor, reference, from: st.phase, to: 'ACTIVATABLE' });
+    this.ctx.log('ownership_transition_recorded', { operation: 'approve', reference, from: st.phase, to: 'ACTIVATABLE' });
   }
 
   /** ACTIVATE AUTHORITY: the one explicit switch (ADR-0040 A2.5). */
   async activate(actor: string, confirmation: string): Promise<void> {
-    this.ctx.log('ownership_activation_requested', { actor, environment: this.ctx.environment });
+    this.ctx.log('ownership_activation_requested', { environment: this.ctx.environment });
     const st = await this.state();
     const refuse = async (code: string, message: string): Promise<never> => {
-      this.ctx.log('ownership_activation_rejected', { actor, errorCode: code });
+      this.ctx.log('ownership_activation_rejected', { errorCode: code });
       return this.reject('activate', actor, code, message);
     };
     if (st.phase !== 'ACTIVATABLE') return refuse('not_activatable', `authority can be activated only from ACTIVATABLE (phase ${st.phase})`);
@@ -240,7 +244,7 @@ export class OwnershipAdmin {
       await q.query(`UPDATE ownership_state SET phase = 'ACTIVE', activated_by = $1, activated_at = now()`, [actor]);
       await this.record({ operation: 'activate', actor, outcome: 'succeeded', from: 'ACTIVATABLE', to: 'ACTIVE', digest: now }, q);
     });
-    this.ctx.log('ownership_activation_succeeded', { actor, from: 'ACTIVATABLE', to: 'ACTIVE', content: now });
+    this.ctx.log('ownership_activation_succeeded', { from: 'ACTIVATABLE', to: 'ACTIVE', content: now });
   }
 
   /** Records that Auth's hierarchy writes are retired (the mirror). The evidence is the operator's attestation from Auth's own tool. */
@@ -250,19 +254,19 @@ export class OwnershipAdmin {
     if (!evidence.trim()) return this.reject('retire', actor, 'evidence_required', 'cite the evidence that Auth has retired its hierarchy writes');
     await this.db.query(`UPDATE ownership_state SET phase = 'RETIRED'`);
     await this.record({ operation: 'retire', actor, outcome: 'succeeded', from: 'ACTIVE', to: 'RETIRED', digest: st.verified_digest, detail: { evidence } });
-    this.ctx.log('ownership_retirement_completed', { actor, from: 'ACTIVE', to: 'RETIRED' });
+    this.ctx.log('ownership_retirement_completed', { from: 'ACTIVE', to: 'RETIRED' });
   }
 
   /** Rollback BEFORE activation only. After activation there is no rollback: it needs reconciliation, which is not designed. */
   async rollback(actor: string, reason: string): Promise<void> {
     const st = await this.state();
     if (st.phase === 'ACTIVE' || st.phase === 'RETIRED') {
-      this.ctx.log('ownership_rollback_rejected', { actor, phase: st.phase });
+      this.ctx.log('ownership_rollback_rejected', { phase: st.phase });
       return this.reject('rollback', actor, 'rollback_after_activation', 'ownership rollback after activation is not automatic and requires reconciliation, which is not designed; a deployment rollback is not an ownership rollback');
     }
     if (st.phase === 'PREPARED') return this.reject('rollback', actor, 'nothing_to_roll_back', 'the environment is already PREPARED');
     await this.db.query(`UPDATE ownership_state SET phase = 'PREPARED'`);
     await this.record({ operation: 'rollback', actor, outcome: 'succeeded', from: st.phase, to: 'PREPARED', detail: { reason } });
-    this.ctx.log('ownership_transition_recorded', { operation: 'rollback', actor, from: st.phase, to: 'PREPARED' });
+    this.ctx.log('ownership_transition_recorded', { operation: 'rollback', from: st.phase, to: 'PREPARED' });
   }
 }

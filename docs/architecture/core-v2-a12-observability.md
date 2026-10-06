@@ -5,8 +5,8 @@
   A12.3 service and messaging metrics (§3B): **A12.3 FORMALLY CLOSED** (PR #206, merge `272ab8d`, post-merge Core CI 24/24). Then A12.4
   logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
   (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; commit `ad15d19`); A12.4.4 (ai-service)
-  **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); A12.4.5 (service negative controls and security review) next;
-  A12.4.6 (validation, PR, closure) pending; A12.4 not complete. Metrics are **off by default**
+  **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); **A12.4.5 service negative controls and
+  security review proven locally** (§4E; not committed); A12.4.6 (validation, PR, closure) pending; A12.4 not complete. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -313,6 +313,49 @@ Branch `feature/core-v2-a12-logging-pii` on `b5bb23d`, 2026-10-06; committed as 
 | `test:deploy` / `check:repo` | 315/315 / PASS |
 
 A12.3 code (`events/`, `metrics/`, `db.service.ts`), `redact.ts` and ai-service are unchanged. Not run: RabbitMQ suites, CI.
+
+## 4E. Evidence (A12.4.5 service negative controls and security review, local)
+
+Branch `feature/core-v2-a12-logging-pii` on `f636c81`, 2026-10-06; not committed. Method: a static review of every operational log
+call site in the eight Core services (about 210, plus the kit's runtime ones), tracing each interpolated value to its source, then
+behavioral controls where a service owns a sensitive boundary that no existing test proves through the production `JsonLogger`
+routing. Each new control was run against the uncorrected code (or with a deliberate leak injected) and failed before it passed.
+
+| Service | Sensitive boundary | Proof |
+|---|---|---|
+| Auth | passwords, TOTP secret and codes, access / refresh / challenge / enrollment tokens, WebAuthn challenge, recovery secret key, operator one-time code, join and invitation codes, forged bearer JWT and cookie, member and operator email, hostile request ids, a pool error carrying a connection string | **new** `test/logging-negative.e2e-spec.ts`: Nest-Logger lines routed through `JsonLogger` as in main.ts; none of the values in any line; lines are single-line JSON; hostile ids neither logged nor echoed. Request paths log nothing by design; the pool line is present with facts only. An injected `email=` line fails it |
+| Organization | operator `--actor`, ownership CLI failures, service policy | **F-2 corrected**; `ownership-admin.spec.ts` (refusal and offline snapshot paths) and the built CLI: `verify-snapshot --actor "Jane Q. Person"` logs digest and correlation id, no name; missing / non-JSON / invalid snapshot files print a refusal or `failed (error=Error code=ENOENT)` |
+| Billing | Payment's HTTP answer, broker events (A12.4.3), organization scope | **F-1 corrected**; `payment-integration.e2e-spec.ts`: a hostile rejection code is `code=[invalid]`, a valid one stays with request and correlation ids, outcome `rejected` unchanged. `organizationId` is UUID-validated before the scope log; `paymentId` is persisted to a `uuid` column before it is logged |
+| Payment | provider webhooks (body, signature, card, contact) | **new** control in `webhooks.e2e-spec.ts`: a forged and a malformed signed webhook carrying card, CVC, email and a secret: the rejection is logged by provider only, nothing else appears |
+| File | capability tickets and URLs, storage keys, file names and content, S3 errors | existing `upload` / `download` e2e (production routing) and `safeDetail`; no new test |
+| Notification | recipient, content, OTP, provider text and codes, broker values | existing `delivery-engine` e2e (OTP, phone, provider exception text, poison values, DB password) and A12.4.3 intake; codes through `boundedCode` / `boundedDiagnostic`; no new test |
+| Audit | event payload vs operational line | lines carry validated `eventId`, `action`, `source` (refusals: `safeId`); the payload stays in the audit record; no new test |
+| Release | admin and automation operations | verified owner id, configured caller, closed operation / outcome / reason, store codes; no new test |
+
+**Findings.**
+
+- **F-1 (low, Billing, corrected):** `payment-dispatcher.ts` logged Payment's response `code` (`payment-client.ts`, from the HTTP body)
+  unvalidated in `msg`. Now `safeToken` against the Core error-code form; nothing persisted or decided changes.
+- **F-2 (medium, Organization, corrected):** the ownership operations logged `actor`, a person's name by schema
+  (`0004_ownership_transition.sql`: "a person, or the provisioning identity"), Category B, on 15 lines. Removed from every line;
+  `ownership_event` keeps it (audit evidence) with the same correlation id. Decision: the actor is **Category B**.
+- **C-1 (concern):** Auth's test harness captures Nest-Logger lines with a plain logger, so the Stage 13.2 `logging.e2e-spec` checks the
+  exception filter's lines only and its pool-warning case inspects no line. The new A12.4.5 test covers both through production routing.
+- **C-2 (concern):** the ownership snapshot validator's refusal text quotes file values (version, ids, keys) to the operator's terminal and
+  `ownership_event.detail`; not an operational log, hierarchy data (C/D), unbounded in length.
+- **C-3 (concern):** `ownership approve --reference` is free operator text logged as `reference` (a rehearsal reference by contract).
+- **Accepted boundary (A12.4.2):** prose PII inside `msg` is not detected by the logger; the static review found no call site that puts
+  an untrusted or sensitive value into `msg`.
+
+| Step | Result |
+|---|---|
+| New / changed controls | Auth `logging-negative` 1/1; Billing `payment-integration` 34/34 incl. F-1 (fails without the fix); Organization `ownership-admin.spec` 2/2 (both fail without the fix); Payment `webhooks` 9/9 |
+| Affected suites | Billing build, typecheck, lint (one pre-existing warning, untouched file), unit 348/348, `dispatcher-stale-retry` e2e 6/6; Organization build, typecheck, lint, unit 145/145; Auth and Payment typecheck and lint |
+| Built ownership CLI (offline, no database) | `verify-snapshot` with a person's name as actor: no name in any line; three failure paths safe |
+| `check:repo` | PASS |
+
+Not changed: service-kit, A12.3 code (metrics, labels, observers, delivery, outbox, pool), audit records, `observability.int-spec`,
+ai-service. Not run: RabbitMQ suites, the safety-gated `ownership.e2e-spec`, CI. A12.4.6 is still required; A12.4 is not complete.
 
 ## 5. Open
 

@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
-import { DbService, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
+import { DbService, JsonLogger, generateServiceToken, kitMigrationsDir, runMigrations, type AuthClient, type AuthIdentity } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { AttemptService } from '../src/attempts/attempt.service.js';
 import { ProviderRegistry } from '../src/providers/provider-registry.js';
@@ -100,6 +100,23 @@ describeWithEnv('webhooks API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'], (
     expect(rows).toHaveLength(1); // deduplicated by (provider, providerEventId)
     const outboxRows = (await t.app.get(DbService).query(`SELECT 1 FROM outbox WHERE name = 'payment.succeeded' AND payload->>'paymentId' = $1`, [payment.id])).rows;
     expect(outboxRows).toHaveLength(1); // no second financial side effect
+  });
+
+  it('V2 A12.4.5: a forged or malformed webhook never puts its body, signature, card, contact or token into a log line', async () => {
+    const lines: string[] = [];
+    t.app.useLogger(new JsonLogger('payment-service', 'debug', (l) => lines.push(l)));
+    const marker = `whsec_${crypto.randomUUID()}`;
+    const hostile = JSON.stringify({ type: 'payment.succeeded', card: '4111111111111111', cvc: '123', email: 'payer@private.example', token: marker });
+    const forgedSignature = `forged-${crypto.randomUUID()}`;
+    await postWebhook(Buffer.from(hostile, 'utf8'), forgedSignature).expect(401);
+    const { createHmac } = await import('node:crypto');
+    const signed = Buffer.from(`{"malformed": ${JSON.stringify(marker)}, "email": "payer@private.example"}`, 'utf8');
+    await postWebhook(signed, createHmac('sha256', 'test-provider-webhook-secret').update(signed).digest('hex')).expect(200);
+
+    const all = lines.join('\n');
+    expect(all).toContain('webhook signature rejected for provider test'); // the forged call is visible, by provider only
+    for (const leaked of [marker, forgedSignature, '4111111111111111', 'private.example', '"cvc"']) expect(all).not.toContain(leaked);
+    for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
   });
 
   it('answers 404 for an unknown provider', async () => {
