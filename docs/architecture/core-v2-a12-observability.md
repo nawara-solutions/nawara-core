@@ -4,8 +4,9 @@
   local security review and the A12.2a correction (§3A), written 2026-10-05: **A12.2 MERGED** (PR #205, `763e1a8`), not certified. Then the
   A12.3 service and messaging metrics (§3B): **A12.3 FORMALLY CLOSED** (PR #206, merge `272ab8d`, post-merge Core CI 24/24). Then A12.4
   logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
-  (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; not committed); A12.4.4 (ai-service) and
-  A12.4.5 (service negative controls) pending; A12.4 not closed. Metrics are **off by default**
+  (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; commit `ad15d19`); A12.4.4 (ai-service)
+  **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); A12.4.5 (service negative controls and security review) next;
+  A12.4.6 (validation, PR, closure) pending; A12.4 not complete. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -205,7 +206,12 @@ Approved architecture (A12.4.1, owner decisions **W1** frames-only stacks, **W2*
   not touched; log fields never become metric labels.
 - **Pending adoption (A12.4.3+).** Auth honours `LOG_LEVEL`; Notification intake and Billing payment-event lines move broker
   `source` / `correlationId` to `safeToken` fields (Billing restores context); CLI failures print type and code, not `e.message`; the
-  ownership CLI's `code` field becomes `errorCode`; ai-service: JSON logs, no query string in the uvicorn access log.
+  ownership CLI's `code` field becomes `errorCode`.
+- **AI boundary (owner decision, 2026-10-06).** A12.4 covers operational logging and PII safety for Core-owned services. The AI
+  runtime is not one: AI implementation belongs to the separate `nawara-ia` repository and workstream, which establishes its own
+  compatible logging and PII policy and uses this one as an integration reference, not as Core-owned implementation. A12.4.4 (planned
+  as ai-service JSON logging) is therefore **NOT APPLICABLE**; the number is kept so the phase history stays readable. The committed
+  `apps/ai-service` scaffold is left as it is until a separate architecture task removes it.
 
 ## 4. Evidence (A12.2, local)
 
@@ -278,7 +284,7 @@ Not run in this slice: service suites (A12.4.3 rebuilds the kit and runs the aff
 
 ## 4D. Evidence (A12.4.3 TypeScript service adoption, local)
 
-Branch `feature/core-v2-a12-logging-pii` on `b5bb23d`, 2026-10-06; not committed. What changed:
+Branch `feature/core-v2-a12-logging-pii` on `b5bb23d`, 2026-10-06; committed as `ad15d19`. What changed:
 
 - **Auth:** `LOG_LEVEL` read with the kit `EnvReader` (default `info`, anything outside debug / info / warn / error refused at
   startup) and used by `main.ts`. CLI failures go through `describeCliFailure`; its Core-authored operator messages are `CliRefusal`.
