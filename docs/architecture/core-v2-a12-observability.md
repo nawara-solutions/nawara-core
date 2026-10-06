@@ -1,7 +1,8 @@
 # Core V2 A12: observability foundation
 
 - **Status:** RECORD of A12.0 discovery, the A12.1 design freeze (owner decisions D1–D8), the A12.2 kit metrics foundation, its
-  local security review and the A12.2a correction (§3A), written 2026-10-05. **A12.2 IMPLEMENTED LOCALLY** (not merged, not certified). Metrics are **off by default**
+  local security review and the A12.2a correction (§3A), written 2026-10-05: **A12.2 MERGED** (PR #205, `763e1a8`), not certified. Then the
+  A12.3 service and messaging metrics (§3B): **A12.3 IMPLEMENTED LOCALLY** and re-proven locally on 2026-10-06 (§4B; not merged, not certified). Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -120,6 +121,42 @@ dead-letter, consumer, database, hierarchy, ownership and shutdown signals, ever
 `nawara-check-dlq` CLIs (arguments, output, exit codes), `/health`, `/ready`, Auth `/auth/health` or any Docker healthcheck. The
 existing observability, readiness and health suites pass unmodified (§4).
 
+## 3B. A12.3 service and messaging metrics
+
+Owner decisions: **D-1** no `event` label (event names are not universally closed, and audit-service accepts `audit.#`), so messaging
+metrics carry the consumer's own `queue` and a closed `outcome` only; **D-2** no domain snapshot mirroring; **D-3** no DLQ depth from the
+application (it stays with `nawara-check-dlq` and, later, broker metrics); **D-4** no wrapping of database queries; **D-5** a minimal
+synchronous gauge `collect` for scrape-time pool state.
+
+- **Observer hooks (single-shot, synchronous, isolated).** `RabbitMqEventBus.setObserver`, `OutboxRelay.setObserver` and
+  `DbService.setPoolObserver` (and the same on auth-service's own pool) tell one observer each outcome AFTER it is decided and settled. A
+  throwing observer is ignored; the notices are unchanged and stay the authoritative operational signals (no metric parses a log line).
+- **Messaging** (`metrics/messaging-metrics.ts`): `nawara_events_published_total{outcome=confirmed|failed|confirm_timeout}`,
+  `nawara_event_publish_duration_seconds`; `nawara_events_consumed_total{queue,outcome}` (processed, retry_scheduled,
+  dead_lettered_malformed / _permanent / _retries_exhausted, dead_letter_deferred, dead_letter_unannotated: the existing notice branches),
+  `nawara_event_handler_duration_seconds{queue}`, `nawara_event_redeliveries_total{queue}`, `nawara_event_consumer_up{queue}`,
+  `nawara_event_consumer_losses_total{queue}`, `nawara_event_consumer_recoveries_total{queue}`, `nawara_event_settle_failures_total{queue}`.
+  `queue` is a name code registered when subscribing (at most 16 per process, pattern-checked, internal set). Each observation is made
+  after the ack / nack it reports: the acknowledgement order of every outcome is unchanged (proven against the bus's real code).
+  **`processed` means the handler completed successfully**; a subsequent acknowledgement failure is represented separately by
+  `nawara_event_settle_failures_total` (the broker redelivers that message), so the same delivery can count once as `processed` and once
+  as a settle failure, and again on its redelivery. Dashboards and alerts (A12.6) must read the two together.
+- **Outbox** (`metrics/outbox-metrics.ts`): `nawara_outbox_pending_events`, `nawara_outbox_retrying_events`,
+  `nawara_outbox_oldest_pending_age_seconds`, `nawara_outbox_stats_timestamp_seconds` (the same aggregate as `nawara-check-outbox-lag`),
+  read by the relay's existing poll loop (no new timer), at most every 15 s per instance, only with an observer, outside the claim
+  transaction, bounded by the pool's timeouts; a failing read is swallowed and only lets the timestamp go stale. `nawara_outbox_relay_pass_failures_total{kind}`
+  counts pass failures by the closed failure kind. The CLI is unchanged and remains the G4 evidence.
+- **Pool** (`metrics/pool-metrics.ts`): `nawara_db_pool_connections`, `_idle_connections`, `_waiting_clients`, `_max_connections`
+  (`pool`), read at scrape from the pool's getters (no query, no timer); `nawara_db_pool_errors_total{pool,kind}` from idle-client
+  errors. Database-side metrics stay with the PostgreSQL exporter (A12.5).
+- **Wiring.** `installMetrics` observes the kit `EVENT_BUS`, `OutboxRelayService` and the kit `DbService` token when present (so
+  auth-service's own pool, which it provides behind that token, is covered by an additive `poolStats()` / `poolMax` / `setPoolObserver`
+  only). audit-service and notification-service keep their buses under their own tokens and observe them with one line after
+  `configureApp` (`MetricsHost.observeEventBus`). Each source is observed once; with metrics off nothing is observed.
+- **Deferred:** an `event` label (needs closed per-service catalogs; Auth has none), domain snapshot mirroring, DLQ and queue depth
+  (`rabbitmq_prometheus`, A12.5 / A12.10), database operation errors, `postgres_exporter`, dashboards and alerts (A12.6), production
+  rollout (A12.10).
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -139,7 +176,44 @@ Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 
 Two existing tests changed, both exhaustive lists of a service's configuration keys (Organization, Billing): `metrics` is the one key
 added, the field this phase introduces into `BaseConfig`. No readiness, health, logging or G4 test changed.
 
+## 4B. Evidence (A12.3, local re-proof)
+
+Branch `feature/core-v2-a12-service-metrics` from `main` at `763e1a8`, uncommitted, 2026-10-06, Node 24 locally. Local evidence for the
+owner's security review: **not certified, not merged**.
+
+| Step | Result |
+|---|---|
+| service-kit build | `npm run build -w @nawara/service-kit` exit 0; `dist/` then compared with a fresh non-incremental compile of the same source: 64/64 `.js` and 64/64 `.d.ts` byte-identical (source maps differ only in their output-relative `sources` path). Every dependent run below used that `dist/` |
+| service-kit unit | 365/365 (29 files); the A12.3 files (`metrics-service.spec`, `metrics-messaging-semantics.spec`) 20/20 (before the C-1 correction below): scrape-time `collect`, a synchronous throw contained, a non-function `collect` refused; hostile and unknown values folded, queue names capped; off-by-default, one observer per source, the in-memory bus ignored; the 8 ack/nack outcomes identical in channel calls and notices with and without the observer; handler duration only when the handler ran; a second observer refused |
+| service-kit integration | 120/120, 0 skipped (17 files; the management-API-gated DLQ file included), against local PostgreSQL 16 and a **disposable** RabbitMQ 3.13.7 (`rabbitmq:3.13-management-alpine`, empty, tmpfs data, no volume, `nofile` 65536, loopback ports 5673/15673, removed afterwards): the existing local broker could not finish booting (1,110 leftover test queues against a 927 file-handle limit), an environment issue, and was not modified. `metrics-messaging.int-spec` 2/2 (publish confirmed / confirm timeout / failed; consume processed, retry, dead-lettered permanent / retries exhausted / malformed; consumer up / lost / recovered; notices unchanged); `metrics-outbox.int-spec` 4/4 (equal to `nawara-check-outbox-lag` healthy / aging / retrying; a failing metrics read changes no claim, publish, stamp, attempt, backoff or notice; 15 s throttle, no query without an observer; bounded failure kind; a throwing observer contained) |
+| Security negative controls | PASS: the hostile routing key, message id, type, headers, payload (organization and user id, email, token), exception text and any UUID are absent from the exposition (kit broker test, Audit and Notification e2e); `queue` and `outcome` are the only messaging labels; series bounded (queue ≤ 16, pool ≤ 8, closed outcomes and kinds) |
+| auth-service | build, typecheck, lint (0 findings); unit 117/117; e2e 436/436 (41 files), including `metrics.e2e-spec` 7/7: pool gauges (`pool="main"`, max 10) and the outbox gauges from its central-audit relay |
+| audit-service | build, typecheck, lint; unit 236/236; e2e 442/442 (18 files, 0 skipped), including `metrics.e2e-spec` 1/1: processed and dead-lettered deliveries counted by `audit-service.audit` only, hostile names and values absent |
+| notification-service | build, typecheck, lint; unit 316/316; e2e 322/322 (15 files), including `metrics.e2e-spec` 1/1: intake deliveries by `notification.events` and a closed outcome, no destination, code, id or header |
+| billing-service (compatibility) | build, typecheck, lint; unit 345/345; e2e 336/336 (17 files, its broker case included) |
+| `check:repo` / `test:repo` | PASS / 64/64 |
+| Lint | no new finding. Pre-existing warnings in files A12.3 does not change: service-kit `events/rabbitmq-event-bus.ts:438` (`no-useless-spread`, a line from 2026-09-23); audit `test/localization.e2e-spec.ts:3`; notification `test/event-intake-broker.e2e-spec.ts:4`, `src/intake/intent-core.ts:56`, `test/send-api.e2e-spec.ts:195`; billing `test/dispatcher-stale-retry.e2e-spec.ts:2` |
+
+**C-1 correction (local security review, 2026-10-06).** The review found that the gauge `collect` contained only a *synchronous*
+throw: TypeScript accepts a promise-returning function where `void` is expected, the wrapper dropped the returned promise, so an async
+`collect` could still `set` a value after the scrape, and its rejection was never handled (a probe showed it ends the process, a
+scrape-triggered crash). No caller was affected (the only `collect`, the pool metrics, is synchronous). Correction in
+`metrics/metrics.ts`, type unchanged: `collect` stays synchronous and is never awaited; `set` is honoured only while the synchronous
+call runs (later calls are ignored); a returned promise or any thenable gets a no-op rejection handler (a throwing `then` getter is
+contained like any throw). Targeted re-proof (nothing else depends on this path): kit build, `dist/` again identical to a fresh
+non-incremental compile (64/64 `.js` and `.d.ts`), typecheck, lint (only the pre-existing warning), unit 366/366 with the focused files
+21/21, Auth `metrics.e2e-spec` 7/7, `check:repo` PASS. The two `collect` tests now prove the contract: a value an async `collect` sets
+after its first `await` never shows, and an async rejection, a delayed one, a non-Promise thenable and a throwing `then` getter raise no
+unhandled rejection; both fail against the previous wrapper. The RabbitMQ, outbox, Audit, Notification and Billing evidence above does
+not use this path and was not rerun.
+
+The A12.2 post-merge CI failure (run 37310414915, Payment `expiry-sweeper` timing) was not rerun: its one authorized rerun passed (§5).
+
 ## 5. Open
+
+- **A15 technical debt (CI):** the Payment `expiry-sweeper` e2e test gives itself a 150 ms real-clock window
+  (`apps/payment-service/test/expiry-sweeper.e2e-spec.ts:82`) and failed once on main after PR #205 (run 37310414915; the one authorized
+  failed-jobs rerun passed). Recorded with the Billing audit-regex flake; not fixed here.
 
 - `prom-client` is deprecated upstream in favour of `@prometheus-io/client` (0.16.x, first published 2026-08-21, an API-compatible
   superset). Owner decision H1: A12 keeps the validated `prom-client` 15.1.3 behind the single import module; the successor will be

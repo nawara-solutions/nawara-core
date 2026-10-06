@@ -68,6 +68,24 @@ describe('auth-service metrics (V2 A12.2)', () => {
     expect(body).toMatch(/^nawara_readiness_check_up\{check="migrations"\} 1$/m);
   });
 
+  it('V2 A12.3: the Auth pool (behind the kit DbService token) and its central-audit outbox relay feed the passive metrics', async () => {
+    const body = await (async () => {
+      const end = Date.now() + 10_000;
+      for (;;) {
+        const b = await scrape(on);
+        if (/^nawara_outbox_stats_timestamp_seconds \d/m.test(b) || Date.now() > end) return b;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    })();
+    expect(body).toMatch(/^nawara_db_pool_max_connections\{pool="main"\} 10$/m);
+    expect(body).toMatch(/^nawara_db_pool_connections\{pool="main"\} \d+$/m);
+    expect(body).toMatch(/^nawara_db_pool_waiting_clients\{pool="main"\} \d+$/m);
+    expect(body).toMatch(/^nawara_outbox_pending_events \d+$/m);
+    expect(body).toMatch(/^nawara_outbox_stats_timestamp_seconds \d/m);
+    // the in-memory test bus has no observer hook: no publish metrics, and nothing breaks
+    expect(body).not.toContain('nawara_events_published_total{');
+  });
+
   it('the listener binds loopback by default', async () => {
     expect((await on.app.get(MetricsHost).address())?.address).toBe('127.0.0.1');
   });

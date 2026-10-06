@@ -1,4 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
+import { DbService } from '../db/db.service.js';
+import { OutboxRelayService } from '../events/events.module.js';
+import { EVENT_BUS } from '../events/types.js';
 import { ReadinessRegistry, type ReadinessObservation } from '../health/readiness.registry.js';
 import type { JsonLogger } from '../logging/json-logger.js';
 import { expressRouteTemplates, httpMetricsMiddleware } from './http-metrics.js';
@@ -42,6 +45,20 @@ export function installMetrics(app: INestApplication, config: MetricsInstallConf
 
   const server = new MetricsServer(metrics, (level, message) => (level === 'error' ? logger.error(message, 'Metrics') : logger.warn(message, 'Metrics')));
   host.attach(metrics, server, server.start(config.metrics.host, config.metrics.port));
+
+  // V2 A12.3: the shared infrastructure the service has, if any: the kit event bus and outbox relay (EventsModule) and the database pool
+  // behind the kit DbService token (auth-service provides its own pool there). Each is observed once; anything absent is skipped.
+  host.observeEventBus(optional(app, EVENT_BUS));
+  host.observeOutboxRelay(optional<OutboxRelayService>(app, OutboxRelayService)?.relay);
+  host.observePool('main', optional(app, DbService));
+}
+
+function optional<T = unknown>(app: INestApplication, token: unknown): T | undefined {
+  try {
+    return app.get(token as never, { strict: false }) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 function readinessObserver(metrics: BoundedMetrics): (o: ReadinessObservation) => void {

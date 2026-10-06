@@ -157,6 +157,25 @@ function deadLetterCopy(sub: EventSubscription, msg: ConsumeMessage, event: Even
   return { content: Buffer.from(JSON.stringify(document)), contentType: 'application/json', messageId: safeId, type: safeType, headers, redacted: true };
 }
 
+/**
+ * V2 A12.3: what the bus reports to its observer (the metrics), AFTER each outcome is decided and settled. Bounded facts only: the
+ * consumer's own queue name (code), a closed outcome, durations. Never an event name, id, header, payload or error text.
+ */
+export type ConsumeOutcome =
+  | 'processed'
+  | 'retry_scheduled'
+  | 'dead_lettered_malformed'
+  | 'dead_lettered_permanent'
+  | 'dead_lettered_retries_exhausted'
+  | 'dead_letter_deferred'
+  | 'dead_letter_unannotated';
+export type EventBusObservation =
+  | { type: 'publish'; outcome: 'confirmed' | 'failed' | 'confirm_timeout'; durationMs: number }
+  | { type: 'consume'; queue: string; outcome: ConsumeOutcome; handlerMs?: number; redelivered: boolean }
+  | { type: 'consumer'; queue: string; state: 'consuming' | 'lost' | 'recovered' | 'closed' }
+  | { type: 'settle_failed'; queue: string };
+export type EventBusObserver = (observation: EventBusObservation) => void;
+
 export type ConsumerState = 'consuming' | 'reconnecting' | 'closed';
 export interface ConsumerStatus {
   queue: string;
@@ -200,6 +219,7 @@ export class RabbitMqEventBus implements EventBus {
   private publisher?: ConfirmChannel;
   private readonly consumers = new Set<ConsumerHandle>();
   private readonly url: string;
+  private observer?: EventBusObserver;
   /**
    * How long a close/cancel may wait before it is abandoned: the heartbeat's worst-case detection (3 intervals). By then a silent
    * connection has been torn down, and a close still pending will never settle. Abandoning is safe: the transport is closed or dead and
@@ -260,6 +280,7 @@ export class RabbitMqEventBus implements EventBus {
   }
 
   async publish(event: EventEnvelope): Promise<void> {
+    const started = performance.now();
     try {
       const ch = await this.publishChannel();
       ch.publish(this.exchange, event.name, Buffer.from(JSON.stringify(event.payload)), {
@@ -271,8 +292,10 @@ export class RabbitMqEventBus implements EventBus {
         headers: { ...event.headers },
       });
       await this.confirmed(ch, `eventId=${messageIdOf(event.id)} name=${event.name}`);
+      this.observe({ type: 'publish', outcome: 'confirmed', durationMs: performance.now() - started });
     } catch (e) {
       this.publisher = undefined;
+      this.observe({ type: 'publish', outcome: e instanceof PublisherConfirmTimeoutError ? 'confirm_timeout' : 'failed', durationMs: performance.now() - started });
       throw e;
     }
   }
@@ -354,6 +377,7 @@ export class RabbitMqEventBus implements EventBus {
       h.consumerTag = consumerTag;
       h.state = 'consuming';
       h.attempts = 0;
+      this.observe({ type: 'consumer', queue: sub.queue, state: 'consuming' });
     } catch (e) {
       await abandonAfter(ch.close(), this.closeBoundMs); // bounded: the re-attach loop must never hang on a dead connection
       throw e;
@@ -366,6 +390,7 @@ export class RabbitMqEventBus implements EventBus {
     h.consumerTag = undefined;
     h.state = 'reconnecting';
     this.notice(`rabbitmq_consumer_lost queue=${h.sub.queue}`);
+    this.observe({ type: 'consumer', queue: h.sub.queue, state: 'lost' });
     void ch.close().catch(() => undefined); // free a channel that is open but no longer consuming
     this.scheduleReconnect(h);
   }
@@ -380,7 +405,10 @@ export class RabbitMqEventBus implements EventBus {
       h.timer = undefined;
       if (h.closed) return;
       this.attach(h).then(
-        () => this.notice(`rabbitmq_consumer_recovered queue=${h.sub.queue}`, 'info'),
+        () => {
+          this.notice(`rabbitmq_consumer_recovered queue=${h.sub.queue}`, 'info');
+          this.observe({ type: 'consumer', queue: h.sub.queue, state: 'recovered' });
+        },
         () => {
           h.attempts += 1;
           this.notice(`rabbitmq_consumer_reconnect_failed queue=${h.sub.queue} attempt=${h.attempts}`);
@@ -394,6 +422,7 @@ export class RabbitMqEventBus implements EventBus {
     h.closed = true;
     h.stopping.abort();
     h.state = 'closed';
+    this.observe({ type: 'consumer', queue: h.sub.queue, state: 'closed' });
     if (h.timer) clearTimeout(h.timer);
     h.timer = undefined;
     this.consumers.delete(h);
@@ -423,10 +452,33 @@ export class RabbitMqEventBus implements EventBus {
     this.opts.onNotice?.(message, level);
   }
 
+  /**
+   * V2 A12.3: one observer (the metrics), set once. It is told each outcome AFTER the bus has acted on it (published or failed; acked,
+   * retried, dead-lettered or requeued; consumer state changed), synchronously; a throwing observer is ignored, so it can change no
+   * result, exception, acknowledgement or notice. Consumers already attached are reported at once.
+   */
+  setObserver(observer: EventBusObserver): void {
+    if (this.observer) throw new Error('an event bus observer is already set');
+    this.observer = observer;
+    for (const h of this.consumers) if (h.state === 'consuming') this.observe({ type: 'consumer', queue: h.sub.queue, state: 'consuming' });
+  }
+
+  private observe(observation: EventBusObservation): void {
+    if (!this.observer) return;
+    try {
+      this.observer(observation);
+    } catch {
+      // An observer never changes what the bus does.
+    }
+  }
+
   private async deliver(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, stopping?: AbortSignal): Promise<void> {
     const h = msg.properties.headers ?? {};
     const retryCount = counter(h[HEADER.retryCount]);
+    const redelivered = msg.fields?.redelivered === true;
     let event: EventEnvelope | undefined;
+    let handlerStarted: number | undefined;
+    let handlerMs: number | undefined;
     try {
       const id = msg.properties.messageId;
       const name = msg.properties.type;
@@ -453,16 +505,21 @@ export class RabbitMqEventBus implements EventBus {
           ...(replayCount > 0 ? { replayCount } : {}),
         },
       };
+      handlerStarted = performance.now();
       await sub.handler(event);
+      handlerMs = performance.now() - handlerStarted;
     } catch (e) {
-      await this.onFailure(ch, msg, sub, event, e, retryCount, stopping);
+      if (handlerStarted !== undefined) handlerMs = performance.now() - handlerStarted;
+      const outcome = await this.onFailure(ch, msg, sub, event, e, retryCount, stopping);
+      this.observe({ type: 'consume', queue: sub.queue, outcome, handlerMs, redelivered });
       return;
     }
     this.settle(() => ch.ack(msg), sub);
+    this.observe({ type: 'consume', queue: sub.queue, outcome: 'processed', handlerMs, redelivered });
   }
 
   /** A failed delivery ends in exactly one of: a confirmed copy in `<queue>.retry`, or a confirmed copy in `<queue>.dead`, then an ack. */
-  private async onFailure(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, event: EventEnvelope | undefined, error: unknown, retryCount: number, stopping?: AbortSignal): Promise<void> {
+  private async onFailure(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, event: EventEnvelope | undefined, error: unknown, retryCount: number, stopping?: AbortSignal): Promise<ConsumeOutcome> {
     const maxRetries = this.opts.retry?.maxRetries ?? 3;
     const delayMs = this.opts.retry?.delayMs ?? 5000;
     const permanent = error instanceof PermanentEventFailure;
@@ -474,7 +531,7 @@ export class RabbitMqEventBus implements EventBus {
         await this.republish(retryQueueName(sub.queue), msg, { [HEADER.retryCount]: retryCount + 1 }, String(delayMs));
         this.notice(`event_retry_scheduled ${who} attempt=${retryCount + 1}/${maxRetries} delayMs=${delayMs} error=${errorName}`);
         this.settle(() => ch.ack(msg), sub);
-        return;
+        return 'retry_scheduled';
       } catch {
         // could not schedule the retry (broker trouble): fall through, the message is dead-lettered rather than lost or looped on
       }
@@ -498,6 +555,7 @@ export class RabbitMqEventBus implements EventBus {
       }, undefined, copy);
       this.notice(`event_dead_lettered ${outcome}${copy?.redacted ? ' body=redacted' : ''}`, 'error');
       this.settle(() => ch.ack(msg), sub);
+      return `dead_lettered_${failure}`;
     } catch {
       if (copy) {
         // Stage 18.8: a consumer with a dead-letter policy never lets the broker dead-letter the untouched original: requeued instead
@@ -509,11 +567,12 @@ export class RabbitMqEventBus implements EventBus {
         this.notice(`event_dead_letter_deferred ${outcome} delayMs=${delayMs} — the copy could not be confirmed; requeued after the delay`, 'error');
         await holdUnless(delayMs, stopping);
         this.settle(() => ch.nack(msg, false, true), sub);
-        return;
+        return 'dead_letter_deferred';
       }
       // the annotated copy could not be confirmed: the broker's own dead-lettering (the queue was just re-declared and bound) still moves the original, unannotated
       this.notice(`event_dead_lettered ${outcome} annotated=false`, 'error');
       this.settle(() => ch.nack(msg, false, false), sub);
+      return 'dead_letter_unannotated';
     }
   }
 
@@ -571,6 +630,7 @@ export class RabbitMqEventBus implements EventBus {
       fn();
     } catch {
       this.notice(`rabbitmq_settle_failed queue=${sub.queue} — the broker will redeliver`);
+      this.observe({ type: 'settle_failed', queue: sub.queue });
     }
   }
 

@@ -18,6 +18,16 @@ export interface HistogramDefinition extends MetricDefinition {
   buckets: readonly number[];
 }
 
+/**
+ * V2 A12.3 (D-5): a gauge may be refreshed AT SCRAPE by a synchronous `collect` that reads in-memory state (a pool's counters) and
+ * reports values through `set`, which resolves labels exactly like the handle does (authentic sets, series budget). It must not do
+ * I/O: whatever it returns is ignored (never awaited), and a throw is contained: the gauge keeps its last values and the scrape succeeds.
+ * V2 A12.3 (C-1): `set` is honoured only during the synchronous call; a returned promise or thenable has its rejection consumed.
+ */
+export interface GaugeDefinition extends MetricDefinition {
+  collect?: (set: (labels: Labels | undefined, value: number) => void) => void;
+}
+
 export interface CounterHandle {
   inc(labels?: Labels, by?: number): void;
 }
@@ -70,11 +80,41 @@ export class BoundedMetrics {
     return { inc: (l, by = 1) => metric.inc(bound(l), by) };
   }
 
-  gauge(def: MetricDefinition): GaugeHandle {
+  gauge(def: GaugeDefinition): GaugeHandle {
     this.validate(def, 'gauge');
+    if (def.collect !== undefined && typeof def.collect !== 'function') throw new Error(`metrics: ${def.name} collect must be a function`);
     const labels = def.labels ?? [];
-    const metric = new Gauge({ name: def.name, help: def.help, labelNames: labels.map((l) => l.name), registers: [this.registry] });
     const bound = this.binder(def, labels);
+    const userCollect = def.collect;
+    const metric: Gauge<string> = new Gauge({
+      name: def.name,
+      help: def.help,
+      labelNames: labels.map((l) => l.name),
+      registers: [this.registry],
+      ...(userCollect
+        ? {
+            collect() {
+              // `set` works only while the collect runs synchronously: a value an async collect reports later is ignored.
+              let active = true;
+              try {
+                const result: unknown = userCollect((l, v) => {
+                  if (active) metric.set(bound(l), v);
+                });
+                // V2 A12.3 (C-1): a collect that returns a promise or any thenable is never awaited, and its rejection is consumed
+                // here, so it can neither delay the scrape nor reach the process as an unhandled rejection.
+                if ((typeof result === 'object' || typeof result === 'function') && result !== null && typeof (result as PromiseLike<unknown>).then === 'function') {
+                  (result as PromiseLike<unknown>).then(undefined, () => undefined);
+                }
+              } catch {
+                // A collect failure never fails the scrape or the service: the gauge keeps its last values.
+              } finally {
+                active = false;
+              }
+              // Returns nothing: a collect is never awaited.
+            },
+          }
+        : {}),
+    });
     return {
       set: (l, v) => metric.set(bound(l), v),
       inc: (l) => metric.inc(bound(l)),

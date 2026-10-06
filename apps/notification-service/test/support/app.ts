@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { Test } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { InMemoryEventBus, JsonLogger, ReadinessRegistry, configureApp, type EventBus, type ServiceTokenEntry } from '@nawara/service-kit';
+import { InMemoryEventBus, JsonLogger, MetricsHost, ReadinessRegistry, configureApp, type EventBus, type ServiceTokenEntry } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
 import { loadNotificationConfig, type NotificationConfig } from '../../src/config/notification-config.js';
 import type { ProviderRegistry } from '../../src/delivery/provider.js';
 import { mountDocs } from '../../src/docs/mount-docs.js';
-import { EventConsumer } from '../../src/intake/event-consumer.js';
+import { EventConsumer, INTAKE_EVENT_BUS } from '../../src/intake/event-consumer.js';
 import { IntakeService } from '../../src/intake/intake.service.js';
 import { ProbeModule } from './probe.js';
 
@@ -80,6 +80,7 @@ export async function createTestApp(
     .compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureApp(app, config, logger);
+  app.get(MetricsHost).observeEventBus(app.get(INTAKE_EVENT_BUS)); // as main.ts (V2 A12.3); off unless METRICS_ENABLED
   mountDocs(app, config); // as main.ts does, before the application starts (only when SWAGGER_PASSWORD is set)
   await app.init();
   return {

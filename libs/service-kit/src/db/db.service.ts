@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown, type 
 import pg from 'pg';
 import { DB_QUERY_TIMEOUT_MARGIN_MS } from '../config/base-config.js';
 import { ReadinessRegistry } from '../health/readiness.registry.js';
-import { describeFailure } from '../logging/failure.js';
+import { describeFailure, failureFacts, type FailureKind } from '../logging/failure.js';
 import { pendingMigrations } from './migrations.js';
 
 /** Anything that can run a parameterized statement: the pool, or a client inside a transaction. */
@@ -45,6 +45,19 @@ export type IsolationLevel = 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABL
 /** `pg`'s client-side `query_timeout` error (no code; the text is pinned by a test against the installed `pg`). */
 export const isQueryTimeout = (e: unknown): boolean => e instanceof Error && e.message === 'Query read timeout';
 
+/** V2 A12.3: told a pool idle-client error's bounded kind (`undefined` when unclassified): never its message or class. */
+export type PoolErrorObserver = (kind: FailureKind | undefined) => void;
+
+/** Notifies a pool observer, isolated: an observer can never turn an idle-client error into a crash. Shared with auth-service's pool. */
+export function notifyPoolError(observer: PoolErrorObserver | undefined, error: unknown): void {
+  if (!observer) return;
+  try {
+    observer(failureFacts(error).kind);
+  } catch {
+    // An observer never changes what the pool does.
+  }
+}
+
 /**
  * PostgreSQL access for one service's OWN database. Every statement is parameterized. The schema is changed only by the
  * explicit migration step, never by this layer and never at startup.
@@ -52,6 +65,7 @@ export const isQueryTimeout = (e: unknown): boolean => e instanceof Error && e.m
 @Injectable()
 export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown {
   private readonly pool: pg.Pool;
+  private poolObserver?: PoolErrorObserver;
 
   constructor(
     @Inject(DB_OPTIONS) private readonly options: DbOptions,
@@ -71,7 +85,10 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
     // An idle client erroring (server restart, failover, terminated session) must not crash the process; the next query reconnects.
     // Stage 14.7: reported (class and code only: a message can carry connection details), as auth-service already did.
     const logger = new Logger('DbService');
-    this.pool.on('error', (e) => logger.warn(`db_pool_idle_client_error ${describeFailure(e)} — the pool discards the client and reconnects on demand`));
+    this.pool.on('error', (e) => {
+      logger.warn(`db_pool_idle_client_error ${describeFailure(e)} — the pool discards the client and reconnects on demand`);
+      notifyPoolError(this.poolObserver, e);
+    });
   }
 
   onModuleInit(): void {
@@ -132,6 +149,17 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
    */
   poolStats(): { total: number; idle: number; waiting: number } {
     return { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount };
+  }
+
+  /** V2 A12.3: the pool's configured maximum (`DB_POOL_MAX`). */
+  get poolMax(): number {
+    return this.options.max ?? 10;
+  }
+
+  /** V2 A12.3: one observer (the metrics), told the bounded failure kind of each idle-client error after it is logged. Set once. */
+  setPoolObserver(observer: PoolErrorObserver): void {
+    if (this.poolObserver) throw new Error('a pool observer is already set');
+    this.poolObserver = observer;
   }
 
   /** Graceful shutdown: waits for checked-out clients to be released, then closes the pool. */

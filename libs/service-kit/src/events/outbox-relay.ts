@@ -1,4 +1,4 @@
-import { describeFailure } from '../logging/failure.js';
+import { describeFailure, failureFacts, type FailureKind } from '../logging/failure.js';
 import { redactString } from '../logging/redact.js';
 import { PollLoop, type DrainOutcome } from '../workers/poll-loop.js';
 import type { Queryable } from '../db/db.service.js';
@@ -22,6 +22,20 @@ export interface RelayOptions {
   maxPassMs?: number;
 }
 
+/** V2 A12.3: at most one outbox aggregate per this interval, per instance, and only while an observer is set. */
+export const OUTBOX_STATS_MIN_INTERVAL_MS = 15_000;
+
+/** V2 A12.3: the same aggregate `nawara-check-outbox-lag` reads (pending rows, the oldest one's age in whole seconds, rows retrying). */
+export const OUTBOX_STATS_SQL = `SELECT count(*)::bigint AS pending, EXTRACT(EPOCH FROM (now() - min("occurredAt")))::int AS oldest_pending_seconds,
+              count(*) FILTER (WHERE attempts > 0)::bigint AS retrying
+         FROM outbox WHERE "publishedAt" IS NULL`;
+
+/** What the relay reports to its observer (the metrics). Counts and a bounded failure kind only: never an id, name, payload or text. */
+export type RelayObservation =
+  | { type: 'pass_failure'; kind: FailureKind | undefined }
+  | { type: 'stats'; pending: number; retrying: number; oldestPendingSeconds: number; at: number };
+export type RelayObserver = (observation: RelayObservation) => void;
+
 interface OutboxRow {
   id: string;
   name: string;
@@ -40,16 +54,29 @@ interface OutboxRow {
  */
 export class OutboxRelay {
   private readonly loop: PollLoop;
+  private observer?: RelayObserver;
+  private lastStatsAt = Number.NEGATIVE_INFINITY;
 
   constructor(
-    private readonly db: { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> },
+    private readonly db: { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T>; query?: Queryable['query'] },
     private readonly bus: EventBus,
     private readonly opts: RelayOptions,
     private readonly onError: (message: string) => void = () => undefined,
   ) {
+    // V2 A12.3: a pass is the drain, then (only with an observer, throttled) the outbox aggregate; the drain's result or error is
+    // returned unchanged, and the aggregate never throws, so the loop, its error reporting and its timing stay what they were.
     this.loop = new PollLoop(
-      () => this.drainPass(),
-      (e) => this.onError(`outbox_relay_pass_failure ${describeFailure(e)} — the next pass retries`),
+      async () => {
+        try {
+          return await this.drainPass();
+        } finally {
+          await this.refreshStats();
+        }
+      },
+      (e) => {
+        this.onError(`outbox_relay_pass_failure ${describeFailure(e)} — the next pass retries`);
+        this.observe({ type: 'pass_failure', kind: failureFacts(e).kind });
+      },
       (ms) => this.onError(`worker_drain_timeout worker=outbox_relay drainTimeoutMs=${ms} — shutdown proceeds; the batch's rows stay unpublished and are relayed again (at least once)`),
     );
   }
@@ -117,6 +144,50 @@ export class OutboxRelay {
       }
       return { published, failed: 0 };
     });
+  }
+
+  /**
+   * V2 A12.3: one observer (the metrics), set once. It is told about pass failures (after they are reported) and, at most every
+   * `OUTBOX_STATS_MIN_INTERVAL_MS`, the outbox aggregate. A throwing observer is ignored.
+   */
+  setObserver(observer: RelayObserver): void {
+    if (this.observer) throw new Error('an outbox relay observer is already set');
+    this.observer = observer;
+  }
+
+  /**
+   * The aggregate, outside the claim transaction, bounded by the pool's statement and query timeouts. Runs only with an observer and
+   * at most every `OUTBOX_STATS_MIN_INTERVAL_MS`; any failure is swallowed (the stats timestamp then goes stale). It never claims,
+   * publishes, stamps or backs off anything.
+   */
+  private async refreshStats(): Promise<void> {
+    if (!this.observer) return;
+    const now = Date.now();
+    if (now - this.lastStatsAt < OUTBOX_STATS_MIN_INTERVAL_MS) return;
+    this.lastStatsAt = now;
+    try {
+      type Row = { pending: string; oldest_pending_seconds: number | null; retrying: string };
+      const { rows } = this.db.query ? await this.db.query<Row>(OUTBOX_STATS_SQL) : await this.db.tx((q) => q.query<Row>(OUTBOX_STATS_SQL));
+      const r = rows[0];
+      this.observe({
+        type: 'stats',
+        pending: Number(r?.pending ?? 0),
+        retrying: Number(r?.retrying ?? 0),
+        oldestPendingSeconds: Number(r?.oldest_pending_seconds ?? 0),
+        at: Date.now() / 1000,
+      });
+    } catch {
+      // A metrics read never affects the relay.
+    }
+  }
+
+  private observe(observation: RelayObservation): void {
+    if (!this.observer) return;
+    try {
+      this.observer(observation);
+    } catch {
+      // An observer never changes what the relay does.
+    }
   }
 
   /** Starts polling (first pass right away). The broker being down only delays delivery; it never affects the business transactions. */

@@ -1,10 +1,11 @@
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { JsonLogger, configureApp } from '@nawara/service-kit';
+import { JsonLogger, MetricsHost, configureApp } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { loadAuditConfig } from './config/audit-config.js';
 import { mountDocs } from './docs/mount-docs.js';
 import { configureHttpServer } from './http/http-server.js';
+import { AUDIT_EVENT_BUS } from './ingestion/audit-consumer.js';
 
 async function bootstrap() {
   const config = loadAuditConfig(); // throws ConfigError (fail closed), never echoing a value
@@ -13,6 +14,8 @@ async function bootstrap() {
   // bodyParser: false lets the kit install its own bounded JSON parser (BODY_LIMIT_KB) inside configureApp: the only body parser.
   const app = await NestFactory.create<NestExpressApplication>(AppModule.register(config), { bodyParser: false, bufferLogs: true });
   configureApp(app, config, logger); // includes enableShutdownHooks(): SIGTERM stops admission, drains HTTP (bounded), then exits
+  // V2 A12.3: the ingestion bus has its own token, so its messaging metrics are wired here (a no-op while METRICS_ENABLED is off).
+  app.get(MetricsHost).observeEventBus(app.get(AUDIT_EVENT_BUS));
   configureHttpServer(app.getHttpServer(), config); // the silent-socket bound
   mountDocs(app, config); // OpenAPI at /audit/docs, behind basic auth, only when SWAGGER_PASSWORD is set
 
