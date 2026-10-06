@@ -59,10 +59,10 @@ describe('JsonLogger', () => {
     for (const s of ['abc123token', 'hunter2', 'zzz']) expect(text).not.toContain(s);
   });
 
-  it("maps Nest's error(message, stack, context) to a structured line", () => {
+  it("maps Nest's error(message, stack, context) to a structured line; the stack keeps its frames only (V2 A12.4, W1)", () => {
     const { lines, logger } = capture();
     logger.error('boom', 'Error: boom\n at x', 'AppService');
-    expect(lines[0]).toMatchObject({ level: 'error', msg: 'boom', context: 'AppService' });
-    expect(lines[0].stack).toContain('Error: boom');
+    expect(lines[0]).toMatchObject({ level: 'error', msg: 'boom', context: 'AppService', stack: 'at x' });
+    expect(lines[0].stack).not.toContain('boom');
   });
 });

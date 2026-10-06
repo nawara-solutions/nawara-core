@@ -2,7 +2,9 @@
 
 - **Status:** RECORD of A12.0 discovery, the A12.1 design freeze (owner decisions D1–D8), the A12.2 kit metrics foundation, its
   local security review and the A12.2a correction (§3A), written 2026-10-05: **A12.2 MERGED** (PR #205, `763e1a8`), not certified. Then the
-  A12.3 service and messaging metrics (§3B): **A12.3 IMPLEMENTED LOCALLY** and re-proven locally on 2026-10-06 (§4B; not merged, not certified). Metrics are **off by default**
+  A12.3 service and messaging metrics (§3B): **A12.3 FORMALLY CLOSED** (PR #206, merge `272ab8d`, post-merge Core CI 24/24). Then A12.4
+  logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
+  (§4C; not committed); **service adoption (A12.4.3+) pending**; A12.4 not closed. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -157,6 +159,53 @@ synchronous gauge `collect` for scrape-time pool state.
   (`rabbitmq_prometheus`, A12.5 / A12.10), database operation errors, `postgres_exporter`, dashboards and alerts (A12.6), production
   rollout (A12.10).
 
+## 3C. A12.4 logging and PII contract
+
+Approved architecture (A12.4.1, owner decisions **W1** frames-only stacks, **W2** bare `code` stays redacted). It hardens the existing
+`JsonLogger`; no logging library is added. It applies to **operational logs only**: audit records (audit-service storage, the
+`audit-contract` catalog) are required evidence and are not sanitized by it, and operational logs never copy audit payloads.
+
+- **Never-throws.** No logger entry point throws into its caller. Values go through `safeSerialize` (`logging/safe-serialize.ts`): only
+  own, enumerable data properties are read through descriptors; an accessor is `[accessor]` (never invoked); `toJSON`, inspection hooks
+  and `Symbol.toStringTag` are never consulted; a throwing Proxy is `[unserializable]`; a cycle `[circular]`; BigInt a bounded `…n`
+  string; Buffer / typed arrays / ArrayBuffer / DataView `[binary N bytes]`; Date its ISO string (`[invalid date]`); Map / Set
+  `[Map N]` / `[Set N]` (never their contents); symbols and functions placeholders. A record that cannot be built becomes
+  `log_record_unserializable`; a failing sink is ignored.
+- **Bounds.** Depth 6, strings 2000 characters, arrays 50 items, objects 50 keys (plus a `[+N]` marker), stacks 20 frames, a line
+  16 KiB (past it the caller's fields become `fieldsTruncated: true`; envelope and `msg` stay).
+- **Envelope.** `ts`, `level`, `service`, `msg`, `context`, `requestId`, `correlationId`, `stack`, `droppedFields`, `fieldsTruncated`
+  belong to the logger. A caller field whose name matches one (case- and separator-insensitively) is dropped and only its NAME is listed
+  in `droppedFields`.
+- **Classification.** A: secrets, never emitted. B: direct PII (email, phone, IP, user agent, address, recipient / destination / contact,
+  personal names), redacted by key by default. C: internal identifiers (user, company, organization, platform, event, request,
+  correlation, payment, invoice, delivery, file ids), allowed as explicitly named fields. D: bounded operational data.
+- **Key redaction** (normalized: case and separators ignored). Secret families `password`, `passwd`, `secret`, `token`, `jwt`,
+  `authorization`, `cookie`, `apikey`, `credential`, `privatekey`, `signature`, `pepper`, `connectionstring`, `challenge`, `sessionid`, and
+  the words `otp`, `totp`, `dsn`. Any key ending in `code` is redacted (bare `code` included: Auth carries a factor code under it) except
+  `statusCode`, `errorCode`, `providerCode`, `failureCode`, `reasonCode`, `exitCode`, `taxCode`, `productCode`, `currencyCode`,
+  `countryCode`; `challengeId` is an identifier. PII by key only: free text is not scanned for PII, so a call site never puts PII in `msg`.
+- **Free-text scrubbing** (`msg`, string fields, key names): `Bearer` / `Basic` credentials (quoted or not), URL userinfo passwords,
+  secret query values (`token`, `access_token`, `refresh_token`, `id_token`, `api_key`, `apikey`, `key`, `secret`, `password`, `code`,
+  `signature`, `sig`, `X-Amz-Signature`, `X-Amz-Credential`), `password=` / `secret=` / `token=`-style pairs in prose (not `code=` or
+  `key=`, which are operational words in log lines), JWT-shaped values, `/file/t/<token>` paths.
+- **Errors.** An Error is `{ errorType, errorCode?, errorKind? }` as `describeFailure` classifies it, read from a data-only copy (no
+  getter runs): never its message, cause or stack. A stack (Nest's `error(msg, stack, ctx)`) keeps its `at …` frames only (W1), the
+  same in development and production. No SQL, parameters, PostgreSQL detail or connection string.
+- **Structured fields.** camelCase, all optional: `operation`, `outcome`, `statusCode`, `errorType`, `errorCode`, `errorKind`,
+  `eventType`, `eventId`, `durationMs`, `attempt` and category-C ids. `msg` stays a stable event key or description; existing
+  `snake_case key=value` lines are compatible debt; no untrusted value is interpolated into `msg`. No schema version field.
+- **HTTP.** No access or request logging is added (no URL, query, body, headers, IP or user agent); HTTP metrics cover traffic.
+- **Correlation.** Preserved as is. `runWithEventContext` restores `requestId` (`event:<id>`) and a validated `correlationId` for a
+  consumer that calls it explicitly; the event bus delivery path is not wrapped. No tracing or causation ids.
+- **Untrusted values.** `safeToken(value, pattern, max)` returns the value only when it matches (`SAFE_ID`, `EVENT_NAME`), else
+  `[invalid]`; logs only, never a metric label.
+- **Unchanged.** `redact` / `redactString` (`logging/redact.ts`) keep their behavior: the outbox relay stores `redactString` output in
+  `lastError` and `nawara-check-outbox-lag` prints it (G4 evidence). A12.3 metrics, observers, event delivery, outbox and pool code are
+  not touched; log fields never become metric labels.
+- **Pending adoption (A12.4.3+).** Auth honours `LOG_LEVEL`; Notification intake and Billing payment-event lines move broker
+  `source` / `correlationId` to `safeToken` fields (Billing restores context); CLI failures print type and code, not `e.message`; the
+  ownership CLI's `code` field becomes `errorCode`; ai-service: JSON logs, no query string in the uvicorn access log.
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -208,6 +257,23 @@ unhandled rejection; both fail against the previous wrapper. The RabbitMQ, outbo
 not use this path and was not rerun.
 
 The A12.2 post-merge CI failure (run 37310414915, Payment `expiry-sweeper` timing) was not rerun: its one authorized rerun passed (§5).
+
+## 4C. Evidence (A12.4.2 kit hardening, local)
+
+Branch `feature/core-v2-a12-logging-pii` from `main` at `272ab8d`, 2026-10-06, Node 24 locally; not committed. Files:
+`logging/safe-serialize.ts` (new), `logging/json-logger.ts`, `context/request-context.ts` (`runWithEventContext`, `SAFE_ID` exported),
+`index.ts` (exports), `test/logging-hardening.spec.ts` (new), `test/logging.spec.ts` (the stack assertion now expects frames only).
+
+| Step | Result |
+|---|---|
+| service-kit build | exit 0; `dist/` identical to a fresh non-incremental compile (65/65 `.js` and `.d.ts`; source maps differ only in their output path) |
+| Focused logging tests | `logging-hardening.spec` + `logging.spec` 56/56: the 41 required negative controls (secrets nested and in arrays; normalized keys; bare `code`, `joinCode`, `invitationCode`, `totpCode` redacted; `statusCode` / `errorCode` / `providerCode` visible; PII keys; Bearer, quoted Bearer, Basic, URL credentials, secret query values, prose `password=` pairs, bare JWT, `/file/t/<token>`; throwing getter, `toJSON`, `Symbol.toStringTag` / `toPrimitive` getters, throwing and revoked Proxies; BigInt; cycles; depth, array, key and record bounds; Buffer, typed arrays, ArrayBuffer, DataView; Dates; Map; Set; Error facts without message, cause or getters; frames-only, at most 20, no message; envelope collisions incl. case variants; `droppedFields` unspoofable; CR / LF / control characters; huge strings; unbuildable record; failing `JSON.stringify`; failing sink; levels) plus `safeToken` and `runWithEventContext` |
+| service-kit unit | 415/415 (30 files) |
+| typecheck / lint | clean / no new finding (the one pre-existing `rabbitmq-event-bus.ts:438` warning) |
+| `check:repo` | PASS |
+| Static security review | three probe findings fixed in this slice (quoted Bearer, prose `password=` pairs, case-variant envelope names) and a `Symbol.toStringTag` getter read replaced by a prototype check; residual, by design: secrets or PII written as prose or JSON inside `msg` other than the patterns above are a call-site responsibility (service negative controls, A12.4.5) |
+
+Not run in this slice: service suites (A12.4.3 rebuilds the kit and runs the affected services), integration suites, CI.
 
 ## 5. Open
 

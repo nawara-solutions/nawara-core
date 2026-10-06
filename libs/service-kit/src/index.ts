@@ -3,9 +3,10 @@ export { ConfigError, EnvReader, type FileReader } from './config/config.js';
 export { loadBaseConfig, loadDbRuntimeConfig, loadTrustProxyHops, parseCorsOrigins, NODE_ENVS, LOG_LEVELS, DB_QUERY_TIMEOUT_MARGIN_MS, DB_QUERY_TIMEOUT_BOUNDS, TRUST_PROXY_HOPS_BOUNDS, type BaseConfig, type DbRuntimeConfig, type NodeEnv, type LogLevel } from './config/base-config.js';
 export { clientAddress, rateLimitClientAddress, normalizeAddress, rateLimitIdentity } from './context/client-address.js';
 
-export { requestContextMiddleware, getRequestContext, runWithRequestContext, correlationHeaders, REQUEST_ID_HEADER, CORRELATION_ID_HEADER, type RequestContext } from './context/request-context.js';
+export { requestContextMiddleware, getRequestContext, runWithRequestContext, runWithEventContext, correlationHeaders, SAFE_ID, REQUEST_ID_HEADER, CORRELATION_ID_HEADER, type RequestContext } from './context/request-context.js';
 
-export { JsonLogger, type LogSink } from './logging/json-logger.js';
+export { JsonLogger, LOG_ENVELOPE_FIELDS, MAX_RECORD_LENGTH, type LogSink } from './logging/json-logger.js';
+export { INVALID_TOKEN, safeSerialize, safeToken, scrubText, isSensitiveKey } from './logging/safe-serialize.js';
 export { redact, redactString } from './logging/redact.js';
 export { describeFailure, failureFacts, type FailureFacts, type FailureKind } from './logging/failure.js';
 
