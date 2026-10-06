@@ -1,10 +1,11 @@
 import { BrokerNotices } from '../../src/ingestion/broker-notices.js';
 import { Test } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { JsonLogger, ReadinessRegistry, configureApp, type EventBus, type ServiceTokenEntry } from '@nawara/service-kit';
+import { JsonLogger, MetricsHost, ReadinessRegistry, configureApp, type EventBus, type ServiceTokenEntry } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
 import { loadAuditConfig, type AuditConfig } from '../../src/config/audit-config.js';
 import { configureHttpServer } from '../../src/http/http-server.js';
+import { AUDIT_EVENT_BUS } from '../../src/ingestion/audit-consumer.js';
 import { ProbeModule } from './probe.js';
 
 export interface TestApp {
@@ -69,6 +70,7 @@ export async function createTestApp(
     .compile();
   const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
   configureApp(app, config, logger);
+  app.get(MetricsHost).observeEventBus(app.get(AUDIT_EVENT_BUS)); // as main.ts (V2 A12.3); off unless METRICS_ENABLED
   configureHttpServer(app.getHttpServer(), config);
   opts.beforeInit?.(app, config);
   await app.init();

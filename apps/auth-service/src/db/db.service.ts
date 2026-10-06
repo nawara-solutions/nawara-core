@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional, type OnApplicationShutdown, type OnModuleInit } from '@nestjs/common';
 import pg from 'pg';
-import { DB_QUERY_TIMEOUT_MARGIN_MS, ReadinessRegistry, describeFailure, isQueryTimeout, listMigrationFiles, pendingOf } from '@nawara/service-kit';
+import { DB_QUERY_TIMEOUT_MARGIN_MS, ReadinessRegistry, describeFailure, isQueryTimeout, listMigrationFiles, notifyPoolError, pendingOf, type PoolErrorObserver } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { AUTH_MIGRATIONS_DIR, AUTH_MIGRATION_OPTIONS } from './migrations.js';
 
@@ -19,11 +19,15 @@ export interface Queryable {
 export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown {
   private readonly pool: pg.Pool;
   private readonly logger = new Logger(DbService.name);
+  private poolObserver?: PoolErrorObserver;
+  /** V2 A12.3: the pool's configured maximum (`DB_POOL_MAX`), for the kit's passive pool metrics. */
+  readonly poolMax: number;
 
   constructor(
     @Inject(APP_CONFIG) cfg: AppConfig,
     @Optional() @Inject(ReadinessRegistry) private readonly readiness?: ReadinessRegistry,
   ) {
+    this.poolMax = cfg.db.poolMax;
     this.pool = new pg.Pool({
       connectionString: cfg.databaseUrl,
       max: cfg.db.poolMax,
@@ -40,7 +44,21 @@ export class DbService implements Queryable, OnModuleInit, OnApplicationShutdown
     // An IDLE client that loses its connection (PostgreSQL restart or failover, an administrator's terminate, a proxy's idle timeout) is reported
     // on the POOL. `pg` discards that client itself and the next query opens a fresh connection, but an 'error' event with no listener is thrown
     // by Node as an uncaught exception and ends the process. Only the error class and code are logged: a message can carry connection details.
-    this.pool.on('error', (e) => this.logger.warn(`db_pool_idle_client_error ${describeFailure(e)} — the pool discards the client and reconnects on demand`));
+    this.pool.on('error', (e) => {
+      this.logger.warn(`db_pool_idle_client_error ${describeFailure(e)} — the pool discards the client and reconnects on demand`);
+      notifyPoolError(this.poolObserver, e);
+    });
+  }
+
+  /** V2 A12.3: pool occupancy for the kit's passive pool metrics (getters only: no query), as the kit's DbService exposes it. */
+  poolStats(): { total: number; idle: number; waiting: number } {
+    return { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount };
+  }
+
+  /** V2 A12.3: one observer (the metrics), told the bounded failure kind of each idle-client error after it is logged. Set once. */
+  setPoolObserver(observer: PoolErrorObserver): void {
+    if (this.poolObserver) throw new Error('a pool observer is already set');
+    this.poolObserver = observer;
   }
 
   /** Stage 13.2: the one dependency GET /ready actually needs. Cheap (a single SELECT), never on the request hot path. */

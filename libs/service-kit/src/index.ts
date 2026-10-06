@@ -37,17 +37,17 @@ export {
 } from './service-auth/organization-reference.js';
 
 export { DbModule } from './db/db.module.js';
-export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, isQueryTimeout, type DbOptions, type Queryable, type IsolationLevel } from './db/db.service.js';
+export { DbService, DB_OPTIONS, pgCode, pgConstraint, isUniqueViolation, isQueryTimeout, notifyPoolError, type DbOptions, type Queryable, type IsolationLevel, type PoolErrorObserver } from './db/db.service.js';
 export { runMigrations, pendingMigrations, pendingOf, listMigrationFiles, MigrationError, MIGRATIONS_TABLE, type MigrationOptions, type MigrationFile, type MigrationResult } from './db/migrations.js';
 export { kitMigrationsDir } from './db/paths.js';
 
 export { EventsModule, OutboxRelayService, EVENTS_OPTIONS, type EventsModuleOptions } from './events/events.module.js';
 export { OutboxService, type NewEvent } from './events/outbox.service.js';
-export { OutboxRelay, type RelayOptions } from './events/outbox-relay.js';
+export { OutboxRelay, type RelayOptions, type RelayObservation, type RelayObserver } from './events/outbox-relay.js';
 export { InboxService, type InboxOutcome } from './events/inbox.service.js';
 export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
-export { RabbitMqEventBus, PublisherConfirmTimeoutError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, DEFAULT_PREFETCH, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus } from './events/rabbitmq-event-bus.js';
+export { RabbitMqEventBus, PublisherConfirmTimeoutError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, DEFAULT_PREFETCH, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus, type ConsumeOutcome, type EventBusObservation, type EventBusObserver } from './events/rabbitmq-event-bus.js';
 
 export { RateLimitModule } from './rate-limit/rate-limit.module.js';
 export { RateLimitService, type RateLimitRule, type RateLimitResult } from './rate-limit/rate-limit.service.js';
@@ -57,6 +57,7 @@ export { configureApp, type ConfigureAppOptions } from './bootstrap.js';
 export { installMetrics, type MetricsInstallConfig } from './metrics/install.js';
 export { loadMetricsConfig, DEFAULT_METRICS_HOST, DEFAULT_METRICS_PORT, type MetricsConfig } from './metrics/metrics-config.js';
 export { MetricsHost } from './metrics/metrics-host.js';
+export type { PoolSource } from './metrics/pool-metrics.js';
 export type { BoundedMetrics, CounterHandle, GaugeHandle, HistogramHandle, HistogramDefinition, Labels, MetricDefinition } from './metrics/metrics.js';
 // V2 A12.2a: closedSet is the only public label factory; growingSet and lazyClosedSet stay internal to the metrics module.
 export { LABEL_NAMES, OTHER, UNMATCHED, closedSet, isForbiddenLabelName, type LabelName, type LabelSet } from './metrics/label-policy.js';
