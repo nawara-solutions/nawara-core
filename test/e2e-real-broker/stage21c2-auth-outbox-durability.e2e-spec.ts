@@ -39,6 +39,21 @@ const RATE_BUCKETS = [
   'INVITATION_RESOLVE_IP', 'INVITATION_RESOLVE_GLOBAL', 'INVITATION_ACCEPT_IP', 'INVITATION_MANAGE_ACTOR',
 ];
 
+/**
+ * V2 A12.4: a service's operational lines are JSON records (`JsonLogger`), so an event is matched by its fields within ONE record, never
+ * by a substring of the text. The harness prefixes each line with `[name] `; a line that is not a JSON object is ignored.
+ */
+function logRecords(service: LiveService): Record<string, unknown>[] {
+  return service.tail().split('\n').flatMap((line) => {
+    try {
+      const record: unknown = JSON.parse(line.replace(/^\[[^\]]*\] /, ''));
+      return record !== null && typeof record === 'object' && !Array.isArray(record) ? [record as Record<string, unknown>] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 async function sql<R extends pg.QueryResultRow = any>(url: string, text: string, params: unknown[] = []): Promise<R[]> {
   const c = new pg.Client({ connectionString: url });
   await c.connect();
@@ -164,7 +179,7 @@ describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live proce
     } finally {
       await bus.close();
     }
-    await waitFor(async () => notification.tail().includes(`notification_duplicate eventId=${crashed.rowId}`), 20_000, 'Notification reports the duplicate');
+    await waitFor(async () => logRecords(notification).some((r) => r.msg === 'notification_duplicate' && r.eventId === crashed.rowId), 20_000, 'Notification reports the duplicate');
     expect(await notificationsFor(crashed.userId!)).toHaveLength(1);
     expect((await sql(notificationDb.url, `SELECT count(*)::int AS n FROM notification WHERE "sourceEventId" = $1`, [crashed.rowId]))[0].n).toBe(1);
   });
