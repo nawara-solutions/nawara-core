@@ -2,7 +2,7 @@
 
 LOCAL development only. Nothing here is production configuration, and it neither performs nor authorizes any production action:
 production observability is A12.10, behind its own decision gate (D2). Record:
-[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D, §3E, §3F, §4G, §4H, §4I.
+[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D, §3E, §3F, §4G–§4J.
 
 ## What it is
 
@@ -134,6 +134,18 @@ availability, sessions by state, transactions, locks, waiting sessions, deadlock
 **Not covered (a separate PostgreSQL configuration decision):** query latency and slow queries. They need `pg_stat_statements`
 (`shared_preload_libraries`) or statement logging, neither of which A12.5 changes. Blocking is visible as lock counts and waiting
 sessions, not as blocker-to-waiter pairs.
+
+## Reading failures (A12.5.4)
+
+Proven together on the full local stack. Monitoring is passive: none of these changes application, broker or database behaviour.
+
+| What fails | What Prometheus shows |
+|---|---|
+| a Core service | its `up{job="<service>"}` = 0; every other target stays UP |
+| RabbitMQ | `up{job="rabbitmq"}` = 0, and each consumer's `nawara_event_consumer_up` = 0 (losses counted). After recovery, consumers re-attach on their own (recoveries counted) |
+| PostgreSQL | `pg_up` = 0 while `up{job="postgres"}` stays 1 (the exporter answers); DB-backed `/ready` reports `database` |
+| postgres-exporter | `up{job="postgres"}` = 0; PostgreSQL and the services are unaffected |
+| Prometheus | nothing else changes: services, broker and database keep working, and each `/metrics` is still served inside the network |
 
 ## Adding a workload later
 

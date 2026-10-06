@@ -9,7 +9,8 @@
   security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): **A12.4 FORMALLY CLOSED** (PR
   #207, merge `6fac8fe`, post-merge Core CI green). Then A12.5: **A12.5.1 local Prometheus collection MERGED** (PR #209, `1ad43d2`; §3D, §4G;
   local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics MERGED** (PR #210, `77b2cc7`;
-  §3E, §4H); **A12.5.3 PostgreSQL exporter proven locally** (§3F, §4I; not committed); A12.5.4, A12.5.5 and A12.6 pending. Metrics are **off by default**
+  §3E, §4H); **A12.5.3 PostgreSQL exporter MERGED** (PR #211, `331bc98`; §3F, §4I); **A12.5.4
+  integrated observability and security validation proven locally** (§4J; not committed); A12.5.5 and A12.6 pending. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; Prometheus and the PostgreSQL exporter exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3), and no
   Grafana or Alertmanager exists yet (A12.6). It performs and authorizes no production action.
@@ -521,6 +522,41 @@ Prometheus only.
 
 Not run: the eight services and RabbitMQ (unchanged by this step; their jobs remain configured), CI. A12.5 overall stays open (A12.5.4,
 A12.5.5); A12.6 has not started.
+
+## 4J. Evidence (A12.5.4 integrated validation, local)
+
+Branch `feature/core-v2-a12-observability-validation` from `main` at `331bc98` (PR #211 merged), 2026-10-06; evidence only, not
+committed. Runtime: one fresh, isolated, disposable Compose project (`.env.example` values, new volumes, so the full bootstrap ran,
+including `observability_monitor`), with all eight services, RabbitMQ, PostgreSQL, postgres-exporter and Prometheus together.
+
+| Step | Result |
+|---|---|
+| Static target model | 10 jobs: 8 × `<service>:9464` (application telemetry), `rabbitmq:15692` (broker, the VM-family drop only), `postgres-exporter:9187` (PostgreSQL); no credentials, remote write or rule files |
+| Normal mode (resolved) | no Prometheus or exporter; Core `METRICS_ENABLED` unset ×8; no service receives the monitoring password; 9464 / 15692 / 9187 published by nothing; the RabbitMQ definition and the PostgreSQL image / volumes identical to observability mode. A role created on a volume initialised in observability mode persists as database state, not as configuration |
+| Observability mode (resolved) | adds exactly `prometheus` and `postgres-exporter`; Core `METRICS_ENABLED=true` ×8; only `postgres` and `postgres-exporter` receive `MONITORING_PASSWORD` |
+| Bootstrap | 11 init steps including "observability monitoring role created"; every service's migrations applied |
+| **Targets** | **10/10 UP simultaneously** (scrapes of 4–67 ms) |
+| Core | `nawara_service_info`, readiness, HTTP and pool ×8; outbox ×6 (Audit and Notification have none); consumers ×3 (Audit, Billing, Notification) |
+| RabbitMQ / PostgreSQL | identity, 3 connections, channels and consumers, 9 queues, backlog, activity, alarms, disk; `pg_up`, sessions, commits, locks, deadlocks, sizes, tuples, cache |
+| Cross-layer: messaging | 2 synthetic envelopes from source `a1254-probe` to Notification's intake: application `nawara_events_consumed_total{outcome="dead_lettered_permanent"}` 2; broker `received` / `routed` 0→4 (including the 2 dead-letter republishes), `delivered` / `acknowledged` 0→2; the parked DLQ messages show in the aggregate `ready` backlog (2). The two layers are complementary signals of the same activity, not exact event accounting |
+| Cross-layer: database | 10 DB-backed `/ready` calls to Billing: `pg_stat_database_xact_commit{datname="billing"}` 282→363, `tup_returned` up; application `nawara_readiness_ready` 0→1, pool metrics present. Complementary signals, not exact query accounting |
+| Host exposure | 9464, 15692 and 9187 not listening on the host (connection refused); 9090 on `127.0.0.1` only. Published: the unchanged application ports, RabbitMQ 5672 / 15672 and Prometheus `127.0.0.1:9090` |
+| Prometheus | admin API disabled; lifecycle 403; remote-write receiver 404; runtime flags admin / lifecycle / receiver false, retention 3d / 1GiB; no container privileged, no `docker.sock` |
+| Secrets | the monitoring password is in no exporter log line, not in Prometheus's loaded configuration, and not in any stored label value; it is held only by `postgres` and `postgres-exporter`; no RabbitMQ or auth credential in Prometheus |
+| Labels / PII | 1,837 stored series. Label names per job match the approved designs. No email, UUID, JWT, bearer token, URL, SQL or probe payload in any label value. The exporter's own `code` / `tags` / `branch` / `revision` are its handler status and build info |
+| Cardinality | Core 71–88 series per service; RabbitMQ 2,144 samples scraped / 261 stored, no VM-internal series; PostgreSQL 954, no per-table or per-index series, `pg_settings` kept. Local figures, not production sizing |
+| Failures | a Core service stopped: only its `up` 0 (9/10), then 10/10. RabbitMQ stopped: `up` 0 and `nawara_event_consumer_up` 0 ×3 (3 losses), Core targets UP; after restart `up` 1, consumers 1 ×3 (3 recoveries). PostgreSQL stopped: `pg_up` 0 with the exporter target UP, Billing `/ready` 503 `database, migrations`; after restart `pg_up` 1, ready 200. Exporter stopped: `up{job="postgres"}` 0, PostgreSQL healthy, Billing ready |
+| Non-invasive | Prometheus stopped: all 8 services 200 on their health / readiness routes, every container healthy, each `/metrics` still served inside the network, broker running; 10/10 after restart. **Conclusion: a monitoring-layer failure did not become a platform or application failure** |
+| Monitoring role | all attributes false except `inherit`; member of `pg_monitor` only; owns no database, schema or table; no CONNECT on service databases. Init script, overlay and scrape config identical to the reviewed A12.5.3 commit |
+| Repository | `check:repo` PASS; `test:repo` 75/75; `promtool check config` SUCCESS; `sh -n` init OK; both Compose modes resolve. No guard needed changing |
+
+Accepted observations (owner, not A12.5.4 defects):
+- The aggregate RabbitMQ backlog includes dead-lettered messages. Per-queue and DLQ-specific backlog visibility is not enabled; it is an
+  A12.6 cardinality and dashboard decision.
+- Prometheus does not scrape itself. Whether its self-observability is useful is decided in A12.6, with the dashboard and alert design.
+
+Not run: the earlier A12.3 / A12.4 / A12.5.x campaigns, CI. A12.5 overall stays open: A12.5.5 is the local certification. A12.6 has not
+started.
 
 ## 5. Open
 
