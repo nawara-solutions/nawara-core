@@ -10,7 +10,9 @@
   #207, merge `6fac8fe`, post-merge Core CI green). Then A12.5: **A12.5.1 local Prometheus collection MERGED** (PR #209, `1ad43d2`; §3D, §4G;
   local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics MERGED** (PR #210, `77b2cc7`;
   §3E, §4H); **A12.5.3 PostgreSQL exporter MERGED** (PR #211, `331bc98`; §3F, §4I); **A12.5.4
-  integrated observability and security validation proven locally** (§4J; not committed); A12.5.5 and A12.6 pending. Metrics are **off by default**
+  integrated observability and security validation MERGED** (PR #212, `879ea44`; §4J); **A12.5 FORMALLY CLOSED** for the LOCAL
+  collection layer by the A12.5.5 certification (§4K). A12.6 (Grafana, dashboards, alerts) not started; production observability
+  (A12.10), G4 and G6 not certified. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; Prometheus and the PostgreSQL exporter exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3), and no
   Grafana or Alertmanager exists yet (A12.6). It performs and authorizes no production action.
@@ -557,6 +559,93 @@ Accepted observations (owner, not A12.5.4 defects):
 
 Not run: the earlier A12.3 / A12.4 / A12.5.x campaigns, CI. A12.5 overall stays open: A12.5.5 is the local certification. A12.6 has not
 started.
+
+## 4K. A12.5 local certification (A12.5.5)
+
+**Certified 2026-10-06 on merged `main` at `879ea44` (PR #212). A12.5 is FORMALLY CLOSED for the LOCAL collection layer.** This
+certification evaluates the merged evidence of A12.5.1–A12.5.4 (§4G–§4J). No runtime was rerun.
+- Since the A12.5.4 integrated proof (`331bc98`), `main` changed only `core-v2-a12-observability.md` and `local-observability.md`.
+- Every configuration, infrastructure, application, service-kit, guard and workflow file is identical to what was proven.
+
+**Certified architecture (local):** Prometheus (opt-in, `127.0.0.1:9090`) scrapes the eight Core services (`:9464`), RabbitMQ (aggregate
+metrics, `:15692`) and `postgres-exporter` (`:9187`) for the one PostgreSQL server. All three are internal to the Compose network.
+Normal mode keeps observability off by default.
+
+**Local collection certified ≠ production monitoring certified.** This closes A12.5 only. It does not close A12, and it does not certify
+production observability, G4, G6 or Final Core Validation.
+
+**Certifies:** opt-in local Prometheus collection; the eight Core scrape targets; RabbitMQ broker and PostgreSQL exporter collection;
+local exposure and network boundaries; credential handling; metric and label safety; the cardinality decisions; failure visibility;
+collector non-invasiveness; normal-versus-observability separation; the local runbook (`docs/runbooks/local-observability.md`).
+
+**Does not certify:** Grafana, dashboards, alerts or Alertmanager (A12.6); production observability, credentials, monitoring role,
+network topology, retention or capacity (A12.10); host and container metrics; backup observability; query latency and slow-query
+analysis; per-queue RabbitMQ visibility; any SLO; G4; G6; Final Core Validation.
+
+| Requirement | Evidence | Merged artifact | Result | Residual / deferred |
+|---|---|---|---|---|
+| Opt-in observability; metrics off in normal mode | §3D, §4G, §4J | `docker-compose.observability.yml`; base file sets no `METRICS_ENABLED` (guard) | PASS | — |
+| Prometheus pinned, local retention, loopback only | §3D, §4G, §4J | `prom/prometheus:v3.13.4@sha256:87861b8c…`, 3d / 1GB, `127.0.0.1:9090` | PASS | production retention: A12.10 |
+| Eight Core targets | §4G (8/8), §4J (10/10) | `prometheus.yml`, jobs ×8 on `:9464` | PASS | — |
+| Core identity, HTTP, readiness, pool, messaging / outbox | §3B, §4G, §4J | service-kit metrics (A12.2 / A12.3, with the §3D correction) | PASS | — |
+| Core bounded labels | §3A, §4G, §4J | closed label policy | PASS | — |
+| RabbitMQ availability, connections, channels, queues and backlog, consumers, activity, redelivery, memory, disk, alarms | §3E, §4H, §4J | job `rabbitmq` → `rabbitmq:15692` | PASS | per-queue / DLQ: A12.6 |
+| RabbitMQ aggregate cardinality, internal endpoint | §3E, §4H, §4J | aggregate `/metrics`, the exact VM-family drop, 15692 unpublished (guard) | PASS | — |
+| PostgreSQL `pg_up`, sessions, transactions, locks and waits, deadlocks, size, tuples, cache | §3F, §4I, §4J | job `postgres` → `postgres-exporter:9187` | PASS | query latency, blocker graph: later |
+| Least-privilege monitoring role | §3F, §4I (23/23 denied), §4J | init: `observability_monitor`, `pg_monitor` only | PASS | production role: A12.10 |
+| Internal exporter; no query text | §3F, §4I, §4J | 9187 unpublished; per-table / index collectors off; no `stat_statements` | PASS | `pg_stat_statements`: later |
+| 10/10 simultaneous targets | §4J | the merged stack | PASS | — |
+| Cross-layer messaging and database | §4J (complementary signals, not exact accounting) | — | PASS | — |
+| Host exposure, secrets, labels / PII, combined cardinality | §4J | — | PASS | — |
+| Failure matrix and non-invasiveness | §4J | — | PASS | — |
+
+**Security (all PASS):**
+- 9464, 15692 and 9187 are not host-published; Prometheus 9090 is on loopback only.
+- Admin API, lifecycle API and remote-write receiver are off.
+- No `docker.sock`; no privileged monitoring container.
+- No real monitoring password is committed (a local placeholder in `.env.example`; `.env` untracked), and no credential is in `prometheus.yml`.
+- No sensitive label value and no SQL or query text was found in the integrated proof.
+- The monitoring role is not a superuser and has no application write or admin authority.
+- RabbitMQ detailed and per-object scrapes are off.
+- Normal mode stays observability-default-off.
+
+**Cardinality** (local evidence only, never production sizing, Prometheus capacity or retention):
+- Core: the A12.3 bounded labels.
+- RabbitMQ: the aggregate endpoint, the exact Erlang VM-internal drop, no per-object or detailed scrape.
+- PostgreSQL: per-table and per-index collectors off, `pg_settings` kept, no query labels or text.
+- Integrated: about 1,837 stored series.
+
+**Failure and non-invasiveness** (§4J):
+- A Core service down shows only its target DOWN.
+- RabbitMQ down shows the broker target DOWN, and the consumers' metrics record the loss and recovery.
+- PostgreSQL down shows `pg_up` = 0 with the exporter still scrapeable, then recovery.
+- The exporter down shows its target DOWN while PostgreSQL is unaffected.
+- Prometheus down: services, broker and database continue.
+
+**Observability is not a platform authority and owns no business state.** This is local evidence, not a production availability or
+SLO claim.
+
+**Accepted, not blockers:**
+- **Prometheus self-scrape:** not enabled; an A12.6 dashboard and alert decision.
+- **RabbitMQ per-queue / DLQ:** not enabled; the aggregate backlog includes dead-lettered messages; an A12.6 cardinality and dashboard
+  decision.
+- **PostgreSQL query visibility:** `observability_monitor` inherits `pg_monitor` and can read statement text in `pg_stat_activity`
+  (role capability), but the exporter exports no SQL or query text to Prometheus (telemetry). Accepted locally; production role policy
+  is A12.10.
+
+**Deferred and classified:**
+- **A12.6:** Grafana, dashboards, alerts and Alertmanager; the per-queue / DLQ decision; the Prometheus self-observability decision.
+- **Later PostgreSQL work:** `pg_stat_statements`, query latency, slow-query analysis, blocker-to-waiter visibility.
+- **A12.10:** production deployment, credentials, monitoring role, network topology, host and container metrics, backup
+  observability, retention and capacity.
+- **G4:** live production monitoring proof.
+- **G6:** deferred.
+- **Final Core Validation:** absolute last.
+
+None of these is required for the local collection layer.
+
+**Static re-validation on `879ea44`:** `check:repo` PASS; `test:repo` 75/75 (11 observability guard tests); `promtool check config`
+SUCCESS; `sh -n` on the PostgreSQL init OK; normal and observability Compose resolve; the runbook link resolves.
 
 ## 5. Open
 
