@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { afterAll, expect, it } from 'vitest';
-import { DbService, InMemoryEventBus, OutboxRelay, kitMigrationsDir, runMigrations, type RelayObservation } from '../src/index.js';
+import { DbService, InMemoryEventBus, OutboxRelay, kitMigrationsDir, runMigrations, type EventEnvelope, type RelayObservation } from '../src/index.js';
 import { OUTBOX_STATS_MIN_INTERVAL_MS, OUTBOX_STATS_SQL } from '../src/events/outbox-relay.js';
 import { BoundedMetrics } from '../src/metrics/metrics.js';
 import { outboxMetrics } from '../src/metrics/outbox-metrics.js';
@@ -85,11 +85,22 @@ describeWithEnv('outbox metrics (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
         await d.query(`INSERT INTO outbox(id, name, payload, "occurredAt") VALUES ($1, 'probe.ev', '{"i":${i}}', now() - ($2 || ' seconds')::interval)`, [`00000000-0000-4000-8000-00000000000${i}`, String(60 - i)]);
       }
     };
+    const ids = Array.from({ length: 6 }, (_, i) => `00000000-0000-4000-8000-00000000000${i}`);
+    /**
+     * The first publish of rows 0 and 1 fails, once each: attempts, lastError and backoff are exercised, and WHICH rows fail does not
+     * depend on scheduling (a "next two publishes" failure could hit row 0 twice if a pass ran after its backoff had elapsed).
+     */
+    class FirstPublishFails extends InMemoryEventBus {
+      private readonly failOnce = new Set([ids[0], ids[1]]);
+      override async publish(event: EventEnvelope): Promise<void> {
+        if (this.failOnce.delete(event.id)) throw new Error('broker unavailable');
+        return super.publish(event);
+      }
+    }
     const run = async (withFailingMetrics: boolean) => {
       const { d } = await fresh();
       await seed(d);
-      const bus = new InMemoryEventBus();
-      bus.failNextPublishes(2); // two failed publishes: attempts, lastError and backoff are exercised
+      const bus = new FirstPublishFails();
       const notices: string[] = [];
       let statsQueries = 0;
       const observed: RelayObservation[] = [];
@@ -116,11 +127,30 @@ describeWithEnv('outbox metrics (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
     };
     const control = await run(false);
     const failing = await run(true);
-    expect(failing.published).toEqual(control.published);
-    expect(failing.published).toHaveLength(6);
+    // The same six events, each published exactly once. Membership, not sequence: a row in backoff is overtaken by the rows behind it
+    // (by design), so the order across a backoff depends on when a pass runs, which is not part of the relay's contract.
+    for (const r of [control, failing]) {
+      expect(r.published).toHaveLength(6);
+      expect(new Set(r.published).size).toBe(6);
+    }
+    expect([...failing.published].sort()).toEqual([...control.published].sort());
+    expect([...control.published].sort()).toEqual(ids);
     expect(failing.rows).toEqual(control.rows);
+    expect(control.rows.map((r: { attempts: number; lastError: string | null; published: boolean }) => [r.attempts, r.lastError, r.published])).toEqual([
+      [2, null, true],
+      [2, null, true],
+      [1, null, true],
+      [1, null, true],
+      [1, null, true],
+      [1, null, true],
+    ]);
     expect(failing.notices).toEqual(control.notices);
-    expect(control.notices.filter((n) => n.startsWith('outbox_publish_failure'))).toHaveLength(2);
+    // exactly two publish failures, row 0's then row 1's, each a first attempt with the base backoff
+    const failures = control.notices.filter((n) => n.startsWith('outbox_publish_failure'));
+    expect(failures.map((n) => [/eventId=(\S+)/.exec(n)?.[1], /attempt=(\d+)/.exec(n)?.[1], /retryInMs=(\d+)/.exec(n)?.[1]])).toEqual([
+      [ids[0], '1', '30'],
+      [ids[1], '1', '30'],
+    ]);
     // the metrics read WAS attempted (once: throttled), failed, and was swallowed: no stats observation, nothing else changed
     expect(failing.statsQueries).toBe(1);
     expect(failing.observed.filter((o) => o.type === 'stats')).toEqual([]);
