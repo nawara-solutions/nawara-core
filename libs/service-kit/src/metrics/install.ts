@@ -1,4 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { DbService } from '../db/db.service.js';
 import { OutboxRelayService } from '../events/events.module.js';
 import { EVENT_BUS } from '../events/types.js';
@@ -48,14 +49,23 @@ export function installMetrics(app: INestApplication, config: MetricsInstallConf
 
   // V2 A12.3: the shared infrastructure the service has, if any: the kit event bus and outbox relay (EventsModule) and the database pool
   // behind the kit DbService token (auth-service provides its own pool there). Each is observed once; anything absent is skipped.
-  host.observeEventBus(optional(app, EVENT_BUS));
-  host.observeOutboxRelay(optional<OutboxRelayService>(app, OutboxRelayService)?.relay);
-  host.observePool('main', optional(app, DbService));
+  const refs = app.get(ModuleRef);
+  host.observeEventBus(optional(refs, EVENT_BUS));
+  host.observeOutboxRelay(optional<OutboxRelayService>(refs, OutboxRelayService)?.relay);
+  host.observePool('main', optional(refs, DbService));
 }
 
-function optional<T = unknown>(app: INestApplication, token: unknown): T | undefined {
+/**
+ * An optional provider, or undefined when the application has none. It is looked up through the root `ModuleRef`, never through `app`:
+ * `NestFactory.create` wraps the application in a proxy that, under its default `abortOnError: true` (every service's `main.ts`), runs
+ * each method in Nest's exception zone, where a failed lookup is logged and the process exits before a `catch` here could run (the
+ * A12.3 defect found by A12.5.1: audit-service and notification-service have no kit `EVENT_BUS` or outbox relay). `ModuleRef.get` is
+ * a plain lookup whose `UnknownElementException` this function catches. Required providers above still use `app.get`, so a genuinely
+ * missing one fails startup as before.
+ */
+function optional<T = unknown>(refs: ModuleRef, token: unknown): T | undefined {
   try {
-    return app.get(token as never, { strict: false }) as T;
+    return refs.get(token as never, { strict: false }) as T;
   } catch {
     return undefined;
   }
