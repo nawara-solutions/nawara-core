@@ -48,7 +48,7 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 |---|---|
 | In production | auth-service, organization-service (**not authoritative**: Auth still owns the hierarchy), audit-service, RabbitMQ (the Auth → Audit relay) |
 | Implemented, not in production | billing-service, payment-service, notification-service, file-service, release-service |
-| Starter only | ai-service |
+| Outside Core | AI runtime: the separate future `nawara-ia` repository ([ADR-0055](adr/0055-ai-service-repository-boundary.md)); Core's `ai-service` scaffold was removed |
 | Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
 | Organization and Audit deployment | **by exact index digest** (V2 A0): a merge only builds a revision-labelled image; a deployment verifies and deploys a selected digest after approval, never rebuilding. Production still runs their legacy images, which the new workflows refuse ([runbook](runbooks/digest-deployments.md)) |
 | Auth deployment | **build ≠ deploy** (V2-A.2): a merge touching Auth, `libs/service-kit`, the package files or the Auth image workflow only builds a revision-labelled image; production changes only by an explicit, owner-authorized deployment of an exact index digest ([runbook](runbooks/auth-service-deploy.md)). Before V2-A.2, seven automatic deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6); it was observed on 2026-10-02 running the legacy image `sha256:26164d42…5eaf`, unchanged by the V2-A.2 merge ([certification record](architecture/core-v2-a-2-certification.md) §6) |
@@ -242,9 +242,9 @@ production track has run. Every capability is certified on its own by the
 V2, and Final Core Validation follows it, last.
 
 **Outside committed V2 scope: FUTURE / IDEA / REQUIRES SEPARATE SCOPE DECISION.** `accounting-service`, `location-service`,
-`search-service`, `analytics-service` and a major `ai-service` build-out. They appear in
-[`core-architecture.md`](architecture/core-architecture.md) as later services; that is not a V2 commitment. CI hygiene for the
-existing ai-service scaffold is A15 work and does not commit AI implementation to V2.
+`search-service` and `analytics-service`. They appear in
+[`core-architecture.md`](architecture/core-architecture.md) as later services; that is not a V2 commitment. AI is not a Core
+service at all: its runtime belongs to the separate future `nawara-ia` repository ([ADR-0055](adr/0055-ai-service-repository-boundary.md)).
 
 ---
 

@@ -61,7 +61,7 @@ for (const f of new Set([...Object.keys(DIGEST_DEPLOYMENTS), ...Object.keys(CONF
 {
   const dockerfiles = {};
   for (const app of readdirSync(join(root, 'apps'))) {
-    try { dockerfiles[`apps/${app}/Dockerfile`] = readFileSync(join(root, 'apps', app, 'Dockerfile'), 'utf8'); } catch { /* no image (ai-service) */ }
+    try { dockerfiles[`apps/${app}/Dockerfile`] = readFileSync(join(root, 'apps', app, 'Dockerfile'), 'utf8'); } catch { /* an app without an image */ }
   }
   const deployScripts = Object.fromEntries(['auth-service', 'organization-service', 'audit-service']
     .map((svc) => [`apps/${svc}/deploy/provision-and-deploy.sh`, readFileSync(join(root, 'apps', svc, 'deploy/provision-and-deploy.sh'), 'utf8')]));

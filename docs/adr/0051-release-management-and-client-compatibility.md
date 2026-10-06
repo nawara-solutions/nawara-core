@@ -11,6 +11,10 @@
 > (service-token policies), [ADR-0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) (client neutrality),
 > [ADR-0034](./0034-shared-service-kit-and-api-conventions.md) (service kit and API conventions). Evidence: the Stage 20.1 record.
 
+> **Amended by [ADR-0055](./0055-ai-service-repository-boundary.md)** (on one point only; the rest of this ADR stands): AI model, prompt
+> and RAG versions belong to the separate AI service, `nawara-ia`, not to a Core `ai-service`. The reserved `ai` kind is unchanged.
+> Text below is left as the original record.
+
 ## Context
 
 Nawara products (Nawara Drive first; Nawara School and others later) will ship **backends, web applications, desktop applications

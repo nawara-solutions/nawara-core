@@ -4,7 +4,6 @@ name: Core CI
 # safety and architecture checks. It builds and tests only: it never deploys, publishes an image or touches production.
 # Covered:      auth-service, notification-service, file-service, audit-service, release-service, payment-service, billing-service, organization-service, service-kit, audit-contract (Node), repository checks.
 #               Production images of auth/organization/billing/payment-service are built and smoke-checked (job `images`), never pushed.
-# NOT covered:  ai-service (Python) has no CI job yet.
 on:
   pull_request:
     branches: [main]
@@ -153,8 +152,7 @@ jobs:
   # Stage 14.2: every deployable Core service image must build from a clean context and boot. A Dockerfile, a missing
   # workspace package (the Stage 13.2 regression: Auth imported @nawara/service-kit its image never provided), a compile
   # error, a runtime crash, a root user or a dead /health fails this job. It builds locally and never pushes an image;
-  # publishing and deploying stay in auth-service-docker-build.yml. notification-service is covered since its Stage 16.3 foundation, file-service since its Stage 17.2 foundation, audit-service since its Stage 18.2 foundation and release-service since its Stage 20.2 foundation;
-  # ai-service is a scaffold, not a deployable Core service, and is deliberately not covered.
+  # publishing and deploying stay in auth-service-docker-build.yml. notification-service is covered since its Stage 16.3 foundation, file-service since its Stage 17.2 foundation, audit-service since its Stage 18.2 foundation and release-service since its Stage 20.2 foundation.
   images:
     name: core image (${{ matrix.service }})
     runs-on: ubuntu-latest

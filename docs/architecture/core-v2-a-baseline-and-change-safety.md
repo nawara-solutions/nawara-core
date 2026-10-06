@@ -79,7 +79,7 @@ to roadmap stage A19 (V2 certification): A19 certifies the V2 capabilities; Fina
 | Area | Content | Label |
 |---|---|---|
 | A0 | baseline and change safety (this record; V2-A.2 Auth deployment transition; V2-A.3 `main` policy) | 🟢 |
-| A1, A2, A15 | architecture, configuration and secrets, developer/platform experience (incl. CI for the existing ai-service scaffold) | 🟢 |
+| A1, A2, A15 | architecture, configuration and secrets, developer/platform experience | 🟢 |
 | A3 | messaging conventions; production `AUTH_EVENTS=on` and per-service broker users are production steps | 🟢 development / 🟡 production |
 | A4, A14 | authentication and security hardening | 🟢 |
 | A12 | observability | 🟢 |
@@ -94,9 +94,9 @@ to roadmap stage A19 (V2 certification): A19 certifies the V2 capabilities; Fina
 | A18 | performance | 🟢 locally / ⚪ production |
 
 **FUTURE / IDEA / REQUIRES SEPARATE SCOPE DECISION** (not committed to V2; not implemented): `accounting-service`,
-`location-service`, `search-service`, `analytics-service`, and a major `ai-service` build-out. Their mention in
-[core-architecture.md](core-architecture.md) is not a V2 commitment. CI hygiene for the existing ai-service scaffold is A15 work and
-does not commit AI implementation to V2.
+`location-service`, `search-service` and `analytics-service`. Their mention in
+[core-architecture.md](core-architecture.md) is not a V2 commitment. AI is not a Core service: its runtime belongs to the separate
+future `nawara-ia` repository, and the former `ai-service` scaffold was removed ([ADR-0055](../adr/0055-ai-service-repository-boundary.md)).
 
 ## 5. The 21.R1 / 21.R2 umbrella: disposition
 
