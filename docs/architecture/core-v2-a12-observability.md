@@ -8,11 +8,11 @@
   **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); **A12.4.5 service negative controls and
   security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): **A12.4 FORMALLY CLOSED** (PR
   #207, merge `6fac8fe`, post-merge Core CI green). Then A12.5: **A12.5.1 local Prometheus collection MERGED** (PR #209, `1ad43d2`; §3D, §4G;
-  local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics proven locally** (§3E, §4H; not
-  committed); A12.5.3–A12.5.5 and A12.6 pending. Metrics are **off by default**
+  local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics MERGED** (PR #210, `77b2cc7`;
+  §3E, §4H); **A12.5.3 PostgreSQL exporter proven locally** (§3F, §4I; not committed); A12.5.4, A12.5.5 and A12.6 pending. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
-  or alerted on; Prometheus exists only as the opt-in LOCAL overlay (A12.5.1), and no Grafana, Alertmanager or exporter exists yet
-  (A12.5.3+, A12.6). It performs and authorizes no production action.
+  or alerted on; Prometheus and the PostgreSQL exporter exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3), and no
+  Grafana or Alertmanager exists yet (A12.6). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
   runtime metrics, an additive readiness observer), its integration through `configureApp` and auth-service's explicit wiring, and a
   repository guard. Not included: messaging, outbox, DLQ, pool and domain metrics (A12.3), logging changes (A12.4), the local stack,
@@ -264,6 +264,32 @@ scrape targets are the Compose-network Core services only; host and container me
   `infra/rabbitmq`, without the management plugin) is unchanged; any production enablement is A12.10, separately authorized.
 - **Guard.** `checkLocalObservability` now also refuses host publication of 15692, and requires the eight Core jobs plus `rabbitmq`.
 
+## 3F. A12.5.3 PostgreSQL exporter (local)
+
+- **Topology.** One local PostgreSQL 16.15 server (`postgres:16-alpine`, Compose `postgres`) holding nine service databases (auth,
+  billing, payment, accounting, organization, notification, file, audit, release). Each is owned by its `<svc>_migrator` and used by its
+  `<svc>_app`, with PUBLIC's `CONNECT` revoked (ADR-0032), plus the optional `audit_retention`. `infra/postgres/init` creates them once,
+  on an empty volume.
+- **Exporter.** `prometheus-community/postgres_exporter` v0.20.1 (latest release; upstream CI-tests PostgreSQL 13–18),
+  `quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343…713e`, verified against the registry manifest index (amd64,
+  arm64, arm/v7, ppc64le). A single overlay service, `postgres-exporter`, with profile `db` and no published port; Prometheus job
+  `postgres` → `postgres-exporter:9187`. One exporter covers the one server: it connects to the `postgres` maintenance database, whose
+  server-wide views cover every database.
+- **Least privilege.** `observability_monitor`: `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT`, member of `pg_monitor`
+  only, with no `CONNECT` on any service database. `pg_read_all_stats` gives database sizes and other sessions' activity without
+  `CONNECT`, and `pg_read_all_settings` the settings. The init script creates it, idempotently, only when `MONITORING_PASSWORD` is set,
+  which only the overlay passes (`docker-compose.yml` is unchanged); no application migration is involved. The password comes from
+  `.env` (a placeholder in `.env.example`) as `DATA_SOURCE_PASS`, never in `prometheus.yml` or a URL.
+  - The role can read other sessions' current statement text in `pg_stat_activity` (inherent to `pg_read_all_stats`). The exporter does
+    not export it, and no label carries a statement.
+- **Cardinality.** About 950 series, all bounded: databases, lock modes, session states, role names, fixed `application_name`, and
+  settings. The per-table and per-index collectors are disabled. Tuple and cache activity are per database. No query text:
+  `stat_statements` is off, and `pg_stat_statements` and query logging are not configured. Query latency and slow queries remain a
+  separate PostgreSQL configuration decision.
+- **Guard.** `checkLocalObservability` also refuses host publication of 9187 and requires the `postgres` job. The exporter must use
+  `observability_monitor` with an interpolated `DATA_SOURCE_PASS`, with no `DATA_SOURCE_NAME` and no URL credential, and
+  `docker-compose.yml` must not pass `MONITORING_PASSWORD`.
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -474,6 +500,27 @@ Prometheus only. The other six service targets were not started; this change doe
 | Negative controls | host 15692 refused and not listening, no Docker host mapping; no credential in the scrape configuration; broker stopped → `up{job="rabbitmq"}` 0 and target DOWN; restarted → UP, with Audit and Notification still UP |
 
 Not run: the full nine-target stack, CI. A12.5 overall stays open (A12.5.3–A12.5.5); A12.6 has not started.
+
+## 4I. Evidence (A12.5.3, local)
+
+Branch `feature/core-v2-a12-postgres-metrics` from `main` at `77b2cc7` (PR #210 merged), 2026-10-06; not committed. Runtime: a fresh,
+isolated, disposable Compose project (`.env.example` values, new volumes, so the init script ran) with PostgreSQL, the exporter and
+Prometheus only.
+
+| Step | Result |
+|---|---|
+| Static | normal mode: no `MONITORING_PASSWORD` for PostgreSQL, no exporter. Overlay: exporter as `observability_monitor`, password interpolated, 0 published ports. 9464 / 15692 / 9187 published by nothing; `docker-compose.yml` unchanged; `promtool check config` SUCCESS; `check:repo` PASS; `test:repo` 75/75 (3 new) |
+| Role | init logged "observability monitoring role created"; super, createdb, createrole, replication and bypassrls all false; member of `pg_monitor` only; owns no database; CONNECT only on `postgres` and the templates |
+| Negative controls (as the role) | 23 of 23 denied: CREATE DATABASE, ROLE and SCHEMA; CREATE TABLE in public; ALTER another role; GRANT itself `pg_write_all_data`; SET ROLE postgres; INSERT, UPDATE, DELETE, TRUNCATE, ALTER, DROP and even SELECT on an admin-owned probe table; CONNECT to each of the nine service databases |
+| Allowed reads | `pg_stat_activity` (all sessions), `pg_stat_database`, `pg_database_size` of a database it cannot connect to, `pg_locks`, superuser-only settings |
+| Target | `postgres` UP (28 ms scrape); 13 collectors succeed; the three per-table / per-index collectors off; 10 jobs configured (the other nine targets not started here) |
+| Cardinality | 954 samples scraped and stored; labels `datname` (12), `mode` (9), `state` (6), role names, `application_name`, `server`; no `query` label, no statement text in any label |
+| Controlled activity (admin, probe table in `postgres`) | a held row lock with a blocked second session: `pg_locks_count{mode="rowexclusivelock"}` 4, `pg_stat_activity_count{wait_event_type="Lock"}` 1. A deliberate deadlock ("deadlock detected"): `pg_stat_database_deadlocks` 0→1, `xact_rollback` 14→15; `xact_commit`, `tup_updated`, `blks_hit` / `blks_read`, `pg_database_size_bytes`, `numbackends`, `pg_settings_max_connections` present |
+| Failure visibility | PostgreSQL stopped: exporter target UP, `pg_up` 0, then 1 after restart. Exporter stopped: `up{job="postgres"}` 0, then 1 after restart |
+| Container | user `nobody`, read-only root filesystem, not privileged, `cap_drop [ALL]`, `no-new-privileges`, no port binding, no mount; host 9187 refused |
+
+Not run: the eight services and RabbitMQ (unchanged by this step; their jobs remain configured), CI. A12.5 overall stays open (A12.5.4,
+A12.5.5); A12.6 has not started.
 
 ## 5. Open
 

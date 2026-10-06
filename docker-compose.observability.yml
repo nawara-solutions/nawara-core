@@ -12,7 +12,10 @@
 #
 # Each listener binds 0.0.0.0:9464 INSIDE its container, so Prometheus can reach `<service>:9464`. It is never published to the
 # host: only the application ports (unchanged) and Prometheus (127.0.0.1:9090) are. See docs/runbooks/local-observability.md.
-# No Grafana, dashboards or alerts before A12.6; no RabbitMQ or PostgreSQL infrastructure metrics before A12.5.2 / A12.5.3.
+# No Grafana, dashboards or alerts before A12.6. RabbitMQ broker metrics (A12.5.2) need no change here: the image already serves them
+# on 15692 inside the network. PostgreSQL server metrics (A12.5.3) come from postgres-exporter, through a least-privilege role that the
+# init script creates only when this file passes MONITORING_PASSWORD, i.e. when the local data volume is first initialised in this mode
+# (for an existing volume, see docs/runbooks/local-observability.md).
 
 x-core-metrics: &core-metrics
   METRICS_ENABLED: 'true'
@@ -20,6 +23,11 @@ x-core-metrics: &core-metrics
   METRICS_PORT: '9464'
 
 services:
+  # V2 A12.5.3: lets infra/postgres/init create the observability_monitor role (pg_monitor only) on a fresh volume.
+  postgres:
+    environment:
+      MONITORING_PASSWORD: ${MONITORING_PASSWORD:?copy .env.example to .env}
+
   auth-service:
     environment: *core-metrics
   billing-service:
@@ -59,6 +67,27 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+
+  # V2 A12.5.3: PostgreSQL server metrics. Connects to the `postgres` maintenance database as observability_monitor (pg_monitor, no
+  # service-database CONNECT, no write right) and serves 9187 on the Compose network only. Per-table / per-index collectors are off:
+  # this exporter sees server-wide and per-database statistics only. No query text: stat_statements stays off (no pg_stat_statements).
+  postgres-exporter:
+    profiles: [db]
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_URI: postgres:5432/postgres?sslmode=disable
+      DATA_SOURCE_USER: observability_monitor
+      DATA_SOURCE_PASS: ${MONITORING_PASSWORD:?copy .env.example to .env}
+    command:
+      - --no-collector.stat_user_tables
+      - --no-collector.statio_user_tables
+      - --no-collector.statio_user_indexes
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
 
 volumes:
   # Local, disposable time-series data (at most 3 days / 1 GB). Remove it with `docker volume rm` when no longer useful.

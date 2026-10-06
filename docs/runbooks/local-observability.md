@@ -2,7 +2,7 @@
 
 LOCAL development only. Nothing here is production configuration, and it neither performs nor authorizes any production action:
 production observability is A12.10, behind its own decision gate (D2). Record:
-[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D, §3E, §4G, §4H.
+[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D, §3E, §3F, §4G, §4H, §4I.
 
 ## What it is
 
@@ -12,10 +12,11 @@ production observability is A12.10, behind its own decision gate (D2). Record:
   `METRICS_HOST=0.0.0.0` and `METRICS_PORT=9464` on the eight Core services (auth, billing, payment, organization, notification,
   file, audit, release) and starts Prometheus (`prom/prometheus:v3.13.4`, the 3.13 LTS line, pinned by digest).
 - Prometheus scrapes `<service>:9464/metrics` over the Compose network, with one job per service, plus the RabbitMQ broker (job
-  `rabbitmq`, `rabbitmq:15692/metrics`, A12.5.2): **nine targets**. Ports 9464 and 15692 are **never** published to the host. Only the
+  `rabbitmq`, `rabbitmq:15692/metrics`, A12.5.2) and the PostgreSQL server through `postgres-exporter` (job `postgres`,
+  `postgres-exporter:9187/metrics`, A12.5.3): **ten targets**. Ports 9464, 15692 and 9187 are **never** published to the host. Only the
   application ports (unchanged), RabbitMQ's existing 5672 / 15672, and Prometheus on `127.0.0.1:9090` are reachable from the host.
-- **Collection only.** Grafana, dashboards and alerts come in A12.6, and PostgreSQL server metrics in A12.5.3. Host and container
-  metrics are deferred to A12.10. There is no log collection (decision D7).
+- **Collection only.** Grafana, dashboards and alerts come in A12.6. Host and container metrics are deferred to A12.10. There is no log
+  collection (decision D7).
 
 ## Use
 
@@ -24,11 +25,13 @@ OBS="-f docker-compose.yml -f docker-compose.observability.yml"
 docker compose $OBS --profile db up -d --wait postgres rabbitmq
 # migrations, once per empty database: see the header of docker-compose.yml (`npm run migrate` per service, `auth-migrate`)
 docker compose $OBS --profile db up -d --wait auth-service billing-service payment-service organization-service \
-  notification-service file-service audit-service release-service prometheus
+  notification-service file-service audit-service release-service postgres-exporter prometheus
 ```
 
-Then open `http://127.0.0.1:9090/targets`: nine jobs (eight services and `rabbitmq`), all `UP`. A service started without the
-overlay has no metrics listener, and its target is `DOWN`.
+Then open `http://127.0.0.1:9090/targets`: ten jobs (eight services, `rabbitmq` and `postgres`), all `UP`. A service started without
+the overlay has no metrics listener, and its target is `DOWN`.
+
+The overlay needs `MONITORING_PASSWORD` in `.env` (see `.env.example`); without it Compose refuses to start in this mode.
 
 Stop with `docker compose $OBS --profile db down`. Prometheus keeps at most 3 days or 1 GB in the named volume
 `nawara_prometheus_data` (disposable: `docker volume rm <project>_nawara_prometheus_data`).
@@ -45,7 +48,8 @@ Stop with `docker compose $OBS --profile db down`. Prometheus keeps at most 3 da
 
 `npm run check:repo` enforces the invariants: no `METRICS_ENABLED` in `docker-compose.yml`, 9464 and 15692 never published, pinned
 overlay images, loopback-only ports, no admin, lifecycle or remote-write flags, no Docker socket or privileged mode, no credential or
-remote write in the scrape configuration, and the nine expected jobs present.
+remote write in the scrape configuration, the ten expected jobs present, and `postgres-exporter` connecting as `observability_monitor`
+with an interpolated password (never written out, never in a URL; only the overlay passes `MONITORING_PASSWORD`).
 
 ## RabbitMQ broker metrics (A12.5.2)
 
@@ -82,6 +86,54 @@ for the whole node.
 Everything here is **aggregate**: ready, unacknowledged and total messages, consumers, and broker message activity are node totals
 (dead-letter queues included). No queue is identified: per-queue identification is not enabled, and the detailed and per-object
 endpoints are not scraped. **Per-queue / DLQ-specific broker visibility is an A12.6 cardinality and dashboard decision.**
+
+## PostgreSQL server metrics (A12.5.3)
+
+The services' pool metrics (`nawara_db_pool_*`, A12.3) describe each service's **client** pool. The `postgres` job adds the **server**:
+availability, sessions by state, transactions, locks, waiting sessions, deadlocks, database sizes, tuple activity and cache reads.
+
+- **Exporter:** `prometheus-community/postgres_exporter` v0.20.1, `quay.io/prometheuscommunity/postgres-exporter:v0.20.1` pinned by
+  digest. Upstream CI-tests PostgreSQL 13–18; the local server is PostgreSQL 16.15. It runs only in the overlay, on the Compose network
+  (9187, never published), as `nobody`, read-only, with no capabilities and `no-new-privileges`.
+- **Coverage:** one exporter for the one shared server. It connects to the `postgres` maintenance database and reads server-wide views,
+  which cover all databases: `pg_stat_database` and `pg_database_size` per database, and `pg_stat_activity` and `pg_locks` for the whole
+  server. It has no `CONNECT` on any service database.
+- **Identity:** `observability_monitor`: `LOGIN`, `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT`, member of the
+  built-in `pg_monitor` only (`pg_read_all_stats`, `pg_read_all_settings`, `pg_stat_scan_tables`). It owns nothing and can write
+  nothing.
+- **Trust boundary:**
+  - *Database role capability:* as a `pg_monitor` member, `observability_monitor` can read everything that built-in role can, including
+    other sessions' current statement text in `pg_stat_activity`. That is accepted for this LOCAL design.
+  - *Exported telemetry:* the exporter configured here does **not** export SQL or query text to Prometheus. The validated telemetry has
+    no query label, `stat_statements` is off, and `pg_stat_statements` is not configured.
+  - Production monitoring-role and credential policy requires separate A12.10 authorization.
+- **Existing volumes:** `infra/postgres/init/01-service-databases.sh` runs automatically only when PostgreSQL initialises a **fresh**
+  volume. It creates the role only when `MONITORING_PASSWORD` is set, which only the overlay passes. A local volume that was already
+  initialised does **not** gain the role just because observability mode is turned on. Either apply that script's monitoring block (it
+  is idempotent) by hand as the `postgres` admin, or recreate the volume, but only when it is a disposable local volume whose data you
+  do not need.
+- **Credentials:** `MONITORING_PASSWORD` comes from `.env` (the local, non-secret placeholder is in `.env.example`). It reaches the
+  exporter as `DATA_SOURCE_PASS`, never in `prometheus.yml` or a connection URL. Production credentials are A12.10.
+- **Cardinality:** about 950 series, bounded by fixed sets: `datname` (12 databases), lock `mode` (9), session `state` (6), role names
+  (`usename`, `rolname`), Core services' fixed `application_name`, and PostgreSQL settings (one gauge each). The per-table and
+  per-index collectors (`stat_user_tables`, `statio_user_tables`, `statio_user_indexes`) are **off**: table-level scans and index
+  activity are not collected, and tuple activity is per database. No query text is exported: `stat_statements` is off,
+  `pg_stat_statements` is not installed, and no exported label carries a statement.
+
+| Signal | Metric |
+|---|---|
+| availability | `up{job="postgres"}` (exporter), `pg_up` (database reachable as the monitoring role), `pg_scrape_collector_success{collector}` |
+| connections | `pg_stat_activity_count{datname,state,usename,application_name,…}`, `pg_stat_database_numbackends`, `pg_settings_max_connections` |
+| transactions | `pg_stat_database_xact_commit`, `pg_stat_database_xact_rollback` |
+| locks, blocking | `pg_locks_count{datname,mode}`; sessions waiting on a lock: `pg_stat_activity_count{wait_event_type="Lock"}`; `pg_stat_activity_max_tx_duration` |
+| deadlocks | `pg_stat_database_deadlocks` |
+| size | `pg_database_size_bytes{datname}` |
+| tuple activity | `pg_stat_database_tup_returned`, `_fetched`, `_inserted`, `_updated`, `_deleted` |
+| cache | `pg_stat_database_blks_hit`, `pg_stat_database_blks_read` |
+
+**Not covered (a separate PostgreSQL configuration decision):** query latency and slow queries. They need `pg_stat_statements`
+(`shared_preload_libraries`) or statement logging, neither of which A12.5 changes. Blocking is visible as lock counts and waiting
+sessions, not as blocker-to-waiter pairs.
 
 ## Adding a workload later
 

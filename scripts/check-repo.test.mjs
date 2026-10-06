@@ -959,3 +959,28 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
     fails(checkLocalObservability(BASE, OVERLAY, PROM.replace("  - job_name: audit-service\n    static_configs:\n      - targets: ['audit-service:9464']\n", '')), /no scrape job audit-service/);
   });
 }
+
+// ---- V2 A12.5.3: PostgreSQL exporter --------------------------------------------------------------------------------------------
+{
+  const BASE = readFileSync(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+  const OVERLAY = readFileSync(new URL('../docker-compose.observability.yml', import.meta.url), 'utf8');
+  const PROM = readFileSync(new URL('../infra/observability/prometheus/prometheus.yml', import.meta.url), 'utf8');
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+  const PASS_LINE = '      DATA_SOURCE_PASS: ${MONITORING_PASSWORD:?copy .env.example to .env}\n';
+
+  test('A12.5.3: publishing postgres-exporter (9187) is refused', () => {
+    fails(checkLocalObservability(BASE, OVERLAY.replace("    read_only: true\n    cap_drop: [ALL]\n    security_opt: ['no-new-privileges:true']\n\nvolumes:", "    read_only: true\n    cap_drop: [ALL]\n    security_opt: ['no-new-privileges:true']\n    ports: ['127.0.0.1:9187:9187']\n\nvolumes:"), PROM), /postgres-exporter publishes the metrics listener \(9187\)/);
+  });
+  test('A12.5.3: the exporter must use the monitoring role with an interpolated password, never a URL credential', () => {
+    fails(checkLocalObservability(BASE, OVERLAY.replace('DATA_SOURCE_USER: observability_monitor', 'DATA_SOURCE_USER: postgres'), PROM), /must connect as observability_monitor/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace('DATA_SOURCE_USER: observability_monitor', 'DATA_SOURCE_USER: auth_migrator'), PROM), /must connect as observability_monitor/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace(PASS_LINE, '      DATA_SOURCE_PASS: written-out-password\n'), PROM), /DATA_SOURCE_PASS must be interpolated/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace('DATA_SOURCE_URI: postgres:5432/postgres?sslmode=disable', 'DATA_SOURCE_URI: observability_monitor:pw@postgres:5432/postgres'), PROM), /must not embed credentials/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace(PASS_LINE, `${PASS_LINE}      DATA_SOURCE_NAME: postgresql://u:p@postgres:5432/postgres\n`), PROM), /must not use DATA_SOURCE_NAME/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace(/\n  postgres-exporter:[\s\S]*?\nvolumes:/, '\nvolumes:'), PROM), /no postgres-exporter service/);
+  });
+  test('A12.5.3: only the overlay may create the monitoring role; the postgres job is required', () => {
+    fails(checkLocalObservability(BASE.replace('      POSTGRES_USER: postgres\n', '      POSTGRES_USER: postgres\n      MONITORING_PASSWORD: ${MONITORING_PASSWORD:-}\n'), OVERLAY, PROM), /postgres must not receive MONITORING_PASSWORD/);
+    fails(checkLocalObservability(BASE, OVERLAY, PROM.replace(/\n  - job_name: postgres\n[\s\S]*$/, '\n')), /no scrape job postgres/);
+  });
+}

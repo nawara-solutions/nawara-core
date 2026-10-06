@@ -52,3 +52,24 @@ SQL
   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname audit -c "GRANT USAGE ON SCHEMA public TO audit_retention;"
   echo "init: retention role created for audit"
 fi
+
+# V2 A12.5.3: the LOCAL observability monitoring role, for postgres_exporter. Created only when MONITORING_PASSWORD is given, which only the
+# opt-in docker-compose.observability.yml passes. It observes and never acts: LOGIN plus the built-in pg_monitor (pg_read_all_stats,
+# pg_read_all_settings, pg_stat_scan_tables), no CONNECT on any service database, no table, schema or role rights. It connects to the
+# `postgres` maintenance database only; server-wide statistics (pg_stat_database, pg_stat_activity, pg_locks, database sizes) need nothing
+# more. Idempotent, so the same statements can be run by hand against an existing local volume. Never a production role (A12.10).
+if [ -n "${MONITORING_PASSWORD:-}" ]; then
+  valid "$MONITORING_PASSWORD" || { echo "init: MONITORING_PASSWORD must be 8+ characters of [A-Za-z0-9_.-]" >&2; exit 1; }
+  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'observability_monitor') THEN
+    CREATE ROLE observability_monitor LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT;
+  END IF;
+END
+\$\$;
+ALTER ROLE observability_monitor LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT PASSWORD '${MONITORING_PASSWORD}';
+GRANT pg_monitor TO observability_monitor;
+SQL
+  echo "init: observability monitoring role created"
+fi

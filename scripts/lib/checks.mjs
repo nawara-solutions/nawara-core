@@ -499,16 +499,22 @@ export function checkImagePins(dockerfiles, deployScripts) {
  * V2 A12.5.1: the local observability overlay stays opt-in, loopback-only and credential-free. `base` is docker-compose.yml,
  * `overlay` docker-compose.observability.yml, `prometheus` its scrape configuration (all text). Checked on the parsed YAML:
  * - the base file never sets METRICS_ENABLED (normal development keeps the kit default: off);
- * - no file publishes a kit metrics listener (9464) or the RabbitMQ Prometheus endpoint (15692, A12.5.2) to the host;
+ * - no file publishes a kit metrics listener (9464), the RabbitMQ Prometheus endpoint (15692, A12.5.2) or postgres-exporter (9187,
+ *   A12.5.3) to the host;
+ * - postgres-exporter (A12.5.3) uses the observability_monitor role, with its password interpolated from the environment and never in a
+ *   connection URL, and only the overlay passes MONITORING_PASSWORD (the base file never creates the monitoring role);
  * - every overlay image is pinned as <image>:<tag>@sha256:<64 hex>, and every port it publishes is bound to 127.0.0.1;
  * - Prometheus gets no admin, lifecycle or remote-write-receiver flag, no Docker socket and no privileged mode;
- * - the scrape configuration holds no credential and no remote write, and has one job for each Core service plus `rabbitmq`.
+ * - the scrape configuration holds no credential and no remote write, and has one job for each Core service plus `rabbitmq` and
+ *   `postgres`.
  */
 export const KIT_METRICS_PORT = 9464;
 export const RABBITMQ_PROMETHEUS_PORT = 15692;
-const INTERNAL_METRICS_PORTS = [String(KIT_METRICS_PORT), String(RABBITMQ_PROMETHEUS_PORT)];
+export const POSTGRES_EXPORTER_PORT = 9187;
+const INTERNAL_METRICS_PORTS = [String(KIT_METRICS_PORT), String(RABBITMQ_PROMETHEUS_PORT), String(POSTGRES_EXPORTER_PORT)];
+export const MONITORING_ROLE = 'observability_monitor';
 export const LOCAL_SCRAPE_JOBS = ['auth-service', 'billing-service', 'payment-service', 'organization-service', 'notification-service', 'file-service',
-  'audit-service', 'release-service', 'rabbitmq'];
+  'audit-service', 'release-service', 'rabbitmq', 'postgres'];
 const FORBIDDEN_PROMETHEUS_FLAGS = ['--web.enable-admin-api', '--web.enable-lifecycle', '--web.enable-remote-write-receiver'];
 const FORBIDDEN_SCRAPE_KEYS = new Set(['basic_auth', 'authorization', 'bearer_token', 'bearer_token_file', 'oauth2', 'password', 'password_file', 'remote_write']);
 function publishedPorts(service) {
@@ -547,6 +553,21 @@ export function checkLocalObservability(base, overlay, prometheus) {
     for (const port of publishedPorts(svc)) if (port.hostIp !== '127.0.0.1') problems.push(`docker-compose.observability.yml: ${name} must publish ports on 127.0.0.1 only`);
     if (svc?.privileged) problems.push(`docker-compose.observability.yml: ${name} must not be privileged`);
     if ((svc?.volumes ?? []).some((v) => String(typeof v === 'object' ? v.source : v).includes('docker.sock'))) problems.push(`docker-compose.observability.yml: ${name} must not mount the Docker socket`);
+  }
+  const envOf = (svc) => {
+    const env = svc?.environment;
+    if (Array.isArray(env)) return Object.fromEntries(env.map((e) => String(e).split(/=(.*)/s).slice(0, 2)));
+    return env !== null && typeof env === 'object' ? env : {};
+  };
+  if ('MONITORING_PASSWORD' in envOf(b?.services?.postgres)) problems.push('docker-compose.yml: postgres must not receive MONITORING_PASSWORD; only docker-compose.observability.yml creates the monitoring role');
+  const exporter = o?.services?.['postgres-exporter'];
+  if (!exporter) problems.push('docker-compose.observability.yml: no postgres-exporter service');
+  else {
+    const env = envOf(exporter);
+    if ('DATA_SOURCE_NAME' in env) problems.push('docker-compose.observability.yml: postgres-exporter must not use DATA_SOURCE_NAME (a password in a URL); use DATA_SOURCE_URI with DATA_SOURCE_USER / DATA_SOURCE_PASS');
+    if (String(env.DATA_SOURCE_URI ?? '').includes('@')) problems.push('docker-compose.observability.yml: postgres-exporter DATA_SOURCE_URI must not embed credentials');
+    if (env.DATA_SOURCE_USER !== MONITORING_ROLE) problems.push(`docker-compose.observability.yml: postgres-exporter must connect as ${MONITORING_ROLE} (never a superuser, migrator or runtime role)`);
+    if (!/^\$\{[A-Z0-9_]+(?::?[?-][^}]*)?\}$/.test(String(env.DATA_SOURCE_PASS ?? ''))) problems.push('docker-compose.observability.yml: postgres-exporter DATA_SOURCE_PASS must be interpolated from the environment, never written out');
   }
   const prom = o?.services?.prometheus;
   if (!prom) problems.push('docker-compose.observability.yml: no prometheus service');
