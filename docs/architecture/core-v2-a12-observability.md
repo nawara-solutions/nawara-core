@@ -6,7 +6,8 @@
   logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
   (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; commit `ad15d19`); A12.4.4 (ai-service)
   **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); **A12.4.5 service negative controls and
-  security review proven locally** (§4E; not committed); A12.4.6 (validation, PR, closure) pending; A12.4 not complete. Metrics are **off by default**
+  security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): A12.4 is locally
+  complete and awaits PR CI; it is not formally closed. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -316,7 +317,7 @@ A12.3 code (`events/`, `metrics/`, `db.service.ts`), `redact.ts` and ai-service 
 
 ## 4E. Evidence (A12.4.5 service negative controls and security review, local)
 
-Branch `feature/core-v2-a12-logging-pii` on `f636c81`, 2026-10-06; not committed. Method: a static review of every operational log
+Branch `feature/core-v2-a12-logging-pii` on `f636c81`, 2026-10-06; committed as `dc0e6b4`. Method: a static review of every operational log
 call site in the eight Core services (about 210, plus the kit's runtime ones), tracing each interpolated value to its source, then
 behavioral controls where a service owns a sensitive boundary that no existing test proves through the production `JsonLogger`
 routing. Each new control was run against the uncorrected code (or with a deliberate leak injected) and failed before it passed.
@@ -356,6 +357,36 @@ routing. Each new control was run against the uncorrected code (or with a delibe
 
 Not changed: service-kit, A12.3 code (metrics, labels, observers, delivery, outbox, pool), audit records, `observability.int-spec`,
 ai-service. Not run: RabbitMQ suites, the safety-gated `ownership.e2e-spec`, CI. A12.4.6 is still required; A12.4 is not complete.
+
+## 4F. Evidence (A12.4.6 final local validation)
+
+The committed branch `dc0e6b4` (four commits on `main` at `272ab8d`: `b5bb23d`, `ad15d19`, `f636c81`, `dc0e6b4`), 2026-10-06. This is
+PR-readiness validation, not Final Core Validation and not production proof.
+
+- **Branch scope (34 files):** shared logging foundation (13 `libs/service-kit` files), TypeScript service adoption (Auth, Billing,
+  Notification, Organization), security negative controls (Auth, Billing, Organization, Payment) and this document. Nothing else:
+  `apps/ai-service`, `metrics/`, `events/`, `db.service.ts`, `redact.ts` and `observability.int-spec.ts` are identical to `main`; the
+  only kit `db/` change is the migration failure text (facts instead of PostgreSQL's message).
+- **Final static review** of every added line for passwords, tokens, authorization, cookies, JWT, TOTP, recovery, WebAuthn, email, phone,
+  actor, recipient, content, payload, body, `error.message`, `JSON.stringify`, provider errors, SQL detail, connection URLs, broker
+  headers and correlation ids: no reachable leak. Message text is printed only for Core-authored refusals (`ConfigError`,
+  `MigrationError`, `CliRefusal`, `OwnershipError`); Billing's event `detail` is a closed union.
+- **Residual concerns, accepted by the owner (not fixed):** C-1 Auth's historical logging test inspects the exception filter's lines only
+  (the A12.4.5 control carries the evidence); C-2 the ownership snapshot refusal text quotes Category C/D file values to the operator's
+  terminal and the audit detail, not to operational logs; C-3 `ownership approve --reference` is operator free text used as a reference
+  label.
+- **Boundaries:** A12.3 unchanged; A12.4.4 not applicable (the AI runtime belongs to `nawara-ia`; the scaffold's removal is a separate
+  task); the `observability.int-spec` collection issue stays separate test-harness debt.
+
+| Step | Result |
+|---|---|
+| service-kit | build; `dist/` identical to a fresh non-incremental compile (132 files); typecheck; lint (one pre-existing warning, untouched `events/` file); unit 420/420 |
+| Services (typecheck, lint, unit; build where source changed) | Auth build, 118/118; Organization build, 145/145; Notification build, 316/316; Billing build, 348/348; Payment 105/105; File 261/261; Audit 236/236; Release 87/87. Lint warnings only in files this branch does not touch |
+| Focused A12.4 controls (real PostgreSQL, no broker) | Auth `logging-negative` + `logging` 5/5; Billing `payment-integration` + `migrations` 42/42; Payment `webhooks` 9/9; Notification `intake` 42/42 |
+| `check:repo` | PASS |
+
+Not run: RabbitMQ suites (A12.4.3 and A12.4.5 evidence stands; kit source unchanged since then), the safety-gated `ownership.e2e-spec`,
+Final Core Validation. A12.4 closes formally only after the pull request's CI passes and the owner merges it.
 
 ## 5. Open
 
