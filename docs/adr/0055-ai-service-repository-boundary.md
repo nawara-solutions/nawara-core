@@ -1,7 +1,6 @@
 # 0055. AI service repository boundary: the AI runtime lives outside `nawara-core`
 
-- **Status:** Proposed (2026-10-06: the project owner's architecture decision; set to Accepted when the pull request that introduces it
-  merges)
+- **Status:** Accepted (2026-10-06: the project owner's architecture decision; merged in #208, `4e5e544`)
 - **Date:** 2026-10-06
 - **Deciders:** Anwar (project owner, architecture owner)
 

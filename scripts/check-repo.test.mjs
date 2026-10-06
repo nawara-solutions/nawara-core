@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -903,3 +903,42 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
     ? swap(workflow(name), GENERATOR, `docker/buildkit-syft-scanner:1.12.0@sha256:${'7'.repeat(64)}`) : workflow(name), cfg));
   assert.deepEqual(results.map((p) => p.length > 0), Object.keys(IMAGE_BUILD_FILES).map((n) => n === 'organization-service-image.yml'));
 });
+
+// ---- V2 A12.5.1: local observability overlay ----------------------------------------------------------------------------------
+{
+  const BASE = readFileSync(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+  const OVERLAY = readFileSync(new URL('../docker-compose.observability.yml', import.meta.url), 'utf8');
+  const PROM = readFileSync(new URL('../infra/observability/prometheus/prometheus.yml', import.meta.url), 'utf8');
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+
+  test('A12.5.1: the repository overlay, base file and scrape configuration pass', () => {
+    assert.deepEqual(checkLocalObservability(BASE, OVERLAY, PROM), []);
+  });
+  test('A12.5.1: metrics enabled in the base file (map or list form) are refused: normal development stays off', () => {
+    fails(checkLocalObservability(BASE.replace('      NODE_ENV: development\n', "      NODE_ENV: development\n      METRICS_ENABLED: 'true'\n"), OVERLAY, PROM), /docker-compose\.yml: .* sets METRICS_ENABLED/);
+    fails(checkLocalObservability('services:\n  x:\n    environment:\n      - METRICS_ENABLED=true\n', OVERLAY, PROM), /x sets METRICS_ENABLED/);
+  });
+  test('A12.5.1: a published metrics listener is refused, in either file and either form', () => {
+    fails(checkLocalObservability(BASE, OVERLAY.replace("    environment: *core-metrics\n  billing-service:", "    environment: *core-metrics\n    ports: ['127.0.0.1:9464:9464']\n  billing-service:"), PROM), /auth-service publishes the metrics listener/);
+    fails(checkLocalObservability('services:\n  y:\n    ports:\n      - target: 9464\n        published: 19464\n', OVERLAY, PROM), /docker-compose\.yml: y publishes the metrics listener/);
+  });
+  test('A12.5.1: an unpinned image or a non-loopback port in the overlay is refused', () => {
+    fails(checkLocalObservability(BASE, OVERLAY.replace(/prom\/prometheus:v[^\n]+/, 'prom/prometheus:latest'), PROM), /prometheus image prom\/prometheus:latest must be pinned/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace("'127.0.0.1:9090:9090'", "'9090:9090'"), PROM), /prometheus must publish ports on 127\.0\.0\.1 only/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace("'127.0.0.1:9090:9090'", "'0.0.0.0:9090:9090'"), PROM), /127\.0\.0\.1 only/);
+  });
+  test('A12.5.1: admin, lifecycle and remote-write-receiver flags, the Docker socket and privileged mode are refused', () => {
+    for (const flag of ['--web.enable-admin-api', '--web.enable-lifecycle', '--web.enable-remote-write-receiver']) {
+      fails(checkLocalObservability(BASE, OVERLAY.replace('      - --storage.tsdb.path=/prometheus\n', `      - --storage.tsdb.path=/prometheus\n      - ${flag}\n`), PROM), new RegExp(`must not run with ${flag}`));
+    }
+    fails(checkLocalObservability(BASE, OVERLAY.replace('      - nawara_prometheus_data:/prometheus\n', '      - nawara_prometheus_data:/prometheus\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n'), PROM), /must not mount the Docker socket/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace('    read_only: true\n', '    read_only: true\n    privileged: true\n'), PROM), /must not be privileged/);
+  });
+  test('A12.5.1: a credential or remote write in the scrape configuration is refused, and so is an empty or missing one', () => {
+    fails(checkLocalObservability(BASE, OVERLAY, PROM.replace("  - job_name: auth-service\n", "  - job_name: auth-service\n    basic_auth: { username: u, password: p }\n")), /basic_auth is not allowed/);
+    fails(checkLocalObservability(BASE, OVERLAY, PROM.replace("  - job_name: auth-service\n", "  - job_name: auth-service\n    authorization: { credentials: x }\n")), /authorization is not allowed/);
+    fails(checkLocalObservability(BASE, OVERLAY, `${PROM}\nremote_write:\n  - url: http://example.invalid/write\n`), /remote_write is not allowed/);
+    fails(checkLocalObservability(BASE, OVERLAY, 'global: {}\n'), /no scrape_configs/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace(/\n  prometheus:[\s\S]*?\nvolumes:/, '\nvolumes:'), PROM), /no prometheus service/);
+  });
+}

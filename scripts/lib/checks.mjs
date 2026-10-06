@@ -495,6 +495,62 @@ export function checkImagePins(dockerfiles, deployScripts) {
   return problems;
 }
 
+/**
+ * V2 A12.5.1: the local observability overlay stays opt-in, loopback-only and credential-free. `base` is docker-compose.yml,
+ * `overlay` docker-compose.observability.yml, `prometheus` its scrape configuration (all text). Checked on the parsed YAML:
+ * - the base file never sets METRICS_ENABLED (normal development keeps the kit default: off);
+ * - no file publishes a kit metrics listener (9464) to the host;
+ * - every overlay image is pinned as <image>:<tag>@sha256:<64 hex>, and every port it publishes is bound to 127.0.0.1;
+ * - Prometheus gets no admin, lifecycle or remote-write-receiver flag, no Docker socket and no privileged mode;
+ * - the scrape configuration holds no credential and no remote write.
+ */
+export const KIT_METRICS_PORT = 9464;
+const FORBIDDEN_PROMETHEUS_FLAGS = ['--web.enable-admin-api', '--web.enable-lifecycle', '--web.enable-remote-write-receiver'];
+const FORBIDDEN_SCRAPE_KEYS = new Set(['basic_auth', 'authorization', 'bearer_token', 'bearer_token_file', 'oauth2', 'password', 'password_file', 'remote_write']);
+function publishedPorts(service) {
+  return (service?.ports ?? []).map((p) => {
+    if (typeof p === 'object' && p !== null) return { hostIp: p.host_ip ?? '', published: String(p.published ?? ''), target: String(p.target ?? '') };
+    const parts = String(p).split(':');
+    const target = parts.pop() ?? '';
+    const published = parts.pop() ?? '';
+    return { hostIp: parts.join(':'), published, target };
+  });
+}
+function forbiddenKeys(node, path = '') {
+  if (Array.isArray(node)) return node.flatMap((v, i) => forbiddenKeys(v, `${path}[${i}]`));
+  if (node === null || typeof node !== 'object') return [];
+  return Object.entries(node).flatMap(([k, v]) => [...(FORBIDDEN_SCRAPE_KEYS.has(k) ? [`${path}${k}`] : []), ...forbiddenKeys(v, `${path}${k}.`)]);
+}
+export function checkLocalObservability(base, overlay, prometheus) {
+  const problems = [];
+  let b, o, p;
+  try { b = parse(base); o = parse(overlay); p = parse(prometheus); } catch (e) { return [`observability configuration is not valid YAML: ${e.message}`]; }
+  for (const [name, svc] of Object.entries(b?.services ?? {})) {
+    const env = svc?.environment;
+    const set = Array.isArray(env) ? env.some((e) => String(e).startsWith('METRICS_ENABLED=')) : env !== null && typeof env === 'object' && 'METRICS_ENABLED' in env;
+    if (set) problems.push(`docker-compose.yml: ${name} sets METRICS_ENABLED; metrics are enabled only by docker-compose.observability.yml`);
+  }
+  for (const [file, doc] of [['docker-compose.yml', b], ['docker-compose.observability.yml', o]]) {
+    for (const [name, svc] of Object.entries(doc?.services ?? {})) {
+      for (const port of publishedPorts(svc)) {
+        if (port.target === String(KIT_METRICS_PORT) || port.published === String(KIT_METRICS_PORT)) problems.push(`${file}: ${name} publishes the metrics listener (${KIT_METRICS_PORT}) to the host`);
+      }
+    }
+  }
+  for (const [name, svc] of Object.entries(o?.services ?? {})) {
+    if (svc?.image !== undefined && !PINNED_IMAGE.test(String(svc.image))) problems.push(`docker-compose.observability.yml: ${name} image ${svc.image} must be pinned as <image>:<tag>@sha256:<64 hex>`);
+    for (const port of publishedPorts(svc)) if (port.hostIp !== '127.0.0.1') problems.push(`docker-compose.observability.yml: ${name} must publish ports on 127.0.0.1 only`);
+    if (svc?.privileged) problems.push(`docker-compose.observability.yml: ${name} must not be privileged`);
+    if ((svc?.volumes ?? []).some((v) => String(typeof v === 'object' ? v.source : v).includes('docker.sock'))) problems.push(`docker-compose.observability.yml: ${name} must not mount the Docker socket`);
+  }
+  const prom = o?.services?.prometheus;
+  if (!prom) problems.push('docker-compose.observability.yml: no prometheus service');
+  else for (const flag of (prom.command ?? []).map(String)) if (FORBIDDEN_PROMETHEUS_FLAGS.some((f) => flag.startsWith(f))) problems.push(`docker-compose.observability.yml: prometheus must not run with ${flag}`);
+  for (const key of forbiddenKeys(p)) problems.push(`infra/observability/prometheus/prometheus.yml: ${key} is not allowed (no credential or remote write in the local scrape configuration)`);
+  if (!Array.isArray(p?.scrape_configs) || p.scrape_configs.length === 0) problems.push('infra/observability/prometheus/prometheus.yml: no scrape_configs');
+  return problems;
+}
+
 export const CI_AGGREGATE = 'core-ci-passed';
 const AGGREGATE_RESULT_RULE = 'all(.[]; .result == "success")';
 
