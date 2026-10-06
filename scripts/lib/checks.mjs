@@ -499,12 +499,16 @@ export function checkImagePins(dockerfiles, deployScripts) {
  * V2 A12.5.1: the local observability overlay stays opt-in, loopback-only and credential-free. `base` is docker-compose.yml,
  * `overlay` docker-compose.observability.yml, `prometheus` its scrape configuration (all text). Checked on the parsed YAML:
  * - the base file never sets METRICS_ENABLED (normal development keeps the kit default: off);
- * - no file publishes a kit metrics listener (9464) to the host;
+ * - no file publishes a kit metrics listener (9464) or the RabbitMQ Prometheus endpoint (15692, A12.5.2) to the host;
  * - every overlay image is pinned as <image>:<tag>@sha256:<64 hex>, and every port it publishes is bound to 127.0.0.1;
  * - Prometheus gets no admin, lifecycle or remote-write-receiver flag, no Docker socket and no privileged mode;
- * - the scrape configuration holds no credential and no remote write.
+ * - the scrape configuration holds no credential and no remote write, and has one job for each Core service plus `rabbitmq`.
  */
 export const KIT_METRICS_PORT = 9464;
+export const RABBITMQ_PROMETHEUS_PORT = 15692;
+const INTERNAL_METRICS_PORTS = [String(KIT_METRICS_PORT), String(RABBITMQ_PROMETHEUS_PORT)];
+export const LOCAL_SCRAPE_JOBS = ['auth-service', 'billing-service', 'payment-service', 'organization-service', 'notification-service', 'file-service',
+  'audit-service', 'release-service', 'rabbitmq'];
 const FORBIDDEN_PROMETHEUS_FLAGS = ['--web.enable-admin-api', '--web.enable-lifecycle', '--web.enable-remote-write-receiver'];
 const FORBIDDEN_SCRAPE_KEYS = new Set(['basic_auth', 'authorization', 'bearer_token', 'bearer_token_file', 'oauth2', 'password', 'password_file', 'remote_write']);
 function publishedPorts(service) {
@@ -533,7 +537,8 @@ export function checkLocalObservability(base, overlay, prometheus) {
   for (const [file, doc] of [['docker-compose.yml', b], ['docker-compose.observability.yml', o]]) {
     for (const [name, svc] of Object.entries(doc?.services ?? {})) {
       for (const port of publishedPorts(svc)) {
-        if (port.target === String(KIT_METRICS_PORT) || port.published === String(KIT_METRICS_PORT)) problems.push(`${file}: ${name} publishes the metrics listener (${KIT_METRICS_PORT}) to the host`);
+        const internal = INTERNAL_METRICS_PORTS.find((p) => port.target === p || port.published === p);
+        if (internal) problems.push(`${file}: ${name} publishes the metrics listener (${internal}) to the host`);
       }
     }
   }
@@ -548,6 +553,10 @@ export function checkLocalObservability(base, overlay, prometheus) {
   else for (const flag of (prom.command ?? []).map(String)) if (FORBIDDEN_PROMETHEUS_FLAGS.some((f) => flag.startsWith(f))) problems.push(`docker-compose.observability.yml: prometheus must not run with ${flag}`);
   for (const key of forbiddenKeys(p)) problems.push(`infra/observability/prometheus/prometheus.yml: ${key} is not allowed (no credential or remote write in the local scrape configuration)`);
   if (!Array.isArray(p?.scrape_configs) || p.scrape_configs.length === 0) problems.push('infra/observability/prometheus/prometheus.yml: no scrape_configs');
+  else {
+    const jobs = new Set(p.scrape_configs.map((j) => j?.job_name));
+    for (const job of LOCAL_SCRAPE_JOBS) if (!jobs.has(job)) problems.push(`infra/observability/prometheus/prometheus.yml: no scrape job ${job}`);
+  }
   return problems;
 }
 

@@ -7,11 +7,12 @@
   (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; commit `ad15d19`); A12.4.4 (ai-service)
   **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); **A12.4.5 service negative controls and
   security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): **A12.4 FORMALLY CLOSED** (PR
-  #207, merge `6fac8fe`, post-merge Core CI green). Then A12.5: **A12.5.1 local Prometheus collection** (§3D, §4G; local only), with an
-  A12.3 post-certification correction (§3D); A12.5.2–A12.5.5 and A12.6 pending. Metrics are **off by default**
+  #207, merge `6fac8fe`, post-merge Core CI green). Then A12.5: **A12.5.1 local Prometheus collection MERGED** (PR #209, `1ad43d2`; §3D, §4G;
+  local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics proven locally** (§3E, §4H; not
+  committed); A12.5.3–A12.5.5 and A12.6 pending. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; Prometheus exists only as the opt-in LOCAL overlay (A12.5.1), and no Grafana, Alertmanager or exporter exists yet
-  (A12.5.2+, A12.6). It performs and authorizes no production action.
+  (A12.5.3+, A12.6). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
   runtime metrics, an additive readiness observer), its integration through `configureApp` and auth-service's explicit wiring, and a
   repository guard. Not included: messaging, outbox, DLQ, pool and domain metrics (A12.3), logging changes (A12.4), the local stack,
@@ -243,6 +244,26 @@ scrape targets are the Compose-network Core services only; host and container me
   kit catches); the required `MetricsHost` and `ReadinessRegistry` stay on `app.get`, so a genuinely missing one still fails startup
   as before; no service's `abortOnError` changes. No production impact: metrics are off unless a deployment sets them.
 
+## 3E. A12.5.2 RabbitMQ native broker metrics (local)
+
+- **Capability.** The repository's local broker image `rabbitmq:3.13-management-alpine` (RabbitMQ 3.13.7) already enables
+  `rabbitmq_prometheus` (`/etc/rabbitmq/enabled_plugins`: `[rabbitmq_management,rabbitmq_prometheus]`). It serves `/metrics` on 15692
+  inside the container, without authentication, in every mode. No RabbitMQ configuration, plugin, image or Compose change is needed:
+  normal development is unchanged by construction, and the broker is scraped only by the opt-in overlay's Prometheus.
+- **Scrape job** `rabbitmq` → `rabbitmq:15692/metrics`, on the Compose network only; 15692 is never published. With the eight service
+  jobs, Prometheus has nine targets.
+- **Cardinality.** The default **aggregated** endpoint (`return_per_object_metrics = false`) gives node-wide totals, with no queue,
+  connection, channel, vhost or user label, so the series count is independent of the number of queues. Of its ~2,150 samples, ~1,880
+  are Erlang VM internals (`erlang_vm_allocators`, `erlang_vm_msacc_*`) that no A12.5 / A12.6 signal uses. The job drops exactly those
+  two families with one `metric_relabel_configs` rule (no renaming, no added label), leaving ~270 stored series. The per-object and
+  detailed endpoints are not scraped.
+- **Queue depth.** Ready, unacknowledged and total messages are observable as **node totals** (dead-letter queues included, no queue
+  named). Per-queue depth, for example a DLQ alert, would need the detailed endpoint with per-queue labels: a separate A12.6 decision
+  with a different, bounded cardinality.
+- **Boundary.** The unauthenticated endpoint is acceptable only inside the local Compose network. Production RabbitMQ (provisioned by
+  `infra/rabbitmq`, without the management plugin) is unchanged; any production enablement is A12.10, separately authorized.
+- **Guard.** `checkLocalObservability` now also refuses host publication of 15692, and requires the eight Core jobs plus `rabbitmq`.
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -434,6 +455,25 @@ Branch `feature/core-v2-a12-prometheus` from `main` at `4e5e544`, 2026-10-06; no
 
 Not run: the broker-gated service metrics e2e suites (the runtime proof covers the real bootstrap), CI. A12.5 overall stays open
 (A12.5.2–A12.5.5); A12.6 has not started.
+
+## 4H. Evidence (A12.5.2, local)
+
+Branch `feature/core-v2-a12-rabbitmq-metrics` from `main` at `1ad43d2` (PR #209 merged), 2026-10-06; not committed. Runtime: the
+isolated, disposable Compose project of A12.5.1 (`.env.example` values), started with PostgreSQL, RabbitMQ, Audit, Notification and
+Prometheus only. The other six service targets were not started; this change does not touch their runtime.
+
+| Step | Result |
+|---|---|
+| Capability (throwaway container of the repository image, no network) | RabbitMQ 3.13.7; `rabbitmq_prometheus-3.13.7` bundled and enabled |
+| Running broker | `rabbitmq-diagnostics environment`: `return_per_object_metrics false`, `tcp_config [{port,15692}]`; `GET rabbitmq:15692/metrics` from the Prometheus container: 200 without credentials; `/metrics/per-object` and `/metrics/detailed` exist, not scraped |
+| Static | `docker-compose.yml`, the overlay and `infra/rabbitmq` unchanged; in observability mode RabbitMQ still publishes only 5672 / 15672; `promtool check config` SUCCESS; `check:repo` PASS; `test:repo` 72/72 (2 new) |
+| Targets | `rabbitmq` UP (33 ms scrape); Audit and Notification UP; 9 jobs configured |
+| Cardinality | 2,150 samples scraped, 267 stored after the drop; an 8th queue added none. Labels: node and cluster identity, versions, `protocol`, `queue_type` and Erlang `kind` / `type` / `table` / `usage`, with no queue, vhost, connection, channel, user or routing-key label |
+| Controlled activity (test-only queues `a1252_metrics_probe` and `_2`, payload `metrics-probe`) | 3 published: `rabbitmq_queues` 6→7, `rabbitmq_queue_messages_ready` 0→3, `rabbitmq_queue_messages` 0→3, `received_total` 0→3. One fetch-and-requeue and three fetch-and-acks: `delivered_total` 4, `redelivered_total` 1, backlog 0. A manual-ack client (2 messages): `acknowledged_total` 0→2. One message held unacknowledged: `rabbitmq_queue_messages_unacked` 1, with `consumers`, `connections` and `channels` each +1; back to 0 after the ack |
+| Resources | `rabbitmq_identity_info`, `rabbitmq_erlang_uptime_seconds`, `rabbitmq_process_resident_memory_bytes` / `_resident_memory_limit_bytes`, `rabbitmq_disk_space_available_bytes` / `_limit_bytes`, and the three `rabbitmq_alarms_*` gauges (0) present |
+| Negative controls | host 15692 refused and not listening, no Docker host mapping; no credential in the scrape configuration; broker stopped → `up{job="rabbitmq"}` 0 and target DOWN; restarted → UP, with Audit and Notification still UP |
+
+Not run: the full nine-target stack, CI. A12.5 overall stays open (A12.5.3–A12.5.5); A12.6 has not started.
 
 ## 5. Open
 
