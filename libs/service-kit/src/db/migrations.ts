@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
 import type { Queryable } from './db.service.js';
+import { describeFailure } from '../logging/failure.js';
 
 export class MigrationError extends Error {
   constructor(message: string) {
@@ -195,7 +196,8 @@ export async function runMigrations(connectionString: string, dirs: string[], op
         await client.query('COMMIT');
       } catch (e) {
         await client.query('ROLLBACK').catch(() => undefined);
-        throw new MigrationError(`${f.name} failed and was rolled back: ${(e as Error).message}`);
+        // V2 A12.4.3: the failure's facts, never PostgreSQL's message (it can quote row values, SQL or a constraint's data).
+        throw new MigrationError(`${f.name} failed and was rolled back: ${describeFailure(e)}`);
       }
       result.applied.push(f.name);
     }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
-import { runWithRequestContext, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
+import { runWithRequestContext, PollLoop, describeFailure, safeToken, type DrainOutcome } from '@nawara/service-kit';
 import type { BillingConfig } from '../config/billing-config.js';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
 import { jobTransitionContext, type TransitionContext } from '../domain/actors.js';
@@ -8,6 +8,9 @@ import { buildPaymentRequestBody } from '../domain/payment-request-mapping.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
 import { PAYMENT_CLIENT } from './payment-client.token.js';
 import type { PaymentClient } from './payment-client.js';
+
+/** V2 A12.4.5: Payment's error code is read from its HTTP answer, so a log line repeats it only in the form Core error codes take. */
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /**
  * Translates a Billing `payment_request` into a call to Payment (SDD 21.1, 21.5). It owns none of Payment's business
@@ -85,7 +88,7 @@ export class PaymentDispatcher {
             this.logger.log(`payment_dispatch_success request=${claim.request.id} correlationId=${claim.correlationId} paymentId=${outcome.snapshot.paymentId}`);
             dispatched++;
           } else if (outcome.kind === 'rejected') {
-            this.logger.error(`payment_dispatch_rejected request=${claim.request.id} correlationId=${claim.correlationId} code=${outcome.code ?? 'none'} — this is a Billing or configuration defect`);
+            this.logger.error(`payment_dispatch_rejected request=${claim.request.id} correlationId=${claim.correlationId} code=${outcome.code === null ? 'none' : safeToken(outcome.code, ERROR_CODE)} — this is a Billing or configuration defect`);
             await this.requests.markRejected(claim.request.id, ctx);
           } else if (outcome.kind === 'auth_fault') {
             this.logger.error(`payment_dispatch_failure request=${claim.request.id} correlationId=${claim.correlationId} reason=auth_fault — Payment refused Billing's own service token (configuration fault); will retry`);

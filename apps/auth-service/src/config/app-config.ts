@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import {
   DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, HTTP_DRAIN_TIMEOUT_BOUNDS,
-  RABBITMQ_HEARTBEAT_BOUNDS, loadMetricsConfig, loadTrustProxyHops, type MetricsConfig,
+  LOG_LEVELS, RABBITMQ_HEARTBEAT_BOUNDS, loadMetricsConfig, loadTrustProxyHops, type LogLevel, type MetricsConfig,
 } from '@nawara/service-kit';
 
 /**
@@ -68,6 +68,8 @@ export type RateBucket =
 
 export interface AppConfig {
   env: 'development' | 'test' | 'production';
+  /** V2 A12.4.3: `LOG_LEVEL` (debug | info | warn | error, default `info`), read and validated exactly as every other Core service does. */
+  logLevel: LogLevel;
   /** HTTP listen port. */
   port: number;
   /** Runtime connection. In production it must be the least-privilege runtime role (ADR-0032), never a superuser or the schema owner. */
@@ -314,6 +316,7 @@ export function loadConfig(
   const port = int(env, 'PORT', 3000, 1, 65_535);
   return {
     env: nodeEnv,
+    logLevel: new EnvReader(env).oneOf('LOG_LEVEL', LOG_LEVELS, 'info'),
     port,
     databaseUrl,
     db: {

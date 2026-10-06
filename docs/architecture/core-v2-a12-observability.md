@@ -2,7 +2,12 @@
 
 - **Status:** RECORD of A12.0 discovery, the A12.1 design freeze (owner decisions D1–D8), the A12.2 kit metrics foundation, its
   local security review and the A12.2a correction (§3A), written 2026-10-05: **A12.2 MERGED** (PR #205, `763e1a8`), not certified. Then the
-  A12.3 service and messaging metrics (§3B): **A12.3 IMPLEMENTED LOCALLY** and re-proven locally on 2026-10-06 (§4B; not merged, not certified). Metrics are **off by default**
+  A12.3 service and messaging metrics (§3B): **A12.3 FORMALLY CLOSED** (PR #206, merge `272ab8d`, post-merge Core CI 24/24). Then A12.4
+  logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
+  (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; commit `ad15d19`); A12.4.4 (ai-service)
+  **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); **A12.4.5 service negative controls and
+  security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): A12.4 is locally
+  complete and awaits PR CI; it is not formally closed. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -157,6 +162,58 @@ synchronous gauge `collect` for scrape-time pool state.
   (`rabbitmq_prometheus`, A12.5 / A12.10), database operation errors, `postgres_exporter`, dashboards and alerts (A12.6), production
   rollout (A12.10).
 
+## 3C. A12.4 logging and PII contract
+
+Approved architecture (A12.4.1, owner decisions **W1** frames-only stacks, **W2** bare `code` stays redacted). It hardens the existing
+`JsonLogger`; no logging library is added. It applies to **operational logs only**: audit records (audit-service storage, the
+`audit-contract` catalog) are required evidence and are not sanitized by it, and operational logs never copy audit payloads.
+
+- **Never-throws.** No logger entry point throws into its caller. Values go through `safeSerialize` (`logging/safe-serialize.ts`): only
+  own, enumerable data properties are read through descriptors; an accessor is `[accessor]` (never invoked); `toJSON`, inspection hooks
+  and `Symbol.toStringTag` are never consulted; a throwing Proxy is `[unserializable]`; a cycle `[circular]`; BigInt a bounded `…n`
+  string; Buffer / typed arrays / ArrayBuffer / DataView `[binary N bytes]`; Date its ISO string (`[invalid date]`); Map / Set
+  `[Map N]` / `[Set N]` (never their contents); symbols and functions placeholders. A record that cannot be built becomes
+  `log_record_unserializable`; a failing sink is ignored.
+- **Bounds.** Depth 6, strings 2000 characters, arrays 50 items, objects 50 keys (plus a `[+N]` marker), stacks 20 frames, a line
+  16 KiB (past it the caller's fields become `fieldsTruncated: true`; envelope and `msg` stay).
+- **Envelope.** `ts`, `level`, `service`, `msg`, `context`, `requestId`, `correlationId`, `stack`, `droppedFields`, `fieldsTruncated`
+  belong to the logger. A caller field whose name matches one (case- and separator-insensitively) is dropped and only its NAME is listed
+  in `droppedFields`.
+- **Classification.** A: secrets, never emitted. B: direct PII (email, phone, IP, user agent, address, recipient / destination / contact,
+  personal names), redacted by key by default. C: internal identifiers (user, company, organization, platform, event, request,
+  correlation, payment, invoice, delivery, file ids), allowed as explicitly named fields. D: bounded operational data.
+- **Key redaction** (normalized: case and separators ignored). Secret families `password`, `passwd`, `secret`, `token`, `jwt`,
+  `authorization`, `cookie`, `apikey`, `credential`, `privatekey`, `signature`, `pepper`, `connectionstring`, `challenge`, `sessionid`, and
+  the words `otp`, `totp`, `dsn`. Any key ending in `code` is redacted (bare `code` included: Auth carries a factor code under it) except
+  `statusCode`, `errorCode`, `providerCode`, `failureCode`, `reasonCode`, `exitCode`, `taxCode`, `productCode`, `currencyCode`,
+  `countryCode`; `challengeId` is an identifier. PII by key only: free text is not scanned for PII, so a call site never puts PII in `msg`.
+- **Free-text scrubbing** (`msg`, string fields, key names): `Bearer` / `Basic` credentials (quoted or not), URL userinfo passwords,
+  secret query values (`token`, `access_token`, `refresh_token`, `id_token`, `api_key`, `apikey`, `key`, `secret`, `password`, `code`,
+  `signature`, `sig`, `X-Amz-Signature`, `X-Amz-Credential`), `password=` / `secret=` / `token=`-style pairs in prose (not `code=` or
+  `key=`, which are operational words in log lines), JWT-shaped values, `/file/t/<token>` paths.
+- **Errors.** An Error is `{ errorType, errorCode?, errorKind? }` as `describeFailure` classifies it, read from a data-only copy (no
+  getter runs): never its message, cause or stack. A stack (Nest's `error(msg, stack, ctx)`) keeps its `at …` frames only (W1), the
+  same in development and production. No SQL, parameters, PostgreSQL detail or connection string.
+- **Structured fields.** camelCase, all optional: `operation`, `outcome`, `statusCode`, `errorType`, `errorCode`, `errorKind`,
+  `eventType`, `eventId`, `durationMs`, `attempt` and category-C ids. `msg` stays a stable event key or description; existing
+  `snake_case key=value` lines are compatible debt; no untrusted value is interpolated into `msg`. No schema version field.
+- **HTTP.** No access or request logging is added (no URL, query, body, headers, IP or user agent); HTTP metrics cover traffic.
+- **Correlation.** Preserved as is. `runWithEventContext` restores `requestId` (`event:<id>`) and a validated `correlationId` for a
+  consumer that calls it explicitly; the event bus delivery path is not wrapped. No tracing or causation ids.
+- **Untrusted values.** `safeToken(value, pattern, max)` returns the value only when it matches (`SAFE_ID`, `EVENT_NAME`), else
+  `[invalid]`; logs only, never a metric label.
+- **Unchanged.** `redact` / `redactString` (`logging/redact.ts`) keep their behavior: the outbox relay stores `redactString` output in
+  `lastError` and `nawara-check-outbox-lag` prints it (G4 evidence). A12.3 metrics, observers, event delivery, outbox and pool code are
+  not touched; log fields never become metric labels.
+- **Pending adoption (A12.4.3+).** Auth honours `LOG_LEVEL`; Notification intake and Billing payment-event lines move broker
+  `source` / `correlationId` to `safeToken` fields (Billing restores context); CLI failures print type and code, not `e.message`; the
+  ownership CLI's `code` field becomes `errorCode`.
+- **AI boundary (owner decision, 2026-10-06).** A12.4 covers operational logging and PII safety for Core-owned services. The AI
+  runtime is not one: AI implementation belongs to the separate `nawara-ia` repository and workstream, which establishes its own
+  compatible logging and PII policy and uses this one as an integration reference, not as Core-owned implementation. A12.4.4 (planned
+  as ai-service JSON logging) is therefore **NOT APPLICABLE**; the number is kept so the phase history stays readable. The committed
+  `apps/ai-service` scaffold is left as it is until a separate architecture task removes it.
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -208,6 +265,128 @@ unhandled rejection; both fail against the previous wrapper. The RabbitMQ, outbo
 not use this path and was not rerun.
 
 The A12.2 post-merge CI failure (run 37310414915, Payment `expiry-sweeper` timing) was not rerun: its one authorized rerun passed (§5).
+
+## 4C. Evidence (A12.4.2 kit hardening, local)
+
+Branch `feature/core-v2-a12-logging-pii` from `main` at `272ab8d`, 2026-10-06, Node 24 locally; not committed. Files:
+`logging/safe-serialize.ts` (new), `logging/json-logger.ts`, `context/request-context.ts` (`runWithEventContext`, `SAFE_ID` exported),
+`index.ts` (exports), `test/logging-hardening.spec.ts` (new), `test/logging.spec.ts` (the stack assertion now expects frames only).
+
+| Step | Result |
+|---|---|
+| service-kit build | exit 0; `dist/` identical to a fresh non-incremental compile (65/65 `.js` and `.d.ts`; source maps differ only in their output path) |
+| Focused logging tests | `logging-hardening.spec` + `logging.spec` 56/56: the 41 required negative controls (secrets nested and in arrays; normalized keys; bare `code`, `joinCode`, `invitationCode`, `totpCode` redacted; `statusCode` / `errorCode` / `providerCode` visible; PII keys; Bearer, quoted Bearer, Basic, URL credentials, secret query values, prose `password=` pairs, bare JWT, `/file/t/<token>`; throwing getter, `toJSON`, `Symbol.toStringTag` / `toPrimitive` getters, throwing and revoked Proxies; BigInt; cycles; depth, array, key and record bounds; Buffer, typed arrays, ArrayBuffer, DataView; Dates; Map; Set; Error facts without message, cause or getters; frames-only, at most 20, no message; envelope collisions incl. case variants; `droppedFields` unspoofable; CR / LF / control characters; huge strings; unbuildable record; failing `JSON.stringify`; failing sink; levels) plus `safeToken` and `runWithEventContext` |
+| service-kit unit | 415/415 (30 files) |
+| typecheck / lint | clean / no new finding (the one pre-existing `rabbitmq-event-bus.ts:438` warning) |
+| `check:repo` | PASS |
+| Static security review | three probe findings fixed in this slice (quoted Bearer, prose `password=` pairs, case-variant envelope names) and a `Symbol.toStringTag` getter read replaced by a prototype check; residual, by design: secrets or PII written as prose or JSON inside `msg` other than the patterns above are a call-site responsibility (service negative controls, A12.4.5) |
+
+Not run in this slice: service suites (A12.4.3 rebuilds the kit and runs the affected services), integration suites, CI.
+
+## 4D. Evidence (A12.4.3 TypeScript service adoption, local)
+
+Branch `feature/core-v2-a12-logging-pii` on `b5bb23d`, 2026-10-06; committed as `ad15d19`. What changed:
+
+- **Auth:** `LOG_LEVEL` read with the kit `EnvReader` (default `info`, anything outside debug / info / warn / error refused at
+  startup) and used by `main.ts`. CLI failures go through `describeCliFailure`; its Core-authored operator messages are `CliRefusal`.
+- **Notification:** the intake consumer restores its log context with `runWithEventContext` (it used to put the raw broker
+  correlation header in every line's envelope); intake lines carry `eventId`, `eventType`, `source` as `safeToken`-validated fields.
+  The correlation id stored with the notification is unchanged.
+- **Billing:** the payment-event handler runs in `runWithEventContext`; `eventId`, `eventType`, `paymentRequestId` are validated fields.
+  The business correlation id passed to `applyPaymentEvent` (recorded with the receipt) is unchanged.
+- **CLIs:** `describeCliFailure` (kit) prints a fixed category and `describeFailure` facts, never `e.message`, in `nawara-migrate`,
+  `nawara-dlq`, `nawara-check-dlq-depth`, `nawara-check-outbox-lag`, Auth's CLIs and the ownership CLI; Core-authored usage text is a
+  `ConfigError` and stays readable; the category phrases keep the restore drill's classification (`infra/backup/restore-drill.sh`).
+  A failed migration's `MigrationError` carries `describeFailure` facts, not PostgreSQL's message.
+- **Ownership:** the structured `code` field is `errorCode`; the CLI's correlation id comes from the log context (a caller field of
+  that name is dropped by the A12.4.2 envelope).
+- **Kit logger:** a Nest `Logger` call `(msg, fields, contextName)` keeps both the fields and the context (it dropped the fields).
+
+| Step | Result |
+|---|---|
+| service-kit | build exit 0, `dist/` identical to a fresh non-incremental compile (66/66 `.js` and `.d.ts`); unit 420/420; typecheck; lint (no new finding) |
+| service-kit PostgreSQL integration (affected) | `migrations.int-spec` + `migrations-strict.int-spec` 15/15; `observability.int-spec` PostgreSQL block 6/6 (outbox-lag CLI failure prefix, migration runner). Its RabbitMQ block builds `new URL(TEST_RABBITMQ_URL)` while the file is collected, so without a broker URL the whole file errors at load (pre-existing, unchanged since `67a5ad7`); run with a placeholder URL and a `-t` filter selecting the PostgreSQL block, RabbitMQ block 2 skipped |
+| Auth | build, typecheck, lint; unit 118/118 (incl. `LOG_LEVEL` default, valid levels, invalid refused); e2e 429 passed, 7 skipped |
+| Notification | build, typecheck, lint; unit 316/316; `intake.e2e-spec` 42/42 incl. the two A12.4.3 tests (hostile source / event id / correlation header never echoed, `[invalid]` and `event:unknown` instead; valid ids in fields and restored context; no recipient, phone or code). Rest of e2e: `security-operations` `/ready` test environment-blocked (RabbitMQ stopped, not authorized); broker-gated suites skipped |
+| Billing | build, typecheck, lint; unit 348/348 incl. `payment-event-consumer.spec` 16/16 (hostile correlation header, event id and payment request id never logged; business correlation id and event id unchanged; context restored); e2e 335 passed, 1 skipped (migration failure now facts, PostgreSQL text absent) |
+| Organization | build, typecheck, lint; unit 144/144 incl. `ownership-admin.spec` (refusal logs `errorCode`, visible through `JsonLogger`); e2e 260 passed; `ownership.e2e-spec` safety-gated (it refuses a cluster that hosts the Organization database) |
+| CLI failure output | `cli-failure.spec`: no message, connection string, SQL or value; Core-authored text kept; restore-drill phrases kept |
+| `test:deploy` / `check:repo` | 315/315 / PASS |
+
+A12.3 code (`events/`, `metrics/`, `db.service.ts`), `redact.ts` and ai-service are unchanged. Not run: RabbitMQ suites, CI.
+
+## 4E. Evidence (A12.4.5 service negative controls and security review, local)
+
+Branch `feature/core-v2-a12-logging-pii` on `f636c81`, 2026-10-06; committed as `dc0e6b4`. Method: a static review of every operational log
+call site in the eight Core services (about 210, plus the kit's runtime ones), tracing each interpolated value to its source, then
+behavioral controls where a service owns a sensitive boundary that no existing test proves through the production `JsonLogger`
+routing. Each new control was run against the uncorrected code (or with a deliberate leak injected) and failed before it passed.
+
+| Service | Sensitive boundary | Proof |
+|---|---|---|
+| Auth | passwords, TOTP secret and codes, access / refresh / challenge / enrollment tokens, WebAuthn challenge, recovery secret key, operator one-time code, join and invitation codes, forged bearer JWT and cookie, member and operator email, hostile request ids, a pool error carrying a connection string | **new** `test/logging-negative.e2e-spec.ts`: Nest-Logger lines routed through `JsonLogger` as in main.ts; none of the values in any line; lines are single-line JSON; hostile ids neither logged nor echoed. Request paths log nothing by design; the pool line is present with facts only. An injected `email=` line fails it |
+| Organization | operator `--actor`, ownership CLI failures, service policy | **F-2 corrected**; `ownership-admin.spec.ts` (refusal and offline snapshot paths) and the built CLI: `verify-snapshot --actor "Jane Q. Person"` logs digest and correlation id, no name; missing / non-JSON / invalid snapshot files print a refusal or `failed (error=Error code=ENOENT)` |
+| Billing | Payment's HTTP answer, broker events (A12.4.3), organization scope | **F-1 corrected**; `payment-integration.e2e-spec.ts`: a hostile rejection code is `code=[invalid]`, a valid one stays with request and correlation ids, outcome `rejected` unchanged. `organizationId` is UUID-validated before the scope log; `paymentId` is persisted to a `uuid` column before it is logged |
+| Payment | provider webhooks (body, signature, card, contact) | **new** control in `webhooks.e2e-spec.ts`: a forged and a malformed signed webhook carrying card, CVC, email and a secret: the rejection is logged by provider only, nothing else appears |
+| File | capability tickets and URLs, storage keys, file names and content, S3 errors | existing `upload` / `download` e2e (production routing) and `safeDetail`; no new test |
+| Notification | recipient, content, OTP, provider text and codes, broker values | existing `delivery-engine` e2e (OTP, phone, provider exception text, poison values, DB password) and A12.4.3 intake; codes through `boundedCode` / `boundedDiagnostic`; no new test |
+| Audit | event payload vs operational line | lines carry validated `eventId`, `action`, `source` (refusals: `safeId`); the payload stays in the audit record; no new test |
+| Release | admin and automation operations | verified owner id, configured caller, closed operation / outcome / reason, store codes; no new test |
+
+**Findings.**
+
+- **F-1 (low, Billing, corrected):** `payment-dispatcher.ts` logged Payment's response `code` (`payment-client.ts`, from the HTTP body)
+  unvalidated in `msg`. Now `safeToken` against the Core error-code form; nothing persisted or decided changes.
+- **F-2 (medium, Organization, corrected):** the ownership operations logged `actor`, a person's name by schema
+  (`0004_ownership_transition.sql`: "a person, or the provisioning identity"), Category B, on 15 lines. Removed from every line;
+  `ownership_event` keeps it (audit evidence) with the same correlation id. Decision: the actor is **Category B**.
+- **C-1 (concern):** Auth's test harness captures Nest-Logger lines with a plain logger, so the Stage 13.2 `logging.e2e-spec` checks the
+  exception filter's lines only and its pool-warning case inspects no line. The new A12.4.5 test covers both through production routing.
+- **C-2 (concern):** the ownership snapshot validator's refusal text quotes file values (version, ids, keys) to the operator's terminal and
+  `ownership_event.detail`; not an operational log, hierarchy data (C/D), unbounded in length.
+- **C-3 (concern):** `ownership approve --reference` is free operator text logged as `reference` (a rehearsal reference by contract).
+- **Accepted boundary (A12.4.2):** prose PII inside `msg` is not detected by the logger; the static review found no call site that puts
+  an untrusted or sensitive value into `msg`.
+
+| Step | Result |
+|---|---|
+| New / changed controls | Auth `logging-negative` 1/1; Billing `payment-integration` 34/34 incl. F-1 (fails without the fix); Organization `ownership-admin.spec` 2/2 (both fail without the fix); Payment `webhooks` 9/9 |
+| Affected suites | Billing build, typecheck, lint (one pre-existing warning, untouched file), unit 348/348, `dispatcher-stale-retry` e2e 6/6; Organization build, typecheck, lint, unit 145/145; Auth and Payment typecheck and lint |
+| Built ownership CLI (offline, no database) | `verify-snapshot` with a person's name as actor: no name in any line; three failure paths safe |
+| `check:repo` | PASS |
+
+Not changed: service-kit, A12.3 code (metrics, labels, observers, delivery, outbox, pool), audit records, `observability.int-spec`,
+ai-service. Not run: RabbitMQ suites, the safety-gated `ownership.e2e-spec`, CI. A12.4.6 is still required; A12.4 is not complete.
+
+## 4F. Evidence (A12.4.6 final local validation)
+
+The committed branch `dc0e6b4` (four commits on `main` at `272ab8d`: `b5bb23d`, `ad15d19`, `f636c81`, `dc0e6b4`), 2026-10-06. This is
+PR-readiness validation, not Final Core Validation and not production proof.
+
+- **Branch scope (34 files):** shared logging foundation (13 `libs/service-kit` files), TypeScript service adoption (Auth, Billing,
+  Notification, Organization), security negative controls (Auth, Billing, Organization, Payment) and this document. Nothing else:
+  `apps/ai-service`, `metrics/`, `events/`, `db.service.ts`, `redact.ts` and `observability.int-spec.ts` are identical to `main`; the
+  only kit `db/` change is the migration failure text (facts instead of PostgreSQL's message).
+- **Final static review** of every added line for passwords, tokens, authorization, cookies, JWT, TOTP, recovery, WebAuthn, email, phone,
+  actor, recipient, content, payload, body, `error.message`, `JSON.stringify`, provider errors, SQL detail, connection URLs, broker
+  headers and correlation ids: no reachable leak. Message text is printed only for Core-authored refusals (`ConfigError`,
+  `MigrationError`, `CliRefusal`, `OwnershipError`); Billing's event `detail` is a closed union.
+- **Residual concerns, accepted by the owner (not fixed):** C-1 Auth's historical logging test inspects the exception filter's lines only
+  (the A12.4.5 control carries the evidence); C-2 the ownership snapshot refusal text quotes Category C/D file values to the operator's
+  terminal and the audit detail, not to operational logs; C-3 `ownership approve --reference` is operator free text used as a reference
+  label.
+- **Boundaries:** A12.3 unchanged; A12.4.4 not applicable (the AI runtime belongs to `nawara-ia`; the scaffold's removal is a separate
+  task); the `observability.int-spec` collection issue stays separate test-harness debt.
+
+| Step | Result |
+|---|---|
+| service-kit | build; `dist/` identical to a fresh non-incremental compile (132 files); typecheck; lint (one pre-existing warning, untouched `events/` file); unit 420/420 |
+| Services (typecheck, lint, unit; build where source changed) | Auth build, 118/118; Organization build, 145/145; Notification build, 316/316; Billing build, 348/348; Payment 105/105; File 261/261; Audit 236/236; Release 87/87. Lint warnings only in files this branch does not touch |
+| Focused A12.4 controls (real PostgreSQL, no broker) | Auth `logging-negative` + `logging` 5/5; Billing `payment-integration` + `migrations` 42/42; Payment `webhooks` 9/9; Notification `intake` 42/42 |
+| `check:repo` | PASS |
+
+Not run: RabbitMQ suites (A12.4.3 and A12.4.5 evidence stands; kit source unchanged since then), the safety-gated `ownership.e2e-spec`,
+Final Core Validation. A12.4 closes formally only after the pull request's CI passes and the owner merges it.
 
 ## 5. Open
 

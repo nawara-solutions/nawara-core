@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { resolveLocale, type Locale } from '../i18n/locale.js';
+import { INVALID_TOKEN, safeToken } from '../logging/safe-serialize.js';
 
 export const REQUEST_ID_HEADER = 'x-request-id';
 export const CORRELATION_ID_HEADER = 'x-correlation-id';
@@ -21,7 +22,7 @@ export interface RequestContext {
 const storage = new AsyncLocalStorage<RequestContext>();
 
 // A client-supplied id is accepted only if it is short and made of safe characters: it ends up in logs and headers.
-const SAFE_ID = /^[A-Za-z0-9._:-]{8,128}$/;
+export const SAFE_ID = /^[A-Za-z0-9._:-]{8,128}$/;
 
 export function getRequestContext(): RequestContext | undefined {
   return storage.getStore();
@@ -47,6 +48,26 @@ export function requestContextMiddleware(req: Request, res: Response, next: Next
   res.setHeader(REQUEST_ID_HEADER, requestId);
   res.setHeader(CORRELATION_ID_HEADER, correlationId);
   runWithRequestContext({ requestId, correlationId, locale: resolveLocale(req.headers['accept-language']) }, next);
+}
+
+/**
+ * V2 A12.4: runs an event handler inside a log context restored from the event, as the Audit and Notification consumers already do:
+ * `requestId` is `event:<id>` and `correlationId` the event's own header when it is a safe id, else the requestId. Untrusted values are
+ * validated (`safeToken`), never echoed. A helper for explicit use in a consumer's handler: it changes nothing about delivery.
+ */
+export function runWithEventContext<T>(event: { id?: unknown; headers?: { correlationId?: unknown } } | undefined, fn: () => T): T {
+  let id: unknown;
+  let header: unknown;
+  try {
+    id = event?.id;
+    header = event?.headers?.correlationId;
+  } catch {
+    // an unreadable event keeps the fallbacks below
+  }
+  const eventId = safeToken(id, SAFE_ID, 120);
+  const requestId = eventId === INVALID_TOKEN ? 'event:unknown' : `event:${eventId}`;
+  const correlation = safeToken(header, SAFE_ID, 128);
+  return runWithRequestContext({ requestId, correlationId: correlation === INVALID_TOKEN ? requestId : correlation }, fn);
 }
 
 /** Headers to send on an outgoing call so the correlation id follows the operation. */

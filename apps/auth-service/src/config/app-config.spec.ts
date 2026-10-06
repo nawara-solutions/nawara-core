@@ -61,6 +61,14 @@ describe('configuration and key management fail closed', () => {
     expect(() => loadConfig({ ...good(), STEP_UP_TTL_SEC: '901' })).toThrow(ConfigError);
     expect(loadConfig({ ...good(), STEP_UP_TTL_SEC: '900' }).stepUp.ttlSec).toBe(900);
   });
+  it('V2 A12.4.3: LOG_LEVEL is read and validated like every other Core service: default info, a valid level honoured, anything else refused', () => {
+    expect(loadConfig(good()).logLevel).toBe('info');
+    for (const level of ['debug', 'info', 'warn', 'error']) expect(loadConfig({ ...good(), LOG_LEVEL: level }).logLevel).toBe(level);
+    for (const bad of ['verbose', 'INFO', 'trace', 'everything']) {
+      expect(() => loadConfig({ ...good(), LOG_LEVEL: bad })).toThrow(/LOG_LEVEL must be one of: debug, info, warn, error/);
+    }
+  });
+
   it('rate limits are configurable and validated', () => {
     expect(loadConfig({ ...good(), RATE_OPERATOR_VERIFY_IDENTIFIER_LIMIT: '7' }).rate.operator_verify_identifier.limit).toBe(7);
     expect(() => loadConfig({ ...good(), RATE_LOGIN_IP_LIMIT: '0' })).toThrow(ConfigError);

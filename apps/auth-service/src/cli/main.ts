@@ -1,7 +1,8 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module.js';
-import { APP_CONFIG, loadConfig, type AppConfig } from '../config/app-config.js';
+import { APP_CONFIG, ConfigError, loadConfig, type AppConfig } from '../config/app-config.js';
+import { describeCliFailure } from '@nawara/service-kit';
 import { PasswordService } from '../crypto/password.js';
 import { TotpSecretCipher } from '../crypto/totp-cipher.js';
 import { DbService } from '../db/db.service.js';
@@ -11,6 +12,7 @@ import { HierarchyAuthorityError, contentDigestNow, exportHierarchy, freeze, ret
 import { serializeSnapshot } from '../hierarchy/snapshot.js';
 import { bootstrapOwner, checkTotpKeys, resealTotpSecrets } from './owner-tools.js';
 import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';
+import { CliRefusal } from './refusal.js';
 
 /**
  *   node dist/cli/main.js bootstrap-owner     env: BOOTSTRAP_COMPANY_NAME, BOOTSTRAP_OWNER_EMAIL, BOOTSTRAP_OWNER_PASSWORD
@@ -31,7 +33,7 @@ const app = await NestFactory.createApplicationContext(AppModule.register(loadCo
 try {
   if (cmd === 'bootstrap-owner') {
     const { BOOTSTRAP_COMPANY_NAME: company, BOOTSTRAP_OWNER_EMAIL: email, BOOTSTRAP_OWNER_PASSWORD: password, BOOTSTRAP_COMPANY_ID: companyId } = process.env;
-    if (!company || !email || !password) throw new Error('BOOTSTRAP_COMPANY_NAME, BOOTSTRAP_OWNER_EMAIL and BOOTSTRAP_OWNER_PASSWORD are required');
+    if (!company || !email || !password) throw new CliRefusal('BOOTSTRAP_COMPANY_NAME, BOOTSTRAP_OWNER_EMAIL and BOOTSTRAP_OWNER_PASSWORD are required');
     // Stage 21.C.2: with an authoritative Company id, the reference-cache protocol places it (never an Auth Company insert).
     const r = await bootstrapOwner(app.get(DbService), app.get(UsersService), app.get(PasswordService), { companyName: company, email, password, companyId }, app.get(HierarchyReference));
     console.log(r.created ? 'owner created' : 'an owner already exists: nothing changed');
@@ -49,32 +51,33 @@ try {
     const rest = process.argv.slice(3);
     for (let i = 0; i < rest.length; i++) {
       const k = rest[i]!;
-      if (!k.startsWith('--')) throw new Error(`unexpected argument: ${k}`);
+      if (!k.startsWith('--')) throw new CliRefusal(`unexpected argument: ${k}`);
       f[k.slice(2)] = k === '--final' || k === '--fresh' ? 'true' : (rest[++i] ?? '');
     }
     const db = app.get(DbService);
     const actor = f.actor ?? '';
-    const needActor = () => { if (!actor.trim()) throw new Error('--actor NAME is required'); return actor; };
+    const needActor = () => { if (!actor.trim()) throw new CliRefusal('--actor NAME is required'); return actor; };
     try {
       if (cmd === 'hierarchy-status') console.log(JSON.stringify(await hierarchyStatus(db), null, 2));
       else if (cmd === 'hierarchy-verify') console.log(`content digest: ${await contentDigestNow(db)}`);
       else if (cmd === 'hierarchy-freeze') { await freeze(db, needActor()); console.log('hierarchy FROZEN'); }
       else if (cmd === 'hierarchy-unfreeze') { await unfreeze(db, needActor()); console.log('hierarchy unfrozen'); }
       else if (cmd === 'hierarchy-export') {
-        if (!f.out) throw new Error('--out FILE is required');
+        if (!f.out) throw new CliRefusal('--out FILE is required');
         const s = await exportHierarchy(db, needActor(), { final: f.final === 'true' });
         writeFileSync(f.out, serializeSnapshot(s), { mode: 0o600 });
         console.log(`snapshot written: whole ${s.digests.whole}; frozen ${s.frozen}; counts ${JSON.stringify(s.counts)}`);
       } else if (cmd === 'hierarchy-retire') { await retireWrites(db, needActor(), f.evidence ?? '', { fresh: f.fresh === 'true' }); console.log('hierarchy writes RETIRED (organization-service is the authority)'); }
-      else throw new Error(`unknown command: ${cmd}`);
+      else throw new CliRefusal(`unknown command: ${cmd}`);
     } catch (e) {
       if (e instanceof HierarchyAuthorityError) { console.error(`refused (${e.code}): ${e.message}`); process.exitCode = 1; } else throw e;
     }
   } else {
-    throw new Error('usage: main.js bootstrap-owner | reseal-totp-keys | check-totp-keys | hierarchy-status|verify|freeze|unfreeze|export|retire');
+    throw new CliRefusal('usage: main.js bootstrap-owner | reseal-totp-keys | check-totp-keys | hierarchy-status|verify|freeze|unfreeze|export|retire');
   }
 } catch (e) {
-  console.error((e as Error).message);
+  // V2 A12.4.3: a Core-authored refusal or configuration error is printed as written; anything else as its facts, never its message.
+  console.error(describeCliFailure(e, (x) => x instanceof CliRefusal || x instanceof ConfigError));
   process.exitCode = 1;
 } finally {
   await app.close();

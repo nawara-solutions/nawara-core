@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import pg from 'pg';
 import { redactString } from '../logging/redact.js';
+import { ConfigError } from '../config/config.js';
+import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
  * Operational outbox-lag check (Stage 5 hardening, completion pass): reports how many outbox rows are still
@@ -24,10 +26,10 @@ async function main(): Promise<void> {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--database-url' && args[i + 1]) url = args[++i];
     else if (args[i] === '--max-age-seconds' && args[i + 1]) maxAgeSeconds = Number(args[++i]);
-    else throw new Error(`unknown argument: ${args[i]}`);
+    else throw new ConfigError(`unknown argument: ${args[i]}`);
   }
-  if (!url) throw new Error('--database-url (or DATABASE_URL) is required');
-  if (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) throw new Error('--max-age-seconds must be a non-negative number');
+  if (!url) throw new ConfigError('--database-url (or DATABASE_URL) is required');
+  if (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) throw new ConfigError('--max-age-seconds must be a non-negative number');
 
   // Bounded, so an unreachable or silent database fails the check (exit 1) instead of hanging a cron or runbook step (the client-side
   // query_timeout covers a server that accepts the query and then stops answering, Stage 15.2).
@@ -64,6 +66,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: unknown) => {
-  console.error(`outbox lag check failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+  console.error(`outbox lag check failed: ${describeCliFailure(e)}`); // V2 A12.4.3: never the error's own message
   process.exit(1);
 });
