@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import amqp from 'amqplib';
 import { formatDeadLetter, inspectDeadLetters, outputToken as q, replayDeadLetter } from '../events/dlq-tools.js';
+import { ConfigError } from '../config/config.js';
+import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
  * Operator tool for a consumer's dead-letter queue. Output is one `key=value` line per fact, so it can be read by a person or grepped.
@@ -17,12 +19,12 @@ const EXIT = { consumed: 0, rejected_again: 2, pending: 3, not_found: 4, not_rep
 
 function parse(argv: string[]): { command: string; opts: Map<string, string[]> } {
   const [command, ...rest] = argv;
-  if (command !== 'list' && command !== 'replay') throw new Error('usage: nawara-dlq <list|replay> --queue <name>.dead ...');
+  if (command !== 'list' && command !== 'replay') throw new ConfigError('usage: nawara-dlq <list|replay> --queue <name>.dead ...');
   const opts = new Map<string, string[]>();
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i]!;
     const value = rest[++i];
-    if (!flag.startsWith('--') || value === undefined) throw new Error(`invalid argument: ${flag}`);
+    if (!flag.startsWith('--') || value === undefined) throw new ConfigError(`invalid argument: ${flag}`);
     opts.set(flag.slice(2), [...(opts.get(flag.slice(2)) ?? []), value]);
   }
   return { command, opts };
@@ -32,24 +34,24 @@ const one = (opts: Map<string, string[]>, name: string): string | undefined => o
 async function main(): Promise<void> {
   const { command, opts } = parse(process.argv.slice(2));
   const queue = one(opts, 'queue');
-  if (!queue) throw new Error('--queue <name>.dead is required');
+  if (!queue) throw new ConfigError('--queue <name>.dead is required');
   const url = process.env.RABBITMQ_URL;
-  if (!url) throw new Error('RABBITMQ_URL is required');
+  if (!url) throw new ConfigError('RABBITMQ_URL is required');
 
   const conn = await amqp.connect(url);
   try {
     if (command === 'list') {
       const limit = Number(one(opts, 'limit') ?? 50);
-      if (!Number.isInteger(limit) || limit < 1) throw new Error('--limit must be a positive integer');
+      if (!Number.isInteger(limit) || limit < 1) throw new ConfigError('--limit must be a positive integer');
       const result = await inspectDeadLetters(conn, queue, { limit, fields: opts.get('field') ?? [] });
       console.log(`dlq_depth queue=${q(queue)} depth=${result.depth ?? 'not_declared'} shown=${result.messages.length}`);
       for (const m of result.messages) console.log(formatDeadLetter(m));
       return;
     }
     const eventId = one(opts, 'event-id');
-    if (!eventId) throw new Error('--event-id <id> is required');
+    if (!eventId) throw new ConfigError('--event-id <id> is required');
     const waitSeconds = Number(one(opts, 'wait-seconds') ?? 10);
-    if (!Number.isFinite(waitSeconds) || waitSeconds < 0) throw new Error('--wait-seconds must be a non-negative number');
+    if (!Number.isFinite(waitSeconds) || waitSeconds < 0) throw new ConfigError('--wait-seconds must be a non-negative number');
     console.log(`dlq_replay_started queue=${q(queue)} event=${q(eventId)}`);
     const r = await replayDeadLetter(conn, queue, eventId, { waitMs: waitSeconds * 1000 });
     console.log(`dlq_replay_result outcome=${r.outcome} event=${q(r.eventId)} target=${r.target} replays=${r.replayCount}`);
@@ -60,6 +62,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: unknown) => {
-  console.error(`nawara-dlq failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+  console.error(`nawara-dlq failed: ${describeCliFailure(e)}`); // V2 A12.4.3: never the error's own message
   process.exit(1);
 });

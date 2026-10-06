@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { DbService, PermanentEventFailure, type EventEnvelope, type Queryable } from '@nawara/service-kit';
+import { DbService, EVENT_NAME, PermanentEventFailure, SAFE_ID, safeToken, type EventEnvelope, type Queryable } from '@nawara/service-kit';
 import { validateVariableValues } from '../templates/variables.js';
 import { isValidDestination, type DeliveryChannel } from './destination.js';
 import { mappingFor, payloadProblems, type EventMapping } from './event-map.js';
@@ -10,6 +10,8 @@ import { IntentCore, type PublishedVersion } from './intent-core.js';
 export type IntakeOutcome = { kind: 'accepted'; notificationId: string; deliveryId: string; invalidDestination: boolean } | { kind: 'duplicate' };
 
 const CORRELATION = /^[A-Za-z0-9._:-]{1,128}$/;
+/** A producing service's name, as the kit names services: the only form of the broker's `source` header a log line repeats. */
+const SOURCE = /^[a-z][a-z0-9-]{1,62}$/;
 
 /**
  * Event intake (SDD §7.1, Stage 16.5): a canonical event becomes a durable notification intent and its delivery, in ONE transaction,
@@ -36,9 +38,11 @@ export class IntakeService {
   ) {}
 
   async handle(event: EventEnvelope): Promise<IntakeOutcome> {
-    const who = `eventId=${event.id} name=${event.name} source=${event.headers.source} correlationId=${event.headers.correlationId ?? '-'}`;
+    // V2 A12.4.3: broker-supplied values reach the log only as validated fields (never echoed when malformed); the correlation id is
+    // the log context's, restored by the consumer.
+    const who = { eventId: safeToken(event.id, SAFE_ID), eventType: safeToken(event.name, EVENT_NAME), source: safeToken(event.headers.source, SOURCE) };
     const reject = (reason: string, detail = ''): never => {
-      this.log.warn(`notification_event_rejected ${who} reason=${reason}${detail}`);
+      this.log.warn(`notification_event_rejected reason=${reason}${detail}`, who);
       throw new PermanentEventFailure(reason);
     };
 
@@ -86,11 +90,11 @@ export class IntakeService {
     });
 
     if (!created) {
-      this.log.log(`notification_duplicate ${who}`);
+      this.log.log('notification_duplicate', who);
       return { kind: 'duplicate' };
     }
-    if (!deliverable) this.log.warn(`notification_delivery_failed ${who} notificationId=${notificationId} deliveryId=${deliveryId} channel=${channel} failureCode=invalid_destination`);
-    this.log.log(`notification_accepted ${who} notificationId=${notificationId} deliveryId=${deliveryId} channel=${channel} template=${m.template} version=${version.version} locale=${version.locale}`);
+    if (!deliverable) this.log.warn(`notification_delivery_failed notificationId=${notificationId} deliveryId=${deliveryId} channel=${channel} failureCode=invalid_destination`, who);
+    this.log.log(`notification_accepted notificationId=${notificationId} deliveryId=${deliveryId} channel=${channel} template=${m.template} version=${version.version} locale=${version.locale}`, who);
     return { kind: 'accepted', notificationId, deliveryId, invalidDestination: !deliverable };
   }
 

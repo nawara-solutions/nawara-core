@@ -2,6 +2,8 @@
 import { resolve } from 'node:path';
 import { kitMigrationsDir } from '../db/paths.js';
 import { runMigrations } from '../db/migrations.js';
+import { ConfigError } from '../config/config.js';
+import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
  * Explicit migration step:  nawara-migrate --dir <path> [--dir <path>...] [--no-kit]
@@ -15,10 +17,10 @@ async function main() {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--dir' && args[i + 1]) dirs.push(resolve(args[++i]));
     else if (args[i] === '--no-kit') withKit = false;
-    else throw new Error(`unknown argument: ${args[i]}`);
+    else throw new ConfigError(`unknown argument: ${args[i]}`);
   }
   const url = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
-  if (!url) throw new Error('MIGRATION_DATABASE_URL (or DATABASE_URL) is required');
+  if (!url) throw new ConfigError('MIGRATION_DATABASE_URL (or DATABASE_URL) is required');
   const result = await runMigrations(url, [...(withKit ? [kitMigrationsDir] : []), ...dirs], { onLockWait });
   for (const n of result.alreadyApplied) console.log(`  = ${n} (already applied)`);
   for (const n of result.adopted) console.log(`  ~ ${n} (checksum recorded)`);
@@ -31,6 +33,6 @@ function onLockWait(): void {
 }
 
 main().catch((e: unknown) => {
-  console.error(`migration failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+  console.error(`migration failed: ${describeCliFailure(e)}`); // V2 A12.4.3: never the error's own message
   process.exit(1);
 });

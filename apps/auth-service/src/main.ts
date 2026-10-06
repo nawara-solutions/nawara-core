@@ -10,7 +10,7 @@ import { AuthExceptionFilter } from './errors.js';
 async function bootstrap() {
   const cfg = loadConfig(); // throws ConfigError (fail closed) if any setting or secret is missing/invalid, before anything starts
   const app = await NestFactory.create(AppModule.register(cfg), { bufferLogs: true });
-  const logger = new JsonLogger('auth-service', 'info');
+  const logger = new JsonLogger('auth-service', cfg.logLevel); // V2 A12.4.3: the validated LOG_LEVEL, as in every other Core service
 
   // Stage 15.5: once shutdown starts, a new request is refused (503, Connection: close) instead of feeding a closing process.
   app.use(shutdownAdmission(app.get(ShutdownState)));
@@ -53,6 +53,6 @@ async function bootstrap() {
 
   await app.listen(cfg.port);
   // Stage 14.7: one line that identifies this instance (no URL, credential or config dump). Liveness is /health, readiness /ready.
-  logger.info('service_started', { port: cfg.port, environment: cfg.env, domainEvents: cfg.events.enabled ? 'outbox' : 'off' });
+  logger.info('service_started', { port: cfg.port, environment: cfg.env, logLevel: cfg.logLevel, domainEvents: cfg.events.enabled ? 'outbox' : 'off' });
 }
 await bootstrap();

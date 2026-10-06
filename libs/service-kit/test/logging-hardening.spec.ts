@@ -390,3 +390,16 @@ describe('safeToken and runWithEventContext', () => {
     expect(JSON.stringify(seen)).not.toContain(SECRET);
   });
 });
+
+describe('V2 A12.4.3: Nest Logger forwarding', () => {
+  it('a Nest Logger call (msg, fields, contextName) keeps both the fields and the context', () => {
+    const c = capture();
+    c.logger.warn('evt', { eventId: 'e-12345678', outcome: 'rejected' }, 'EventIntake');
+    c.logger.log('evt2', 'EventIntake');
+    c.logger.error('evt3', { eventId: 'e-12345678' }, 'EventIntake');
+    expect(c.lines()[0]).toMatchObject({ level: 'warn', msg: 'evt', context: 'EventIntake', eventId: 'e-12345678', outcome: 'rejected' });
+    expect(c.lines()[1]).toMatchObject({ level: 'info', msg: 'evt2', context: 'EventIntake' });
+    expect(c.lines()[2]).toMatchObject({ level: 'error', msg: 'evt3', context: 'EventIntake', eventId: 'e-12345678' });
+    expect(c.lines()[2].stack).toBeUndefined();
+  });
+});

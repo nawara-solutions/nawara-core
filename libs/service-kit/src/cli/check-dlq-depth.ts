@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import amqp from 'amqplib';
+import { ConfigError } from '../config/config.js';
+import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
  * Operational DLQ-depth check (Stage 5 hardening): reports the message count on one or more dead-letter queues
@@ -15,11 +17,11 @@ async function main(): Promise<void> {
   const queues: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--queue' && args[i + 1]) queues.push(args[++i]!);
-    else throw new Error(`unknown argument: ${args[i]}`);
+    else throw new ConfigError(`unknown argument: ${args[i]}`);
   }
-  if (queues.length === 0) throw new Error('at least one --queue <name> is required');
+  if (queues.length === 0) throw new ConfigError('at least one --queue <name> is required');
   const url = process.env.RABBITMQ_URL;
-  if (!url) throw new Error('RABBITMQ_URL is required');
+  if (!url) throw new ConfigError('RABBITMQ_URL is required');
 
   const conn = await amqp.connect(url);
   let stuck = 0;
@@ -51,6 +53,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: unknown) => {
-  console.error(`dlq depth check failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+  console.error(`dlq depth check failed: ${describeCliFailure(e)}`); // V2 A12.4.3: never the error's own message
   process.exit(1);
 });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PermanentEventFailure, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
+import { JsonLogger, PermanentEventFailure, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { notificationMigrationsDir } from '../src/app.module.js';
 import { EVENT_MAP, mappingFor } from '../src/intake/event-map.js';
@@ -211,6 +211,34 @@ describeWithEnv('event intake: canonical event → durable intent (real PostgreS
     it('after the whole intake suite: zero delivery attempts (no provider was called)', async () => {
       expect(await count('notification_delivery_attempt')).toBe(0);
       expect(await count('notification_delivery', `status NOT IN ('PENDING', 'FAILED')`)).toBe(0);
+    });
+  });
+  describe('V2 A12.4.3: broker values in log lines', () => {
+    const handle = (e: EventEnvelope) => (t.consumer as unknown as { handle(e: EventEnvelope): Promise<void> }).handle(e);
+    // Nest's Logger is process-wide: an earlier test's second app (`other`) re-routed it, so route it back to this app's capture.
+    beforeAll(() => t.app.useLogger(new JsonLogger('notification-service', 'debug', (l) => t.logs.push(JSON.parse(l)))));
+
+    it('a hostile source, event id or correlation header is never echoed; the line says [invalid] and the context falls back', async () => {
+      const marker = `HOSTILE-${randomUUID()}`;
+      const name = EVENT_MAP[0]!.name;
+      const e = { ...envelope(name, payloadFor(name), { source: `auth-service\n${marker}`, correlationId: `c\r\n${marker}` }), id: `x y ${marker}` };
+      const from = t.logs.length;
+      await expect(handle(e)).rejects.toBeInstanceOf(PermanentEventFailure); // unmapped source: rejected exactly as before
+      const lines = t.logs.slice(from);
+      expect(JSON.stringify(lines)).not.toContain(marker);
+      expect(lines.find((l) => String(l.msg).startsWith('notification_event_rejected reason=unmapped_event'))).toMatchObject({
+        eventId: '[invalid]', eventType: name, source: '[invalid]', requestId: 'event:unknown', correlationId: 'event:unknown',
+      });
+    });
+
+    it('a valid delivery keeps useful, validated identifiers in fields and in its restored context; no recipient', async () => {
+      const name = EVENT_MAP[0]!.name;
+      const e = envelope(name, payloadFor(name));
+      const from = t.logs.length;
+      await handle(e);
+      const accepted = t.logs.slice(from).find((l) => String(l.msg).startsWith('notification_accepted'));
+      expect(accepted).toMatchObject({ eventId: e.id, eventType: name, source: 'auth-service', requestId: `event:${e.id}`, correlationId: e.headers.correlationId });
+      for (const v of [EMAIL, PHONE, CODE]) expect(JSON.stringify(t.logs.slice(from))).not.toContain(v);
     });
   });
 });

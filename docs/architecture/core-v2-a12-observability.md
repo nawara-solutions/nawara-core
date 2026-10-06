@@ -4,7 +4,8 @@
   local security review and the A12.2a correction (§3A), written 2026-10-05: **A12.2 MERGED** (PR #205, `763e1a8`), not certified. Then the
   A12.3 service and messaging metrics (§3B): **A12.3 FORMALLY CLOSED** (PR #206, merge `272ab8d`, post-merge Core CI 24/24). Then A12.4
   logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
-  (§4C; not committed); **service adoption (A12.4.3+) pending**; A12.4 not closed. Metrics are **off by default**
+  (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; not committed); A12.4.4 (ai-service) and
+  A12.4.5 (service negative controls) pending; A12.4 not closed. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
@@ -274,6 +275,38 @@ Branch `feature/core-v2-a12-logging-pii` from `main` at `272ab8d`, 2026-10-06, N
 | Static security review | three probe findings fixed in this slice (quoted Bearer, prose `password=` pairs, case-variant envelope names) and a `Symbol.toStringTag` getter read replaced by a prototype check; residual, by design: secrets or PII written as prose or JSON inside `msg` other than the patterns above are a call-site responsibility (service negative controls, A12.4.5) |
 
 Not run in this slice: service suites (A12.4.3 rebuilds the kit and runs the affected services), integration suites, CI.
+
+## 4D. Evidence (A12.4.3 TypeScript service adoption, local)
+
+Branch `feature/core-v2-a12-logging-pii` on `b5bb23d`, 2026-10-06; not committed. What changed:
+
+- **Auth:** `LOG_LEVEL` read with the kit `EnvReader` (default `info`, anything outside debug / info / warn / error refused at
+  startup) and used by `main.ts`. CLI failures go through `describeCliFailure`; its Core-authored operator messages are `CliRefusal`.
+- **Notification:** the intake consumer restores its log context with `runWithEventContext` (it used to put the raw broker
+  correlation header in every line's envelope); intake lines carry `eventId`, `eventType`, `source` as `safeToken`-validated fields.
+  The correlation id stored with the notification is unchanged.
+- **Billing:** the payment-event handler runs in `runWithEventContext`; `eventId`, `eventType`, `paymentRequestId` are validated fields.
+  The business correlation id passed to `applyPaymentEvent` (recorded with the receipt) is unchanged.
+- **CLIs:** `describeCliFailure` (kit) prints a fixed category and `describeFailure` facts, never `e.message`, in `nawara-migrate`,
+  `nawara-dlq`, `nawara-check-dlq-depth`, `nawara-check-outbox-lag`, Auth's CLIs and the ownership CLI; Core-authored usage text is a
+  `ConfigError` and stays readable; the category phrases keep the restore drill's classification (`infra/backup/restore-drill.sh`).
+  A failed migration's `MigrationError` carries `describeFailure` facts, not PostgreSQL's message.
+- **Ownership:** the structured `code` field is `errorCode`; the CLI's correlation id comes from the log context (a caller field of
+  that name is dropped by the A12.4.2 envelope).
+- **Kit logger:** a Nest `Logger` call `(msg, fields, contextName)` keeps both the fields and the context (it dropped the fields).
+
+| Step | Result |
+|---|---|
+| service-kit | build exit 0, `dist/` identical to a fresh non-incremental compile (66/66 `.js` and `.d.ts`); unit 420/420; typecheck; lint (no new finding) |
+| service-kit PostgreSQL integration (affected) | `migrations.int-spec` + `migrations-strict.int-spec` 15/15; `observability.int-spec` PostgreSQL block 6/6 (outbox-lag CLI failure prefix, migration runner). Its RabbitMQ block builds `new URL(TEST_RABBITMQ_URL)` while the file is collected, so without a broker URL the whole file errors at load (pre-existing, unchanged since `67a5ad7`); run with a placeholder URL and a `-t` filter selecting the PostgreSQL block, RabbitMQ block 2 skipped |
+| Auth | build, typecheck, lint; unit 118/118 (incl. `LOG_LEVEL` default, valid levels, invalid refused); e2e 429 passed, 7 skipped |
+| Notification | build, typecheck, lint; unit 316/316; `intake.e2e-spec` 42/42 incl. the two A12.4.3 tests (hostile source / event id / correlation header never echoed, `[invalid]` and `event:unknown` instead; valid ids in fields and restored context; no recipient, phone or code). Rest of e2e: `security-operations` `/ready` test environment-blocked (RabbitMQ stopped, not authorized); broker-gated suites skipped |
+| Billing | build, typecheck, lint; unit 348/348 incl. `payment-event-consumer.spec` 16/16 (hostile correlation header, event id and payment request id never logged; business correlation id and event id unchanged; context restored); e2e 335 passed, 1 skipped (migration failure now facts, PostgreSQL text absent) |
+| Organization | build, typecheck, lint; unit 144/144 incl. `ownership-admin.spec` (refusal logs `errorCode`, visible through `JsonLogger`); e2e 260 passed; `ownership.e2e-spec` safety-gated (it refuses a cluster that hosts the Organization database) |
+| CLI failure output | `cli-failure.spec`: no message, connection string, SQL or value; Core-authored text kept; restore-drill phrases kept |
+| `test:deploy` / `check:repo` | 315/315 / PASS |
+
+A12.3 code (`events/`, `metrics/`, `db.service.ts`), `redact.ts` and ai-service are unchanged. Not run: RabbitMQ suites, CI.
 
 ## 5. Open
 

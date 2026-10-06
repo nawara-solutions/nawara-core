@@ -4,6 +4,7 @@ import { assertPasswordPolicy, PasswordService } from '../crypto/password.js';
 import type { TotpSecretCipher } from '../crypto/totp-cipher.js';
 import type { DbService } from '../db/db.service.js';
 import type { UsersService } from '../users/users.service.js';
+import { CliRefusal } from './refusal.js';
 
 /**
  * First-owner bootstrap (ADR-0016, company-scoped per ADR-0022). Idempotent and refusing:
@@ -32,10 +33,10 @@ export async function bootstrapOwner(
       try {
         return await hierarchy.ensure('company', a.companyId!);
       } catch {
-        throw new Error('Organization Service could not confirm that Company (unavailable, not yet readable, or the reference write was refused); nothing was created');
+        throw new CliRefusal('Organization Service could not confirm that Company (unavailable, not yet readable, or the reference write was refused); nothing was created');
       }
     })();
-    if (!exists) throw new Error('Organization Service does not know that Company id (or it is outside auth-service\'s credential); nothing was created');
+    if (!exists) throw new CliRefusal('Organization Service does not know that Company id (or it is outside auth-service\'s credential); nothing was created');
   }
   return db.tx(async (q) => {
     // Check-then-insert is only safe when bootstraps are serialised: otherwise two concurrent runs each
@@ -49,16 +50,16 @@ export async function bootstrapOwner(
     const authority = (await q.query(`SELECT mode FROM hierarchy_authority`)).rows[0]?.mode as string | undefined;
     let companyId: string;
     if (authority === 'org_authoritative') {
-      if (!a.companyId) throw new Error('organization-service is the hierarchy authority: pass the authoritative Company id (BOOTSTRAP_COMPANY_ID); auth-service does not create a Company');
+      if (!a.companyId) throw new CliRefusal('organization-service is the hierarchy authority: pass the authoritative Company id (BOOTSTRAP_COMPANY_ID); auth-service does not create a Company');
       const ref = await q.query(`SELECT id FROM company WHERE id = $1`, [a.companyId]);
-      if (!ref.rowCount) throw new Error('no validated reference row exists for that Company id; place it with the reference-cache protocol first (nothing is created here)');
+      if (!ref.rowCount) throw new CliRefusal('no validated reference row exists for that Company id; place it with the reference-cache protocol first (nothing is created here)');
       companyId = ref.rows[0].id;
     } else if (a.companyId && hierarchy) {
       companyId = a.companyId.toLowerCase(); // the validated reference row placed above (a fresh environment's F4): no Company insert
     } else {
       // Stage 21.C.2 (ADR-0040 A1.2 "the local hierarchy write paths are already off"): with Organization Service as the source, even a
       // not-yet-activated (fresh) environment never gets an Auth-created Company.
-      if (hierarchy?.fromOrganizationService) throw new Error('the hierarchy source is organization-service: pass the authoritative Company id (BOOTSTRAP_COMPANY_ID); auth-service does not create a Company');
+      if (hierarchy?.fromOrganizationService) throw new CliRefusal('the hierarchy source is organization-service: pass the authoritative Company id (BOOTSTRAP_COMPANY_ID); auth-service does not create a Company');
       const company = await q.query(`SELECT id FROM company ORDER BY "createdAt" LIMIT 1`);
       companyId = company.rows[0]?.id ?? (await q.query(`INSERT INTO company(id,name) VALUES ($1,$2) RETURNING id`, [randomUUID(), a.companyName])).rows[0].id;
     }

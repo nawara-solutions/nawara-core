@@ -191,7 +191,10 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
       await c.query(`CREATE FUNCTION test_injected_backfill_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected backfill failure'; END $$`);
       await c.query(`CREATE TRIGGER subscription_99_injected_failure BEFORE UPDATE ON subscription FOR EACH ROW EXECUTE FUNCTION test_injected_backfill_failure()`);
       try {
-        await expect(runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir])).rejects.toThrow(/0015_subscription_billing_anchor\.sql failed and was rolled back: injected backfill failure/);
+        // V2 A12.4.3: the runner reports the failure's facts, never PostgreSQL's text (which can quote row values).
+        const failure = await runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir]).catch((e: unknown) => e);
+        expect((failure as Error).message).toMatch(/^0015_subscription_billing_anchor\.sql failed and was rolled back: error=\S+ code=P0001$/);
+        expect((failure as Error).message).not.toContain('injected backfill failure');
       } finally {
         await c.query(`DROP TRIGGER subscription_99_injected_failure ON subscription`);
         await c.query(`DROP FUNCTION test_injected_backfill_failure()`);

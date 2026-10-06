@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { DbService, JsonLogger } from '@nawara/service-kit';
+import { ConfigError, DbService, JsonLogger, describeCliFailure, runWithRequestContext } from '@nawara/service-kit';
 import { ACTIVATE_CONFIRMATION, OwnershipAdmin, OwnershipError } from '../ownership/ownership-admin.js';
 
 /**
@@ -25,7 +25,7 @@ function flags(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (!a.startsWith('--') || argv[i + 1] === undefined) throw new Error(`unexpected argument: ${a}`);
+    if (!a.startsWith('--') || argv[i + 1] === undefined) throw new ConfigError(`unexpected argument: ${a}`);
     out[a.slice(2)] = argv[++i]!;
   }
   return out;
@@ -33,15 +33,15 @@ function flags(argv: string[]): Record<string, string> {
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
-  if (!cmd) throw new Error('usage: ownership status | declare-class | verify-snapshot | import | verify | approve | activate | retire | rollback');
+  if (!cmd) throw new ConfigError('usage: ownership status | declare-class | verify-snapshot | import | verify | approve | activate | retire | rollback');
   const f = flags(rest);
   const actor = f.actor ?? '';
   const needActor = (): string => {
-    if (!actor.trim()) throw new Error('--actor NAME is required (who is doing this, recorded in the audit)');
+    if (!actor.trim()) throw new ConfigError('--actor NAME is required (who is doing this, recorded in the audit)');
     return actor;
   };
   const url = process.env.OWNERSHIP_ADMIN_DATABASE_URL;
-  if (!url && cmd !== 'verify-snapshot') throw new Error('OWNERSHIP_ADMIN_DATABASE_URL is required (the operations login, never the runtime role)');
+  if (!url && cmd !== 'verify-snapshot') throw new ConfigError('OWNERSHIP_ADMIN_DATABASE_URL is required (the operations login, never the runtime role)');
 
   const logger = new JsonLogger('organization-service', 'info');
   const correlationId = randomUUID();
@@ -50,7 +50,8 @@ async function main(): Promise<void> {
   const admin = new OwnershipAdmin(db, {
     environment,
     correlationId,
-    log: (event, fields) => logger.info(event, { ...fields, correlationId, environment }),
+    // V2 A12.4.3: the correlation id is the logger's envelope field (a caller field of that name is dropped), so it comes from the context.
+    log: (event, fields) => runWithRequestContext({ requestId: correlationId, correlationId }, () => logger.info(event, { ...fields, environment })),
     productionActivationEnabled: process.env.OWNERSHIP_PRODUCTION_ACTIVATION === 'enabled',
   });
   try {
@@ -59,7 +60,7 @@ async function main(): Promise<void> {
         console.log(JSON.stringify(await admin.status(), null, 2));
         break;
       case 'declare-class':
-        if (f.class !== 'existing' && f.class !== 'fresh') throw new Error('--class existing|fresh is required');
+        if (f.class !== 'existing' && f.class !== 'fresh') throw new ConfigError('--class existing|fresh is required');
         await admin.declareClass(needActor(), f.class);
         console.log(`environment class declared: ${f.class}`);
         break;
@@ -95,10 +96,11 @@ async function main(): Promise<void> {
         console.log('rolled back to PREPARED');
         break;
       default:
-        throw new Error(`unknown command: ${cmd} (activation confirmation is ${ACTIVATE_CONFIRMATION})`);
+        throw new ConfigError(`unknown command: ${cmd} (activation confirmation is ${ACTIVATE_CONFIRMATION})`);
     }
   } catch (e) {
-    console.error(e instanceof OwnershipError ? `refused (${e.code}): ${e.message}` : (e as Error).message);
+    // V2 A12.4.3: a Core-authored refusal as written; anything else as its facts, never its message.
+    console.error(e instanceof OwnershipError ? `refused (${e.code}): ${e.message}` : describeCliFailure(e));
     process.exitCode = 1;
   } finally {
     await db.onApplicationShutdown().catch(() => undefined);
@@ -107,8 +109,11 @@ async function main(): Promise<void> {
 
 function required(f: Record<string, string>, name: string): string {
   const v = f[name];
-  if (!v) throw new Error(`--${name} is required`);
+  if (!v) throw new ConfigError(`--${name} is required`);
   return v;
 }
 
-await main();
+await main().catch((e: unknown) => {
+  console.error(describeCliFailure(e)); // a usage or configuration error before the command runs
+  process.exitCode = 1;
+});

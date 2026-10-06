@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
-import { EVENT_BUS, PermanentEventFailure, pgCode, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import { EVENT_BUS, EVENT_NAME, PermanentEventFailure, pgCode, runWithEventContext, SAFE_ID, safeToken, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
@@ -15,6 +15,9 @@ class MalformedPaymentEventError extends PermanentEventFailure {
 function isParty(v: unknown): v is { type: string; id: string } {
   return typeof v === 'object' && v !== null && typeof (v as { type?: unknown }).type === 'string' && typeof (v as { id?: unknown }).id === 'string';
 }
+
+/** A payment request id as Billing issues it: the only form a log line repeats (a malformed one is `[invalid]`). */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Parses the wire payload into `PaymentEventFacts`, trusting NOTHING about its shape (SDD 21.4: the consumer never
@@ -114,12 +117,21 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
    *    was written, and the retry runs this same code again, so `payment_event_receipt` de-duplicates it exactly like any redelivery.
    * A `conflict` or `deferred` outcome is NOT a failure: it is acknowledged and recorded in its receipt (the reconciler completes a deferred one).
    */
-  private async handle(event: EventEnvelope): Promise<void> {
-    const correlationId = event.headers.correlationId ?? `event:${event.id}`;
+  /**
+   * V2 A12.4.3: every log line of a delivery carries its context (requestId `event:<id>`, the VALIDATED correlation id); the delivery
+   * itself, its acknowledgement and its retries are exactly what `process` does.
+   */
+  private handle(event: EventEnvelope): Promise<void> {
+    return runWithEventContext(event, () => this.process(event));
+  }
+
+  private async process(event: EventEnvelope): Promise<void> {
+    const correlationId = event.headers.correlationId ?? `event:${event.id}`; // business data (recorded with the receipt), unchanged
     const replay = event.headers.replayCount ?? 0;
-    const who = `event=${event.id} name=${event.name} correlationId=${correlationId}`;
+    // Broker-supplied values reach the log only as validated fields, never echoed when malformed.
+    const who = { eventId: safeToken(event.id, SAFE_ID), eventType: safeToken(event.name, EVENT_NAME) };
     // An operator replay of a dead-lettered message is the same delivery in every respect but this marker, which only names the log lines.
-    const tag = (base: string, replayed: string) => (replay > 0 ? `${replayed} ${who} replays=${replay}` : `${base} ${who}`);
+    const tag = (base: string, replayed: string) => (replay > 0 ? `${replayed} replays=${replay}` : base);
     let facts: PaymentEventFacts;
     let settledAt: Date;
     try {
@@ -131,7 +143,7 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
       settledAt = new Date(event.headers.occurredAt);
       if (Number.isNaN(settledAt.getTime())) throw new MalformedPaymentEventError();
     } catch (e) {
-      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`);
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`, who);
       throw e;
     }
     let result;
@@ -145,26 +157,26 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     } catch (e) {
       const permanent = pgCode(e)?.startsWith('22') === true;
       const errorName = e instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(e.name) ? e.name : 'Error';
-      this.logger.error(`payment_event_processing_failure ${who} paymentRequestId=${facts.paymentRequestId} classification=${permanent ? 'permanent' : 'transient'} retry=${event.headers.retryCount ?? 0} error=${errorName}${replay > 0 ? ` replays=${replay}` : ''}`);
+      this.logger.error(`payment_event_processing_failure classification=${permanent ? 'permanent' : 'transient'} retry=${event.headers.retryCount ?? 0} error=${errorName}${replay > 0 ? ` replays=${replay}` : ''}`, { ...who, paymentRequestId: safeToken(facts.paymentRequestId, UUID) });
       if (permanent) {
-        if (replay > 0) this.logger.error(`payment_event_replay_rejected ${who} replays=${replay} classification=permanent reason=invalid_identifier`);
+        if (replay > 0) this.logger.error(`payment_event_replay_rejected replays=${replay} classification=permanent reason=invalid_identifier`, who);
         throw new PermanentEventFailure('invalid_identifier', { cause: e });
       }
       throw e;
     }
-    const at = `paymentRequestId=${facts.paymentRequestId}`;
+    const at = { ...who, paymentRequestId: safeToken(facts.paymentRequestId, UUID) };
     if (replay > 0 && !result.firstDelivery) {
       // The receipt already existed: this event was processed before, so the replay changed nothing and the recorded outcome is what it was.
-      this.logger.log(`payment_event_replay_duplicate ${who} replays=${replay} ${at} recordedOutcome=${result.outcome}`);
+      this.logger.log(`payment_event_replay_duplicate replays=${replay} recordedOutcome=${result.outcome}`, at);
       return;
     }
-    if (result.outcome === 'applied') this.logger.log(`${tag('payment_event_applied', 'payment_event_replay_succeeded')} ${at}`);
-    if (result.outcome === 'ignored') this.logger.log(`${tag('payment_event_ignored', 'payment_event_replay_ignored')} ${at} detail=${result.detail}`);
-    if (result.outcome === 'conflict') this.logger.error(`${tag('payment_event_conflict', 'payment_event_replay_conflict')} ${at} detail=${result.detail} — needs manual review`);
-    if (result.outcome === 'deferred') this.logger.warn(`${tag('payment_event_deferred', 'payment_event_replay_deferred')} ${at} detail=${result.detail} — the reconciler will complete it`);
+    if (result.outcome === 'applied') this.logger.log(tag('payment_event_applied', 'payment_event_replay_succeeded'), at);
+    if (result.outcome === 'ignored') this.logger.log(`${tag('payment_event_ignored', 'payment_event_replay_ignored')} detail=${result.detail}`, at);
+    if (result.outcome === 'conflict') this.logger.error(`${tag('payment_event_conflict', 'payment_event_replay_conflict')} detail=${result.detail} — needs manual review`, at);
+    if (result.outcome === 'deferred') this.logger.warn(`${tag('payment_event_deferred', 'payment_event_replay_deferred')} detail=${result.detail} — the reconciler will complete it`, at);
     // Stage 12.4: only meaningful once the payment itself was applied — a settled offering that conflicts with the
     // organization's existing Subscription never rolls back the payment (section 24), so it needs its own, separately
     // visible signal rather than being folded into `payment_event_conflict` above.
-    if (result.subscription === 'conflict') this.logger.error(`payment_event_subscription_conflict ${who} ${at} — settlement applied but its offering conflicts with the organization's existing Subscription; needs manual review`);
+    if (result.subscription === 'conflict') this.logger.error(`payment_event_subscription_conflict — settlement applied but its offering conflicts with the organization's existing Subscription; needs manual review`, at);
   }
 }

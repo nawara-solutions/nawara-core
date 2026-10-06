@@ -86,24 +86,25 @@ export class JsonLogger implements LoggerService {
 
   // Structured API for services
   debug(message: unknown, contextOrFields?: string | Record<string, unknown>) {
-    this.dispatch('debug', message, contextOrFields);
+    this.dispatch('debug', message, [contextOrFields]);
   }
   info(message: unknown, contextOrFields?: string | Record<string, unknown>) {
-    this.dispatch('info', message, contextOrFields);
+    this.dispatch('info', message, [contextOrFields]);
   }
 
-  // Nest LoggerService API
+  // Nest LoggerService API. A Nest `Logger` appends its context name AFTER the caller's parameters, so `new Logger('X').warn(msg, fields)`
+  // arrives as (msg, fields, 'X'): the context is the last string, the fields the first object (V2 A12.4.3).
   log(message: unknown, ...rest: unknown[]) {
-    this.dispatch('info', message, rest[rest.length - 1]);
+    this.dispatch('info', message, rest);
   }
   warn(message: unknown, ...rest: unknown[]) {
-    this.dispatch('warn', message, rest[rest.length - 1]);
+    this.dispatch('warn', message, rest);
   }
   verbose(message: unknown, ...rest: unknown[]) {
-    this.dispatch('debug', message, rest[rest.length - 1]);
+    this.dispatch('debug', message, rest);
   }
   fatal(message: unknown, ...rest: unknown[]) {
-    this.dispatch('error', message, rest[rest.length - 1]);
+    this.dispatch('error', message, rest);
   }
   /** Nest calls error(message, stack?, context?). The stack's frames go to the log only, never to a response, and never its message. */
   error(message: unknown, ...rest: unknown[]) {
@@ -118,9 +119,13 @@ export class JsonLogger implements LoggerService {
     }
   }
 
-  private dispatch(level: LogLevel, message: unknown, contextOrFields?: unknown) {
-    if (typeof contextOrFields === 'string') this.write(level, message, contextOrFields);
-    else if (contextOrFields !== null && typeof contextOrFields === 'object') this.write(level, message, undefined, contextOrFields);
-    else this.write(level, message);
+  private dispatch(level: LogLevel, message: unknown, rest: unknown[]) {
+    try {
+      const strings = rest.filter((r): r is string => typeof r === 'string');
+      const fields = rest.find((r) => typeof r === 'object' && r !== null);
+      this.write(level, message, strings[strings.length - 1], fields);
+    } catch {
+      this.write(level, UNSERIALIZABLE_RECORD);
+    }
   }
 }

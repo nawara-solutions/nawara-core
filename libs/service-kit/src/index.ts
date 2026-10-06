@@ -9,6 +9,7 @@ export { JsonLogger, LOG_ENVELOPE_FIELDS, MAX_RECORD_LENGTH, type LogSink } from
 export { INVALID_TOKEN, safeSerialize, safeToken, scrubText, isSensitiveKey } from './logging/safe-serialize.js';
 export { redact, redactString } from './logging/redact.js';
 export { describeFailure, failureFacts, type FailureFacts, type FailureKind } from './logging/failure.js';
+export { describeCliFailure } from './logging/cli-failure.js';
 
 export { KitExceptionFilter, type ErrorBody, type KitExceptionFilterOptions } from './errors/exception.filter.js';
 export { httpError, attachLocalizedMessage, attachLocalizedMessageList, type LocalizedListItem } from './errors/http-error.js';

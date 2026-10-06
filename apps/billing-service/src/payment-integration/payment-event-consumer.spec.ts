@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { PermanentEventFailure, type EventEnvelope } from '@nawara/service-kit';
+import { PermanentEventFailure, getRequestContext, type EventEnvelope } from '@nawara/service-kit';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PaymentEventConsumer } from './payment-event-consumer.js';
 
@@ -17,13 +17,18 @@ const envelope = (over: Partial<EventEnvelope> = {}, headers: Partial<EventEnvel
     paymentId: 'p-1', producer: 'billing-service', paymentRequestId: PRID, sourceType: 'invoice', sourceId: 'inv-1',
     payer: { type: 'user', id: SECRET }, seller: { type: 'organization', id: 'org-1' }, organizationId: 'org-1', currency: 'TND', revision: 0, amount: 1000,
   },
-  headers: { eventId: 'e1111111-1111-4111-8111-111111111111', occurredAt: '2026-01-01T00:00:00Z', correlationId: 'corr-1', source: 'payment-service', version: 1, ...headers },
+  headers: { eventId: 'e1111111-1111-4111-8111-111111111111', occurredAt: '2026-01-01T00:00:00Z', correlationId: 'corr-0001', source: 'payment-service', version: 1, ...headers },
   ...over,
 });
 
 describe('PaymentEventConsumer failure classification and replay logging', () => {
   let logs: string[];
-  const capture = (level: 'log' | 'warn' | 'error') => vi.spyOn(Logger.prototype, level).mockImplementation((m: unknown) => void logs.push(`${level}: ${String(m)}`));
+  // V2 A12.4.3: a line is its message, then its structured fields and the log context's correlation id, as `key=value`.
+  const capture = (level: 'log' | 'warn' | 'error') =>
+    vi.spyOn(Logger.prototype, level).mockImplementation((m: unknown, ...rest: unknown[]) => {
+      const fields = { ...(rest.find((r) => typeof r === 'object' && r !== null) as Record<string, unknown> | undefined), correlationId: getRequestContext()?.correlationId };
+      logs.push(`${level}: ${String(m)} ${Object.entries(fields).map(([k, v]) => `${k}=${String(v)}`).join(' ')}`);
+    });
   const build = (apply: (...a: unknown[]) => Promise<unknown>) => {
     let handler!: (e: EventEnvelope) => Promise<void>;
     const bus = { subscribe: vi.fn(async (sub: { handler: typeof handler }) => { handler = sub.handler; return { close: async () => undefined }; }) };
@@ -41,8 +46,7 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
   it('a malformed payload is a PermanentEventFailure (never retried)', async () => {
     const handler = await build(vi.fn()).start();
     await expect(handler(envelope({ payload: { paymentId: 1 } }))).rejects.toBeInstanceOf(PermanentEventFailure);
-    expect(logs.join('\n')).toContain('payment_event_dead_letter event=e1111111');
-    expect(logs.join('\n')).toContain('classification=permanent reason=malformed_payload');
+    expect(logs.join('\n')).toContain('payment_event_dead_letter classification=permanent reason=malformed_payload eventId=e1111111');
   });
 
   it('an identifier PostgreSQL refuses (SQLSTATE class 22) is permanent: retrying cannot change it', async () => {
@@ -69,7 +73,7 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     expect(failure).not.toBeInstanceOf(PermanentEventFailure);
     const text = logs.join('\n');
     expect(text).toContain('classification=transient retry=2');
-    expect(text).toContain('correlationId=corr-1');
+    expect(text).toContain('correlationId=corr-0001');
     expect(text).not.toContain('Connection terminated unexpectedly'); // error messages are not logged, only the error class name
   });
 
@@ -84,7 +88,7 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     for (const call of [first, retry, replayed]) {
       expect(call[0]).toBe('e1111111-1111-4111-8111-111111111111');
       expect(call[1]).toMatchObject({ paymentRequestId: PRID, currency: 'TND', amount: 1000, paymentId: 'p-1' });
-      expect(call[2].correlationId).toBe('corr-1');
+      expect(call[2].correlationId).toBe('corr-0001');
       expect(call[2].cause).toEqual({ type: 'payment_event', id: 'e1111111-1111-4111-8111-111111111111' });
     }
   });
@@ -105,12 +109,12 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     const apply = vi.fn().mockResolvedValue({ outcome, detail: outcome === 'applied' ? null : 'some_detail', firstDelivery: true });
     const handler = await build(apply).start();
     await handler(envelope());
-    expect(logs.join('\n')).toContain(`${normal} event=e1111111`);
+    expect(logs.join('\n')).toContain(`${normal}${outcome === 'applied' ? '' : ' detail=some_detail'}${outcome === 'conflict' ? ' — needs manual review' : ''}${outcome === 'deferred' ? ' — the reconciler will complete it' : ''} eventId=e1111111`);
     logs.length = 0;
     await handler(envelope({}, { replayCount: 2 }));
     const text = logs.join('\n');
-    expect(text).toContain(`${replayed} event=e1111111`);
-    expect(text).toContain('replays=2');
+    expect(text).toContain(`${replayed} replays=2`);
+    expect(text).toContain('eventId=e1111111');
     expect(text).toContain(`paymentRequestId=${PRID}`);
     expect(text).not.toContain(SECRET);
   });
@@ -120,7 +124,7 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     const handler = await build(apply).start();
     await handler(envelope({}, { replayCount: 1 }));
     const text = logs.join('\n');
-    expect(text).toContain('payment_event_replay_duplicate event=e1111111');
+    expect(text).toContain('payment_event_replay_duplicate replays=1 recordedOutcome=applied eventId=e1111111');
     expect(text).toContain('recordedOutcome=applied');
     expect(text).not.toContain('payment_event_replay_succeeded');
   });
@@ -128,6 +132,38 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
   it('a replayed message that is still malformed is logged as replay_rejected and stays a permanent failure', async () => {
     const handler = await build(vi.fn()).start();
     await expect(handler(envelope({ payload: {} }, { replayCount: 1 }))).rejects.toBeInstanceOf(PermanentEventFailure);
-    expect(logs.join('\n')).toContain('payment_event_replay_rejected event=e1111111');
+    expect(logs.join('\n')).toContain('payment_event_replay_rejected replays=1 classification=permanent reason=malformed_payload eventId=e1111111');
+  });
+  it('V2 A12.4.3: a hostile correlation header is never logged; the business correlation id is exactly what it was', async () => {
+    const apply = vi.fn().mockResolvedValue({ outcome: 'applied', detail: null, firstDelivery: true });
+    const handler = await build(apply).start();
+    const hostile = `corr\n${SECRET} injected`;
+    await handler(envelope({}, { correlationId: hostile }));
+    expect(apply.mock.calls[0]![2].correlationId).toBe(hostile); // recorded with the receipt as before: logging changes nothing
+    const text = logs.join('\n');
+    expect(text).not.toContain(SECRET);
+    expect(text).toContain('correlationId=event:e1111111-1111-4111-8111-111111111111'); // the validated fallback
+  });
+
+  it('V2 A12.4.3: a hostile event id or payment request id is never logged; the delivery is processed exactly as before', async () => {
+    const apply = vi.fn().mockRejectedValue(Object.assign(new Error(`invalid input syntax for type uuid: "${SECRET}"`), { code: '22P02' }));
+    const handler = await build(apply).start();
+    const hostileId = `x y ${SECRET}`;
+    const event = envelope({ id: hostileId, payload: { ...envelope().payload, paymentRequestId: `not-a-uuid ${SECRET}` } });
+    const failure = await handler(event).catch((e) => e);
+    expect(failure).toBeInstanceOf(PermanentEventFailure);
+    expect(apply.mock.calls[0]![0]).toBe(hostileId);
+    const text = logs.join('\n');
+    expect(text).not.toContain(SECRET);
+    expect(text).toContain('eventId=[invalid]');
+    expect(text).toContain('paymentRequestId=[invalid]');
+    expect(text).toContain('correlationId=corr-0001'); // the event's valid correlation id is the log context's
+  });
+
+  it('V2 A12.4.3: a valid delivery logs inside its restored context, with useful validated identifiers', async () => {
+    const apply = vi.fn().mockResolvedValue({ outcome: 'applied', detail: null, firstDelivery: true });
+    const handler = await build(apply).start();
+    await handler(envelope({}, { correlationId: 'corr-12345678' }));
+    expect(logs.join('\n')).toContain(`payment_event_applied eventId=e1111111-1111-4111-8111-111111111111 eventType=payment.cancelled paymentRequestId=${PRID} correlationId=corr-12345678`);
   });
 });

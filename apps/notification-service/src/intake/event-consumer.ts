@@ -3,7 +3,7 @@ import {
   Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { DbService, DB_OPTIONS, ReadinessRegistry, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import { DbService, DB_OPTIONS, ReadinessRegistry, pendingMigrations, runWithEventContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import { NOTIFICATION_CONFIG } from '../config/notification-config.token.js';
 import type { NotificationConfig } from '../config/notification-config.js';
 import { EVENT_MAP, INTAKE_BINDINGS, INTAKE_QUEUE } from './event-map.js';
@@ -110,9 +110,9 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     return undefined;
   }
 
+  /** V2 A12.4.3: the log context is restored from VALIDATED event values (a hostile id or correlation header is never echoed). */
   private handle(event: EventEnvelope): Promise<void> {
-    const correlationId = event.headers.correlationId ?? `event:${event.id}`;
-    return runWithRequestContext({ requestId: `event:${event.id}`, correlationId }, async () => {
+    return runWithEventContext(event, async () => {
       await this.intake.handle(event);
     });
   }

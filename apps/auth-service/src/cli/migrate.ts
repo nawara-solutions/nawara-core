@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { MigrationError, runMigrations } from '@nawara/service-kit';
+import { MigrationError, describeCliFailure, runMigrations } from '@nawara/service-kit';
 import { AUTH_MIGRATION_OPTIONS, AUTH_MIGRATIONS_DIR } from '../db/migrations.js';
 
 /**
@@ -24,6 +24,6 @@ function onLockWait(): void {
 }
 
 main().catch((e: unknown) => {
-  console.error(`migration failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+  console.error(`migration failed: ${describeCliFailure(e)}`); // V2 A12.4.3: never the error's own message
   process.exit(1);
 });

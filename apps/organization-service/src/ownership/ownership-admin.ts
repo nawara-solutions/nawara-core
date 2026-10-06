@@ -126,7 +126,7 @@ export class OwnershipAdmin {
       v = this.verifySnapshotText(actor, text);
     } catch (e) {
       const err = e as OwnershipError;
-      this.ctx.log('ownership_import_failed', { actor, code: err.code });
+      this.ctx.log('ownership_import_failed', { actor, errorCode: err.code });
       return this.reject('import', actor, err.code, err.message);
     }
     const digest = v.snapshot.digests.whole;
@@ -184,7 +184,7 @@ export class OwnershipAdmin {
       });
     } catch (e) {
       const err = e instanceof OwnershipError ? e : new OwnershipError('import_failed', (e as Error).message);
-      this.ctx.log('ownership_import_failed', { actor, snapshotDigest: digest, code: err.code });
+      this.ctx.log('ownership_import_failed', { actor, snapshotDigest: digest, errorCode: err.code });
       return this.reject('import', actor, err.code, err.message, { digest });
     }
   }
@@ -194,7 +194,7 @@ export class OwnershipAdmin {
     const st = await this.state();
     const now = await this.contentDigestNow();
     if (now !== expected) {
-      this.ctx.log('ownership_import_failed', { actor, code: 'verification_mismatch' });
+      this.ctx.log('ownership_import_failed', { actor, errorCode: 'verification_mismatch' });
       return this.reject('verify', actor, 'verification_mismatch', 'the content digest does not equal the expected digest', { digest: now });
     }
     let phase = st.phase;
@@ -225,7 +225,7 @@ export class OwnershipAdmin {
     this.ctx.log('ownership_activation_requested', { actor, environment: this.ctx.environment });
     const st = await this.state();
     const refuse = async (code: string, message: string): Promise<never> => {
-      this.ctx.log('ownership_activation_rejected', { actor, code });
+      this.ctx.log('ownership_activation_rejected', { actor, errorCode: code });
       return this.reject('activate', actor, code, message);
     };
     if (st.phase !== 'ACTIVATABLE') return refuse('not_activatable', `authority can be activated only from ACTIVATABLE (phase ${st.phase})`);
