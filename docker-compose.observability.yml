@@ -1,0 +1,65 @@
+# V2 A12.5.1: OPT-IN local observability overlay. LOCAL development only; nothing here is production configuration.
+#
+# Normal development uses docker-compose.yml alone: every Core service keeps the kit default METRICS_ENABLED=false (no metrics
+# listener at all). Adding this file opts in. It turns on each Core service's metrics listener on the Compose network and starts
+# Prometheus:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile db up -d --wait postgres rabbitmq
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile db up -d \
+#     auth-service billing-service payment-service organization-service notification-service file-service audit-service \
+#     release-service prometheus
+#   open http://127.0.0.1:9090/targets
+#
+# Each listener binds 0.0.0.0:9464 INSIDE its container, so Prometheus can reach `<service>:9464`. It is never published to the
+# host: only the application ports (unchanged) and Prometheus (127.0.0.1:9090) are. See docs/runbooks/local-observability.md.
+# No Grafana, dashboards or alerts before A12.6; no RabbitMQ or PostgreSQL infrastructure metrics before A12.5.2 / A12.5.3.
+
+x-core-metrics: &core-metrics
+  METRICS_ENABLED: 'true'
+  METRICS_HOST: 0.0.0.0
+  METRICS_PORT: '9464'
+
+services:
+  auth-service:
+    environment: *core-metrics
+  billing-service:
+    environment: *core-metrics
+  payment-service:
+    environment: *core-metrics
+  organization-service:
+    environment: *core-metrics
+  notification-service:
+    environment: *core-metrics
+  file-service:
+    environment: *core-metrics
+  audit-service:
+    environment: *core-metrics
+  release-service:
+    environment: *core-metrics
+
+  prometheus:
+    image: prom/prometheus:v3.13.4@sha256:87861b8cf91579109319ebc300f3f1060e6da9c05d6ae8ad15a20c879e84e32e
+    # The image's default flags, written out, plus a short local retention. No --web.enable-admin-api, no
+    # --web.enable-lifecycle, no remote write.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=3d
+      - --storage.tsdb.retention.size=1GB
+    ports:
+      - '127.0.0.1:9090:9090'
+    volumes:
+      - ./infra/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - nawara_prometheus_data:/prometheus
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:9090/-/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Local, disposable time-series data (at most 3 days / 1 GB). Remove it with `docker volume rm` when no longer useful.
+  nawara_prometheus_data:

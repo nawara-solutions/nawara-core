@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -67,6 +67,12 @@ for (const f of new Set([...Object.keys(DIGEST_DEPLOYMENTS), ...Object.keys(CONF
     .map((svc) => [`apps/${svc}/deploy/provision-and-deploy.sh`, readFileSync(join(root, 'apps', svc, 'deploy/provision-and-deploy.sh'), 'utf8')]));
   problems.push(...checkImagePins(dockerfiles, deployScripts));
 }
+// V2 A12.5.1: the local observability overlay stays opt-in, loopback-only, pinned and credential-free.
+problems.push(...checkLocalObservability(
+  readFileSync(join(root, 'docker-compose.yml'), 'utf8'),
+  readFileSync(join(root, 'docker-compose.observability.yml'), 'utf8'),
+  readFileSync(join(root, 'infra/observability/prometheus/prometheus.yml'), 'utf8'),
+));
 try {
   readFileSync(join(wfDir, 'core-ci.yml'));
 } catch {
@@ -107,4 +113,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage, local observability');

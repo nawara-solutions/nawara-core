@@ -6,10 +6,12 @@
   logging and PII (§3C): **architecture approved** (owner decisions W1, W2); **A12.4.2 kit hardening implemented and proven locally**
   (§4C; commit `b5bb23d`); **A12.4.3 TypeScript service adoption proven locally** (§4D; commit `ad15d19`); A12.4.4 (ai-service)
   **NOT APPLICABLE**: the AI runtime is not a Core-owned service (§3C); **A12.4.5 service negative controls and
-  security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): A12.4 is locally
-  complete and awaits PR CI; it is not formally closed. Metrics are **off by default**
+  security review proven locally** (§4E; commit `dc0e6b4`); **A12.4.6 final local validation passed** (§4F): **A12.4 FORMALLY CLOSED** (PR
+  #207, merge `6fac8fe`, post-merge Core CI green). Then A12.5: **A12.5.1 local Prometheus collection** (§3D, §4G; local only), with an
+  A12.3 post-certification correction (§3D); A12.5.2–A12.5.5 and A12.6 pending. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
-  or alerted on; no Prometheus, Grafana, Alertmanager or exporter exists yet (A12.5+). It performs and authorizes no production action.
+  or alerted on; Prometheus exists only as the opt-in LOCAL overlay (A12.5.1), and no Grafana, Alertmanager or exporter exists yet
+  (A12.5.2+, A12.6). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
   runtime metrics, an additive readiness observer), its integration through `configureApp` and auth-service's explicit wiring, and a
   repository guard. Not included: messaging, outbox, DLQ, pool and domain metrics (A12.3), logging changes (A12.4), the local stack,
@@ -215,6 +217,32 @@ Approved architecture (A12.4.1, owner decisions **W1** frames-only stacks, **W2*
   `apps/ai-service` scaffold is left as it is until a separate architecture task removes it. (Later: removed by that task;
   the boundary is [ADR-0055](../adr/0055-ai-service-repository-boundary.md).)
 
+## 3D. A12.5.1 local Prometheus, and an A12.3 post-certification correction
+
+A12.5.0 discovery and the owner's decisions: Grafana starts in A12.6; `postgres_exporter` with a `pg_monitor` role is A12.5.3;
+scrape targets are the Compose-network Core services only; host and container metrics are deferred to A12.10.
+
+- **Opt-in overlay** (`docker-compose.observability.yml`). Normal development (`docker-compose.yml` alone) keeps every service's
+  kit default `METRICS_ENABLED=false`. The overlay adds `METRICS_ENABLED=true`, `METRICS_HOST=0.0.0.0` and `METRICS_PORT=9464` to the
+  eight Core services, merged into their environment (no service is duplicated), and starts Prometheus
+  `prom/prometheus:v3.13.4@sha256:87861b8c…e84e32e` (the 3.13 LTS line) on `127.0.0.1:9090`. It has a 3 d / 1 GB retention, no admin,
+  lifecycle or remote-write API, and runs read-only with no capabilities. Port 9464 stays inside the Compose network.
+- **Scrape configuration** (`infra/observability/prometheus/prometheus.yml`): one job per service, 30 s interval, 10 s timeout, no
+  relabelling and no credential. A future workload (`nawara-ia`, a product) is one more job; its code stays in its own repository.
+- **Repository guard** (`checkLocalObservability`, `check:repo`): no `METRICS_ENABLED` in `docker-compose.yml`; 9464 never published;
+  pinned overlay images and loopback-only ports; no admin, lifecycle or remote-write flag, Docker socket or privileged mode; no
+  credential or remote write in the scrape configuration.
+- **A12.3 post-certification correction** (found by the A12.5.1 runtime proof; A12.3 stays formally closed). With metrics on,
+  audit-service and notification-service exited at startup. `installMetrics` looked up its optional providers (the kit `EVENT_BUS`,
+  `OutboxRelayService`, `DbService`) with `app.get` inside `try`/`catch`. But `NestFactory.create`, under Nest's default
+  `abortOnError: true` (every service's `main.ts`), returns a proxy that runs each application method in Nest's exception zone, which
+  logs a failed lookup and calls `process.exit(1)` before the `catch` runs (`@nestjs/core` 12.0.3, `nest-factory.js`
+  `createExceptionZone`, `exceptions-zone.js`). Audit and Notification provide neither the kit `EVENT_BUS` nor an outbox relay; a service
+  without `DbService` would have exited too. The A12.3 tests built applications with `Test.createTestingModule`, which has no such
+  proxy. **Correction:** the three optional lookups go through the root `ModuleRef` (a plain lookup whose `UnknownElementException` the
+  kit catches); the required `MetricsHost` and `ReadinessRegistry` stay on `app.get`, so a genuinely missing one still fails startup
+  as before; no service's `abortOnError` changes. No production impact: metrics are off unless a deployment sets them.
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -388,6 +416,24 @@ PR-readiness validation, not Final Core Validation and not production proof.
 
 Not run: RabbitMQ suites (A12.4.3 and A12.4.5 evidence stands; kit source unchanged since then), the safety-gated `ownership.e2e-spec`,
 Final Core Validation. A12.4 closes formally only after the pull request's CI passes and the owner merges it.
+
+## 4G. Evidence (A12.5.1, local)
+
+Branch `feature/core-v2-a12-prometheus` from `main` at `4e5e544`, 2026-10-06; not committed.
+
+| Step | Result |
+|---|---|
+| Static Compose resolution | without the overlay: `METRICS_*` unset for all eight services (kit default off), no Prometheus. With it: all eight `true` / `0.0.0.0` / `9464`, every other environment key preserved, Prometheus only on `127.0.0.1:9090`. 9464 is published by nothing |
+| `check:repo` / `test:repo` | PASS / 70 tests (6 new for the guard, each refusing a broken variant) |
+| Prometheus pin | registry manifest index: `prom/prometheus:v3.13.4` is `sha256:87861b8c…e84e32e` (linux/amd64, arm64, arm/v7, ppc64le, riscv64, s390x); the pulled image's digest matches; upstream release v3.13.4 is final, and the 3.13 line is designated LTS by upstream |
+| `promtool check config` | tracked configuration valid; a deliberately invalid temporary copy refused |
+| A12.3 correction | `metrics-optional-providers.spec.ts` (real `NestFactory`, default `abortOnError`, `process.exit` recorded): 4/4. Against the original `install.ts` it fails (3 exits with every optional provider absent, 1 with only `DbService` absent). Required-provider failure still exits; metrics off touches nothing. Audit and Notification `main-metrics.spec.ts` (real `AppModule`, `main.ts`'s own lines): 2/2 each, and 2 exits each against the original kit |
+| Focused suites | service-kit build (`dist/` identical to a fresh compile), typecheck, lint (one pre-existing warning), unit 424/424; Audit typecheck, lint, unit 238/238; Notification typecheck, lint, unit 318/318 |
+| Runtime (an isolated, disposable Compose project with `.env.example` values and fresh volumes) | all eight services and Prometheus healthy; **8/8 targets UP** (scrapes of 4–9 ms); distinct `job` / `instance`. Audit and Notification answer `/health` 200 and `/ready` 200, and expose `nawara_service_info`, pool metrics and `nawara_event_consumer_up{queue}` = 1; `nawara_readiness_ready` follows the `/ready` runs |
+| Negative controls | 9464 refused on the host; only `127.0.0.1:9090` listens; admin API disabled; lifecycle API 403; label names only `job`, `instance`, `check`, `kind`, `le`, `pool`, `queue`, `service` and the runtime version labels |
+
+Not run: the broker-gated service metrics e2e suites (the runtime proof covers the real bootstrap), CI. A12.5 overall stays open
+(A12.5.2–A12.5.5); A12.6 has not started.
 
 ## 5. Open
 
