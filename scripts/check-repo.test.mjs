@@ -942,3 +942,20 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
     fails(checkLocalObservability(BASE, OVERLAY.replace(/\n  prometheus:[\s\S]*?\nvolumes:/, '\nvolumes:'), PROM), /no prometheus service/);
   });
 }
+
+// ---- V2 A12.5.2: RabbitMQ native broker metrics ---------------------------------------------------------------------------------
+{
+  const BASE = readFileSync(new URL('../docker-compose.yml', import.meta.url), 'utf8');
+  const OVERLAY = readFileSync(new URL('../docker-compose.observability.yml', import.meta.url), 'utf8');
+  const PROM = readFileSync(new URL('../infra/observability/prometheus/prometheus.yml', import.meta.url), 'utf8');
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+
+  test('A12.5.2: publishing the RabbitMQ Prometheus endpoint (15692) is refused, in either file and either form', () => {
+    fails(checkLocalObservability(BASE.replace("      - '127.0.0.1:15672:15672'\n", "      - '127.0.0.1:15672:15672'\n      - '127.0.0.1:15692:15692'\n"), OVERLAY, PROM), /docker-compose\.yml: rabbitmq publishes the metrics listener \(15692\)/);
+    fails(checkLocalObservability(BASE, `${OVERLAY}\n`.replace('\nvolumes:\n', "\n  rabbitmq:\n    ports:\n      - target: 15692\n        published: 25692\n\nvolumes:\n"), PROM), /docker-compose\.observability\.yml: rabbitmq publishes the metrics listener \(15692\)/);
+  });
+  test('A12.5.2: the scrape configuration must keep every Core job and the rabbitmq job', () => {
+    fails(checkLocalObservability(BASE, OVERLAY, PROM.replace(/\n  - job_name: rabbitmq\n[\s\S]*$/, '\n')), /no scrape job rabbitmq/);
+    fails(checkLocalObservability(BASE, OVERLAY, PROM.replace("  - job_name: audit-service\n    static_configs:\n      - targets: ['audit-service:9464']\n", '')), /no scrape job audit-service/);
+  });
+}

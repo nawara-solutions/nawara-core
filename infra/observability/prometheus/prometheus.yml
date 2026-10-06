@@ -1,8 +1,8 @@
 # V2 A12.5.1: LOCAL development Prometheus. Not production configuration (production placement is A12.10, decision D2).
 # Started only through the opt-in overlay `docker-compose.observability.yml`; see docs/runbooks/local-observability.md.
 #
-# Targets are the eight Core services' kit metrics listeners (`METRICS_PORT` 9464) on the Compose network. They are never
-# published to the host. One job per service: `nawara_service_info{service}` is the only metric that names its service, so a
+# Targets are the eight Core services' kit metrics listeners (`METRICS_PORT` 9464) and, since A12.5.2, the RabbitMQ broker's native
+# endpoint (15692), all on the Compose network. None is published to the host. One job per service: `nawara_service_info{service}` is the only metric that names its service, so a
 # series is identified by its `job` and `instance`. No relabelling adds labels, and nothing here holds a credential.
 #
 # Another workload (for example `nawara-ia` or a product) is added later as its own job pointing at its own metrics endpoint.
@@ -39,3 +39,20 @@ scrape_configs:
   - job_name: release-service
     static_configs:
       - targets: ['release-service:9464']
+
+  # V2 A12.5.2: the broker itself, through RabbitMQ's native `rabbitmq_prometheus` plugin. The local image already enables it; it listens
+  # on 15692 inside the Compose network only (never published). `/metrics` is the AGGREGATED endpoint: node-level totals, without
+  # per-queue, per-connection or per-channel labels, so its series count does not grow with the number of queues or clients.
+  # Application-side messaging metrics stay with the services (A12.3). No credential: the endpoint needs none, and it is reachable only
+  # from this network.
+  - job_name: rabbitmq
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['rabbitmq:15692']
+    # Of the ~2,150 aggregated series, ~1,880 are Erlang VM internals: per-allocator memory detail and scheduler micro-state accounting.
+    # Their count is fixed by the VM, but no A12.5 / A12.6 signal needs them, so they are dropped here (names are never rewritten).
+    # The broker's own families and `erlang_vm_memory_*` are kept.
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'erlang_vm_allocators|erlang_vm_msacc_.+'
+        action: drop
