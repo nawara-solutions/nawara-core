@@ -212,7 +212,8 @@ Approved architecture (A12.4.1, owner decisions **W1** frames-only stacks, **W2*
   runtime is not one: AI implementation belongs to the separate `nawara-ia` repository and workstream, which establishes its own
   compatible logging and PII policy and uses this one as an integration reference, not as Core-owned implementation. A12.4.4 (planned
   as ai-service JSON logging) is therefore **NOT APPLICABLE**; the number is kept so the phase history stays readable. The committed
-  `apps/ai-service` scaffold is left as it is until a separate architecture task removes it.
+  `apps/ai-service` scaffold is left as it is until a separate architecture task removes it. (Later: removed by that task;
+  the boundary is [ADR-0055](../adr/0055-ai-service-repository-boundary.md).)
 
 ## 4. Evidence (A12.2, local)
 

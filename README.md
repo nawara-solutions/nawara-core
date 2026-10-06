@@ -15,7 +15,9 @@ App-specific logic (driving lessons, exam rules, course content — anything uni
 | **notification-service** | Generic email (Resend) and SMS (Twilio) delivery from events or a service-token API; templates, retries, ambiguity policy. Push is a later channel | Any app needing to notify users      |
 | **billing-service**      | What is owed: Product, Price, Invoice, PaymentRequest, and the Subscription/Entitlement model (one Subscription per Organization; see [ADR-0044](docs/adr/0044-subscription-entitlement-final-model.md)) | Any app needing to bill or check commercial access |
 | **payment-service**      | How money was paid and the payment state only — payments, attempts, gateway adapters, transactional outbox to RabbitMQ. Not the billing or accounting system. | Billing, or any app needing to charge users |
-| **ai-service**           | Generic LLM-backed service (chat, Q&A, content generation) — configurable knowledge base/prompt per calling app                                 | Any app needing AI features          |
+
+AI is not a Core service: the AI runtime (providers, models, prompts, inference) belongs to the separate future `nawara-ia`
+repository ([ADR-0055](docs/adr/0055-ai-service-repository-boundary.md)); an AI integration uses Core's platform contracts.
 
 Each service:
 
@@ -25,8 +27,8 @@ Each service:
 
 ## Tech Stack
 
-- **Language:** TypeScript (NestJS) for auth/notification/payment; Python (FastAPI) for ai-service (best ecosystem for LLM/RAG work)
-- **Databases:** PostgreSQL per service; Redis for caching/sessions; a vector DB (or `pgvector`) for ai-service's knowledge base
+- **Language:** TypeScript (NestJS) for the Core services
+- **Databases:** PostgreSQL per service; Redis for caching/sessions
 - **Messaging:** RabbitMQ for async events (e.g. `PaymentCompleted`, `UserRegistered`) that other services/apps can subscribe to
 - **Infra:** Docker Compose (local dev), Kubernetes (production, when needed)
 
@@ -39,8 +41,7 @@ nawara-core/
 │   ├── organization-service/   # implemented, not yet authoritative (auth-service still owns Company/Platform/Organization)
 │   ├── billing-service/        # implemented through Stage 12.7: catalog, invoices, Subscription/Entitlement
 │   ├── payment-service/        # implemented through Stage 12.7: settlement, attempts, outbox, real-broker publishing
-│   ├── notification-service/   # NestJS, Notification V1 (Stage 16, certified in 16.10)
-│   └── ai-service/             # FastAPI starter (/health only)
+│   └── notification-service/   # NestJS, Notification V1 (Stage 16, certified in 16.10)
 ├── libs/
 │   └── service-kit/            # technical foundations for new services (no business logic); see its README
 ├── infra/postgres/             # local PostgreSQL: one database + migrator/runtime roles per service, and a verify script
@@ -77,7 +78,6 @@ Other Nawara Solutions apps (including Nawara Drive) never import this repo. The
 POST https://api.nawara-solutions.com/auth/login
 POST https://api.nawara-solutions.com/payment/charge
 POST https://api.nawara-solutions.com/notification/send
-POST https://api.nawara-solutions.com/ai/chat
 ```
 
 ## Status
@@ -93,7 +93,7 @@ POST https://api.nawara-solutions.com/ai/chat
 Service detail (dated): auth-service is implemented and deployed. billing-service and payment-service are implemented through Stage 12.7
 (catalog, invoicing, settlement, Subscription/Entitlement, and a real-broker Payment→Billing integration — none of
 this is production-deployed yet). organization-service is implemented but not yet authoritative. notification-service
-is implemented and certified for V1 (Stage 16; production enablement has documented external prerequisites). ai-service
-remains a starter. See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md)
+is implemented and certified for V1 (Stage 16; production enablement has documented external prerequisites). There is
+no AI service in Core (ADR-0055). See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md)
 for the detailed implemented/designed/deferred breakdown (dated; re-verify against `docs/sdd/*` for the current state
 of any one service).

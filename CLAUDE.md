@@ -52,7 +52,8 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
 1. **auth-service** (NestJS/TypeScript) — registration, login, JWT + refresh tokens, role-based access control. Generic `User` concept only — no app-specific roles baked in beyond a generic `role: string`.
 2. **notification-service** (NestJS/TypeScript) — dispatches notifications based on generic events (`{userId, channel, template, data}`). No knowledge of what triggered the notification. Implemented and certified for email (Resend) and SMS (Twilio); push (FCM) is not built. Not in production.
 3. **payment-service** (NestJS/TypeScript) — payment processing only: how money was paid and the payment state (payments, attempts, cash workflow, refunds, webhooks). Gateway adapters (Flouci, Konnect, Paymee, Stripe) live behind a common interface so adding a gateway doesn't touch business logic. It is not the billing or accounting system (see below). Implemented (attempts, webhooks, outbox, reconciliation) with only the `test` provider; no real gateway adapter exists yet. Design: `docs/architecture/financial-architecture.md`. Not in production.
-4. **ai-service** (Python/FastAPI) — generic LLM-backed chat/Q&A/content-generation service. Each calling app supplies its own prompt config and knowledge base reference; this service has no built-in domain knowledge. **Today a scaffold only** (FastAPI `/health`); a build-out is FUTURE / IDEA, not committed V2 scope.
+
+**AI is not a Core service** (ADR-0055): the AI runtime (providers, models, prompts, inference and its deployment) belongs to the separate future `nawara-ia` repository. Core removed its `ai-service` scaffold; an AI integration uses Core's platform contracts (identity, authorization, scope, correlation, audit), each designed when a real requirement exists.
 
 **`organization-service`** (NestJS/TypeScript) — Company, Platform, Organization. **Implemented (ADR-0039 Stage 9; ownership and service-authorization mechanisms in Stage 10.1) but NOT yet authoritative:** auth-service still owns these entities, and authority is activated only by an explicit, gated operation that has not been performed anywhere (see `apps/organization-service/README.md` and `docs/architecture/stage-10/stage-10-1-implementation.md`). Service-token API with an explicit per-caller policy; never owns users or membership.
 
@@ -79,8 +80,7 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
 - Every service exposes interactive API docs via OpenAPI, mounted at `GET /docs`. For NestJS
   services, this is `@nestjs/swagger` (`DocumentBuilder` + `SwaggerModule.setup('docs', ...)` in
   `main.ts`) — every controller method gets `@ApiOperation`/`@ApiResponse`, every DTO field gets
-  `@ApiProperty`. FastAPI's `ai-service` gets this for free at the same path with no extra setup.
-- Python service: FastAPI, typed with Pydantic models.
+  `@ApiProperty`.
 - `libs/service-kit` holds **technical infrastructure only** shared by Core services (configuration, logging, request ids, errors, health, service authentication, database and migrations, outbox/inbox). It must never contain business logic; `npm run check:repo` enforces part of this.
 - `libs/audit-contract` holds the shared audit event contract and catalog used by Core producers and audit-service. There is no `libs/shared-types`. Services in this repo can import libs; external apps (Nawara Drive) only talk over HTTP, never via these libs directly.
 - Services consume `libs/service-kit` and `libs/audit-contract` through their built `dist/`: after changing either, build the libraries before running dependent tests. Stale `dist/` is never valid evidence.

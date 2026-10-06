@@ -37,7 +37,7 @@ and refund workflows; entitlements; the organization-service and how Auth refere
 ## 4. Deferred (consciously)
 
 Rate limiting and OpenAPI setup in the kit (ADR-0034 lists them; not yet built); dead-letter alerting (retry and replay tooling exist: M-07);
-outbox and inbox pruning; a CI job for ai-service (Python); formatting checks; deploy workflows for new services;
+outbox and inbox pruning; formatting checks; deploy workflows for new services;
 production database roles, backups and RabbitMQ; migrating auth-service onto the kit.
 
 ## 5. Deployment safety (fixes in this change)
