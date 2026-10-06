@@ -2,8 +2,9 @@
 # Started only through the opt-in overlay `docker-compose.observability.yml`; see docs/runbooks/local-observability.md.
 #
 # Targets are the eight Core services' kit metrics listeners (`METRICS_PORT` 9464) and, since A12.5.2, the RabbitMQ broker's native
-# endpoint (15692), all on the Compose network. None is published to the host. One job per service: `nawara_service_info{service}` is the only metric that names its service, so a
-# series is identified by its `job` and `instance`. No relabelling adds labels, and nothing here holds a credential.
+# endpoint (15692) and, since A12.5.3, postgres-exporter (9187), all on the Compose network. None is published to the host. One job
+# per service: `nawara_service_info{service}` is the only metric that names its service, so a series is identified by its `job` and
+# `instance`. No relabelling adds labels, and nothing here holds a credential.
 #
 # Another workload (for example `nawara-ia` or a product) is added later as its own job pointing at its own metrics endpoint.
 # Its code never comes into this repository.
@@ -56,3 +57,10 @@ scrape_configs:
       - source_labels: [__name__]
         regex: 'erlang_vm_allocators|erlang_vm_msacc_.+'
         action: drop
+
+  # V2 A12.5.3: PostgreSQL server-side metrics through postgres_exporter (9187, Compose network only). It connects as observability_monitor
+  # (pg_monitor) to the `postgres` maintenance database: server-wide and per-database statistics for the one shared server, with no
+  # per-table or per-index series and no query text. The application pool metrics (nawara_db_pool_*) stay with the services.
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
