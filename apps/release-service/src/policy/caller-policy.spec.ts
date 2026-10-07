@@ -56,3 +56,37 @@ describe('RELEASE_SERVICE_POLICY (ADR-0042 decision 2, ADR-0051 §8): per caller
     expect((err as Error).message).toMatch(message);
   });
 });
+
+describe('V2 A1.3: RELEASE_SERVICE_POLICY on the kit parser (ADR-0052, ADR-0056 §11)', () => {
+  // Raw JSON on purpose: a JavaScript object would collapse a repeated key before the parser ever saw it.
+  it.each([
+    ['a repeated caller key', '{"callers":{"drive-ci":{"products":{"drive":["release.publish"]}},"drive-ci":{"products":{"drive":["release.register","release.publish"]}}}}'],
+    ['a repeated product key', '{"callers":{"drive-ci":{"products":{"drive":["release.publish"],"drive":["release.register"]}}}}'],
+    ['a repeated entry property', '{"callers":{"drive-ci":{"products":{"drive":["release.publish"]},"products":{"booking":["release.register"]}}}}'],
+    ['a repeated top-level key', '{"callers":{},"callers":{"drive-ci":{"products":{"drive":["release.register"]}}}}'],
+  ])('refuses %s instead of keeping the last one', (_name, raw) => {
+    let err: unknown;
+    try {
+      ReleaseCallerPolicy.parse(raw, ['drive-ci']);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(/must not repeat a key/);
+    expect((err as Error).message).not.toContain('release.register');
+  });
+
+  it('whitespace-only is "no policy": empty when nothing is registered, refused when a caller is registered (no fallback)', () => {
+    expect(ReleaseCallerPolicy.parse(' \n\t ', []).allows('drive-ci', 'drive', 'release.register')).toBe(false);
+    expect(() => ReleaseCallerPolicy.parse(' \n\t ', ['drive-ci'])).toThrow(/required/);
+  });
+
+  it('the repository smoke document (scripts/smoke-core-image.sh) keeps exactly its authority', () => {
+    const p = ReleaseCallerPolicy.parse('{"callers":{"smoke-ci":{"products":{"smoke":["release.register","release.publish"]}}}}', ['smoke-ci']);
+    expect(p.allows('smoke-ci', 'smoke', 'release.register')).toBe(true);
+    expect(p.allows('smoke-ci', 'smoke', 'release.publish')).toBe(true);
+    expect(p.allows('smoke-ci', 'drive', 'release.register')).toBe(false);
+    expect(p.holds('smoke-ci', 'release.publish')).toBe(true);
+    expect(p.holds('other', 'release.register')).toBe(false);
+  });
+});
