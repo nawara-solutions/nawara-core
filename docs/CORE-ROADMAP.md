@@ -164,7 +164,12 @@ A12 Observability
   A12.10 production observability              not started (production scope)
 A13 Audit backup / restore                     ✅ certified (tooling, local, CI; production evidence gated)
 A14 Supply chain and build provenance          ✅ certified
-Next foundation: A1 Architecture (not started)
+A1 Architecture                                🔄 OPEN
+  A1.0  discovery                              ✅ complete
+  A1.1  decisions, ADR governance (Q-ADR-1)    ✅ complete locally; owner-approved
+  A1.2  consolidated conventions ADR           ✅ complete locally; owner-approved (ADR-0056 Accepted; ADR-0034 superseded)
+  A1.3  caller-policy migration                next (not started)
+  A1.4 – A1.5  guards, certification           not started
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -192,7 +197,12 @@ protection, full-SHA requirement) are not enabled. **V2 A12** (observability): t
 and PII contract (A12.2–A12.4) and the local collection layer (A12.5) are closed, and the **A12.6 local observability** layer (Grafana
 dashboards, Prometheus alert rules, the allowlisted self-scrape, integrated validation) is **formally certified and closed on `main`**
 (PR #217, [record](architecture/core-v2-a12-observability.md) §4R). It is LOCAL only: production observability (A12.10) has not
-started, and the scope of A12.7–A12.9 is not yet defined. The next foundation is **A1 Architecture**.
+started, and the scope of A12.7–A12.9 is not yet defined. **A1 Architecture** is open
+([record](architecture/core-v2-a1-architecture.md)): A1.0 discovery is complete and A1.1 has recorded the owner decisions OD-A1-1 to
+OD-A1-6 (an ADR is Accepted on the architecture owner's explicit approval; one consolidated conventions ADR will supersede ADR-0034;
+the five hand-written caller-policy parsers move to the kit; Auth code convergence belongs to A4). A1.2 has written the consolidated
+conventions ADR, [ADR-0056](adr/0056-core-architecture-and-api-conventions.md), Accepted by the architecture owner on 2026-10-07; it
+supersedes ADR-0034 and is the current Core architecture and API convention. Next is A1.3.
 
 ### Compatibility and safety rules for V1 work
 
@@ -433,3 +443,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A14: supply chain and build provenance (SHA-pinned actions, pinned bases, SBOM, GitHub artifact attestations, attestation-verifying deploys) | [`core-v2-a14-supply-chain.md`](architecture/core-v2-a14-supply-chain.md) |
 | V2 A13: Audit backup and restore coverage (O1–O6, the O3-B privilege finding, design, evidence) | [`core-v2-a13-audit-backup.md`](architecture/core-v2-a13-audit-backup.md) |
 | V2 A12: observability (kit metrics, logging and PII, local collection, Grafana dashboards, alert rules, integration, local certification) | [`core-v2-a12-observability.md`](architecture/core-v2-a12-observability.md) |
+| V2 A1: architecture (scope, A1.0 findings, owner decisions OD-A1-1 to OD-A1-6, the review of every Proposed ADR, A1 targets) | [`core-v2-a1-architecture.md`](architecture/core-v2-a1-architecture.md) |

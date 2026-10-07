@@ -33,9 +33,29 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 1. Copy [`template.md`](./template.md) to `NNNN-short-kebab-title.md` (next sequential number).
 2. Fill it in with status `Proposed`.
 3. Get it reviewed in the PR that introduces the decision (or the PR that first acts on it).
-4. On merge, set status to `Accepted`.
-5. If a later decision replaces this one, set this one's status to `Superseded by ADR-000X`
-   and link both directions.
+4. When the **architecture owner explicitly approves the decision**, set status to `Accepted`, with the date and where the approval is
+   recorded (for example "Accepted (2026-09-26, by the owner, Stage 19.1 decision D1)").
+5. If a later decision replaces this one, set this one's status to `Superseded by ADR-000X` (or `Partially superseded by ADR-000X`
+   for part of it) and link both directions.
+
+## Status lifecycle (Core V2 A1.1, owner decision OD-A1-1 / Q-ADR-1)
+
+| Status | Meaning |
+|---|---|
+| `Proposed` | written and reviewable; not yet approved. An ADR may already be implemented, merged and relied on while Proposed |
+| `Accepted` | the architecture owner has **explicitly approved** the decision, recorded in the ADR's status line. It does not imply that every consequence is implemented |
+| `Superseded by ADR-000X` / `Partially superseded by ADR-000X` | a later ADR replaces all or part of the decision; both ADRs link to each other so the history stays traceable |
+| `Deprecated` | the decision no longer applies and nothing replaces it |
+| `Rejected` | considered and not adopted |
+
+- **Merge is not approval.** Merging the PR that adds or acts on an ADR does not make it Accepted.
+- **Implementation is not approval.** Code, passing tests or a deployment that follow an ADR do not make it Accepted, and neither
+  does another ADR building on it. The `Deciders` field names who decides, not that they have approved.
+- **Supersession takes effect when the superseding ADR is Accepted.** Older ADRs already marked (partially) superseded or amended by
+  an ADR that is still `Proposed` (for example 0005 → 0026; 0009, 0016 → 0022; 0011, 0014 → 0023; 0001 → 0030; the 0004 and 0006
+  amendment banners → 0026) keep that marker as historical record; the supersession becomes formal when the newer ADR is Accepted.
+- Status changes are made one ADR at a time, never in bulk. The current review of every Proposed ADR is in the
+  [A1 record](../architecture/core-v2-a1-architecture.md) §3.
 
 ## Index
 
@@ -74,7 +94,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service is the intended future owner of Company, Platform and Organization (mechanism deferred) | Proposed |
 | [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
 | [0033](./0033-service-to-service-authentication-and-user-identity.md) | Service-to-service authentication, and how services identify the end user | Accepted (2026-09-26, Stage 19.1 D1) |
-| [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Proposed (error convention amended by 0054) |
+| [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Superseded by ADR-0056 (2026-10-07) |
 | [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed |
 | [0036](./0036-money-parties-and-source-references.md) | Money, explicit parties and generic source references | Proposed |
 | [0037](./0037-reliable-events-outbox-inbox.md) | Reliable events: RabbitMQ with a transactional outbox and an inbox | Proposed |
@@ -96,3 +116,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0053](./0053-core-v1-production-rabbitmq.md) | Core V1 production RabbitMQ: one private node on the VPS, per-service least-privilege identities, audit-service deployed before Auth relays | Accepted (2026-09-27, RB-1 approved; RB-2) |
 | [0054](./0054-localized-error-messages-and-stable-error-codes.md) | Error responses: a stable machine `code` and a server-localized `message` (EN / FR / AR) | Accepted (2026-10-01, Core V1 refactor R1; #161) |
 | [0055](./0055-ai-service-repository-boundary.md) | AI service repository boundary: the AI runtime lives outside `nawara-core` (future `nawara-ia`); the Core scaffold is removed | Accepted (2026-10-06, owner decision; #208) |
+| [0056](./0056-core-architecture-and-api-conventions.md) | Core architecture and API conventions: **the current Core convention** (consolidated; supersedes 0034) | Accepted (2026-10-07, by the architecture owner, A1.2) |
