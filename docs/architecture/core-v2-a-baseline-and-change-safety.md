@@ -299,9 +299,10 @@ locked; Final Core Validation absolute last.
 Appended. §5 and §7 list Q-ADR-1 as open (→ A1, owner decision). It is decided by A1.1, **OD-A1-1**: an ADR becomes Accepted on the
 architecture owner's explicit approval, not on merge or implementation ([A1 record](core-v2-a1-architecture.md) §2,
 [`docs/adr/README.md`](../adr/README.md) status lifecycle). The review of every Proposed ADR is in the A1 record §3; status changes stay
-one ADR at a time, as §7 says. A1.1 is complete locally; A1 stays open.
+one ADR at a time, as §7 says. At this checkpoint A1.1 was complete locally and A1 remained open; A1 was subsequently certified and
+closed by PR #222 (merge `321ec0bedccedb0bbee98b5c05c538ca69e5b1ca`; §14).
 
-## 14. Later status: A1 Architecture (2026-10-07; certification pending)
+## 14. Later status: A1 Architecture (2026-10-07; certified and closed)
 
 Appended. §5 (and the R11 follow-ups after it) hand several items to **A1 Architecture** (the architecture stage, not V2-A.1, which
 is the documentation formalization closed in §10). They have since been resolved through A1 Architecture
@@ -315,6 +316,22 @@ is the documentation formalization closed in §10). They have since been resolve
 - **Architecture enforcement:** caller-policy delegation of all seven consumers and the dependency direction are guarded by
   `check:repo` since A1.4, PR #221.
 
-A1.5 certification is complete locally and awaits owner review; **A1 Architecture is certified and closed only when its certification
-PR is merged.** Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6, F7 locked; Final Core Validation
+**A1 Architecture is CERTIFIED / CLOSED**: its certification pull request, #222, is merged (`321ec0bedccedb0bbee98b5c05c538ca69e5b1ca`).
+(This paragraph first said the certification awaited owner review; corrected with the A2 certification, a records correction only.)
+Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6, F7 locked; Final Core Validation
 absolute last.
+
+## 15. Later status: A2 Configuration and Secrets (2026-10-07; certification pending merge)
+
+Appended. §4 lists A2 as GREEN work. A2.0 to A2.5 are complete and on `main`
+([A2 record](core-v2-a2-configuration-and-secrets.md)): the kit's configuration primitives (PR #223), their adoption in the seven
+kit-based services (PR #224), targeted Auth hardening (PR #225), the ignore policy, environment reference and rotation runbook
+(PR #226) and permanent repository guards (PR #227). The certification baseline is `main` at
+`77f55d0065236a9660672d9cbe1cfd023b1c7f9b`, the PR #227 merge.
+
+The A2.6 certification (A2 record §10) found no A2-owned blocker; **A2 is certified and closed when its certification pull request is
+merged**, and is open until then. The certification is repository and local and has no production or G6 dependency. Activating A2 in
+the deployed services (Auth, Organization, Audit) stays separately authorized production work, with the documented pre-deploy
+configuration checks. Deferred with owners: Auth loader convergence and the JWT key ring (A4), generic CLI hygiene (A15), the
+Organization ownership tooling (A5 / F6 / F7), general secret scanning (A14). Unchanged: A3.6 and A3.7 deferred; A12.10 not started;
+G4 and G6 deferred; G7, F6, F7 locked; Final Core Validation absolute last.

@@ -164,13 +164,21 @@ A12 Observability
   A12.10 production observability              not started (production scope)
 A13 Audit backup / restore                     ✅ certified (tooling, local, CI; production evidence gated)
 A14 Supply chain and build provenance          ✅ certified
-A1 Architecture                                🔄 OPEN (certification PR pending)
+A1 Architecture                                ✅ CERTIFIED / CLOSED (PR #222, merge 321ec0b)
   A1.0  discovery                              ✅ closed
   A1.1  decisions, ADR governance (Q-ADR-1)    ✅ closed on main (PR #219)
   A1.2  consolidated conventions ADR           ✅ closed on main (PR #219; ADR-0056 Accepted; ADR-0034 superseded)
   A1.3  caller-policy migration                ✅ closed on main (PR #220)
   A1.4  architecture guards                    ✅ closed on main (PR #221)
-  A1.5  certification                          complete locally; owner review pending
+  A1.5  certification                          ✅ closed on main (PR #222)
+A2 Configuration & Secrets                     🔄 OPEN until the certification PR merges (then CERTIFIED / CLOSED)
+  A2.0  discovery, owner decisions             ✅ complete
+  A2.1  service-kit configuration hardening    ✅ closed on main (PR #223)
+  A2.2  seven-service adoption                 ✅ closed on main (PR #224)
+  A2.3  targeted Auth hardening                ✅ closed on main (PR #225)
+  A2.4  hygiene, environment reference, rotation ✅ closed on main (PR #226)
+  A2.5  repository guards                      ✅ closed on main (PR #227)
+  A2.6  certification                          certification PR pending merge
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -198,16 +206,22 @@ protection, full-SHA requirement) are not enabled. **V2 A12** (observability): t
 and PII contract (A12.2–A12.4) and the local collection layer (A12.5) are closed, and the **A12.6 local observability** layer (Grafana
 dashboards, Prometheus alert rules, the allowlisted self-scrape, integrated validation) is **formally certified and closed on `main`**
 (PR #217, [record](architecture/core-v2-a12-observability.md) §4R). It is LOCAL only: production observability (A12.10) has not
-started, and the scope of A12.7–A12.9 is not yet defined. **A1 Architecture** is open
-([record](architecture/core-v2-a1-architecture.md)): A1.0 discovery is complete and A1.1 has recorded the owner decisions OD-A1-1 to
+started, and the scope of A12.7–A12.9 is not yet defined. **A1 Architecture** is **certified and closed** (PR #222, merge
+`321ec0bedccedb0bbee98b5c05c538ca69e5b1ca`; [record](architecture/core-v2-a1-architecture.md)): A1.0 discovery is complete and A1.1 has recorded the owner decisions OD-A1-1 to
 OD-A1-6 (an ADR is Accepted on the architecture owner's explicit approval; one consolidated conventions ADR will supersede ADR-0034;
 the five hand-written caller-policy parsers move to the kit; Auth code convergence belongs to A4). A1.2 has written the consolidated
 conventions ADR, [ADR-0056](adr/0056-core-architecture-and-api-conventions.md), Accepted by the architecture owner on 2026-10-07; it
 supersedes ADR-0034 and is the current Core architecture and API convention. A1.3 moved the five hand-written caller-policy parsers to
 the kit's `parseCallerPolicy` (PR #220; Organization's stricter grammar by owner decision OD-A1-3a, with a runbook pre-deploy check
 before its first such deployment), and A1.4 enforces the caller-policy delegation of all seven consumers and the dependency direction
-in `check:repo` (PR #221). A1.5 certification is complete locally and awaits owner review; A1 Architecture closes only when its
-certification PR is merged ([record](architecture/core-v2-a1-architecture.md) §12).
+in `check:repo` (PR #221). A1.5 certified the stage; its certification PR (#222) is merged
+([record](architecture/core-v2-a1-architecture.md) §12). **A2 Configuration & Secrets**
+([record](architecture/core-v2-a2-configuration-and-secrets.md)): A2.1 hardened the kit's configuration primitives (PR #223), A2.2
+adopted them in the seven kit-based services (PR #224), A2.3 hardened Auth inside its own loader (PR #225; loader convergence stays
+A4), A2.4 fixed the ignore policy, the environment reference and the rotation runbook (PR #226), and A2.5 guards those invariants in
+`check:repo` (PR #227). The A2.6 certification (record §10) found no A2-owned blocker; **A2 is open until its certification PR is
+merged, and is certified and closed by that merge.** It is repository and local: activating A2 in the deployed services stays
+separately authorized production work, and A2 has no G6 dependency.
 
 ### Compatibility and safety rules for V1 work
 
@@ -449,3 +463,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A13: Audit backup and restore coverage (O1–O6, the O3-B privilege finding, design, evidence) | [`core-v2-a13-audit-backup.md`](architecture/core-v2-a13-audit-backup.md) |
 | V2 A12: observability (kit metrics, logging and PII, local collection, Grafana dashboards, alert rules, integration, local certification) | [`core-v2-a12-observability.md`](architecture/core-v2-a12-observability.md) |
 | V2 A1: architecture (scope, A1.0 findings, owner decisions OD-A1-1 to OD-A1-6, the review of every Proposed ADR, A1 targets) | [`core-v2-a1-architecture.md`](architecture/core-v2-a1-architecture.md) |
+| V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
