@@ -1,5 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { DbService, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
@@ -167,6 +170,44 @@ describeWithEnv('audit retention (real PostgreSQL 16, real roles)', ['TEST_DATAB
         expect(r.status).toBe(1);
         expect(r.stderr).toMatch(/retention (failed|refused)/);
         for (const secret of [new URL(d.appUrl).password, new URL(d.migratorUrl).password]) expect(r.stderr + r.stdout).not.toContain(secret);
+      }
+    });
+
+    it('V2 A15.1: RETENTION_DATABASE_URL is read through the kit reader (trimmed; NAME or NAME_FILE; both refused) and nothing else changes', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'audit-retention-'));
+      const run = (env: Record<string, string>, ...args: string[]) =>
+        spawnSync('node', ['dist/cli/retention.js', ...args], { cwd: ROOT, env: { PATH: process.env.PATH ?? '', ...env }, encoding: 'utf8' });
+      const secret = new URL(d.retentionUrl).password;
+      try {
+        const file = join(dir, 'retention-url');
+        writeFileSync(file, `${d.retentionUrl}\n`);
+        // By file, and by name with surrounding whitespace: the same run as before (a dry run with no policy purges nothing).
+        const accepted: Array<Record<string, string>> = [{ RETENTION_DATABASE_URL_FILE: file }, { RETENTION_DATABASE_URL: `  ${d.retentionUrl}\n` }];
+        for (const env of accepted) {
+          const ok = run(env, '--dry-run');
+          expect(ok.status).toBe(0);
+          expect(JSON.parse(ok.stdout.trim().split('\n').pop()!).summary).toMatchObject({ neverPurged: [...CATEGORIES], categories: [] });
+        }
+        const both = run({ RETENTION_DATABASE_URL: d.retentionUrl, RETENTION_DATABASE_URL_FILE: file }, '--dry-run');
+        expect(both.status).toBe(1);
+        expect(both.stderr).toBe('retention failed: set RETENTION_DATABASE_URL or RETENTION_DATABASE_URL_FILE, not both\n');
+        const unreadable = run({ RETENTION_DATABASE_URL_FILE: join(dir, 'missing') }, '--dry-run');
+        expect(unreadable.status).toBe(1);
+        expect(unreadable.stderr).toBe('retention failed: RETENTION_DATABASE_URL_FILE is set but the file cannot be read\n');
+        // Unchanged refusals: no URL (unset or whitespace only), a URL that is not PostgreSQL, a role that can write records (by file too).
+        const refused: Array<Record<string, string>> = [{}, { RETENTION_DATABASE_URL: '   ' }, { RETENTION_DATABASE_URL: 'mysql://x' }];
+        for (const env of refused) {
+          const r = run(env);
+          expect(r.status).toBe(1);
+          expect(r.stderr).toBe('retention failed: RETENTION_DATABASE_URL (the retention role) is required\n');
+        }
+        writeFileSync(file, d.appUrl);
+        const writer = run({ RETENTION_DATABASE_URL_FILE: file });
+        expect(writer.status).toBe(1);
+        expect(writer.stderr).toMatch(/^retention failed: retention refused/);
+        for (const r of [both, unreadable, writer]) for (const s of [secret, new URL(d.appUrl).password]) expect(r.stdout + r.stderr).not.toContain(s);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
     });
 

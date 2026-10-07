@@ -1,5 +1,8 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import request from 'supertest';
@@ -292,6 +295,51 @@ describeWithEnv('notification security and operations (real PostgreSQL)', ['TEST
       await drain(t.app.get(DeliveryWorker));
       const after = await promisify(execFile)(process.execPath, [cli, 'retire-check', 't1'], { env: { ...process.env, DATABASE_URL: db.url } });
       expect(JSON.parse(after.stdout)).toEqual({ keyId: 't1', safe: true });
+    });
+
+    it('V2 A15.1: the operator CLI reads DATABASE_URL and the active key id through the kit reader (NAME or NAME_FILE; both refused, exit 2)', () => {
+      const cli = fileURLToPath(new URL('../dist/cli/secret-keys.js', import.meta.url));
+      const dir = mkdtempSync(join(tmpdir(), 'notification-secret-keys-'));
+      const run = (env: Record<string, string>, ...args: string[]) => spawnSync(process.execPath, [cli, ...args], { env: { PATH: process.env.PATH ?? '', ...env }, encoding: 'utf8' });
+      const secret = new URL(db.url).password || 'no-password-to-leak';
+      try {
+        const urlFile = join(dir, 'database-url');
+        const idFile = join(dir, 'active-key-id');
+        writeFileSync(urlFile, `${db.url}\n`);
+        writeFileSync(idFile, 'active-1\n');
+        // By file, and by name with surrounding whitespace: same output and exit codes as before.
+        const accepted: Array<Record<string, string>> = [{ DATABASE_URL_FILE: urlFile }, { DATABASE_URL: `  ${db.url}\n` }];
+        for (const env of accepted) {
+          const usage = run(env, 'usage');
+          expect(usage.status).toBe(0);
+          expect(Array.isArray(JSON.parse(usage.stdout))).toBe(true);
+        }
+        // The active id is trimmed and may come from a file: retiring it is unsafe (exit 3), another id is safe (exit 0).
+        const activeIds: Array<Record<string, string>> = [{ NOTIFICATION_SECRET_ACTIVE_KEY_ID: ' active-1 ' }, { NOTIFICATION_SECRET_ACTIVE_KEY_ID_FILE: idFile }];
+        for (const env of activeIds) {
+          expect(run({ DATABASE_URL: db.url, ...env }, 'retire-check', 'active-1').status).toBe(3);
+          expect(run({ DATABASE_URL: db.url, ...env }, 'retire-check', 'unused-9').status).toBe(0);
+        }
+        const both = run({ DATABASE_URL: db.url, DATABASE_URL_FILE: urlFile }, 'usage');
+        expect(both.status).toBe(2);
+        expect(both.stderr).toBe('secret-keys: set DATABASE_URL or DATABASE_URL_FILE, not both\n');
+        const bothIds = run({ DATABASE_URL: db.url, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'active-1', NOTIFICATION_SECRET_ACTIVE_KEY_ID_FILE: idFile }, 'usage');
+        expect(bothIds.status).toBe(2);
+        expect(bothIds.stderr).toBe('secret-keys: set NOTIFICATION_SECRET_ACTIVE_KEY_ID or NOTIFICATION_SECRET_ACTIVE_KEY_ID_FILE, not both\n');
+        const unreadable = run({ DATABASE_URL_FILE: join(dir, 'missing') }, 'usage');
+        expect(unreadable.status).toBe(2);
+        expect(unreadable.stderr).toBe('secret-keys: DATABASE_URL_FILE is set but the file cannot be read\n');
+        // Unchanged: no URL (unset or whitespace only) is the usage line, exit 2.
+        const missing: Array<Record<string, string>> = [{}, { DATABASE_URL: '  ' }];
+        for (const env of missing) {
+          const r = run(env, 'usage');
+          expect(r.status).toBe(2);
+          expect(r.stderr).toMatch(/^usage: DATABASE_URL=… secret-keys usage/);
+        }
+        for (const r of [both, bothIds, unreadable]) expect(r.stdout + r.stderr).not.toContain(secret);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 
