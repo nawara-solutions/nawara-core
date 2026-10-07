@@ -16,8 +16,10 @@
   Service, Core · Messaging, Core · PostgreSQL), with the owner-approved Core · Overview outbox correction, MERGED / CLOSED** (PR #215,
   merge `e3b68dee818d05e271af90e9d787c74715edfb90`; §3H, §4M); A12.6.3: discovery (A12.6.3.0) approved, and **A12.6.3.1 alerting
   foundation (rule loading, allowlisted self-scrape, availability and Prometheus alerts)** and **A12.6.3.2 (the remaining ten
-  alerts)** owner-approved locally; **A12.6.3.3 focused runtime proof COMPLETE**, so **A12.6.3 is LOCALLY COMPLETE** (§3I, §4N–§4P;
-  not yet committed); **A12.6 OPEN**: A12.6.4 (integration / security validation) and A12.6.5 follow. Production
+  alerts)** owner-approved locally; **A12.6.3.3 focused runtime proof COMPLETE**; **A12.6.3 CLOSED ON MAIN** (PR #216, merge
+  `4ffcb0d4b5ced0174d76bcc7f8d9ce4fe0f4f120`; §3I, §4N–§4P). **A12.6.4 integrated local observability and security validation
+  owner-approved locally** (§4Q); **A12.6.5 local certification COMPLETE: A12.6 LOCAL OBSERVABILITY FORMALLY CERTIFIED LOCALLY** (§4R).
+  A12.6.4 and A12.6.5 are not yet on `main`: A12.6 is closed on `main` only once their pull request is merged. Production
   observability (A12.10) not started; G4 and G6 deferred, not certified; Final Core Validation not run. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; Prometheus, the PostgreSQL exporter and Grafana exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3, A12.6.1), and
@@ -457,7 +459,7 @@ same server's connection capacity), `template0` / `template1` excluded.
 
 **A12.6.3.0 owner decisions (discovery approved 2026-10-07):** Prometheus is the alert-rule authority. The self-scrape is narrowly
 allowlisted. Alertmanager stays DEFERRED (D6a): no `alerting:` block, and alerts are read in the Prometheus UI (`127.0.0.1:9090/alerts`)
-(Grafana's read-only view of the Prometheus rules is checked in the A12.6.3 runtime proof). Readiness stays dashboard only, with no alert. RabbitMQ per-queue / DLQ depth, outcome-series
+(Grafana's read-only view of the Prometheus rules was not exercised by A12.6.3, which ran without Grafana; A12.6.4 checked it: §4Q). Readiness stays dashboard only, with no alert. RabbitMQ per-queue / DLQ depth, outcome-series
 pre-creation and a SettleFailures alert are deferred. Grafana configuration is unchanged (no Grafana-managed alerting). Thresholds and
 `for` durations are LOCAL validation values; production thresholds and receivers are A12.10.
 
@@ -1049,6 +1051,127 @@ Same branch and working tree (`origin/main` `e3b68de`), 2026-10-07.
 
 **A12.6.3.3 COMPLETE. A12.6.3 LOCALLY COMPLETE** (A12.6.3.1–.3; not yet committed). A12.6 stays OPEN: A12.6.4 integration and security
 validation, A12.6.5.
+
+## 4Q. Evidence (A12.6.4, integrated local observability and security validation)
+
+Branch `feature/core-v2-a12-integration-validation` from `main` at `4ffcb0d` (PR #216 merge, containing `4bb7f50`), 2026-10-07. One
+campaign that proves only what the earlier evidence did not.
+- **Discovery (A12.6.4.0) change-impact result:** Grafana configuration, the exporter, `infra/postgres`, `infra/rabbitmq`, service-kit and
+  the services are unchanged since their evidence, which stands. Not repeated: the A12.6.1 hardening campaign, the A12.6.2 query
+  campaign, the A12.5.3 privilege drill, the A12.5.4 failure matrix and the A12.6.3 CoreServiceDown cycle.
+- **Preflight:** `check:repo` PASS, `test:repo` 104/104, promtool 16 rules SUCCESS.
+- **Project:** disposable Compose project `a1264-obs`, with fresh volumes and a scratch copy of `.env.example` (never the developer's
+  `.env`). Images built and service migrations run.
+- **Topology:** the complete overlay: PostgreSQL, RabbitMQ, the eight Core services, postgres-exporter, Prometheus and Grafana.
+- **Traffic:** a few harmless 4xx GET requests to two services, no 5xx.
+- **No additional failure injection was performed.**
+
+| Proof | Result |
+|---|---|
+| Integrated topology | 13 containers healthy; Prometheus job set **exactly** the 11 expected (8 Core, `rabbitmq`, `postgres`, `prometheus`), all `up`, 0 dropped targets (11/11 at 09:48:53Z) |
+| Rules | 4 groups (`core-messaging` 4, `core-services` 3, `infrastructure` 7, `prometheus` 2); 16 alerting, 0 recording, 16 unique; health `ok`; static label keys `severity` only; evaluation failures 0 and missed iterations 0 in every group; reload successful 1 |
+| Prometheus control plane | running config has no `alerting`, Alertmanager, remote write or credential (0 matches); `activeAlertmanagers` empty; admin, lifecycle and remote-write receiver flags `false`; admin API → "admin APIs disabled"; `/-/reload` → "Lifecycle API is not enabled"; host binding `127.0.0.1:9090` only |
+| Grafana smoke | `/api/health` ok; `127.0.0.1:3100` only; exactly one datasource (`nawara-prometheus`, prometheus, `http://prometheus:9090`), health OK; exactly the four dashboards in folder `nawara-core`; anonymous → 401, `admin/admin` → 401 |
+| **Gap 1: Overview outbox correction, live** | The three corrected queries (panels 19 and 20) through Grafana's datasource all keep the `and on (job, instance) (nawara_outbox_stats_timestamp_seconds > 0)` filter and have no `vector(`. They return exactly the six outbox services (auth, billing, file, organization, payment, release, each 0: real zeros, stats read). audit-service and notification-service do not appear (no outbox). The jobs with stats timestamp > 0 are the same six; none was still 0 (every relay read within seconds of start). The never-read case therefore cannot occur in a healthy running stack without restarting a service, so it stays proven by promtool (§4M correction note) |
+| **Gap 2: Grafana rule view** | **Supported.** `GET /api/prometheus/nawara-prometheus/api/v1/rules` (Grafana proxying the datasource's rules) → 200, the four groups, 16 alerting rules. Grafana-managed rules (`/api/prometheus/grafana/api/v1/rules`) → empty: no Grafana-managed alerting. Prometheus stays the rule authority |
+| Representative dashboard queries (through Grafana) | Service: `up{job="billing-service"}` 1; release-service request rate `4xx` ≈ 0.077/s. Messaging: consumers attached for the three queues (audit, billing, notification), each 1. PostgreSQL: `pg_up` 1; connections 9–10 against `max_connections` 100 and 3 reserved |
+| Cross-layer consistency (same live data, compared as sets) | **Outbox:** the Overview's corrected domain equals OutboxBacklogAging's domain (the runtime rule expression without its age threshold): 6 = 6 job/instance pairs. **Messaging:** the Messaging dashboard's consumer domain equals ConsumerDetached's: 3 = 3 job/instance/queue. **DB pool:** the Service dashboard's pool-waiting query over every `$job` equals DbPoolWaiting's: 8 = 8 job/instance/pool (`main`). No difference |
+| Cardinality | `prometheus_tsdb_head_series` 1,868 = stored series. Per job: postgres 959, rabbitmq 266, billing 92, release 91, auth / file / organization / payment 74, audit / notification 71, prometheus **22**. Top families: `nodejs_gc_duration_seconds_bucket` 168, `pg_locks_count` 108, `nawara_event_publish_duration_seconds_bucket` 104, `pg_stat_activity_count` 72, `pg_stat_activity_max_tx_duration` 72, `pg_roles_connection_limit` 35, … |
+| Cardinality vs the 1,809 reference | +59, all bounded and activity-dependent: +34 HTTP series (17 each for the two services that received traffic, one route each; the other six have none); Node GC series per GC kind (bounded at 3 kinds × 9 = 27 per job, now present on all eight); session-dependent PostgreSQL activity series. No unexpected family, no unbounded growth. Local evidence only, not production sizing |
+| Labels and sensitive data | 52 label names. Beyond the kit / exporter / broker labels already documented, the extras are bounded build and identity information (one value each: versions, `goos`, `revision`, RabbitMQ cluster and node identity), exporter and broker internals (`collector` 13, `registry`, `content_type`, `encoding`, the exporter's own handler `code` 3, RabbitMQ's fixed Mnesia `table` 22 and memory `usage` 7), PostgreSQL role names (`rolname` 35, all built-in `pg_*` or service roles, as documented in A12.5.3) and `server` (1 value, `host:port`). Value counts: route 2, queue 3, datname 12, usename 8, application_name 6, instance 11, rule_group 4. Pattern scan (email, UUID, query string, URL, long digit runs, credential words) over route / queue / instance / application_name / usename / datname / rule_group / service / check: **0 hits**; every route a template. No `query`, `statement`, `payload`, `header`, `authorization`, `email`, id, `url` or `vhost` label; no `pg_stat_statements*`, `pg_stat(io)_user_(tables\|indexes)*` or `rabbitmq_detailed_*` family (581 families in total) |
+| RabbitMQ boundary | scrape URL `http://rabbitmq:15692/metrics` (aggregate; not `/metrics/detailed` or `/metrics/per-object`); 0 `rabbitmq_*` series with a `queue` or `vhost` label; the three alarm families present, one series each, all 0. Nothing triggered |
+| PostgreSQL boundary | `up{job="postgres"}` 1, `pg_up` 1; 0 `pg_*` series with a `query` label; no statement or per-table / per-index family; the alert families present (`numbackends` 12, `max_connections` 1, `superuser_reserved_connections` 1, `deadlocks` 12, `pg_stat_activity_count` 72). The monitoring-role privilege drill was **not** repeated: A12.5.3 stands |
+| Exposure and hardening | host bindings all `127.0.0.1` (application ports 3000–3007, Grafana 3100, Prometheus 9090, PostgreSQL 5433, RabbitMQ 5672 / 15672); 0 non-loopback bindings; 9464, 15692 and 9187 not published (Compose-network only). Prometheus, Grafana and postgres-exporter: read-only root, `CapDrop ALL`. No container privileged; no Docker socket mounted. Prometheus mounts `prometheus.yml` and `rules` read-only (tests not mounted); Grafana mounts its provisioning and dashboards read-only. The application, database and broker containers keep the unchanged local-development settings |
+| Healthy-stack alerts | at 09:56:00Z, 7 minutes after full initialization (past OutboxStatsStale's 300 s grace plus `for: 2m`): `count(ALERTS)` none; `max_over_time(count(ALERTS)[8m:30s])` empty, so **no alert was pending or firing at any point**; no outbox stats still 0; 11/11 targets up |
+| Cleanup | the project's 13 containers, network, three volumes (`a1264-obs_*`) and nine built images removed, plus the scratch env and wrapper. **No prune.** Containers, volumes and networks identical to the pre-campaign snapshot. Earlier retained evidence volumes, the developer's own volume and unrelated containers are preserved |
+
+**A12.6.4 COMPLETE LOCALLY** (not yet committed). A12.6 stays OPEN until A12.6.5, the local certification, which consumes A12.5 and
+A12.6.1–A12.6.4 evidence and inexpensive static checks; it does not rerun this campaign. Local evidence only: it certifies no
+production Prometheus, Grafana, thresholds, receivers, retention, host monitoring, production database or broker monitoring, backup
+observability or live alerting (A12.10, G4).
+
+## 4R. A12.6 local certification (A12.6.5)
+
+**A12.6 LOCAL OBSERVABILITY — FORMALLY CERTIFIED LOCALLY.** Branch `feature/core-v2-a12-integration-validation` at `main` `4ffcb0d`,
+2026-10-07. This is a certification from accumulated evidence: **no runtime campaign was repeated**. No Docker stack was started, no
+alert was triggered, no cardinality was re-measured, and no Grafana, RabbitMQ or PostgreSQL check was rerun.
+- **Consumed:** A12.3 (§3B, §4B), A12.4 (§3C, §4C–§4F), A12.5.1–A12.5.5 (§3D–§3F, §4G–§4K), A12.6.0 (§3G, D6a), A12.6.1 (§3G, §4L),
+  A12.6.2 (§3H, §4M with its Overview correction), A12.6.3 (§3I, §4N–§4P; PR #216) and A12.6.4 (§4Q).
+- **Static checks at certification:** `check:repo`, `test:repo` (104/104), `scripts/check-prometheus-rules.sh` (16 rules) and the
+  documentation links.
+
+**Local certified ≠ production monitoring certified.** This certifies the LOCAL, opt-in observability layer that A12.6 built on the
+A12.5 collection layer:
+- Grafana (`127.0.0.1:3100`, one Prometheus datasource) and its four provisioned dashboards;
+- the 16 Prometheus alert rules evaluated by Prometheus;
+- the allowlisted Prometheus self-scrape;
+- their integration with the eight Core services, RabbitMQ and PostgreSQL;
+- the security, exposure and data-boundedness properties below;
+- the repository guards that keep them so.
+
+It certifies nothing in production (A12.10), G4, G6 or Final Core Validation.
+
+| Requirement | Evidence | Result |
+|---|---|---|
+| **Collection:** the eight Core services are observable | A12.5 (§4G, §4J, §4K); A12.6.4: 8/8 Core targets up together with everything else | PASS |
+| **Infrastructure metrics:** RabbitMQ and PostgreSQL observability | A12.5.2 / .3 / .4 (§4H–§4J); A12.6.4: `rabbitmq` and `postgres` targets up, `pg_up` 1, the alert families present | PASS |
+| **Prometheus:** integrated collection, rules and self-observability | A12.5 (§4G, §4K); A12.6.3 (§4N–§4P: 16 rules load, self-scrape allowlist, 22 series); A12.6.4: exactly 11 jobs all up, 4 groups / 16 rules healthy, 0 evaluation failures, 0 missed iterations, reload successful | PASS |
+| **Grafana:** local operator visualisation through one Prometheus datasource | A12.6.1 (§4L: hardening, authentication, outbound, datasource, provisioning, recreation); A12.6.2 (§4M); A12.6.4: healthy, exactly one datasource `nawara-prometheus` (OK), 401 for anonymous and `admin/admin`, read-only rule view of the 16 Prometheus rules | PASS |
+| **Dashboards:** Overview, Service, Messaging and PostgreSQL views | A12.6.1 (Overview) and A12.6.2 (§4M: every panel query, variables, no-data semantics); A12.6.4: the four uids provisioned, one representative live query per dashboard | PASS |
+| **Outbox initialisation semantics:** uninitialised gauges never shown as a healthy zero | A12.6.2 correction (§3H, §4M: promtool synthetic proof, old expression fails, corrected passes; guard); A12.6.3 (rules and guard carry the same filter; OutboxStatsStale covers never-read); A12.6.4 (§4Q: live, the corrected queries return exactly the six initialised outbox services, none for audit / notification) | PASS |
+| **Alerting:** bounded local catalog with deterministic semantics | A12.6.3 (§3I, §4N, §4O): 16 alerts in 4 groups, 18 promtool test groups, mutation negative controls, `checkAlertRules` (exact catalog, bounded labels, selection-only matchers, HTTP floor, single reviewed `label_replace`) | PASS |
+| **Runtime alert pipeline:** a real target failure reaches pending / firing and recovers | A12.6.3.3 (§4P): `release-service` stopped → CoreServiceDown pending → firing after `for: 2m` → service restored → inactive; only that alert | PASS |
+| **Healthy integrated topology:** no spurious alerts | A12.6.4 (§4Q): the complete stack healthy for more than 7 minutes (past OutboxStatsStale's grace + `for`), `count(ALERTS)` 0, no pending or firing alert in the window | PASS |
+| **Cross-layer consistency:** dashboard and alert domains agree | A12.6.4 (§4Q): outbox 6 = 6, messaging 3 = 3, DB pool 8 = 8 (same live data, compared as sets) | PASS |
+| **Cardinality:** local metrics bounded and explained | A12.5 (§3E, §3F, §4J: about 1,837, drops and disabled collectors); A12.6.3.3 (22 self-scrape series: 1,087 endpoint samples → 17 kept + 5 scrape series); A12.6.4: **1,868** series, self-scrape **22**, the difference attributed to bounded activity series | PASS |
+| **Sensitive-data safety:** no sensitive or unbounded application data in metrics or alerts | A12.2a / A12.3 closed label policy (§3A, §3B), A12.4 logging and PII contract (§3C); A12.5.4 label review (§4J); dashboard and rule guards (§3H, §3I); A12.6.4 (§4Q): 52 label names all bounded, 0 pattern hits (email, UUID, query string, URL, long digits, credential words), no forbidden label or family; alert labels only `severity` plus bounded series labels | PASS |
+| **Exposure:** monitoring endpoints exposed as intended | A12.5 (§4J), A12.6.1 (§4L), A12.6.3.3 (§4P), A12.6.4 (§4Q): host bindings loopback only (Prometheus 9090, Grafana 3100); 9464 / 15692 / 9187 on the Compose network only; observability containers read-only, `CapDrop ALL`, not privileged, no Docker socket; Prometheus admin, lifecycle and remote-write receiver off; no Alertmanager or remote write | PASS |
+| **Repository enforcement:** future changes are guarded | `check:repo` (`checkLocalObservability`, `checkAlertRules`, `checkLocalGrafana`, `checkDashboardSemantics`), `test:repo` 104/104, promtool `check config` / `check rules` / `test rules` in Core CI (`repository checks`, required by `core-ci-passed`) | PASS |
+
+**Cardinality note.** 1,868 series (22 of them the Prometheus self-scrape) is bounded LOCAL evidence for one development stack with light
+traffic. It is not a production capacity, retention or sizing figure (A12.10).
+
+**Security and privacy summary.**
+- Metrics come from closed label sets: route templates, code-declared queues and pools, fixed outcomes. The exporter exports no query
+  text and no per-table or per-index data; the broker endpoint is aggregate only.
+- Alerts carry only `severity` and bounded series labels, with static annotations.
+- Grafana and Prometheus are loopback-only, authenticated (Grafana) or administratively inert (Prometheus), read-only and
+  capability-free. Their configuration holds no credential.
+- The monitoring role is least-privilege (`pg_monitor`), proven by A12.5.3's 23 refusals; its configuration has not changed since.
+
+**Deferred and out of scope** (preserved; none is waived):
+
+| Item | Classification |
+|---|---|
+| Alertmanager | DEFERRED (D6a: until a concrete receiver exists) |
+| External alert receivers, production alert routing | PRODUCTION-SCOPE (A12.10) |
+| Production thresholds (the A12.6.3 thresholds are LOCAL validation values) | PRODUCTION-SCOPE (A12.10) |
+| Production retention and capacity tuning | PRODUCTION-SCOPE (A12.10) |
+| RabbitMQ per-queue metrics | DEFERRED (cardinality decision) |
+| DLQ-depth alerting, generic broker backlog alert | DEFERRED (needs per-queue metrics) |
+| SettleFailures alert | DEFERRED |
+| Outcome-series pre-creation (kit change) | DEFERRED (MessagesDeadLettered keeps its documented residual limits) |
+| Long-running PostgreSQL transaction alert | DEFERRED |
+| TSDB failure alerts | DEFERRED |
+| PostgreSQL query latency, `pg_stat_statements`, blocker → waiter visibility | DEFERRED (separate PostgreSQL decision) |
+| Readiness alert | NOT REQUIRED FOR LOCAL A12.6 CERTIFICATION (owner decision: readiness is dashboard only) |
+| Prometheus self-scrape-down alert | NOT REQUIRED FOR LOCAL A12.6 CERTIFICATION (rejected: a down Prometheus evaluates nothing) |
+| Host and container monitoring | PRODUCTION-SCOPE (A12.10) |
+| Backup observability | PRODUCTION-SCOPE (A12.10) |
+| Production Prometheus / Grafana deployment, credentials, monitoring role, operational access | PRODUCTION-SCOPE (A12.10) |
+| Production PostgreSQL and RabbitMQ monitoring | PRODUCTION-SCOPE (A12.10) |
+| Live operational monitoring proof | G4 (deferred) |
+
+**Boundaries.**
+- A12.6 local certification ≠ A12.10 production observability. A12.10 is NOT STARTED, and decides deployment topology, thresholds,
+  receivers and routing, retention, credentials, production database and broker monitoring, capacity and operational access.
+- A12.6 does not certify G4, which stays deferred. A12.6 has no dependency on G6, G7, F6 or F7: G6 is deferred; G7, F6 and F7 are locked.
+- **FCV NOT RUN — ABSOLUTE LAST**, after the planned Core and platform work, the required production gates and the required service work.
+  This certification is not permission to run it.
+
+**Status.** A12.6.0 CLOSED; A12.6.1 CLOSED; A12.6.2 CLOSED; A12.6.3 CLOSED ON MAIN (PR #216); A12.6.4 OWNER APPROVED LOCALLY; **A12.6.5
+LOCAL CERTIFICATION COMPLETE**; **A12.6 FORMALLY CERTIFIED LOCALLY**. The A12.6.4 evidence and this certification are not yet
+committed, so A12.6 is not yet closed on `main`.
 
 ## 5. Open
 
