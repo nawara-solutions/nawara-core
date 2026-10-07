@@ -7,12 +7,13 @@
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile db up -d --wait postgres rabbitmq
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml --profile db up -d \
 #     auth-service billing-service payment-service organization-service notification-service file-service audit-service \
-#     release-service prometheus
-#   open http://127.0.0.1:9090/targets
+#     release-service postgres-exporter prometheus grafana
+#   open http://127.0.0.1:9090/targets      # Prometheus
+#   open http://127.0.0.1:3100              # Grafana (admin / GRAFANA_ADMIN_PASSWORD from .env)
 #
 # Each listener binds 0.0.0.0:9464 INSIDE its container, so Prometheus can reach `<service>:9464`. It is never published to the
-# host: only the application ports (unchanged) and Prometheus (127.0.0.1:9090) are. See docs/runbooks/local-observability.md.
-# No Grafana, dashboards or alerts before A12.6. RabbitMQ broker metrics (A12.5.2) need no change here: the image already serves them
+# host: only the application ports (unchanged), Prometheus (127.0.0.1:9090) and Grafana (127.0.0.1:3100, A12.6.1) are. See
+# docs/runbooks/local-observability.md. No alert rules before A12.6.3; Alertmanager is deferred until a concrete receiver exists. RabbitMQ broker metrics (A12.5.2) need no change here: the image already serves them
 # on 15692 inside the network. PostgreSQL server metrics (A12.5.3) come from postgres-exporter, through a least-privilege role that the
 # init script creates only when this file passes MONITORING_PASSWORD, i.e. when the local data volume is first initialised in this mode
 # (for an existing volume, see docs/runbooks/local-observability.md).
@@ -88,6 +89,52 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
+
+  # V2 A12.6.1: LOCAL Grafana (OSS image), reading Prometheus only. Provisioned from the repository at every start: one datasource,
+  # the "Nawara Core" folder and its dashboards. Runtime state (its SQLite database, sessions) lives in tmpfs and is lost on
+  # recreation, which restores exactly the committed baseline. No anonymous access, no sign-up, no default admin password, no plugin
+  # installation and no call home (usage reporting, update checks, news feed, Gravatar, feedback links, plugin preinstall / update).
+  grafana:
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3100:3000'
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?copy .env.example to .env}
+      GF_SECURITY_DISABLE_GRAVATAR: 'true'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_AUTH_BASIC_ENABLED: 'true'
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_USERS_ALLOW_ORG_CREATE: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_ANALYTICS_FEEDBACK_LINKS_ENABLED: 'false'
+      GF_NEWS_NEWS_FEED_ENABLED: 'false'
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: 'false'
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false'
+      GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED: 'true'
+      GF_LOG_MODE: console
+    # Only the two provisioning kinds used are mounted; the image's other (empty) provisioning directories stay as shipped.
+    volumes:
+      - ./infra/observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    tmpfs:
+      - /var/lib/grafana:uid=472,gid=0,mode=0770
+      - /tmp:uid=472,gid=0,mode=0770
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/api/health']
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
 volumes:
   # Local, disposable time-series data (at most 3 days / 1 GB). Remove it with `docker volume rm` when no longer useful.

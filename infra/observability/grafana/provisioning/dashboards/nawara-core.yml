@@ -1,0 +1,17 @@
+# V2 A12.6.1: the repository is the source of truth for dashboards. They load from committed JSON (infra/observability/grafana/
+# dashboards/nawara-core), cannot be deleted or saved from the UI, and are restored as-is on every start. Grafana runtime state is
+# ephemeral; edit locally, export the JSON, commit it.
+apiVersion: 1
+
+providers:
+  - name: nawara-core
+    orgId: 1
+    folder: Nawara Core
+    folderUid: nawara-core
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/dashboards/nawara-core
+      foldersFromFilesStructure: false

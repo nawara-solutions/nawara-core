@@ -581,6 +581,122 @@ export function checkLocalObservability(base, overlay, prometheus) {
   return problems;
 }
 
+/**
+ * V2 A12.6.1: the LOCAL Grafana in docker-compose.observability.yml and its repository provisioning. `overlay` is the overlay text,
+ * `datasources` / `providers` the provisioning YAML, `dashboards` a map of repository path to dashboard JSON text, `envExample` the
+ * .env.example text. Grafana:
+ * - runs the pinned OSS image, published on 127.0.0.1:3100 only, read-only, all capabilities dropped, `no-new-privileges`, its runtime
+ *   state in tmpfs (no volume for /var/lib/grafana) and its provisioning mounted read-only;
+ * - has no anonymous access, no sign-up, and an admin password interpolated from the environment (never written out, never `admin`);
+ * - never calls home and installs nothing: reporting, update checks, news, Gravatar, feedback links, plugin preinstall / auto-update /
+ *   admin are off, and no plugin is requested;
+ * - has exactly one datasource: Prometheus, uid `nawara-prometheus`, `http://prometheus:9090`, proxy access, no credential.
+ * Dashboards are deterministic, reference that datasource by uid only, select series by `job` (only `nawara_service_info` carries
+ * `service`), never fabricate zeroes with `or vector(0)`, and read readiness only where it ran (the kit exports 0 before the first run).
+ */
+export const GRAFANA_DATASOURCE_UID = 'nawara-prometheus';
+export const GRAFANA_FOLDER = 'Nawara Core';
+const GRAFANA_REQUIRED_ENV = {
+  GF_AUTH_ANONYMOUS_ENABLED: 'false',
+  GF_USERS_ALLOW_SIGN_UP: 'false',
+  GF_USERS_ALLOW_ORG_CREATE: 'false',
+  GF_SECURITY_DISABLE_GRAVATAR: 'true',
+  GF_ANALYTICS_REPORTING_ENABLED: 'false',
+  GF_ANALYTICS_CHECK_FOR_UPDATES: 'false',
+  GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false',
+  GF_ANALYTICS_FEEDBACK_LINKS_ENABLED: 'false',
+  GF_NEWS_NEWS_FEED_ENABLED: 'false',
+  GF_PLUGINS_PREINSTALL_DISABLED: 'true',
+  GF_PLUGINS_PREINSTALL_AUTO_UPDATE: 'false',
+  GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false',
+};
+const GRAFANA_FORBIDDEN_ENV = ['GF_INSTALL_PLUGINS', 'GF_PLUGINS_PREINSTALL', 'GF_PLUGINS_PREINSTALL_SYNC', 'GF_PLUGINS_PREINSTALL_ASYNC', 'GF_AUTH_ANONYMOUS_ORG_ROLE',
+  'GF_SECURITY_ADMIN_PASSWORD__FILE', 'GF_AUTH_DISABLE_LOGIN_FORM', 'GF_AUTH_PROXY_ENABLED'];
+const INTERPOLATED = /^\$\{[A-Z0-9_]+(?::?[?-][^}]*)?\}$/;
+const DASHBOARD_VOLATILE_KEYS = ['id', 'version', 'iteration', 'created', 'updated', '__inputs', '__requires', '__elements'];
+function walkJson(node, visit, path = '') {
+  if (Array.isArray(node)) { node.forEach((v, i) => walkJson(v, visit, `${path}[${i}]`)); return; }
+  if (node === null || typeof node !== 'object') return;
+  for (const [k, v] of Object.entries(node)) { visit(k, v, `${path}${path ? '.' : ''}${k}`); walkJson(v, visit, `${path}${path ? '.' : ''}${k}`); }
+}
+export function checkLocalGrafana(overlay, datasources, providers, dashboards, envExample) {
+  const problems = [];
+  const where = 'docker-compose.observability.yml: grafana';
+  let o, ds, pv;
+  try { o = parse(overlay); ds = parse(datasources); pv = parse(providers); } catch (e) { return [`Grafana configuration is not valid YAML: ${e.message}`]; }
+  const g = o?.services?.grafana;
+  if (!g) problems.push(`${where}: no grafana service`);
+  else {
+    if (!String(g.image ?? '').startsWith('grafana/grafana:') || !PINNED_IMAGE.test(String(g.image))) problems.push(`${where} must run grafana/grafana:<tag>@sha256:<64 hex> (the OSS image, pinned)`);
+    const ports = publishedPorts(g);
+    if (ports.length !== 1 || ports[0].hostIp !== '127.0.0.1' || ports[0].published !== '3100' || ports[0].target !== '3000') problems.push(`${where} must publish exactly 127.0.0.1:3100:3000`);
+    if (g.read_only !== true) problems.push(`${where} must be read_only`);
+    if (!asArray(g.cap_drop).includes('ALL')) problems.push(`${where} must drop all capabilities`);
+    if (!asArray(g.security_opt).some((x) => /^no-new-privileges(:true)?$/.test(String(x)))) problems.push(`${where} must set no-new-privileges`);
+    if (g.user !== undefined) problems.push(`${where} must keep the image's non-root user (no user override)`);
+    if (g.privileged || g.network_mode === 'host' || g.pid === 'host' || g.cap_add) problems.push(`${where} must not be privileged, use the host network or PID namespace, or add capabilities`);
+    for (const v of asArray(g.volumes)) {
+      const text = typeof v === 'object' ? `${v.source}:${v.target}${v.read_only ? ':ro' : ''}` : String(v);
+      const [source = '', target = ''] = text.split(':');
+      if (!source.startsWith('./')) problems.push(`${where} volume ${text} must be a repository bind mount (runtime state is tmpfs, never a volume)`);
+      if (!text.endsWith(':ro')) problems.push(`${where} volume ${text} must be read-only`);
+      if (target === '/var/lib/grafana' || text.includes('docker.sock')) problems.push(`${where} volume ${text} is not allowed`);
+    }
+    if (!asArray(g.tmpfs).some((t) => String(typeof t === 'object' ? t.target : t).split(':')[0] === '/var/lib/grafana')) problems.push(`${where} must keep /var/lib/grafana in tmpfs`);
+    const env = g.environment && typeof g.environment === 'object' && !Array.isArray(g.environment) ? g.environment : null;
+    if (!env) problems.push(`${where} environment must be a map`);
+    else {
+      for (const [k, v] of Object.entries(GRAFANA_REQUIRED_ENV)) if (String(env[k]) !== v) problems.push(`${where} must set ${k}=${v}`);
+      for (const k of GRAFANA_FORBIDDEN_ENV) if (k in env) problems.push(`${where} must not set ${k}`);
+      if (!INTERPOLATED.test(String(env.GF_SECURITY_ADMIN_PASSWORD ?? ''))) problems.push(`${where} GF_SECURITY_ADMIN_PASSWORD must be interpolated from the environment, never written out`);
+      for (const k of Object.keys(env)) if (/^GF_DATABASE_|^GF_REMOTE_CACHE_|^GF_UNIFIED_ALERTING_|^GF_SMTP_/.test(k)) problems.push(`${where} must not set ${k}`);
+    }
+  }
+  const passwordLine = /^GRAFANA_ADMIN_PASSWORD=(.*)$/m.exec(envExample ?? '');
+  if (!passwordLine) problems.push('.env.example: no GRAFANA_ADMIN_PASSWORD placeholder');
+  else if (passwordLine[1].trim() === '' || passwordLine[1].trim() === 'admin') problems.push('.env.example: GRAFANA_ADMIN_PASSWORD must be a non-empty placeholder other than admin');
+
+  const list = asArray(ds?.datasources);
+  if (list.length !== 1) problems.push(`infra/observability/grafana/provisioning/datasources: exactly one datasource is allowed (found ${list.length})`);
+  for (const d of list) {
+    if (d?.type !== 'prometheus' || d?.uid !== GRAFANA_DATASOURCE_UID || d?.url !== 'http://prometheus:9090' || d?.access !== 'proxy') {
+      problems.push(`infra/observability/grafana/provisioning/datasources: the datasource must be type prometheus, uid ${GRAFANA_DATASOURCE_UID}, url http://prometheus:9090, access proxy`);
+    }
+    for (const k of ['basicAuth', 'basicAuthUser', 'user', 'password', 'secureJsonData', 'withCredentials', 'database']) if (d && k in d) problems.push(`infra/observability/grafana/provisioning/datasources: ${k} is not allowed (Prometheus needs no credential)`);
+  }
+  if (asArray(ds?.deleteDatasources).length) problems.push('infra/observability/grafana/provisioning/datasources: deleteDatasources is not used');
+  const provs = asArray(pv?.providers);
+  if (provs.length !== 1 || provs[0]?.folder !== GRAFANA_FOLDER || provs[0]?.type !== 'file' || provs[0]?.allowUiUpdates !== false || provs[0]?.disableDeletion !== true) {
+    problems.push(`infra/observability/grafana/provisioning/dashboards: one file provider, folder "${GRAFANA_FOLDER}", allowUiUpdates false, disableDeletion true`);
+  }
+
+  const uids = new Map();
+  for (const [file, text] of Object.entries(dashboards)) {
+    let d;
+    try { d = JSON.parse(text); } catch (e) { problems.push(`${file}: not valid JSON (${e.message})`); continue; }
+    if (typeof d?.uid !== 'string' || !/^[a-z0-9-]{1,40}$/.test(d.uid)) problems.push(`${file}: a fixed lowercase uid is required`);
+    else if (uids.has(d.uid)) problems.push(`${file}: uid ${d.uid} is also used by ${uids.get(d.uid)}`);
+    else uids.set(d.uid, file);
+    for (const k of DASHBOARD_VOLATILE_KEYS) if (d && k in d) problems.push(`${file}: top-level "${k}" is not allowed (dashboards are deterministic: no numeric id, version, timestamp or export inputs)`);
+    walkJson(d, (k, v, path) => {
+      if (k === 'datasource' && v !== null && !(typeof v === 'object' && v.type === 'prometheus' && v.uid === GRAFANA_DATASOURCE_UID)) {
+        problems.push(`${file}: ${path} must be {"type":"prometheus","uid":"${GRAFANA_DATASOURCE_UID}"}`);
+      }
+      if (k === 'expr' && typeof v === 'string') {
+        if (/\bor\s+vector\s*\(/.test(v)) problems.push(`${file}: ${path} uses "or vector(...)" (a fabricated value hides no data)`);
+        if (/nawara_readiness_/.test(v) && !/nawara_readiness_last_run_timestamp_seconds(\{[^}]*\})?\s*>\s*0\b/.test(v)) {
+          problems.push(`${file}: ${path} reads readiness without "nawara_readiness_last_run_timestamp_seconds > 0" (before the first /ready run the kit exports 0: "not run" must never read as not ready)`);
+        }
+        if (/\bservice\s*(=~|!~|!=|=)/.test(v) || /\b(by|without)\s*\([^)]*\bservice\b/.test(v)) {
+          if (!v.includes('nawara_service_info')) problems.push(`${file}: ${path} selects on "service"; use "job" (only nawara_service_info carries service)`);
+        }
+      }
+    });
+  }
+  if (!uids.has('nawara-core-overview')) problems.push('infra/observability/grafana/dashboards: the Core overview dashboard (uid nawara-core-overview) is missing');
+  return problems;
+}
+
 export const CI_AGGREGATE = 'core-ci-passed';
 const AGGREGATE_RESULT_RULE = 'all(.[]; .result == "success")';
 

@@ -1,0 +1,16 @@
+# V2 A12.6.1: LOCAL Grafana's only datasource. Grafana reads metrics through Prometheus and nothing else: no PostgreSQL, RabbitMQ or
+# Core-service datasource, so it holds no database, broker or application credential. Prometheus needs no authentication on the
+# Compose network, so this file holds no secret. Not production configuration (A12.10).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: nawara-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 30s
