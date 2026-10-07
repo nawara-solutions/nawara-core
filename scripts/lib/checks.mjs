@@ -1,4 +1,6 @@
 // Static checks the repository enforces on itself. Pure functions (text in, problems out) so they are unit-testable.
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { parse } from 'yaml';
@@ -1162,8 +1164,25 @@ const isCreateRequireCall = (node) => {
  * specifier, in the forms listed above, plus the two caller-policy signals the A1.4 completeness rule needs. A use of the kit's
  * `parseCallerPolicy` is a named import of it from any module or a call to it; a policy read is a configuration read of a variable of
  * the `SERVICE_POLICY` family (`reader.get / required / optional('…')`, `process.env.…`, `process.env['…']`).
+ *
+ * V2 A2.5 adds two configuration facts from the same pass. `readsProcessEnv`: the file reaches the process environment in any form
+ * (`process.env`, `process['env']`, `globalThis.process.env`, `const { env } = process`, `({ env } = process)`,
+ * `import { env } from 'node:process'`); a comment, a string or a type (`NodeJS.ProcessEnv`, `typeof process.env`) is not a read.
+ * `configNames`: the LITERAL environment variable names the file passes to a configuration read: the first argument of an
+ * `EnvReader` method called on `reader` (or Auth's `src`), a name passed to one of the known configuration helpers
+ * (`CONFIG_NAME_HELPERS`: `readKey(reader, 'X_KEY', …)`, `int(env, 'X_TTL', …)`), and `env.X` / `env['X']`. A computed name (a
+ * template with substitutions, or a prefix a helper completes) is not literal and is not listed: the list is high-confidence, not complete.
  */
 export function sourceFacts(relPath, text) {
+  // One parse per file and run: the source guards and the A2.5 README coverage read the same facts (callers never mutate them).
+  const cached = FACTS.get(relPath);
+  if (cached?.text === text) return cached.facts;
+  const facts = parseSourceFacts(relPath, text);
+  FACTS.set(relPath, { text, facts });
+  return facts;
+}
+const FACTS = new Map();
+function parseSourceFacts(relPath, text) {
   const kind = /\.[cm]?ts$|\.tsx$/.test(relPath) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
   const sf = ts.createSourceFile(relPath, text, ts.ScriptTarget.Latest, true, kind);
   const requireAliases = new Set();
@@ -1177,7 +1196,11 @@ export function sourceFacts(relPath, text) {
   const specifiers = [];
   let usesCallerPolicy = false;
   const policyReads = [];
+  let readsProcessEnv = false;
+  const configNames = new Set();
   const visit = (node) => {
+    if (isProcessEnvAccess(node)) readsProcessEnv = true;
+    for (const name of literalConfigNames(node)) configNames.add(name);
     let spec;
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
       spec = staticSpecifier(node.moduleSpecifier);
@@ -1206,7 +1229,7 @@ export function sourceFacts(relPath, text) {
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return { specifiers, usesCallerPolicy, policyReads };
+  return { specifiers, usesCallerPolicy, policyReads, readsProcessEnv, configNames: [...configNames] };
 }
 const CALLER_POLICY_PARSER = 'parseCallerPolicy';
 const CONFIG_READS = new Set(['get', 'required', 'optional']); // the kit ConfigReader's string reads
@@ -1215,6 +1238,59 @@ const isProcessEnv = (node) => {
   const n = unwrap(node);
   return ts.isPropertyAccessExpression(n) && n.name.text === 'env' && ts.isIdentifier(unwrap(n.expression)) && unwrap(n.expression).text === 'process';
 };
+
+const isProcessObject = (node) => {
+  const n = unwrap(node);
+  return !!n && ((ts.isIdentifier(n) && n.text === 'process') || (ts.isPropertyAccessExpression(n) && n.name.text === 'process'));
+};
+const PROCESS_MODULES = new Set(['node:process', 'process']);
+const bindsEnv = (name) => !!name && (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) && name.text === 'env';
+/** V2 A2.5: one syntax node that reaches the process environment (see `sourceFacts`). */
+function isProcessEnvAccess(node) {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text === 'env' && isProcessObject(node.expression);
+  if (ts.isElementAccessExpression(node)) return isProcessObject(node.expression) && staticSpecifier(node.argumentExpression) === 'env';
+  if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && isProcessObject(node.initializer)) {
+    return node.name.elements.some((el) => bindsEnv(el.propertyName ?? el.name));
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && isProcessObject(node.right)) {
+    const left = unwrap(node.left);
+    return ts.isObjectLiteralExpression(left) && left.properties.some((p) => bindsEnv(p.name));
+  }
+  if (ts.isImportDeclaration(node) && PROCESS_MODULES.has(staticSpecifier(node.moduleSpecifier) ?? '')) {
+    const named = node.importClause?.namedBindings;
+    return !!named && ts.isNamedImports(named) && named.elements.some((el) => (el.propertyName ?? el.name).text === 'env');
+  }
+  return false;
+}
+const ENV_NAME = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/;
+const ENV_READER_METHODS = new Set(['get', 'required', 'optional', 'int', 'bool', 'oneOf', 'secret', 'url']); // the kit's EnvReader
+const ENV_READERS = new Set(['reader', 'src']); // an EnvReader by convention; `src` is Auth's SecretSource (A4 converges it)
+/** Helper functions that take a literal variable name: the kit's key helpers, Auth's loader helpers, Notification's loader helpers. */
+const CONFIG_NAME_HELPERS = new Set(['readKey', 'readOptionalKey', 'readKeyRing', 'decodeKey', 'int', 'required', 'secretBytes', 'matching', 'providerUrl']);
+const isEnvObject = (node) => {
+  const n = unwrap(node);
+  return !!n && ((ts.isIdentifier(n) && n.text === 'env') || isProcessEnvAccess(n));
+};
+/** V2 A2.5: the literal environment variable names one syntax node reads (see `sourceFacts`). */
+function literalConfigNames(node) {
+  if (ts.isCallExpression(node)) {
+    const callee = unwrap(node.expression);
+    if (ts.isPropertyAccessExpression(callee)) {
+      const receiver = unwrap(callee.expression);
+      const reads = ENV_READER_METHODS.has(callee.name.text) && ts.isIdentifier(receiver) && ENV_READERS.has(receiver.text);
+      const name = reads ? staticSpecifier(node.arguments[0]) : undefined;
+      return name !== undefined && ENV_NAME.test(name) ? [name] : [];
+    }
+    if (ts.isIdentifier(callee) && CONFIG_NAME_HELPERS.has(callee.text)) return node.arguments.map(staticSpecifier).filter((a) => a !== undefined && ENV_NAME.test(a));
+    return [];
+  }
+  if (ts.isPropertyAccessExpression(node) && isEnvObject(node.expression)) return ENV_NAME.test(node.name.text) ? [node.name.text] : [];
+  if (ts.isElementAccessExpression(node) && isEnvObject(node.expression)) {
+    const name = staticSpecifier(node.argumentExpression);
+    return name !== undefined && ENV_NAME.test(name) ? [name] : [];
+  }
+  return [];
+}
 
 /** Every static module specifier a source file references (A1.4: the shared collector behind the metrics and dependency guards). */
 export function staticModuleSpecifiers(relPath, text) {
@@ -1369,8 +1445,23 @@ export function checkSource(relPath, text, { appPackages } = {}) {
     const what = facts.usesCallerPolicy ? 'uses parseCallerPolicy' : `reads ${facts.policyReads[0]}`;
     problems.push(`${relPath}: ${what}, but ${app} has no governed caller-policy module; add it to CALLER_POLICY_MODULES (scripts/lib/checks.mjs, V2 A1.4)`);
   }
+  // V2 A2.5: the process environment is read once, at the configuration boundary (the service loader) and by command-line tools.
+  if (facts?.readsProcessEnv && /^(?:apps|libs)\/[a-z-]+\/src\//.test(relPath) && !isTest && !PROCESS_ENV_BOUNDARY.some((allowed) => allowed.test(relPath))) {
+    problems.push(`${relPath}: reads process.env directly; configuration is read once by the service configuration loader (src/config/*-config.ts) and reaches the rest of the service as a typed value`);
+  }
   return problems;
 }
+
+/**
+ * V2 A2.5: where non-test source may reach `process.env`: each service's configuration loader, the kit's base loader, and the
+ * command-line tools of a service or of the kit (their convergence belongs to A15, A4 and A5, not to this guard).
+ */
+export const PROCESS_ENV_BOUNDARY = [
+  /^apps\/[a-z-]+\/src\/config\/[a-z-]+-config\.ts$/,
+  /^libs\/service-kit\/src\/config\/base-config\.ts$/,
+  /^apps\/[a-z-]+\/src\/cli\//,
+  /^libs\/service-kit\/src\/cli\//,
+];
 
 /**
  * The hierarchy snapshot contract (ADR-0040 decision 5): auth-service (the exporter) and organization-service (the importer) share NO code,
@@ -1426,3 +1517,222 @@ export function checkNoPlatformIdOnFinancialRecords(relPath, text) {
   }
   return problems;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A2.5: configuration and secret hygiene guards. Every diagnostic names a path, a variable or a rule and NEVER a value: a template
+// value, a decoded key and a fingerprint are all kept out of the messages.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+const baseName = (path) => path.slice(path.lastIndexOf('/') + 1);
+/** The only environment-like file that may be committed: a development template. */
+export const ENV_TEMPLATE = '.env.example';
+export const isEnvTemplate = (path) => baseName(path) === ENV_TEMPLATE;
+
+/** Paths a correct `.gitignore` ignores (a real or local environment file, at the root or in a package) and keeps trackable (the templates). */
+export const ENV_PATHS_IGNORED = ['.env', '.env.local', '.env.production', 'apps/auth-service/.env', 'apps/auth-service/.env.local'];
+export const ENV_PATHS_TRACKABLE = ['.env.example', 'apps/auth-service/.env.example'];
+
+/**
+ * The behaviour of `.gitignore`, not its text: `isIgnored(path)` answers with Git's own evaluation of the rules (true, false, or
+ * undefined when Git could not answer). Any spelling of the rules that keeps the behaviour passes.
+ */
+export function checkEnvIgnorePolicy(isIgnored) {
+  const problems = [];
+  for (const [paths, expected] of [[ENV_PATHS_IGNORED, true], [ENV_PATHS_TRACKABLE, false]]) {
+    for (const path of paths) {
+      const ignored = isIgnored(path);
+      if (ignored === undefined) problems.push(`.gitignore: Git could not evaluate the ignore rules for ${path} (git check-ignore failed); the environment ignore policy cannot be verified`);
+      else if (ignored !== expected) {
+        problems.push(expected
+          ? `.gitignore no longer ignores ${path}: a real environment file could be committed (expected rules: .env, .env.*, !.env.example)`
+          : `.gitignore ignores ${path}: the committed development templates must stay trackable (expected rule: !.env.example)`);
+      }
+    }
+  }
+  return problems;
+}
+
+const git = (cwd, args) => spawnSync('git', ['-c', 'core.excludesFile=', ...args], { cwd, encoding: 'utf8' });
+/**
+ * The Git-backed `isIgnored` of the runner (and of the tests, on a fixture directory): `git check-ignore --no-index` judges a path by
+ * the ignore rules alone, so a tracked template answers correctly. A user-level excludes file is switched off: only the repository's
+ * rules count. Exit 0 = ignored, 1 = not ignored, anything else = Git could not answer.
+ */
+export function gitIgnoreProbe(cwd) {
+  return (path) => {
+    const status = git(cwd, ['check-ignore', '--no-index', '-q', '--', path]).status;
+    return status === 0 ? true : status === 1 ? false : undefined;
+  };
+}
+/** The files Git tracks under `cwd` (the index, not the disk: an ignored local `.env` is not one), or undefined when Git could not answer. */
+export function gitTrackedFiles(cwd) {
+  const result = git(cwd, ['ls-files', '-z']);
+  return result.status === 0 ? result.stdout.split('\0').filter(Boolean) : undefined;
+}
+
+/**
+ * No tracked environment file except the templates: a basename `.env`, `.env.<anything>` or `<anything>.env` (`prod.env`,
+ * `secrets.env`) is refused wherever it is; `.env.example` is the one name allowed. The content is not read: this is not a scanner.
+ */
+export function checkTrackedEnvFiles(trackedPaths) {
+  if (trackedPaths === undefined) return ['Git could not list the tracked files (git ls-files failed); the tracked environment-file guard cannot run'];
+  return trackedPaths
+    .filter((path) => { const name = baseName(path); return name !== ENV_TEMPLATE && (name === '.env' || name.startsWith('.env.') || name.endsWith('.env')); })
+    .map((path) => `${path} is tracked: only ${ENV_TEMPLATE} templates may be committed (remove it from the index; a real environment file never enters the repository)`);
+}
+
+/**
+ * The active assignments of an environment template, in order: `NAME=value` lines (an optional `export`), comments and blank lines
+ * skipped. A quoted value is taken up to its closing quote; an unquoted one ends at an inline `#` comment and is trimmed.
+ */
+export function envAssignments(text) {
+  const out = [];
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+    if (!m) continue;
+    const raw = m[2].trim();
+    const quoted = /^(['"])(.*?)\1/.exec(raw);
+    out.push({ name: m[1], value: quoted ? quoted[2] : raw.replace(/(^|\s)#.*$/, '').trim() });
+  }
+  return out;
+}
+
+const sha256 = (data) => createHash('sha256').update(data).digest('hex');
+/** Standard, canonical base64 (as the kit's `decodeKey` reads it), or undefined. */
+function canonicalBase64(text) {
+  const m = /^([A-Za-z0-9+/]+)(={0,2})$/.exec(text);
+  if (!m || m[1].length % 4 === 1 || (m[2] !== '' && (m[1].length + m[2].length) % 4 !== 0)) return undefined;
+  const bytes = Buffer.from(m[1], 'base64');
+  return bytes.toString('base64').replace(/=+$/, '') === m[1] ? bytes : undefined;
+}
+const KEY_ID_PREFIX = /^[A-Za-z0-9_-]{1,32}:/; // a key-ring or caller entry: "id:material"
+const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43,}$/; // a generated service token: 32 or more random bytes, base64url
+const looksGenerated = (text) => /[a-z]/.test(text) && /[A-Z]/.test(text) && /[0-9]/.test(text);
+/**
+ * The catalog fingerprints one template value may match, by SHAPE (never by variable name). A value is one secret or a list of
+ * `id:secret` entries. A 64-hex entry is a published token digest: it is itself a fingerprint. Canonical base64 of 32 bytes or more is
+ * key material (fingerprint of the decoded bytes, or of the text when it is used as a textual secret). A base64url string of 43
+ * characters or more that looks generated is a service token (fingerprint of its text). Anything else is not a published secret here.
+ */
+function publishedSecretFingerprints(value) {
+  const secrets = [];
+  for (const entry of value.split(',')) {
+    const text = entry.trim().replace(KEY_ID_PREFIX, '').trim();
+    if (/^[0-9a-f]{64}$/.test(text)) { secrets.push([text]); continue; }
+    const key = canonicalBase64(text);
+    if (key && key.length >= 32) secrets.push([sha256(key), sha256(Buffer.from(text, 'utf8'))]);
+    else if (TOKEN_SHAPE.test(text) && looksGenerated(text)) secrets.push([sha256(Buffer.from(text, 'utf8'))]);
+  }
+  return secrets;
+}
+
+export const DEVELOPMENT_SECRET_CATALOG = 'libs/service-kit/src/config/development-keys.ts';
+/** The catalog as written in the kit: fingerprint → the runtime variable it names. Read as text; the checker repeats no fingerprint. */
+export function developmentSecretCatalog(catalogText) {
+  return new Map([...String(catalogText ?? '').matchAll(/\[\s*'([0-9a-f]{64})'\s*,\s*'([A-Za-z0-9_]+)'\s*\]/g)].map((m) => [m[1], m[2]]));
+}
+
+/**
+ * The published development secrets and the kit's fingerprint catalog are the SAME SET, in both directions (OD-A2.5-3), whatever its
+ * size. `templates` maps each tracked `.env.example` to its text.
+ * - Every secret-shaped value of a template is in the catalog: otherwise production would accept a secret this repository publishes.
+ * - Every catalog fingerprint matches a template value: otherwise the catalog refuses, and documents, a secret nobody publishes.
+ * Adding or removing a development secret therefore changes a template and the catalog together.
+ */
+export function checkDevelopmentSecretCatalog(templates, catalogText) {
+  const catalog = developmentSecretCatalog(catalogText);
+  if (catalog.size === 0) return [`${DEVELOPMENT_SECRET_CATALOG}: no development-secret fingerprint could be read; the catalog guard cannot run (update developmentSecretCatalog if its form changed)`];
+  const problems = [];
+  const matched = new Set();
+  for (const [path, text] of Object.entries(templates)) {
+    for (const { name, value } of envAssignments(text)) {
+      for (const candidates of publishedSecretFingerprints(value)) {
+        const hit = candidates.find((fingerprint) => catalog.has(fingerprint));
+        if (hit) matched.add(hit);
+        else problems.push(`${path}: ${name} is published development secret material that is not in the development-secret catalog (${DEVELOPMENT_SECRET_CATALOG}); production would accept it. Add its fingerprint, or do not publish it`);
+      }
+    }
+  }
+  for (const [fingerprint, label] of catalog) {
+    if (!matched.has(fingerprint)) problems.push(`${DEVELOPMENT_SECRET_CATALOG}: the catalog entry for ${label} matches no value of a tracked ${ENV_TEMPLATE}; remove the entry or restore the published value`);
+  }
+  return problems;
+}
+
+/**
+ * Every tracked template opens with a comment block that says it is for development only (any wording containing "development only").
+ * The root template is the local Compose template: each variable it sets is consumed by a Compose file (`composeTexts`: path → text).
+ * The reverse is not required (Compose may default a variable), and service templates are not matched against their loaders.
+ */
+export function checkEnvTemplates(templates, composeTexts) {
+  const problems = [];
+  for (const [path, text] of Object.entries(templates)) {
+    const lines = String(text).split(/\r?\n/);
+    const end = lines.findIndex((l) => !l.trim().startsWith('#'));
+    const header = (end < 0 ? lines : lines.slice(0, end)).join('\n');
+    if (!/development[- ]only/i.test(header)) problems.push(`${path}: must open with a comment that says the template is for development only`);
+  }
+  const root = templates[ENV_TEMPLATE];
+  if (root === undefined) return [...problems, `${ENV_TEMPLATE} (the root local-development template) is missing or not tracked`];
+  const compose = Object.values(composeTexts).join('\n');
+  for (const { name } of envAssignments(root)) {
+    if (!new RegExp(`\\$(?:\\{${name}\\b|${name}\\b)`).test(compose)) {
+      problems.push(`${ENV_TEMPLATE}: ${name} is not referenced by any Compose file (${Object.keys(composeTexts).join(', ')}); remove it or reference it`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Whether a `.dockerignore` keeps `path` out of the build context, with Docker's documented rules: `**` matches any number of
+ * directories (including none), `*` any run without a separator, `?` one such character; `!` re-includes; the LAST matching rule
+ * wins; a rule matching a directory covers everything under it. No Docker daemon.
+ */
+export function dockerIgnoreExcludes(text, path) {
+  let excluded = false;
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const rule = line.trim();
+    if (rule === '' || rule.startsWith('#')) continue;
+    const negate = rule.startsWith('!');
+    const pattern = rule.replace(/^!/, '').trim().replace(/^\/+|\/+$/g, '');
+    if (pattern === '') continue;
+    const body = pattern.split('/').map((segment) => (segment === '**' ? '(?:.*/)?'
+      : `${segment.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')}/`)).join('').replace(/\/$/, '');
+    if (new RegExp(`^${body}(?:/.*)?$`).test(path)) excluded = !negate;
+  }
+  return excluded;
+}
+export const DOCKER_CONTEXT_EXCLUDED = ['.env', '.env.local', 'apps/auth-service/.env', 'apps/auth-service/.env.local', 'libs/service-kit/.env'];
+export const DOCKER_CONTEXT_REQUIRED = ['package.json', 'apps/auth-service/src/main.ts', 'apps/auth-service/deploy/provision-and-deploy.sh'];
+/** No environment file enters an image build context (a build-stage layer would keep it); what a build needs stays in it. */
+export function checkDockerContext(dockerignoreText) {
+  if (dockerignoreText === undefined) return ['.dockerignore is missing: environment files would enter every image build context'];
+  return [
+    ...DOCKER_CONTEXT_EXCLUDED.filter((path) => !dockerIgnoreExcludes(dockerignoreText, path))
+      .map((path) => `.dockerignore lets ${path} into the build context (expected rules: **/.env and **/.env.*, with no later rule re-including it)`),
+    ...DOCKER_CONTEXT_REQUIRED.filter((path) => dockerIgnoreExcludes(dockerignoreText, path))
+      .map((path) => `.dockerignore excludes ${path}, which an image build needs: an environment rule is too broad`),
+  ];
+}
+
+const mentions = (text, name) => new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`).test(text);
+/**
+ * High-confidence README coverage (OD-A2.5-1 = B): every LITERAL variable name a service's own source reads (`sourceFacts`'s
+ * `configNames`, over `sources`: path → text of its non-test `src` files outside `src/cli`) appears in the service README. Computed
+ * names, the kit's own base variables (read in the kit, documented as groups) and command-line tools are outside it by construction;
+ * the reverse direction is not enforced (a README legitimately names other services' variables).
+ */
+export function checkReadmeEnvironmentCoverage(app, readmeText, sources) {
+  const readme = `apps/${app}/README.md`;
+  if (readmeText === undefined) return [`${readme} is missing: ${app} has no environment reference`];
+  const readBy = new Map();
+  for (const [path, text] of Object.entries(sources)) {
+    for (const name of sourceFacts(path, text).configNames) if (!readBy.has(name)) readBy.set(name, path);
+  }
+  if (readBy.size === 0) return [`apps/${app}: no literal configuration read was found in its source; the README coverage guard cannot run (update sourceFacts if the loader changed form)`];
+  return [...readBy].filter(([name]) => !mentions(readmeText, name))
+    .map(([name, path]) => `${readme} does not document ${name}, which ${path} reads`);
+}
+/** The source files the README coverage reads: a service's non-test `src` TypeScript outside its command-line tools. */
+export const isServiceConfigSource = (app, relPath) => relPath.startsWith(`apps/${app}/src/`) && !relPath.startsWith(`apps/${app}/src/cli/`)
+  && /\.ts$/.test(relPath) && !relPath.endsWith('.d.ts') && !/(^|\/)test\//.test(relPath) && !/\.(e2e-|int-)?spec\.ts$/.test(relPath);

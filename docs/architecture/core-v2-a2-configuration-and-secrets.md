@@ -3,8 +3,9 @@
 - **Status:** RECORD of A2.0 discovery and A2.1.0 design (both read-only, owner-reviewed, 2026-10-07, on `main` at `321ec0b`, the
   PR #222 merge), of **A2.1: service-kit configuration hardening** (**closed on `main`**: PR #223, merge `b6a8402`; §4) and of
   **A2.2: seven-service adoption** (**closed on `main`**: PR #224, merge `975d848`; §6) of **A2.3: targeted Auth hardening**
-  (**closed on `main`**: PR #225, merge `6e86ab0`; §7) and of **A2.4: configuration hygiene, templates and secret rotation**
-  (**complete locally, owner review pending**; §8). **A2 is OPEN.** A2.5 and A2.6 are not started.
+  (**closed on `main`**: PR #225, merge `6e86ab0`; §7), of **A2.4: configuration hygiene, templates and secret rotation**
+  (**closed on `main`**: PR #226, merge `0854abd17714b7b686aafdc8c221d99bbc48e18c`; §8) and of **A2.5: configuration and secret
+  repository guards** (**complete locally, owner review pending**; §9). **A2 is OPEN.** A2.6 (certification) is not started.
 - **Scope of A2** ([roadmap](../CORE-ROADMAP.md) A2): typed and validated configuration; environment separation; secret lifecycle and
   rotation; deployment contracts. **Not A2:** Auth loader convergence and JWT key-ring verification (A4); the Organization ownership
   CLI and its production gate (A5 / F6 / F7); production credential restriction (A3.6 / A3.7); production deploy-script changes
@@ -95,8 +96,10 @@ A2.2  seven-service adoption            ✅ closed on main (PR #224, merge 975d8
 A2.3.0  Auth discovery                  ✅ complete (owner-reviewed)
 A2.3  targeted Auth hardening           ✅ closed on main (PR #225, merge 6e86ab0; §7)
 A2.4.0  hygiene discovery               ✅ complete (owner-reviewed)
-A2.4  hygiene, templates, rotation      ✅ complete locally; owner review pending (§8)
-A2.5 – A2.6                             not started
+A2.4  hygiene, templates, rotation      ✅ closed on main (PR #226, merge 0854abd; §8)
+A2.5.0  repository-guard discovery      ✅ complete (owner-reviewed)
+A2.5  repository guards                 ✅ complete locally; owner review pending (§9)
+A2.6  certification                     not started
 ```
 
 A2 is OPEN. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
@@ -180,7 +183,7 @@ absolute last.
   `REQUIRE_CONTACT_VERIFICATION=1`, an `auth_admin` or `auth` user, a repeated TOTP id, the published `JWT_SECRET`: REFUSED). A merge
   builds the Auth image (`auth-service-docker-build.yml`); deployment stays manual. No G6 dependency; RED: none.
 
-## 8. A2.4: configuration hygiene, templates and secret rotation (2026-10-07, local)
+## 8. A2.4: configuration hygiene, templates and secret rotation (2026-10-07; closed on `main`, PR #226, merge `0854abd`)
 
 - **Owner decisions:** OD-A2.4-1 = C (the root `.env.example` is the Compose development template, the four existing service
   templates stay, and each service README's Environment / Configuration table is the per-service variable reference; no template is
@@ -225,3 +228,62 @@ absolute last.
   image (`.dockerignore` and `apps/auth-service/**` are in its path filter); deployment stays manual. RED: none; no G6 dependency.
 - **Left for A2.5:** permanent repository guards (the ignore policy, template completeness against the development-secret catalog, the
   `process.env` boundary, coverage of the environment reference).
+
+## 9. A2.5: configuration and secret repository guards (2026-10-07, local)
+
+Permanent guards in the existing repository checker (`scripts/lib/checks.mjs`, wired by `scripts/check-repo.mjs`, tested in
+`scripts/check-repo.test.mjs`; `npm run check:repo` and `npm run test:repo`, both already steps of Core CI). No runtime source, loader,
+template, Compose file, Dockerfile, deploy script or workflow changed.
+
+- **Owner decisions:** OD-A2.5-1 = B (README coverage for high-confidence literal names only; no registry of computed names);
+  OD-A2.5-2 = A (tracked basenames `.env`, `.env.*` and `*.env` are refused; only `.env.example` is allowed); OD-A2.5-3 = A (the
+  development-secret catalog and the templates agree in both directions, with no fixed count).
+
+| Guard | Prevents | Mechanism | Input |
+|---|---|---|---|
+| Git ignore behaviour (`checkEnvIgnorePolicy`) | a real or local environment file becoming committable; a template becoming ignored | Git's own evaluation, `git check-ignore --no-index`, on representative paths (user-level excludes switched off) | `.gitignore` |
+| Docker context (`checkDockerContext`) | an environment file entering an image build context | a static evaluator of Docker's ignore rules (`**`, `*`, `?`, `!`, last match wins); no daemon | `.dockerignore` |
+| Tracked environment files (`checkTrackedEnvFiles`) | a committed `.env`, `.env.local`, `prod.env`, … | basename rule over `git ls-files` (the index, so an ignored local file on disk never fails the check) | the Git index |
+| Development-secret catalog (`checkDevelopmentSecretCatalog`) | a published secret production would accept; a stale catalog entry | SHA-256 of each secret-shaped template value compared with the fingerprints in `development-keys.ts`, both directions | tracked `.env.example` files + the catalog source |
+| Templates (`checkEnvTemplates`) | a template without its development-only warning; a root variable Compose no longer consumes | opening comment contains "development only"; each root variable is referenced as `${NAME…}` by a Compose file | tracked templates + `docker-compose*.yml` |
+| `process.env` boundary (in `checkSource`) | configuration read outside the loader | the shared `sourceFacts` parser pass plus a path allowlist | non-test `apps/*/src`, `libs/*/src` |
+| README coverage (`checkReadmeEnvironmentCoverage`) | an undocumented configuration variable | literal names read by a service's source must appear in its README | each service's non-test, non-CLI `src` + its README |
+
+- **Secret shapes (by value, never by variable name):** canonical base64 of 32 decoded bytes or more (also inside an `id:key` ring);
+  a generated base64url token of 43 characters or more; a 64-hex token digest, which must itself be a catalog fingerprint. Local
+  database passwords and short development credentials are not key material and are outside the catalog, as in A2.1. The guard reads
+  the catalog source as text and hashes the template values itself: it repeats no value and no fingerprint.
+- **`process.env` boundary:** allowed only in `apps/<service>/src/config/*-config.ts`, `libs/service-kit/src/config/base-config.ts`,
+  `apps/<service>/src/cli/**` and `libs/service-kit/src/cli/**`. Detected forms: `process.env` (any use), `process['env']`,
+  `globalThis.process.env`, `const { env } = process`, `({ env } = process)` and `import { env } from 'node:process'`; comments,
+  strings and types are not reads. Inventory at introduction: 468 non-test source files, 18 files reaching the environment (8 service
+  loaders, the kit base loader, 5 service CLIs, 4 kit CLIs), **0 outside the boundary**. The CLIs stay allowed: their convergence is
+  A15 (generic), A4 (Auth) and A5 / F6 / F7 (Organization ownership).
+- **README coverage:** literal names are the first argument of an `EnvReader` method on `reader` (or Auth's `src`), a name passed to a
+  known helper (`readKey`, `readOptionalKey`, `readKeyRing`, `decodeKey`, Auth's `int` / `required` / `secretBytes`, Notification's
+  `matching` / `providerUrl`) and `env.X`. Outside by design: computed names (Auth `RATE_<rule>_LIMIT` / `_WINDOW_SEC`, File
+  `FILE_<kind>_RATE_PER_CALLER` / `_PER_ORGANIZATION`), the kit's base variables (read in the kit, documented as groups), CLIs, and the
+  reverse direction (a README may name another service's variables). Coverage at introduction: Auth 52, File 47, Notification 41,
+  Billing 22, Payment 15, Audit 12, Release 12, Organization 8 literal names, all documented.
+- **Documentation correction (found by A2.5.0):** eight variables were read but not named in their README. Billing now lists
+  `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S`, `BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE` and
+  `BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE`; File names `FILE_STORAGE_CONNECT_TIMEOUT_MS`, `FILE_STORAGE_IDLE_TIMEOUT_MS`,
+  `FILE_STORAGE_REQUEST_TIMEOUT_MS` and `FILE_DELETE_RETRY_MAX_SECONDS` explicitly (they were written as a wildcard and a suffix).
+  Defaults and bounds are those of the loaders; no loader changed.
+- **Diagnostics:** deterministic and value-free. Each names a path and a variable or rule; no template value, decoded key,
+  fingerprint or URL is printed, and the tests assert it on generated fixture secrets.
+- **Non-goals:** no `_FILE` guard (the split between the kit and Auth's `SecretSource` is A4's convergence; a guard would freeze it
+  or force A4 early); no static production-refusal guard (the runtime tests of the kit, Auth, File, Notification, Billing and Payment
+  already prove each refusal against the published values; the catalog guard closes the one structural gap they cannot see); no
+  general secret scanner (A14); no template-per-service rule; no service-template ↔ loader matching.
+- **Note on §4:** the guard reads the catalog as source text, not through `@nawara/service-kit/testing`, so `check:repo` needs no
+  built `dist/`.
+- **Evidence (local):** `test:repo` 120 passed (111 before; 9 new fixture tests, including a runner-wiring test); `check:repo` green
+  on the real repository. Negative controls, each red when mutated and restored byte-for-byte: the `.env.*` ignore rule removed; the
+  Docker rules removed; one catalog fingerprint removed (diagnostic names the variable only); a `process.env` read added to a runtime
+  file; one newly documented variable removed from each README; each guard disconnected from the runner. Cost: `check:repo` 1.39 s →
+  1.44 s, `test:repo` 2.48 s → 2.73 s.
+- **Production:** GREEN. Checker, tests and documentation only; nothing was deployed, rotated or inspected. RED: none; no G6
+  dependency.
+- **Next:** A2.6, the A2 certification (reconciliation of A2.0 to A2.5, open-blocker review, proportional final validation). A2
+  stays OPEN until then.

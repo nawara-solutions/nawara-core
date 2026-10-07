@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1462,7 +1465,7 @@ test('V2 A1.4: a caller-policy consumer outside the inventory fails (completenes
     'apps/billing-service/src/common/pagination.ts': 'export const decode = (c: string) => JSON.parse(Buffer.from(c, "base64url").toString());',
     'apps/booking-service/src/cursor.ts': 'export const decode = (c: string) => JSON.parse(c);',
     'libs/service-kit/src/events/x.ts': 'export const body = (b: Buffer) => JSON.parse(b.toString());',
-    'libs/service-kit/src/service-auth/caller-policy.ts': "export function parseCallerPolicy() {} const v = process.env.SERVICE_POLICY;", // the kit is the parser's home
+    'libs/service-kit/src/service-auth/caller-policy.ts': "export function parseCallerPolicy() {} const v = reader.get('SERVICE_POLICY');", // the kit is the parser's home
   };
   for (const [rel, text] of Object.entries(allowed)) assert.deepEqual(checkSource(rel, text), [], rel);
 });
@@ -1536,4 +1539,286 @@ test('V2 A1.4: the runner wires both guards (the workspace packages reach checkS
     && c.arguments[2].properties.some((p) => p.name?.text === 'appPackages')), 'checkSource(rel, text, { appPackages })');
   assert.equal(named('workspaceAppPackages').length, 1, 'the packages are read from the application manifests');
   assert.equal(named('checkCallerPolicyInventory').length, 1, 'the caller-policy inventory is checked');
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A2.5: configuration and secret hygiene guards. Fixture secrets are generated per run: no published value is repeated here.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/** A temporary Git directory holding one `.gitignore`: the ignore guard is tested on Git's own evaluation, as the runner uses it. */
+function withGitDirectory(gitignore, run) {
+  const dir = mkdtempSync(join(tmpdir(), 'nawara-ignore-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir }).status, 0, 'git init');
+    writeFileSync(join(dir, '.gitignore'), gitignore);
+    return run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const GITIGNORE = 'node_modules/\n.env\n.env.*\n!.env.example\n';
+
+test('V2 A2.5: the environment ignore policy is checked on behaviour (Git evaluates the rules)', () => {
+  withGitDirectory(GITIGNORE, (dir) => assert.deepEqual(checkEnvIgnorePolicy(gitIgnoreProbe(dir)), []));
+  // Another spelling with the same behaviour passes: the guard does not match text.
+  withGitDirectory('**/.env\n**/.env.*\n!**/.env.example\n', (dir) => assert.deepEqual(checkEnvIgnorePolicy(gitIgnoreProbe(dir)), []));
+  withGitDirectory('node_modules/\n.env\n!.env.example\n', (dir) => {
+    const problems = checkEnvIgnorePolicy(gitIgnoreProbe(dir));
+    assert.deepEqual(problems.map((p) => /ignores (\S+):/.exec(p)[1]), ['.env.local', '.env.production', 'apps/auth-service/.env.local']);
+    assert.match(problems[0], /^\.gitignore no longer ignores \.env\.local: a real environment file could be committed/);
+  });
+  withGitDirectory('node_modules/\n.env\n.env.*\n', (dir) => {
+    assert.deepEqual(checkEnvIgnorePolicy(gitIgnoreProbe(dir)), [
+      '.gitignore ignores .env.example: the committed development templates must stay trackable (expected rule: !.env.example)',
+      '.gitignore ignores apps/auth-service/.env.example: the committed development templates must stay trackable (expected rule: !.env.example)',
+    ]);
+  });
+  withGitDirectory('node_modules/\n', (dir) => assert.equal(checkEnvIgnorePolicy(gitIgnoreProbe(dir)).length, ENV_PATHS_IGNORED.length));
+  // Git could not answer (not a repository): reported, never read as "not ignored" or as a pass.
+  const outside = mkdtempSync(join(tmpdir(), 'nawara-nogit-'));
+  try {
+    const probe = gitIgnoreProbe(outside);
+    if (probe('.env') === undefined) assert.match(checkEnvIgnorePolicy(probe).join('\n'), /Git could not evaluate the ignore rules for \.env /);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+  assert.match(checkEnvIgnorePolicy(() => undefined)[0], /Git could not evaluate the ignore rules/);
+});
+
+test('V2 A2.5: no tracked environment file except the .env.example templates (the index, not the disk)', () => {
+  assert.deepEqual(checkTrackedEnvFiles(['.env.example', 'apps/auth-service/.env.example', 'apps/x-service/src/env.ts', 'docs/environment.md', 'apps/x-service/src/config/env-reader.ts', 'scripts/dotenv.mjs']), []);
+  for (const path of ['.env', 'apps/x-service/.env', 'apps/x-service/.env.local', '.env.production', 'prod.env', 'deploy/secrets.env', 'apps/x-service/.env.example.bak.env']) {
+    assert.deepEqual(checkTrackedEnvFiles(['.env.example', path]), [`${path} is tracked: only .env.example templates may be committed (remove it from the index; a real environment file never enters the repository)`], path);
+  }
+  assert.match(checkTrackedEnvFiles(undefined)[0], /Git could not list the tracked files/);
+  assert.equal(isEnvTemplate('apps/x-service/.env.example'), true);
+  assert.equal(isEnvTemplate('apps/x-service/.env.example.bak'), false);
+  // The runner's source is the index: an ignored file on disk is not listed, a tracked one is.
+  withGitDirectory(GITIGNORE, (dir) => {
+    writeFileSync(join(dir, '.env'), 'LOCAL=1\n');
+    writeFileSync(join(dir, '.env.example'), '# development only\n');
+    assert.equal(spawnSync('git', ['add', '.'], { cwd: dir }).status, 0);
+    assert.deepEqual(gitTrackedFiles(dir).sort(), ['.env.example', '.gitignore']);
+    assert.deepEqual(checkTrackedEnvFiles(gitTrackedFiles(dir)), []);
+    assert.equal(spawnSync('git', ['add', '-f', '.env'], { cwd: dir }).status, 0);
+    assert.match(checkTrackedEnvFiles(gitTrackedFiles(dir)).join(), /^\.env is tracked/);
+  });
+});
+
+const fingerprint = (data) => createHash('sha256').update(data).digest('hex');
+const catalogSource = (entries) => `export const DEVELOPMENT_SECRET_FINGERPRINTS = new Map([\n${entries.map(([fp, label]) => `  ['${fp}', '${label}'], // x`).join('\n')}\n]);\n`;
+/** A generated fixture: two keys, a two-entry key ring, a service token and its published digest; template and catalog agree. */
+function secretFixture() {
+  const key = randomBytes(32);
+  const padded = randomBytes(33);
+  const ring = [randomBytes(32), randomBytes(32)];
+  let token;
+  do token = randomBytes(32).toString('base64url'); while (!(/[a-z]/.test(token) && /[A-Z]/.test(token) && /[0-9]/.test(token)));
+  const values = { key: key.toString('base64'), padded: padded.toString('base64'), ring: ring.map((k, i) => `k${i + 1}:${k.toString('base64')}`).join(','), token, digest: fingerprint(token) };
+  const template = ['# Development only.', 'PORT=3000', 'DATABASE_URL=postgres://app:local-password@localhost:5432/app', `X_KEY=${values.key}`, `X_PADDED_KEY="${values.padded}"  # quoted`,
+    `X_KEYS=${values.ring}`, `X_TOKEN=${values.token}`, `X_TOKENS=caller:${values.digest}`, 'X_POLICY=\'{"callers":{"a":{"operations":["x.read"]}}}\'', 'EMPTY=      # a placeholder', '# COMMENTED_KEY=not-a-value', ''].join('\n');
+  const catalog = [[fingerprint(key), 'X_KEY'], [fingerprint(padded), 'X_PADDED_KEY'], [fingerprint(ring[0]), 'X_KEYS'], [fingerprint(ring[1]), 'X_KEYS'], [fingerprint(token), 'X_TOKEN']];
+  return { values, template, catalog };
+}
+const noLeak = (problems, values) => {
+  for (const problem of problems) {
+    for (const secret of Object.values(values).flatMap((v) => v.split(/[,:]/))) if (secret.length >= 16) assert.ok(!problem.includes(secret), 'a diagnostic must not contain a template value');
+    assert.doesNotMatch(problem, /[0-9a-f]{64}/, 'a diagnostic must not contain a fingerprint');
+    assert.doesNotMatch(problem.replaceAll(DEVELOPMENT_SECRET_CATALOG, '<catalog>'), /[A-Za-z0-9+/_-]{40,}/, 'a diagnostic must not contain anything secret-shaped');
+  }
+};
+
+test('V2 A2.5: the published development secrets and the fingerprint catalog are the same set, in both directions', () => {
+  const { values, template, catalog } = secretFixture();
+  const check = (text, entries) => checkDevelopmentSecretCatalog({ '.env.example': text }, catalogSource(entries));
+  assert.deepEqual(check(template, catalog), []);
+  // Templates are read together: a secret may live in a service template.
+  assert.deepEqual(checkDevelopmentSecretCatalog({ '.env.example': '# development only\n', 'apps/x-service/.env.example': template }, catalogSource(catalog)), []);
+
+  const without = (label, nth = 0) => { let seen = 0; return catalog.filter(([, l]) => l !== label || seen++ !== nth); };
+  const missing = (label, variable, nth) => {
+    const problems = check(template, without(label, nth));
+    assert.deepEqual(problems, [`.env.example: ${variable} is published development secret material that is not in the development-secret catalog (${DEVELOPMENT_SECRET_CATALOG}); production would accept it. Add its fingerprint, or do not publish it`], label);
+    noLeak(problems, values);
+  };
+  missing('X_KEY', 'X_KEY');
+  missing('X_PADDED_KEY', 'X_PADDED_KEY'); // quoted, with an inline comment
+  missing('X_KEYS', 'X_KEYS', 1); // the second ring entry alone
+  // The token's fingerprint is also its published digest: without it, the token AND the digest are uncataloged.
+  const tokenProblems = check(template, without('X_TOKEN'));
+  assert.deepEqual(tokenProblems.map((p) => /^\.env\.example: (\w+) is published/.exec(p)[1]), ['X_TOKEN', 'X_TOKENS']);
+  noLeak(tokenProblems, values);
+  // A digest of something that is not a published token is refused on its own.
+  const strayDigest = check(`${template}Y_TOKENS=other:${fingerprint('unpublished')}\n`, catalog);
+  assert.deepEqual(strayDigest.map((p) => /^\.env\.example: (\w+) /.exec(p)[1]), ['Y_TOKENS']);
+
+  // Reverse (OD-A2.5-3): a catalog entry whose value is no longer published.
+  const stale = check(template.replace(/^X_KEY=.*\n/m, ''), catalog);
+  assert.deepEqual(stale, [`${DEVELOPMENT_SECRET_CATALOG}: the catalog entry for X_KEY matches no value of a tracked .env.example; remove the entry or restore the published value`]);
+  noLeak(stale, values);
+  const extra = check(template, [...catalog, [fingerprint('never published'), 'Z_KEY']]);
+  assert.match(extra.join(), /the catalog entry for Z_KEY matches no value/);
+  assert.equal(extra.length, 1);
+
+  // Structural, never a count: an empty pair and a one-secret pair both agree; an unreadable catalog is reported, not passed.
+  assert.deepEqual(check('# development only\nX_KEY=' + values.key + '\n', [catalog[0]]), []);
+  assert.match(check(template, []).join(), /no development-secret fingerprint could be read/);
+  assert.match(checkDevelopmentSecretCatalog({ '.env.example': template }, undefined).join(), /no development-secret fingerprint could be read/);
+  // Not secret-shaped: short values, URLs, JSON, words, a comment.
+  assert.deepEqual(check('# development only\nA=short\nB=postgres://u:p@h:5432/d\nC=this-is-a-long-lowercase-placeholder-value-for-a-test-bucket\nD=\'{"a":1}\'\n' + template.split('\n').slice(1).join('\n'), catalog), []);
+  assert.deepEqual(envAssignments('A=1\n  export B="x y" # c\n#C=3\nD=   # none\nE=a#b\n\nnot a line\n'), [{ name: 'A', value: '1' }, { name: 'B', value: 'x y' }, { name: 'D', value: '' }, { name: 'E', value: 'a#b' }]);
+});
+
+test('V2 A2.5: the real catalog and the real templates agree, and the catalog is read in full', () => {
+  const catalogText = repoFile(DEVELOPMENT_SECRET_CATALOG);
+  const catalog = developmentSecretCatalog(catalogText);
+  assert.equal(catalog.size, (catalogText.match(/'[0-9a-f]{64}'/g) ?? []).length, 'every fingerprint literal of the catalog is parsed');
+  assert.ok(catalog.size > 0);
+  const templates = Object.fromEntries(gitTrackedFiles(new URL('..', import.meta.url).pathname).filter(isEnvTemplate).map((rel) => [rel, repoFile(rel)]));
+  assert.ok('.env.example' in templates);
+  assert.deepEqual(checkDevelopmentSecretCatalog(templates, catalogText), []);
+});
+
+test('V2 A2.5: every template says it is for development only, and the root template is consumed by Compose', () => {
+  const compose = { 'docker-compose.yml': 'services:\n  a:\n    environment:\n      A: ${A_PASSWORD:?set it}\n      B: ${B_URL}\n      C: "${C_PORT:-3000}"\n      D: $D_NAME\n' };
+  const root = '# Local stack.\n# Development only: never use these values elsewhere.\n\nA_PASSWORD=x\nB_URL=y\nC_PORT=1\nD_NAME=z\n';
+  assert.deepEqual(checkEnvTemplates({ '.env.example': root, 'apps/x-service/.env.example': '# x-service, DEVELOPMENT-ONLY template\nANY_NAME=1\n' }, compose), []);
+  assert.deepEqual(checkEnvTemplates({ '.env.example': root.replace('Development only', 'Local'), 'apps/x-service/.env.example': 'A=1\n# development only\n' }, compose), [
+    '.env.example: must open with a comment that says the template is for development only',
+    'apps/x-service/.env.example: must open with a comment that says the template is for development only', // not in the opening comment
+  ]);
+  assert.deepEqual(checkEnvTemplates({ '.env.example': `${root}UNUSED_VALUE=1\nA_PASS=2\n# COMMENTED=3\n` }, compose), [
+    '.env.example: UNUSED_VALUE is not referenced by any Compose file (docker-compose.yml); remove it or reference it',
+    '.env.example: A_PASS is not referenced by any Compose file (docker-compose.yml); remove it or reference it', // a prefix of A_PASSWORD is not a reference
+  ]);
+  // A second Compose file counts; service templates are never matched against Compose or a loader.
+  assert.deepEqual(checkEnvTemplates({ '.env.example': `${root}OVERLAY_ONLY=1\n` }, { ...compose, 'docker-compose.observability.yml': 'x: ${OVERLAY_ONLY}' }), []);
+  assert.match(checkEnvTemplates({ 'apps/x-service/.env.example': '# development only\n' }, compose).join(), /\.env\.example \(the root local-development template\) is missing or not tracked/);
+});
+
+test('V2 A2.5: process.env is read only at the configuration boundary (loaders and command-line tools)', () => {
+  const read = 'export const v = process.env.X_VALUE;';
+  const allowed = {
+    'apps/x-service/src/config/x-config.ts': 'export function loadXConfig(env: NodeJS.ProcessEnv = process.env) { return env; }',
+    'libs/service-kit/src/config/base-config.ts': 'export function loadBaseConfig(name: string, env = process.env) { return env; }',
+    'apps/x-service/src/cli/main.ts': "const url = process.env.MIGRATION_DATABASE_URL; process.env.X_EVENTS = 'off'; const { A_NAME } = process.env;",
+    'libs/service-kit/src/cli/migrate.ts': read,
+    // Tests, comments, strings and types are not reads; another object's env is not the process environment.
+    'apps/x-service/src/a.spec.ts': read,
+    'apps/x-service/test/a.e2e-spec.ts': read,
+    'libs/service-kit/src/a.int-spec.ts': read,
+    'apps/x-service/src/b.ts': "// process.env.X is read by the loader\nconst s = 'process.env.X'; const t = `${'process'}.env`; /* const { env } = process */",
+    'apps/x-service/src/c.ts': 'export function f(env: NodeJS.ProcessEnv, e: typeof process.env) { return [env.X_VALUE, e, config.env, options.process]; }',
+    'apps/x-service/scripts/tool.mjs': read, // outside src
+  };
+  for (const [rel, text] of Object.entries(allowed)) assert.deepEqual(checkSource(rel, text), [], rel);
+
+  const forms = {
+    'property': read,
+    'bracket key': "export const v = process.env['X_VALUE'];",
+    'double-quoted key': 'export const v = process.env["X_VALUE"];',
+    'bracket env': "export const v = process['env'].X_VALUE;",
+    'whole object': 'export const all = { ...process.env };',
+    'passed on': 'load(process.env);',
+    'destructured': 'const { env } = process;',
+    'destructured, renamed': 'const { env: e, argv } = process;',
+    'assigned destructuring': 'let env; ({ env } = process);',
+    'through globalThis': 'export const v = globalThis.process.env.X_VALUE;',
+    'parenthesized': 'export const v = (process).env.X_VALUE;',
+    'named import': "import { env } from 'node:process'; export const v = env.X_VALUE;",
+    'write': "process.env.X_VALUE = 'on';",
+  };
+  const runtime = ['apps/x-service/src/main.ts', 'apps/x-service/src/deep/module/a.ts', 'libs/service-kit/src/events/bus.ts', 'libs/audit-contract/src/index.ts',
+    'apps/x-service/src/config/x-config.token.ts', 'apps/x-service/src/config/helper.ts', 'libs/service-kit/src/config/config.ts', 'libs/audit-contract/src/cli/tool.ts'];
+  for (const rel of runtime) {
+    for (const [label, text] of Object.entries(forms)) {
+      // Only this guard's finding is compared: the audit contract's own rule also (rightly) refuses its node:process import.
+      assert.deepEqual(checkSource(rel, text).filter((p) => p.includes('process.env')), [`${rel}: reads process.env directly; configuration is read once by the service configuration loader (src/config/*-config.ts) and reaches the rest of the service as a typed value`], `${rel}: ${label}`);
+    }
+  }
+  assert.equal(PROCESS_ENV_BOUNDARY.length, 4, 'the boundary is the reviewed allowlist: loaders, the kit base loader, service CLIs, kit CLIs');
+  assert.equal(sourceFacts('a.ts', read).readsProcessEnv, true);
+  assert.equal(sourceFacts('a.ts', 'const x = config.env;').readsProcessEnv, false);
+});
+
+test('V2 A2.5: a README documents every literal variable its service reads (high-confidence; computed names are outside)', () => {
+  const loader = [
+    "const a = reader.required('X_URL'); const b = reader.int('X_TTL_SECONDS', { default: 1, min: 1, max: 9 }); const c = reader.bool('X_ENABLED', true);",
+    "const d = reader.oneOf('X_MODE', ['a', 'b'], 'a'); const e = reader.secret('X_SECRET'); const f = reader.url('X_BASE', ['https:']); const g = reader.get('X_OPTIONAL') ?? reader.optional('X_OTHER', 'd');",
+    "const h = readKey(reader, 'X_HASH_KEY', rules); const i = readOptionalKey(reader, 'X_OLD_KEY', rules); const j = readKeyRing(reader, 'X_KEYS', 'X_ACTIVE_KEY_ID', rules);",
+    "const k = int(env, 'X_LIMIT', 1, 1, 9); const l = required(src, 'X_REQUIRED'); const m = secretBytes(src, 'X_PEPPER', true); const n = env.X_ISSUER ?? env['X_AUDIENCE']; const o = src.get('X_FROM_SOURCE');",
+    // Computed names and look-alikes: none of these is a literal read.
+    "const p = reader.int(`X_${name}_RATE`, opts); const q = rule(env, 'LOGIN_IP', 5, 300); const r = Symbol('X_CONFIG'); const s = map.get('X_NOT_ENV'); const t = headers.get('X_HEADER');",
+    "throw new ConfigError('X_MENTIONED must be set'); const u = 'X_STRING'; // reader.get('X_COMMENTED')",
+  ].join('\n');
+  const names = ['X_URL', 'X_TTL_SECONDS', 'X_ENABLED', 'X_MODE', 'X_SECRET', 'X_BASE', 'X_OPTIONAL', 'X_OTHER', 'X_HASH_KEY', 'X_OLD_KEY', 'X_KEYS', 'X_ACTIVE_KEY_ID', 'X_LIMIT', 'X_REQUIRED', 'X_PEPPER', 'X_ISSUER', 'X_AUDIENCE', 'X_FROM_SOURCE'];
+  assert.deepEqual(sourceFacts('apps/x-service/src/config/x-config.ts', loader).configNames.sort(), [...names].sort());
+  const readme = (list) => `# x-service\n\n| Variable | Meaning |\n|---|---|\n${list.map((n) => `| \`${n}\` | … |`).join('\n')}\n| \`OTHER_SERVICE_URL\` | an integration variable nothing here reads |\n`;
+  const sources = { 'apps/x-service/src/config/x-config.ts': loader, 'apps/x-service/src/storage/storage-config.ts': "export const s = (reader) => reader.int('X_STORAGE_TIMEOUT_MS', o);" };
+  assert.deepEqual(checkReadmeEnvironmentCoverage('x-service', readme([...names, 'X_STORAGE_TIMEOUT_MS']), sources), []);
+  assert.deepEqual(checkReadmeEnvironmentCoverage('x-service', readme(names.filter((n) => n !== 'X_TTL_SECONDS')), sources), [
+    'apps/x-service/README.md does not document X_TTL_SECONDS, which apps/x-service/src/config/x-config.ts reads',
+    'apps/x-service/README.md does not document X_STORAGE_TIMEOUT_MS, which apps/x-service/src/storage/storage-config.ts reads',
+  ]);
+  // A longer name or a wildcard is not a mention of the variable.
+  assert.match(checkReadmeEnvironmentCoverage('x-service', readme([...names.filter((n) => n !== 'X_KEYS'), 'X_KEYS_PREVIOUS', 'X_STORAGE_*_TIMEOUT_MS', 'X_STORAGE_TIMEOUT_MS']), sources).join(), /^apps\/x-service\/README\.md does not document X_KEYS, which/);
+  assert.match(checkReadmeEnvironmentCoverage('x-service', undefined, sources).join(), /README\.md is missing/);
+  assert.match(checkReadmeEnvironmentCoverage('x-service', readme(names), { 'apps/x-service/src/a.ts': 'export const a = 1;' }).join(), /no literal configuration read was found/);
+  // What the runner feeds it: the service's non-test source outside its command-line tools.
+  assert.equal(isServiceConfigSource('x-service', 'apps/x-service/src/storage/storage-config.ts'), true);
+  for (const rel of ['apps/x-service/src/cli/main.ts', 'apps/x-service/src/config/x-config.spec.ts', 'apps/x-service/test/a.e2e-spec.ts', 'apps/y-service/src/a.ts', 'apps/x-service/src/a.d.ts', 'apps/x-service/README.md']) {
+    assert.equal(isServiceConfigSource('x-service', rel), false, rel);
+  }
+});
+
+test('V2 A2.5: no environment file enters a Docker build context (static evaluation of .dockerignore)', () => {
+  const rules = 'node_modules\n**/dist\n*.md\n# no environment file\n**/.env\n**/.env.*\n';
+  assert.deepEqual(checkDockerContext(rules), []);
+  assert.deepEqual(checkDockerContext(repoFile('.dockerignore')), []);
+  assert.deepEqual(checkDockerContext('node_modules\n**/dist\n'), DOCKER_CONTEXT_EXCLUDED.map((p) => `.dockerignore lets ${p} into the build context (expected rules: **/.env and **/.env.*, with no later rule re-including it)`));
+  // Root-only rules leave the packages' files in; a later negation re-includes (the last matching rule wins).
+  assert.deepEqual(checkDockerContext('.env\n.env.*\n').map((p) => /lets (\S+) into/.exec(p)[1]), ['apps/auth-service/.env', 'apps/auth-service/.env.local', 'libs/service-kit/.env']);
+  assert.deepEqual(checkDockerContext(`${rules}!**/.env\n`).map((p) => /lets (\S+) into/.exec(p)[1]), ['.env', 'apps/auth-service/.env', 'libs/service-kit/.env']);
+  assert.deepEqual(checkDockerContext(`!**/.env\n${rules}`), [], 'an earlier negation is overridden');
+  assert.match(checkDockerContext(`${rules}apps\n`).join('\n'), /\.dockerignore excludes apps\/auth-service\/src\/main\.ts, which an image build needs/);
+  assert.match(checkDockerContext(`${rules}**/*.sh\n`).join('\n'), /excludes apps\/auth-service\/deploy\/provision-and-deploy\.sh/);
+  assert.match(checkDockerContext(undefined).join(), /\.dockerignore is missing/);
+  const excludes = (pattern, path) => dockerIgnoreExcludes(`${pattern}\n`, path);
+  assert.equal(excludes('**/.env', '.env'), true); // ** matches no directory too
+  assert.equal(excludes('**/.env', 'a/b/.env'), true);
+  assert.equal(excludes('*/.env', 'a/b/.env'), false); // * does not cross a separator
+  assert.equal(excludes('**/.env.*', 'a/.envrc'), false);
+  assert.equal(excludes('**/.env.*', 'a/src/env.ts'), false);
+  assert.equal(excludes('.en?', '.env'), true);
+  assert.equal(excludes('**/test', 'apps/a/test/x.ts'), true); // a directory rule covers what is under it
+  assert.equal(excludes('.env', '.envx'), false);
+});
+
+test('V2 A2.5: the runner wires every configuration and secret guard, on Git-backed inputs', () => {
+  const sf = ts.createSourceFile('check-repo.mjs', repoFile('scripts/check-repo.mjs'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const calls = [];
+  const visit = (n) => {
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) calls.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const named = (name) => calls.filter((c) => c.expression.text === name);
+  const pushed = (name) => named(name).filter((c) => ts.isSpreadElement(c.parent) && ts.isCallExpression(c.parent.parent) && c.parent.parent.expression.getText() === 'problems.push');
+  for (const guard of ['checkEnvIgnorePolicy', 'checkDockerContext', 'checkTrackedEnvFiles', 'checkDevelopmentSecretCatalog', 'checkEnvTemplates', 'checkReadmeEnvironmentCoverage']) {
+    assert.equal(pushed(guard).length, 1, `${guard} is called once and its problems are reported`);
+  }
+  const arg = (name, i = 0) => pushed(name)[0].arguments[i].getText();
+  assert.equal(arg('checkEnvIgnorePolicy'), 'gitIgnoreProbe(root)', 'the ignore rules are evaluated by Git on the repository');
+  assert.equal(arg('checkDockerContext'), "readOrUndefined('.dockerignore')");
+  assert.equal(named('gitTrackedFiles').length, 1);
+  assert.equal(named('gitTrackedFiles')[0].arguments[0].getText(), 'root', 'the tracked files come from the index of the repository');
+  assert.equal(arg('checkTrackedEnvFiles'), 'tracked');
+  assert.equal(arg('checkDevelopmentSecretCatalog'), 'templates');
+  assert.equal(arg('checkDevelopmentSecretCatalog', 1), 'readOrUndefined(DEVELOPMENT_SECRET_CATALOG)');
+  assert.equal(arg('checkEnvTemplates'), 'templates');
+  const templatesFrom = sf.getFullText().match(/const templates = ([^\n]+)/)?.[1] ?? '';
+  assert.match(templatesFrom, /^Object\.fromEntries\(\(tracked \?\? \[\]\)\.filter\(isEnvTemplate\)/, 'the templates are the tracked .env.example files');
+  assert.equal(named('isServiceConfigSource').length, 1, 'the README coverage reads the service source');
+  // The process.env boundary lives in checkSource, which the runner already calls for every source file (A1.4 wiring test above).
+  assert.equal(named('checkSource').length, 1);
 });
