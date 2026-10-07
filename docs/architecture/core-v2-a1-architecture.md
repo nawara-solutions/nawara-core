@@ -3,9 +3,11 @@
 - **Status:** RECORD of A1.0 discovery (read-only, approved by the owner) and **A1.1 architecture decisions and ADR governance
   reconciliation**, written 2026-10-07 on `main` at `f4faf98` (PR #218 merge), and **A1.2: the consolidated conventions ADR**
   ([ADR-0056](../adr/0056-core-architecture-and-api-conventions.md), **Accepted** by the architecture owner on 2026-10-07; ADR-0034
-  superseded; §8, §9), and **A1.3: caller-policy convergence** (five services on the kit parser, **complete locally**, not committed;
-  §10). **A1 is OPEN:** A1.4 and A1.5 are not started. A1.1 and A1.2 change documentation only; A1.3 changes the five services' policy
-  parsers, their tests and one runbook: no kit, Auth, infrastructure, workflow or package change, and no production action.
+  superseded; §8, §9), **A1.3: caller-policy convergence** (five services on the kit parser; **closed on `main`**, PR #220, merge
+  `5e90601`; §10) and **A1.4: architecture guards** (repository checks only; **complete locally**, owner-reviewed, PR open; §11).
+  **A1 is OPEN:** A1.5 is not started. A1.1 and A1.2 change documentation only; A1.3 changes the five services' policy parsers, their
+  tests and one runbook; A1.4 changes the repository checks and their tests only. No kit, Auth, infrastructure, workflow or package
+  change, and no production action.
 - **Scope of A1** ([roadmap](../CORE-ROADMAP.md) A1; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4, §5, §7): service
   boundaries and dependency direction; the standard bootstrap and service-kit adoption; the Auth convergence target; the common request
   context; the contract compatibility and migration strategy; Q-ADR-1 and the review of Proposed ADRs; Core-wide DTO conventions; route
@@ -136,8 +138,8 @@ consumer boundary for AI workloads (ADR-0055: a future `nawara-ia` is one more r
 A1.0  discovery                                   ✅ complete (owner-reviewed)
 A1.1  decisions, ADR governance                   ✅ complete locally; owner-approved
 A1.2  consolidated conventions ADR (ADR-0056)    ✅ complete locally; owner-approved; ADR-0056 Accepted, ADR-0034 superseded
-A1.3  caller-policy migration (five services)     ✅ complete locally (§10); not committed; owner review pending
-A1.4  repository guards                           not started
+A1.3  caller-policy migration (five services)     ✅ closed on main (PR #220, merge 5e90601; §10)
+A1.4  repository guards                           ✅ complete locally (§11); owner-reviewed; PR open, not merged
 A1.5  certification                               not started
 ```
 
@@ -229,5 +231,49 @@ absolute last.
 - **A1.4 guard candidates (reported, not implemented):** no hand-written parsing of `*_SERVICE_POLICY` / `SERVICE_POLICY` outside
   `parseCallerPolicy` (for example, no `JSON.parse` in a service's policy module); every caller-policy wrapper delegates to the kit;
   the existing `check:repo` architecture-boundary checks (application → application, library → application) stay as they are.
-- **Next:** owner review of A1.3; then one commit per service (Release, Audit, File, Notification, Organization with the runbook) on
-  one branch and one PR, only when authorized. A1.4 not started. A1 stays OPEN.
+- **Closed on `main`:** after owner review, five commits (one per service, Organization with the runbook and this record) merged as
+  PR #220 (`5e90601`) with every CI check green.
+
+## 11. A1.4: architecture guards (2026-10-07, local)
+
+- **A1.4.0 discovery** (read-only, owner-reviewed) found the caller-policy architecture unguarded and the cross-service import rule
+  **partially** guarded: ordinary `import … from`, `import type` and `export … from` were refused, but side-effect imports,
+  dynamic `import()`, `require()` and bare workspace-package specifiers (`billing-service/…`, which npm workspaces resolve) were not.
+  No current code used a missed form. **Owner decision OD-A1-4a = Option 1:** close those gaps in A1.4 by reusing the A12.2a
+  syntax-aware collector.
+- **Caller-policy guard** (`scripts/lib/checks.mjs`, run by `npm run check:repo`):
+  - an explicit inventory, `CALLER_POLICY_MODULES`, of the seven consumers, each bound to its variable: Billing
+    (`BILLING_SERVICE_POLICY`), Payment (`PAYMENT_SERVICE_POLICY`), Organization (`SERVICE_POLICY`), Notification, File, Audit and Release
+    (`<SERVICE>_SERVICE_POLICY`). Auth has no caller policy and is not governed. A missing inventoried module is a violation;
+  - each module must import `parseCallerPolicy` by name (not aliased, not type-only) from `@nawara/service-kit`, call it with
+    `variable: '<its variable>'` (the environment-variable binding is part of the inventory, not a second guard), and must not call
+    `JSON.parse`, `JSON['parse']` or `parseJsonStrict` itself. Inspection is syntax-aware: a comment or string that mentions a parser is
+    not a call. Wrapper shapes (classes, or Billing / Payment's functions) are not constrained;
+  - **completeness:** a non-test file under `apps/<service>/src/` that uses `parseCallerPolicy` or reads a `…SERVICE_POLICY` variable
+    (`reader.get / required / optional`, `process.env`) fails unless its service has an inventory entry, so a new consumer cannot appear
+    ungoverned. Unrelated `JSON.parse` (cursors, HTTP bodies, events, templates, the kit) is untouched.
+  - Not static, by design: duplicate-key rejection and Organization's OD-A1-3a strictness are runtime behaviour of the kit parser, kept
+    by the kit's and the services' tests; delegation is what the guard enforces.
+- **Dependency direction (ADR-0056):** the A12.2a collector is generalized into one syntax-aware pass per source file
+  (`sourceFacts`), shared by the metrics-client guard, the cross-service guard and the completeness rule. Application → other
+  application and library → application imports are now refused in every static module-loading form (import, type import,
+  re-export, side-effect import, dynamic `import()`, `require`, `import x = require`, `createRequire`, `require.resolve`), including
+  bare workspace-package specifiers. The package names come from each `apps/<dir>/package.json`, never from a naming scheme, and
+  the runner fails closed if none is found. A library import now has its own message. The audit-contract direction rule is unchanged
+  and keeps its input. Mentions in comments or strings are no longer treated as imports.
+- **Evidence (local):**
+  - `npm run test:repo` 111/111 (104 before; 7 new tests: the inventory against the real modules, the module guard's pass and fail
+    matrix, the missing module, completeness, the collector, app → app and library → application in every form with pass controls,
+    and the runner's wiring);
+  - `npm run check:repo` passes on the real repository, about 1.4 s (as before);
+  - mutation controls, restored byte-for-byte:
+    - with `JSON.parse` not detected, the call no longer required, an inventory variable changed (`check:repo` red too), `import()`
+      or `require()` not collected, bare workspace packages ignored, completeness off, or library → application allowed, `test:repo`
+      is red;
+    - so it is when the runner stops passing the workspace packages or stops checking the inventory.
+- **Residual (owner review, as for A12.2a):** a fully computed module specifier, or a policy parser moved into another file of a
+  governed service while the governed module keeps a decoy call, cannot be decided statically; the services' raw-JSON duplicate-key
+  tests still fail if parsing bypasses the kit.
+- **Unchanged:** no application, kit, Auth, workflow, Compose, package or `CLAUDE.md` change; no runtime behaviour change, so the A1.3
+  runtime campaign is not repeated. The `CLAUDE.md` OpenAPI drift (§9) stays for A1.5.
+- **Owner review passed;** one commit and one PR. A1.4 closes on `main` only when that PR is merged. A1.5 not started. A1 stays OPEN.

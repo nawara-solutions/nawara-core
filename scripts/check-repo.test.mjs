@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1366,3 +1366,174 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
     fails(withExpr('PgDeadlocks', () => 'sum by (job, instance, datname) (rate(pg_stat_database_blk_read_time{job="postgres"}[10m])) > 0'), /not collected/);
   });
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A1.4: architecture guards (ADR-0056; A1.3 caller-policy convergence; OD-A1-4a = Option 1).
+
+const repoFile = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+const KIT_IMPORT = "import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';\n";
+const classPolicy = (variable = 'RELEASE_SERVICE_POLICY') => `${KIT_IMPORT}
+export class ReleaseCallerPolicy {
+  private constructor(private readonly callers: ReadonlyMap<string, unknown>) {}
+  static parse(raw: string | undefined, registered: readonly string[]): ReleaseCallerPolicy {
+    const map = parseCallerPolicy<unknown>(raw, registered, { variable: '${variable}', keys: ['products'], entry: (at, e) => e });
+    return new ReleaseCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
+  }
+}
+`;
+const REL = 'apps/release-service/src/policy/caller-policy.ts';
+
+test('V2 A1.4: the caller-policy inventory is exactly the seven A1.3 consumers, each bound to its variable (Auth is not one)', () => {
+  assert.deepEqual(CALLER_POLICY_MODULES, {
+    'apps/billing-service/src/admission/caller-admission.policy.ts': 'BILLING_SERVICE_POLICY',
+    'apps/payment-service/src/authorization/caller-admission.policy.ts': 'PAYMENT_SERVICE_POLICY',
+    'apps/organization-service/src/authorization/service-policy.ts': 'SERVICE_POLICY',
+    'apps/notification-service/src/api/caller-policy.ts': 'NOTIFICATION_SERVICE_POLICY',
+    'apps/file-service/src/policy/caller-policy.ts': 'FILE_SERVICE_POLICY',
+    'apps/audit-service/src/policy/caller-policy.ts': 'AUDIT_SERVICE_POLICY',
+    'apps/release-service/src/policy/caller-policy.ts': 'RELEASE_SERVICE_POLICY',
+  });
+  // The real modules pass: every one delegates its document to the kit parser.
+  assert.deepEqual(checkCallerPolicyInventory(Object.fromEntries(Object.keys(CALLER_POLICY_MODULES).map((rel) => [rel, repoFile(rel)]))), []);
+});
+
+test('V2 A1.4: a governed caller-policy module delegates to parseCallerPolicy and never parses the document itself', () => {
+  const ok = (text, rel = REL, variable = 'RELEASE_SERVICE_POLICY') => assert.deepEqual(checkCallerPolicyModule(rel, text, variable), [], text);
+  const refused = (text, message, variable = 'RELEASE_SERVICE_POLICY') => assert.match(checkCallerPolicyModule(REL, text, variable).join('\n'), message, text);
+
+  // PASS: a wrapper class; Billing / Payment's function style; comments and strings that merely mention a parser.
+  ok(classPolicy());
+  ok("import { parseCallerPolicy, policyList, type CallerPolicyMap } from '@nawara/service-kit';\nexport function parseBillingServicePolicy(raw: string | undefined, registered: readonly string[]): CallerPolicyMap<unknown> {\n  return parseCallerPolicy(raw, registered, { variable: 'BILLING_SERVICE_POLICY', keys: ['operations'], entry: (at, e) => e });\n}\n",
+    'apps/billing-service/src/admission/caller-admission.policy.ts', 'BILLING_SERVICE_POLICY');
+  ok(`${classPolicy()}// Before A1.3 this module called JSON.parse(raw) itself.\n/* parseJsonStrict(raw) is the kit's job */\n`);
+  ok(`${classPolicy()}export const NOTE = 'JSON.parse is never called here';\nexport const T = \`JSON['parse'](x)\`;\n`);
+
+  // FAIL: the shared parser replaced by a local one.
+  const local = "import { ConfigError } from '@nawara/service-kit';\nexport function parse(raw: string) { const doc = JSON.parse(raw); return doc; }\n";
+  refused(local, /must import parseCallerPolicy/);
+  refused(local, /never calls parseCallerPolicy/);
+  refused(local, /calls JSON\.parse; a governed caller-policy module must not parse the policy document itself/);
+  // FAIL: imported but not called (parsing done locally instead).
+  refused(classPolicy().replace(/parseCallerPolicy<unknown>\(raw, registered, (\{[^}]*\})\)/, 'JSON.parse(raw)'), /never calls parseCallerPolicy[\s\S]*calls JSON\.parse/);
+  refused(`${KIT_IMPORT}export const x = 1;\n`, /never calls parseCallerPolicy/);
+  // FAIL: a valid shared-parser call plus a local parser beside it, in either spelling or through the kit's strict reader.
+  refused(`${classPolicy()}export const shadow = (raw: string) => JSON.parse(raw);\n`, /calls JSON\.parse/);
+  refused(`${classPolicy()}export const shadow = (raw: string) => JSON['parse'](raw);\n`, /calls JSON\.parse/);
+  refused(`${classPolicy()}export const shadow = (raw: string) => (JSON).parse(raw);\n`, /calls JSON\.parse/);
+  refused(classPolicy().replace('parseCallerPolicy }', 'parseCallerPolicy, parseJsonStrict }') + 'export const shadow = (raw: string) => parseJsonStrict(raw, \'X\');\n', /calls parseJsonStrict/);
+  // FAIL: no import at all (a local look-alike), an alias, a type-only import, a namespace import.
+  refused(classPolicy().replace(KIT_IMPORT, 'function parseCallerPolicy<E>(...a: unknown[]): any { return a; }\n'), /must import parseCallerPolicy from @nawara\/service-kit/);
+  refused(classPolicy().replace('parseCallerPolicy }', 'parseCallerPolicy as p }').replace('parseCallerPolicy<unknown>(', 'p<unknown>('), /imports parseCallerPolicy under an alias/);
+  refused(classPolicy().replace(KIT_IMPORT, "import type { parseCallerPolicy } from '@nawara/service-kit';\n"), /must import parseCallerPolicy/);
+  refused(classPolicy().replace(KIT_IMPORT, "import * as kit from '@nawara/service-kit';\n").replace('parseCallerPolicy<unknown>(', 'kit.parseCallerPolicy<unknown>('), /must import parseCallerPolicy[\s\S]*never calls parseCallerPolicy/);
+  // FAIL: the call is not bound to the inventoried variable (a renamed, missing or computed variable).
+  refused(classPolicy('RELEASE_POLICY'), /no parseCallerPolicy call is bound to RELEASE_SERVICE_POLICY/);
+  refused(classPolicy().replace("variable: 'RELEASE_SERVICE_POLICY', ", ''), /no parseCallerPolicy call is bound to RELEASE_SERVICE_POLICY/);
+  refused(classPolicy().replace("variable: 'RELEASE_SERVICE_POLICY'", 'variable: NAME'), /no parseCallerPolicy call is bound to RELEASE_SERVICE_POLICY/);
+});
+
+test('V2 A1.4: a missing governed caller-policy module is reported', () => {
+  const files = Object.fromEntries(Object.keys(CALLER_POLICY_MODULES).map((rel) => [rel, repoFile(rel)]));
+  files['apps/file-service/src/policy/caller-policy.ts'] = undefined;
+  assert.deepEqual(checkCallerPolicyInventory(files), [
+    'apps/file-service/src/policy/caller-policy.ts (the governed caller-policy module for FILE_SERVICE_POLICY) is missing; update CALLER_POLICY_MODULES if it moved',
+  ]);
+});
+
+test('V2 A1.4: a caller-policy consumer outside the inventory fails (completeness); unrelated JSON parsing stays allowed', () => {
+  const ungoverned = (text, rel = 'apps/booking-service/src/policy.ts') => assert.match(checkSource(rel, text).join(), /has no governed caller-policy module; add it to CALLER_POLICY_MODULES/, text);
+  ungoverned("import { parseCallerPolicy } from '@nawara/service-kit';\nexport const p = (raw: string) => parseCallerPolicy(raw, [], { variable: 'BOOKING_SERVICE_POLICY', keys: [], entry: (a, e) => e });\n");
+  ungoverned("import { parseCallerPolicy as p } from '@nawara/service-kit';\n");
+  ungoverned("import * as kit from '@nawara/service-kit';\nkit.parseCallerPolicy(raw, [], spec);\n");
+  ungoverned("export const raw = reader.get('BOOKING_SERVICE_POLICY');\n", 'apps/booking-service/src/config/booking-config.ts');
+  ungoverned("export const raw = reader.required('SERVICE_POLICY');\n", 'apps/booking-service/src/config/booking-config.ts');
+  ungoverned('export const raw = process.env.BOOKING_SERVICE_POLICY;\n', 'apps/booking-service/src/main.ts');
+  ungoverned("export const raw = process.env['BOOKING_SERVICE_POLICY'];\n", 'apps/booking-service/src/main.ts');
+  // An existing service that is not governed (Auth) gains a policy read: refused too.
+  ungoverned("export const raw = reader.get('AUTH_SERVICE_POLICY');\n", 'apps/auth-service/src/config/auth-config.ts');
+
+  const allowed = {
+    'apps/billing-service/src/config/billing-config.ts': "const p = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(t));", // governed
+    'apps/organization-service/src/config/organization-config.ts': "servicePolicyRaw: reader.get('SERVICE_POLICY'),", // governed
+    'apps/booking-service/src/x.ts': "// parseCallerPolicy is the kit's; reader.get('BOOKING_SERVICE_POLICY') comes later\nconst s = 'BOOKING_SERVICE_POLICY';",
+    'apps/booking-service/src/tokens.ts': "export const SERVICE_POLICY = Symbol('SERVICE_POLICY'); const t = reader.get('SERVICE_TOKENS');",
+    'apps/booking-service/test/p.e2e-spec.ts': "import { parseCallerPolicy } from '@nawara/service-kit';", // tests are not consumers
+    'apps/booking-service/src/p.spec.ts': "const raw = process.env.BOOKING_SERVICE_POLICY;",
+    'apps/billing-service/src/common/pagination.ts': 'export const decode = (c: string) => JSON.parse(Buffer.from(c, "base64url").toString());',
+    'apps/booking-service/src/cursor.ts': 'export const decode = (c: string) => JSON.parse(c);',
+    'libs/service-kit/src/events/x.ts': 'export const body = (b: Buffer) => JSON.parse(b.toString());',
+    'libs/service-kit/src/service-auth/caller-policy.ts': "export function parseCallerPolicy() {} const v = process.env.SERVICE_POLICY;", // the kit is the parser's home
+  };
+  for (const [rel, text] of Object.entries(allowed)) assert.deepEqual(checkSource(rel, text), [], rel);
+});
+
+test('V2 A1.4: the shared static-specifier collector sees every module-loading form, and only real ones', () => {
+  assert.deepEqual(staticModuleSpecifiers('apps/x-service/src/a.ts', [
+    "import a from 'm1';", "import type { B } from 'm2';", "export * from 'm3';", "import 'm4';", "const c = await import('m5');",
+    "const d = require('m6');", "import e = require('m7');", "type F = import('m8').F;",
+    "// import g from 'not1';", "const s = 'not2'; const t = `from 'not3'`;",
+  ].join('\n')), ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'm8']);
+});
+
+test('V2 A1.4 (OD-A1-4a): app → app and library → application imports are refused in every module-loading form', () => {
+  const manifests = Object.fromEntries(['audit-service', 'auth-service', 'billing-service', 'file-service', 'notification-service', 'organization-service', 'payment-service', 'release-service']
+    .map((dir) => [dir, repoFile(`apps/${dir}/package.json`)]));
+  const appPackages = workspaceAppPackages(manifests);
+  assert.equal(appPackages.size, 8);
+  assert.equal(appPackages.get('billing-service'), 'billing-service'); // read from the manifest, never derived from a naming scheme
+  assert.equal(workspaceAppPackages({ 'x-service': '{"name":"@acme/x"}' }).get('@acme/x'), 'x-service');
+
+  const forms = (target) => ({
+    'static import': `import { X } from '${target}';`,
+    'type-only import': `import type { X } from '${target}';`,
+    're-export': `export * from '${target}';`,
+    'side-effect import': `import '${target}';`,
+    'dynamic import': `const m = await import('${target}');`,
+    'require': `const m = require('${target}');`,
+  });
+  const appToApp = {
+    'apps/payment-service/src/a.ts': ['../../billing-service/src/x.js', '../../../apps/billing-service/src/x.js', 'billing-service', 'billing-service/dist/x.js'],
+    'apps/payment-service/test/a.e2e-spec.ts': ['../../billing-service/src/x.js', 'billing-service/dist/x.js'],
+  };
+  for (const [rel, targets] of Object.entries(appToApp)) {
+    for (const target of targets) {
+      for (const [label, text] of Object.entries(forms(target))) {
+        assert.match(checkSource(rel, text, { appPackages }).join(), /imports another service's source/, `${rel}: ${label} of ${target}`);
+      }
+    }
+  }
+  const libToApp = {
+    'libs/service-kit/src/x.ts': ['../../../apps/auth-service/src/x.js', 'auth-service', 'organization-service/dist/x.js'],
+    'libs/audit-contract/src/x.ts': ['../../../apps/audit-service/src/x.js'],
+  };
+  for (const [rel, targets] of Object.entries(libToApp)) {
+    for (const target of targets) {
+      for (const [label, text] of Object.entries(forms(target))) {
+        assert.match(checkSource(rel, text, { appPackages }).join(), /a shared library imports application source/, `${rel}: ${label} of ${target}`);
+      }
+    }
+  }
+  // PASS controls: the service's own files and package, external and node modules, the shared libraries; mentions are not imports.
+  const allowed = {
+    'apps/payment-service/src/a.ts': "import { X } from './x.js'; import y from '../common/y.js'; import { Pool } from 'pg'; import { Z } from '@nawara/service-kit'; import { W } from '@nawara/audit-contract'; import { createHash } from 'node:crypto'; const own = await import('payment-service/dist/x.js');",
+    'apps/billing-service/src/b.ts': "// moved from '../../payment-service/src/x.js'\nconst note = \"see require('payment-service')\"; const t = `import('auth-service')`;",
+    'libs/service-kit/src/y.ts': "import { Pool } from 'pg'; import { x } from './x.js'; const m = await import('node:fs');",
+    'apps/payment-service/src/c.ts': "import { x } from 'billing-service-sdk'; import y from '@billing-service/x';", // look-alike packages are not workspace apps
+  };
+  for (const [rel, text] of Object.entries(allowed)) assert.deepEqual(checkSource(rel, text, { appPackages }), [], rel);
+});
+
+test('V2 A1.4: the runner wires both guards (the workspace packages reach checkSource; the inventory is checked)', () => {
+  const sf = ts.createSourceFile('check-repo.mjs', repoFile('scripts/check-repo.mjs'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const calls = [];
+  const visit = (n) => {
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) calls.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const named = (name) => calls.filter((c) => c.expression.text === name);
+  assert.ok(named('checkSource').some((c) => c.arguments[2] && ts.isObjectLiteralExpression(c.arguments[2])
+    && c.arguments[2].properties.some((p) => p.name?.text === 'appPackages')), 'checkSource(rel, text, { appPackages })');
+  assert.equal(named('workspaceAppPackages').length, 1, 'the packages are read from the application manifests');
+  assert.equal(named('checkCallerPolicyInventory').length, 1, 'the caller-policy inventory is checked');
+});
