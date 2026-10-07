@@ -188,6 +188,16 @@ describe('notification-service configuration', () => {
         expect(loadNotificationConfig(env({ ...RESEND, NOTIFICATION_EMAIL_FROM: 'no-reply@notify.example.com' })).delivery.resend!.from).toBe('no-reply@notify.example.com');
       });
 
+      it('V2 A2.1 (OD-A2-4): surrounding whitespace of NOTIFICATION_EMAIL_FROM is normalized before validation; the sender rules still apply', () => {
+        const from = (v: string) => loadNotificationConfig(env({ ...RESEND, NOTIFICATION_EMAIL_FROM: v })).delivery.resend!.from;
+        expect(from(' Lead <a@b.example>')).toBe('Lead <a@b.example>');
+        expect(from('\tNawara <no-reply@notify.example.com>  ')).toBe('Nawara <no-reply@notify.example.com>');
+        // normalization touches only the ends: header injection and malformed senders are still refused after it
+        for (const v of [' Evil\r\nBcc: x@evil.test <a@b.example> ', ' "Quoted" <a@b.example>', '  not-an-address  ']) {
+          expect(() => from(v), JSON.stringify(v)).toThrow(ConfigError);
+        }
+      });
+
       it('credentials are read only for the provider selected; nothing is required with none', () => {
         expect(loadNotificationConfig(env({ NOTIFICATION_SMS_PROVIDER: 'none' })).delivery.twilio).toBeUndefined();
         expect(loadNotificationConfig(env({ ...TWILIO })).delivery.resend).toBeUndefined();
@@ -204,7 +214,7 @@ describe('notification-service configuration', () => {
 
       it.each([
         ['NOTIFICATION_RESEND_API_KEY', ['sk_live_x', 're_short', 're_has space in it 0123456789'], RESEND],
-        ['NOTIFICATION_EMAIL_FROM', ['Nawara <no-reply@notify>', 'Evil\r\nBcc: x@evil.test <a@b.example>', '"Quoted" <a@b.example>', 'a, b <a@b.example>', 'x'.repeat(65) + ' <a@b.example>', ' Lead <a@b.example>', 'not-an-address'], RESEND],
+        ['NOTIFICATION_EMAIL_FROM', ['Nawara <no-reply@notify>', 'Evil\r\nBcc: x@evil.test <a@b.example>', '"Quoted" <a@b.example>', 'a, b <a@b.example>', 'x'.repeat(65) + ' <a@b.example>', 'not-an-address'], RESEND],
         ['NOTIFICATION_RESEND_BASE_URL', ['ftp://api.resend.com', 'not a url'], RESEND],
         ['NOTIFICATION_TWILIO_ACCOUNT_SID', ['AC123', `SK${'a'.repeat(32)}`, `AC${'A'.repeat(32)}`], TWILIO],
         ['NOTIFICATION_TWILIO_API_KEY_SID', [`AC${'a'.repeat(32)}`], TWILIO],
