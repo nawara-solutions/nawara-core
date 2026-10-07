@@ -293,3 +293,10 @@ certified records-based by A3.8** ([V2-A.3 record §8](core-v2-a-3-ci-and-rulese
 (production access proof, D-3) and A3.7 (organization-secret restriction, D-4) deferred**. The environment has not been proven as the
 sole production credential holder. Stage A0 is therefore certified with those two items deferred. Unchanged: G6 deferred; G7, F6, F7
 locked; Final Core Validation absolute last.
+
+## 13. Later status: Q-ADR-1 decided (2026-10-07)
+
+Appended. §5 and §7 list Q-ADR-1 as open (→ A1, owner decision). It is decided by A1.1, **OD-A1-1**: an ADR becomes Accepted on the
+architecture owner's explicit approval, not on merge or implementation ([A1 record](core-v2-a1-architecture.md) §2,
+[`docs/adr/README.md`](../adr/README.md) status lifecycle). The review of every Proposed ADR is in the A1 record §3; status changes stay
+one ADR at a time, as §7 says. A1.1 is complete locally; A1 stays open.

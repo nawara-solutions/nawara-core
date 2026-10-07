@@ -1,6 +1,6 @@
 # 0034. A small shared service-kit library, and one set of API conventions
 
-- **Status:** Proposed (error convention amended by [ADR-0054](./0054-localized-error-messages-and-stable-error-codes.md))
+- **Status:** Superseded by [ADR-0056](./0056-core-architecture-and-api-conventions.md) (2026-10-07, on ADR-0056's acceptance by the architecture owner; previously Proposed, error convention amended by [ADR-0054](./0054-localized-error-messages-and-stable-error-codes.md))
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
 
@@ -8,6 +8,11 @@
 > `requestId`") is amended by [ADR-0054](./0054-localized-error-messages-and-stable-error-codes.md): the body keeps that shape, a
 > stable `code` becomes the machine contract on every shared-architecture error, and `message` may be rendered in English, French or
 > Arabic through `Accept-Language` (English by default, unchanged). Nothing else in this ADR changes.
+
+> **Forward note (2026-10-07, Core V2 A1.2):** **superseded by [ADR-0056](./0056-core-architecture-and-api-conventions.md)**, Accepted
+> 2026-10-07 by the architecture owner, which consolidates this ADR's conventions with ADR-0054 and the A1.1 owner decisions (owner
+> decision OD-A1-2). **ADR-0056 is the current authoritative Core architecture and API convention.** This ADR is kept unchanged below as
+> history.
 
 > **Refinements recorded by the [payment SDD](../sdd/payment-service.md) (2026-09-19), not yet decisions of their own:** (1) creations that have a durable business key (a payment from a payment request, a refund with a client reference) use that **natural key** for idempotency instead of the `Idempotency-Key` header, which stays for other mutating operations; (2) the error body gains an optional stable `code` field (an additive change to the kit's filter, plus a `502` status text); (3) a service's OpenAPI page is served under its routed prefix (`/payment/docs`, as `/auth/docs`), because the gateway routes only `/<prefix>`. If you disagree with any of them, revise the SDD.
 
