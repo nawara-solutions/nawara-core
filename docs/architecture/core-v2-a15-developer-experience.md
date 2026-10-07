@@ -1,8 +1,9 @@
 # Core V2 A15: developer and platform experience
 
 - **Status:** RECORD of the A15.0 discovery (read-only, owner-reviewed, 2026-10-07, on `main` at `869100d`, the PR #228 merge that
-  certified A2), of the A15.1.0 design (read-only, owner-reviewed) and of **A15.1: generic CLI configuration hygiene** (**complete
-  locally, owner review pending**; §4). **A15 is OPEN.** A15.2 to A15.5 are not started.
+  certified A2), of the A15.1.0 design (read-only, owner-reviewed), of **A15.1: generic CLI configuration hygiene** (**closed on `main`**:
+  PR #229, merge `a7c56643a72c9b1b829c1b89521f7f8165aaa7f0`; §4) and of **A15.2: the canonical developer path and toolchain**
+  (**complete locally, owner review pending**; §5). **A15 is OPEN.** A15.3 to A15.5 are not started.
 - **Scope of A15** ([roadmap](../CORE-ROADMAP.md) A15): service templates, shared libraries, local environment, testing and CI
   conventions, documentation, generators, localization conventions. The roadmap gives no subphases or completion criteria; §3 does.
   **Not A15:** Auth's CLIs and loader (A4); the Organization ownership tooling (A5 / F6 / F7); observability capabilities (A12);
@@ -54,11 +55,16 @@
 ```text
 A15.0  discovery, owner decisions       ✅ complete (owner-reviewed)
 A15.1.0  CLI hygiene design             ✅ complete (owner-reviewed)
-A15.1  generic CLI configuration hygiene   complete locally; owner review pending (§4)
-A15.2 – A15.5                           not started
+A15.1  generic CLI configuration hygiene   ✅ closed on main (PR #229, merge a7c5664; §4)
+A15.2.0  developer-path design          ✅ complete (owner-reviewed)
+A15.2  developer path and toolchain     complete locally; owner review pending (§5)
+A15.3 – A15.5                           not started
 ```
 
-## 4. A15.1: generic CLI configuration hygiene (2026-10-07, local)
+## 4. A15.1: generic CLI configuration hygiene (2026-10-07; closed on `main`, PR #229, merge `a7c5664`)
+
+Merged with 24 of 24 pull-request checks green; that run covered the broker-dependent suites that could not run on the development
+machine (below).
 
 A15.1 **adopts** the A2 configuration model in the generic operator CLIs. `EnvReader`, `ConfigError` and `describeCliFailure` are
 unchanged, and no service runtime changed.
@@ -118,3 +124,46 @@ unchanged, and no service runtime changed.
 - **Production.** GREEN to implement and to merge: the kit path makes the Auth, Organization and Audit image workflows **build**;
   nothing deploys (deploy workflows are dispatch-only). **YELLOW, later and separate:** the new CLI behaviour reaches production with
   the next owner-authorized deploy of each image. RED: none; no G6 dependency.
+
+## 5. A15.2: the canonical developer path and toolchain (2026-10-07, local)
+
+- **Owner decisions:** OD-A15.2-1 = A (`engines.node` `22.x` and `.nvmrc` `22`: parity with CI and the images; advisory, no
+  `engine-strict`, no npm declaration); OD-A15.2-2 = B (the guide is `docs/DEVELOPMENT.md`, linked from the root README);
+  OD-A15.2-3 = A (a root `build:libs` script, CI's own command); OD-A15.2-4 = A (pre-PR guidance is documentation only: no
+  orchestration command). Also decided: remove the three leftover `nest deploy` scripts; correct Auth's stale migration instruction;
+  leave `docker-compose.yml` untouched; no guard on the commands the guide shows.
+- **Toolchain.** Node 22 is what CI (`NODE_VERSION`) and every application Dockerfile already use. It is now declared for developers
+  in the root `package.json` and `.nvmrc`, and `check:repo` keeps the four in step (`checkNodeToolchain`: `.nvmrc` is the
+  reference; `engines.node`, every Node version of Core CI and every Dockerfile base image must name the same major).
+- **`npm run build:libs`** builds `@nawara/service-kit` and `@nawara/audit-contract`, which the services consume through their built
+  `dist/`. CI keeps its own explicit command.
+- **[Developer guide](../DEVELOPMENT.md).** One journey: prerequisites; first run (install, libraries, checks, environment,
+  infrastructure); running a service (migrate, start, health); the validation ladder and what to run before a pull request; the local
+  equivalent of every Core CI job; the test environment, stated once; changing dependencies; troubleshooting (only failures that
+  have actually occurred); where the specialized documents are. It restates no A2 rule beyond what a developer needs and links the
+  rest.
+- **READMEs.** The root README's setup block is replaced by a short "Developing" section that points to the guide (its build line
+  named the kit only). The eight service READMEs and the two library READMEs keep their own commands and lose the repeated shared
+  recipe: the library build becomes `npm run build:libs`, and the inline `TEST_DATABASE_ADMIN_URL` / `TEST_RABBITMQ_URL` values
+  give way to a reference to the guide. Two examples that pointed at port 5432 (Organization, the kit) are corrected: Compose
+  publishes PostgreSQL on 5433. Auth's "apply db/migrations/0001..0007" becomes its real migration command.
+- **Package scripts.** `"deploy": "nest deploy"` is removed from Auth, Billing and Payment: a scaffold leftover with no caller, and
+  misleading beside the digest deployments. No deployment workflow or script changed.
+- **Lockfile.** `package-lock.json` gains the same `engines` entry on its root package (three lines, by owner decision, so that a
+  later `npm install` does not produce an unrelated diff); no dependency, version, integrity or resolved URL changed.
+- **Not changed, on purpose.** `docker-compose.yml`: its header comment still says
+  Auth "does not depend on" the kit, which is no longer true. **Deferred comment debt**, to be corrected the next time that file is
+  edited for a reason of its own.
+- **Found, for A15.3:** `libs/service-kit/test/observability.int-spec.ts` cannot be loaded without `TEST_RABBITMQ_URL` (it reads the
+  variable while the suite is being declared), so its PostgreSQL tests do not run without a broker either. The guide's
+  troubleshooting names the symptom; the fix belongs with the other local-determinism items.
+- **Boundaries kept.** A15.3 (the local broker, stale test queues, the timer-dependent tests, the ADD drift) and A15.4 (the
+  new-service checklist, the localization convention) are untouched. Nothing of A2 or A14 changed: no reader, template, ignore rule,
+  guard, workflow, pin or dependency.
+- **Evidence (local).** `test:repo` 124 passed (122 before; the Node guard's fixtures and its wiring); `check:repo`; the changed
+  `package.json` files parse; `npm run build:libs` builds both libraries; relative links of every changed document; the guide's
+  commands read against `package.json`, the workspace scripts and `core-ci.yml`. Negative control: `.nvmrc` set to 20 makes
+  `check:repo` red, naming each source that disagrees; restored byte-for-byte.
+- **Production:** none. GREEN to implement and to merge: the root `package.json` and the Auth, Audit and library paths make the
+  Auth, Organization and Audit image workflows **build**; nothing deploys, and nothing changes at runtime. No G6 dependency. Drive
+  does not depend on this: no API, event or contract changed.
