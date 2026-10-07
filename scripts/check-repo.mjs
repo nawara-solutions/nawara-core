@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -97,13 +97,18 @@ try {
   problems.push('core-ci.yml is missing');
 }
 
+// V2 A1.4: the workspace applications by package name (from their manifests), so a bare workspace-package import is a cross-service import.
+const appPackages = workspaceAppPackages(Object.fromEntries(readdirSync(join(root, 'apps'))
+  .filter((dir) => readOptional(join(root, 'apps', dir, 'package.json')) !== '')
+  .map((dir) => [dir, readFileSync(join(root, 'apps', dir, 'package.json'), 'utf8')])));
+if (appPackages.size === 0) problems.push('no workspace application manifest (apps/*/package.json) was found; the dependency-direction guard cannot run');
 for (const base of ['apps', 'libs']) {
   for (const file of walk(join(root, base))) {
     const isSql = file.endsWith('.sql'); // schemas too (Stage 17.3): a product concept must not enter a Core table either
     if ((!/\.(ts|mjs|js)$/.test(file) && !isSql) || file.endsWith('.d.ts')) continue;
     const rel = relative(root, file).split('\\').join('/');
     const text = readFileSync(file, 'utf8');
-    problems.push(...checkSource(rel, text));
+    problems.push(...checkSource(rel, text, { appPackages }));
     if (!isSql) problems.push(...checkAuthErrorCoverage(rel, text));
   }
 }
@@ -115,6 +120,8 @@ const readOrUndefined = (rel) => {
     return undefined;
   }
 };
+// V2 A1.4: every governed caller-policy module delegates its document to the kit's parseCallerPolicy, bound to its variable.
+problems.push(...checkCallerPolicyInventory(Object.fromEntries(Object.keys(CALLER_POLICY_MODULES).map((rel) => [rel, readOrUndefined(rel)]))));
 problems.push(...checkHierarchyFixtures(
   readOrUndefined('apps/auth-service/test/fixtures/hierarchy-snapshot.v1.json'),
   readOrUndefined('apps/organization-service/test/fixtures/hierarchy-snapshot.v1.json'),
@@ -131,4 +138,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana');

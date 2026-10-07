@@ -1157,8 +1157,13 @@ const isCreateRequireCall = (node) => {
   return !!n && ts.isCallExpression(n) && calleeName(n.expression) === 'createRequire';
 };
 
-/** The static metrics-client module specifiers a source file references (empty when none). */
-export function metricsClientReferences(relPath, text) {
+/**
+ * ONE syntax-aware pass over a source file (A12.2a; generalized in V2 A1.4 so every source guard shares it): every STATIC module
+ * specifier, in the forms listed above, plus the two caller-policy signals the A1.4 completeness rule needs. A use of the kit's
+ * `parseCallerPolicy` is a named import of it from any module or a call to it; a policy read is a configuration read of a variable of
+ * the `SERVICE_POLICY` family (`reader.get / required / optional('…')`, `process.env.…`, `process.env['…']`).
+ */
+export function sourceFacts(relPath, text) {
   const kind = /\.[cm]?ts$|\.tsx$/.test(relPath) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
   const sf = ts.createSourceFile(relPath, text, ts.ScriptTarget.Latest, true, kind);
   const requireAliases = new Set();
@@ -1170,10 +1175,15 @@ export function metricsClientReferences(relPath, text) {
   collect(sf);
 
   const specifiers = [];
+  let usesCallerPolicy = false;
+  const policyReads = [];
   const visit = (node) => {
     let spec;
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) spec = staticSpecifier(node.moduleSpecifier);
-    else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) spec = staticSpecifier(node.moduleReference.expression);
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
+      spec = staticSpecifier(node.moduleSpecifier);
+      const named = ts.isImportDeclaration(node) ? node.importClause?.namedBindings : undefined;
+      if (named && ts.isNamedImports(named) && named.elements.some((el) => (el.propertyName ?? el.name).text === CALLER_POLICY_PARSER)) usesCallerPolicy = true;
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) spec = staticSpecifier(node.moduleReference.expression);
     else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) spec = staticSpecifier(node.argument.literal);
     else if (ts.isCallExpression(node)) {
       const callee = unwrap(node.expression);
@@ -1184,23 +1194,148 @@ export function metricsClientReferences(relPath, text) {
         || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'resolve' && ['require', ...requireAliases].includes(calleeName(callee.expression) ?? '')) // require.resolve('x')
         || isCreateRequireCall(callee); // createRequire(url)('x')
       if (loads) spec = staticSpecifier(node.arguments[0]);
+      if (calleeName(callee) === CALLER_POLICY_PARSER) usesCallerPolicy = true;
+      const read = staticSpecifier(node.arguments[0]);
+      if (ts.isPropertyAccessExpression(callee) && CONFIG_READS.has(callee.name.text) && read !== undefined && POLICY_VARIABLE.test(read)) policyReads.push(read);
+    } else if (ts.isPropertyAccessExpression(node) && isProcessEnv(node.expression) && POLICY_VARIABLE.test(node.name.text)) policyReads.push(node.name.text);
+    else if (ts.isElementAccessExpression(node) && isProcessEnv(node.expression)) {
+      const read = staticSpecifier(node.argumentExpression);
+      if (read !== undefined && POLICY_VARIABLE.test(read)) policyReads.push(read);
     }
-    if (spec !== undefined && METRICS_CLIENT.test(spec)) specifiers.push(spec);
+    if (spec !== undefined) specifiers.push(spec);
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return specifiers;
+  return { specifiers, usesCallerPolicy, policyReads };
+}
+const CALLER_POLICY_PARSER = 'parseCallerPolicy';
+const CONFIG_READS = new Set(['get', 'required', 'optional']); // the kit ConfigReader's string reads
+const POLICY_VARIABLE = /^(?:[A-Z][A-Z0-9]*_)?SERVICE_POLICY$/;
+const isProcessEnv = (node) => {
+  const n = unwrap(node);
+  return ts.isPropertyAccessExpression(n) && n.name.text === 'env' && ts.isIdentifier(unwrap(n.expression)) && unwrap(n.expression).text === 'process';
+};
+
+/** Every static module specifier a source file references (A1.4: the shared collector behind the metrics and dependency guards). */
+export function staticModuleSpecifiers(relPath, text) {
+  return sourceFacts(relPath, text).specifiers;
 }
 
-export function checkMetricsClientImport(relPath, text) {
+/** The static metrics-client module specifiers a source file references (empty when none). */
+export function metricsClientReferences(relPath, text) {
+  return staticModuleSpecifiers(relPath, text).filter((spec) => METRICS_CLIENT.test(spec));
+}
+
+/** `specifiers`: the file's already-collected static specifiers (checkSource shares its one pass); computed when omitted. */
+export function checkMetricsClientImport(relPath, text, specifiers) {
   if (relPath.startsWith(METRICS_CLIENT_HOME) || !PARSED.test(relPath) || relPath.endsWith('.d.ts')) return [];
-  return metricsClientReferences(relPath, text).length > 0
+  return (specifiers ?? staticModuleSpecifiers(relPath, text)).some((spec) => METRICS_CLIENT.test(spec))
     ? [`${relPath}: imports the metrics client library; only ${METRICS_CLIENT_HOME} may (create metrics through the kit's BoundedMetrics)`]
     : [];
 }
 
-/** No product concepts in Core services or the kit; no financial-domain declarations in the kit; no cross-service source imports. */
-export function checkSource(relPath, text) {
+/**
+ * V2 A1.4 (ADR-0056 §11; A1.3): the governed caller-policy modules, each bound to its environment variable. Every one parses its
+ * policy document with the kit's `parseCallerPolicy` (envelope, registration cross-check, unknown and duplicate keys) and keeps only its
+ * own dimension checks. A service that reads a `…SERVICE_POLICY` variable or uses `parseCallerPolicy` must have its module here.
+ */
+export const CALLER_POLICY_MODULES = {
+  'apps/billing-service/src/admission/caller-admission.policy.ts': 'BILLING_SERVICE_POLICY',
+  'apps/payment-service/src/authorization/caller-admission.policy.ts': 'PAYMENT_SERVICE_POLICY',
+  'apps/organization-service/src/authorization/service-policy.ts': 'SERVICE_POLICY',
+  'apps/notification-service/src/api/caller-policy.ts': 'NOTIFICATION_SERVICE_POLICY',
+  'apps/file-service/src/policy/caller-policy.ts': 'FILE_SERVICE_POLICY',
+  'apps/audit-service/src/policy/caller-policy.ts': 'AUDIT_SERVICE_POLICY',
+  'apps/release-service/src/policy/caller-policy.ts': 'RELEASE_SERVICE_POLICY',
+};
+const CALLER_POLICY_APPS = new Set(Object.keys(CALLER_POLICY_MODULES).map((p) => p.split('/')[1]));
+const KIT = '@nawara/service-kit';
+
+/**
+ * One governed caller-policy module (parsed, never regex-matched, so a comment or string mentioning `JSON.parse` is not a call):
+ * a named, non-aliased value import of `parseCallerPolicy` from the kit; a call to it whose spec carries `variable: '<its variable>'`;
+ * and no local document parser (`JSON.parse`, `JSON['parse']`, the kit's `parseJsonStrict` called directly). Wrapper shapes are free.
+ */
+export function checkCallerPolicyModule(relPath, text, variable) {
+  const sf = ts.createSourceFile(relPath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let imported = false;
+  let aliased = false;
+  let calls = 0;
+  let bound = false;
+  const parsers = new Set();
+  const isVariableBinding = (arg) => ts.isObjectLiteralExpression(arg) && arg.properties.some((p) => ts.isPropertyAssignment(p)
+    && (ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name)) && p.name.text === 'variable' && staticSpecifier(p.initializer) === variable);
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node) && staticSpecifier(node.moduleSpecifier) === KIT && !node.importClause?.isTypeOnly) {
+      const named = node.importClause?.namedBindings;
+      for (const el of named && ts.isNamedImports(named) ? named.elements : []) {
+        if ((el.propertyName ?? el.name).text !== CALLER_POLICY_PARSER || el.isTypeOnly) continue;
+        if (el.propertyName && el.name.text !== CALLER_POLICY_PARSER) aliased = true;
+        else imported = true;
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = unwrap(node.expression);
+      if (ts.isIdentifier(callee) && callee.text === CALLER_POLICY_PARSER) {
+        calls += 1;
+        if (node.arguments.some(isVariableBinding)) bound = true;
+      }
+      const isJson = (n) => ts.isIdentifier(unwrap(n)) && unwrap(n).text === 'JSON';
+      if ((ts.isPropertyAccessExpression(callee) && isJson(callee.expression) && callee.name.text === 'parse')
+        || (ts.isElementAccessExpression(callee) && isJson(callee.expression) && staticSpecifier(callee.argumentExpression) === 'parse')) parsers.add('JSON.parse');
+      if (calleeName(callee) === 'parseJsonStrict') parsers.add('parseJsonStrict');
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  const problems = [];
+  const at = `${relPath} (governed caller-policy module for ${variable})`;
+  if (aliased) problems.push(`${at}: imports parseCallerPolicy under an alias; import it by its name from ${KIT} so the shared parser stays visible`);
+  else if (!imported) problems.push(`${at}: must import parseCallerPolicy from ${KIT}; the policy document is parsed by the kit's shared parser (ADR-0056 §11)`);
+  if (calls === 0) problems.push(`${at}: never calls parseCallerPolicy; the policy document must be parsed by the kit's shared parser (ADR-0056 §11)`);
+  else if (!bound) problems.push(`${at}: no parseCallerPolicy call is bound to ${variable} (its spec must carry variable: '${variable}')`);
+  for (const parser of parsers) {
+    problems.push(`${at}: calls ${parser}; a governed caller-policy module must not parse the policy document itself (the kit's parser refuses duplicate keys and unknown properties)`);
+  }
+  return problems;
+}
+
+/** The inventory as a whole: `files` maps each governed path to its text, or undefined when the file is missing. */
+export function checkCallerPolicyInventory(files) {
+  const problems = [];
+  for (const [relPath, variable] of Object.entries(CALLER_POLICY_MODULES)) {
+    const text = files[relPath];
+    if (text === undefined) problems.push(`${relPath} (the governed caller-policy module for ${variable}) is missing; update CALLER_POLICY_MODULES if it moved`);
+    else problems.push(...checkCallerPolicyModule(relPath, text, variable));
+  }
+  return problems;
+}
+
+/** V2 A1.4: workspace package name → application directory, read from each `apps/<dir>/package.json` (never a naming convention). */
+export function workspaceAppPackages(manifests) {
+  const packages = new Map();
+  for (const [dir, text] of Object.entries(manifests)) {
+    const name = JSON.parse(text).name;
+    if (typeof name === 'string' && name !== '') packages.set(name, dir);
+  }
+  return packages;
+}
+
+const bareName = (spec) => {
+  if (spec.startsWith('.') || spec.startsWith('/') || /^[a-z]+:/.test(spec)) return undefined; // relative, absolute, node: / file: …
+  const parts = spec.split('/');
+  return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+};
+/** The application a module specifier reaches into, if any: an `apps/<x>/` path, a relative `../<x>-service` path, or a workspace package. */
+const targetApp = (spec, appPackages) =>
+  /(?:^|\/)apps\/([a-z-]+)\//.exec(spec)?.[1] ?? /^(?:\.\.\/)+([a-z-]+-service)\b/.exec(spec)?.[1] ?? appPackages?.get(bareName(spec) ?? '');
+
+/**
+ * No product concepts in Core services or the kit; no financial-domain declarations in the kit; no cross-service source imports and no
+ * library → application import (V2 A1.4: every module-loading form, from the shared syntax-aware pass; `appPackages` from
+ * `workspaceAppPackages` adds the bare workspace-package form); every caller-policy consumer governed (A1.4).
+ */
+export function checkSource(relPath, text, { appPackages } = {}) {
   const problems = [];
   if (BIDI_CONTROL.test(text) && !BIDI_ALLOWLIST.has(relPath)) problems.push(`${relPath}: contains an invisible bidirectional control character (write it as an escape)`);
   const inKit = relPath.startsWith('libs/service-kit/');
@@ -1218,13 +1353,22 @@ export function checkSource(relPath, text) {
     problems.push(`${relPath}: opens the hierarchy reference-write gate; only the reference-cache protocol (hierarchy/hierarchy-reference.ts) may place hierarchy rows`);
   }
   const app = /^apps\/([a-z-]+)\//.exec(relPath)?.[1];
-  for (const m of text.matchAll(/from\s+['"]([^'"]+)['"]/g)) {
-    const spec = m[1];
-    const other = /(?:^|\/)apps\/([a-z-]+)\//.exec(spec)?.[1] ?? (/^(?:\.\.\/)+([a-z-]+-service)\b/.exec(spec)?.[1]);
-    if (other && other !== app) problems.push(`${relPath}: imports another service's source (${spec}); services talk over APIs and events only`);
-    problems.push(...checkAuditContractDirection(relPath, spec));
+  const regexSpecifiers = [...text.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]);
+  for (const spec of regexSpecifiers) problems.push(...checkAuditContractDirection(relPath, spec)); // unchanged since Stage 19
+  const facts = PARSED.test(relPath) && !relPath.endsWith('.d.ts') ? sourceFacts(relPath, text) : undefined;
+  for (const spec of new Set(facts ? facts.specifiers : regexSpecifiers)) {
+    const other = targetApp(spec, appPackages);
+    if (!other || other === app) continue;
+    problems.push(app
+      ? `${relPath}: imports another service's source (${spec}); services talk over APIs and events only`
+      : `${relPath}: a shared library imports application source (${spec}); libraries never depend on an application (ADR-0056)`);
   }
-  problems.push(...checkMetricsClientImport(relPath, text));
+  if (facts) problems.push(...checkMetricsClientImport(relPath, text, facts.specifiers));
+  const isTest = /(^|\/)test\//.test(relPath) || /\.(e2e-|int-)?spec\.ts$/.test(relPath);
+  if (facts && app && relPath.startsWith(`apps/${app}/src/`) && !isTest && !CALLER_POLICY_APPS.has(app) && (facts.usesCallerPolicy || facts.policyReads.length > 0)) {
+    const what = facts.usesCallerPolicy ? 'uses parseCallerPolicy' : `reads ${facts.policyReads[0]}`;
+    problems.push(`${relPath}: ${what}, but ${app} has no governed caller-policy module; add it to CALLER_POLICY_MODULES (scripts/lib/checks.mjs, V2 A1.4)`);
+  }
   return problems;
 }
 
