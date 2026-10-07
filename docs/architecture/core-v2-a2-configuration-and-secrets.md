@@ -4,8 +4,10 @@
   PR #222 merge), of **A2.1: service-kit configuration hardening** (**closed on `main`**: PR #223, merge `b6a8402`; §4) and of
   **A2.2: seven-service adoption** (**closed on `main`**: PR #224, merge `975d848`; §6) of **A2.3: targeted Auth hardening**
   (**closed on `main`**: PR #225, merge `6e86ab0`; §7), of **A2.4: configuration hygiene, templates and secret rotation**
-  (**closed on `main`**: PR #226, merge `0854abd17714b7b686aafdc8c221d99bbc48e18c`; §8) and of **A2.5: configuration and secret
-  repository guards** (**complete locally, owner review pending**; §9). **A2 is OPEN.** A2.6 (certification) is not started.
+  (**closed on `main`**: PR #226, merge `0854abd17714b7b686aafdc8c221d99bbc48e18c`; §8), of **A2.5: configuration and secret
+  repository guards** (**closed on `main`**: PR #227, merge `77f55d0065236a9660672d9cbe1cfd023b1c7f9b`; §9) and of the **A2.6
+  certification** (§10; its pull request is pending). **A2 is OPEN until the certification pull request is merged**; that merge
+  makes A2 CERTIFIED / CLOSED.
 - **Scope of A2** ([roadmap](../CORE-ROADMAP.md) A2): typed and validated configuration; environment separation; secret lifecycle and
   rotation; deployment contracts. **Not A2:** Auth loader convergence and JWT key-ring verification (A4); the Organization ownership
   CLI and its production gate (A5 / F6 / F7); production credential restriction (A3.6 / A3.7); production deploy-script changes
@@ -98,11 +100,12 @@ A2.3  targeted Auth hardening           ✅ closed on main (PR #225, merge 6e86a
 A2.4.0  hygiene discovery               ✅ complete (owner-reviewed)
 A2.4  hygiene, templates, rotation      ✅ closed on main (PR #226, merge 0854abd; §8)
 A2.5.0  repository-guard discovery      ✅ complete (owner-reviewed)
-A2.5  repository guards                 ✅ complete locally; owner review pending (§9)
-A2.6  certification                     not started
+A2.5  repository guards                 ✅ closed on main (PR #227, merge 77f55d0; §9)
+A2.6.0  certification assessment        ✅ complete (owner-reviewed; zero A2 blockers)
+A2.6  certification                     certification pull request pending merge (§10)
 ```
 
-A2 is OPEN. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
+A2 is OPEN until the certification pull request is merged. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
 absolute last.
 
 ## 6. A2.2: seven-service adoption (2026-10-07, local)
@@ -229,7 +232,7 @@ absolute last.
 - **Left for A2.5:** permanent repository guards (the ignore policy, template completeness against the development-secret catalog, the
   `process.env` boundary, coverage of the environment reference).
 
-## 9. A2.5: configuration and secret repository guards (2026-10-07, local)
+## 9. A2.5: configuration and secret repository guards (2026-10-07; closed on `main`, PR #227, merge `77f55d0`)
 
 Permanent guards in the existing repository checker (`scripts/lib/checks.mjs`, wired by `scripts/check-repo.mjs`, tested in
 `scripts/check-repo.test.mjs`; `npm run check:repo` and `npm run test:repo`, both already steps of Core CI). No runtime source, loader,
@@ -285,5 +288,122 @@ template, Compose file, Dockerfile, deploy script or workflow changed.
   1.44 s, `test:repo` 2.48 s → 2.73 s.
 - **Production:** GREEN. Checker, tests and documentation only; nothing was deployed, rotated or inspected. RED: none; no G6
   dependency.
-- **Next:** A2.6, the A2 certification (reconciliation of A2.0 to A2.5, open-blocker review, proportional final validation). A2
-  stays OPEN until then.
+- **Next:** A2.6, the A2 certification (§10).
+
+## 10. A2 certification (A2.6, 2026-10-07)
+
+**Scope certified:** the A2 stage of the [roadmap](../CORE-ROADMAP.md): typed and validated configuration, environment separation,
+secret lifecycle and rotation, deployment contracts, as bounded in the header of this record. The certification is repository and
+local: it certifies the code, the guards and the documentation on `main`, not their activation in production.
+
+### 10.1 Baseline
+
+`main` at `77f55d0065236a9660672d9cbe1cfd023b1c7f9b`, the PR #227 merge. The reviewed A2.5 head `3ff74b0` was merged with an
+identical tree, and nothing landed after it before this certification.
+
+### 10.2 Completed stages
+
+| Stage | What | Pull request | Merge |
+|---|---|---|---|
+| A2.0 | discovery and owner decisions (§1, §2) | – (read-only) | – |
+| A2.1 | shared service-kit configuration hardening (§4) | #223 | `b6a8402a17fa02f57adc3f5fce78150ac331f359` |
+| A2.2 | adoption in the seven kit-based services (§6) | #224 | `975d848bb4c73750727ed06c32040fc5e618591b` |
+| A2.3 | targeted Auth hardening (§7) | #225 | `6e86ab0918debac6545de5bf2cf3b749d6b53d93` |
+| A2.4 | configuration hygiene, environment reference, rotation (§8) | #226 | `0854abd17714b7b686aafdc8c221d99bbc48e18c` |
+| A2.5 | permanent repository guards (§9) | #227 | `77f55d0065236a9660672d9cbe1cfd023b1c7f9b` |
+
+Each pull request merged with a green `core-ci-passed` and no unsuccessful check (#227: 24 of 24, run 37647146565).
+
+### 10.3 Owner decisions
+
+| Decision | Final state |
+|---|---|
+| OD-A2-1 = A | implemented (A2.3); Auth loader convergence is A4 |
+| OD-A2-2 = A | implemented (the kit fingerprint catalog); kept in step with the templates by A2.5 |
+| OD-A2-3 = Yes | implemented (A2.1); adopted (A2.2, A2.3) |
+| OD-A2-4 = A | implemented in `EnvReader`; Auth's own secret source is A4 |
+| OD-A2-5 = Yes, bounded | deferred by OD-A2.4-4 = B (A15; Auth's CLIs A4); the Organization ownership CLI stays excluded (A5 / F6 / F7) |
+| OD-A2-6 | honoured: `_FILE` is supported and not activated in production; no deploy script was changed for it |
+| OD-A2-7 = Yes | implemented ([secret rotation runbook](../runbooks/secret-rotation.md)); JWT key-ring verification is A4 |
+| OD-A2.1-a, OD-A2.1-b | implemented |
+| OD-A2.2-1 = A, OD-A2.2-2 = A | implemented; the pre-deploy checks are documented, not run |
+| OD-A2.3-1 = A, OD-A2.3-2 = A, OD-A2.3-3 = A | implemented |
+| OD-A2.4-1 = C, OD-A2.4-2 = A, OD-A2.4-3 = A | implemented |
+| OD-A2.4-4 = B | the deferral is the decision (A15, A4) |
+| OD-A2.5-1 = B, OD-A2.5-2 = A, OD-A2.5-3 = A | implemented |
+
+**Unresolved A2-owned decisions: none.**
+
+### 10.4 Final invariants
+
+| Invariant | Result |
+|---|---|
+| surrounding whitespace removed; whitespace-only is unset | PASS |
+| strict decimal integers | PASS |
+| strict booleans where they apply (Auth `AUTH_EVENTS`, `REQUIRE_CONTACT_VERIFICATION`) | PASS |
+| an unset `NODE_ENV` is production, in all eight services | PASS |
+| required and optional semantics | PASS |
+| kit services: `NAME` or `NAME_FILE`, both together refused | PASS |
+| no `_FILE` delivery activated in production | PASS |
+| key material: canonical base64, size, ring ids, distinct keys | PASS |
+| published development credentials: fingerprints only, refused in production (caller and callee sides) | PASS |
+| catalog and templates agree in both directions | PASS |
+| runtime database role: `postgres`, `root`, `*_migrator`, `*_admin` refused in production | PASS |
+| broker identity and rotation model documented (local guest; one production identity per service) | PASS |
+| docs credentials through the kit helper in the seven kit-based services | PASS |
+| seven kit-based services adopted; Auth hardened inside its own loader | PASS |
+| environment reference per service, local loading guidance, rotation runbook | PASS |
+| the seven A2.5 repository guards, wired and tested (§9) | PASS |
+
+Deferred, each with its owner; none is an A2 failure:
+
+| Owner | Work |
+|---|---|
+| A4 | Auth `SecretSource` convergence on `EnvReader`; the remaining Auth `_FILE` paths (`DATABASE_URL`, `RABBITMQ_URL`); the JWT verification key ring; Auth docs credentials and CLIs on the kit helpers |
+| A15 | generic CLI hygiene (the operational CLIs on the kit's reader) |
+| A5 / F6 / F7 | the Organization ownership tooling |
+| A14 | general secret scanning and push protection |
+| Production (separately authorized) | real `_FILE` delivery; cleaning stale entries from a server `.env`; real rotations; the candidate-image compatibility checks and the deployments that activate A2.1 to A2.3 in Auth, Organization and Audit |
+
+### 10.5 Security properties
+
+A2, as merged:
+
+- prints no secret value in a configuration error or a repository diagnostic (asserted per helper and per guard);
+- repeats no published development secret in plaintext (fingerprints only; the guard hashes the template values itself);
+- strengthens production refusal and weakens none of it;
+- does not activate `_FILE` in production;
+- changed no production secret and no production configuration;
+- leaves zero runtime `process.env` reads outside the configuration boundary, which `check:repo` now guards permanently;
+- keeps `NODE_ENV` fail-safe (unset is production).
+
+### 10.6 Accepted limitations and follow-ups
+
+| Item | Class |
+|---|---|
+| the Auth deploy command without its digest input in `core-rabbitmq-production.md` §1 | follow-up, outside A2 |
+| the Auth deploy script still writes `TRUST_PROXY=true` | accepted limitation (changing it is a behaviour change) |
+| Auth's secret source lets the file win when `NAME` and `NAME_FILE` are both set | A4 |
+| the CLIs read variables by name only | A15, A4 or A5 / F6 / F7, as in §8 |
+| README coverage is for high-confidence literal names only | accepted limitation (OD-A2.5-1 = B) |
+| the `grep ^SWAGGER_` hint in the Auth deploy script's comment | follow-up |
+| the peppers cannot be rotated | accepted and documented limitation (OD-A2-7) |
+
+### 10.7 Validation
+
+- **Reused (green on the byte-identical `main` tree):** the Core CI runs of pull requests #223 to #227, which include the service-kit
+  suite, the Auth suite and every service's configuration specs; the negative controls of A2.1 to A2.5 recorded in §4 and §6 to §9.
+- **Run once for this certification:** `npm run check:repo`; `npm run test:repo` (120 passed); the relative links of the three
+  changed documents; a read of those documents for consistency of pull requests, merge commits and statuses.
+- **Not run, by design:** service suites, end-to-end suites, image builds, production checks, Final Core Validation.
+
+### 10.8 Production and G6
+
+The certification is repository and local. Production was not accessed or changed. Activating A2 in the deployed services stays
+separately authorized work (YELLOW, PRODUCTION VERIFICATION DEFERRED; §4, §6, §7). A2 has **no G6 dependency**; G6 stays deferred.
+
+### 10.9 Certification statement
+
+**A2, Configuration and Secrets, has zero A2-owned blockers and satisfies its approved scope and certification criteria.** This
+section prepares the formal closure: **A2 becomes CERTIFIED / CLOSED when the pull request carrying this certification is merged to
+`main` with the required checks green.** Until then A2 is open.
