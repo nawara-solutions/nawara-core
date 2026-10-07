@@ -15,7 +15,13 @@ const load = (env: NodeJS.ProcessEnv, production: boolean, files: Record<string,
 describe('storage configuration (Stage 17.4)', () => {
   it('requires a provider: no default, no fallback', () => {
     expect(() => load({}, false)).toThrow(/FILE_STORAGE_PROVIDER is required/);
-    for (const typo of ['S3', 'local', 'minio', 'r2', 'filesytem', 's3 ']) expect(() => load({ ...S3, FILE_STORAGE_PROVIDER: typo }, true), typo).toThrow(/FILE_STORAGE_PROVIDER must be one of: filesystem, s3/);
+    for (const typo of ['S3', 'local', 'minio', 'r2', 'filesytem', ' S3 ']) expect(() => load({ ...S3, FILE_STORAGE_PROVIDER: typo }, true), typo).toThrow(/FILE_STORAGE_PROVIDER must be one of: filesystem, s3/);
+  });
+
+  it('V2 A2.1 (OD-A2-4): surrounding whitespace of FILE_STORAGE_PROVIDER is normalized before validation', () => {
+    expect(load({ ...S3, FILE_STORAGE_PROVIDER: 's3 ' }, true)).toMatchObject({ provider: 's3' });
+    expect(load({ ...S3, FILE_STORAGE_PROVIDER: ' s3' }, true)).toMatchObject({ provider: 's3' });
+    expect(() => load({ ...S3, FILE_STORAGE_PROVIDER: '   ' }, true)).toThrow(/FILE_STORAGE_PROVIDER is required/); // blank is unset, never a default
   });
 
   it('refuses the filesystem store in production, with no override, and accepts it elsewhere', () => {

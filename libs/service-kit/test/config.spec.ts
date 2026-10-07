@@ -20,8 +20,8 @@ describe('EnvReader', () => {
     }
   });
 
-  it('reads NAME_FILE (the file wins) and fails clearly, without the path content, when it cannot be read', () => {
-    expect(reader({ DB_PASS_FILE: '/run/secrets/db', DB_PASS: 'from-env' }, { '/run/secrets/db': 'from-file\n' }).get('DB_PASS')).toBe('from-file');
+  it('reads NAME_FILE and fails clearly, without the path content, when it cannot be read', () => {
+    expect(reader({ DB_PASS_FILE: '/run/secrets/db' }, { '/run/secrets/db': 'from-file\n' }).get('DB_PASS')).toBe('from-file');
     expect(() => reader({ DB_PASS_FILE: '/missing' }).get('DB_PASS')).toThrow('DB_PASS_FILE is set but the file cannot be read');
   });
 
@@ -40,6 +40,82 @@ describe('EnvReader', () => {
       expect((e as Error).message).not.toContain('hunter2');
     }
     expect(() => reader({ U: 'not a url' }).url('U', ['postgres:'])).toThrow('U must be a valid URL');
+  });
+});
+
+describe('V2 A2.1: EnvReader normalization (OD-A2-4), NAME / NAME_FILE ambiguity (OD-A2.1-b), strict integers (OD-A2.1-a)', () => {
+  const never = (fn: () => unknown, secret: string, message: RegExp) => {
+    let error: unknown;
+    try {
+      fn();
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as Error).message).toMatch(message);
+    expect((error as Error).message).not.toContain(secret);
+  };
+
+  it('removes surrounding whitespace and treats a blank value as unset (required fails, optional falls back)', () => {
+    expect(reader({ A: '  value \t\n' }).get('A')).toBe('value');
+    expect(reader({ A: 'two words' }).get('A')).toBe('two words'); // inner whitespace kept
+    for (const blank of ['', ' ', ' \t\n ']) {
+      expect(reader({ A: blank }).get('A')).toBeUndefined();
+      expect(() => reader({ A: blank }).required('A')).toThrow('A is required');
+      expect(reader({ A: blank }).optional('A', 'fallback')).toBe('fallback');
+      expect(reader({ A: blank }).bool('A', true)).toBe(true);
+      expect(reader({ A: blank }).oneOf('A', ['x', 'y'] as const, 'y')).toBe('y');
+      expect(() => reader({ A: blank }).secret('A', 16)).toThrow('A is required');
+      expect(() => reader({ A: blank }).url('A', ['https:'])).toThrow('A is required');
+    }
+    expect(reader({ FLAG: ' false ' }).bool('FLAG', true)).toBe(false);
+  });
+
+  it('a blank integer is unset (the default applies): whitespace can never become 0', () => {
+    for (const blank of [' ', '\t', ' \n ']) {
+      expect(reader({ N: blank }).int('N', { default: 7, min: 0, max: 10 })).toBe(7);
+      expect(reader({ TRUST_PROXY_HOPS: blank }).int('TRUST_PROXY_HOPS', { default: 2, min: 0, max: 5 })).toBe(2);
+    }
+  });
+
+  it.each(['0', '5', '-5', '+5', '007', ' 5 '])('accepts the decimal integer %j', (raw) => {
+    expect(reader({ N: raw }).int('N', { default: 1, min: -10, max: 10 })).toBe(Number(raw.trim()));
+  });
+
+  it.each(['1e3', '0x10', '0b1', '0o7', '1.5', '5.0', 'NaN', 'Infinity', '-Infinity', '+', '-', '+-5', '--5', '5-', '1_000', '1 000', 'five'])(
+    'refuses %j as an integer, without echoing it',
+    (raw) => never(() => reader({ N: raw }).int('N', { default: 1, min: 1, max: 1_000_000 }), raw, /^N must be an integer between 1 and 1000000$/),
+  );
+
+  it('keeps the range check after parsing, and refuses an integer beyond the safe range', () => {
+    expect(() => reader({ N: '11' }).int('N', { default: 1, min: 0, max: 10 })).toThrow('N must be an integer between 0 and 10');
+    expect(() => reader({ N: '-1' }).int('N', { default: 1, min: 0, max: 10 })).toThrow(ConfigError);
+    expect(() => reader({ N: '9007199254740993' }).int('N', { default: 1, min: 0, max: Number.MAX_SAFE_INTEGER })).toThrow(ConfigError);
+  });
+
+  it('NAME_FILE: trailing newline and surrounding whitespace removed; an empty or blank file is unset; a blank path is unset', () => {
+    expect(reader({ K_FILE: '/run/secrets/k' }, { '/run/secrets/k': '  s3cret-from-file \n' }).get('K')).toBe('s3cret-from-file');
+    expect(reader({ K_FILE: '  /run/secrets/k  ' }, { '/run/secrets/k': 'v' }).get('K')).toBe('v');
+    expect(reader({ K_FILE: '/run/secrets/k' }, { '/run/secrets/k': '' }).get('K')).toBeUndefined();
+    expect(reader({ K_FILE: '/run/secrets/k' }, { '/run/secrets/k': ' \n\n' }).get('K')).toBeUndefined();
+    expect(() => reader({ K_FILE: '/run/secrets/k' }, { '/run/secrets/k': '\n' }).required('K')).toThrow('K is required');
+    expect(reader({ K_FILE: '   ', K: 'direct' }).get('K')).toBe('direct'); // a blank path is no file
+  });
+
+  it('refuses NAME and NAME_FILE together, naming the variables only (neither source is silently preferred)', () => {
+    const fileSecret = 'the-file-secret-value';
+    const envSecret = 'the-env-secret-value';
+    never(() => reader({ K: envSecret, K_FILE: '/run/secrets/k' }, { '/run/secrets/k': fileSecret }).get('K'), envSecret, /^set K or K_FILE, not both$/);
+    never(() => reader({ K: envSecret, K_FILE: '/run/secrets/k' }, { '/run/secrets/k': fileSecret }).get('K'), fileSecret, /not both/);
+    never(() => reader({ K: envSecret, K_FILE: '/run/secrets/k' }, { '/run/secrets/k': fileSecret }).get('K'), '/run/secrets/k', /not both/);
+    // decided before any file is read: an unreadable file does not mask the ambiguity
+    never(() => reader({ K: envSecret, K_FILE: '/missing' }).get('K'), envSecret, /not both/);
+    // a blank direct value is unset, so a file alone is fine
+    expect(reader({ K: '  ', K_FILE: '/run/secrets/k' }, { '/run/secrets/k': fileSecret }).get('K')).toBe(fileSecret);
+  });
+
+  it('an unreadable file fails closed without echoing its path', () => {
+    never(() => reader({ K_FILE: '/run/secrets/private-path' }).required('K'), '/run/secrets/private-path', /^K_FILE is set but the file cannot be read$/);
   });
 });
 
