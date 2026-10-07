@@ -1,5 +1,6 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, loadOrganizationReferenceConfig, parseServiceTokens,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, isPublishedDevelopmentSecret, loadBaseConfig,
+  loadOrganizationReferenceConfig, parseServiceTokens, readDocsCredentials,
   registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { parseBillingServicePolicy, type BillingCallerPolicy } from '../admission/caller-admission.policy.js';
@@ -70,18 +71,13 @@ export interface BillingConfig extends BaseConfig {
   subscriptionGraceDays?: number;
 }
 
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-
 export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): BillingConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig('billing-service', env, reader);
 
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032: the runtime role is DML-only; production refuses a superuser, schema-owner or bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
 
   const rabbitmqUrl = reader.optional('RABBITMQ_URL');
   if (rabbitmqUrl !== undefined) reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']);
@@ -123,17 +119,14 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     rabbitmqUrl,
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      // A password that protects financial API documentation must not be trivial.
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    // A password that protects financial API documentation must not be trivial: at least 16 characters (the kit rule).
+    docs: readDocsCredentials(reader),
     rateLimits: {
       invoiceCreatePerMinute: reader.int('BILLING_RATE_LIMIT_INVOICE_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),
       paymentRequestCreatePerMinute: reader.int('BILLING_RATE_LIMIT_PAYMENT_REQUEST_CREATE_PER_MINUTE', { default: 30, min: 1, max: 100_000 }),
     },
     paymentServiceUrl: reader.url('PAYMENT_SERVICE_URL', ['http:', 'https:']),
-    paymentServiceToken: reader.secret('PAYMENT_SERVICE_TOKEN', 32),
+    paymentServiceToken: paymentServiceToken(reader, base.isProduction),
     paymentTimeoutMs: reader.int('PAYMENT_TIMEOUT_MS', { default: 5000, min: 100, max: 60_000 }),
     dispatch: {
       intervalMs: reader.int('BILLING_DISPATCH_INTERVAL_MS', { default: 2000, min: 100, max: 300_000 }),
@@ -156,4 +149,16 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     throw new ConfigError('BILLING_DISPATCH_STALE_SENDING_MS must be at least twice PAYMENT_TIMEOUT_MS');
   }
   return config;
+}
+
+/**
+ * Billing's raw credential for Payment. V2 A2.2 (the caller side of OD-A2.2-1): production refuses a token published in this repository
+ * (`.env.example`), which anyone could present; Payment refuses its digest on the callee side. Never echoed.
+ */
+function paymentServiceToken(reader: EnvReader, isProduction: boolean): string {
+  const token = reader.secret('PAYMENT_SERVICE_TOKEN', 32);
+  if (isProduction && isPublishedDevelopmentSecret(token)) {
+    throw new ConfigError('PAYMENT_SERVICE_TOKEN is a published development token and is refused in production');
+  }
+  return token;
 }

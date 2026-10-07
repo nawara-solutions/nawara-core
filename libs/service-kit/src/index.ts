@@ -27,7 +27,7 @@ export { HealthController } from './health/health.controller.js';
 export { DEFAULT_HTTP_DRAIN_TIMEOUT_MS, HTTP_DRAIN_TIMEOUT_BOUNDS, HttpDrain, ShutdownState, shutdownAdmission } from './health/http-drain.js';
 export { ReadinessRegistry, ReadinessCheckTimeout, type ReadinessCheck, type ReadinessResult, type ReadinessLog, type ReadinessObservation, type ReadinessObserver } from './health/readiness.registry.js';
 
-export { hashServiceToken, generateServiceToken, parseServiceTokens, MAX_TOKENS_PER_CALLER, type ServiceTokenEntry } from './service-auth/service-token.js';
+export { assertNoPublishedServiceTokens, hashServiceToken, generateServiceToken, parseServiceTokens, MAX_TOKENS_PER_CALLER, type ServiceTokenEntry } from './service-auth/service-token.js';
 export { ServiceTokenGuard, CallerService, SERVICE_TOKENS, type ServiceRequest } from './service-auth/service-token.guard.js';
 export { ServiceAuthModule } from './service-auth/service-auth.module.js';
 export { HttpAuthClient, type AuthClient, type AuthIdentity, type AuthMembership, type HttpAuthClientOptions } from './service-auth/auth-client.js';

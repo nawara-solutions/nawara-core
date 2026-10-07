@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials,
+  readOptionalKey, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { ReleaseCallerPolicy } from '../policy/caller-policy.js';
 
@@ -53,18 +54,13 @@ export interface ReleaseConfig extends BaseConfig {
   compatibility: { maxAgeS: number; ratePerClient: number; rateLimitKey: Buffer };
 }
 
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-
 /** Throws `ConfigError` (never echoing a value) on any missing or invalid setting, before anything starts. */
 export function loadReleaseConfig(env: NodeJS.ProcessEnv = process.env): ReleaseConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig(SERVICE_NAME, env, reader);
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032: the runtime role holds DML only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032: the runtime role holds DML only; production refuses a superuser, schema-owner or bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   const rabbitmqUrl = reader.get('RABBITMQ_URL') === undefined ? undefined : reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']);
   if (base.isProduction && rabbitmqUrl === undefined) {
@@ -76,10 +72,7 @@ export function loadReleaseConfig(env: NodeJS.ProcessEnv = process.env): Release
     databaseUrl,
     serviceTokens,
     callerPolicy: ReleaseCallerPolicy.parse(reader.get('RELEASE_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))]),
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    docs: readDocsCredentials(reader),
     rabbitmqUrl,
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
@@ -92,17 +85,15 @@ export function loadReleaseConfig(env: NodeJS.ProcessEnv = process.env): Release
   };
 }
 
-/** `RELEASE_RATE_LIMIT_KEY`: base64, at least 32 bytes (the File rule). Never echoed. */
+/**
+ * `RELEASE_RATE_LIMIT_KEY`: canonical base64 of at least 32 bytes, read by the kit (V2 A2.2), which in production also refuses a key that
+ * does not look random. Required in production; elsewhere a random per-process key when absent. Never echoed.
+ */
 function rateLimitKey(reader: EnvReader, isProduction: boolean): Buffer {
-  const raw = reader.get('RELEASE_RATE_LIMIT_KEY');
-  if (raw === undefined) {
-    if (isProduction) throw new ConfigError('RELEASE_RATE_LIMIT_KEY is required in production (it keys client addresses for the public rate limit)');
-    return randomBytes(32);
-  }
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) throw new ConfigError('RELEASE_RATE_LIMIT_KEY must be base64');
-  const key = Buffer.from(raw, 'base64');
-  if (key.length < 32) throw new ConfigError('RELEASE_RATE_LIMIT_KEY must decode to at least 32 bytes');
-  return key;
+  const key = readOptionalKey(reader, 'RELEASE_RATE_LIMIT_KEY', { isProduction });
+  if (key !== undefined) return key;
+  if (isProduction) throw new ConfigError('RELEASE_RATE_LIMIT_KEY is required in production (it keys client addresses for the public rate limit)');
+  return randomBytes(32);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

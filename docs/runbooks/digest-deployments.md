@@ -47,6 +47,9 @@ explicit, owner-authorized production mutation
 
 1. Take the index digest from the summary of the image workflow run of the `main` commit to deploy (an earlier labelled `main`
    artifact may be selected).
+   **Before dispatching (V2 A2.2, OD-A2.2-2):** confirm that this candidate image accepts the server's configuration: for
+   organization-service the check in its [runbook](organization-production.md) §2; for audit-service the check below. Each prints only
+   `OK` or `REFUSED`; on `REFUSED`, correct the configuration first.
 2. Dispatch, for example:
 
    ```bash
@@ -66,6 +69,19 @@ explicit, owner-authorized production mutation
    holds the `production-deploy-core-api` queue has not been observed yet.
 5. The server side is the service's unchanged `provision-and-deploy.sh`, streamed **from that same image**, with the service's own
    pre-checks (see its runbook).
+
+**audit-service configuration check (V2 A2.1 / A2.2).** Newer images read the configuration more strictly (A2.1: surrounding whitespace
+removed and a blank value unset, plain decimal integers, `NAME` and `NAME_FILE` not both set; A2.2: in production the database user may
+not be a superuser, a `*_migrator` or a `*_admin` role; the caller policy as since A1.3). On the server, let the **candidate** image's own
+loader read the `.env` the service runs with; it prints only `OK` or `REFUSED`, never a value, and opens no connection:
+
+```bash
+NEW=ghcr.io/<owner>/nawara-core-audit-service@sha256:<64 hex>   # the digest about to be deployed
+docker run --rm --env-file "$HOME/nawara-core/audit-service/.env" --entrypoint node "$NEW" --input-type=module -e '
+import { loadAuditConfig } from "./dist/config/audit-config.js";
+try { loadAuditConfig(); console.log("OK  this image accepts the configuration"); }
+catch { console.log("REFUSED  this image would not start with this configuration: fix it before deploying"); process.exit(1); }'
+```
 
 ## 3. Migrations and rollback
 

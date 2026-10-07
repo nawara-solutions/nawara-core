@@ -1,5 +1,5 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { AuditCallerPolicy } from '../policy/caller-policy.js';
 
@@ -53,19 +53,14 @@ export interface AuditConfig extends BaseConfig {
   docs: { username: string; password?: string };
 }
 
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-
 /** Throws `ConfigError` (never echoing a value) on any missing or invalid setting, before anything starts. */
 export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig(SERVICE_NAME, env, reader);
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032 and ADR-0049 (A23): the runtime role may only insert and read. Refuse a superuser or schema-owner login rather than run
-    // an append-only store with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032 and ADR-0049 (A23): the runtime role may only insert and read; production refuses a superuser, schema-owner or
+  // bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   return {
     ...base,
@@ -83,10 +78,7 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
         authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3_000, min: 100, max: 30_000 }),
       },
     }),
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    docs: readDocsCredentials(reader),
   };
 }
 

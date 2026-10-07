@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { generateServiceToken } from '@nawara/service-kit';
 import { describe, expect, it } from 'vitest';
 import { loadPaymentConfig } from './payment-config.js';
 
@@ -177,7 +179,7 @@ describe('loadPaymentConfig', () => {
     expect(loadPaymentConfig(PROD_ENV).databaseUrl).toBe(BASE_ENV.DATABASE_URL);
   });
 
-  it.each(['postgres', 'root', 'payment_migrator'])('refuses the %s database user in production, without echoing the URL', (user) => {
+  it.each(['postgres', 'root', 'payment_migrator', 'payment_admin', 'x_admin'])('refuses the %s database user in production, without echoing the URL', (user) => {
     try {
       loadPaymentConfig({ ...PROD_ENV, DATABASE_URL: `postgres://${user}:s3cret-value@localhost:5433/payment` });
       throw new Error('no throw');
@@ -185,6 +187,21 @@ describe('loadPaymentConfig', () => {
       expect((err as Error).message).toMatch(/least-privilege runtime role/);
       expect((err as Error).message).not.toContain('s3cret-value');
     }
+  });
+
+  it('V2 A2.2 (OD-A2.2-1, callee side): refuses a registered digest of the development token published in .env.example, naming the caller only', () => {
+    const line = readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8').split('\n').find((l) => l.startsWith('BILLING_TO_PAYMENT_DIGEST='));
+    const published = line!.slice('BILLING_TO_PAYMENT_DIGEST='.length).trim();
+    const admitted = (digest: string) => ({ ...PROD_ENV, SERVICE_TOKENS: `billing-service:${digest}`, PAYMENT_SERVICE_POLICY: BILLING_POLICY });
+    try {
+      loadPaymentConfig(admitted(published));
+      throw new Error('no throw');
+    } catch (err) {
+      expect((err as Error).message).toBe('SERVICE_TOKENS registers a published development token for caller "billing-service"; it is refused in production');
+      expect((err as Error).message).not.toContain(published);
+    }
+    expect(loadPaymentConfig(admitted(generateServiceToken().digest)).serviceTokens).toHaveLength(1); // an unrelated digest passes
+    expect(loadPaymentConfig({ ...BASE_ENV, SERVICE_TOKENS: `billing-service:${published}`, PAYMENT_SERVICE_POLICY: BILLING_POLICY }).serviceTokens).toHaveLength(1); // development keeps it
   });
 
   it('allows any database user outside production (tests use an admin connection)', () => {

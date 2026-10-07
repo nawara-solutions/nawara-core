@@ -29,3 +29,12 @@ export function isPublishedDevelopmentSecret(material: Buffer | string): boolean
   const bytes = typeof material === 'string' ? Buffer.from(material.trim(), 'utf8') : material;
   return DEVELOPMENT_SECRET_FINGERPRINTS.has(createHash('sha256').update(bytes).digest('hex'));
 }
+
+/**
+ * V2 A2.2 (OD-A2.2-1): true when a SHA-256 hex digest is the fingerprint of a published development secret. A callee stores only the
+ * digest of a service token (`SERVICE_TOKENS`), and that digest is exactly the token's catalog fingerprint, so the callee can recognise a
+ * published token without its plaintext. Internal to the kit: services call `assertNoPublishedServiceTokens`.
+ */
+export function isPublishedDevelopmentFingerprint(sha256Hex: string): boolean {
+  return DEVELOPMENT_SECRET_FINGERPRINTS.has(sha256Hex.toLowerCase());
+}

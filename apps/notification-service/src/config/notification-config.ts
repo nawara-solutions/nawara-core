@@ -1,7 +1,6 @@
-import { createHash } from 'node:crypto';
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig,
-  type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertDistinctKeys, assertRuntimeDatabaseRole, decodeKey,
+  loadBaseConfig, parseServiceTokens, readDocsCredentials, readKey, readKeyRing, readOptionalKey, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { NotificationCallerPolicy } from '../api/caller-policy.js';
 import type { ResendConfig } from '../delivery/providers/resend.js';
@@ -205,8 +204,8 @@ function deliveryConfig(reader: EnvReader, base: BaseConfig): DeliveryConfig {
   // Required while a provider is selected (the worker runs); read whenever it is set (tests inject providers directly).
   const destinationLimit: DestinationLimitConfig | undefined = anyProvider || reader.get('NOTIFICATION_DESTINATION_LIMIT_KEY') !== undefined
     ? {
-      key: keyMaterial(reader, base, 'NOTIFICATION_DESTINATION_LIMIT_KEY'),
-      previousKey: reader.get('NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY') === undefined ? undefined : keyMaterial(reader, base, 'NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY'),
+      key: readKey(reader, 'NOTIFICATION_DESTINATION_LIMIT_KEY', { isProduction: base.isProduction }),
+      previousKey: readOptionalKey(reader, 'NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY', { isProduction: base.isProduction }),
       limit: reader.int('NOTIFICATION_RATE_DESTINATION_LIMIT', { default: 30, min: 1, max: 100_000 }),
       windowSec: reader.int('NOTIFICATION_RATE_DESTINATION_WINDOW_SEC', { default: 3_600, min: 60, max: 86_400 }),
     }
@@ -221,90 +220,29 @@ function deliveryConfig(reader: EnvReader, base: BaseConfig): DeliveryConfig {
   };
 }
 
-/**
- * SHA-256 fingerprints of key material published in this repository for development (`.env.example`, Compose): refused in production.
- * Fingerprints, not the values, so no key literal lives in the code.
- */
-export const KNOWN_DEVELOPMENT_KEY_FINGERPRINTS = new Set<string>([
-  '7d360ae4d70b474d51887536414d75ea6e1126ce72722e16c644d306472b860d',
-  '00dc11d97b09a19e474c41199d94ee2fd5c217bb6f5a04eb25500bb9be52e98d',
-  'debb5bcc42ea2c448ca4df51179e0458ca8a319a77b585acb851baf05e241840',
-]);
-
-/**
- * Key material for one purpose: base64 of at least 32 bytes. In production a key published for development, or one with an obviously
- * non-random shape (fewer than 12 distinct byte values in its first 32 bytes), is refused. Never echoed.
- */
-function checkKey(name: string, key: Buffer, base: BaseConfig): Buffer {
-  if (key.length < 32) throw new ConfigError(`${name} must be the base64 of at least 32 random bytes`);
-  if (base.isProduction) {
-    if (KNOWN_DEVELOPMENT_KEY_FINGERPRINTS.has(createHash('sha256').update(key).digest('hex'))) {
-      throw new ConfigError(`${name} is a published development key and is refused in production`);
-    }
-    if (new Set(key.subarray(0, 32)).size < 12) throw new ConfigError(`${name} does not look random and is refused in production`);
-  }
-  return key;
-}
-
-function keyMaterial(reader: EnvReader, base: BaseConfig, name: string): Buffer {
-  return checkKey(name, Buffer.from(reader.required(name), 'base64'), base);
-}
-
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-const KEY_ID = /^[A-Za-z0-9_-]{1,32}$/;
-
-function secretKeyRing(reader: EnvReader, base: BaseConfig): { keys: Map<string, Buffer>; activeKeyId: string } {
-  const keys = new Map<string, Buffer>();
-  for (const pair of reader.required('NOTIFICATION_SECRET_KEYS').split(',')) {
-    const i = pair.indexOf(':');
-    const id = pair.slice(0, Math.max(i, 0)).trim();
-    const key = Buffer.from(pair.slice(i + 1).trim(), 'base64');
-    if (i < 1 || !KEY_ID.test(id) || key.length !== 32 || keys.has(id)) {
-      throw new ConfigError('NOTIFICATION_SECRET_KEYS must be "id:base64(32 bytes)[,id:base64(32 bytes)]" with distinct ids');
-    }
-    keys.set(id, checkKey('NOTIFICATION_SECRET_KEYS', key, base));
-  }
-  if (new Set([...keys.values()].map((k) => k.toString('hex'))).size !== keys.size) {
-    throw new ConfigError('NOTIFICATION_SECRET_KEYS must not repeat a key');
-  }
-  const activeKeyId = reader.required('NOTIFICATION_SECRET_ACTIVE_KEY_ID');
-  if (!keys.has(activeKeyId)) throw new ConfigError('NOTIFICATION_SECRET_ACTIVE_KEY_ID does not name a key in NOTIFICATION_SECRET_KEYS');
-  return { keys, activeKeyId };
-}
-
 /** Throws `ConfigError` (never echoing a value) on any missing or invalid setting, before anything starts. */
 export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): NotificationConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig(SERVICE_NAME, env, reader);
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
-  const ring = secretKeyRing(reader, base);
-  const requestHashKey = keyMaterial(reader, base, 'NOTIFICATION_REQUEST_HASH_KEY');
+  // ADR-0032: the runtime role is DML-only; production refuses a superuser, schema-owner or bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
+  // V2 A2.2: every key through the kit: canonical base64; in production no published development key and no key that does not look random.
+  const keyRules = { isProduction: base.isProduction };
+  const ring = readKeyRing(reader, 'NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_SECRET_ACTIVE_KEY_ID', { ...keyRules, exactBytes: 32 });
+  const requestHashKey = readKey(reader, 'NOTIFICATION_REQUEST_HASH_KEY', keyRules);
   const previousRaw = reader.get('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS');
-  const requestHashPreviousKeys = previousRaw === undefined ? [] : previousRaw.split(',').map((k) => checkKey('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', Buffer.from(k.trim(), 'base64'), base));
+  const requestHashPreviousKeys = previousRaw === undefined ? [] : previousRaw.split(',').map((k) => decodeKey('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', k.trim(), keyRules));
   if (requestHashPreviousKeys.length > 2) throw new ConfigError('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS holds at most 2 keys (a bounded retirement window)');
   const delivery = deliveryConfig(reader, base);
   // One key, one purpose (Stage 16.9): the secret ring, the request hash and the destination limiter never share key material.
-  const purposes: Array<[string, Buffer]> = [
-    ...[...ring.keys.values()].map((k) => ['NOTIFICATION_SECRET_KEYS', k] as [string, Buffer]),
+  assertDistinctKeys([
+    ...[...ring.keys.values()].map((k) => ['NOTIFICATION_SECRET_KEYS', k] as const),
     ['NOTIFICATION_REQUEST_HASH_KEY', requestHashKey],
-    ...requestHashPreviousKeys.map((k) => ['NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', k] as [string, Buffer]),
-    ...(delivery.destinationLimit ? [['NOTIFICATION_DESTINATION_LIMIT_KEY', delivery.destinationLimit.key] as [string, Buffer]] : []),
-    ...(delivery.destinationLimit?.previousKey ? [['NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY', delivery.destinationLimit.previousKey] as [string, Buffer]] : []),
-  ];
-  for (let i = 0; i < purposes.length; i++) {
-    for (let j = i + 1; j < purposes.length; j++) {
-      if (purposes[i][1].equals(purposes[j][1])) {
-        throw new ConfigError(purposes[i][0] === purposes[j][0]
-          ? `${purposes[i][0]} must not repeat a key`
-          : `${purposes[j][0]} must differ from ${purposes[i][0]} (one key, one purpose)`);
-      }
-    }
-  }
+    ...requestHashPreviousKeys.map((k) => ['NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', k] as const),
+    ...(delivery.destinationLimit ? [['NOTIFICATION_DESTINATION_LIMIT_KEY', delivery.destinationLimit.key] as const] : []),
+    ...(delivery.destinationLimit?.previousKey ? [['NOTIFICATION_DESTINATION_LIMIT_PREVIOUS_KEY', delivery.destinationLimit.previousKey] as const] : []),
+  ]);
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   const defaultLocale = reader.required('NOTIFICATION_DEFAULT_LOCALE');
   if (!LOCALE_SHAPE.test(defaultLocale) || defaultLocale.length > 35) throw new ConfigError('NOTIFICATION_DEFAULT_LOCALE must be a BCP 47 locale such as en or fr');
@@ -328,10 +266,7 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
     },
     maxScheduleAheadSec: reader.int('NOTIFICATION_MAX_SCHEDULE_AHEAD_SEC', { default: 2_592_000, min: 60, max: 31_536_000 }),
     apiIntakeLimitPerMinute: reader.int('NOTIFICATION_API_INTAKE_LIMIT_PER_MINUTE', { default: 600, min: 1, max: 100_000 }),
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    docs: readDocsCredentials(reader),
     delivery,
   };
 }

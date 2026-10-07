@@ -67,7 +67,7 @@ describe('loadOrganizationConfig', () => {
   });
 
   it('refuses a superuser or schema-owner database role in production (ADR-0032), but not in development', () => {
-    for (const user of ['postgres', 'root', 'organization_migrator']) {
+    for (const user of ['postgres', 'root', 'organization_migrator', 'organization_admin', 'x_admin']) {
       expect(refusal({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL, RABBITMQ_URL: 'amqp://mq' })).toContain('least-privilege');
       expect(loadOrganizationConfig({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@h/organization`, AUTH_SERVICE_URL: BASE.AUTH_SERVICE_URL, RABBITMQ_URL: 'amqp://mq' }).databaseUrl).toContain(user);
     }

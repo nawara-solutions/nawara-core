@@ -111,7 +111,7 @@ describe('audit-service configuration', () => {
   });
 
   it('production refuses the superuser or a migrator as the runtime database role (a development-only shortcut)', () => {
-    for (const user of ['postgres', 'root', 'audit_migrator']) {
+    for (const user of ['postgres', 'root', 'audit_migrator', 'audit_admin', 'x_admin']) {
       expect(() => loadAuditConfig(env({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@db/audit` }))).toThrow(/least-privilege runtime role/);
       expect(loadAuditConfig(env({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@db/audit` })).databaseUrl).toContain(user);
     }

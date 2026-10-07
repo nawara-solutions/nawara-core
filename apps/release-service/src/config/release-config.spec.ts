@@ -1,10 +1,13 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ConfigError } from '@nawara/service-kit';
 import { SERVICE_NAME, loadReleaseConfig } from './release-config.js';
 
 const DB = 'postgres://release_app:pw-not-real@db:5432/release';
 const BROKER = 'amqp://guest:guest@broker:5672';
-const KEY = Buffer.alloc(32, 7).toString('base64');
+// V2 A2.2: a random key; production refuses a key that does not look random (the previous constant fixture would now be refused).
+const KEY_BYTES = randomBytes(32);
+const KEY = KEY_BYTES.toString('base64');
 const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, RABBITMQ_URL: BROKER, RELEASE_RATE_LIMIT_KEY: KEY, ...over });
 const DIGEST = 'a'.repeat(64);
 
@@ -50,7 +53,8 @@ describe('release-service configuration', () => {
 
   it('refuses a missing or invalid database URL, and a superuser or migrator login in production, never echoing the value', () => {
     for (const bad of [{ DATABASE_URL: undefined }, { DATABASE_URL: '' }, { DATABASE_URL: 'mysql://release_app:pw-not-real@db/release' }, { DATABASE_URL: 'not a url' },
-      { DATABASE_URL: 'postgres://postgres:pw-not-real@db/release' }, { DATABASE_URL: 'postgres://release_migrator:pw-not-real@db/release' }]) {
+      { DATABASE_URL: 'postgres://postgres:pw-not-real@db/release' }, { DATABASE_URL: 'postgres://release_migrator:pw-not-real@db/release' },
+      { DATABASE_URL: 'postgres://release_admin:pw-not-real@db/release' }, { DATABASE_URL: 'postgres://x_admin:pw-not-real@db/release' }]) {
       let err: unknown;
       try {
         loadReleaseConfig(env(bad));
@@ -92,7 +96,7 @@ describe('release-service configuration', () => {
 
   it('Stage 20.5 public read: bounded freshness and rate; the limiter key is base64 ≥ 32 bytes, required in production, never echoed', () => {
     const c = loadReleaseConfig(env());
-    expect(c.compatibility).toEqual({ maxAgeS: 60, ratePerClient: 120, rateLimitKey: Buffer.alloc(32, 7) });
+    expect(c.compatibility).toEqual({ maxAgeS: 60, ratePerClient: 120, rateLimitKey: KEY_BYTES });
     expect(() => loadReleaseConfig(env({ RELEASE_RATE_LIMIT_KEY: undefined }))).toThrow(/required in production/);
     expect(loadReleaseConfig(env({ NODE_ENV: 'development', RELEASE_RATE_LIMIT_KEY: undefined })).compatibility.rateLimitKey).toHaveLength(32);
     for (const bad of ['c2hvcnQ=', 'not base64!!']) {
@@ -108,5 +112,26 @@ describe('release-service configuration', () => {
     for (const [name, value] of [['RELEASE_COMPATIBILITY_MAX_AGE_S', '301'], ['RELEASE_COMPATIBILITY_MAX_AGE_S', '-1'], ['RELEASE_COMPATIBILITY_RATE_PER_CLIENT', '0']]) {
       expect(() => loadReleaseConfig(env({ [name]: value })), `${name}=${value}`).toThrow(ConfigError);
     }
+  });
+
+  it('V2 A2.2: the limiter key is canonical standard base64 (the kit rule) and, in production, must look random', () => {
+    const refused = (value: string, message: RegExp, over: NodeJS.ProcessEnv = {}) => {
+      let err: unknown;
+      try {
+        loadReleaseConfig(env({ RELEASE_RATE_LIMIT_KEY: value, ...over }));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, value).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toMatch(message);
+      expect((err as Error).message).not.toContain(value);
+    };
+    refused(randomBytes(32).toString('base64url').replace(/^./, '-'), /^RELEASE_RATE_LIMIT_KEY must be standard base64/); // URL-safe alphabet
+    refused(`${KEY.slice(0, 10)} ${KEY.slice(10)}`, /standard base64/); // embedded whitespace
+    refused(`${KEY}=`, /standard base64/); // wrong padding
+    const weak = Buffer.alloc(32, 7).toString('base64');
+    refused(weak, /^RELEASE_RATE_LIMIT_KEY does not look random and is refused in production$/);
+    expect(loadReleaseConfig(env({ NODE_ENV: 'development', RELEASE_RATE_LIMIT_KEY: weak })).compatibility.rateLimitKey).toEqual(Buffer.alloc(32, 7)); // development accepts it
+    expect(loadReleaseConfig(env({ RELEASE_RATE_LIMIT_KEY: KEY.replace(/=+$/, '') })).compatibility.rateLimitKey).toEqual(KEY_BYTES); // unpadded canonical
   });
 });

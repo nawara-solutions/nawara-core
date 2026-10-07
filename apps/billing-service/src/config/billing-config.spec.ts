@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { generateServiceToken } from '@nawara/service-kit';
 import { describe, expect, it } from 'vitest';
 import { loadBillingConfig } from './billing-config.js';
@@ -233,7 +234,7 @@ describe('loadBillingConfig', () => {
       expect(refusal(env)).toContain('RABBITMQ_URL');
     });
 
-    it.each(['postgres', 'root', 'billing_migrator', 'other_migrator'])('refuses the database user %s (a superuser or schema owner must never run the service)', (user) => {
+    it.each(['postgres', 'root', 'billing_migrator', 'other_migrator', 'billing_admin', 'x_admin'])('refuses the database user %s (a superuser, schema owner or bootstrap admin must never run the service)', (user) => {
       const message = refusal({ ...PROD, DATABASE_URL: `postgres://${user}:pw@db:5432/billing` });
       expect(message).toContain('DATABASE_URL');
       expect(message).not.toContain(user);
@@ -241,6 +242,16 @@ describe('loadBillingConfig', () => {
 
     it('accepts the runtime role', () => {
       expect(loadBillingConfig({ ...PROD, DATABASE_URL: 'postgres://billing_app:pw@db:5432/billing' }).databaseUrl).toContain('billing_app');
+    });
+
+    it('V2 A2.2: refuses the development PAYMENT_SERVICE_TOKEN published in .env.example (caller side), never echoing it', () => {
+      const line = readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8').split('\n').find((l) => l.startsWith('BILLING_TO_PAYMENT_TOKEN='));
+      const published = line!.slice('BILLING_TO_PAYMENT_TOKEN='.length).trim();
+      const message = refusal({ ...PROD, PAYMENT_SERVICE_TOKEN: published });
+      expect(message).toBe('PAYMENT_SERVICE_TOKEN is a published development token and is refused in production');
+      expect(message).not.toContain(published);
+      expect(loadBillingConfig({ ...BASE, PAYMENT_SERVICE_TOKEN: published }).paymentServiceToken).toBe(published); // development keeps it
+      expect(loadBillingConfig({ ...PROD, PAYMENT_SERVICE_TOKEN: generateServiceToken().token }).isProduction).toBe(true); // a fresh token passes
     });
 
     it('does not apply the database-role rule outside production (local development uses whatever the developer has)', () => {
