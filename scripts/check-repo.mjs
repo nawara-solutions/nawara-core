@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -133,9 +133,30 @@ for (const svc of ['billing-service', 'payment-service']) {
   }
 }
 
+// V2 A2.5: configuration and secret hygiene. Git answers what is ignored and what is tracked (the index, never the disk: a developer's
+// ignored local .env must not fail the check); everything else is read as text. No value is ever printed.
+{
+  problems.push(...checkEnvIgnorePolicy(gitIgnoreProbe(root)));
+  problems.push(...checkDockerContext(readOrUndefined('.dockerignore')));
+  const tracked = gitTrackedFiles(root);
+  problems.push(...checkTrackedEnvFiles(tracked));
+  const templates = Object.fromEntries((tracked ?? []).filter(isEnvTemplate).map((rel) => [rel, readOptional(join(root, rel))]));
+  problems.push(...checkDevelopmentSecretCatalog(templates, readOrUndefined(DEVELOPMENT_SECRET_CATALOG)));
+  const composeFiles = readdirSync(root).filter((name) => /^docker-compose(\..+)?\.ya?ml$/.test(name));
+  problems.push(...checkEnvTemplates(templates, Object.fromEntries(composeFiles.map((name) => [name, readFileSync(join(root, name), 'utf8')]))));
+  for (const app of appPackages.values()) {
+    const sources = {};
+    for (const file of walk(join(root, 'apps', app, 'src'))) {
+      const rel = relative(root, file).split('\\').join('/');
+      if (isServiceConfigSource(app, rel)) sources[rel] = readFileSync(file, 'utf8');
+    }
+    problems.push(...checkReadmeEnvironmentCoverage(app, readOrUndefined(`apps/${app}/README.md`), sources));
+  }
+}
+
 if (problems.length > 0) {
   console.error(`repository checks failed (${problems.length}):`);
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene');
