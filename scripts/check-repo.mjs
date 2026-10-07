@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
@@ -73,6 +73,19 @@ problems.push(...checkLocalObservability(
   readFileSync(join(root, 'docker-compose.observability.yml'), 'utf8'),
   readFileSync(join(root, 'infra/observability/prometheus/prometheus.yml'), 'utf8'),
 ));
+// V2 A12.6.1: local Grafana: loopback-only, no default or anonymous access, no call home, one Prometheus datasource, deterministic dashboards.
+{
+  const grafana = join(root, 'infra/observability/grafana');
+  const dashboards = {};
+  for (const file of walk(join(grafana, 'dashboards'))) if (file.endsWith('.json')) dashboards[relative(root, file)] = readFileSync(file, 'utf8');
+  problems.push(...checkLocalGrafana(
+    readFileSync(join(root, 'docker-compose.observability.yml'), 'utf8'),
+    readFileSync(join(grafana, 'provisioning/datasources/prometheus.yml'), 'utf8'),
+    readFileSync(join(grafana, 'provisioning/dashboards/nawara-core.yml'), 'utf8'),
+    dashboards,
+    readFileSync(join(root, '.env.example'), 'utf8'),
+  ));
+}
 try {
   readFileSync(join(wfDir, 'core-ci.yml'));
 } catch {
@@ -113,4 +126,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage, local observability');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local Grafana');

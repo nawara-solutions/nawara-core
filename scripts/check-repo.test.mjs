@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
+import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -969,7 +969,7 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
   const PASS_LINE = '      DATA_SOURCE_PASS: ${MONITORING_PASSWORD:?copy .env.example to .env}\n';
 
   test('A12.5.3: publishing postgres-exporter (9187) is refused', () => {
-    fails(checkLocalObservability(BASE, OVERLAY.replace("    read_only: true\n    cap_drop: [ALL]\n    security_opt: ['no-new-privileges:true']\n\nvolumes:", "    read_only: true\n    cap_drop: [ALL]\n    security_opt: ['no-new-privileges:true']\n    ports: ['127.0.0.1:9187:9187']\n\nvolumes:"), PROM), /postgres-exporter publishes the metrics listener \(9187\)/);
+    fails(checkLocalObservability(BASE, OVERLAY.replace('      - --no-collector.statio_user_indexes\n', "      - --no-collector.statio_user_indexes\n    ports: ['127.0.0.1:9187:9187']\n"), PROM), /postgres-exporter publishes the metrics listener \(9187\)/);
   });
   test('A12.5.3: the exporter must use the monitoring role with an interpolated password, never a URL credential', () => {
     fails(checkLocalObservability(BASE, OVERLAY.replace('DATA_SOURCE_USER: observability_monitor', 'DATA_SOURCE_USER: postgres'), PROM), /must connect as observability_monitor/);
@@ -982,5 +982,113 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
   test('A12.5.3: only the overlay may create the monitoring role; the postgres job is required', () => {
     fails(checkLocalObservability(BASE.replace('      POSTGRES_USER: postgres\n', '      POSTGRES_USER: postgres\n      MONITORING_PASSWORD: ${MONITORING_PASSWORD:-}\n'), OVERLAY, PROM), /postgres must not receive MONITORING_PASSWORD/);
     fails(checkLocalObservability(BASE, OVERLAY, PROM.replace(/\n  - job_name: postgres\n[\s\S]*$/, '\n')), /no scrape job postgres/);
+  });
+}
+
+// ---- V2 A12.6.1: local Grafana --------------------------------------------------------------------------------------------------
+{
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const OVERLAY = read('docker-compose.observability.yml');
+  const DS = read('infra/observability/grafana/provisioning/datasources/prometheus.yml');
+  const PV = read('infra/observability/grafana/provisioning/dashboards/nawara-core.yml');
+  const OVERVIEW_PATH = 'infra/observability/grafana/dashboards/nawara-core/core-overview.json';
+  const OVERVIEW = read(OVERVIEW_PATH);
+  const ENV = read('.env.example');
+  const DASH = { [OVERVIEW_PATH]: OVERVIEW };
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+  const check = ({ overlay = OVERLAY, ds = DS, pv = PV, dash = DASH, env = ENV } = {}) => checkLocalGrafana(overlay, ds, pv, dash, env);
+  const grafanaEnv = (from, to) => OVERLAY.replace(from, to);
+  const withExpr = (expr) => {
+    const d = JSON.parse(OVERVIEW);
+    d.panels.find((p) => p.targets).targets[0].expr = expr;
+    return { [OVERVIEW_PATH]: JSON.stringify(d) };
+  };
+
+  test('A12.6.1: the repository Grafana service, provisioning, dashboards and placeholder pass', () => {
+    assert.deepEqual(check(), []);
+  });
+  test('A12.6.1: an unpinned or non-OSS image, a non-loopback or extra port is refused', () => {
+    fails(check({ overlay: OVERLAY.replace(/grafana\/grafana:13[^\n]+/, 'grafana/grafana:latest') }), /grafana must run grafana\/grafana:<tag>@sha256/);
+    fails(check({ overlay: OVERLAY.replace(/grafana\/grafana:13/, 'grafana/grafana-enterprise:13') }), /grafana must run grafana\/grafana:<tag>@sha256/);
+    fails(check({ overlay: OVERLAY.replace("'127.0.0.1:3100:3000'", "'3100:3000'") }), /must publish exactly 127\.0\.0\.1:3100:3000/);
+    fails(check({ overlay: OVERLAY.replace("'127.0.0.1:3100:3000'", "'0.0.0.0:3100:3000'") }), /must publish exactly 127\.0\.0\.1:3100:3000/);
+    fails(check({ overlay: OVERLAY.replace("      - '127.0.0.1:3100:3000'\n", "      - '127.0.0.1:3100:3000'\n      - '127.0.0.1:3101:3001'\n") }), /must publish exactly/);
+  });
+  test('A12.6.1: a writable root, kept capabilities, a user override, a state volume or a writable mount is refused', () => {
+    const g = OVERLAY.slice(OVERLAY.indexOf('\n  grafana:'));
+    const swap = (from, to) => OVERLAY.replace(g, g.replace(from, to));
+    fails(check({ overlay: swap('    read_only: true\n', '    read_only: false\n') }), /grafana must be read_only/);
+    fails(check({ overlay: swap('    cap_drop: [ALL]\n', '') }), /must drop all capabilities/);
+    fails(check({ overlay: swap("    security_opt: ['no-new-privileges:true']\n", '') }), /must set no-new-privileges/);
+    fails(check({ overlay: swap('    read_only: true\n', '    read_only: true\n    user: root\n') }), /non-root user/);
+    fails(check({ overlay: swap('    read_only: true\n', '    read_only: true\n    privileged: true\n') }), /must not be privileged/);
+    fails(check({ overlay: swap('dashboards:/etc/grafana/dashboards:ro\n', 'dashboards:/etc/grafana/dashboards:ro\n      - grafana_data:/var/lib/grafana\n') }), /must be a repository bind mount/);
+    fails(check({ overlay: swap('dashboards:/etc/grafana/dashboards:ro\n', 'dashboards:/etc/grafana/dashboards\n') }), /must be read-only/);
+    fails(check({ overlay: swap('dashboards:/etc/grafana/dashboards:ro\n', 'dashboards:/etc/grafana/dashboards:ro\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n') }), /docker\.sock/);
+    fails(check({ overlay: swap('      - /var/lib/grafana:uid=472,gid=0,mode=0770\n', '') }), /must keep \/var\/lib\/grafana in tmpfs/);
+  });
+  test('A12.6.1: anonymous access, sign-up, a written-out admin password or an admin/admin placeholder is refused', () => {
+    fails(check({ overlay: grafanaEnv("GF_AUTH_ANONYMOUS_ENABLED: 'false'", "GF_AUTH_ANONYMOUS_ENABLED: 'true'") }), /must set GF_AUTH_ANONYMOUS_ENABLED=false/);
+    fails(check({ overlay: grafanaEnv("      GF_AUTH_ANONYMOUS_ENABLED: 'false'\n", '') }), /must set GF_AUTH_ANONYMOUS_ENABLED=false/);
+    fails(check({ overlay: grafanaEnv("GF_USERS_ALLOW_SIGN_UP: 'false'", "GF_USERS_ALLOW_SIGN_UP: 'true'") }), /GF_USERS_ALLOW_SIGN_UP=false/);
+    fails(check({ overlay: grafanaEnv(/GF_SECURITY_ADMIN_PASSWORD: [^\n]+/, 'GF_SECURITY_ADMIN_PASSWORD: admin') }), /GF_SECURITY_ADMIN_PASSWORD must be interpolated/);
+    fails(check({ overlay: grafanaEnv(/      GF_SECURITY_ADMIN_PASSWORD: [^\n]+\n/, '') }), /GF_SECURITY_ADMIN_PASSWORD must be interpolated/);
+    fails(check({ env: ENV.replace(/^GRAFANA_ADMIN_PASSWORD=.*$/m, 'GRAFANA_ADMIN_PASSWORD=admin') }), /must be a non-empty placeholder other than admin/);
+    fails(check({ env: ENV.replace(/^GRAFANA_ADMIN_PASSWORD=.*\n/m, '') }), /no GRAFANA_ADMIN_PASSWORD placeholder/);
+  });
+  test('A12.6.1: any call home or plugin installation is refused', () => {
+    for (const [k, on] of [['GF_ANALYTICS_REPORTING_ENABLED', 'true'], ['GF_ANALYTICS_CHECK_FOR_UPDATES', 'true'], ['GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES', 'true'],
+      ['GF_ANALYTICS_FEEDBACK_LINKS_ENABLED', 'true'], ['GF_NEWS_NEWS_FEED_ENABLED', 'true'], ['GF_SECURITY_DISABLE_GRAVATAR', 'false'],
+      ['GF_PLUGINS_PREINSTALL_DISABLED', 'false'], ['GF_PLUGINS_PREINSTALL_AUTO_UPDATE', 'true'], ['GF_PLUGINS_PLUGIN_ADMIN_ENABLED', 'true']]) {
+      fails(check({ overlay: grafanaEnv(new RegExp(`${k}: '[a-z]+'`), `${k}: '${on}'`) }), new RegExp(`must set ${k}=`));
+    }
+    for (const k of ['GF_INSTALL_PLUGINS', 'GF_PLUGINS_PREINSTALL', 'GF_PLUGINS_PREINSTALL_SYNC']) {
+      fails(check({ overlay: grafanaEnv("      GF_LOG_MODE: console\n", `      GF_LOG_MODE: console\n      ${k}: grafana-clock-panel\n`) }), new RegExp(`must not set ${k}$`));
+    }
+    fails(check({ overlay: grafanaEnv("      GF_LOG_MODE: console\n", '      GF_LOG_MODE: console\n      GF_DATABASE_TYPE: postgres\n') }), /must not set GF_DATABASE_TYPE/);
+  });
+  test('A12.6.1: exactly one credential-free Prometheus datasource, by uid', () => {
+    fails(check({ ds: DS.replace('uid: nawara-prometheus', 'uid: other') }), /uid nawara-prometheus/);
+    fails(check({ ds: DS.replace('url: http://prometheus:9090', 'url: http://127.0.0.1:9090') }), /url http:\/\/prometheus:9090/);
+    fails(check({ ds: DS.replace('access: proxy', 'access: direct') }), /access proxy/);
+    fails(check({ ds: DS.replace('    editable: false\n', '    editable: false\n    basicAuth: true\n') }), /basicAuth is not allowed/);
+    fails(check({ ds: DS.replace('    editable: false\n', '    editable: false\n    secureJsonData: { password: x }\n') }), /secureJsonData is not allowed/);
+    fails(check({ ds: `${DS}  - name: Postgres\n    uid: pg\n    type: postgres\n    url: postgres:5432\n    access: proxy\n` }), /exactly one datasource is allowed \(found 2\)/);
+    fails(check({ pv: PV.replace('allowUiUpdates: false', 'allowUiUpdates: true') }), /allowUiUpdates false/);
+    fails(check({ pv: PV.replace('folder: Nawara Core', 'folder: General') }), /folder "Nawara Core"/);
+  });
+  test('A12.6.1: dashboards are deterministic, use the datasource uid and job, and never fabricate zeroes', () => {
+    const d = JSON.parse(OVERVIEW);
+    assert.equal(d.uid, 'nawara-core-overview');
+    assert.equal(d.title, 'Core · Overview');
+    fails(check({ dash: { [OVERVIEW_PATH]: JSON.stringify({ ...d, id: 7 }) } }), /top-level "id" is not allowed/);
+    fails(check({ dash: { [OVERVIEW_PATH]: JSON.stringify({ ...d, version: 3 }) } }), /top-level "version" is not allowed/);
+    fails(check({ dash: { [OVERVIEW_PATH]: JSON.stringify({ ...d, __inputs: [] }) } }), /top-level "__inputs" is not allowed/);
+    fails(check({ dash: { [OVERVIEW_PATH]: OVERVIEW.replace('"uid": "nawara-prometheus"', '"uid": "abc123"') } }), /must be \{"type":"prometheus","uid":"nawara-prometheus"\}/);
+    fails(check({ dash: { [OVERVIEW_PATH]: JSON.stringify({ ...d, panels: [{ ...d.panels[1], datasource: 1 }] }) } }), /datasource must be/);
+    fails(check({ dash: withExpr('sum(up) or vector(0)') }), /or vector/);
+    fails(check({ dash: withExpr('sum by (service) (rate(nawara_http_server_requests_total[5m]))') }), /selects on "service"; use "job"/);
+    fails(check({ dash: withExpr('up{service="auth-service"}') }), /selects on "service"/);
+    assert.deepEqual(check({ dash: withExpr('nawara_service_info{service="auth-service"}') }), []);
+    fails(check({ dash: withExpr('nawara_readiness_ready{job="auth-service"}') }), /reads readiness without/);
+    fails(check({ dash: withExpr('time() - nawara_readiness_last_run_timestamp_seconds') }), /reads readiness without/);
+    assert.deepEqual(check({ dash: withExpr('time() - (nawara_readiness_last_run_timestamp_seconds{job="a"} > 0)') }), []);
+    fails(check({ dash: { [OVERVIEW_PATH]: '{' } }), /not valid JSON/);
+    fails(check({ dash: { [OVERVIEW_PATH]: OVERVIEW, 'x/copy.json': OVERVIEW } }), /uid nawara-core-overview is also used/);
+    fails(check({ dash: {} }), /uid nawara-core-overview\) is missing/);
+  });
+  test('A12.6.1: the overview has the required panels, selected by job, over every Core job', () => {
+    const d = JSON.parse(OVERVIEW);
+    const exprs = d.panels.flatMap((p) => (p.targets ?? []).map((t) => t.expr));
+    for (const needle of ['up{job=~"', 'up{job="rabbitmq"}', 'up{job="postgres"}', 'scrape_duration_seconds', 'scrape_samples_scraped', 'nawara_readiness_ready',
+      'nawara_readiness_last_run_timestamp_seconds', 'nawara_http_server_requests_total', 'status_class="5xx"', 'nawara_db_pool_waiting_clients',
+      'nawara_db_pool_max_connections', 'nawara_event_consumer_up', 'nawara_outbox_oldest_pending_age_seconds', 'nawara_outbox_pending_events',
+      'nawara_outbox_retrying_events', 'rabbitmq_queue_messages_ready', 'pg_up', 'pg_settings_max_connections']) {
+      assert.ok(exprs.some((e) => e.includes(needle)), `no panel query uses ${needle}`);
+    }
+    const core = /job=~"([^"]+)"/.exec(exprs.find((e) => e.startsWith('up{job=~')))[1].split('|');
+    assert.deepEqual(core.sort(), ['audit-service', 'auth-service', 'billing-service', 'file-service', 'notification-service', 'organization-service', 'payment-service', 'release-service']);
+    const ids = d.panels.map((p) => p.id);
+    assert.equal(new Set(ids).size, ids.length);
   });
 }

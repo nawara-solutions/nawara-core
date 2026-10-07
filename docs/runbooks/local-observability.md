@@ -1,4 +1,4 @@
-# Local observability (V2 A12.5)
+# Local observability (V2 A12.5, A12.6)
 
 LOCAL development only. Nothing here is production configuration, and it neither performs nor authorizes any production action:
 production observability is A12.10, behind its own decision gate (D2). Record:
@@ -15,8 +15,9 @@ production observability is A12.10, behind its own decision gate (D2). Record:
   `rabbitmq`, `rabbitmq:15692/metrics`, A12.5.2) and the PostgreSQL server through `postgres-exporter` (job `postgres`,
   `postgres-exporter:9187/metrics`, A12.5.3): **ten targets**. Ports 9464, 15692 and 9187 are **never** published to the host. Only the
   application ports (unchanged), RabbitMQ's existing 5672 / 15672, and Prometheus on `127.0.0.1:9090` are reachable from the host.
-- **Collection only.** Grafana, dashboards and alerts come in A12.6. Host and container metrics are deferred to A12.10. There is no log
-  collection (decision D7).
+- **Grafana (A12.6.1)** reads Prometheus and shows the provisioned "Nawara Core" dashboards on `127.0.0.1:3100` (see
+  [Grafana](#grafana-a1261)). Alert rules come later in A12.6. Alertmanager is deferred until a concrete receiver exists. Host and
+  container metrics are deferred to A12.10. There is no log collection (decision D7).
 
 ## Use
 
@@ -25,16 +26,40 @@ OBS="-f docker-compose.yml -f docker-compose.observability.yml"
 docker compose $OBS --profile db up -d --wait postgres rabbitmq
 # migrations, once per empty database: see the header of docker-compose.yml (`npm run migrate` per service, `auth-migrate`)
 docker compose $OBS --profile db up -d --wait auth-service billing-service payment-service organization-service \
-  notification-service file-service audit-service release-service postgres-exporter prometheus
+  notification-service file-service audit-service release-service postgres-exporter prometheus grafana
 ```
 
 Then open `http://127.0.0.1:9090/targets`: ten jobs (eight services, `rabbitmq` and `postgres`), all `UP`. A service started without
 the overlay has no metrics listener, and its target is `DOWN`.
 
-The overlay needs `MONITORING_PASSWORD` in `.env` (see `.env.example`); without it Compose refuses to start in this mode.
+The overlay needs `MONITORING_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` in `.env` (see `.env.example`); without them Compose refuses to
+start in this mode.
 
 Stop with `docker compose $OBS --profile db down`. Prometheus keeps at most 3 days or 1 GB in the named volume
 `nawara_prometheus_data` (disposable: `docker volume rm <project>_nawara_prometheus_data`).
+
+## Grafana (A12.6.1)
+
+- **Open** `http://127.0.0.1:3100` and sign in as `admin` with `GRAFANA_ADMIN_PASSWORD` from your `.env`. The `.env.example` value is a
+  non-secret local placeholder. `admin/admin` does not work, there is no anonymous access, and there is no sign-up.
+- **Content:** folder **Nawara Core** → **Core · Overview** (`/d/nawara-core-overview`). One datasource: **Prometheus**
+  (`nawara-prometheus`). Grafana reads nothing else: no database, broker or service.
+- **Nothing is kept.** Grafana's state lives in tmpfs, and the datasource, folder and dashboard are provisioned from
+  `infra/observability/grafana/` at every start. Dashboards cannot be saved or deleted from the UI. Recreating the container
+  (`docker compose $OBS up -d --force-recreate grafana`) restores exactly what the repository holds. To change a dashboard, edit it
+  locally, export the JSON (Share → Export, **without** "Export for sharing externally"), and replace the file in
+  `infra/observability/grafana/dashboards/nawara-core/`; `npm run check:repo` checks it. A sign-in session does not survive a
+  recreation.
+- **No call home.** Usage reporting, update and plugin-update checks, the news feed, Gravatar, feedback links, plugin preinstall
+  and the plugin catalogue are off. No plugin is installed.
+- **Reading the overview:**
+  - *No data* means the series does not exist: for example, a target not scraped yet, or a service started without the overlay.
+  - *Not run* (readiness) means nothing has called `/ready` since the service started. Compose healthchecks call `/health`, so this is
+    normal locally, and it is **not** a sign that the service is unhealthy. A service is listed only once its `/ready` has run. The raw
+    gauges read 0 before that, so the panels filter them out. Readiness has no alert.
+  - A service with no database pool, consumer or outbox simply has no line in that panel: not applicable, not 0.
+  - The **5xx ratio** stays blank below 1 request per minute (not applicable). 0 means traffic with no 5xx.
+  - RabbitMQ backlog is the **aggregate** of all queues, retry and dead-letter queues included. No queue is identified.
 
 ## Settings and why
 
@@ -45,11 +70,15 @@ Stop with `docker compose $OBS --profile db down`. Prometheus keeps at most 3 da
 | retention | 3 days, 1 GB | short and disposable; no production assumption |
 | admin API, lifecycle API, remote write | off | not needed locally; less surface |
 | container | read-only, all capabilities dropped, `no-new-privileges`, config mounted read-only | nothing else is needed |
+| Grafana | `127.0.0.1:3100`, read-only, all capabilities dropped, `no-new-privileges`, non-root, tmpfs state, read-only provisioning | local viewing only; the repository is the source of truth |
 
 `npm run check:repo` enforces the invariants: no `METRICS_ENABLED` in `docker-compose.yml`, 9464 and 15692 never published, pinned
 overlay images, loopback-only ports, no admin, lifecycle or remote-write flags, no Docker socket or privileged mode, no credential or
 remote write in the scrape configuration, the ten expected jobs present, and `postgres-exporter` connecting as `observability_monitor`
-with an interpolated password (never written out, never in a URL; only the overlay passes `MONITORING_PASSWORD`).
+with an interpolated password (never written out, never in a URL; only the overlay passes `MONITORING_PASSWORD`). For Grafana
+(A12.6.1) it also enforces the pinned OSS image on `127.0.0.1:3100` only, the container hardening, tmpfs state, anonymous access and
+sign-up off, an interpolated admin password that is never `admin`, every call-home and plugin switch off, exactly one credential-free
+Prometheus datasource, and deterministic dashboards that select by `job` and never use `or vector(0)`.
 
 ## RabbitMQ broker metrics (A12.5.2)
 

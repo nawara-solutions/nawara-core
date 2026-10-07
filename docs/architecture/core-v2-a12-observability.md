@@ -11,11 +11,13 @@
   local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics MERGED** (PR #210, `77b2cc7`;
   §3E, §4H); **A12.5.3 PostgreSQL exporter MERGED** (PR #211, `331bc98`; §3F, §4I); **A12.5.4
   integrated observability and security validation MERGED** (PR #212, `879ea44`; §4J); **A12.5 FORMALLY CLOSED** for the LOCAL
-  collection layer by the A12.5.5 certification (§4K). A12.6 (Grafana, dashboards, alerts) not started; production observability
-  (A12.10), G4 and G6 not certified. Metrics are **off by default**
+  collection layer by the A12.5.5 certification (§4K). A12.6: the A12.6.0 decisions are recorded (§3G, D6a), and **A12.6.1 LOCAL
+  Grafana foundation and Core overview proven locally and owner-reviewed (readiness dashboard filter approved, no kit change), PR
+  pending** (§3G, §4L); **A12.6 OPEN**: A12.6.2 (other dashboards) not started, rules and self-scrape follow (A12.6.3). Production
+  observability (A12.10) not started; G4 and G6 deferred, not certified; Final Core Validation not run. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
-  or alerted on; Prometheus and the PostgreSQL exporter exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3), and no
-  Grafana or Alertmanager exists yet (A12.6). It performs and authorizes no production action.
+  or alerted on; Prometheus, the PostgreSQL exporter and Grafana exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3, A12.6.1), and
+  no Alertmanager exists (deferred, D6a). It performs and authorizes no production action.
 - **Scope of A12.2:** the service-kit metrics foundation (bounded registry, closed label policy, separate metrics listener, HTTP and
   runtime metrics, an additive readiness observer), its integration through `configureApp` and auth-service's explicit wiring, and a
   repository guard. Not included: messaging, outbox, DLQ, pool and domain metrics (A12.3), logging changes (A12.4), the local stack,
@@ -46,6 +48,10 @@ demonstration belongs to G6.
 
 Refinement D1a: metrics are served by a **separate listener** (`METRICS_PORT`), never by the application server, so `/metrics` can
 never be an application route or appear under a routed prefix such as `/auth`, and it keeps answering while the application drains.
+
+Refinement D6a (A12.6.0 owner decision, 2026-10-06): **D6 is superseded and refined, not rewritten.** Alertmanager is **DEFERRED until a
+concrete receiver exists**: an Alertmanager with nowhere to send adds a component and proves nothing. Until then, alert rules (later in
+A12.6) are evaluated by Prometheus and read in its UI and in Grafana. The D6 row above stays as recorded in A12.1.
 
 ## 3. A12.2 implementation (kit metrics foundation)
 
@@ -292,6 +298,69 @@ scrape targets are the Compose-network Core services only; host and container me
 - **Guard.** `checkLocalObservability` also refuses host publication of 9187 and requires the `postgres` job. The exporter must use
   `observability_monitor` with an interpolated `DATA_SOURCE_PASS`, with no `DATA_SOURCE_NAME` and no URL credential, and
   `docker-compose.yml` must not pass `MONITORING_PASSWORD`.
+
+## 3G. A12.6.0 decisions and A12.6.1 Grafana foundation (local)
+
+**A12.6.0 owner decisions (discovery approved 2026-10-06):**
+
+| | Decision |
+|---|---|
+| Grafana | LOCAL only, in the opt-in overlay: the OSS image `grafana/grafana` (the `grafana-oss` repository is no longer updated upstream since 12.4.0), pinned by digest, `127.0.0.1:3100` (host 3000 is Auth) |
+| Access | no anonymous access, no sign-up; the admin password comes from `.env` (`GRAFANA_ADMIN_PASSWORD`); `admin/admin` must not work |
+| State | none persisted: the repository provisions the datasource, folder and dashboards on every start; runtime state is tmpfs |
+| Datasource | exactly one: Prometheus, uid `nawara-prometheus`; Grafana never reads PostgreSQL, RabbitMQ or a service directly |
+| Outbound | no usage reporting, update or plugin-update checks, news feed, Gravatar, feedback links, plugin preinstall or installation |
+| Alertmanager | DEFERRED until a concrete receiver exists (D6a above) |
+| Prometheus self-scrape | APPROVED for A12.6.3, as an allowlisted job; not in A12.6.1 |
+| RabbitMQ per-queue / DLQ | DEFERRED; dashboards show the aggregate backlog, which includes dead-letter queues |
+| Readiness | dashboard only: the last `/ready` result and its age; never an alert, never proof of unhealthy |
+| Dashboards | query by `job` (only `nawara_service_info` carries `service`); no `or vector(0)`; no data, not applicable and zero stay distinct |
+
+**A12.6.1 implementation:**
+- **Service.** `grafana` in `docker-compose.observability.yml`:
+  - `grafana/grafana:13.2.3@sha256:b28bae15…e572`, `127.0.0.1:3100:3000`; it starts after Prometheus is healthy, and its healthcheck is
+    `/api/health`.
+  - `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, the image's non-root user (472); no Docker socket, no privileged mode.
+  - Runtime state in tmpfs (`/var/lib/grafana`, `/tmp`), with no volume.
+  - Provisioning and dashboards bind-mounted read-only from `infra/observability/grafana/`.
+  - Hardening by `GF_*` environment: `GF_AUTH_ANONYMOUS_ENABLED=false`, `GF_USERS_ALLOW_SIGN_UP=false`, `GF_USERS_ALLOW_ORG_CREATE=false`;
+    reporting, update checks, plugin update checks, feedback links, news and Gravatar off; `GF_PLUGINS_PREINSTALL_DISABLED=true`,
+    `GF_PLUGINS_PREINSTALL_AUTO_UPDATE=false`, `GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false`, `GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED=true`.
+  - `GF_SECURITY_ADMIN_PASSWORD` interpolated from `GRAFANA_ADMIN_PASSWORD` (a non-secret local placeholder in `.env.example`; Compose
+    refuses to start without it).
+- **Provisioning.**
+  - `provisioning/datasources/prometheus.yml`: one datasource, uid `nawara-prometheus`, `http://prometheus:9090`, proxy, no credential,
+    not editable.
+  - `provisioning/dashboards/nawara-core.yml`: one file provider, folder "Nawara Core" (uid `nawara-core`), `allowUiUpdates: false`,
+    `disableDeletion: true`.
+- **Dashboard.** `dashboards/nawara-core/core-overview.json`, "Core · Overview", uid `nawara-core-overview`. Deterministic JSON: no
+  numeric id, version or timestamp; every panel names the datasource by uid. Rows:
+  - **targets:** `up` for the eight Core jobs, `rabbitmq` and `postgres` (the exporter) separately, plus `pg_up`; scrape duration and
+    samples per job;
+  - **readiness (dashboard only):** the last `nawara_readiness_ready` and the age of the last run. Before the first `/ready` run the kit
+    exports `nawara_readiness_ready 0` with `nawara_readiness_last_run_timestamp_seconds 0` (found in the §4L proof). Both panels
+    therefore keep only series whose last-run timestamp is above 0. A service whose `/ready` never ran is not listed ("not run" when
+    none has), and never reads as NOT READY. The guard requires this filter in every readiness query.
+    The kit behaviour itself is unchanged.
+
+  - **HTTP:** request rate by `job`, and the 5xx ratio. The ratio is shown only at 1 request per minute or more over 5 minutes, so it
+    is blank below that, never 0. A real 0 means traffic with no 5xx.
+  - **database pools:** waiting clients, and utilisation (connections / max);
+  - **messaging and outbox:** `nawara_event_consumer_up` per queue; outbox oldest pending age, pending and retrying;
+  - **RabbitMQ:** target up; aggregate ready and unacknowledged backlog (all queues, dead-letter queues included);
+  - **PostgreSQL:** `pg_up`; connections (`numbackends`) against `max_connections`.
+  - Services without a pool, consumer or outbox have no series: the panel shows nothing for them (not applicable), never 0.
+- **Guard.** `checkLocalGrafana` (`npm run check:repo`) enforces all of the following:
+  - the pinned OSS image, exactly `127.0.0.1:3100:3000`, read-only, no capabilities, `no-new-privileges`, no user override;
+  - read-only repository mounts only; `/var/lib/grafana` in tmpfs;
+  - every required `GF_*` value; no plugin installation variable and no external database, cache, SMTP or alerting setting;
+  - an interpolated admin password, and a `.env.example` placeholder that is neither empty nor `admin`;
+  - exactly one credential-free Prometheus datasource by uid; the one locked file provider;
+  - dashboards with a unique fixed uid, no volatile keys, the datasource by uid only, no `or vector(`, no `service` selection
+    outside `nawara_service_info`, and the last-run `> 0` filter in every readiness query.
+  - `test:repo`: 83 tests, 8 for Grafana.
+- **Not in A12.6.1:** other dashboards (A12.6.2), alert or recording rules and rule files, Prometheus self-scrape (A12.6.3),
+  Alertmanager (deferred), any production Grafana (A12.10).
 
 ## 4. Evidence (A12.2, local)
 
@@ -646,6 +715,33 @@ None of these is required for the local collection layer.
 
 **Static re-validation on `879ea44`:** `check:repo` PASS; `test:repo` 75/75 (11 observability guard tests); `promtool check config`
 SUCCESS; `sh -n` on the PostgreSQL init OK; normal and observability Compose resolve; the runbook link resolves.
+
+## 4L. Evidence (A12.6.1, local)
+
+Disposable Compose project `a1261-obs`: fresh volumes, the tracked `.env.example` placeholders, and the full overlay stack (eight
+services, RabbitMQ, PostgreSQL, the exporter, Prometheus, Grafana) all healthy. Torn down afterwards: its containers, volumes, network
+and built images were removed. The user's own containers and volumes were not touched.
+
+| Proof | Result |
+|---|---|
+| Hardening | `read_only: true` and tmpfs work together: Grafana 13.2.3 starts and stays healthy with a read-only root (`/var/lib/grafana` and `/tmp` in tmpfs, uid 472). Inspected: user 472, `CapEff` 0, no capabilities added, `no-new-privileges`, not privileged, no Docker socket; writes to the image and provisioning paths fail (read-only file system); mounts are three read-only binds and no volume |
+| Exposure | host listener `127.0.0.1:3100` only; the non-loopback host address gets no answer; 9464, 15692 and 9187 are not published |
+| Authentication | unauthenticated `/api/user`, `/api/search`, `/api/datasources`, `/api/folders`, the dashboard and `/api/admin/settings` → 401; `admin/admin` (basic and form login) → 401; an empty password → 401; sign-up refused; the configured credential → 200. `/api/health` is public liveness only |
+| Effective configuration | `/api/admin/settings`: anonymous off, sign-up and organisation creation off; reporting, update checks, plugin update checks, feedback links, news and Gravatar off; plugin preinstall disabled, auto-update off, plugin admin off, public-key retrieval off, no preinstall list; SQLite in `/var/lib/grafana`; the admin password is masked |
+| Outbound | open connections sampled three times over 40 s: loopback, the Compose gateway (inbound host requests) and `prometheus:9090` only. The logs name no grafana.com, telemetry or Gravatar endpoint. No plugin directory content; only bundled core plugins; the plugin install API → 404 |
+| Datasource | exactly one: `nawara-prometheus`, prometheus, `http://prometheus:9090`, proxy, no basic auth, read-only; health OK; deleting or modifying it → 403. With Prometheus stopped, health returns an explicit error (no host), Grafana stays up and services are unaffected; after restart, health is OK |
+| Provisioning | one folder ("Nawara Core", uid `nawara-core`), one dashboard (`nawara-core-overview`, "Core · Overview"), provisioned from `core-overview.json`; saving over it → 400 "Cannot save provisioned dashboard"; deleting it → 400 |
+| Queries | every panel query (25 targets) succeeds through Grafana: `up` 8 Core + `rabbitmq` + `postgres`; `pg_up`; scrape health on 10 jobs; pools on 8 jobs; consumers on 3 jobs (audit, billing, notification); outbox on 6 jobs; aggregate RabbitMQ backlog; PostgreSQL connections vs max |
+| Readiness semantics | before any `/ready`: no series ("not run"), although the kit exports 0. After one `/ready` on billing: billing READY (1), age about 51 s; no other service is listed |
+| HTTP semantics | with about 1.2 req/s on billing: request rate shown; 5xx ratio = 0 (a real zero: traffic, no 5xx); release-service (one request, below 1/min) has a rate but **no** 5xx ratio (blank, not applicable) |
+| Recreation | `--force-recreate grafana`: a new container; the old session cookie → 401; a datasource added at runtime is gone; the baseline proof passes again (66/66); no Grafana volume exists |
+| Configuration | Compose refuses to start the overlay without `GRAFANA_ADMIN_PASSWORD`; the normal `docker-compose.yml` has no Grafana, Prometheus or exporter and no `METRICS_ENABLED` |
+| Determinism | regenerating the dashboard gives the identical file (same SHA-256); top-level keys have no id, version or timestamp; no numeric datasource id, no `or vector`, no `service` selector |
+
+Finding, fixed in the dashboard: the readiness gauges are 0 before the first `/ready` run (above). The first runtime proof showed every
+service NOT READY with an age of about 56 years. The fix and its guard are in §3G. No kit, service or Prometheus change was made.
+
+Not done: other dashboards, rules, self-scrape, Alertmanager (out of scope); CI (not run: no push).
 
 ## 5. Open
 
