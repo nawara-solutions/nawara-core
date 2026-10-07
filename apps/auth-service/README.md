@@ -15,10 +15,17 @@ It does **not** own commercial state — Subscription and effective entitlement 
 ## Run
 
 ```bash
+cd apps/auth-service
 cp .env.example .env         # local development ONLY; generate every secret: openssl rand -base64 32
+set -a; . ./.env; set +a     # nothing loads .env for you: export it into this shell before starting
 # apply db/migrations/0001..0007 to your database, then:
-npm run start:dev -w auth-service
+npm run start:dev
 ```
+
+**`NODE_ENV` must be set for a local run** (the template sets `NODE_ENV=development`). Unset, it means **production** (V2 A2.3): the
+service then demands the production settings (WebAuthn origins, the runtime database role, a broker) and refuses to start without them.
+The service never reads a `.env` file itself; the configuration comes from the process environment only (Compose, `docker run
+--env-file`, or the `set -a` line above). Because the shell reads the file, a value that contains spaces, quotes or braces (a JSON policy) must be wrapped in single quotes there.
 
 The process **refuses to start** if any secret is missing, weak or duplicated. Secrets come from the
 environment or from files (`NAME_FILE=/run/secrets/name`); see `.env.example` and the key-management
@@ -44,6 +51,35 @@ refuses to start without it; the deploy script checks it before touching anythin
 in-memory bus. The local `auth_audit_event` trail is unchanged and keeps what central audit never receives (IP, session family,
 metadata). The CLI writes no central event and never runs a relay. See the
 [Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
+
+## Environment
+
+Read once at startup by `src/config/app-config.ts`; a missing or invalid value stops the process, and no error repeats a value. This
+table is the reference for Auth's variables; [`.env.example`](./.env.example) is a local-development template. Secrets marked **file**
+may be given as `NAME_FILE=/path` instead of `NAME` (Auth's `SecretSource`: the file wins when both are set). Rotation:
+[secret rotation runbook](../../docs/runbooks/secret-rotation.md).
+
+| Variable | Required | Default | Secret | Meaning |
+|---|---|---|---|---|
+| `NODE_ENV` | no | `production` | no | `development`, `test` or `production`; unset means production |
+| `PORT`, `LOG_LEVEL`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS` (or the older `TRUST_PROXY`), `HTTP_DRAIN_TIMEOUT_MS`, `METRICS_*` | no | 3000, `info`, none, 0, 5000, off | no | HTTP baseline (same rules as the kit); CORS takes exact origins only |
+| `DATABASE_URL` | yes | none | **yes** (password) | the runtime role `auth_app`; in production `postgres`, `root`, `auth`, `*_migrator` and `*_admin` are refused. No `_FILE` yet (A4) |
+| `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | no | 10, 5000, 30000, 60000, statement + 5000 | no | bounded database limits |
+| `JWT_SECRET` | yes | none | **yes, file** | HS256 signing key: canonical base64 of at least 32 bytes |
+| `JWT_ISSUER`, `JWT_AUDIENCE`, `ACCESS_TOKEN_TTL_SEC`, `REFRESH_TOKEN_TTL_SEC` | no | `nawara-auth`, `nawara`, 900, 14 days | no | token claims and lifetimes (access 30 to 3600 s) |
+| `OPERATOR_CODE_PEPPER`, `SECRET_KEY_PEPPER`, `THROTTLE_KEY_PEPPER`, `JOIN_CODE_PEPPER` | yes | none | **yes, file** | HMAC peppers, canonical base64 of at least 32 bytes, all distinct. **Not rotatable transparently** (see the rotation runbook) |
+| `TOTP_ENCRYPTION_KEYS`, `TOTP_ENCRYPTION_ACTIVE_KEY_ID` | yes | none | **yes, file** | key ring `id:base64(32 bytes)[,…]` and the id used for new secrets; no repeated id or key |
+| `TOTP_ISSUER`, `TOTP_EPOCH_TOLERANCE_SEC`, `BCRYPT_COST` | no | `Nawara`, 30, 12 | no | factor and password parameters |
+| `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGINS`, `WEBAUTHN_RP_NAME` | **in production** | `localhost`, `http://localhost:3000`, `Nawara` | no | passkeys: https origins under the RP id |
+| `CHALLENGE_TTL_SEC`, `STEP_UP_TTL_SEC`, `RECOVERY_COOLDOWN_SEC`, `RECOVERY_REQUEST_TTL_SEC`, `RECOVERY_ENROLLMENT_TTL_SEC` | no | 600, 300, 1 day, 7 days, 1800 | no | owner ceremonies (step-up at most 900 s) |
+| `WORK_TIMEZONE`, `OPERATOR_FALLBACK_SESSION_SEC`, `OPERATOR_CONFIRMATION_TTL_SEC` | no | `UTC`, 8 h, 8 h | no | operator sessions |
+| `INVITATION_MIN_MINUTES`, `INVITATION_DEFAULT_MINUTES`, `INVITATION_MAX_MINUTES`, `CONTACT_CODE_TTL_SEC` | no | 15, 1440, 10080, 900 | no | onboarding lifetimes |
+| `REQUIRE_CONTACT_VERIFICATION` | no | `false` | no | exactly `true` or `false` |
+| `RATE_<BUCKET>_LIMIT`, `RATE_<BUCKET>_WINDOW_SEC`, `BASELINE_RATE_LIMIT_PER_MINUTE` | no | per bucket (see `rate` in `app-config.ts`), 100 | no | throttling; buckets such as `LOGIN_IP`, `LOGIN_IDENTIFIER`, `REFRESH_IP`, `STEP_UP_OWNER` |
+| `AUTH_EVENTS` | no | `on` | no | exactly `on` or `off`: whether domain-event rows are written (production keeps `off`) |
+| `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes** (URL password) | the outbox relay's broker (audit evidence, independent of `AUTH_EVENTS`). No `_FILE` yet (A4) |
+| `AUTH_HIERARCHY_SOURCE`, `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_SERVICE_TOKEN`, `ORGANIZATION_SERVICE_TIMEOUT_MS` | no | `local`, none, none, 2000 | token: **yes, file** | Auth's Organization Service client; URL and token are set together |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes, file** | API docs; mounted only with a password of at least 16 characters |
 
 ## Organization onboarding (join codes)
 
@@ -93,7 +129,10 @@ membership grants organization access, evaluated from current rows on every requ
 ```bash
 npm run build -w auth-service
 # create the ONE first owner (idempotent; refuses if an owner exists; mints no key, enrolls no factor)
-BOOTSTRAP_COMPANY_NAME=... BOOTSTRAP_OWNER_EMAIL=... BOOTSTRAP_OWNER_PASSWORD=... npm run cli -w auth-service -- bootstrap-owner
+# Do not type the password inline (it would stay in the shell history and in the process list): read it without echo (bash).
+read -rs -p 'owner password: ' BOOTSTRAP_OWNER_PASSWORD && export BOOTSTRAP_OWNER_PASSWORD && echo
+BOOTSTRAP_COMPANY_NAME=... BOOTSTRAP_OWNER_EMAIL=... npm run cli -w auth-service -- bootstrap-owner
+unset BOOTSTRAP_OWNER_PASSWORD
 # TOTP encryption-key rotation: add the new key to TOTP_ENCRYPTION_KEYS, make it active, then
 npm run cli -w auth-service -- reseal-totp-keys     # remove the old key only when "still under an old key: 0"
 ```

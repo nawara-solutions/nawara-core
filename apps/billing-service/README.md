@@ -200,18 +200,20 @@ live processes in `test/e2e-real-broker/stage4-real-broker-dlq-replay.e2e-spec.t
 ## Configuration
 
 Every value below is read at startup and validated; an invalid or missing required value stops the process.
-Secrets may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME`. See [`.env.example`](./.env.example).
+**Every** value may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME` (setting both is refused); surrounding
+whitespace is removed and a blank value is unset. This table is the reference; [`.env.example`](./.env.example) is a local-development
+template. Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `DATABASE_URL` | yes | runtime connection, the `billing_app` role. In production a superuser or `*_migrator` login is refused |
+| `DATABASE_URL` | yes | runtime connection, the `billing_app` role. In production `postgres`, `root`, `*_migrator` and `*_admin` are refused |
 | `AUTH_SERVICE_URL`, `AUTH_TIMEOUT_MS` | URL yes | live identity for user bearers (sent to Auth only) |
 | `BILLING_SUPPORTED_CURRENCIES` | yes | ISO 4217 codes accepted on an invoice or price; **no default** (B-005). Each must also exist in the immutable `currency` table |
 | `SERVICE_TOKENS` | no | accepted callers, `<caller>:<sha256 digest>`; empty means every service call is refused. **Core V1 admits none** (ADR-0052, Q5) |
 | `BILLING_SERVICE_POLICY` | when a token is registered | Stage 21.C.2: each caller's operations and `allowedPlatforms` (deny by default; kit caller-policy mechanism). V1: `{"callers":{}}` |
 | `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_REFERENCE_TOKEN`, `ORGANIZATION_REFERENCE_TIMEOUT_MS` | in production once a caller is admitted | Organization verification of asserted Organizations and of the entitlement read (fails closed, `503 hierarchy_unavailable`); `ORGANIZATION_REFERENCE_FIXTURE` is a non-production alternative, refused in production |
 | `RABBITMQ_URL` | **in production** | event bus; without it the in-memory bus is used (development and tests only) |
-| `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_TOKEN` | yes | payment-service's base URL and Billing's own service token (bearer sent to Payment; a user's bearer is never forwarded) |
+| `PAYMENT_SERVICE_URL`, `PAYMENT_SERVICE_TOKEN` | yes | payment-service's base URL and Billing's own service token (bearer sent to Payment; a user's bearer is never forwarded). In production the token published in the root `.env.example` is refused |
 | `PAYMENT_TIMEOUT_MS` | no | per-call timeout to Payment (default 5000ms) |
 | `BILLING_DISPATCH_INTERVAL_MS`, `BILLING_DISPATCH_BATCH_SIZE`, `BILLING_DISPATCH_STALE_SENDING_MS` | no | `PaymentDispatcher`'s poll interval, batch size and stale-`sending` retry threshold, which is also the interval between two attempts at the same request (defaults: 2000ms, 50, 60s). A pass renews its claims not sent yet every quarter of the stale window, so a slow Payment never makes another instance re-send them; the stale window must be at least twice `PAYMENT_TIMEOUT_MS` (refused at startup otherwise; Stage 15.8) |
 | `BILLING_RECONCILE_INTERVAL_MS`, `BILLING_RECONCILE_STALE_REQUESTED_MS` | no | `PaymentReconciler`'s poll interval and stale-`requested` threshold (defaults: 30s, 5min) |
@@ -223,13 +225,16 @@ Secrets may be given as `NAME_FILE=/path` (a mounted secret) instead of `NAME`. 
 ## Running locally
 
 ```bash
-cp .env.example .env                                 # edit for your setup
+cd apps/billing-service
+cp .env.example .env                                 # edit for your setup (NODE_ENV=development is in the template)
+set -a; . ./.env; set +a                             # nothing loads .env for you: export it into this shell before starting
 docker compose --profile db up -d --wait postgres    # from the repo root
 MIGRATION_DATABASE_URL=postgres://billing_migrator:...@localhost:5433/billing npm run migrate -w billing-service
 npm run start:dev -w billing-service
 ```
 
-Nothing migrates at service start; `/ready` fails while a migration is pending.
+Nothing migrates at service start; `/ready` fails while a migration is pending. The service never reads a `.env` file itself, and an
+unset `NODE_ENV` means **production**. Because the shell reads the file, a value that contains spaces, quotes or braces (a JSON policy) must be wrapped in single quotes there.
 
 ## Tests
 

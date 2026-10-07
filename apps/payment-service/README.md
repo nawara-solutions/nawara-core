@@ -98,13 +98,42 @@ merchant-of-record behaviour, full periodic reconciliation, admin/support toolin
 - Observability (structured counters/alerts for stuck attempts, conflicts, outbox lag) is not built —
   the background jobs log via Nest's `Logger` only.
 
+## Environment
+
+Read once at startup by `src/config/payment-config.ts` (the kit's `EnvReader`); a missing or invalid value stops the process, and no
+error repeats a value. This table is the reference; [`.env.example`](./.env.example) is a local-development template. **Every** value may
+be given as `NAME_FILE=/path` instead of `NAME` (setting both is refused); surrounding whitespace is removed and a blank value is unset.
+Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
+
+| Variable | Required | Default | Secret | Meaning |
+|---|---|---|---|---|
+| `NODE_ENV`, `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS`, `HTTP_DRAIN_TIMEOUT_MS`, `DB_*`, `METRICS_*` | no | kit defaults (`NODE_ENV` = `production`) | no | the kit's base configuration |
+| `DATABASE_URL` | yes | none | **yes** (password) | the runtime role `payment_app`; in production `postgres`, `root`, `*_migrator` and `*_admin` are refused |
+| `AUTH_SERVICE_URL`, `AUTH_TIMEOUT_MS` | URL yes | none, 3000 | no | live identity for user bearers |
+| `SERVICE_TOKENS` | no | none (every service call refused) | no (digests) | accepted callers, `<caller>:<sha256 digest>`, at most two per caller. In production a digest of the token published in the root `.env.example` is refused |
+| `PAYMENT_SERVICE_POLICY` | when a token is registered | none | no | each caller's operations and `allowedPlatforms` (deny by default) |
+| `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_REFERENCE_TOKEN`, `ORGANIZATION_REFERENCE_TIMEOUT_MS` | **in production** | none, none, 2000 | token: **yes** | Organization verification (no bypass in production; `ORGANIZATION_REFERENCE_FIXTURE` is refused there) |
+| `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes** (URL password) | event bus; without it the in-memory bus (development and tests only) |
+| `PAYMENT_SUPPORTED_CURRENCIES` | no | `TND` | no | ISO 4217 codes, comma-separated |
+| `PAYMENT_MAX_ATTEMPTS`, `IDEMPOTENCY_TTL_HOURS` | no | 3, 24 | no | attempts per payment (1 to 20); idempotency retention |
+| `PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE`, `PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE` | no | 300, 30 | no | per-caller limits |
+| `PAYMENT_RETURN_URL_ALLOWLIST` | no | empty | no | allowed return-URL prefixes |
+| `PAYMENT_TEST_PROVIDER` | no | `false` | no | the development test gateway; **refused in production** |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes** | API docs; mounted only with a password of at least 16 characters |
+
+No real gateway adapter exists yet, so there is no gateway credential to configure.
+
 ## Running locally
 
 ```bash
-cp .env.example .env                  # edit AUTH_SERVICE_URL etc. for your setup
+cd apps/payment-service
+cp .env.example .env                  # edit AUTH_SERVICE_URL etc. for your setup (NODE_ENV=development is in the template)
+set -a; . ./.env; set +a              # nothing loads .env for you: export it into this shell before starting
 docker compose --profile db up -d --wait postgres   # from the repo root
-npm run start:dev -w payment-service
+npm run start:dev
 ```
+
+Unset, `NODE_ENV` means **production**: the service then requires a broker and the runtime database role. Because the shell reads the file, a value that contains spaces, quotes or braces (a JSON policy) must be wrapped in single quotes there.
 
 ## Migrations
 
