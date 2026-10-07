@@ -1,6 +1,9 @@
 node_modules/
 dist/
+# Environment files: real and local ones are never committed (V2 A2.4). Only the *.example templates are tracked.
 .env
+.env.*
+!.env.example
 __pycache__/
 .venv/
 *.venv/

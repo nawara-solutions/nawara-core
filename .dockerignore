@@ -7,3 +7,6 @@ node_modules
 *.md
 **/*.spec.ts
 **/test
+# V2 A2.4: no environment file enters a build context (a local apps/<service>/.env would otherwise reach a build-stage layer).
+**/.env
+**/.env.*
