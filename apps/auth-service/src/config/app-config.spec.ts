@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -27,12 +27,12 @@ describe('configuration and key management fail closed', () => {
   });
   it('requires every secret to be distinct (domain separation)', () => {
     const e = good(); e.SECRET_KEY_PEPPER = e.JWT_SECRET;
-    expect(() => loadConfig(e)).toThrow(/distinct/);
+    expect(() => loadConfig(e)).toThrow(/^SECRET_KEY_PEPPER must differ from JWT_SECRET \(one key, one purpose\)$/); // V2 A2.3: the variables are named
   });
   it('the join-code pepper is purpose-separated: it must differ from every other secret, and verification defaults to off', () => {
     for (const other of ['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER']) {
       const e = good(); e.JOIN_CODE_PEPPER = e[other];
-      expect(() => loadConfig(e)).toThrow(/distinct/);
+      expect(() => loadConfig(e)).toThrow(new RegExp(`^JOIN_CODE_PEPPER must differ from ${other} \\(one key, one purpose\\)$`));
     }
     expect(loadConfig(good()).onboarding.requireContactVerification).toBe(false);
     expect(loadConfig({ ...good(), REQUIRE_CONTACT_VERIFICATION: 'true' }).onboarding.requireContactVerification).toBe(true);
@@ -263,5 +263,119 @@ describe('WebAuthn production configuration: the owner admin UI origin under the
     expect(loadConfig(prod({ WEBAUTHN_ORIGINS: 'https://nawara-solutions.com' })).webauthn.origins).toEqual(['https://nawara-solutions.com']);
     expect(loadConfig(prod({ WEBAUTHN_ORIGINS: 'https://admin.nawara-solutions.com, https://owner.admin.nawara-solutions.com' })).webauthn.origins)
       .toEqual(['https://admin.nawara-solutions.com', 'https://owner.admin.nawara-solutions.com']);
+  });
+});
+
+describe('V2 A2.3: targeted configuration hardening (OD-A2.3-1, OD-A2.3-2)', () => {
+  const PROD_BASE = {
+    DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672',
+    WEBAUTHN_RP_ID: 'example.com', WEBAUTHN_ORIGINS: 'https://app.example.com',
+  };
+  const refused = (env: NodeJS.ProcessEnv, message: RegExp, ...secrets: string[]) => {
+    let err: unknown;
+    try {
+      loadConfig(env);
+    } catch (e) {
+      err = e;
+    }
+    expect(err, JSON.stringify(Object.keys(env).filter((k) => !(k in good())))).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(message);
+    for (const v of secrets) expect((err as Error).message).not.toContain(v);
+  };
+  /** A value of the tracked `.env.example`: a published development secret; never printed. */
+  const template = (name: string) => readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8').split('\n').find((l) => l.startsWith(`${name}=`))!.slice(name.length + 1).trim();
+
+  it('OD-A2.3-1: Auth\'s ConfigError is the kit\'s class (one identity for every configuration error)', async () => {
+    const kit = await import('@nawara/service-kit');
+    expect(ConfigError).toBe(kit.ConfigError);
+  });
+
+  it('OD-A2.3-2: an unset or blank NODE_ENV is production (the production rules then apply); only development, test and production are accepted', () => {
+    const unset: NodeJS.ProcessEnv = { ...good(), ...PROD_BASE }; delete unset.NODE_ENV;
+    expect(loadConfig(unset).env).toBe('production');
+    expect(loadConfig({ ...good(), ...PROD_BASE, NODE_ENV: '  ' }).env).toBe('production'); // blank is unset (the kit's reading)
+    refused({ ...good(), NODE_ENV: undefined, WEBAUTHN_RP_ID: undefined }, /WEBAUTHN_RP_ID and WEBAUTHN_ORIGINS are required in production/);
+    for (const v of ['development', 'test']) expect(loadConfig({ ...good(), NODE_ENV: v }).env).toBe(v);
+    expect(loadConfig({ ...good(), NODE_ENV: ' development ' }).env).toBe('development'); // surrounding whitespace removed
+    for (const bad of ['prod', 'Production', 'PRODUCTION', 'dev', 'staging']) refused({ ...good(), NODE_ENV: bad }, /^NODE_ENV must be one of: development, test, production$/);
+  });
+
+  it('AUTH_EVENTS is exactly on (the default) or off; anything else is refused instead of silently meaning on', () => {
+    expect(loadConfig(good()).events.enabled).toBe(true);
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'on' }).events.enabled).toBe(true);
+    expect(loadConfig({ ...good(), AUTH_EVENTS: 'off' }).events.enabled).toBe(false);
+    expect(loadConfig({ ...good(), AUTH_EVENTS: ' off ' }).events.enabled).toBe(false); // surrounding whitespace removed
+    for (const bad of ['true', 'false', '1', '0', 'yes', 'no', 'ON', 'OFF', 'Off', 'garbage']) refused({ ...good(), AUTH_EVENTS: bad }, /^AUTH_EVENTS must be one of: on, off$/, bad.length > 3 ? bad : '\u0000');
+  });
+
+  it('REQUIRE_CONTACT_VERIFICATION is exactly true or false (default false); an ambiguous value is refused instead of silently turning verification off', () => {
+    expect(loadConfig(good()).onboarding.requireContactVerification).toBe(false);
+    expect(loadConfig({ ...good(), REQUIRE_CONTACT_VERIFICATION: 'true' }).onboarding.requireContactVerification).toBe(true);
+    expect(loadConfig({ ...good(), REQUIRE_CONTACT_VERIFICATION: 'false' }).onboarding.requireContactVerification).toBe(false);
+    expect(loadConfig({ ...good(), REQUIRE_CONTACT_VERIFICATION: ' true ' }).onboarding.requireContactVerification).toBe(true);
+    for (const bad of ['1', '0', 'yes', 'no', 'TRUE', 'FALSE', 'True', 'garbage']) {
+      refused({ ...good(), REQUIRE_CONTACT_VERIFICATION: bad }, /^REQUIRE_CONTACT_VERIFICATION must be "true" or "false"$/);
+    }
+  });
+
+  it('CORS_ORIGINS: the same exact-origin rule, and the error never repeats the rejected entry (a URL may carry credentials)', () => {
+    const credentialed = 'https://user:password@example.invalid';
+    refused({ ...good(), CORS_ORIGINS: `https://ok.test,${credentialed}` }, /^CORS_ORIGINS entries must be exact origins/, credentialed, 'password', 'user:');
+    refused({ ...good(), CORS_ORIGINS: 'https://example.invalid/path?token=abc' }, /exact origins/, 'token=abc', '/path');
+    expect(loadConfig({ ...good(), CORS_ORIGINS: ' https://a.test , http://localhost:3000 ' }).corsOrigins).toEqual(['https://a.test', 'http://localhost:3000']);
+  });
+
+  it.each(['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'JOIN_CODE_PEPPER'])(
+    '%s is canonical standard base64 of at least 32 bytes, never echoed',
+    (name) => {
+      const valid = good()[name]!;
+      for (const bad of [`${valid.slice(0, 10)}*${valid.slice(10)}`, `${valid.slice(0, 10)} ${valid.slice(10)}`, `${valid}=`, randomBytes(32).toString('base64url').replace(/^./, '-')]) {
+        refused({ ...good(), [name]: bad }, new RegExp(`^${name} must be standard base64`), bad);
+      }
+      refused({ ...good(), [name]: randomBytes(31).toString('base64') }, new RegExp(`^${name} must decode to at least 32 bytes$`));
+      expect(loadConfig({ ...good(), [name]: valid.replace(/=+$/, '') }).env).toBe('test'); // unpadded canonical is fine
+    },
+  );
+
+  it.each([
+    ['JWT_SECRET', 'AUTH_JWT_SECRET'], ['OPERATOR_CODE_PEPPER', 'AUTH_OPERATOR_CODE_PEPPER'], ['SECRET_KEY_PEPPER', 'AUTH_SECRET_KEY_PEPPER'],
+    ['THROTTLE_KEY_PEPPER', 'AUTH_THROTTLE_KEY_PEPPER'], ['JOIN_CODE_PEPPER', 'AUTH_JOIN_CODE_PEPPER'],
+  ])('production refuses the published development %s (and a non-random one); development keeps it', (name, templateName) => {
+    const published = template(templateName);
+    refused({ ...good(), ...PROD_BASE, NODE_ENV: 'production', [name]: published }, new RegExp(`^${name} is a published development key and is refused in production$`), published);
+    refused({ ...good(), ...PROD_BASE, NODE_ENV: 'production', [name]: Buffer.alloc(32, 9).toString('base64') }, new RegExp(`^${name} does not look random and is refused in production$`));
+    expect(loadConfig({ ...good(), [name]: published }).env).toBe('test');
+  });
+
+  it('TOTP_ENCRYPTION_KEYS: ids, exact size, canonical base64, no repeated id or key, an existing active id; published keys refused in production', () => {
+    const [a, b] = [randomBytes(32).toString('base64'), randomBytes(32).toString('base64')];
+    const ring = (keys: string, active = 'k1') => ({ ...good(), TOTP_ENCRYPTION_KEYS: keys, TOTP_ENCRYPTION_ACTIVE_KEY_ID: active });
+    refused(ring(`k1:${a},k1:${b}`), /^TOTP_ENCRYPTION_KEYS must not repeat a key id$/, a, b); // was a silent overwrite
+    refused(ring(`k1:${a},k2:${a}`), /^TOTP_ENCRYPTION_KEYS must not repeat a key$/, a);
+    refused(ring(`k1:${a}`, 'k9'), /^TOTP_ENCRYPTION_ACTIVE_KEY_ID does not name a key in TOTP_ENCRYPTION_KEYS$/);
+    refused(ring(`bad id:${a}`), /^TOTP_ENCRYPTION_KEYS must be "id:base64\(32 bytes\)/, a);
+    refused(ring(a), /^TOTP_ENCRYPTION_KEYS must be "id:base64/, a);
+    refused(ring(`k1:${randomBytes(33).toString('base64')}`), /^TOTP_ENCRYPTION_KEYS must decode to exactly 32 bytes$/);
+    refused(ring(`k1:${a}!`), /^TOTP_ENCRYPTION_KEYS must be standard base64/, a);
+    const published = `k1:${template('AUTH_TOTP_KEY_K1')}`;
+    refused({ ...ring(published), ...PROD_BASE, NODE_ENV: 'production' }, /^TOTP_ENCRYPTION_KEYS is a published development key and is refused in production$/, template('AUTH_TOTP_KEY_K1'));
+    expect(loadConfig(ring(published)).secrets.totpKeys.get('k1')).toHaveLength(32); // development keeps it
+    expect(loadConfig(ring(`k1:${a},k2:${b}`, 'k2')).secrets.totpActiveKeyId).toBe('k2');
+    const e: NodeJS.ProcessEnv = { ...ring(`k1:${a}`), JWT_SECRET: a };
+    refused(e, /^TOTP_ENCRYPTION_KEYS must differ from JWT_SECRET \(one key, one purpose\)$/, a); // cross-purpose separation kept
+  });
+
+  it.each(['auth', 'auth_admin', 'x_admin', 'postgres', 'auth_migrator'])('production refuses the %s database user (the kit rule plus Auth\'s owner role)', (user) => {
+    refused({ ...good(), ...PROD_BASE, NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:s3cret-value@db:5432/auth` }, /^DATABASE_URL must use the least-privilege runtime role in production/, 's3cret-value');
+  });
+
+  it('production accepts the runtime role auth_app; a malformed user encoding is a ConfigError, never echoing the URL', () => {
+    expect(loadConfig({ ...good(), ...PROD_BASE, NODE_ENV: 'production' }).databaseUrl).toContain('auth_app');
+    refused({ ...good(), ...PROD_BASE, NODE_ENV: 'production', DATABASE_URL: 'postgres://bad%E0%A4%A:s3cret-value@db:5432/auth' }, /^DATABASE_URL must be a valid URL with a percent-encoded user$/, 's3cret-value');
+  });
+
+  it('a NAME_FILE that cannot be read is a value-free ConfigError (the path never appears)', () => {
+    const path = '/run/secrets/very-sensitive-jwt-location';
+    refused({ ...good(), JWT_SECRET: undefined, JWT_SECRET_FILE: path }, /^JWT_SECRET_FILE is set but the file cannot be read$/, path, 'very-sensitive');
   });
 });

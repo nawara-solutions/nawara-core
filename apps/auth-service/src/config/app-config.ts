@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import {
-  DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, HTTP_DRAIN_TIMEOUT_BOUNDS,
-  LOG_LEVELS, RABBITMQ_HEARTBEAT_BOUNDS, loadMetricsConfig, loadTrustProxyHops, type LogLevel, type MetricsConfig,
+  ConfigError, DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader,
+  HTTP_DRAIN_TIMEOUT_BOUNDS, LOG_LEVELS, NODE_ENVS, RABBITMQ_HEARTBEAT_BOUNDS, assertDistinctKeys, assertRuntimeDatabaseRole, decodeKey,
+  loadMetricsConfig, loadTrustProxyHops, parseCorsOrigins, type LogLevel, type MetricsConfig,
 } from '@nawara/service-kit';
 
 /**
@@ -21,13 +22,21 @@ export class EnvSecretSource implements SecretSource {
   constructor(private readonly env: NodeJS.ProcessEnv = process.env) {}
   get(name: string): string | undefined {
     const file = this.env[`${name}_FILE`];
-    if (file) return readFileSync(file, 'utf8').trim();
+    if (file) {
+      // V2 A2.3: a read failure names the variable only (the operating-system error would carry the path).
+      try {
+        return readFileSync(file, 'utf8').trim();
+      } catch {
+        throw new ConfigError(`${name}_FILE is set but the file cannot be read`);
+      }
+    }
     const v = this.env[name];
     return v === undefined || v === '' ? undefined : v;
   }
 }
 
-export class ConfigError extends Error {}
+/** V2 A2.3 (OD-A2.3-1): the kit's class, so every configuration error, Auth's and the kit helpers', is one `ConfigError`. */
+export { ConfigError };
 
 export interface RateRule {
   /** Maximum hits per window. */
@@ -166,13 +175,12 @@ function required(src: SecretSource, name: string): string {
   return v;
 }
 
-/** Decodes a base64 secret and enforces a minimum entropy size. Never echoes the value. */
-function secretBytes(src: SecretSource, name: string, minBytes = 32): Buffer {
-  const b = Buffer.from(required(src, name), 'base64');
-  if (b.length < minBytes) {
-    throw new ConfigError(`${name} must be base64 of at least ${minBytes} random bytes`);
-  }
-  return b;
+/**
+ * A base64 secret read through the `SecretSource`, checked by the kit's key rules (V2 A2.3): canonical standard base64 of at least 32
+ * bytes; in production, no development key published in this repository and no key that does not look random. Never echoed.
+ */
+function secretBytes(src: SecretSource, name: string, isProduction: boolean): Buffer {
+  return decodeKey(name, required(src, name), { isProduction });
 }
 
 /**
@@ -203,49 +211,48 @@ function rule(env: NodeJS.ProcessEnv, name: string, limit: number, windowSec: nu
   };
 }
 
-/**
- * Database users that must never run the service in production: the default superuser name, any schema-owner role, and
- * `auth`, the database owner the production deploy creates (apps/auth-service/deploy/provision-and-deploy.sh).
- */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|auth|.+_migrator)$/;
-
+/** `auth`: the database owner the production deploy creates (apps/auth-service/deploy/provision-and-deploy.sh); never the runtime role. */
+const AUTH_DATABASE_OWNER = 'auth';
 
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   src: SecretSource = new EnvSecretSource(env),
 ): AppConfig {
-  const nodeEnv = (env.NODE_ENV ?? 'development') as AppConfig['env'];
-  if (!['development', 'test', 'production'].includes(nodeEnv)) {
-    throw new ConfigError('NODE_ENV must be development, test or production');
-  }
+  const reader = new EnvReader(env);
+  // V2 A2.3 (OD-A2.3-2): an unset NODE_ENV is production, the safe behaviour, as in every other Core service; anything else is refused.
+  const nodeEnv: AppConfig['env'] = reader.oneOf('NODE_ENV', NODE_ENVS, 'production');
+  const isProduction = nodeEnv === 'production';
 
-  const jwtSecret = secretBytes(src, 'JWT_SECRET');
+  const jwtSecret = secretBytes(src, 'JWT_SECRET', isProduction);
   const totpKeys = new Map<string, Buffer>();
   for (const pair of required(src, 'TOTP_ENCRYPTION_KEYS').split(',')) {
     const i = pair.indexOf(':');
-    const id = pair.slice(0, i).trim();
-    const key = Buffer.from(pair.slice(i + 1).trim(), 'base64');
-    if (i < 1 || !/^[A-Za-z0-9_-]{1,32}$/.test(id) || key.length !== 32) {
+    const id = i < 0 ? '' : pair.slice(0, i).trim();
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(id)) {
       throw new ConfigError('TOTP_ENCRYPTION_KEYS must be "id:base64(32 bytes)[,id:base64(32 bytes)]"');
     }
-    totpKeys.set(id, key);
+    // V2 A2.3: a repeated id would silently replace the earlier key.
+    if (totpKeys.has(id)) throw new ConfigError('TOTP_ENCRYPTION_KEYS must not repeat a key id');
+    totpKeys.set(id, decodeKey('TOTP_ENCRYPTION_KEYS', pair.slice(i + 1).trim(), { isProduction, exactBytes: 32 }));
   }
   const totpActiveKeyId = required(src, 'TOTP_ENCRYPTION_ACTIVE_KEY_ID');
   if (!totpKeys.has(totpActiveKeyId)) {
     throw new ConfigError('TOTP_ENCRYPTION_ACTIVE_KEY_ID does not name a key in TOTP_ENCRYPTION_KEYS');
   }
-  const operatorCodePepper = secretBytes(src, 'OPERATOR_CODE_PEPPER');
-  const secretKeyPepper = secretBytes(src, 'SECRET_KEY_PEPPER');
-  const throttlePepper = secretBytes(src, 'THROTTLE_KEY_PEPPER');
-  const joinCodePepper = secretBytes(src, 'JOIN_CODE_PEPPER');
+  const operatorCodePepper = secretBytes(src, 'OPERATOR_CODE_PEPPER', isProduction);
+  const secretKeyPepper = secretBytes(src, 'SECRET_KEY_PEPPER', isProduction);
+  const throttlePepper = secretBytes(src, 'THROTTLE_KEY_PEPPER', isProduction);
+  const joinCodePepper = secretBytes(src, 'JOIN_CODE_PEPPER', isProduction);
 
-  // Domain separation: one compromised/leaked secret must not unlock another purpose.
-  const distinct = new Set(
-    [jwtSecret, operatorCodePepper, secretKeyPepper, throttlePepper, joinCodePepper, ...totpKeys.values()].map((b) => b.toString('hex')),
-  );
-  if (distinct.size !== 5 + totpKeys.size) {
-    throw new ConfigError('every secret (JWT, peppers, TOTP keys) must be distinct');
-  }
+  // Domain separation: one compromised/leaked secret must not unlock another purpose (errors name the variables, never the material).
+  assertDistinctKeys([
+    ['JWT_SECRET', jwtSecret],
+    ['OPERATOR_CODE_PEPPER', operatorCodePepper],
+    ['SECRET_KEY_PEPPER', secretKeyPepper],
+    ['THROTTLE_KEY_PEPPER', throttlePepper],
+    ['JOIN_CODE_PEPPER', joinCodePepper],
+    ...[...totpKeys.values()].map((k) => ['TOTP_ENCRYPTION_KEYS', k] as const),
+  ]);
 
   const stepUpTtl = int(env, 'STEP_UP_TTL_SEC', 300, 30, MAX_STEP_UP_SEC);
   const origins = (env.WEBAUTHN_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -262,12 +269,12 @@ export function loadConfig(
   let dbUrl: URL;
   try { dbUrl = new URL(databaseUrl); } catch { throw new ConfigError('DATABASE_URL must be a valid URL'); }
   if (!['postgres:', 'postgresql:'].includes(dbUrl.protocol)) throw new ConfigError('DATABASE_URL must use postgres: or postgresql:');
-  if (nodeEnv === 'production' && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(dbUrl.username))) {
-    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032: the runtime role is DML-only; production refuses a superuser, schema-owner, bootstrap-admin or the database-owner login
+  // (V2 A2.3: the kit rule plus Auth's owner role).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction, alsoForbidden: [AUTH_DATABASE_OWNER] });
 
-  const eventsEnabled = env.AUTH_EVENTS !== 'off';
+  // V2 A2.3: exactly `on` (the default) or `off`; anything else is refused instead of silently meaning on.
+  const eventsEnabled = reader.oneOf('AUTH_EVENTS', ['on', 'off'] as const, 'on') === 'on';
 
   // Stage 18.7.5: the relay's broker, read regardless of AUTH_EVENTS; the same variables and bounds as the other Core producers.
   const auditRabbitmqUrl = env.RABBITMQ_URL || undefined;
@@ -294,15 +301,8 @@ export function loadConfig(
     throw new ConfigError('INVITATION_MIN_MINUTES <= INVITATION_DEFAULT_MINUTES <= INVITATION_MAX_MINUTES must hold');
   }
 
-  const corsOrigins = (env.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  for (const o of corsOrigins) {
-    let parsed: URL | undefined;
-    try { parsed = new URL(o); } catch { /* reported below */ }
-    // an exact origin only: no wildcard, no path/query/trailing slash, http(s) scheme (a typo must fail closed, not open)
-    if (o.includes('*') || !parsed || !['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== o) {
-      throw new ConfigError(`CORS_ORIGINS entries must be exact origins such as https://app.example.com (wildcards, paths and other schemes are refused); got "${o}"`);
-    }
-  }
+  // V2 A2.3: the kit's exact-origin rule (the same rule), whose error never repeats the rejected entry.
+  const corsOrigins = parseCorsOrigins(env.CORS_ORIGINS);
 
   const docsPassword = src.get('SWAGGER_PASSWORD');
   if (docsPassword !== undefined && docsPassword.length < 16) {
@@ -316,7 +316,7 @@ export function loadConfig(
   const port = int(env, 'PORT', 3000, 1, 65_535);
   return {
     env: nodeEnv,
-    logLevel: new EnvReader(env).oneOf('LOG_LEVEL', LOG_LEVELS, 'info'),
+    logLevel: reader.oneOf('LOG_LEVEL', LOG_LEVELS, 'info'),
     port,
     databaseUrl,
     db: {
@@ -330,9 +330,9 @@ export function loadConfig(
     events: { enabled: eventsEnabled },
     hierarchy: loadHierarchy(env, src),
     audit: auditRelay,
-    trustProxyHops: loadTrustProxyHops(new EnvReader(env)),
+    trustProxyHops: loadTrustProxyHops(reader),
     corsOrigins,
-    metrics: loadMetricsConfig(new EnvReader(env), port, nodeEnv),
+    metrics: loadMetricsConfig(reader, port, nodeEnv),
     baselineRateLimitPerMinute: int(env, 'BASELINE_RATE_LIMIT_PER_MINUTE', 100, 1, 1_000_000),
     jwt: {
       secret: new Uint8Array(jwtSecret),
@@ -399,7 +399,8 @@ export function loadConfig(
       invitation_manage_actor: rule(env, 'INVITATION_MANAGE_ACTOR', 20, 3600),
     },
     onboarding: {
-      requireContactVerification: env.REQUIRE_CONTACT_VERIFICATION === 'true',
+      // V2 A2.3: exactly `true` or `false` (default false); an ambiguous value is refused instead of silently turning verification off.
+      requireContactVerification: reader.bool('REQUIRE_CONTACT_VERIFICATION', false),
       contactCodeTtlSec: int(env, 'CONTACT_CODE_TTL_SEC', 900, 60, 3600),
       invitation: invitation,
     },
