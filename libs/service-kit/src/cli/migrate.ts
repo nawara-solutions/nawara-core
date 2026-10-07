@@ -2,12 +2,14 @@
 import { resolve } from 'node:path';
 import { kitMigrationsDir } from '../db/paths.js';
 import { runMigrations } from '../db/migrations.js';
-import { ConfigError } from '../config/config.js';
+import { ConfigError, EnvReader } from '../config/config.js';
+import { migrationDatabaseUrl } from './cli-config.js';
 import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
  * Explicit migration step:  nawara-migrate --dir <path> [--dir <path>...] [--no-kit]
- * Connects with MIGRATION_DATABASE_URL (the schema-owner role), falling back to DATABASE_URL. The kit's own migrations
+ * Connects with MIGRATION_DATABASE_URL (the schema-owner role), falling back to DATABASE_URL; each may be given as NAME_FILE instead
+ * (V2 A15.1: read through the kit's EnvReader; the fallback is read only when the first is unset). The kit's own migrations
  * (outbox, inbox) run first unless --no-kit. Nothing here runs at service start. The connection string is never printed.
  */
 async function main() {
@@ -19,8 +21,7 @@ async function main() {
     else if (args[i] === '--no-kit') withKit = false;
     else throw new ConfigError(`unknown argument: ${args[i]}`);
   }
-  const url = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
-  if (!url) throw new ConfigError('MIGRATION_DATABASE_URL (or DATABASE_URL) is required');
+  const url = migrationDatabaseUrl(new EnvReader(process.env));
   const result = await runMigrations(url, [...(withKit ? [kitMigrationsDir] : []), ...dirs], { onLockWait });
   for (const n of result.alreadyApplied) console.log(`  = ${n} (already applied)`);
   for (const n of result.adopted) console.log(`  ~ ${n} (checksum recorded)`);

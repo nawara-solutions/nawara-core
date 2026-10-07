@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1821,4 +1821,75 @@ test('V2 A2.5: the runner wires every configuration and secret guard, on Git-bac
   assert.equal(named('isServiceConfigSource').length, 1, 'the README coverage reads the service source');
   // The process.env boundary lives in checkSource, which the runner already calls for every source file (A1.4 wiring test above).
   assert.equal(named('checkSource').length, 1);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A15.1: the migrated operator CLIs read their configuration through the kit's EnvReader and nothing else.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test('V2 A15.1: a migrated operator CLI hands process.env to EnvReader and reads it in no other way', () => {
+  const good = "import { EnvReader } from '../config/config.js';\nconst url = new EnvReader(process.env).get('X_URL'); // process.env.X_URL is not read\nconst s = 'process.env.X';";
+  const resolvers = "export function brokerUrl(reader) { return reader.required('RABBITMQ_URL'); } // never process.env";
+  const files = (overrides = {}) => ({ ...Object.fromEntries(ENV_READER_CLIS.map((rel) => [rel, good])), [ENV_READER_CLI_RESOLVERS]: resolvers, ...overrides });
+  assert.deepEqual(checkEnvReaderClis(files()), []);
+  assert.deepEqual(sourceFacts('a.ts', good).envReaderUses, 1);
+  assert.deepEqual(sourceFacts('a.ts', good).directEnvUses, 0);
+  // Other accepted spellings of the same thing: a named reader, parentheses, more than one reader.
+  for (const text of ["const reader = new EnvReader((process.env)); reader.get('X');", "const a = new EnvReader(process.env); const b = new EnvReader(process.env, readFile);"]) {
+    assert.deepEqual(checkEnvReaderClis(files({ [ENV_READER_CLIS[0]]: text })), [], text);
+  }
+
+  const direct = {
+    'named read': "const url = process.env.X_URL;",
+    'named read next to the reader': "const r = new EnvReader(process.env); const id = process.env.X_ID;",
+    'fallback chain': "const url = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;",
+    'bracket read': "const r = new EnvReader(process.env); const url = process.env['X_URL'];",
+    'destructuring': "const r = new EnvReader(process.env); const { X_URL } = process.env;",
+    'destructured env': "const { env } = process; const r = new EnvReader(env);",
+    'write': "const r = new EnvReader(process.env); process.env.X_EVENTS = 'off';",
+    'spread copy': "const r = new EnvReader({ ...process.env });",
+    'aliased': "const env = process.env; const r = new EnvReader(env);",
+    'another reader class': "const r = new OtherReader(process.env);",
+    'second argument': "const r = new EnvReader(fake, process.env);",
+  };
+  for (const rel of ENV_READER_CLIS) {
+    for (const [label, text] of Object.entries(direct)) {
+      const problems = checkEnvReaderClis(files({ [rel]: text }));
+      assert.equal(problems.length, 1, `${rel}: ${label}`);
+      assert.match(problems[0], new RegExp(`^${rel.replace(/[.]/g, '\\.')}: reads process\\.env directly; this operator CLI reads its configuration through the kit's EnvReader`), label);
+    }
+  }
+  // A listed CLI that stops using the reader, or disappears, is reported: the inventory cannot go stale silently.
+  assert.match(checkEnvReaderClis(files({ [ENV_READER_CLIS[1]]: 'export const x = 1;' })).join(), /does not read its configuration through new EnvReader\(process\.env\)/);
+  assert.match(checkEnvReaderClis(files({ [ENV_READER_CLIS[2]]: undefined })).join(), /is missing; update ENV_READER_CLIS if it moved/);
+  assert.equal(checkEnvReaderClis({}).length, ENV_READER_CLIS.length + 1);
+  // The shared resolvers take a reader: they never reach the environment, not even to build one.
+  for (const text of ["export const brokerUrl = (reader) => process.env.RABBITMQ_URL ?? reader.required('RABBITMQ_URL');", 'export const reader = () => new EnvReader(process.env);']) {
+    assert.deepEqual(checkEnvReaderClis(files({ [ENV_READER_CLI_RESOLVERS]: text })), [`${ENV_READER_CLI_RESOLVERS}: reads process.env; the resolvers read only through the EnvReader they are given (V2 A15.1)`]);
+  }
+  assert.match(checkEnvReaderClis(files({ [ENV_READER_CLI_RESOLVERS]: undefined })).join(), /cli-config\.ts \(the operator CLIs' configuration resolvers\) is missing/);
+
+  // The inventory is the six A15.1 CLIs; Auth's CLIs (A4) and the Organization ownership CLI (A5 / F6 / F7) are not in it, and the
+  // path boundary of A2.5 still admits every CLI directory (nothing was removed from it).
+  assert.equal(ENV_READER_CLIS.length, 6);
+  assert.ok(!ENV_READER_CLIS.some((rel) => /auth-service|organization-service/.test(rel)));
+  for (const rel of [...ENV_READER_CLIS, 'apps/auth-service/src/cli/main.ts', 'apps/organization-service/src/cli/ownership.ts']) {
+    assert.ok(PROCESS_ENV_BOUNDARY.some((allowed) => allowed.test(rel)), rel);
+    assert.deepEqual(checkSource(rel, "const v = process.env.X_VALUE;"), [], rel); // A2.5 is unchanged: the new rule is a separate check
+  }
+  // The real files satisfy it.
+  assert.deepEqual(checkEnvReaderClis(Object.fromEntries([...ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS].map((rel) => [rel, repoFile(rel)]))), []);
+});
+
+test('V2 A15.1: the runner checks the migrated operator CLIs', () => {
+  const sf = ts.createSourceFile('check-repo.mjs', repoFile('scripts/check-repo.mjs'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const calls = [];
+  const visit = (n) => {
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === 'checkEnvReaderClis') calls.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  assert.equal(calls.length, 1, 'checkEnvReaderClis is called once');
+  assert.ok(ts.isSpreadElement(calls[0].parent) && calls[0].parent.parent.expression.getText() === 'problems.push', 'its problems are reported');
+  assert.equal(calls[0].arguments[0].getText(), 'Object.fromEntries([...ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS].map((rel) => [rel, readOrUndefined(rel)]))', 'every listed CLI and the resolvers are read from the repository');
 });

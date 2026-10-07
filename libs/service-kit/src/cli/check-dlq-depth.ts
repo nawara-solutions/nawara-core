@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import amqp from 'amqplib';
-import { ConfigError } from '../config/config.js';
+import { ConfigError, EnvReader } from '../config/config.js';
+import { brokerUrl } from './cli-config.js';
 import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
@@ -20,8 +21,7 @@ async function main(): Promise<void> {
     else throw new ConfigError(`unknown argument: ${args[i]}`);
   }
   if (queues.length === 0) throw new ConfigError('at least one --queue <name> is required');
-  const url = process.env.RABBITMQ_URL;
-  if (!url) throw new ConfigError('RABBITMQ_URL is required');
+  const url = brokerUrl(new EnvReader(process.env)); // RABBITMQ_URL or RABBITMQ_URL_FILE (V2 A15.1)
 
   const conn = await amqp.connect(url);
   let stuck = 0;

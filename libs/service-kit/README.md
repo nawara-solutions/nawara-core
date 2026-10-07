@@ -107,6 +107,7 @@ Retry and dead-lettering republish the message with its original body, message i
 
 ```bash
 # `nawara-dlq` is the kit's `bin`; from a built checkout or a service image run `node libs/service-kit/dist/cli/dlq.js` instead
+# the broker URL comes from RABBITMQ_URL or RABBITMQ_URL_FILE (a mounted secret), never from an argument
 RABBITMQ_URL=amqp://... nawara-check-dlq --queue billing.payment-events.dead          # depth only; exits 1 if non-empty
 RABBITMQ_URL=amqp://... nawara-dlq list --queue billing.payment-events.dead --field paymentRequestId
 # dlq_depth queue=... depth=1 shown=1
@@ -210,12 +211,20 @@ A clean close (close-ok from a healthy broker) keeps amqplib's graceful FIN.
 Services add their own worker signals in the same shape (`*_pass_failure` with the failure, `webhook_retry_exhausted`, ...) and a
 `service_started` line (`port`, `environment`, no configuration values).
 
-`nawara-check-outbox-lag --database-url <url> [--max-age-seconds 60]` prints `pending`, `oldest pending age`, `retrying` (pending rows
+`DATABASE_URL=<url> nawara-check-outbox-lag [--max-age-seconds 60]` (or `DATABASE_URL_FILE=<path>`) prints `pending`, `oldest pending age`, `retrying` (pending rows
 that already failed a publish), `max attempts`, and the oldest pending row's `id`/`name`/`attempts`/`nextAttemptAt` and last recorded
 error (class and redacted message, never a payload). Exit `0` when no pending row is older than the threshold, `1` when one is or
 when the check itself fails (connect is bounded at 10 s). Retries stay unlimited: a high `max attempts` with an old row means an event
 has been retrying for a long time, not a brief broker blip. `nawara-migrate` prints a line when it has to wait for another runner's
 migration lock (the wait itself is unchanged).
+
+**Operator CLI configuration (V2 A15.1).** `nawara-migrate`, `nawara-dlq`, `nawara-check-dlq` and `nawara-check-outbox-lag` read their
+connection settings through the kit's `EnvReader`, like the services: surrounding whitespace is removed, a blank value is unset, a
+setting may be given as `NAME` or as `NAME_FILE` (a mounted secret), and both together are refused. `nawara-migrate` uses
+`MIGRATION_DATABASE_URL` and falls back to `DATABASE_URL` only when the first is unset (the fallback is then not read at all).
+`nawara-check-outbox-lag --database-url <url>` still works and still wins over the environment, but is **deprecated**: a credential on
+the command line is visible to other processes, so it prints one warning on stderr (never the URL); stdout and the exit codes are
+unchanged. No CLI prints a connection string, a file's content or an argument value.
 
 ## Not in the kit (yet)
 

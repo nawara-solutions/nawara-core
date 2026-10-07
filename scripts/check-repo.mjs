@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -153,10 +153,12 @@ for (const svc of ['billing-service', 'payment-service']) {
     problems.push(...checkReadmeEnvironmentCoverage(app, readOrUndefined(`apps/${app}/README.md`), sources));
   }
 }
+// V2 A15.1: the migrated operator CLIs read their configuration only through the kit's EnvReader.
+problems.push(...checkEnvReaderClis(Object.fromEntries([...ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS].map((rel) => [rel, readOrUndefined(rel)]))));
 
 if (problems.length > 0) {
   console.error(`repository checks failed (${problems.length}):`);
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration');

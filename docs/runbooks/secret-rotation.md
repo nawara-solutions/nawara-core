@@ -107,4 +107,4 @@ Provider keys are read at startup only and are shape-checked (`re_…` for Resen
 | Production `_FILE` secret delivery (deploy scripts) | separately authorized production work (OD-A2-6) |
 | Tooled database-credential rotation for services other than Auth | not planned in A2 |
 | Pepper rotation | not planned |
-| The operational CLIs reading through the kit's reader (`_FILE`, value-free errors) | follow-up (A15); Auth's CLIs with A4; the Organization ownership CLI with A5 / F6 / F7 |
+| The operational CLIs reading through the kit's reader (`_FILE`, value-free errors) | done for the generic CLIs by A15.1 (the kit's four, Notification `secret-keys`, Audit `retention`; [A15 record](../architecture/core-v2-a15-developer-experience.md) §4); Auth's CLIs with A4; the Organization ownership CLI with A5 / F6 / F7 |

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import amqp from 'amqplib';
 import { formatDeadLetter, inspectDeadLetters, outputToken as q, replayDeadLetter } from '../events/dlq-tools.js';
-import { ConfigError } from '../config/config.js';
+import { ConfigError, EnvReader } from '../config/config.js';
+import { brokerUrl } from './cli-config.js';
 import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
  * Operator tool for a consumer's dead-letter queue. Output is one `key=value` line per fact, so it can be read by a person or grepped.
- * The broker URL comes ONLY from `RABBITMQ_URL` (never an argument, never printed).
+ * The broker URL comes ONLY from `RABBITMQ_URL` or `RABBITMQ_URL_FILE` (never an argument, never printed).
  *
  *   nawara-dlq list   --queue billing.payment-events.dead [--limit 50] [--field paymentRequestId ...]
  *   nawara-dlq replay --queue billing.payment-events.dead --event-id <id> [--wait-seconds 10]
@@ -35,8 +36,7 @@ async function main(): Promise<void> {
   const { command, opts } = parse(process.argv.slice(2));
   const queue = one(opts, 'queue');
   if (!queue) throw new ConfigError('--queue <name>.dead is required');
-  const url = process.env.RABBITMQ_URL;
-  if (!url) throw new ConfigError('RABBITMQ_URL is required');
+  const url = brokerUrl(new EnvReader(process.env));
 
   const conn = await amqp.connect(url);
   try {

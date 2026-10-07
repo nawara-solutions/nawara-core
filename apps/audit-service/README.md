@@ -94,6 +94,7 @@ psql "$MIGRATION_DATABASE_URL" -c "INSERT INTO audit_retention_policy(category, 
 # the retention role runs the purge (a scheduler or an operator; bounded, resumable, idempotent; ledgered in audit_retention_run)
 RETENTION_DATABASE_URL=postgres://audit_retention:…@host:5432/audit npm run retention -w audit-service -- --dry-run
 RETENTION_DATABASE_URL=… npm run retention -w audit-service -- [--category <c>] [--batch-size 1000] [--max-batches 100]
+# a scheduler can mount the credential instead: RETENTION_DATABASE_URL_FILE=<path> (setting both is refused)
 ```
 
 There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: reserved, not built). The query limiter's state

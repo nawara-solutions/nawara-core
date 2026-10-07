@@ -62,7 +62,7 @@ kit relay delivers it asynchronously. A broker or audit-service outage **never**
 1. Confirm it with the snapshot (`pending`, `oldest_pending_s`, `retrying`), or on demand:
 
    ```bash
-   nawara-check-outbox-lag --database-url <release runtime URL> --max-age-seconds 300
+   DATABASE_URL_FILE=<file holding the release runtime URL> nawara-check-outbox-lag --max-age-seconds 300   # or DATABASE_URL=…; not --database-url (deprecated: visible in the process list)
    ```
 
    (the kit CLI; it reads only; exit 1 = over the threshold). It is also in the image at
