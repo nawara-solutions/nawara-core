@@ -163,9 +163,10 @@ New endpoints and new code follow the [CURRENT] rules. Existing V1 contracts are
 - **[CURRENT]** Services authenticate to each other and identify the end user as decided in ADR-0033 and ADR-0042; each service admits a
   caller only through an explicit, deny-by-default caller policy (decided in ADR-0042; its shared kit mechanism and adoption in
   [ADR-0052](./0052-core-v1-capability-closure.md)).
-- **[TARGET: A1.3]** Organization, Notification, File, Audit and Release move from their own policy parsers to the kit's
+- **[CURRENT]** Organization, Notification, File, Audit and Release move from their own policy parsers to the kit's
   `parseCallerPolicy` (OD-A1-3): uniform fail-closed parsing and duplicate-key detection, with no change to environment-variable names,
-  caller identities, scopes or authorization semantics.
+  caller identities, scopes or authorization semantics. (Implemented by A1.3, PR #220; enforced for all seven consumers by
+  `check:repo` since A1.4, PR #221. Label updated from [TARGET: A1.3] by A1.5, OD-A1-5a; the decision is unchanged.)
 - **[DEFERRED: A6]** Authorization semantics (what an admitted caller may do, ownership-aware checks).
 
 ### 12. Bootstrap
@@ -198,7 +199,8 @@ New endpoints and new code follow the [CURRENT] rules. Existing V1 contracts are
 
 - New endpoints, new services and A15 templates follow the [CURRENT] rules; reviews cite this ADR.
 - Existing stable contracts are unaffected; [COMPAT] items stay until a deliberate, versioned V2 change.
-- [TARGET] items are implemented by their stages (A1.3, A4) and verified there; this ADR does not claim them.
+- [TARGET] items are implemented by their stages (A4) and verified there; this ADR does not claim them. (The A1.3 target is
+  implemented, PR #220, and is now [CURRENT], §11.)
 - A1.4 may enforce the source-dependency rules and the route prefix in `check:repo`.
 - ADR-0034 is marked `Superseded by ADR-0056` (done on this ADR's acceptance, 2026-10-07).
 
@@ -213,6 +215,6 @@ New endpoints and new code follow the [CURRENT] rules. Existing V1 contracts are
 | [0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) domain-owned admin APIs | **references** (§5, §13) |
 | [0042](./0042-service-token-scopes-and-administrative-authorization.md) service-token scopes | **references** (§2, §11) |
 | [0050](./0050-platform-administration-and-verified-human-authority.md) verified human authority | **references** (§5) |
-| [0052](./0052-core-v1-capability-closure.md) shared caller policy | **references** (§11); the A1.3 target completes its adoption |
+| [0052](./0052-core-v1-capability-closure.md) shared caller policy | **references** (§11); A1.3 completed its adoption (PR #220) |
 | [0054](./0054-localized-error-messages-and-stable-error-codes.md) errors | **references**; authoritative for the envelope (§9) |
 | [0055](./0055-ai-service-repository-boundary.md) AI boundary | **references** (§13) |

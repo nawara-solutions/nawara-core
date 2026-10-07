@@ -217,7 +217,7 @@ Delivered by a small `libs/service-kit` ([ADR-0034](../adr/0034-shared-service-k
 | Ids | `X-Request-Id` (generated if absent) and `X-Correlation-Id` (propagated across services and into event headers) |
 | Health | `GET /health` = process alive; `GET /ready` = every dependency check passes, else 503. Root paths, not routed publicly |
 | Errors | Nest default `{ statusCode, message, error }` plus `requestId`; validation failures 400; never a stack trace or a database message. Amended by [ADR-0054](../adr/0054-localized-error-messages-and-stable-error-codes.md): a stable `code` is the machine contract, `message` may be localized (EN / FR / AR via `Accept-Language`, English by default) |
-| API | public prefix is the singular domain noun (`/organization`, `/file`, ...), no version segment in v1; additive changes only; a breaking change becomes `/v2/<prefix>`; OpenAPI at `GET /docs` |
+| API | public prefix is the singular domain noun (`/organization`, `/file`, ...), no version segment in v1; additive changes only; a breaking change becomes `/v2/<prefix>`; OpenAPI at `GET /<service>/docs`, mounted only when `SWAGGER_PASSWORD` is set, behind basic authentication |
 | Lists | `?limit=&cursor=` → `{ items, nextCursor }`; allow-listed `sort` and filters |
 | Idempotency | `Idempotency-Key` on resource-creating `POST`s |
 | Security | `helmet`, request-size limit, baseline rate limit, DTO whitelist with unknown fields rejected, deny-by-default routes |

@@ -164,12 +164,13 @@ A12 Observability
   A12.10 production observability              not started (production scope)
 A13 Audit backup / restore                     ✅ certified (tooling, local, CI; production evidence gated)
 A14 Supply chain and build provenance          ✅ certified
-A1 Architecture                                🔄 OPEN
-  A1.0  discovery                              ✅ complete
-  A1.1  decisions, ADR governance (Q-ADR-1)    ✅ complete locally; owner-approved
-  A1.2  consolidated conventions ADR           ✅ complete locally; owner-approved (ADR-0056 Accepted; ADR-0034 superseded)
-  A1.3  caller-policy migration                next (not started)
-  A1.4 – A1.5  guards, certification           not started
+A1 Architecture                                🔄 OPEN (certification PR pending)
+  A1.0  discovery                              ✅ closed
+  A1.1  decisions, ADR governance (Q-ADR-1)    ✅ closed on main (PR #219)
+  A1.2  consolidated conventions ADR           ✅ closed on main (PR #219; ADR-0056 Accepted; ADR-0034 superseded)
+  A1.3  caller-policy migration                ✅ closed on main (PR #220)
+  A1.4  architecture guards                    ✅ closed on main (PR #221)
+  A1.5  certification                          complete locally; owner review pending
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -202,7 +203,11 @@ started, and the scope of A12.7–A12.9 is not yet defined. **A1 Architecture** 
 OD-A1-6 (an ADR is Accepted on the architecture owner's explicit approval; one consolidated conventions ADR will supersede ADR-0034;
 the five hand-written caller-policy parsers move to the kit; Auth code convergence belongs to A4). A1.2 has written the consolidated
 conventions ADR, [ADR-0056](adr/0056-core-architecture-and-api-conventions.md), Accepted by the architecture owner on 2026-10-07; it
-supersedes ADR-0034 and is the current Core architecture and API convention. Next is A1.3.
+supersedes ADR-0034 and is the current Core architecture and API convention. A1.3 moved the five hand-written caller-policy parsers to
+the kit's `parseCallerPolicy` (PR #220; Organization's stricter grammar by owner decision OD-A1-3a, with a runbook pre-deploy check
+before its first such deployment), and A1.4 enforces the caller-policy delegation of all seven consumers and the dependency direction
+in `check:repo` (PR #221). A1.5 certification is complete locally and awaits owner review; A1 Architecture closes only when its
+certification PR is merged ([record](architecture/core-v2-a1-architecture.md) §12).
 
 ### Compatibility and safety rules for V1 work
 
@@ -334,7 +339,7 @@ Every Admin feature declares which state its backend contract is in.
 
 | State | Meaning | Admin may |
 |---|---|---|
-| 🟢 **EXISTING / CONFIRMED** | the endpoint exists in Core today; its contract is the service's OpenAPI at `GET /docs` | integrate directly (and check whether that service is in production) |
+| 🟢 **EXISTING / CONFIRMED** | the endpoint exists in Core today; its contract is the service's OpenAPI at `GET /<service>/docs` (mounted only when `SWAGGER_PASSWORD` is set, behind basic authentication) | integrate directly (and check whether that service is in production) |
 | 🟡 **PLANNED V2 / MOCKED** | the capability is in the accepted V2 direction; no real endpoint yet | build UI, domain models, an API interface, a mock adapter and mock data. **The mock is not the backend contract.** |
 | 🔴 **UNDEFINED** | Core has not established the contract | design UX, placeholders and frontend-only view models. **No permanent backend API or schema may be declared;** a Core design decision comes first. |
 
@@ -431,7 +436,7 @@ project's concern. Core's localized `message` is for display only. Application b
 | Decisions | [`docs/adr/`](adr/) |
 | Service architecture and boundaries | [`core-architecture.md`](architecture/core-architecture.md), [`financial-architecture.md`](architecture/financial-architecture.md) |
 | One service's design | [`docs/sdd/`](sdd/) and the service's README |
-| Exact API contract | the service's OpenAPI at `GET /docs` |
+| Exact API contract | the service's OpenAPI at `GET /<service>/docs` (JSON at `/<service>/docs-json`; mounted only when `SWAGGER_PASSWORD` is set, behind basic authentication) |
 | Production facts and gates | [`stage-21-x-cutover-record.md`](architecture/stage-21/stage-21-x-cutover-record.md), [`docs/runbooks/`](runbooks/) |
 | Product integration | [`core-product-integration-guide.md`](architecture/core-product-integration-guide.md) |
 | Error localization and the per-service error-code index | [`core-error-localization.md`](architecture/core-error-localization.md) |

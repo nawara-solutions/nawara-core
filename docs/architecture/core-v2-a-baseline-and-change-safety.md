@@ -300,3 +300,21 @@ Appended. §5 and §7 list Q-ADR-1 as open (→ A1, owner decision). It is decid
 architecture owner's explicit approval, not on merge or implementation ([A1 record](core-v2-a1-architecture.md) §2,
 [`docs/adr/README.md`](../adr/README.md) status lifecycle). The review of every Proposed ADR is in the A1 record §3; status changes stay
 one ADR at a time, as §7 says. A1.1 is complete locally; A1 stays open.
+
+## 14. Later status: A1 Architecture (2026-10-07; certification pending)
+
+Appended. §5 (and the R11 follow-ups after it) hand several items to **A1 Architecture** (the architecture stage, not V2-A.1, which
+is the documentation formalization closed in §10). They have since been resolved through A1 Architecture
+([A1 record](core-v2-a1-architecture.md) §12):
+
+- **Q-ADR-1:** decided by OD-A1-1 (§13 above). ADR-0018 and ADR-0037 stay Proposed: no status changed without explicit approval.
+- **Core-wide DTO and API conventions, D10 for new code, route naming:** consolidated in
+  [ADR-0056](../adr/0056-core-architecture-and-api-conventions.md) (Accepted; supersedes ADR-0034), PR #219. Existing V1 routes
+  (`/notification/notifications`, File's routes) are kept as compatibility exceptions; a breaking rename still needs a V2 design (A16).
+- **The five hand-written caller-policy parsers:** moved to the kit's `parseCallerPolicy` by A1.3, PR #220.
+- **Architecture enforcement:** caller-policy delegation of all seven consumers and the dependency direction are guarded by
+  `check:repo` since A1.4, PR #221.
+
+A1.5 certification is complete locally and awaits owner review; **A1 Architecture is certified and closed only when its certification
+PR is merged.** Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6, F7 locked; Final Core Validation
+absolute last.

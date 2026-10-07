@@ -46,7 +46,8 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   `payment_reconciler`); the organization from the persisted invoice, subscription or product seller (catalog corrections G3/G4: null
   for an organization-less invoice or a non-organization seller); a change caused by a Payment event carries its id as `causationId`.
   See the [Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
-- **HTTP API** (`src/invoices/*.controller.ts`, mounted at `GET /docs`): products, prices, invoices (create, list, get, issue,
+- **HTTP API** (`src/invoices/*.controller.ts`; OpenAPI at `GET /billing/docs`, mounted only when `SWAGGER_PASSWORD` is set, behind basic
+  authentication): products, prices, invoices (create, list, get, issue,
   discard) and payment requests (create, get, cancel). `@nestjs/swagger` decorators on every operation and DTO field.
 - **Payment integration** (`src/payment-integration`, SDD section 21):
   - `PaymentClient` port + `HttpPaymentClient` adapter — Billing's domain depends on the interface, never on HTTP directly.
