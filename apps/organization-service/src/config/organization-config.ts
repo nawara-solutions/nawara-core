@@ -1,5 +1,5 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 
 /**
@@ -29,18 +29,13 @@ export interface OrganizationConfig extends BaseConfig {
   rabbitmqHeartbeatS: number;
 }
 
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-
 export function loadOrganizationConfig(env: NodeJS.ProcessEnv = process.env): OrganizationConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig('organization-service', env, reader);
 
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032: the runtime role is DML-only; production refuses a superuser, schema-owner or bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
 
   const rabbitmqUrl = reader.optional('RABBITMQ_URL');
   if (rabbitmqUrl !== undefined) reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']);
@@ -59,10 +54,7 @@ export function loadOrganizationConfig(env: NodeJS.ProcessEnv = process.env): Or
     servicePolicyRaw: reader.get('SERVICE_POLICY'),
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      // A password that protects API documentation of an authority service must not be trivial.
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    // A password that protects API documentation of an authority service must not be trivial: at least 16 characters (the kit rule).
+    docs: readDocsCredentials(reader),
   };
 }
