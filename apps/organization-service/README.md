@@ -161,6 +161,28 @@ deleted. Every attempt, rejected ones included, is an `ownership_event` row and 
 `ownership_import_succeeded`, `ownership_import_failed`, `ownership_activation_requested`, `ownership_activation_succeeded`,
 `ownership_activation_rejected`, `ownership_retirement_completed`, `ownership_rollback_rejected`, `ownership_snapshot_verified`).
 
+## Environment
+
+Read once at startup by `src/config/organization-config.ts` (the kit's `EnvReader`); a missing or invalid value stops the process, and
+no error repeats a value. This table is the reference; [`.env.example`](./.env.example) is a local-development template. **Every** value
+may be given as `NAME_FILE=/path` instead of `NAME` (setting both is refused); surrounding whitespace is removed and a blank value is
+unset. Production values are written by `deploy/provision-and-deploy.sh` and `deploy/register-caller.sh`; before deploying a new image,
+run the check in the [production runbook](../../docs/runbooks/organization-production.md) §2. Rotation:
+[secret rotation runbook](../../docs/runbooks/secret-rotation.md).
+
+| Variable | Required | Default | Secret | Meaning |
+|---|---|---|---|---|
+| `NODE_ENV`, `PORT`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS`, `HTTP_DRAIN_TIMEOUT_MS`, `DB_*`, `METRICS_*` | no | kit defaults (`NODE_ENV` = `production`) | no | the kit's base configuration |
+| `DATABASE_URL` | yes | none | **yes** (password) | the runtime role `organization_app`; in production `postgres`, `root`, `*_migrator` and `*_admin` are refused |
+| `AUTH_SERVICE_URL`, `AUTH_TIMEOUT_MS` | URL yes | none, 3000 | no | live identity and grants for human administrators |
+| `SERVICE_TOKENS` | no | none (every service call refused) | no (digests) | accepted callers, `<caller>:<sha256 digest>`, at most two per caller |
+| `SERVICE_POLICY` | when a token is registered | none | no | each caller's `capabilities` and `allowedPlatforms`; exactly `{"callers":{…}}`, no other key or property, no repeated key |
+| `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes** (URL password) | the audit relay's broker; without it the in-memory bus (development and tests only) |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes** | API docs; mounted only with a password of at least 16 characters |
+
+The ownership CLI (`dist/cli/ownership.js`) reads its own variables (`OWNERSHIP_ADMIN_DATABASE_URL`, `OWNERSHIP_PRODUCTION_ACTIVATION`);
+see the ownership section above.
+
 ## Running it
 
 ```bash

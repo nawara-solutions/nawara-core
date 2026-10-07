@@ -87,6 +87,20 @@ test('WebAuthn: a new installation gets the Nawara RP and the owner admin UI ori
   assert.doesNotMatch(env, /hsalem-anwar/, 'no personal-domain WebAuthn default');
 });
 
+test('V2 A2.4: a fresh .env carries no Payment setting (Auth has no Payment client, ADR-0042 Amendment 3), and an existing one is left alone', () => {
+  const fresh = auditBound();
+  assert.equal(deploy(fresh).code, 0);
+  assert.doesNotMatch(envFile(fresh), /^PAYMENT_SERVICE_(TOKEN|URL)=/m, 'the deploy no longer provisions settings Auth does not read');
+
+  // Existing installations are not cleaned up by a deploy (removing an entry from a server .env is a separate, deliberate action).
+  const existing = auditBound();
+  mkdirSync(join(existing.home, 'nawara-core/auth-service'), { recursive: true });
+  writeFileSync(join(existing.home, 'nawara-core/auth-service/.env'), 'PAYMENT_SERVICE_URL=http://kept.invalid\n');
+  assert.equal(deploy(existing).code, 0);
+  assert.match(envFile(existing), /^PAYMENT_SERVICE_URL=http:\/\/kept\.invalid$/m, 'an entry already on the server is neither removed nor rewritten');
+  assert.doesNotMatch(envFile(existing), /^PAYMENT_SERVICE_TOKEN=/m);
+});
+
 test('WebAuthn: existing values in .env are never overwritten by a deployment (changing them is a deliberate edit)', () => {
   const w = auditBound();
   mkdirSync(join(w.home, 'nawara-core/auth-service'), { recursive: true });

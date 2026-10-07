@@ -162,7 +162,6 @@ ensure "$APP_ENV" THROTTLE_KEY_PEPPER "$(b64)"
 ensure "$APP_ENV" JOIN_CODE_PEPPER "$(b64)"
 ensure "$APP_ENV" TOTP_ENCRYPTION_KEYS "k1:$(b64)"
 ensure "$APP_ENV" TOTP_ENCRYPTION_ACTIVE_KEY_ID k1
-ensure "$APP_ENV" PAYMENT_SERVICE_TOKEN "$(openssl rand -hex 32)"
 # WebAuthn (owner passkeys). The RP ID scopes every credential; WEBAUTHN_ORIGINS are the exact https BROWSER origins that run
 # navigator.credentials.* (the owner admin UI), never this API's host. Owner decision: RP nawara-solutions.com, admin UI
 # https://admin.nawara-solutions.com. Like every value here, an existing setting is never overwritten: changing a running
@@ -170,7 +169,6 @@ ensure "$APP_ENV" PAYMENT_SERVICE_TOKEN "$(openssl rand -hex 32)"
 ensure "$APP_ENV" WEBAUTHN_RP_ID "${WEBAUTHN_RP_ID:-nawara-solutions.com}"
 ensure "$APP_ENV" WEBAUTHN_ORIGINS "${WEBAUTHN_ORIGINS:-https://admin.nawara-solutions.com}"
 ensure "$APP_ENV" WEBAUTHN_RP_NAME Nawara
-ensure "$APP_ENV" PAYMENT_SERVICE_URL "${PAYMENT_SERVICE_URL:-http://nawara-core-payment-service:3000}"
 ensure "$APP_ENV" TRUST_PROXY true
 ensure "$APP_ENV" AUTH_EVENTS off
 # Stage 18.7.5: the outbox relay's broker. Stage 21.C.2: AUTH_EVENTS=off above now means "write no domain-event rows" (the relay still

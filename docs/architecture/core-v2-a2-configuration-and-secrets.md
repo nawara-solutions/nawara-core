@@ -2,8 +2,9 @@
 
 - **Status:** RECORD of A2.0 discovery and A2.1.0 design (both read-only, owner-reviewed, 2026-10-07, on `main` at `321ec0b`, the
   PR #222 merge), of **A2.1: service-kit configuration hardening** (**closed on `main`**: PR #223, merge `b6a8402`; §4) and of
-  **A2.2: seven-service adoption** (**closed on `main`**: PR #224, merge `975d848`; §6) and of **A2.3: targeted Auth hardening**
-  (**complete locally, owner review pending**; §7). **A2 is OPEN.** A2.4 to A2.6 are not started.
+  **A2.2: seven-service adoption** (**closed on `main`**: PR #224, merge `975d848`; §6) of **A2.3: targeted Auth hardening**
+  (**closed on `main`**: PR #225, merge `6e86ab0`; §7) and of **A2.4: configuration hygiene, templates and secret rotation**
+  (**complete locally, owner review pending**; §8). **A2 is OPEN.** A2.5 and A2.6 are not started.
 - **Scope of A2** ([roadmap](../CORE-ROADMAP.md) A2): typed and validated configuration; environment separation; secret lifecycle and
   rotation; deployment contracts. **Not A2:** Auth loader convergence and JWT key-ring verification (A4); the Organization ownership
   CLI and its production gate (A5 / F6 / F7); production credential restriction (A3.6 / A3.7); production deploy-script changes
@@ -92,8 +93,10 @@ A2.1  service-kit hardening             ✅ closed on main (PR #223, merge b6a84
 A2.2.0  adoption plan                   ✅ complete (owner-reviewed)
 A2.2  seven-service adoption            ✅ closed on main (PR #224, merge 975d848; §6)
 A2.3.0  Auth discovery                  ✅ complete (owner-reviewed)
-A2.3  targeted Auth hardening           ✅ complete locally; owner review pending (§7)
-A2.4 – A2.6                             not started
+A2.3  targeted Auth hardening           ✅ closed on main (PR #225, merge 6e86ab0; §7)
+A2.4.0  hygiene discovery               ✅ complete (owner-reviewed)
+A2.4  hygiene, templates, rotation      ✅ complete locally; owner review pending (§8)
+A2.5 – A2.6                             not started
 ```
 
 A2 is OPEN. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
@@ -176,3 +179,49 @@ absolute last.
   only `OK` or `REFUSED`; proven locally against synthetic configurations (deploy-script shapes: OK; `AUTH_EVENTS=false`,
   `REQUIRE_CONTACT_VERIFICATION=1`, an `auth_admin` or `auth` user, a repeated TOTP id, the published `JWT_SECRET`: REFUSED). A merge
   builds the Auth image (`auth-service-docker-build.yml`); deployment stays manual. No G6 dependency; RED: none.
+
+## 8. A2.4: configuration hygiene, templates and secret rotation (2026-10-07, local)
+
+- **Owner decisions:** OD-A2.4-1 = C (the root `.env.example` is the Compose development template, the four existing service
+  templates stay, and each service README's Environment / Configuration table is the per-service variable reference; no template is
+  added for symmetry); OD-A2.4-2 = A (the ignore convention below); OD-A2.4-3 = A (the Auth deploy script stops provisioning the two
+  unused Payment settings); OD-A2.4-4 = B (CLI adoption deferred).
+- **Finding that shaped the model:** no service loads a `.env` file itself (no loader, no `--env-file`); configuration reaches a
+  service only through its process environment. A per-service `.env` therefore does nothing until it is exported, and with an unset
+  `NODE_ENV` a service is in production mode.
+- **Ignore policy.** `.gitignore`: `.env`, `.env.*`, `!.env.example`, at any depth (before: only `.env`, so `.env.local` or
+  `.env.production` could be committed). `.dockerignore`: `**/.env`, `**/.env.*` (before: none, so a local `apps/<service>/.env`
+  reached a build-stage layer). The five tracked `.env.example` templates stay tracked.
+- **Stale Auth settings.** `apps/auth-service/deploy/provision-and-deploy.sh` no longer ensures `PAYMENT_SERVICE_TOKEN` and
+  `PAYMENT_SERVICE_URL` (Auth has had no Payment client since ADR-0042 Amendment 3). The `ensure` helper only adds a missing entry, so an
+  entry already in a server `.env` is neither removed nor rewritten: cleaning it is a separate production action, not done here.
+- **Documentation model.**
+
+| What | Where |
+|---|---|
+| a service's variables (required, default, secret, `_FILE`) | its README Environment / Configuration table: added for Auth, Payment and Organization; Billing's corrected (the `*_admin` refusal, `_FILE` for every value, the published token) |
+| local development values | the root `.env.example` (header states: Compose template, published development values refused in production) |
+| running a service locally | the READMEs: export the `.env` (`set -a; . ./.env; set +a`) and keep `NODE_ENV=development`; quote values the shell would split |
+| rotation, the pepper and JWT limits, handling secrets while operating, the database-role and broker-identity model | [secret rotation runbook](../runbooks/secret-rotation.md) (new), which links the existing service procedures instead of copying them |
+| decisions and status | this record |
+
+- **`_FILE` today.** The seven kit-based services accept `NAME` or `NAME_FILE` for every variable and refuse both together. Auth: its
+  secrets through its secret source (the file wins when both are set) and its kit-read settings like the kit; `DATABASE_URL`,
+  `RABBITMQ_URL` and the rest by name only. The CLIs by name only. Production still delivers a plain `--env-file`: no `_FILE` delivery is
+  activated.
+- **Secret handling in documentation.** The Auth README no longer shows the bootstrap owner password typed inline (it is read without
+  echo); the rotation runbook warns against printing a secret to read it back (the `grep ^SWAGGER_` hint in the Auth deploy script's
+  comment is such a command; the script is not changed for it).
+- **Deferred, with owners.** Operational CLIs on the kit's reader: a follow-up (A15); Auth's CLIs: A4; the Audit retention CLI: outside
+  this scope (A13 is closed); the Organization ownership CLI: A5 / F6 / F7. Unchanged and recorded: the Auth deploy script still writes
+  the older `TRUST_PROXY=true` (one hop; changing what new installations get would be a behaviour change). Out-of-scope follow-up: the
+  Auth deploy command in `core-rabbitmq-production.md` §1 is shown without its digest input.
+- **Evidence (local):** `git check-ignore` assertions (real and local environment files ignored at the root and under `apps/`; the
+  templates trackable); a static evaluation of `.dockerignore` with Docker's pattern rules (environment files excluded, source and deploy
+  scripts kept); `npm run test:deploy` 316 passed, with a new Auth test (a fresh `.env` has neither Payment setting; an existing entry is
+  kept); three negative controls, each red when weakened and restored byte-for-byte (the `.env.*` rule removed; the Docker rules removed;
+  one stale `ensure` restored); document links; `check:repo`; `test:repo`.
+- **Production:** GREEN. No runtime behaviour changes; nothing was deployed, rotated or removed from a server. A merge builds the Auth
+  image (`.dockerignore` and `apps/auth-service/**` are in its path filter); deployment stays manual. RED: none; no G6 dependency.
+- **Left for A2.5:** permanent repository guards (the ignore policy, template completeness against the development-secret catalog, the
+  `process.env` boundary, coverage of the environment reference).
