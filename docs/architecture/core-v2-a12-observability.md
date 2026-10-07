@@ -13,9 +13,11 @@
   integrated observability and security validation MERGED** (PR #212, `879ea44`; §4J); **A12.5 FORMALLY CLOSED** for the LOCAL
   collection layer by the A12.5.5 certification (§4K). A12.6: the A12.6.0 decisions are recorded (§3G, D6a); **A12.6.1 LOCAL
   Grafana foundation and Core overview MERGED** (PR #214, merge `8d5aa7a`; §3G, §4L); **A12.6.2 operational dashboards (Core ·
-  Service, Core · Messaging, Core · PostgreSQL) proven locally and owner-reviewed, with one owner-approved Core · Overview outbox
-  correction resolved locally; pending finalization** (§3H, §4M); **A12.6 OPEN**: rules and
-  self-scrape follow (A12.6.3, not started). Production
+  Service, Core · Messaging, Core · PostgreSQL), with the owner-approved Core · Overview outbox correction, MERGED / CLOSED** (PR #215,
+  merge `e3b68dee818d05e271af90e9d787c74715edfb90`; §3H, §4M); A12.6.3: discovery (A12.6.3.0) approved, and **A12.6.3.1 alerting
+  foundation (rule loading, allowlisted self-scrape, availability and Prometheus alerts)** and **A12.6.3.2 (the remaining ten
+  alerts)** owner-approved locally; **A12.6.3.3 focused runtime proof COMPLETE**, so **A12.6.3 is LOCALLY COMPLETE** (§3I, §4N–§4P;
+  not yet committed); **A12.6 OPEN**: A12.6.4 (integration / security validation) and A12.6.5 follow. Production
   observability (A12.10) not started; G4 and G6 deferred, not certified; Final Core Validation not run. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; Prometheus, the PostgreSQL exporter and Grafana exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3, A12.6.1), and
@@ -451,6 +453,126 @@ guard now refuses an outbox gauge without the filter on any dashboard (§4M, cor
 selector is **APPROVED as implemented**: the nine service databases plus `postgres` (its exporter and administrative sessions use the
 same server's connection capacity), `template0` / `template1` excluded.
 
+## 3I. A12.6.3 alerting foundation (local)
+
+**A12.6.3.0 owner decisions (discovery approved 2026-10-07):** Prometheus is the alert-rule authority. The self-scrape is narrowly
+allowlisted. Alertmanager stays DEFERRED (D6a): no `alerting:` block, and alerts are read in the Prometheus UI (`127.0.0.1:9090/alerts`)
+(Grafana's read-only view of the Prometheus rules is checked in the A12.6.3 runtime proof). Readiness stays dashboard only, with no alert. RabbitMQ per-queue / DLQ depth, outcome-series
+pre-creation and a SettleFailures alert are deferred. Grafana configuration is unchanged (no Grafana-managed alerting). Thresholds and
+`for` durations are LOCAL validation values; production thresholds and receivers are A12.10.
+
+**A12.6.3.1 implementation:**
+- **Rule loading.** Prometheus loads `rule_files: [/etc/prometheus/rules/*.rules.yml]` at the existing global 30 s evaluation interval
+  (no per-group interval).
+  - The rules live in `infra/observability/prometheus/rules/nawara-core.rules.yml`, mounted read-only
+    (`./infra/observability/prometheus/rules:/etc/prometheus/rules:ro`).
+  - Their promtool tests live in `infra/observability/prometheus/tests/nawara-core.rules.test.yml`, which is never mounted.
+- **Self-scrape.** Job `prometheus` scrapes `localhost:9090` inside its own container, so no new port is published. One
+  `metric_relabel_configs` keep rule retains exactly eight families (names verified against the v3.13.4 source):
+  - `prometheus_config_last_reload_successful`, `prometheus_config_last_reload_success_timestamp_seconds`;
+  - `prometheus_rule_evaluation_failures_total`, `prometheus_rule_group_last_evaluation_timestamp_seconds`,
+    `prometheus_rule_group_iterations_missed_total`;
+  - `process_start_time_seconds`, `process_resident_memory_bytes`, `prometheus_tsdb_head_series`.
+
+  Prometheus still writes `up` and the `scrape_*` series for the job. The only label beyond `job` / `instance` is `rule_group`
+  (`<rule file>;<group>`): a container path plus a group name, bounded by the repository's groups. There is no URL, query, credential or
+  user data. Go runtime, HTTP handler, service discovery, notification and other TSDB families are dropped. Expected size: 5 single
+  series, 3 per rule group (3 groups now), plus 5 scrape series, about 19 in total.
+- **Alerts (A12.6.3.1).** Labels: `severity` plus the series' own `job`, `instance` and `rule_group`. Annotations: static text with only
+  those labels and `$value`.
+
+| Alert | Group | Expression | for | Severity | Meaning |
+|---|---|---|---|---|---|
+| CoreServiceDown | core-services | `up{job=~"<the 8 Core jobs>"} == 0` | 2m | critical | a Core service cannot be scraped (static targets: a stopped container is `up` 0, never absent) |
+| RabbitMQDown | infrastructure | `up{job="rabbitmq"} == 0` | 2m | critical | the broker's metrics endpoint does not answer |
+| PostgreSQLDown | infrastructure | `pg_up{job="postgres"} == 0` | 2m | critical | the exporter answers but cannot reach PostgreSQL |
+| PostgresExporterDown | infrastructure | `up{job="postgres"} == 0` | 5m | warning | monitoring is blind; `pg_up` disappears, so PostgreSQLDown cannot fire for this |
+| PrometheusRuleFailures | prometheus | `increase(prometheus_rule_evaluation_failures_total{job="prometheus"}[10m]) > 0` | — | warning | a rule group failed to evaluate in the last 10 minutes (the counter starts at 0 when a group loads) |
+| PrometheusConfigReloadFailed | prometheus | `prometheus_config_last_reload_successful{job="prometheus"} == 0` | — | warning | a reload (SIGHUP locally) failed; the previous configuration stays in force |
+
+- **Validation.** `scripts/check-prometheus-rules.sh` runs `promtool check config`, `check rules` (lint fatal) and `test rules`. It uses
+  the Prometheus image already pinned in `docker-compose.observability.yml` (no new dependency) with `--network none`, a read-only root
+  and read-only mounts. Core CI runs it as a step of the existing `repository checks` job: no new job, and `core-ci-passed` is unchanged.
+- **Guard** (`checkLocalObservability`, extended; `checkAlertRules`):
+  - Prometheus configuration: no `alerting` block or Alertmanager; `rule_files` exactly the rules glob; exactly one `prometheus` job, on
+    `localhost:9090`, keeping exactly the eight families with one keep rule; no other job scraping Prometheus.
+  - Mounts: the rules directory mounted read-only exactly once; the tests directory never; every Prometheus bind mount read-only.
+  - Rule shape: alert rules only, with unique names and no per-group interval; `severity` (critical | warning) is the only static label;
+    annotations are `summary` / `description` with no URL, using only approved labels and `$value`.
+  - Rule expressions:
+    - no `or vector(`, no readiness metric, no detailed broker metric, no `label_replace` / `label_join`;
+    - every series bounded to its job: `up` and `nawara_*` to the exact Core job list or `rabbitmq` / `postgres` / `prometheus`;
+      `pg_*` to postgres, `rabbitmq_*` to rabbitmq, `prometheus_*` to prometheus;
+    - matchers and groupings only on approved labels;
+    - outbox gauges only behind the A12.6.2 stats filter.
+  - Tests: they load exactly the rule file; every alert has a test where it fires and one where it does not; no test names an unknown
+    alert.
+  - `test:repo`: 98 tests (7 new for A12.6.3).
+- **Deferred to A12.6.3.2** (implemented there; see below): ConsumerDetached, MessagesDeadLettered, OutboxBacklogAging,
+  OutboxStatsStale, DbPoolWaiting, HttpServerErrorRatio, BrokerResourceAlarm, PgConnectionPressure, PgDeadlocks, PgLockWaits. These are
+  **ten** alerts (the discovery's phase plan said "11"; the catalog has ten).
+- **Not in A12.6.3:** Alertmanager and receivers, readiness alerts, SettleFailures, per-queue / DLQ alerts, Grafana-managed alerts, a
+  PrometheusSelfScrapeDown alert (rejected: a down Prometheus evaluates nothing), production thresholds (A12.10).
+
+**A12.6.3.2 implementation: the remaining ten alerts.** The same file, now four groups (`core-services`, `core-messaging`,
+`infrastructure`, `prometheus`), 16 alerts, the global 30 s interval. Labels: `severity` plus `job`, `instance` and, where the operator
+needs it, `queue`, `pool`, `datname` or `alarm`. Every rule aggregates other labels away: `outcome`, `route`, `method`, `status_class`,
+`usename`, `application_name`, `wait_event`, `mode`, `state`, `datid` and the broker's `protocol` / `queue_type` /
+`dead_letter_strategy` never reach an alert. `<C>` below is the exact list of the eight Core jobs. **All thresholds are LOCAL validation
+values; production tuning is A12.10.**
+
+| Alert | Group | Expression (concept) | for | Severity | Labels |
+|---|---|---|---|---|---|
+| ConsumerDetached | core-messaging | `nawara_event_consumer_up{job=~"<C>"} == 0` | 2m | critical | job, instance, queue |
+| MessagesDeadLettered | core-messaging | increase of the four dead-letter outcomes over 10m `> 0`, **or** a dead-letter series that exists now but not 10m ago | — | warning | job, instance, queue |
+| OutboxBacklogAging | core-messaging | `oldest_pending_age_seconds > 60 and on (job, instance) (stats_timestamp_seconds > 0)` | 5m | warning | job, instance |
+| OutboxStatsStale | core-messaging | `time() - (stats_timestamp > 0) > 120`, **or** `stats_timestamp == 0` with the process older than 300 s | 2m | warning | job, instance |
+| DbPoolWaiting | core-services | `nawara_db_pool_waiting_clients{job=~"<C>"} > 0` | 3m | warning | job, instance, pool |
+| HttpServerErrorRatio | core-services | 5xx / non-aborted requests over 5m `> 0.05` **and** `increase(5xx[5m]) >= 3`, per job | 3m | warning | job |
+| BrokerResourceAlarm | infrastructure | `label_replace(` the three `rabbitmq_alarms_*` families, `"alarm"`, …`) == 1` | 1m | critical | job, instance, alarm |
+| PgConnectionPressure | infrastructure | `sum(numbackends) / (max_connections − superuser_reserved_connections) > 0.8` | 5m | warning | job, instance |
+| PgDeadlocks | infrastructure | `sum by (…, datname) (increase(pg_stat_database_deadlocks{datname!~"template0\|template1"}[10m])) > 0` | — | warning | job, instance, datname |
+| PgLockWaits | infrastructure | `sum by (…, datname) (pg_stat_activity_count{wait_event_type="Lock", datname!~template}) >= 1` | 5m | warning | job, instance, datname |
+
+- **Applicability by existence.** No rule manufactures a series. A service without a consumer, pool or outbox has no series, so its
+  rule cannot fire.
+- **Outbox initialisation** (the A12.6.2 rule). OutboxBacklogAging reads the age only where the stats timestamp is above 0: an
+  uninitialised 0 never alerts. OutboxStatsStale covers both ways the figures can be wrong:
+  - *stale*: read before, then not for over 2 minutes;
+  - *never read*: still 0 five minutes after the process started, for example the database unreachable from start. This is the case
+    the overview correction was about; no other alert sees it.
+  The 60 s age threshold is `nawara-check-outbox-lag`'s own "needs manual review" age.
+- **MessagesDeadLettered.** `outcome` is folded away (the action, inspecting `<queue>.dead`, is the same); `dead_letter_deferred`,
+  `processed` and `retry_scheduled` never fire it.
+  - Branch A, `increase(…[10m])`, sees later increments, and a restart followed by a new dead letter (counter reset).
+  - Branch B, `… unless … offset 10m`, sees the FIRST dead letter of a series. prom-client creates a labelled series at its first
+    increment, which `increase()` cannot see.
+  - **Residual limits, documented and tested:** (1) a restarted process whose count equals its predecessor's within the window
+    (1 → 1) is not seen; (2) a series older than Prometheus' own history (a fresh Prometheus) fires once as new. The dashboards'
+    since-start counts stay the reference. No kit change, no pre-created series (deferred).
+- **HttpServerErrorRatio.** 4xx and client-aborted requests are not errors; aborted requests are left out of the denominator too. The
+  absolute floor of at least 3 5xx answers in 5 minutes stops a single 5xx at low traffic from firing. The `for` window is 3 minutes.
+- **BrokerResourceAlarm.** The one reviewed `label_replace`, over exactly `memory_used_watermark`, `free_disk_space_watermark` and
+  `file_descriptor_limit`: aggregate families with no object label. The guard accepts only this exact form; `label_replace` stays
+  forbidden everywhere else.
+- **PostgreSQL.** Server-level connection pressure counts only the non-reserved slots. PgDeadlocks uses `increase`, so a statistics
+  reset never fires. PgLockWaits counts sessions **waiting** at every evaluation for 5 minutes, which is sustained contention: lock
+  counts alone never fire it, and blocker → waiter pairs are not collected. Template databases are excluded.
+- **Guard additions** (`checkAlertRules`):
+  - the exact catalog (`ALERT_CATALOG`, four groups, 16 alerts); deferred and rejected names refused (SettleFailures, readiness,
+    self-scrape, DLQ / depth, broker backlog, long transactions, TSDB, Alertmanager);
+  - approved labels `job`, `instance`, `queue`, `pool`, `datname`, `alarm`, `rule_group`;
+  - selection-only matchers: `outcome=~` the four dead-letter outcomes, `status_class="5xx"` / `!="aborted"`,
+    `wait_event_type="Lock"`;
+  - no bare `{…}` selector, and no `label_replace` except BrokerResourceAlarm's exact form;
+  - HttpServerErrorRatio has both its ratio and its absolute floor; PgLockWaits counts waiting sessions, never `pg_locks_count`;
+  - no uncollected PostgreSQL data.
+
+  `test:repo`: 104 tests (6 new for A12.6.3.2, and the A12.6.3.1 inventory assertion now checks the full catalog).
+- **Deferred (unchanged):** SettleFailures, Alertmanager, readiness alerts, PrometheusSelfScrapeDown (rejected), RabbitMQ per-queue
+  metrics, DLQ-depth and generic broker backlog alerts, outcome-series pre-creation, a long-running-transaction alert, TSDB failure
+  alerts, production thresholds and receivers (A12.10), Grafana-managed alerting.
+
 ## 4. Evidence (A12.2, local)
 
 Branch `feature/core-v2-a12-observability-foundation` from `main` at `ceb5407`, 2026-10-05, Node 24 locally (the images run Node 22).
@@ -867,6 +989,66 @@ auth-service never read (timestamp 0, gauges 0), billing-service read with nothi
 retrying 2 and age 42 s, each query returns only billing 0 and payment's value. auth-service is absent (no data), and labels and
 legends are unchanged. The same test with the `origin/main` expressions fails: auth-service appears as a false 0. No stack was
 started.
+
+## 4N. Evidence (A12.6.3.1, local, static)
+
+Branch `feature/core-v2-a12-alerting-foundation` from `main` at `e3b68de` (PR #215 merge), 2026-10-07. Static and synthetic only. No
+Compose stack was started: `promtool check config` loads the configuration and the rule files it references, which is the loading
+proof this slice needs. The runtime proof (rules loaded in a running Prometheus, the self-scrape series count, a real fire and
+recovery) is A12.6.3.3.
+
+| Proof | Result |
+|---|---|
+| `promtool check config` (lint fatal) | SUCCESS, 1 rule file found |
+| `promtool check rules` (lint fatal) | SUCCESS, 6 rules |
+| `promtool test rules` | SUCCESS, 6 test groups |
+| Test coverage | CoreServiceDown: healthy, a 1-minute outage, a sustained outage firing for exactly one job, recovery, and the broker and exporter down without a CoreServiceDown. RabbitMQDown: healthy, transient, sustained, recovery. PostgreSQL unreachable with the exporter up: PostgreSQLDown only, then recovery. Exporter down (`pg_up` stale): PostgresExporterDown only, not before 5 minutes, then recovery. PrometheusRuleFailures: none, one failure firing with its `rule_group`, resolved after the 10-minute window, and a counter reset (3 → 0, a restart) never firing. PrometheusConfigReloadFailed: success, failure, success again |
+| Negative controls (mutated copies of the rules, in scratch) | each makes `promtool test rules` fail: an unbounded `up == 0`, a PostgreSQLDown that also fires on `absent(pg_up)`, PostgresExporterDown `for: 1m`, PrometheusRuleFailures on the raw counter |
+| `check:repo` / `test:repo` | PASS / 98/98 |
+| Compose | the normal and observability files resolve |
+
+## 4O. Evidence (A12.6.3.2, local, static)
+
+Same branch, continuing A12.6.3.1 (`origin/main` still `e3b68de`), 2026-10-07. Static and synthetic only: no stack, no dashboard or
+kit change.
+
+| Proof | Result |
+|---|---|
+| `promtool check config` / `check rules` (lint fatal) | SUCCESS: 1 rule file, 16 rules |
+| `promtool test rules` | SUCCESS: 18 test groups (6 from A12.6.3.1, 12 new) |
+| New cases | ConsumerDetached: attached, a 1-minute detach, a sustained detach firing with its queue, reconnect, a non-consumer. MessagesDeadLettered: `processed` / `retry_scheduled` / `dead_letter_deferred` never; the first dead letter (series appears at 1), a later increment, a stable count resolving after 10 minutes, a restart then a new dead letter (reset); both residual limits shown. OutboxBacklogAging: never-read zero, real zero, ageing shorter than `for`, sustained ageing, drained, no outbox. OutboxStatsStale: fresh, stale, never read inside and past the 5-minute grace, first read resolving, no outbox. DbPoolWaiting: idle, a brief wait, a sustained wait, recovery, no pool. HttpServerErrorRatio: no 5xx series, one 5xx at low traffic, many 5xx at 1 %, 100 % but two 5xx (aborted and 4xx ignored), a firing service and its recovery. BrokerResourceAlarm: none, a short alarm, disk and file-descriptor alarms each labelled, memory alone, recovery. PgConnectionPressure: 70 %, a short spike, sustained 86 %, recovery. PgDeadlocks: flat, one deadlock, resolution, a statistics reset, a template database. PgLockWaits: locks held without waiting, a short wait, sustained waiting, recovery |
+| Negative controls (mutated copies of the rules, in scratch) | each makes `promtool test rules` fail: HttpServerErrorRatio without its absolute floor, PgLockWaits on `pg_locks_count`, MessagesDeadLettered without the first-event branch, OutboxStatsStale without the startup grace, PgDeadlocks including template databases. The floor mutation first passed: the low-traffic services were only pending at the test's evaluation times. A 9-minute evaluation was added, and the mutation now fails |
+| Guard negative controls (`test:repo`) | outbox filter removed or `>= 0`, `or vector(0)`, the HTTP floor or ratio removed, a broadened broker alarm match, a bare `{__name__=…}` selector, label_replace elsewhere, PgLockWaits on locks held, uncollected PostgreSQL data, widened outcome / status_class / wait_event_type matchers, propagated `outcome` / `usename`, deferred alert names, a missing catalog alert |
+| `check:repo` / `test:repo` | PASS / 104/104 |
+
+## 4P. Evidence (A12.6.3.3, focused local runtime proof)
+
+Same branch and working tree (`origin/main` `e3b68de`), 2026-10-07.
+- **Project:** disposable Compose project `a1263-obs`, using the existing overlay topology with a scratch copy of `.env.example` (never
+  the developer's `.env`). Images were built and service migrations run.
+- **Why the full stack:** every scrape target is static. A partial stack would leave the other targets `up` 0 and fire seven more
+  CoreServiceDown alerts plus RabbitMQDown and PostgresExporterDown, so "exactly one CoreServiceDown" could not be shown.
+- **Not started:** Grafana (not needed).
+- **Scope:** one real fire and recovery. Not a failure matrix: the other alerts are proven by promtool (§4O).
+
+| Proof | Result |
+|---|---|
+| Startup | Prometheus healthy with the new configuration; 11/11 targets UP (eight Core services, `rabbitmq`, `postgres`, `prometheus`) |
+| Rule inventory (`/api/v1/rules`) | 4 groups (`core-messaging`, `core-services`, `infrastructure`, `prometheus`), all from `/etc/prometheus/rules/nawara-core.rules.yml`, interval 30 s; **16 alerting rules**, 0 recording rules, 16 unique names, every rule health `ok`. No deferred or rejected alert (SettleFailures, PrometheusSelfScrapeDown, readiness, DLQ depth, broker backlog, long transaction, TSDB) |
+| Self-scrape | `up{job="prometheus"}` 1. **22 stored series** for `job="prometheus"`, in exactly the 8 allowlisted families plus the 5 scrape series: `prometheus_rule_evaluation_failures_total`, `prometheus_rule_group_iterations_missed_total` and `prometheus_rule_group_last_evaluation_timestamp_seconds` with 4 series each (one per group); `prometheus_config_last_reload_successful`, `prometheus_config_last_reload_success_timestamp_seconds`, `process_start_time_seconds`, `process_resident_memory_bytes` and `prometheus_tsdb_head_series` with 1 each; `up`, `scrape_duration_seconds`, `scrape_samples_scraped`, `scrape_samples_post_metric_relabeling` and `scrape_series_added`. Label names: `__name__`, `job`, `instance`, `rule_group` only. Unrestricted, the endpoint returns **1,087** samples (`scrape_samples_scraped`); the allowlist keeps **17** (`scrape_samples_post_metric_relabeling`). Whole head: 1,809 series. No unexpected family. (A12.6.3.1's estimate of about 19 assumed three groups; four groups give 22.) |
+| Rule health | `prometheus_config_last_reload_successful` 1; `prometheus_rule_evaluation_failures_total` 0 in all 4 groups; `prometheus_rule_group_iterations_missed_total` 0 in all 4 groups; each group last evaluated 12–34 s before the read |
+| Initial state | `release-service` healthy, `up` 1; no alert pending or firing |
+| Target | **`release-service`**: it consumes nothing, no other service calls it, it holds no migration or cutover state, and stopping or starting it is non-destructive |
+| Injection | `docker compose -p a1263-obs … stop release-service` at 09:24:43Z (not removed, not rebuilt); `up{job="release-service"}` 0 by 09:24:58Z |
+| Pending | 09:25:03Z: CoreServiceDown, `job="release-service"`, `instance="release-service:9464"`, state **pending**, activeAt 09:25:00Z |
+| Firing | 09:27:04Z: state **firing**, 2 minutes after activeAt (`for: 2m`). Exactly one active alert in Prometheus; `ALERTS` showed RabbitMQDown, PostgreSQLDown and PostgresExporterDown empty; the only target down was `release-service` |
+| Recovery | `docker compose … start release-service` at 09:27:17Z: healthy and `up` 1 after about 10 s, no active alert after about 14 s; the CoreServiceDown rule `inactive`, health `ok` |
+| After the cycle | still 22 stored series in 13 families for `job="prometheus"`; rule evaluation failures 0 in all groups |
+| Exposure (focused) | host ports loopback only (application ports, 5433, 5672, 15672, 9090); 9464, 15692 and 9187 unpublished. Prometheus: mounts `prometheus.yml` and `/etc/prometheus/rules` read-only (writing there: "Read-only file system") and its data volume; no tests directory; read-only root, `CapDrop ALL`, unchanged flags. The running configuration has no `alerting`, Alertmanager, remote write or credential; `activeAlertmanagers` empty. Admin API → "admin APIs disabled"; `/-/reload` → "Lifecycle API is not enabled" |
+| Cleanup | `release-service` restored and healthy before teardown. The disposable project was removed: containers, network, its three volumes, its nine built images. No prune. Earlier retained evidence volumes, the developer's own volume and unrelated containers are unchanged. No observability stack was running before; none is running after |
+
+**A12.6.3.3 COMPLETE. A12.6.3 LOCALLY COMPLETE** (A12.6.3.1–.3; not yet committed). A12.6 stays OPEN: A12.6.4 integration and security
+validation, A12.6.5.
 
 ## 5. Open
 

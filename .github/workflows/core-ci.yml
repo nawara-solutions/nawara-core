@@ -38,6 +38,10 @@ jobs:
         run: npm run check:repo
       - name: checks' own tests
         run: npm run test:repo
+      # V2 A12.6.3: the LOCAL Prometheus configuration and alert rules, with promtool from the Prometheus image pinned in
+      # docker-compose.observability.yml (no network, read-only mounts): check config, check rules, and the synthetic alert tests.
+      - name: Prometheus configuration and alert rules (promtool)
+        run: bash scripts/check-prometheus-rules.sh
       # ADR-0053: the production deployment scripts (broker, audit-service, auth-service) against a fake docker CLI, including the
       # audit-service-before-Auth ordering rule. The real-broker certification (test:deploy:real-broker) needs Docker and runs on demand.
       - name: deployment script tests

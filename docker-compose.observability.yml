@@ -13,7 +13,8 @@
 #
 # Each listener binds 0.0.0.0:9464 INSIDE its container, so Prometheus can reach `<service>:9464`. It is never published to the
 # host: only the application ports (unchanged), Prometheus (127.0.0.1:9090) and Grafana (127.0.0.1:3100, A12.6.1) are. See
-# docs/runbooks/local-observability.md. No alert rules before A12.6.3; Alertmanager is deferred until a concrete receiver exists. RabbitMQ broker metrics (A12.5.2) need no change here: the image already serves them
+# docs/runbooks/local-observability.md. Since A12.6.3 Prometheus evaluates the LOCAL alert rules and scrapes a narrow allowlist of its own
+# metrics; Alertmanager is deferred until a concrete receiver exists. RabbitMQ broker metrics (A12.5.2) need no change here: the image already serves them
 # on 15692 inside the network. PostgreSQL server metrics (A12.5.3) come from postgres-exporter, through a least-privilege role that the
 # init script creates only when this file passes MONITORING_PASSWORD, i.e. when the local data volume is first initialised in this mode
 # (for an existing volume, see docs/runbooks/local-observability.md).
@@ -59,6 +60,8 @@ services:
       - '127.0.0.1:9090:9090'
     volumes:
       - ./infra/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # V2 A12.6.3: the alert rules only (read-only); their tests (infra/observability/prometheus/tests) are never mounted.
+      - ./infra/observability/prometheus/rules:/etc/prometheus/rules:ro
       - nawara_prometheus_data:/prometheus
     read_only: true
     cap_drop: [ALL]

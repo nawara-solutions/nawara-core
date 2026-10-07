@@ -1,0 +1,664 @@
+# V2 A12.6.3: promtool unit tests for infra/observability/prometheus/rules (synthetic series, no stack). Never mounted into Prometheus.
+# Run by scripts/check-prometheus-rules.sh (CI: repository checks). Series use the 30 s scrape interval; "stale" is the marker Prometheus
+# writes when a target stops answering. Every alert has at least: no alert while healthy, no alert for a failure shorter than `for`,
+# fires when sustained, resolves on recovery.
+rule_files:
+  - ../rules/nawara-core.rules.yml
+evaluation_interval: 30s
+
+tests:
+  - name: CoreServiceDown — healthy, transient, sustained, recovery; broker and exporter outages are not Core outages
+    interval: 30s
+    input_series:
+      - series: 'up{job="auth-service",instance="auth-service:9464"}'
+        values: '1x30'
+      # down 1m .. 2m (one minute, shorter than `for: 2m`): never fires
+      - series: 'up{job="billing-service",instance="billing-service:9464"}'
+        values: '1 1 0 0 0 1x25'
+      # down from 5m to 8m30, up again at 9m
+      - series: 'up{job="payment-service",instance="payment-service:9464"}'
+        values: '1x9 0x7 1x13'
+      - series: 'up{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0x30'
+      - series: 'up{job="postgres",instance="postgres-exporter:9187"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: CoreServiceDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: CoreServiceDown
+        exp_alerts: []
+      - eval_time: 6m30s
+        alertname: CoreServiceDown
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: CoreServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: payment-service
+              instance: payment-service:9464
+            exp_annotations:
+              summary: Core service payment-service is down
+              description: Prometheus has not been able to scrape payment-service (payment-service:9464) for 2 minutes.
+      - eval_time: 9m30s
+        alertname: CoreServiceDown
+        exp_alerts: []
+
+  - name: RabbitMQDown — healthy, transient, sustained, recovery
+    interval: 30s
+    input_series:
+      # up 0..1m30, down 2m..3m (1 minute), up 3m30..5m, down 5m30..9m30, up from 10m
+      - series: 'up{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '1x3 0x2 1x3 0x8 1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RabbitMQDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RabbitMQDown
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: RabbitMQDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rabbitmq
+              instance: rabbitmq:15692
+            exp_annotations:
+              summary: RabbitMQ is down
+              description: Prometheus has not been able to scrape the broker's metrics endpoint (rabbitmq:15692) for 2 minutes.
+      - eval_time: 10m30s
+        alertname: RabbitMQDown
+        exp_alerts: []
+
+  - name: PostgreSQL unreachable while the exporter answers — PostgreSQLDown only
+    interval: 30s
+    input_series:
+      - series: 'up{job="postgres",instance="postgres-exporter:9187"}'
+        values: '1x25'
+      # unreachable 1m30 .. 6m30, reachable again from 7m
+      - series: 'pg_up{job="postgres",instance="postgres-exporter:9187"}'
+        values: '1x2 0x10 1x12'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PostgreSQLDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: PostgreSQLDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PostgreSQLDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: postgres
+              instance: postgres-exporter:9187
+            exp_annotations:
+              summary: PostgreSQL is unreachable
+              description: postgres-exporter is up but has not reached PostgreSQL for 2 minutes.
+      - eval_time: 4m
+        alertname: PostgresExporterDown
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: PostgreSQLDown
+        exp_alerts: []
+
+  - name: postgres-exporter down (pg_up disappears) — PostgresExporterDown only
+    interval: 30s
+    input_series:
+      # the exporter stops answering at 1m30 (up 0, pg_up stale), answers again from 8m
+      - series: 'up{job="postgres",instance="postgres-exporter:9187"}'
+        values: '1x2 0x12 1x10'
+      - series: 'pg_up{job="postgres",instance="postgres-exporter:9187"}'
+        values: '1 1 1 stale'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PostgresExporterDown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: PostgresExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: postgres
+              instance: postgres-exporter:9187
+            exp_annotations:
+              summary: postgres-exporter is down
+              description: PostgreSQL metrics have not been collected for 5 minutes (postgres-exporter:9187). Monitoring is blind; the database itself is not shown to be down.
+      - eval_time: 7m
+        alertname: PostgreSQLDown
+        exp_alerts: []
+      - eval_time: 8m30s
+        alertname: PostgresExporterDown
+        exp_alerts: []
+
+  - name: PrometheusRuleFailures — none, one failure, resolution after the window, a counter reset is not a failure
+    interval: 30s
+    input_series:
+      # one failure at 5m30
+      - series: 'prometheus_rule_evaluation_failures_total{job="prometheus",instance="localhost:9090",rule_group="/etc/prometheus/rules/nawara-core.rules.yml;core-services"}'
+        values: '0x10 1x30'
+      # a Prometheus restart: the counter goes from 3 back to 0 and stays there
+      - series: 'prometheus_rule_evaluation_failures_total{job="prometheus",instance="localhost:9090",rule_group="/etc/prometheus/rules/nawara-core.rules.yml;infrastructure"}'
+        values: '3x10 0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PrometheusRuleFailures
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: PrometheusRuleFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: prometheus
+              instance: localhost:9090
+              rule_group: /etc/prometheus/rules/nawara-core.rules.yml;core-services
+            exp_annotations:
+              summary: Prometheus rule evaluation is failing
+              description: Rule group /etc/prometheus/rules/nawara-core.rules.yml;core-services had evaluation failures in the last 10 minutes; its alerts may be wrong or missing.
+      - eval_time: 17m
+        alertname: PrometheusRuleFailures
+        exp_alerts: []
+
+  - name: PrometheusConfigReloadFailed — success, failed reload, successful reload again
+    interval: 30s
+    input_series:
+      # a failed reload at 3m, a successful one at 6m
+      - series: 'prometheus_config_last_reload_successful{job="prometheus",instance="localhost:9090"}'
+        values: '1x5 0x5 1x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PrometheusConfigReloadFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PrometheusConfigReloadFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: prometheus
+              instance: localhost:9090
+            exp_annotations:
+              summary: Prometheus configuration reload failed
+              description: The last configuration reload failed; Prometheus keeps running with the previous configuration and rules.
+      - eval_time: 7m
+        alertname: PrometheusConfigReloadFailed
+        exp_alerts: []
+
+  # ---- A12.6.3.2 ------------------------------------------------------------------------------------------------------------------
+  - name: ConsumerDetached — attached, short detach, sustained detach, reconnect; a non-consumer has no series
+    interval: 30s
+    input_series:
+      # detached 1m .. 2m (shorter than `for`), then 5m .. 8m30, attached again from 9m
+      - series: 'nawara_event_consumer_up{job="billing-service",instance="billing-service:9464",queue="billing.payment-events"}'
+        values: '1 1 0 0 0 1 1 1 1 1 0x7 1x10'
+      - series: 'nawara_event_consumer_up{job="audit-service",instance="audit-service:9464",queue="audit-service.audit"}'
+        values: '1x28'
+      # auth-service consumes nothing: only its target exists
+      - series: 'up{job="auth-service",instance="auth-service:9464"}'
+        values: '1x28'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ConsumerDetached
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ConsumerDetached
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: ConsumerDetached
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: billing-service
+              instance: billing-service:9464
+              queue: billing.payment-events
+            exp_annotations:
+              summary: billing-service is not consuming billing.payment-events
+              description: The billing.payment-events consumer of billing-service (billing-service:9464) has been detached for 2 minutes; its events wait in the broker.
+      - eval_time: 9m30s
+        alertname: ConsumerDetached
+        exp_alerts: []
+
+  - name: MessagesDeadLettered — other outcomes never fire; first event, later increment, resolution, restart
+    interval: 30s
+    input_series:
+      # outcomes that are not parked messages
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="processed"}'
+        values: '0+1x70'
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="retry_scheduled"}'
+        values: '0+1x70'
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="dead_letter_deferred"}'
+        values: '0+1x70'
+      # the FIRST dead letter at 5m (the series appears at 1), a second one at 20m
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="dead_lettered_malformed"}'
+        values: '_x9 1x29 2x30'
+      # audit-service: 3 dead letters since start, a restart at 15m (stale), and a new dead letter after it (the new process counts 1)
+      - series: 'nawara_events_consumed_total{job="audit-service",instance="audit-service:9464",queue="audit-service.audit",outcome="dead_lettered_permanent"}'
+        values: '3x29 stale _x5 1x34'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: MessagesDeadLettered
+        exp_alerts:
+          # audit's series is older than Prometheus' history here (no sample 10 minutes ago): reported once as new (a documented residual)
+          - exp_labels:
+              severity: warning
+              job: audit-service
+              instance: audit-service:9464
+              queue: audit-service.audit
+            exp_annotations:
+              summary: audit-service dead-lettered messages from audit-service.audit
+              description: audit-service parked messages in audit-service.audit.dead in the last 10 minutes; inspect them with nawara-check-dlq.
+      - eval_time: 6m
+        alertname: MessagesDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: billing-service
+              instance: billing-service:9464
+              queue: billing.payment-events
+            exp_annotations:
+              summary: billing-service dead-lettered messages from billing.payment-events
+              description: billing-service parked messages in billing.payment-events.dead in the last 10 minutes; inspect them with nawara-check-dlq.
+          - exp_labels:
+              severity: warning
+              job: audit-service
+              instance: audit-service:9464
+              queue: audit-service.audit
+            exp_annotations:
+              summary: audit-service dead-lettered messages from audit-service.audit
+              description: audit-service parked messages in audit-service.audit.dead in the last 10 minutes; inspect them with nawara-check-dlq.
+      # 16m: billing's count is stable, audit has history now and restarted without a new dead letter yet: nothing
+      - eval_time: 16m
+        alertname: MessagesDeadLettered
+        exp_alerts: []
+      # 18m30: audit's new process parked one message (counter 3 -> 1, a reset) while its old series is within the window
+      - eval_time: 18m30s
+        alertname: MessagesDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: audit-service
+              instance: audit-service:9464
+              queue: audit-service.audit
+            exp_annotations:
+              summary: audit-service dead-lettered messages from audit-service.audit
+              description: audit-service parked messages in audit-service.audit.dead in the last 10 minutes; inspect them with nawara-check-dlq.
+      - eval_time: 21m
+        alertname: MessagesDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: billing-service
+              instance: billing-service:9464
+              queue: billing.payment-events
+            exp_annotations:
+              summary: billing-service dead-lettered messages from billing.payment-events
+              description: billing-service parked messages in billing.payment-events.dead in the last 10 minutes; inspect them with nawara-check-dlq.
+          - exp_labels:
+              severity: warning
+              job: audit-service
+              instance: audit-service:9464
+              queue: audit-service.audit
+            exp_annotations:
+              summary: audit-service dead-lettered messages from audit-service.audit
+              description: audit-service parked messages in audit-service.audit.dead in the last 10 minutes; inspect them with nawara-check-dlq.
+      - eval_time: 33m
+        alertname: MessagesDeadLettered
+        exp_alerts: []
+
+  - name: MessagesDeadLettered — known residual — a restart with an equal count inside the window is not seen
+    interval: 30s
+    input_series:
+      # one dead letter long ago; restart at 15m; the new process parks one message at 17m: 1 -> 1 is no reset, the series existed
+      - series: 'nawara_events_consumed_total{job="notification-service",instance="notification-service:9464",queue="notification.events",outcome="dead_lettered_retries_exhausted"}'
+        values: '1x29 stale _x3 1x20'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: MessagesDeadLettered
+        exp_alerts: []
+
+  - name: OutboxBacklogAging — uninitialised zero, real zero, short and sustained ageing, recovery; no outbox
+    interval: 30s
+    input_series:
+      # never read: timestamp 0, gauges 0
+      - series: 'nawara_outbox_stats_timestamp_seconds{job="auth-service",instance="auth-service:9464"}'
+        values: '0x40'
+      - series: 'nawara_outbox_oldest_pending_age_seconds{job="auth-service",instance="auth-service:9464"}'
+        values: '0x40'
+      # read, nothing pending
+      - series: 'nawara_outbox_stats_timestamp_seconds{job="file-service",instance="file-service:9464"}'
+        values: '1+30x40'
+      - series: 'nawara_outbox_oldest_pending_age_seconds{job="file-service",instance="file-service:9464"}'
+        values: '0x40'
+      # read; old for 2m (1m .. 3m), then from 5m to 12m30, drained at 13m
+      - series: 'nawara_outbox_stats_timestamp_seconds{job="billing-service",instance="billing-service:9464"}'
+        values: '1+30x40'
+      - series: 'nawara_outbox_oldest_pending_age_seconds{job="billing-service",instance="billing-service:9464"}'
+        values: '0 0 90x4 0x3 90x15 0x15'
+      # audit-service has no outbox: its gauges do not exist
+      - series: 'up{job="audit-service",instance="audit-service:9464"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OutboxBacklogAging
+        exp_alerts: []
+      - eval_time: 9m30s
+        alertname: OutboxBacklogAging
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: OutboxBacklogAging
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: billing-service
+              instance: billing-service:9464
+            exp_annotations:
+              summary: Outbox of billing-service is not draining
+              description: The oldest pending outbox event of billing-service (billing-service:9464) has been older than 60 seconds for 5 minutes.
+      - eval_time: 13m30s
+        alertname: OutboxBacklogAging
+        exp_alerts: []
+
+  - name: OutboxStatsStale — fresh, stale, never read within and beyond the grace period, first read; no outbox
+    interval: 30s
+    input_series:
+      # fresh (the timestamp follows the clock)
+      - series: 'nawara_outbox_stats_timestamp_seconds{job="file-service",instance="file-service:9464"}'
+        values: '1+30x40'
+      - series: 'process_start_time_seconds{job="file-service",instance="file-service:9464"}'
+        values: '0x40'
+      # read until 5m, then no more reads (stale from 7m30), read again from 12m
+      - series: 'nawara_outbox_stats_timestamp_seconds{job="billing-service",instance="billing-service:9464"}'
+        values: '1+30x10 301x13 721+30x16'
+      - series: 'process_start_time_seconds{job="billing-service",instance="billing-service:9464"}'
+        values: '0x40'
+      # never read; the process started at 0: grace until 5m, firing from 7m30, first successful read at 9m
+      - series: 'nawara_outbox_stats_timestamp_seconds{job="auth-service",instance="auth-service:9464"}'
+        values: '0x17 541+30x22'
+      - series: 'process_start_time_seconds{job="auth-service",instance="auth-service:9464"}'
+        values: '0x40'
+      # audit-service has no outbox
+      - series: 'process_start_time_seconds{job="audit-service",instance="audit-service:9464"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxStatsStale
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: OutboxStatsStale
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: OutboxStatsStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: auth-service
+              instance: auth-service:9464
+            exp_annotations:
+              summary: Outbox figures of auth-service are stale
+              description: The outbox aggregate of auth-service (auth-service:9464) has not been read for over 2 minutes, or never since start; its outbox figures cannot be trusted.
+      - eval_time: 10m
+        alertname: OutboxStatsStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: billing-service
+              instance: billing-service:9464
+            exp_annotations:
+              summary: Outbox figures of billing-service are stale
+              description: The outbox aggregate of billing-service (billing-service:9464) has not been read for over 2 minutes, or never since start; its outbox figures cannot be trusted.
+      - eval_time: 12m30s
+        alertname: OutboxStatsStale
+        exp_alerts: []
+
+  - name: DbPoolWaiting — idle, brief wait, sustained wait, recovery; no pool
+    interval: 30s
+    input_series:
+      # waiting 1m .. 2m30 (brief), then 5m .. 9m30, recovered from 10m
+      - series: 'nawara_db_pool_waiting_clients{job="payment-service",instance="payment-service:9464",pool="main"}'
+        values: '0 0 2 2 2 2 0 0 0 0 3x9 0x10'
+      - series: 'nawara_db_pool_waiting_clients{job="release-service",instance="release-service:9464",pool="main"}'
+        values: '0x29'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DbPoolWaiting
+        exp_alerts: []
+      - eval_time: 7m30s
+        alertname: DbPoolWaiting
+        exp_alerts: []
+      - eval_time: 8m30s
+        alertname: DbPoolWaiting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: payment-service
+              instance: payment-service:9464
+              pool: main
+            exp_annotations:
+              summary: Database pool of payment-service has waiting requests
+              description: Requests have been waiting for a main pool client in payment-service (payment-service:9464) for 3 minutes; the pool is saturated.
+      - eval_time: 10m30s
+        alertname: DbPoolWaiting
+        exp_alerts: []
+
+  - name: HttpServerErrorRatio — needs both > 5 % and at least 3 5xx in 5 minutes
+    interval: 30s
+    input_series:
+      # auth-service: traffic, no 5xx series at all
+      - series: 'nawara_http_server_requests_total{job="auth-service",instance="auth-service:9464",method="GET",route="/a",status_class="2xx"}'
+        values: '0+10x40'
+      # payment-service: low traffic, one 5xx (about 9 %, but 1 error)
+      - series: 'nawara_http_server_requests_total{job="payment-service",instance="payment-service:9464",method="GET",route="/p",status_class="2xx"}'
+        values: '0+1x40'
+      - series: 'nawara_http_server_requests_total{job="payment-service",instance="payment-service:9464",method="GET",route="/p",status_class="5xx"}'
+        values: '0x10 1x30'
+      # file-service: 10 5xx per 5 minutes but 1 % of a busy service
+      - series: 'nawara_http_server_requests_total{job="file-service",instance="file-service:9464",method="GET",route="/f",status_class="2xx"}'
+        values: '0+100x40'
+      - series: 'nawara_http_server_requests_total{job="file-service",instance="file-service:9464",method="GET",route="/f",status_class="5xx"}'
+        values: '0+1x40'
+      # release-service: 100 % 5xx but only 2 of them; client aborts and 4xx are not errors
+      - series: 'nawara_http_server_requests_total{job="release-service",instance="release-service:9464",method="GET",route="/r",status_class="5xx"}'
+        values: '0x10 2x30'
+      - series: 'nawara_http_server_requests_total{job="release-service",instance="release-service:9464",method="GET",route="/r",status_class="aborted"}'
+        values: '0+50x40'
+      - series: 'nawara_http_server_requests_total{job="release-service",instance="release-service:9464",method="GET",route="/r",status_class="4xx"}'
+        values: '0+50x40'
+      # billing-service: about 17 % 5xx, 20 per 5 minutes, until 10m; none after
+      - series: 'nawara_http_server_requests_total{job="billing-service",instance="billing-service:9464",method="GET",route="/b",status_class="2xx"}'
+        values: '0+10x40'
+      - series: 'nawara_http_server_requests_total{job="billing-service",instance="billing-service:9464",method="GET",route="/b",status_class="5xx"}'
+        values: '0+2x20 40x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HttpServerErrorRatio
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HttpServerErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: billing-service
+            exp_annotations:
+              summary: billing-service is answering 5xx
+              description: More than 5 % of billing-service's requests (and at least 3) answered 5xx over 5 minutes, for 3 minutes.
+      # payment-service and release-service have been above 5 % since 5m (longer than `for`): only the absolute floor keeps them quiet
+      - eval_time: 9m
+        alertname: HttpServerErrorRatio
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: billing-service
+            exp_annotations:
+              summary: billing-service is answering 5xx
+              description: More than 5 % of billing-service's requests (and at least 3) answered 5xx over 5 minutes, for 3 minutes.
+      - eval_time: 17m
+        alertname: HttpServerErrorRatio
+        exp_alerts: []
+
+  - name: BrokerResourceAlarm — no alarm, each alarm, short alarm, recovery
+    interval: 30s
+    input_series:
+      # memory alarm 1m .. 1m30 (short), disk alarm 3m .. 5m30, file-descriptor alarm 3m .. 5m30; all clear from 6m
+      - series: 'rabbitmq_alarms_memory_used_watermark{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0 0 1 1 0x20'
+      - series: 'rabbitmq_alarms_free_disk_space_watermark{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0x5 1x5 0x13'
+      - series: 'rabbitmq_alarms_file_descriptor_limit{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0x5 1x5 0x13'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: BrokerResourceAlarm
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BrokerResourceAlarm
+        exp_alerts: []
+      - eval_time: 4m30s
+        alertname: BrokerResourceAlarm
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rabbitmq
+              instance: rabbitmq:15692
+              alarm: free_disk_space_watermark
+            exp_annotations:
+              summary: RabbitMQ resource alarm free_disk_space_watermark
+              description: The broker has raised its free_disk_space_watermark alarm for 1 minute; publishers are blocked until it clears.
+          - exp_labels:
+              severity: critical
+              job: rabbitmq
+              instance: rabbitmq:15692
+              alarm: file_descriptor_limit
+            exp_annotations:
+              summary: RabbitMQ resource alarm file_descriptor_limit
+              description: The broker has raised its file_descriptor_limit alarm for 1 minute; publishers are blocked until it clears.
+      - eval_time: 6m30s
+        alertname: BrokerResourceAlarm
+        exp_alerts: []
+
+  - name: BrokerResourceAlarm — the memory alarm alone
+    interval: 30s
+    input_series:
+      - series: 'rabbitmq_alarms_memory_used_watermark{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0 1x6 0x5'
+      - series: 'rabbitmq_alarms_free_disk_space_watermark{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0x12'
+      - series: 'rabbitmq_alarms_file_descriptor_limit{job="rabbitmq",instance="rabbitmq:15692"}'
+        values: '0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BrokerResourceAlarm
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rabbitmq
+              instance: rabbitmq:15692
+              alarm: memory_used_watermark
+            exp_annotations:
+              summary: RabbitMQ resource alarm memory_used_watermark
+              description: The broker has raised its memory_used_watermark alarm for 1 minute; publishers are blocked until it clears.
+      - eval_time: 4m
+        alertname: BrokerResourceAlarm
+        exp_alerts: []
+
+  - name: PgConnectionPressure — 70 %, a short spike, sustained pressure, recovery
+    interval: 30s
+    input_series:
+      # capacity 100 - 3 reserved = 97; billing holds 38, auth 30 (68, 70 %) or 45 (83, 86 %)
+      - series: 'pg_stat_database_numbackends{job="postgres",instance="postgres-exporter:9187",datid="1",datname="auth"}'
+        values: '30x5 45x5 30x3 45x14 30x10'
+      - series: 'pg_stat_database_numbackends{job="postgres",instance="postgres-exporter:9187",datid="2",datname="billing"}'
+        values: '38x40'
+      - series: 'pg_settings_max_connections{job="postgres",instance="postgres-exporter:9187"}'
+        values: '100x40'
+      - series: 'pg_settings_superuser_reserved_connections{job="postgres",instance="postgres-exporter:9187"}'
+        values: '3x40'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PgConnectionPressure
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: PgConnectionPressure
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: PgConnectionPressure
+        exp_alerts: []
+      - eval_time: 13m30s
+        alertname: PgConnectionPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: postgres
+              instance: postgres-exporter:9187
+            exp_annotations:
+              summary: PostgreSQL connections above 80 % of capacity
+              description: Client backends have used more than 80 % of the non-reserved connection slots for 5 minutes.
+      - eval_time: 16m
+        alertname: PgConnectionPressure
+        exp_alerts: []
+
+  - name: PgDeadlocks — flat, one deadlock, resolution, statistics reset, template database
+    interval: 30s
+    input_series:
+      - series: 'pg_stat_database_deadlocks{job="postgres",instance="postgres-exporter:9187",datid="1",datname="billing"}'
+        values: '0x40'
+      # one deadlock at 5m
+      - series: 'pg_stat_database_deadlocks{job="postgres",instance="postgres-exporter:9187",datid="2",datname="auth"}'
+        values: '0x9 1x30'
+      # statistics reset: 2 -> 0
+      - series: 'pg_stat_database_deadlocks{job="postgres",instance="postgres-exporter:9187",datid="3",datname="payment"}'
+        values: '2x10 0x30'
+      - series: 'pg_stat_database_deadlocks{job="postgres",instance="postgres-exporter:9187",datid="4",datname="template1"}'
+        values: '0x9 5x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PgDeadlocks
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: PgDeadlocks
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: postgres
+              instance: postgres-exporter:9187
+              datname: auth
+            exp_annotations:
+              summary: Deadlocks in auth
+              description: PostgreSQL resolved deadlocks in the auth database in the last 10 minutes.
+      - eval_time: 16m
+        alertname: PgDeadlocks
+        exp_alerts: []
+
+  - name: PgLockWaits — locks without waiting, a short wait, sustained waiting, recovery
+    interval: 30s
+    input_series:
+      # locks exist all along (not contention)
+      - series: 'pg_locks_count{job="postgres",instance="postgres-exporter:9187",datname="billing",mode="rowexclusivelock"}'
+        values: '4x40'
+      # a session waits 1m .. 3m30 (short), then 5m .. 11m30; none from 12m
+      - series: 'pg_stat_activity_count{job="postgres",instance="postgres-exporter:9187",datname="billing",state="active",usename="billing_app",application_name="billing-service",backend_type="client backend",wait_event="relation",wait_event_type="Lock"}'
+        values: '_ _ 1x5 _x2 1x13 _x10'
+      - series: 'pg_stat_activity_count{job="postgres",instance="postgres-exporter:9187",datname="billing",state="idle",usename="billing_app",application_name="billing-service",backend_type="client backend",wait_event="ClientRead",wait_event_type="Client"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: PgLockWaits
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PgLockWaits
+        exp_alerts: []
+      - eval_time: 10m30s
+        alertname: PgLockWaits
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: postgres
+              instance: postgres-exporter:9187
+              datname: billing
+            exp_annotations:
+              summary: Lock waits in billing
+              description: Sessions in the billing database have been waiting on locks for 5 minutes.
+      - eval_time: 18m
+        alertname: PgLockWaits
+        exp_alerts: []

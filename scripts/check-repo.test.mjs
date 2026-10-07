@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1224,5 +1224,145 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
       'pg_locks_count', 'pg_stat_database_deadlocks', 'pg_database_size_bytes', 'pg_stat_database_tup_inserted', 'pg_stat_database_blks_hit', 'pg_stat_database_blks_read']) {
       assert.ok(p.some((e) => e.includes(needle)), `no PostgreSQL panel uses ${needle}`);
     }
+  });
+}
+
+// ---- V2 A12.6.3: alerting foundation (rules, self-scrape) ----------------------------------------------------------------------------
+{
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const BASE = read('docker-compose.yml');
+  const OVERLAY = read('docker-compose.observability.yml');
+  const PROM = read('infra/observability/prometheus/prometheus.yml');
+  const RULES = read('infra/observability/prometheus/rules/nawara-core.rules.yml');
+  const TESTS = read('infra/observability/prometheus/tests/nawara-core.rules.test.yml');
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+  const check = ({ overlay = OVERLAY, prom = PROM, rules = RULES, tests = TESTS } = {}) => checkLocalObservability(BASE, overlay, prom, rules, tests);
+  const KEEP = PROMETHEUS_SELF_METRICS.join('|');
+  // The rule file with one alert's field changed (`edit` gets the parsed rule).
+  const editRule = (alert, edit) => {
+    const doc = parse(RULES);
+    edit(doc.groups.flatMap((g) => g.rules).find((r) => r.alert === alert), doc);
+    return JSON.stringify(doc);
+  };
+
+  test('A12.6.3: the repository rules, tests, self-scrape and mounts pass', () => {
+    assert.deepEqual(check(), []);
+    // A12.6.3.2 completed the catalog: the six A12.6.3.1 alerts plus ten.
+    const byGroup = Object.fromEntries(parse(RULES).groups.map((g) => [g.name, g.rules.map((r) => r.alert)]));
+    assert.deepEqual(byGroup, ALERT_CATALOG);
+    for (const a of ['CoreServiceDown', 'PostgreSQLDown', 'PostgresExporterDown', 'PrometheusConfigReloadFailed', 'PrometheusRuleFailures', 'RabbitMQDown']) assert.ok(Object.values(byGroup).flat().includes(a));
+    const core = /job=~"([^"]+)"/.exec(parse(RULES).groups.flatMap((g) => g.rules).find((r) => r.alert === 'CoreServiceDown').expr)[1].split('|');
+    assert.deepEqual(core.sort(), [...CORE_JOBS].sort());
+  });
+  test('A12.6.3: no Alertmanager, and rule_files is exactly the rules directory glob', () => {
+    fails(check({ prom: `${PROM}\nalerting:\n  alertmanagers:\n    - static_configs:\n        - targets: ['alertmanager:9093']\n` }), /no alerting block or Alertmanager/);
+    fails(check({ prom: PROM.replace('  - /etc/prometheus/rules/*.rules.yml\n', '  - /etc/prometheus/rules/*.yml\n') }), /rule_files must be exactly/);
+    fails(check({ prom: PROM.replace('  - /etc/prometheus/rules/*.rules.yml\n', '  - /etc/prometheus/rules/*.rules.yml\n  - /etc/prometheus/tests/*.yml\n') }), /rule_files must be exactly/);
+  });
+  test('A12.6.3: exactly one self-scrape job, on its own port, keeping exactly the approved families', () => {
+    fails(check({ prom: PROM.replace(/\n  # V2 A12\.6\.3: Prometheus itself[\s\S]*$/, '\n') }), /exactly one self-scrape job "prometheus" is required \(found 0\)/);
+    fails(check({ prom: PROM.replace(`regex: '${KEEP}'`, `regex: '${KEEP}|go_goroutines'`) }), /must keep exactly/);
+    fails(check({ prom: PROM.replace(`regex: '${KEEP}'`, "regex: '.+'") }), /must keep exactly/);
+    fails(check({ prom: PROM.replace(`regex: '${KEEP}'`, `regex: '${KEEP.replace('|prometheus_tsdb_head_series', '')}'`) }), /must keep exactly/);
+    fails(check({ prom: PROM.replace('        action: keep\n', '        action: drop\n') }), /must keep exactly/);
+    fails(check({ prom: PROM.replace("      - targets: ['localhost:9090']\n", "      - targets: ['prometheus.example.org:9090']\n") }), /must scrape exactly localhost:9090/);
+    fails(check({ prom: PROM.replace("  - job_name: prometheus\n", "  - job_name: prometheus\n    scheme: https\n") }), /must not set scheme/);
+    fails(check({ prom: `${PROM}  - job_name: prometheus-all\n    static_configs:\n      - targets: ['localhost:9090']\n` }), /job prometheus-all scrapes Prometheus/);
+  });
+  test('A12.6.3: the rules are mounted read-only and the tests never', () => {
+    const mount = '      - ./infra/observability/prometheus/rules:/etc/prometheus/rules:ro\n';
+    fails(check({ overlay: OVERLAY.replace(mount, '') }), /must mount the rules exactly once, read-only/);
+    fails(check({ overlay: OVERLAY.replace(mount, mount.replace(':ro\n', '\n')) }), /must be read-only|must mount the rules exactly once/);
+    fails(check({ overlay: OVERLAY.replace(mount, `${mount}      - ./infra/observability/prometheus/tests:/etc/prometheus/tests:ro\n`) }), /must not mount the rule tests/);
+  });
+  test('A12.6.3: rule labels, severities and annotations stay bounded and static', () => {
+    fails(check({ rules: editRule('CoreServiceDown', (r) => { r.labels.severity = 'page'; }) }), /labels must be exactly severity: critical \| warning/);
+    fails(check({ rules: editRule('CoreServiceDown', (r) => { r.labels.team = 'core'; }) }), /labels must be exactly severity/);
+    fails(check({ rules: editRule('RabbitMQDown', (r) => { r.annotations.runbook_url = 'https://wiki.example.org'; }) }), /annotation runbook_url is not allowed|must not contain a URL/);
+    fails(check({ rules: editRule('RabbitMQDown', (r) => { r.annotations.description += ' See https://example.org'; }) }), /must not contain a URL/);
+    fails(check({ rules: editRule('CoreServiceDown', (r) => { r.annotations.summary = 'down on {{ $labels.route }}'; }) }), /may use only \$value and \$labels/);
+    fails(check({ rules: editRule('CoreServiceDown', (r, doc) => { doc.groups[0].rules.push({ record: 'job:up:sum', expr: 'sum(up)' }); }) }), /alert rules only/);
+    fails(check({ rules: editRule('CoreServiceDown', (r, doc) => { doc.groups[0].interval = '1m'; }) }), /must not set interval/);
+  });
+  test('A12.6.3: expressions are bounded, never fabricate zeroes, and never alert on readiness', () => {
+    const expr = (alert, e) => check({ rules: editRule(alert, (r) => { r.expr = e; }) });
+    fails(expr('CoreServiceDown', 'up == 0'), /up must select the Core jobs/);
+    fails(expr('CoreServiceDown', 'up{job=~".+-service"} == 0'), /up must select the Core jobs/);
+    fails(expr('CoreServiceDown', 'up{job=~"auth-service|billing-service"} == 0'), /up must select the Core jobs/);
+    fails(expr('CoreServiceDown', `nawara_readiness_ready{job=~"${CORE_JOBS.join('|')}"} == 0`), /readiness is dashboard only/);
+    fails(expr('PostgreSQLDown', '(pg_up{job="postgres"} or vector(0)) == 0'), /or vector/);
+    fails(expr('PostgreSQLDown', 'pg_up == 0'), /pg_up must select job="postgres"/);
+    fails(expr('RabbitMQDown', 'rabbitmq_detailed_queue_messages{job="rabbitmq"} > 0'), /detailed broker metrics/);
+    fails(expr('PrometheusRuleFailures', 'increase(prometheus_rule_evaluation_failures_total[10m]) > 0'), /must select job="prometheus"/);
+    fails(expr('CoreServiceDown', `sum by (job, route) (rate(nawara_http_server_requests_total{job=~"${CORE_JOBS.join('|')}",status_class="5xx"}[5m])) > 0`), /groups or matches on "route"|matches on "status_class"/);
+    fails(expr('CoreServiceDown', `label_replace(up{job=~"${CORE_JOBS.join('|')}"}, "x", "$1", "job", "(.*)") == 0`), /must not create labels/);
+    fails(expr('CoreServiceDown', `nawara_outbox_pending_events{job=~"${CORE_JOBS.join('|')}"} > 100`), /reads outbox gauges without/);
+  });
+  test('A12.6.3: every alert has a firing and a quiet promtool test, and the tests load exactly the rule file', () => {
+    const tests = parse(TESTS);
+    const strip = (alert, keepFiring) => JSON.stringify({ ...tests, tests: tests.tests.map((g) => ({ ...g, alert_rule_test: g.alert_rule_test.filter((a) => a.alertname !== alert || (keepFiring ? a.exp_alerts.length : !a.exp_alerts.length)) })) });
+    fails(check({ tests: strip('PostgresExporterDown', false) }), /no test where PostgresExporterDown fires/);
+    fails(check({ tests: strip('PrometheusConfigReloadFailed', true) }), /no test where PrometheusConfigReloadFailed does not fire/);
+    fails(check({ tests: TESTS.replace('  - ../rules/nawara-core.rules.yml\n', '  - ../rules/other.yml\n') }), /rule_files must be exactly/);
+    fails(check({ tests: TESTS.replace('alertname: RabbitMQDown\n', 'alertname: RabbitMqDown\n') }), /tests the unknown alert RabbitMqDown/);
+    fails(check({ rules: '' }), /no rule group/);
+    assert.deepEqual(checkAlertRules(RULES, TESTS), []);
+  });
+}
+
+// ---- V2 A12.6.3.2: the remaining alert catalog ---------------------------------------------------------------------------------------
+{
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const RULES = read('infra/observability/prometheus/rules/nawara-core.rules.yml');
+  const TESTS = read('infra/observability/prometheus/tests/nawara-core.rules.test.yml');
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+  const rule = (doc, alert) => doc.groups.flatMap((g) => g.rules).find((r) => r.alert === alert);
+  const withRule = (alert, edit) => { const doc = parse(RULES); edit(rule(doc, alert), doc); return checkAlertRules(JSON.stringify(doc), TESTS); };
+  const withExpr = (alert, f) => withRule(alert, (r) => { r.expr = f(r.expr); });
+  const C = CORE_JOBS.join('|');
+
+  test('A12.6.3.2: exactly the approved catalog; deferred and rejected alerts stay out', () => {
+    assert.equal(Object.values(ALERT_CATALOG).flat().length, 16);
+    assert.deepEqual(checkAlertRules(RULES, TESTS), []);
+    fails(withRule('PgLockWaits', (r, doc) => { doc.groups[2].rules = doc.groups[2].rules.filter((x) => x.alert !== 'PgLockWaits'); }), /alert PgLockWaits is missing from group infrastructure/);
+    for (const name of ['SettleFailures', 'CoreServiceNotReady', 'PrometheusSelfScrapeDown', 'DlqDepthHigh', 'BrokerBacklogHigh', 'PgLongTransaction']) {
+      fails(withRule('CoreServiceDown', (r, doc) => { doc.groups[0].rules.push({ ...r, alert: name }); }), new RegExp(`${name} is deferred or rejected`));
+    }
+    fails(withRule('CoreServiceDown', (r, doc) => { doc.groups[0].rules.push({ ...r, alert: 'SomethingElse' }); }), /SomethingElse is not in the approved alert catalog/);
+    fails(withRule('CoreServiceDown', (r, doc) => { doc.groups.push({ name: 'extra', rules: [] }); }), /the groups must be exactly/);
+  });
+  test('A12.6.3.2: labels stay bounded; selection-only labels never widen', () => {
+    fails(withExpr('ConsumerDetached', () => `sum by (job, queue, outcome) (nawara_events_consumed_total{job=~"${C}"}) > 0`), /groups or matches on "outcome"/);
+    fails(withExpr('MessagesDeadLettered', (e) => e.replaceAll('dead_lettered_malformed|', 'processed|')), /matches on "outcome=~/);
+    fails(withExpr('DbPoolWaiting', () => `nawara_db_pool_waiting_clients{job=~"${C}",route="/x"} > 0`), /matches on "route="/);
+    fails(withExpr('HttpServerErrorRatio', (e) => e.replace('status_class!="aborted"', 'status_class!="4xx"')), /matches on "status_class!=/);
+    fails(withExpr('PgLockWaits', (e) => e.replace('wait_event_type="Lock"', 'wait_event_type=~".+"')), /matches on "wait_event_type=~/);
+    fails(withExpr('PgDeadlocks', (e) => e.replace('sum by (job, instance, datname)', 'sum by (job, instance, datname, usename)')), /groups or matches on "usename"/);
+    fails(withRule('ConsumerDetached', (r) => { r.annotations.description = 'payload {{ $labels.outcome }}'; }), /may use only \$value and \$labels/);
+  });
+  test('A12.6.3.2: the outbox rules keep the A12.6.2 initialisation filter; no fabricated zero', () => {
+    fails(withExpr('OutboxBacklogAging', (e) => e.replace(/ and on \(job, instance\) \(nawara_outbox_stats_timestamp_seconds\{[^}]*\} > 0\)/, '')), /reads outbox gauges without/);
+    fails(withExpr('OutboxBacklogAging', (e) => e.replace('> 0)', '>= 0)')), /reads outbox gauges without/);
+    fails(withExpr('OutboxStatsStale', (e) => `${e} or vector(0)`), /or vector/);
+    fails(withExpr('ConsumerDetached', () => 'nawara_event_consumer_up == 0'), /must be bounded to the Core jobs/);
+  });
+  test('A12.6.3.2: HttpServerErrorRatio keeps both the ratio and the absolute 5xx floor', () => {
+    fails(withExpr('HttpServerErrorRatio', (e) => e.replace(/\n\s*and on \(job\)\n[^\n]*>= 3/, '')), /needs both an error ratio threshold and an absolute 5xx floor/);
+    fails(withExpr('HttpServerErrorRatio', (e) => e.replace(') > 0.05', ')')), /needs both an error ratio threshold/);
+  });
+  test('A12.6.3.2: BrokerResourceAlarm is the one reviewed label_replace, over the three aggregate alarms only', () => {
+    assert.deepEqual(BROKER_ALARMS, ['memory_used_watermark', 'free_disk_space_watermark', 'file_descriptor_limit']);
+    fails(withExpr('BrokerResourceAlarm', (e) => e.replace('(memory_used_watermark|free_disk_space_watermark|file_descriptor_limit)', '(.+)')), /BrokerResourceAlarm: must be exactly label_replace/);
+    fails(withExpr('BrokerResourceAlarm', (e) => e.replace('|file_descriptor_limit', '|file_descriptor_limit|other')), /must be exactly label_replace/);
+    fails(withExpr('BrokerResourceAlarm', (e) => e.replace(',job="rabbitmq"', '')), /must be exactly label_replace/);
+    fails(withExpr('BrokerResourceAlarm', () => 'max by (job, instance, queue) (rabbitmq_queue_messages{job="rabbitmq"}) > 0'), /must be exactly label_replace/);
+    fails(withExpr('CoreServiceDown', (e) => `label_replace(${e}, "alarm", "x", "", "")`), /must not create labels/);
+    fails(withExpr('RabbitMQDown', () => '{__name__=~"rabbitmq_.+",job="rabbitmq"} == 0'), /bare \{…\} selector/);
+  });
+  test('A12.6.3.2: PostgreSQL rules stay scoped to postgres, count waiting sessions, and use only collected data', () => {
+    fails(withExpr('PgLockWaits', () => 'sum by (job, instance, datname) (pg_locks_count{job="postgres",datname!~"template0|template1"}) >= 1'), /must count sessions waiting on a lock/);
+    fails(withExpr('PgConnectionPressure', (e) => e.replaceAll('{job="postgres"}', '')), /must select job="postgres"/);
+    fails(withExpr('PgDeadlocks', () => 'sum by (job, instance, datname) (increase(pg_stat_statements_calls_total{job="postgres"}[10m])) > 0'), /not collected/);
+    fails(withExpr('PgDeadlocks', () => 'sum by (job, instance, datname) (rate(pg_stat_database_blk_read_time{job="postgres"}[10m])) > 0'), /not collected/);
   });
 }

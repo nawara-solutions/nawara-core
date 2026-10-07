@@ -2,7 +2,7 @@
 
 LOCAL development only. Nothing here is production configuration, and it neither performs nor authorizes any production action:
 production observability is A12.10, behind its own decision gate (D2). Record:
-[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D–§3H, §4G–§4M.
+[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D–§3I, §4G–§4P.
 
 ## What it is
 
@@ -13,10 +13,12 @@ production observability is A12.10, behind its own decision gate (D2). Record:
   file, audit, release) and starts Prometheus (`prom/prometheus:v3.13.4`, the 3.13 LTS line, pinned by digest).
 - Prometheus scrapes `<service>:9464/metrics` over the Compose network, with one job per service, plus the RabbitMQ broker (job
   `rabbitmq`, `rabbitmq:15692/metrics`, A12.5.2) and the PostgreSQL server through `postgres-exporter` (job `postgres`,
-  `postgres-exporter:9187/metrics`, A12.5.3): **ten targets**. Ports 9464, 15692 and 9187 are **never** published to the host. Only the
+  `postgres-exporter:9187/metrics`, A12.5.3), and, since A12.6.3, a narrow allowlist of its own metrics (job `prometheus`,
+  `localhost:9090` inside its container): **eleven targets**. Ports 9464, 15692 and 9187 are **never** published to the host. Only the
   application ports (unchanged), RabbitMQ's existing 5672 / 15672, and Prometheus on `127.0.0.1:9090` are reachable from the host.
 - **Grafana (A12.6.1)** reads Prometheus and shows the provisioned "Nawara Core" dashboards on `127.0.0.1:3100` (see
-  [Grafana](#grafana-a1261)). Alert rules come later in A12.6. Alertmanager is deferred until a concrete receiver exists. Host and
+  [Grafana](#grafana-a1261)). Since A12.6.3 Prometheus evaluates LOCAL alert rules (see [Alerts](#alerts-a1263)). Alertmanager is
+  deferred until a concrete receiver exists. Host and
   container metrics are deferred to A12.10. There is no log collection (decision D7).
 
 ## Use
@@ -29,7 +31,7 @@ docker compose $OBS --profile db up -d --wait auth-service billing-service payme
   notification-service file-service audit-service release-service postgres-exporter prometheus grafana
 ```
 
-Then open `http://127.0.0.1:9090/targets`: ten jobs (eight services, `rabbitmq` and `postgres`), all `UP`. A service started without
+Then open `http://127.0.0.1:9090/targets`: eleven jobs (eight services, `rabbitmq`, `postgres` and `prometheus`), all `UP`. A service started without
 the overlay has no metrics listener, and its target is `DOWN`.
 
 The overlay needs `MONITORING_PASSWORD` and `GRAFANA_ADMIN_PASSWORD` in `.env` (see `.env.example`); without them Compose refuses to
@@ -104,6 +106,44 @@ so in a text panel. Lock counts and sessions waiting on a lock are available.
 
 Latency panels (p95 / p99) are histogram estimates, precise only to the bucket bounds, and blank when nothing happened in the window.
 
+## Alerts (A12.6.3)
+
+Prometheus evaluates the rules in `infra/observability/prometheus/rules/` every 30 s. **There is no Alertmanager**: nothing is sent
+anywhere. Read alerts at `http://127.0.0.1:9090/alerts` (pending = the condition holds but not yet for its `for` duration; firing).
+Grafana is not configured for alerting; its view of these Prometheus rules is checked in the A12.6.3 runtime proof. Thresholds are
+LOCAL validation values, not production ones.
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| CoreServiceDown | a Core service's metrics target has not answered for 2 minutes | critical |
+| RabbitMQDown | the broker's metrics endpoint has not answered for 2 minutes | critical |
+| PostgreSQLDown | postgres-exporter answers but has not reached PostgreSQL for 2 minutes (`pg_up` 0) | critical |
+| PostgresExporterDown | postgres-exporter has not answered for 5 minutes: monitoring is blind, the database may be fine (PostgreSQLDown cannot fire then) | warning |
+| PrometheusRuleFailures | a rule group failed to evaluate in the last 10 minutes (`rule_group` names it) | warning |
+| PrometheusConfigReloadFailed | the last configuration reload failed; the previous configuration stays in force | warning |
+| ConsumerDetached | a consumer (billing, notification or audit) has been detached from its queue for 2 minutes | critical |
+| MessagesDeadLettered | a consumer parked messages in `<queue>.dead` in the last 10 minutes (inspect them with `nawara-check-dlq`) | warning |
+| OutboxBacklogAging | the oldest pending outbox event has been older than 60 s for 5 minutes (only once the outbox was read) | warning |
+| OutboxStatsStale | the outbox figures have not been read for over 2 minutes, or never since a start more than 5 minutes ago | warning |
+| DbPoolWaiting | requests have waited for a database pool client for 3 minutes | warning |
+| HttpServerErrorRatio | over 5 minutes, more than 5 % of a service's requests AND at least 3 answered 5xx, for 3 minutes | warning |
+| BrokerResourceAlarm | RabbitMQ has raised its memory, disk or file-descriptor alarm for 1 minute (`alarm` says which) | critical |
+| PgConnectionPressure | client backends above 80 % of the non-reserved connection slots for 5 minutes | warning |
+| PgDeadlocks | PostgreSQL resolved deadlocks in a database in the last 10 minutes | warning |
+| PgLockWaits | sessions in a database have waited on locks for 5 minutes (not "locks exist"; which session blocks which is not shown) | warning |
+
+- **Readiness has no alert** (dashboard only): its gauges change only when something calls `/ready`.
+- A stopped service is `up` 0 (its target stays configured), so CoreServiceDown fires for it after 2 minutes; this is expected locally
+  when you run only part of the stack.
+- No alert fires for a component a service does not have (no consumer, pool or outbox: no series), and outbox figures count only once
+  the outbox has been read.
+- **MessagesDeadLettered** can miss a dead letter right after a restart whose count equals the previous process's, and fires once
+  for old dead letters when Prometheus is new: the dashboards' since-start counts stay the reference.
+- Deferred: an alert on settle failures, on dead-letter queue depth or broker backlog (per-queue metrics are not enabled), on long
+  transactions, and any notification (no Alertmanager).
+- Change a rule: edit the rule file, add or adjust its test in `infra/observability/prometheus/tests/`, run
+  `bash scripts/check-prometheus-rules.sh`, then restart Prometheus (`docker compose $OBS restart prometheus`; the lifecycle API is off).
+
 ## Settings and why
 
 | Setting | Value | Reason |
@@ -123,7 +163,10 @@ with an interpolated password (never written out, never in a URL; only the overl
 sign-up off, an interpolated admin password that is never `admin`, every call-home and plugin switch off, exactly one credential-free
 Prometheus datasource, and deterministic dashboards that select by `job` and never use `or vector(0)`. Since A12.6.2 it also
 requires the four dashboards, bounded single-valued variables used only as exact matches, aggregate-only broker metrics kept apart
-from application metrics, and no PostgreSQL panel on data that is not collected.
+from application metrics, and no PostgreSQL panel on data that is not collected. Since A12.6.3 it also requires: no `alerting` block;
+the rules glob as the only `rule_files`; one self-scrape job keeping exactly the approved families; the rules mounted read-only and the
+tests never; and bounded alert rules with a firing and a quiet promtool test each. `bash scripts/check-prometheus-rules.sh` (Docker)
+runs promtool from the pinned image; CI runs it too.
 
 ## RabbitMQ broker metrics (A12.5.2)
 
