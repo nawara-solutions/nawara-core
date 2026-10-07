@@ -77,10 +77,11 @@ Nothing in this repo should reference Nawara Drive-specific concepts (students, 
 ## Tech conventions
 
 - TypeScript services: NestJS, following Nest's module/controller/service/DTO structure.
-- Every service exposes interactive API docs via OpenAPI, mounted at `GET /docs`. For NestJS
-  services, this is `@nestjs/swagger` (`DocumentBuilder` + `SwaggerModule.setup('docs', ...)` in
-  `main.ts`) — every controller method gets `@ApiOperation`/`@ApiResponse`, every DTO field gets
-  `@ApiProperty`.
+- Every service exposes interactive API docs via OpenAPI at `GET /<service>/docs` (JSON at
+  `/<service>/docs-json`), mounted only when `SWAGGER_PASSWORD` is set and then behind basic
+  authentication (ADR-0056 §10). For NestJS services this is `@nestjs/swagger` (`DocumentBuilder` +
+  `SwaggerModule.setup('<service>/docs', ...)`, in `main.ts` or the service's `docs/mount-docs.ts`) —
+  every controller method gets `@ApiOperation`/`@ApiResponse`, every DTO field gets `@ApiProperty`.
 - `libs/service-kit` holds **technical infrastructure only** shared by Core services (configuration, logging, request ids, errors, health, service authentication, database and migrations, outbox/inbox). It must never contain business logic; `npm run check:repo` enforces part of this.
 - `libs/audit-contract` holds the shared audit event contract and catalog used by Core producers and audit-service. There is no `libs/shared-types`. Services in this repo can import libs; external apps (Nawara Drive) only talk over HTTP, never via these libs directly.
 - Services consume `libs/service-kit` and `libs/audit-contract` through their built `dist/`: after changing either, build the libraries before running dependent tests. Stale `dist/` is never valid evidence.

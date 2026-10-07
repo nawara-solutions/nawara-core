@@ -4,10 +4,11 @@
   reconciliation**, written 2026-10-07 on `main` at `f4faf98` (PR #218 merge), and **A1.2: the consolidated conventions ADR**
   ([ADR-0056](../adr/0056-core-architecture-and-api-conventions.md), **Accepted** by the architecture owner on 2026-10-07; ADR-0034
   superseded; §8, §9), **A1.3: caller-policy convergence** (five services on the kit parser; **closed on `main`**, PR #220, merge
-  `5e90601`; §10) and **A1.4: architecture guards** (repository checks only; **complete locally**, owner-reviewed, PR open; §11).
-  **A1 is OPEN:** A1.5 is not started. A1.1 and A1.2 change documentation only; A1.3 changes the five services' policy parsers, their
-  tests and one runbook; A1.4 changes the repository checks and their tests only. No kit, Auth, infrastructure, workflow or package
-  change, and no production action.
+  `5e90601`; §10), **A1.4: architecture guards** (repository checks only; **closed on `main`**, PR #221, merge `21edab9`; §11) and
+  **A1.5: certification** (records only; **complete locally, owner review pending**; §12). **A1 is OPEN** until the A1.5 PR is
+  merged. A1.1, A1.2 and A1.5 change documentation only; A1.3 changes the five services' policy parsers, their tests and one runbook;
+  A1.4 changes the repository checks and their tests only. No kit, Auth, infrastructure, workflow or package change, and no production
+  action.
 - **Scope of A1** ([roadmap](../CORE-ROADMAP.md) A1; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4, §5, §7): service
   boundaries and dependency direction; the standard bootstrap and service-kit adoption; the Auth convergence target; the common request
   context; the contract compatibility and migration strategy; Q-ADR-1 and the review of Proposed ADRs; Core-wide DTO conventions; route
@@ -136,11 +137,11 @@ consumer boundary for AI workloads (ADR-0055: a future `nawara-ia` is one more r
 
 ```text
 A1.0  discovery                                   ✅ complete (owner-reviewed)
-A1.1  decisions, ADR governance                   ✅ complete locally; owner-approved
-A1.2  consolidated conventions ADR (ADR-0056)    ✅ complete locally; owner-approved; ADR-0056 Accepted, ADR-0034 superseded
+A1.1  decisions, ADR governance                   ✅ closed on main (PR #219, merge 88e11b8); owner-approved
+A1.2  consolidated conventions ADR (ADR-0056)    ✅ closed on main (PR #219, merge 88e11b8); ADR-0056 Accepted, ADR-0034 superseded
 A1.3  caller-policy migration (five services)     ✅ closed on main (PR #220, merge 5e90601; §10)
-A1.4  repository guards                           ✅ complete locally (§11); owner-reviewed; PR open, not merged
-A1.5  certification                               not started
+A1.4  repository guards                           ✅ closed on main (PR #221, merge 21edab9; §11)
+A1.5  certification                               ✅ complete locally (§12); owner review pending
 ```
 
 A1 is OPEN. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
@@ -187,8 +188,8 @@ absolute last.
      retroactive migration requirement, and existing endpoints (Billing's invoice list included) keep their behaviour (ADR-0056 §4).
 - **Documentation drift (follow-up, not fixed here):** `CLAUDE.md` ("Tech conventions") still says OpenAPI is mounted at `GET /docs`
   via `SwaggerModule.setup('docs', …)`; the verified implementation is `/<service>/docs` as above. To be corrected in a later
-  documentation change; no code is changed to match the stale text.
-- **Next:** A1.3 (caller-policy migration), not started. A1 stays OPEN.
+  documentation change; no code is changed to match the stale text. (Corrected by A1.5, §12.)
+- **Next (at the time):** A1.3 (caller-policy migration). Since closed on `main` (§10); current state in §7 and §12.
 
 ## 10. A1.3: caller-policy convergence (2026-10-07, local)
 
@@ -276,4 +277,29 @@ absolute last.
   tests still fail if parsing bypasses the kit.
 - **Unchanged:** no application, kit, Auth, workflow, Compose, package or `CLAUDE.md` change; no runtime behaviour change, so the A1.3
   runtime campaign is not repeated. The `CLAUDE.md` OpenAPI drift (§9) stays for A1.5.
-- **Owner review passed;** one commit and one PR. A1.4 closes on `main` only when that PR is merged. A1.5 not started. A1 stays OPEN.
+- **Closed on `main`:** after owner review, one commit (`42b6a8d`) merged as PR #221 (`21edab9cd65992d1804653f70712d72bb74bcb21`)
+  with every CI check green.
+
+## 12. A1.5: certification (2026-10-07, local)
+
+Records only: A1.5 certifies the merged A1 work from its recorded evidence and repeats no runtime campaign, because it changes no code,
+check or configuration. The code certified is what #220 and #221 merged with CI green; `main` has not changed since (`21edab9`).
+
+| Phase | Deliverable | PR / merge | Owner decisions | Runtime change | Evidence relied on | Accepted boundaries |
+|---|---|---|---|---|---|---|
+| A1.0 | discovery (§1) | records only | none | none | read-only discovery, owner-reviewed | none |
+| A1.1 | decisions and ADR governance: Q-ADR-1, review of every Proposed ADR (§2, §3) | #219 / `88e11b8` | OD-A1-1 to OD-A1-6 | none | the review; CI green | status changes one ADR at a time |
+| A1.2 | [ADR-0056](../adr/0056-core-architecture-and-api-conventions.md) conventions; ADR-0034 superseded (§8, §9) | #219 / `88e11b8` | ADR-0056 Accepted; OpenAPI at `/<service>/docs`; unknown query parameters refused on new endpoints only | none | design-conformance review (8 corrections); CI green | the `CLAUDE.md` OpenAPI drift, corrected here |
+| A1.3 | five caller-policy parsers on the kit's `parseCallerPolicy` (§10) | #220 / `5e90601` | OD-A1-3a = A | **yes, configuration grammar:** a repeated JSON key refuses to boot (all five); Organization also refuses an extra top-level key and an unknown entry property | focused 31 / 47 / 71 / 119 / 33; unit, service e2e and shared suites; mutation controls; CI green | the live Organization `SERVICE_POLICY` was not inspected: the runbook pre-deploy check is required before the first Organization deploy containing A1.3 |
+| A1.4 | caller-policy and dependency-direction guards in `check:repo` (§11) | #221 / `21edab9` (commit `42b6a8d`) | OD-A1-4a = Option 1 | none | `test:repo` 111/111, `check:repo`, ten guard mutations caught; CI green | fully computed module specifiers; a parser moved to another file behind a decoy call |
+| A1.5 | this certification: the `CLAUDE.md` OpenAPI bullet, the ADR-0056 §11 label, the roadmap and the V2-A record | this branch, not merged | OD-A1-5a = yes (ADR-0056 §11 `[TARGET: A1.3]` → `[CURRENT]`, decision and status unchanged); OD-A1-5b = yes (V2-A record later status) | none | `check:repo`; `test:repo` 111/111; link, naming and status checks | none new |
+
+- **Exit criteria:** governance merged and consistent; ADR-0056 Accepted; ADR-0034 Superseded (no other ADR status changed in A1);
+  caller-policy convergence merged; the seven consumers enforced; dependency-direction guards merged; the A1.4 boundaries recorded;
+  the `CLAUDE.md` OpenAPI drift corrected; this record, the roadmap and the V2-A record accurate; `check:repo` and `test:repo` pass;
+  no runtime change in A1.5; the certification PR's CI green; the owner merges it. **Only then is A1 Architecture certified and closed
+  on `main`.**
+- **Not claimed:** A1 certification closes **A1 Architecture** only. It does not claim Core V2 complete, production readiness, G4,
+  G6, G7, F6, F7, A12.10, A19 or Final Core Validation. (A1 Architecture is not "V2-A.1", which is the earlier documentation
+  formalization stage.)
+- **Status:** A1.5 complete locally, owner review pending. **A1 is OPEN.**
