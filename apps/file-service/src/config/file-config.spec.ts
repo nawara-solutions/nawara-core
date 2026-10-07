@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ConfigError, generateServiceToken } from '@nawara/service-kit';
 import { DEFAULT_FILE_MAX_BYTES, FILE_MAX_BYTES_BOUND, SERVICE_NAME, loadFileConfig } from './file-config.js';
@@ -7,7 +8,8 @@ const DB = 'postgres://file_app:pw-not-real@db:5432/file';
 /** Stage 17.4: a store is required; production accepts only S3 (placeholder values: nothing is contacted at load). */
 const S3 = { FILE_STORAGE_PROVIDER: 's3', FILE_S3_ENDPOINT: 'https://objects.example.test', FILE_S3_REGION: 'auto', FILE_S3_BUCKET: 'files-test', FILE_S3_ACCESS_KEY_ID: 'AKIDEXAMPLE', FILE_S3_SECRET_ACCESS_KEY: 'not-a-real-secret-0000' };
 /** Stage 17.5: the upload settings (placeholder keys: two different 32-byte values). */
-const UPLOAD = { FILE_PUBLIC_BASE_URL: 'https://files.example.test', FILE_REQUEST_HASH_KEY: Buffer.alloc(32, 1).toString('base64'), FILE_RATE_LIMIT_KEY: Buffer.alloc(32, 2).toString('base64') };
+// V2 A2.2: random keys; production refuses a key that does not look random (the previous constant fixtures would now be refused).
+const UPLOAD = { FILE_PUBLIC_BASE_URL: 'https://files.example.test', FILE_REQUEST_HASH_KEY: randomBytes(32).toString('base64'), FILE_RATE_LIMIT_KEY: randomBytes(32).toString('base64') };
 /** Stage 18.7.4: the audit relay's broker (required in production). */
 const MQ = { RABBITMQ_URL: 'amqp://mq.example.test:5672' };
 const env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ DATABASE_URL: DB, ...S3, ...UPLOAD, ...MQ, ...over });
@@ -124,7 +126,7 @@ describe('file-service configuration', () => {
   });
 
   it('production refuses the superuser or a migrator as the runtime database role (a development-only shortcut)', () => {
-    for (const user of ['postgres', 'root', 'file_migrator']) {
+    for (const user of ['postgres', 'root', 'file_migrator', 'file_admin', 'x_admin']) {
       expect(() => loadFileConfig(env({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:pw@db/file` }))).toThrow(/least-privilege runtime role/);
       expect(loadFileConfig(env({ NODE_ENV: 'development', DATABASE_URL: `postgres://${user}:pw@db/file` })).databaseUrl).toContain(user);
     }
@@ -182,6 +184,31 @@ describe('file-service configuration', () => {
     expect(() => loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: UPLOAD.FILE_RATE_LIMIT_KEY }))).toThrow(/must differ/);
     expect(() => loadFileConfig(env({ FILE_REQUEST_HASH_PREVIOUS_KEYS: Buffer.alloc(16, 3).toString('base64') }))).toThrow(/at least 32 bytes/);
   });
+  it('V2 A2.2: keys follow the kit rules: canonical base64; in production no published development key and no key that does not look random', () => {
+    const template = (name: string) => readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8').split('\n').find((l) => l.startsWith(`${name}=`))!.slice(name.length + 1).trim();
+    const refused = (over: NodeJS.ProcessEnv, message: RegExp) => {
+      let err: unknown;
+      try {
+        loadFileConfig(env(over));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, JSON.stringify(Object.keys(over))).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toMatch(message);
+      for (const v of Object.values(over)) if (v && v.length > 8) expect((err as Error).message).not.toContain(v);
+    };
+    const published = template('FILE_REQUEST_HASH_KEY');
+    refused({ FILE_REQUEST_HASH_KEY: published }, /^FILE_REQUEST_HASH_KEY is a published development key and is refused in production$/);
+    refused({ FILE_RATE_LIMIT_KEY: template('FILE_RATE_LIMIT_KEY') }, /^FILE_RATE_LIMIT_KEY is a published development key/);
+    expect(loadFileConfig(env({ NODE_ENV: 'development', FILE_REQUEST_HASH_KEY: published })).upload.requestHashKey).toHaveLength(33); // development keeps it
+    refused({ FILE_RATE_LIMIT_KEY: Buffer.alloc(32, 2).toString('base64') }, /^FILE_RATE_LIMIT_KEY does not look random and is refused in production$/);
+    refused({ FILE_REQUEST_HASH_KEY: `${UPLOAD.FILE_REQUEST_HASH_KEY}=` }, /^FILE_REQUEST_HASH_KEY must be standard base64/); // bad padding
+    refused({ FILE_RATE_LIMIT_KEY: randomBytes(32).toString('base64url').replace(/^./, '_') }, /^FILE_RATE_LIMIT_KEY must be standard base64/); // URL-safe alphabet
+    refused({ FILE_RATE_LIMIT_KEY: UPLOAD.FILE_REQUEST_HASH_KEY }, /^FILE_RATE_LIMIT_KEY must differ from FILE_REQUEST_HASH_KEY \(one key, one purpose\)$/);
+    const old = randomBytes(32).toString('base64');
+    refused({ FILE_REQUEST_HASH_PREVIOUS_KEYS: `${old},${old}` }, /^FILE_REQUEST_HASH_PREVIOUS_KEYS must not repeat a key$/); // new: duplicate previous keys
+  });
+
   it('Stage 17.9: the store\'s idle bound must exceed the client-side idle bounds (a stalled client is cut by the right timer)', () => {
     expect(() => loadFileConfig(env({ FILE_STORAGE_IDLE_TIMEOUT_MS: '30000' }))).toThrow(/FILE_STORAGE_IDLE_TIMEOUT_MS \(30000\) must exceed/);
     expect(() => loadFileConfig(env({ FILE_STORAGE_IDLE_TIMEOUT_MS: '45000', FILE_DOWNLOAD_IDLE_TIMEOUT_MS: '60000' }))).toThrow(/must exceed/);

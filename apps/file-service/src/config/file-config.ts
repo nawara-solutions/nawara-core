@@ -1,5 +1,5 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, parseServiceTokens, type BaseConfig, type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { FileCallerPolicy } from '../policy/caller-policy.js';
 import { loadStorageConfig, type StorageConfig } from '../storage/storage-config.js';
@@ -59,18 +59,13 @@ export interface FileConfig extends BaseConfig {
   rabbitmqHeartbeatS: number;
 }
 
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role. */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-
 /** Throws `ConfigError` (never echoing a value) on any missing or invalid setting, before anything starts. */
 export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig(SERVICE_NAME, env, reader);
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032: the runtime role is DML-only; production refuses a superuser, schema-owner or bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   const maxBytes = reader.int('FILE_MAX_BYTES', { default: DEFAULT_FILE_MAX_BYTES, min: 1, max: FILE_MAX_BYTES_BOUND });
   const storage = loadStorageConfig(reader, base.isProduction);
@@ -100,10 +95,7 @@ export function loadFileConfig(env: NodeJS.ProcessEnv = process.env): FileConfig
     maxBytes,
     storage,
     upload,
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    docs: readDocsCredentials(reader),
     cleanup,
     limits,
     ops: { reportIntervalMs: reader.int('FILE_OPS_REPORT_INTERVAL_MS', { default: 60_000, min: 10_000, max: 3_600_000 }) },

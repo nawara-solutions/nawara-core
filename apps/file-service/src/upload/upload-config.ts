@@ -1,4 +1,4 @@
-import { ConfigError, type EnvReader } from '@nawara/service-kit';
+import { ConfigError, assertDistinctKeys, decodeKey, readKey, type EnvReader } from '@nawara/service-kit';
 
 export interface UploadConfig {
   /** `FILE_UPLOAD_TICKET_TTL_SECONDS` (default 120, 60–300, F16): an upload ticket's lifetime. It bounds the START of an upload only. */
@@ -33,17 +33,6 @@ export interface UploadConfig {
   downloadMinThroughputBytesPerSecond: number;
 }
 
-function keyMaterial(reader: EnvReader, name: string): Buffer {
-  return decodeKey(name, reader.required(name));
-}
-
-function decodeKey(name: string, raw: string): Buffer {
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) throw new ConfigError(`${name} must be base64`);
-  const key = Buffer.from(raw, 'base64');
-  if (key.length < 32) throw new ConfigError(`${name} must decode to at least 32 bytes`);
-  return key;
-}
-
 /** Stage 17.5 settings. Errors name the variable and never echo a value (keys may come from `*_FILE`). */
 export function loadUploadConfig(reader: EnvReader, isProduction: boolean): UploadConfig {
   const publicBaseUrl = reader.url('FILE_PUBLIC_BASE_URL', isProduction ? ['https:'] : ['https:', 'http:']);
@@ -51,17 +40,21 @@ export function loadUploadConfig(reader: EnvReader, isProduction: boolean): Uplo
   if (parsed.username || parsed.password || parsed.search || parsed.hash || publicBaseUrl.endsWith('/')) {
     throw new ConfigError('FILE_PUBLIC_BASE_URL must be a plain base URL without credentials, query, fragment or trailing slash');
   }
-  const requestHashKey = keyMaterial(reader, 'FILE_REQUEST_HASH_KEY');
-  const rateLimitKey = keyMaterial(reader, 'FILE_RATE_LIMIT_KEY');
-  if (requestHashKey.equals(rateLimitKey)) throw new ConfigError('FILE_REQUEST_HASH_KEY and FILE_RATE_LIMIT_KEY must be different keys (one key, one purpose)');
+  // V2 A2.2: the kit's key rules (canonical base64, at least 32 bytes; in production no published development key and no key that does not
+  // look random) and one key, one purpose across the current and previous keys.
+  const keyRules = { isProduction };
+  const requestHashKey = readKey(reader, 'FILE_REQUEST_HASH_KEY', keyRules);
+  const rateLimitKey = readKey(reader, 'FILE_RATE_LIMIT_KEY', keyRules);
   const previousRaw = reader.get('FILE_REQUEST_HASH_PREVIOUS_KEYS');
-  const requestHashPreviousKeys = previousRaw === undefined || previousRaw.trim() === ''
+  const requestHashPreviousKeys = previousRaw === undefined
     ? []
-    : previousRaw.split(',').map((k) => decodeKey('FILE_REQUEST_HASH_PREVIOUS_KEYS', k.trim()));
+    : previousRaw.split(',').map((k) => decodeKey('FILE_REQUEST_HASH_PREVIOUS_KEYS', k.trim(), keyRules));
   if (requestHashPreviousKeys.length > 2) throw new ConfigError('FILE_REQUEST_HASH_PREVIOUS_KEYS holds at most 2 keys (a bounded retirement window)');
-  for (const k of requestHashPreviousKeys) {
-    if (k.equals(requestHashKey) || k.equals(rateLimitKey)) throw new ConfigError('FILE_REQUEST_HASH_PREVIOUS_KEYS must differ from FILE_REQUEST_HASH_KEY and FILE_RATE_LIMIT_KEY');
-  }
+  assertDistinctKeys([
+    ['FILE_REQUEST_HASH_KEY', requestHashKey],
+    ['FILE_RATE_LIMIT_KEY', rateLimitKey],
+    ...requestHashPreviousKeys.map((k) => ['FILE_REQUEST_HASH_PREVIOUS_KEYS', k] as const),
+  ]);
   return {
     ticketTtlSeconds: reader.int('FILE_UPLOAD_TICKET_TTL_SECONDS', { default: 120, min: 60, max: 300 }),
     attachTtlSeconds: reader.int('FILE_ATTACH_TTL_SECONDS', { default: 86_400, min: 300, max: 2_592_000 }),
