@@ -1,4 +1,4 @@
-import { ConfigError } from '@nawara/service-kit';
+import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';
 import { FILE_MEDIA_TYPES, type FileMediaType } from './media-types.js';
 
 /** The operations a caller policy can grant (SDD §11). Nothing is granted unless listed. */
@@ -36,53 +36,38 @@ export class FileCallerPolicy {
   private constructor(private readonly callers: ReadonlyMap<string, CallerPolicy>) {}
 
   static parse(raw: string | undefined, registered: readonly string[], maxBytesCeiling: number): FileCallerPolicy {
-    if (raw === undefined || raw.trim() === '') {
-      if (registered.length > 0) throw new ConfigError(`FILE_SERVICE_POLICY is required: every registered caller needs an explicit entry (deny by default): ${registered.join(', ')}`);
-      return new FileCallerPolicy(new Map());
-    }
-    let doc: unknown;
-    try {
-      doc = JSON.parse(raw);
-    } catch {
-      throw new ConfigError('FILE_SERVICE_POLICY must be valid JSON');
-    }
-    const callers = (doc as { callers?: unknown } | null)?.callers;
-    if (typeof callers !== 'object' || callers === null || Array.isArray(callers) || Object.keys(doc as object).length !== 1) {
-      throw new ConfigError('FILE_SERVICE_POLICY must be {"callers": {...}}');
-    }
-    const map = new Map<string, CallerPolicy>();
-    for (const [name, entry] of Object.entries(callers as Record<string, unknown>)) {
-      const at = `FILE_SERVICE_POLICY: "${name}"`;
-      if (!registered.includes(name)) throw new ConfigError(`FILE_SERVICE_POLICY names "${name}", which has no registered service token`);
-      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new ConfigError(`${at} must be an object`);
-      const e = entry as Record<string, unknown>;
-      for (const k of Object.keys(e)) if (!KEYS.has(k)) throw new ConfigError(`${at} has an unknown property "${k}"`);
+    // V2 A1.3: the document (envelope, registration cross-check both ways, unknown and duplicate keys at any depth) is the kit's
+    // shared parser (ADR-0052, ADR-0056 §11); the operations / organizations / mediaTypes / maxBytes dimensions below are unchanged,
+    // including the FILE_MAX_BYTES ceiling.
+    const map = parseCallerPolicy<CallerPolicy>(raw, registered, {
+      variable: 'FILE_SERVICE_POLICY',
+      keys: [...KEYS],
+      entry: (at, e) => {
+        if (!Array.isArray(e.operations) || e.operations.length === 0) throw new ConfigError(`${at} needs an explicit, non-empty operations list`);
+        for (const op of e.operations) if (!(FILE_OPERATIONS as readonly unknown[]).includes(op)) throw new ConfigError(`${at} lists an operation other than ${FILE_OPERATIONS.join(' / ')}`);
+        const operations = new Set(e.operations as FileOperation[]);
+        if (operations.size !== e.operations.length) throw new ConfigError(`${at} lists an operation twice`);
 
-      if (!Array.isArray(e.operations) || e.operations.length === 0) throw new ConfigError(`${at} needs an explicit, non-empty operations list`);
-      for (const op of e.operations) if (!(FILE_OPERATIONS as readonly unknown[]).includes(op)) throw new ConfigError(`${at} lists an operation other than ${FILE_OPERATIONS.join(' / ')}`);
-      const operations = new Set(e.operations as FileOperation[]);
-      if (operations.size !== e.operations.length) throw new ConfigError(`${at} lists an operation twice`);
+        if (e.organizations !== 'none' && e.organizations !== 'request') throw new ConfigError(`${at}.organizations must be "none" or "request"`);
 
-      if (e.organizations !== 'none' && e.organizations !== 'request') throw new ConfigError(`${at}.organizations must be "none" or "request"`);
-
-      const createsBytes = [...operations].some((op) => CREATES_BYTES.has(op));
-      let mediaTypes: Set<FileMediaType> | undefined;
-      let maxBytes: number | undefined;
-      if (createsBytes) {
-        if (!Array.isArray(e.mediaTypes) || e.mediaTypes.length === 0) throw new ConfigError(`${at} may upload or issue tickets, so it needs an explicit, non-empty mediaTypes list`);
-        for (const t of e.mediaTypes) if (!(FILE_MEDIA_TYPES as readonly unknown[]).includes(t)) throw new ConfigError(`${at} lists a media type outside the V1 allow-list (${FILE_MEDIA_TYPES.join(', ')})`);
-        mediaTypes = new Set(e.mediaTypes as FileMediaType[]);
-        if (!Number.isSafeInteger(e.maxBytes) || (e.maxBytes as number) < 1 || (e.maxBytes as number) > maxBytesCeiling) {
-          throw new ConfigError(`${at}.maxBytes must be an integer between 1 and FILE_MAX_BYTES (${maxBytesCeiling})`);
+        const createsBytes = [...operations].some((op) => CREATES_BYTES.has(op));
+        let mediaTypes: Set<FileMediaType> | undefined;
+        let maxBytes: number | undefined;
+        if (createsBytes) {
+          if (!Array.isArray(e.mediaTypes) || e.mediaTypes.length === 0) throw new ConfigError(`${at} may upload or issue tickets, so it needs an explicit, non-empty mediaTypes list`);
+          for (const t of e.mediaTypes) if (!(FILE_MEDIA_TYPES as readonly unknown[]).includes(t)) throw new ConfigError(`${at} lists a media type outside the V1 allow-list (${FILE_MEDIA_TYPES.join(', ')})`);
+          mediaTypes = new Set(e.mediaTypes as FileMediaType[]);
+          if (!Number.isSafeInteger(e.maxBytes) || (e.maxBytes as number) < 1 || (e.maxBytes as number) > maxBytesCeiling) {
+            throw new ConfigError(`${at}.maxBytes must be an integer between 1 and FILE_MAX_BYTES (${maxBytesCeiling})`);
+          }
+          maxBytes = e.maxBytes as number;
+        } else if (e.mediaTypes !== undefined || e.maxBytes !== undefined) {
+          throw new ConfigError(`${at}: mediaTypes and maxBytes apply only to a caller that may upload or issue tickets`);
         }
-        maxBytes = e.maxBytes as number;
-      } else if (e.mediaTypes !== undefined || e.maxBytes !== undefined) {
-        throw new ConfigError(`${at}: mediaTypes and maxBytes apply only to a caller that may upload or issue tickets`);
-      }
-      map.set(name, { operations, organizations: e.organizations, mediaTypes, maxBytes });
-    }
-    for (const r of registered) if (!map.has(r)) throw new ConfigError(`registered caller "${r}" has no FILE_SERVICE_POLICY entry (deny by default)`);
-    return new FileCallerPolicy(map);
+        return { operations, organizations: e.organizations, mediaTypes, maxBytes };
+      },
+    });
+    return new FileCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
   }
 
   /** The caller's policy, or undefined (then every request is refused). */
