@@ -3,9 +3,9 @@
 - **Status:** RECORD of A1.0 discovery (read-only, approved by the owner) and **A1.1 architecture decisions and ADR governance
   reconciliation**, written 2026-10-07 on `main` at `f4faf98` (PR #218 merge), and **A1.2: the consolidated conventions ADR**
   ([ADR-0056](../adr/0056-core-architecture-and-api-conventions.md), **Accepted** by the architecture owner on 2026-10-07; ADR-0034
-  superseded; §8, §9). **A1 is OPEN:** A1.3 to
-  A1.5 are not started. A1.1 and A1.2 change documentation only: no service, kit, infrastructure, workflow or package change, and no
-  production action.
+  superseded; §8, §9), and **A1.3: caller-policy convergence** (five services on the kit parser, **complete locally**, not committed;
+  §10). **A1 is OPEN:** A1.4 and A1.5 are not started. A1.1 and A1.2 change documentation only; A1.3 changes the five services' policy
+  parsers, their tests and one runbook: no kit, Auth, infrastructure, workflow or package change, and no production action.
 - **Scope of A1** ([roadmap](../CORE-ROADMAP.md) A1; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4, §5, §7): service
   boundaries and dependency direction; the standard bootstrap and service-kit adoption; the Auth convergence target; the common request
   context; the contract compatibility and migration strategy; Q-ADR-1 and the review of Proposed ADRs; Core-wide DTO conventions; route
@@ -136,7 +136,7 @@ consumer boundary for AI workloads (ADR-0055: a future `nawara-ia` is one more r
 A1.0  discovery                                   ✅ complete (owner-reviewed)
 A1.1  decisions, ADR governance                   ✅ complete locally; owner-approved
 A1.2  consolidated conventions ADR (ADR-0056)    ✅ complete locally; owner-approved; ADR-0056 Accepted, ADR-0034 superseded
-A1.3  caller-policy migration (five services)     next; not started
+A1.3  caller-policy migration (five services)     ✅ complete locally (§10); not committed; owner review pending
 A1.4  repository guards                           not started
 A1.5  certification                               not started
 ```
@@ -188,3 +188,46 @@ absolute last.
   documentation change; no code is changed to match the stale text.
 - **Next:** A1.3 (caller-policy migration), not started. A1 stays OPEN.
 
+## 10. A1.3: caller-policy convergence (2026-10-07, local)
+
+- **Owner decision OD-A1-3a = A:** Organization adopts the kit's strict validation as is (no lenient mode, no kit option).
+- **Done:** Release, Audit, File, Notification and Organization (in that order) parse their policy with the kit's `parseCallerPolicy`
+  (ADR-0052, ADR-0056 §11); each service keeps only its own dimension checks, inside the kit's `entry` callback. **Unchanged:** the
+  wrapper classes and their public methods, the static `parse` signatures, the downstream representations, the environment-variable
+  names (`RELEASE_SERVICE_POLICY`, `AUDIT_SERVICE_POLICY`, `FILE_SERVICE_POLICY`, `NOTIFICATION_SERVICE_POLICY`, `SERVICE_POLICY`),
+  caller identities, scope vocabularies and authorization semantics. Repeated values inside a list keep their previous treatment
+  (refused where a service refused them; tolerated as a set in Notification and Organization). No `libs/service-kit` change was needed.
+- **Stricter, by decision:**
+  - all five: a repeated JSON key at any depth (top level, caller, entry property, nested map) refuses to boot; before, `JSON.parse`
+    silently kept the last one;
+  - Organization only: an extra top-level key and an unknown entry property (anything other than `capabilities` / `allowedPlatforms`)
+    now refuse to boot; before, both were ignored. The other four already refused them.
+- **Wording only:** kit messages replace a few service messages (an unknown property is no longer echoed; a caller name outside the
+  caller-name pattern prints as `<invalid caller name>`; Organization's "explicit policy entry" / "registered token" become "explicit
+  entry" / "registered service token"). Five test expectations were adjusted to the new wording; each case is still refused.
+- **Fixtures:** every repository-owned policy (`scripts/smoke-core-image.sh`, `docker-compose.yml`, `apps/organization-service/.env.example`,
+  `deploy/register-caller.sh`'s generated shapes, every unit and e2e fixture) already conforms; each smoke document and the Organization
+  generated shapes are pinned by an equivalence test.
+- **Production policy NOT inspected.** Whether the live Organization `SERVICE_POLICY` conforms is unknown. The
+  [Organization runbook](../runbooks/organization-production.md) §2 now carries a pre-deploy check: the candidate image's own parser
+  reads the server's `.env` and prints only `OK` / `REFUSED`, never the value. It must pass before the first deploy of an image that
+  contains A1.3. (A refused policy fails closed: the replacement never becomes ready and the previous container is restored.)
+- **Evidence (local):**
+  - focused suites: Release 31, Audit 47, File 71, Notification 119, Organization 33, all pass;
+  - mutation controls (service-local, restored byte-for-byte): with duplicates normalized away before the kit, every raw duplicate-key
+    test failed in all five services; with no registered callers passed to the kit, the deny-by-default tests failed in all five;
+  - unit suites: Release 93, Audit 243, File 266, Notification 324, Organization 155; typecheck and lint clean for the changed files;
+  - e2e suites: Release 225, Audit 435 (7 skipped), File 296 (35 skipped), Notification 324, Organization 262; shared suites
+    audit-producers 26, auth-organization 9, real-broker 23. Audit, Notification and Organization e2e ran on a throwaway PostgreSQL 16
+    and RabbitMQ 3.13: the local Compose broker could not finish booting (too many leftover test queues for its file-handle limit), and
+    the Compose database hosts an `organization` database that the Organization suite's safety guard refuses to touch. One Audit timing
+    test (`owner-operational`, Auth refused/unresolvable within budget) failed once under load, then passed in isolation and in a full
+    rerun;
+  - `npm run check:repo` passes; `npm run test:repo` 104/104.
+- **Blast radius when merged:** the Organization and Audit merges build images and stop (build ≠ deploy); Release, File and
+  Notification run Core CI image smoke only. Auth is untouched (no kit or package change).
+- **A1.4 guard candidates (reported, not implemented):** no hand-written parsing of `*_SERVICE_POLICY` / `SERVICE_POLICY` outside
+  `parseCallerPolicy` (for example, no `JSON.parse` in a service's policy module); every caller-policy wrapper delegates to the kit;
+  the existing `check:repo` architecture-boundary checks (application → application, library → application) stay as they are.
+- **Next:** owner review of A1.3; then one commit per service (Release, Audit, File, Notification, Organization with the runbook) on
+  one branch and one PR, only when authorized. A1.4 not started. A1 stays OPEN.

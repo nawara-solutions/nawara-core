@@ -1,4 +1,4 @@
-import { ConfigError } from '@nawara/service-kit';
+import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';
 
 /**
  * Service authorization policy (ADR-0042 decisions 2, 3 and 4 and Amendment 1). Authentication (ADR-0033) says WHICH service is calling
@@ -21,6 +21,7 @@ export type RequiredCapability = Capability | typeof COMPANY_UPDATE;
 export const SERVICE_POLICY = Symbol('SERVICE_POLICY');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ASSIGNABLE: Capability[] = ['hierarchy.reference.read', 'hierarchy.read', 'hierarchy.provision'];
+const KEYS = ['capabilities', 'allowedPlatforms'];
 
 export interface CallerPolicy {
   capabilities: ReadonlySet<RequiredCapability>;
@@ -46,44 +47,35 @@ export class ServicePolicy {
   }
 
   static parse(raw: string | undefined, registered: string[]): ServicePolicy {
-    if (raw === undefined || raw.trim() === '') {
-      if (registered.length > 0) throw new ConfigError(`SERVICE_POLICY is required: every registered caller needs an explicit policy entry (deny by default): ${registered.join(', ')}`);
-      return ServicePolicy.empty();
-    }
-    let doc: unknown;
-    try {
-      doc = JSON.parse(raw);
-    } catch {
-      throw new ConfigError('SERVICE_POLICY must be valid JSON');
-    }
-    const callers = (doc as { callers?: Record<string, { capabilities?: unknown; allowedPlatforms?: unknown }> } | null)?.callers;
-    if (typeof callers !== 'object' || callers === null || Array.isArray(callers)) throw new ConfigError('SERVICE_POLICY must be {"callers": {...}}');
-    const map = new Map<string, CallerPolicy>();
-    for (const [name, entry] of Object.entries(callers)) {
-      if (!registered.includes(name)) throw new ConfigError(`SERVICE_POLICY names "${name}", which has no registered token`);
-      if (typeof entry !== 'object' || entry === null) throw new ConfigError(`SERVICE_POLICY entry for "${name}" is not an object`);
-      const caps = entry.capabilities;
-      if (!Array.isArray(caps) || caps.length === 0) throw new ConfigError(`"${name}" needs at least one capability`);
-      for (const c of caps) {
-        if (!(CAPABILITIES as readonly string[]).includes(c as string)) throw new ConfigError(`"${name}": unknown capability ${JSON.stringify(c)}`);
-        if (!ASSIGNABLE.includes(c as Capability)) throw new ConfigError(`"${name}": ${String(c)} cannot be assigned (no accepted decision names a holder)`);
-      }
-      const set = new Set(caps as Capability[]);
-      const provisioning = set.has('hierarchy.provision');
-      if (provisioning && set.size > 1) throw new ConfigError(`"${name}": the provisioning capability is held by a dedicated identity alone`);
-      let platforms: Set<string> | null = null;
-      if (provisioning) {
-        if (entry.allowedPlatforms !== undefined) throw new ConfigError(`"${name}": provisioning is outside Platform scope and takes no allowedPlatforms`);
-      } else {
-        const ap = entry.allowedPlatforms;
-        if (!Array.isArray(ap)) throw new ConfigError(`"${name}": allowedPlatforms is required (an explicit list, possibly empty; there is no wildcard)`);
-        for (const p of ap) if (typeof p !== 'string' || !UUID.test(p)) throw new ConfigError(`"${name}": allowedPlatforms must list platform ids (no wildcard): ${JSON.stringify(p)}`);
-        platforms = new Set(ap as string[]);
-      }
-      map.set(name, { capabilities: set as ReadonlySet<RequiredCapability>, allowedPlatforms: platforms });
-    }
-    for (const r of registered) if (!map.has(r)) throw new ConfigError(`registered caller "${r}" has no SERVICE_POLICY entry (deny by default)`);
-    return new ServicePolicy(map);
+    // V2 A1.3 (OD-A1-3a = A): the document is the kit's shared parser (ADR-0052, ADR-0056 §11). Stricter than before on purpose:
+    // exactly {"callers": {...}} (no extra top-level key), no entry property other than capabilities / allowedPlatforms, and no
+    // repeated key at any depth. The capability and Platform-scope rules below are unchanged.
+    const map = parseCallerPolicy<CallerPolicy>(raw, registered, {
+      variable: 'SERVICE_POLICY',
+      keys: KEYS,
+      entry: (at, e) => {
+        const caps = e.capabilities;
+        if (!Array.isArray(caps) || caps.length === 0) throw new ConfigError(`${at} needs at least one capability`);
+        for (const c of caps) {
+          if (!(CAPABILITIES as readonly string[]).includes(c as string)) throw new ConfigError(`${at}: unknown capability ${JSON.stringify(c)}`);
+          if (!ASSIGNABLE.includes(c as Capability)) throw new ConfigError(`${at}: ${String(c)} cannot be assigned (no accepted decision names a holder)`);
+        }
+        const set = new Set(caps as Capability[]);
+        const provisioning = set.has('hierarchy.provision');
+        if (provisioning && set.size > 1) throw new ConfigError(`${at}: the provisioning capability is held by a dedicated identity alone`);
+        let platforms: Set<string> | null = null;
+        if (provisioning) {
+          if (e.allowedPlatforms !== undefined) throw new ConfigError(`${at}: provisioning is outside Platform scope and takes no allowedPlatforms`);
+        } else {
+          const ap = e.allowedPlatforms;
+          if (!Array.isArray(ap)) throw new ConfigError(`${at}: allowedPlatforms is required (an explicit list, possibly empty; there is no wildcard)`);
+          for (const p of ap) if (typeof p !== 'string' || !UUID.test(p)) throw new ConfigError(`${at}: allowedPlatforms must list platform ids (no wildcard): ${JSON.stringify(p)}`);
+          platforms = new Set(ap as string[]);
+        }
+        return { capabilities: set as ReadonlySet<RequiredCapability>, allowedPlatforms: platforms };
+      },
+    });
+    return new ServicePolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
   }
 
   has(caller: string, capability: RequiredCapability): boolean {
