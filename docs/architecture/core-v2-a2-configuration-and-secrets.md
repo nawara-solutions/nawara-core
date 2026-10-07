@@ -2,7 +2,8 @@
 
 - **Status:** RECORD of A2.0 discovery and A2.1.0 design (both read-only, owner-reviewed, 2026-10-07, on `main` at `321ec0b`, the
   PR #222 merge), of **A2.1: service-kit configuration hardening** (**closed on `main`**: PR #223, merge `b6a8402`; §4) and of
-  **A2.2: seven-service adoption** (**complete locally, owner review pending**; §6). **A2 is OPEN.** A2.3 to A2.6 are not started.
+  **A2.2: seven-service adoption** (**closed on `main`**: PR #224, merge `975d848`; §6) and of **A2.3: targeted Auth hardening**
+  (**complete locally, owner review pending**; §7). **A2 is OPEN.** A2.4 to A2.6 are not started.
 - **Scope of A2** ([roadmap](../CORE-ROADMAP.md) A2): typed and validated configuration; environment separation; secret lifecycle and
   rotation; deployment contracts. **Not A2:** Auth loader convergence and JWT key-ring verification (A4); the Organization ownership
   CLI and its production gate (A5 / F6 / F7); production credential restriction (A3.6 / A3.7); production deploy-script changes
@@ -89,8 +90,10 @@ A2.0  discovery                         ✅ complete (owner-reviewed)
 A2.1.0  kit design                      ✅ complete (owner-reviewed)
 A2.1  service-kit hardening             ✅ closed on main (PR #223, merge b6a8402)
 A2.2.0  adoption plan                   ✅ complete (owner-reviewed)
-A2.2  seven-service adoption            ✅ complete locally; owner review pending (§6)
-A2.3 – A2.6                             not started
+A2.2  seven-service adoption            ✅ closed on main (PR #224, merge 975d848; §6)
+A2.3.0  Auth discovery                  ✅ complete (owner-reviewed)
+A2.3  targeted Auth hardening           ✅ complete locally; owner review pending (§7)
+A2.4 – A2.6                             not started
 ```
 
 A2 is OPEN. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
@@ -134,3 +137,42 @@ absolute last.
   reads the server's `.env` and prints only `OK` or `REFUSED` ([Organization runbook](../runbooks/organization-production.md) §2;
   [digest deployments](../runbooks/digest-deployments.md) §2 for Audit), proven locally against synthetic configurations (`*_app`: OK;
   `*_admin`, a malformed policy: REFUSED). No G6 dependency; RED: none.
+
+## 7. A2.3: targeted Auth hardening (2026-10-07, local)
+
+- **Owner decisions:** OD-A2.3-1 = A (Auth re-exports the kit's `ConfigError`: one class for every configuration error; the CLI's
+  `describeCliFailure` already treats it as safe); OD-A2.3-2 = A (an unset `NODE_ENV` is production, as in every other Core service);
+  OD-A2.3-3 = A (the Auth pre-deploy check below, in A2.3).
+- **Inside Auth's own loader** (`apps/auth-service/src/config/app-config.ts`): its `SecretSource` (the KMS plug-in point) is kept, and
+  only the targeted items change:
+
+| Setting | Before | After |
+|---|---|---|
+| `NODE_ENV` | unset = development | kit `oneOf`: unset or blank = production; only development / test / production (surrounding whitespace removed) |
+| `AUTH_EVENTS` | anything but `off` = on | only `on` (default) / `off`; anything else refused |
+| `REQUIRE_CONTACT_VERIFICATION` | only `true` = true, anything else silently false | only `true` / `false` (default false); anything else refused |
+| `CORS_ORIGINS` | error repeated the rejected entry | the kit's `parseCorsOrigins` (same rule), no echo |
+| `JWT_SECRET`, four peppers | lenient base64, at least 32 bytes | kit `decodeKey`: canonical base64, at least 32 bytes; production refuses a published or non-random key |
+| `TOTP_ENCRYPTION_KEYS` | a repeated id silently replaced the earlier key; lenient base64 | repeated id refused; each key `decodeKey` (exactly 32 bytes, production refusals); active id required |
+| domain separation | one generic "must be distinct" | kit `assertDistinctKeys`, naming the two variables |
+| `DATABASE_URL` user (production) | `postgres`, `root`, `auth`, `*_migrator` | kit `assertRuntimeDatabaseRole` + `alsoForbidden: ['auth']`: also `*_admin`; a malformed encoding is a `ConfigError` |
+| unreadable `NAME_FILE` | the operating-system error (with the path) escaped | `NAME_FILE is set but the file cannot be read` |
+
+- **Boundaries.** A4 keeps: loader convergence (`SecretSource` versus `EnvReader`, `readKeyRing`, `readDocsCredentials`, `_FILE` for
+  `DATABASE_URL` / `RABBITMQ_URL`, global trimming and the `NAME` + `NAME_FILE` rule), the JWT verification key ring, rotation and key
+  ids. A2.4 keeps: templates (`NODE_ENV=development` for local runs), the stale `PAYMENT_SERVICE_TOKEN` the Auth deploy script still
+  provisions, the rotation matrix (peppers are not rotatable), the environment reference, CLI hygiene. `SWAGGER_PASSWORD` and
+  `ORGANIZATION_SERVICE_TOKEN` are unchanged. No kit, deploy-script, workflow or package change.
+- **Tests:** the configuration spec grows from 74 to 97 (every grammar above, never-echo checks including a credentialed CORS URL and a
+  sensitive `_FILE` path, each published Auth secret refused in production and kept in development, the TOTP cases, the roles); two
+  expectations moved from the generic "distinct" text to the named messages. Every e2e and shared-suite fixture already uses
+  `NODE_ENV=test` and random canonical keys; the CI image smoke uses the production shapes, which pass.
+- **Evidence (local):** configuration spec 97, unit suite 141, typecheck, changed-file lint; eight negative controls (development default,
+  lenient `AUTH_EVENTS`, lenient contact verification, CORS echo, production key rules off, TOTP overwrite, `auth` role allowed, raw
+  `_FILE` error), each red when weakened and restored byte-for-byte; `check:repo`, `test:repo`.
+- **Production (YELLOW, PRODUCTION VERIFICATION DEFERRED):** Auth is deployed; every row above activates at its next owner-authorized
+  deploy. The values `provision-and-deploy.sh` writes pass; a hand edit may not. Mitigation (OD-A2.3-3, documented, not run):
+  [Auth deploy runbook](../runbooks/auth-service-deploy.md) §2, the candidate image's `loadConfig()` over the server's `.env`, printing
+  only `OK` or `REFUSED`; proven locally against synthetic configurations (deploy-script shapes: OK; `AUTH_EVENTS=false`,
+  `REQUIRE_CONTACT_VERIFICATION=1`, an `auth_admin` or `auth` user, a repeated TOTP id, the published `JWT_SECRET`: REFUSED). A merge
+  builds the Auth image (`auth-service-docker-build.yml`); deployment stays manual. No G6 dependency; RED: none.

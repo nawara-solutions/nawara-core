@@ -38,6 +38,23 @@ explicit, owner-authorized production mutation
 
 1. Take the index digest from the summary of the `build-image` run of the commit to deploy (it must be a `main` commit; an earlier
    labelled `main` artifact is allowed, OD-4).
+   **Before dispatching (V2 A2.3, OD-A2.3-3): confirm the candidate image accepts the server's configuration.** Images from A2.3 on
+   read it more strictly: `AUTH_EVENTS` only `on` / `off`, `REQUIRE_CONTACT_VERIFICATION` only `true` / `false`, an unset `NODE_ENV`
+   is production, `JWT_SECRET`, the four peppers and each `TOTP_ENCRYPTION_KEYS` entry canonical base64 (in production neither
+   published in `.env.example` nor non-random), no repeated TOTP key id, and in production a `DATABASE_URL` user that is not `auth`,
+   a superuser, a `*_migrator` or a `*_admin` role. Values the deploy script generates pass; a hand edit may not. On the server, let
+   the **candidate** image's own loader read the `.env` the service runs with; it prints only `OK` or `REFUSED`, never a value, and
+   opens no connection:
+
+   ```bash
+   NEW=ghcr.io/<owner>/nawara-core-auth-service@sha256:<64 hex>   # the digest about to be deployed
+   docker run --rm --env-file "$HOME/nawara-core/auth-service/.env" --entrypoint node "$NEW" --input-type=module -e '
+   import { loadConfig } from "./dist/config/app-config.js";
+   try { loadConfig(); console.log("OK  this image accepts the configuration"); }
+   catch { console.log("REFUSED  this image would not start with this configuration: fix it before deploying"); process.exit(1); }'
+   ```
+
+   On `REFUSED`, do not deploy: correct the `.env` (or regenerate the value the way `provision-and-deploy.sh` does) and run it again.
 2. Dispatch:
 
    ```bash
