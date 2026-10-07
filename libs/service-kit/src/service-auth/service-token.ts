@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { ConfigError } from '../config/config.js';
+import { isPublishedDevelopmentFingerprint } from '../config/development-keys.js';
 
 /** One accepted credential: which calling service it identifies and the SHA-256 digest of its token. */
 export interface ServiceTokenEntry {
@@ -45,4 +46,18 @@ export function parseServiceTokens(raw: string | undefined): ServiceTokenEntry[]
     entries.push({ caller, digest });
   }
   return entries;
+}
+
+/**
+ * V2 A2.2 (OD-A2.2-1): in production, refuses a registered service-token digest that belongs to a development token published in this
+ * repository (anyone with the repository could present it). The callee side of the check: the caller refuses the raw token with
+ * `isPublishedDevelopmentSecret`. The error names the caller, never the digest.
+ */
+export function assertNoPublishedServiceTokens(entries: readonly ServiceTokenEntry[], opts: { isProduction: boolean }): void {
+  if (!opts.isProduction) return;
+  for (const { caller, digest } of entries) {
+    if (isPublishedDevelopmentFingerprint(digest)) {
+      throw new ConfigError(`SERVICE_TOKENS registers a published development token for caller "${caller}"; it is refused in production`);
+    }
+  }
 }

@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, generateServiceToken, hashServiceToken, parseServiceTokens } from '../src/index.js';
+import { ConfigError, assertNoPublishedServiceTokens, generateServiceToken, hashServiceToken, parseServiceTokens } from '../src/index.js';
 
 describe('service tokens', () => {
   it('generates a random token whose digest is what the callee stores', () => {
@@ -35,5 +36,35 @@ describe('service tokens', () => {
     } catch (e) {
       expect((e as Error).message).not.toContain('SECRETLOOKING');
     }
+  });
+});
+
+describe('V2 A2.2 (OD-A2.2-1): assertNoPublishedServiceTokens, the callee side of published-token refusal', () => {
+  /** The published development token of `.env.example`; read in the test, never printed. */
+  const published = (() => {
+    const line = readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8').split('\n').find((l) => l.startsWith('BILLING_TO_PAYMENT_TOKEN='));
+    return line!.slice('BILLING_TO_PAYMENT_TOKEN='.length).trim();
+  })();
+  const publishedDigest = hashServiceToken(published);
+
+  it('production refuses a registered digest of a published development token, naming the caller only', () => {
+    const entries = parseServiceTokens(`billing-service:${publishedDigest},other-service:${hashServiceToken('fresh-token-never-published-0123456789')}`);
+    let error: unknown;
+    try {
+      assertNoPublishedServiceTokens(entries, { isProduction: true });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as Error).message).toBe('SERVICE_TOKENS registers a published development token for caller "billing-service"; it is refused in production');
+    expect((error as Error).message).not.toContain(publishedDigest);
+    expect((error as Error).message).not.toContain(published);
+  });
+
+  it('development and tests keep the published token; unrelated digests pass everywhere', () => {
+    expect(() => assertNoPublishedServiceTokens(parseServiceTokens(`billing-service:${publishedDigest}`), { isProduction: false })).not.toThrow();
+    const fresh = parseServiceTokens(`a-caller:${generateServiceToken().digest},b-caller:${generateServiceToken().digest}`);
+    expect(() => assertNoPublishedServiceTokens(fresh, { isProduction: true })).not.toThrow();
+    expect(() => assertNoPublishedServiceTokens([], { isProduction: true })).not.toThrow();
   });
 });
