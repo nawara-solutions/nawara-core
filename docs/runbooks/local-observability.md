@@ -2,7 +2,7 @@
 
 LOCAL development only. Nothing here is production configuration, and it neither performs nor authorizes any production action:
 production observability is A12.10, behind its own decision gate (D2). Record:
-[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D, §3E, §3F, §4G–§4J.
+[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D–§3H, §4G–§4M.
 
 ## What it is
 
@@ -42,8 +42,10 @@ Stop with `docker compose $OBS --profile db down`. Prometheus keeps at most 3 da
 
 - **Open** `http://127.0.0.1:3100` and sign in as `admin` with `GRAFANA_ADMIN_PASSWORD` from your `.env`. The `.env.example` value is a
   non-secret local placeholder. `admin/admin` does not work, there is no anonymous access, and there is no sign-up.
-- **Content:** folder **Nawara Core** → **Core · Overview** (`/d/nawara-core-overview`). One datasource: **Prometheus**
-  (`nawara-prometheus`). Grafana reads nothing else: no database, broker or service.
+- **Content:** folder **Nawara Core** → **Core · Overview** (`/d/nawara-core-overview`) and, since A12.6.2, **Core · Service**
+  (`/d/nawara-core-service`), **Core · Messaging** (`/d/nawara-core-messaging`) and **Core · PostgreSQL** (`/d/nawara-core-postgresql`);
+  see [Operational dashboards](#operational-dashboards-a1262). One datasource: **Prometheus** (`nawara-prometheus`). Grafana reads
+  nothing else: no database, broker or service.
 - **Nothing is kept.** Grafana's state lives in tmpfs, and the datasource, folder and dashboard are provisioned from
   `infra/observability/grafana/` at every start. Dashboards cannot be saved or deleted from the UI. Recreating the container
   (`docker compose $OBS up -d --force-recreate grafana`) restores exactly what the repository holds. To change a dashboard, edit it
@@ -60,6 +62,47 @@ Stop with `docker compose $OBS --profile db down`. Prometheus keeps at most 3 da
   - A service with no database pool, consumer or outbox simply has no line in that panel: not applicable, not 0.
   - The **5xx ratio** stays blank below 1 request per minute (not applicable). 0 means traffic with no 5xx.
   - RabbitMQ backlog is the **aggregate** of all queues, retry and dead-letter queues included. No queue is identified.
+
+## Operational dashboards (A12.6.2)
+
+Each has one selector at the top. It offers only known values, and a panel uses it as an exact match.
+
+- **Core · Service:** choose the service in **Core service** (the eight Core scrape jobs). Rows: availability (target, uptime,
+  readiness), HTTP (rate by status class, 5xx ratio, p95 / p99, busiest and failing routes, in flight), database pool, outbox,
+  messaging and runtime (CPU, memory, event loop, GC).
+- **Core · Messaging:** the top row covers every Core consumer: attached or lost, and messages each one **parked** in its
+  `<queue>.dead` since start. Choose a queue in **Consumer queue** for its outcomes, handler latency and incidents. Then come
+  publishing for all Core publishers, and the RabbitMQ broker.
+- **Core · PostgreSQL:** the server row covers the whole local server. Choose a database in **Database** for its size, sessions,
+  transactions, locks, deadlocks, tuples and cache. `postgres` is the maintenance database; its sessions are the exporter's and
+  administrative ones.
+
+**Reading the empty states.** A panel never invents a 0; its empty text says why it is empty:
+
+| Shown | Meaning |
+|---|---|
+| *not applicable* (no outbox / no consumer / no pool) | the selected service does not have that component (audit-service and notification-service have no outbox; only billing, notification and audit consume) |
+| *not run* | `/ready` has not been called since the service started (Compose calls `/health`); not a failure |
+| *no outbox* on the outbox figures of a service that has one | the relay has not read the outbox aggregate yet; the **Outbox stats age** panel says how fresh the figures are |
+| *none observed* | the event (a consume or publish outcome, a loss, a pool or relay failure) has not happened since the process started. Rare events are counted **since start**; **Uptime** says since when |
+| blank 5xx / rollback / cache ratio | too little traffic for a meaningful ratio (below 1 request or 1 transaction per minute, or no block access) |
+| `0` | a real zero: the series exists and the value is 0 |
+
+**Messaging: two kinds of "dead letter".**
+- *Application dead-lettered (parked)* comes from Core's consumers. The message is in `<queue>.dead`, classified as malformed,
+  permanent or retries exhausted. This is the signal to act on; the `nawara-check-dlq` CLI lists the messages.
+  *Dead-letter deferred* means the parking copy could not be confirmed: the message was requeued, not lost.
+- *Broker dead-letter mechanics* is RabbitMQ's own counter. **expired** rises with every retry: a retry-queue message whose delay ends
+  goes back to its main queue that way. It is not a count of parked messages, and Core's parked copies do not appear in it.
+- *Aggregate broker backlog* is every queue together: main, retry **and** dead-letter queues. Parked messages stay in it until someone
+  removes them, so a flat non-zero backlog can be parked messages, not slow consumers. No queue is identified; per-queue depth is not
+  enabled.
+
+**PostgreSQL: not available here.** Query latency, slow or top statements, blocker → waiter pairs, per-table / per-index activity and
+I/O timing are not collected locally (no `pg_stat_statements`, those exporter collectors off, `track_io_timing` off). The dashboard says
+so in a text panel. Lock counts and sessions waiting on a lock are available.
+
+Latency panels (p95 / p99) are histogram estimates, precise only to the bucket bounds, and blank when nothing happened in the window.
 
 ## Settings and why
 
@@ -78,7 +121,9 @@ remote write in the scrape configuration, the ten expected jobs present, and `po
 with an interpolated password (never written out, never in a URL; only the overlay passes `MONITORING_PASSWORD`). For Grafana
 (A12.6.1) it also enforces the pinned OSS image on `127.0.0.1:3100` only, the container hardening, tmpfs state, anonymous access and
 sign-up off, an interpolated admin password that is never `admin`, every call-home and plugin switch off, exactly one credential-free
-Prometheus datasource, and deterministic dashboards that select by `job` and never use `or vector(0)`.
+Prometheus datasource, and deterministic dashboards that select by `job` and never use `or vector(0)`. Since A12.6.2 it also
+requires the four dashboards, bounded single-valued variables used only as exact matches, aggregate-only broker metrics kept apart
+from application metrics, and no PostgreSQL panel on data that is not collected.
 
 ## RabbitMQ broker metrics (A12.5.2)
 

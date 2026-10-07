@@ -1,0 +1,1758 @@
+{
+  "uid": "nawara-core-postgresql",
+  "title": "Core · PostgreSQL",
+  "description": "V2 A12.6.2: the shared local PostgreSQL server and one database in detail (choose it with \"Database\"), through postgres-exporter. LOCAL observability. Provisioned from the repository; edits in the UI are not saved.",
+  "tags": [
+    "nawara-core",
+    "local"
+  ],
+  "editable": false,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "datname",
+        "label": "Database",
+        "description": "A Core service database, or the postgres maintenance database (exporter and admin sessions). Template databases are excluded.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "nawara-prometheus"
+        },
+        "definition": "label_values(pg_database_size_bytes{job=\"postgres\",datname=~\"auth|billing|payment|accounting|organization|notification|file|audit|release|postgres\"}, datname)",
+        "query": "label_values(pg_database_size_bytes{job=\"postgres\",datname=~\"auth|billing|payment|accounting|organization|notification|file|audit|release|postgres\"}, datname)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Server",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Exporter up",
+      "description": "`up{job=\"postgres\"}`: postgres-exporter (9187) answered Prometheus. This is the exporter, not the database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "up{job=\"postgres\"}",
+          "legendFormat": "exporter",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Database reachable",
+      "description": "`pg_up`: 1 the exporter reached PostgreSQL as observability_monitor; 0 it could not. No data: the exporter is down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "pg_up{job=\"postgres\"}",
+          "legendFormat": "pg_up",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Connection use",
+      "description": "`sum(pg_stat_database_numbackends)` (client backends, all databases) / `pg_settings_max_connections`. superuser_reserved_connections of the maximum are kept for superusers (see the settings).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(pg_stat_database_numbackends{job=\"postgres\"}) / max(pg_settings_max_connections{job=\"postgres\"})",
+          "legendFormat": "used",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Sessions waiting on a lock",
+      "description": "Sessions whose current wait is a heavyweight lock (`pg_stat_activity_count{wait_event_type=\"Lock\"}`), all databases. 0 is real: sessions were observed and none waits on a lock. Which session blocks which is not available.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 13,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(pg_stat_activity_count{job=\"postgres\",wait_event_type=\"Lock\"}) or (0 * sum(pg_stat_activity_count{job=\"postgres\"}))",
+          "legendFormat": "waiting",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Longest open transaction",
+      "description": "`max(pg_stat_activity_max_tx_duration)`: age of the oldest open transaction on the server (0 when none). Long-open transactions hold locks and block vacuum.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "max(pg_stat_activity_max_tx_duration{job=\"postgres\"})",
+          "legendFormat": "oldest transaction",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Connections vs max",
+      "description": "Client backends on the server (`sum(pg_stat_database_numbackends)`) against `max_connections` and the superuser-reserved share.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(pg_stat_database_numbackends{job=\"postgres\"})",
+          "legendFormat": "connections",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "max(pg_settings_max_connections{job=\"postgres\"})",
+          "legendFormat": "max_connections",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "max(pg_settings_superuser_reserved_connections{job=\"postgres\"})",
+          "legendFormat": "superuser reserved",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "Sessions by state (server)",
+      "description": "`sum by (state) (pg_stat_activity_count)`: active, idle, idle in transaction (holds a snapshot and locks while idle), and the rest.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (state) (pg_stat_activity_count{job=\"postgres\"})",
+          "legendFormat": "{{state}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 9,
+      "title": "Operational settings",
+      "description": "Selected `pg_settings_*`, as the exporter reads them: capacity, memory, timeouts and whether I/O timing is collected. 0 or -1 means the timeout or logging threshold is off. Statement logging and query statistics are not configured (no pg_stat_statements).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "pg_settings_max_connections{job=\"postgres\"}",
+          "legendFormat": "max_connections",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "pg_settings_superuser_reserved_connections{job=\"postgres\"}",
+          "legendFormat": "superuser_reserved_connections",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "pg_settings_shared_buffers_bytes{job=\"postgres\"}",
+          "legendFormat": "shared_buffers",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "pg_settings_work_mem_bytes{job=\"postgres\"}",
+          "legendFormat": "work_mem",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "E",
+          "expr": "pg_settings_statement_timeout_seconds{job=\"postgres\"}",
+          "legendFormat": "statement_timeout",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "F",
+          "expr": "pg_settings_lock_timeout_seconds{job=\"postgres\"}",
+          "legendFormat": "lock_timeout",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "G",
+          "expr": "pg_settings_idle_in_transaction_session_timeout_seconds{job=\"postgres\"}",
+          "legendFormat": "idle_in_transaction_session_timeout",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "H",
+          "expr": "pg_settings_deadlock_timeout_seconds{job=\"postgres\"}",
+          "legendFormat": "deadlock_timeout",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "I",
+          "expr": "pg_settings_track_io_timing{job=\"postgres\"}",
+          "legendFormat": "track_io_timing",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "E"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "off (0)",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "-1": {
+                        "text": "off (-1)",
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "F"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "off (0)",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "-1": {
+                        "text": "off (-1)",
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "G"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "off (0)",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "-1": {
+                        "text": "off (-1)",
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "H"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "off (0)",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "-1": {
+                        "text": "off (-1)",
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "I"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "off",
+                        "color": "text",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "on",
+                        "color": "text",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 10,
+      "title": "Database: $datname",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 11,
+      "title": "Size",
+      "description": "`pg_database_size_bytes` for the selected database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "pg_database_size_bytes{job=\"postgres\",datname=\"$datname\"}",
+          "legendFormat": "size",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 12,
+      "title": "Backends",
+      "description": "`pg_stat_database_numbackends`: client backends connected to the selected database now.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 5,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "pg_stat_database_numbackends{job=\"postgres\",datname=\"$datname\"}",
+          "legendFormat": "backends",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "Waiting on a lock",
+      "description": "Sessions on the selected database whose current wait is a heavyweight lock. 0 is real: the database's sessions were observed and none waits. Blocker → waiter pairs are not available.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 10,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(pg_stat_activity_count{job=\"postgres\",datname=\"$datname\",wait_event_type=\"Lock\"}) or (0 * sum(pg_stat_activity_count{job=\"postgres\",datname=\"$datname\"}))",
+          "legendFormat": "waiting",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 14,
+      "title": "Deadlocks (time range)",
+      "description": "`increase(pg_stat_database_deadlocks[$__range])`: deadlocks PostgreSQL detected and resolved (by aborting a transaction) in the selected database during the dashboard time range. The series exists from the start, so 0 is a real zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 15,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "increase(pg_stat_database_deadlocks{job=\"postgres\",datname=\"$datname\"}[$__range])",
+          "legendFormat": "deadlocks",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 15,
+      "title": "Longest open transaction",
+      "description": "`max(pg_stat_activity_max_tx_duration)` for the selected database (0 when none open).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "max(pg_stat_activity_max_tx_duration{job=\"postgres\",datname=\"$datname\"})",
+          "legendFormat": "oldest transaction",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Transactions",
+      "description": "Commits and rollbacks per second (`pg_stat_database_xact_commit`, `_xact_rollback`) for the selected database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(pg_stat_database_xact_commit{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "commit",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "rate(pg_stat_database_xact_rollback{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "rollback",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Rollback ratio (≥ 1 transaction/min)",
+      "description": "rollbacks / (commits + rollbacks) over 5 minutes, only with at least 1 transaction per minute; blank below that (not applicable), never 0. Rollbacks include application-intended ones, so a non-zero ratio is not by itself an error.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(pg_stat_database_xact_rollback{job=\"postgres\",datname=\"$datname\"}[5m]) / ((rate(pg_stat_database_xact_commit{job=\"postgres\",datname=\"$datname\"}[5m]) + rate(pg_stat_database_xact_rollback{job=\"postgres\",datname=\"$datname\"}[5m])) >= (1/60))",
+          "legendFormat": "rollback ratio",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "below 1 transaction/min",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Sessions by state",
+      "description": "`sum by (state) (pg_stat_activity_count)` for the selected database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (state) (pg_stat_activity_count{job=\"postgres\",datname=\"$datname\"})",
+          "legendFormat": "{{state}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Locks held by mode",
+      "description": "`pg_locks_count` by lock mode for the selected database (granted and waiting). Lock counts only: which session blocks which is not available.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (mode) (pg_locks_count{job=\"postgres\",datname=\"$datname\"})",
+          "legendFormat": "{{mode}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Tuple activity",
+      "description": "Rows per second for the selected database: returned (scanned), fetched (by index), inserted, updated, deleted. Per database only: table and index detail are not collected.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 28
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(pg_stat_database_tup_returned{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "returned",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "rate(pg_stat_database_tup_fetched{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "fetched",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "rate(pg_stat_database_tup_inserted{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "inserted",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "rate(pg_stat_database_tup_updated{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "updated",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "E",
+          "expr": "rate(pg_stat_database_tup_deleted{job=\"postgres\",datname=\"$datname\"}[5m])",
+          "legendFormat": "deleted",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Buffer cache hit ratio",
+      "description": "blks_hit / (blks_hit + blks_read) over 5 minutes for the selected database: the share of block requests served from shared buffers. Blank when the database read no block in the window (not applicable, never 0 or 100 %). A miss may still be served by the OS page cache.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 28
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(pg_stat_database_blks_hit{job=\"postgres\",datname=\"$datname\"}[5m]) / ((rate(pg_stat_database_blks_hit{job=\"postgres\",datname=\"$datname\"}[5m]) + rate(pg_stat_database_blks_read{job=\"postgres\",datname=\"$datname\"}[5m])) > 0)",
+          "legendFormat": "hit ratio",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no block access in window",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Database size",
+      "description": "`pg_database_size_bytes` over time for the selected database.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "pg_database_size_bytes{job=\"postgres\",datname=\"$datname\"}",
+          "legendFormat": "{{datname}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "text",
+      "id": 23,
+      "title": "Not available on this dashboard",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "These need collection that is **not** enabled locally (a separate decision):\n\n- query latency, slow queries, top statements, statement counts or text (`pg_stat_statements` is not installed);\n- blocker → waiter relationships (only lock counts and waiting sessions are exported);\n- per-table and per-index activity (those exporter collectors are off);\n- block I/O timing (`track_io_timing` is off, so read/write times stay 0)."
+      }
+    }
+  ]
+}

@@ -687,13 +687,141 @@ export function checkLocalGrafana(overlay, datasources, providers, dashboards, e
         if (/nawara_readiness_/.test(v) && !/nawara_readiness_last_run_timestamp_seconds(\{[^}]*\})?\s*>\s*0\b/.test(v)) {
           problems.push(`${file}: ${path} reads readiness without "nawara_readiness_last_run_timestamp_seconds > 0" (before the first /ready run the kit exports 0: "not run" must never read as not ready)`);
         }
+        // V2 A12.6.2: the outbox gauges are 0 until the relay's first successful aggregate read; a panel shows them only for a job
+        // and instance whose stats timestamp is set.
+        if (/\bnawara_outbox_(pending_events|retrying_events|oldest_pending_age_seconds)\b/.test(v)
+          && !/\band\s+on\s*\(\s*job\s*,\s*instance\s*\)\s*\(\s*nawara_outbox_stats_timestamp_seconds(\{[^}]*\})?\s*>\s*0\s*\)/.test(v)) {
+          problems.push(`${file}: ${path} reads outbox gauges without "and on (job, instance) (nawara_outbox_stats_timestamp_seconds > 0)" (before the first successful stats read the kit exports 0: "not read yet" must never read as no pending work)`);
+        }
         if (/\bservice\s*(=~|!~|!=|=)/.test(v) || /\b(by|without)\s*\([^)]*\bservice\b/.test(v)) {
           if (!v.includes('nawara_service_info')) problems.push(`${file}: ${path} selects on "service"; use "job" (only nawara_service_info carries service)`);
         }
       }
     });
+    if (d && typeof d === 'object') problems.push(...checkDashboardSemantics(file, d, text));
   }
-  if (!uids.has('nawara-core-overview')) problems.push('infra/observability/grafana/dashboards: the Core overview dashboard (uid nawara-core-overview) is missing');
+  for (const [uid, title] of Object.entries(GRAFANA_DASHBOARDS)) {
+    if (!uids.has(uid)) problems.push(`infra/observability/grafana/dashboards: the "${title}" dashboard (uid ${uid}) is missing`);
+  }
+  return problems;
+}
+
+/**
+ * V2 A12.6.2: the provisioned dashboards (uid → title) and the one bounded variable each operational dashboard has: its name, the metric
+ * its values come from (the label of the same name), and how its source selector must be bounded. A variable is never multi-value, "All"
+ * or free text, and a panel uses it only as an exact match (`<name>="$<name>"`), never as a regular expression.
+ */
+export const GRAFANA_DASHBOARDS = {
+  'nawara-core-overview': 'Core · Overview',
+  'nawara-core-service': 'Core · Service',
+  'nawara-core-messaging': 'Core · Messaging',
+  'nawara-core-postgresql': 'Core · PostgreSQL',
+};
+export const CORE_JOBS = ['auth-service', 'billing-service', 'payment-service', 'organization-service', 'notification-service', 'file-service', 'audit-service', 'release-service'];
+const DASHBOARD_VARIABLES = {
+  'nawara-core-service': { name: 'job', metric: 'nawara_service_info' },
+  'nawara-core-messaging': { name: 'queue', metric: 'nawara_event_consumer_up' },
+  'nawara-core-postgresql': { name: 'datname', metric: 'pg_database_size_bytes' },
+};
+const DASHBOARD_PANEL_TYPES = new Set(['row', 'stat', 'timeseries', 'text']);
+const GRAFANA_BUILTIN_VARIABLES = new Set(['__range', '__interval', '__rate_interval']);
+const LITERAL_ALTERNATION = /^[a-z0-9_.-]+(\|[a-z0-9_.-]+)*$/;
+// Detailed / per-object broker metrics, and labels that identify one broker object (the aggregated endpoint has none of them).
+const RABBITMQ_PER_OBJECT_LABEL = /^(queue|vhost|channel|connection|exchange|consumer_tag)$/;
+// PostgreSQL capabilities that are not collected locally (A12.5.3): statement statistics, per-table / per-index collectors, I/O timing.
+const UNSUPPORTED_POSTGRES = /\bpg_stat_statements|\bpg_stat(io)?_user_(tables|indexes)|\bpg_stat_database_blk_(read|write)_time\b|\bquery\s*(=~|!~|!=|=)|\bby\s*\([^)]*\bquery\b/;
+const matchersOf = (body) => [...(body ?? '').matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*"([^"]*)"/g)].map(([, label, op, value]) => ({ label, op, value }));
+const selectorsOf = (expr, prefix) => [...expr.matchAll(new RegExp(`\\b(${prefix}[a-zA-Z0-9_]*)\\b(\\s*\\{([^}]*)\\})?`, 'g'))].map((m) => ({ metric: m[1], braces: m[2] !== undefined, matchers: matchersOf(m[3]) }));
+const sameSet = (a, b) => a.length === b.length && [...a].sort().join('|') === [...b].sort().join('|');
+const isCoreJobs = (m) => m.label === 'job' && ((m.op === '=~' && sameSet(m.value.split('|'), CORE_JOBS)) || (m.op === '=' && (CORE_JOBS.includes(m.value) || m.value === '$job')));
+
+function checkDashboardSemantics(file, d, text) {
+  const problems = [];
+  const at = (where, msg) => problems.push(`${file}: ${where} ${msg}`);
+  const expected = DASHBOARD_VARIABLES[d.uid];
+  if (GRAFANA_DASHBOARDS[d.uid] && d.title !== GRAFANA_DASHBOARDS[d.uid]) at('title', `must be "${GRAFANA_DASHBOARDS[d.uid]}" for uid ${d.uid}`);
+  if (d.editable !== false) at('editable', 'must be false (provisioned from the repository)');
+  if (asArray(d.links).length) at('links', 'must be empty (no external link)');
+  if (text.includes('://')) at('content', 'must not contain a URL (no external dashboard, link or service)');
+  walkJson(d, (k, v, path) => {
+    if (['gnetId', 'rawSql', 'rawQuery', 'sql'].includes(k)) at(path, 'is not allowed (no Grafana.com dashboard, no SQL)');
+    if (/password|secret|token|apikey|credential/i.test(k)) at(path, 'is not allowed (dashboards hold no credential)');
+  });
+
+  // Variables: only the expected one, a bounded label_values() over its own metric, single-valued, never free text.
+  const vars = asArray(d.templating?.list);
+  if (!expected && vars.length) at('templating', 'must define no variable');
+  if (expected && (vars.length !== 1 || vars[0]?.name !== expected.name)) at('templating', `must define exactly the variable "${expected.name}"`);
+  for (const v of vars) {
+    const where = `variable ${v?.name}`;
+    if (v?.type !== 'query') at(where, 'must be a query variable (no textbox, custom, constant or ad hoc filter)');
+    if (v?.multi === true || v?.includeAll === true || v?.allValue !== undefined) at(where, 'must be single-valued (no multi-value, "All" or custom all value)');
+    if (v?.regex) at(where, 'must not post-filter values with a regex');
+    const def = typeof v?.query === 'string' ? v.query : v?.query?.query;
+    const m = /^label_values\(([a-z_]+)\{([^}]*)\},\s*([a-z_]+)\)$/.exec(String(def ?? ''));
+    if (!m || v?.definition !== def) { at(where, 'must be label_values(<metric>{<bounded selector>}, <label>), the same in "query" and "definition"'); continue; }
+    const [, metric, body, label] = m;
+    const matchers = matchersOf(body);
+    if (label !== v.name || (expected && (v.name !== expected.name || metric !== expected.metric))) at(where, `must read the label "${v.name}" from ${expected?.metric ?? 'its own metric'}`);
+    if (body.includes('$')) at(where, 'must not depend on another variable');
+    for (const x of matchers) if (x.op === '=~' && !LITERAL_ALTERNATION.test(x.value)) at(where, `matcher ${x.label}=~"${x.value}" must be a literal alternation`);
+    if (v.name === 'job' || v.name === 'queue') {
+      if (!matchers.some((x) => x.label === 'job' && x.op === '=~' && sameSet(x.value.split('|'), CORE_JOBS))) at(where, 'must be bounded to the eight Core jobs (job=~"<the Core jobs>")');
+    }
+    if (v.name === 'datname') {
+      if (!matchers.some((x) => x.label === 'job' && x.op === '=' && x.value === 'postgres')) at(where, 'must select job="postgres"');
+      const dbs = matchers.find((x) => x.label === 'datname' && x.op === '=~');
+      if (!dbs || dbs.value.split('|').some((n) => /^template/.test(n))) at(where, 'must be bounded to an explicit list of databases without template databases');
+    }
+  }
+
+  const ids = new Set();
+  let usesVariable = false;
+  for (const panel of asArray(d.panels)) {
+    const where = `panel ${panel?.id} "${panel?.title}"`;
+    if (!DASHBOARD_PANEL_TYPES.has(panel?.type)) at(where, `has type "${panel?.type}": only ${[...DASHBOARD_PANEL_TYPES].join(', ')} (no plugin panel)`);
+    if (ids.has(panel?.id)) at(where, 'reuses a panel id');
+    ids.add(panel?.id);
+    if (asArray(panel?.links).length) at(where, 'must not have links');
+    if (panel?.type === 'text' && /<\s*(script|iframe|img)/i.test(String(panel?.options?.content ?? ''))) at(where, 'text must be plain markdown (no script, frame or image)');
+    const exprs = asArray(panel?.targets).map((t) => String(t?.expr ?? ''));
+    const all = exprs.join('\n');
+    if (/\brabbitmq_/.test(all) && /\bnawara_/.test(all)) at(where, 'mixes broker (rabbitmq_*) and application (nawara_*) metrics: the two layers stay separate');
+    if (/\brabbitmq_global_messages_dead_lettered_/.test(all) && (!/mechanics/i.test(panel.title) || /\bdlq\b/i.test(panel.title))) {
+      at(where, 'shows broker dead-letter counters: its title must say "mechanics" and never "DLQ" (retry TTL cycling is dead-lettering too; parked messages are the application outcome)');
+    }
+    if (/\brabbitmq_queue_messages(_ready|_unacked)?\b/.test(all) && !/aggregate/i.test(panel.title)) at(where, 'shows broker queue totals: its title must say "aggregate" (retry and dead-letter queues are included)');
+    for (const e of exprs) {
+      for (const s of selectorsOf(e, 'rabbitmq_')) {
+        if (/^rabbitmq_detailed_/.test(s.metric)) at(where, `uses ${s.metric} (the detailed endpoint is not scraped)`);
+        if (!s.matchers.some((x) => x.label === 'job' && x.op === '=' && x.value === 'rabbitmq')) at(where, `${s.metric} must select job="rabbitmq"`);
+        for (const x of s.matchers) if (RABBITMQ_PER_OBJECT_LABEL.test(x.label)) at(where, `${s.metric} selects the per-object label "${x.label}" (aggregate broker metrics only)`);
+      }
+      if (/\brabbitmq_/.test(e) && /\b(by|without|on|ignoring)\s*\([^)]*\b(queue|vhost|channel|connection|exchange)\b/.test(e)) at(where, 'groups broker metrics by a per-object label (aggregate broker metrics only)');
+      for (const s of selectorsOf(e, 'pg_')) if (!s.matchers.some((x) => x.label === 'job' && x.op === '=' && x.value === 'postgres')) at(where, `${s.metric} must select job="postgres"`);
+      if (UNSUPPORTED_POSTGRES.test(e)) at(where, 'uses PostgreSQL data that is not collected (statements, query text, per-table / per-index, I/O timing)');
+      // Variables: exact match on the dashboard's own variable only.
+      for (const [, name] of e.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) {
+        if (GRAFANA_BUILTIN_VARIABLES.has(name)) continue;
+        if (!expected || name !== expected.name) at(where, `uses the unknown variable $${name}`);
+      }
+      if (expected) {
+        const residue = e.split(`${expected.name}="$${expected.name}"`).join('');
+        if (residue.includes(`$${expected.name}`) || residue.includes(`\${${expected.name}`)) at(where, `uses $${expected.name} other than as the exact match ${expected.name}="$${expected.name}" (never a regex)`);
+        if (e.includes(`${expected.name}="$${expected.name}"`)) usesVariable = true;
+      }
+      if (expected) {
+        // Operational dashboards: every Core metric is bounded to the Core jobs (or the selected one).
+        for (const s of selectorsOf(e, 'nawara_')) if (!s.matchers.some(isCoreJobs)) at(where, `${s.metric} must be bounded to the Core jobs (job=~"<the Core jobs>" or job="$job")`);
+      }
+      if (d.uid === 'nawara-core-service') {
+        for (const prefix of ['nawara_', 'process_', 'nodejs_', 'up\\b']) {
+          for (const s of selectorsOf(e, prefix)) if (!s.matchers.some((x) => x.label === 'job' && x.op === '=' && x.value === '$job')) at(where, `${s.metric} must select job="$job"`);
+        }
+      }
+    }
+  }
+  if (expected && !usesVariable) at('panels', `never filter by ${expected.name}="$${expected.name}"`);
   return problems;
 }
 

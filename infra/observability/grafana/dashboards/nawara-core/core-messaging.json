@@ -1,0 +1,1356 @@
+{
+  "uid": "nawara-core-messaging",
+  "title": "Core · Messaging",
+  "description": "V2 A12.6.2: Core application messaging (per consumer queue) and the RabbitMQ broker (aggregate), LOCAL observability. Provisioned from the repository; edits in the UI are not saved.",
+  "tags": [
+    "nawara-core",
+    "local"
+  ],
+  "editable": false,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "queue",
+        "label": "Consumer queue",
+        "description": "A queue a Core service consumes (from nawara_event_consumer_up; bounded by the service-kit).",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "nawara-prometheus"
+        },
+        "definition": "label_values(nawara_event_consumer_up{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}, queue)",
+        "query": "label_values(nawara_event_consumer_up{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}, queue)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Application consumers (all Core queues)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Consumers attached",
+      "description": "`nawara_event_consumer_up` per Core service and queue: 1 consuming, 0 lost or closed. Only services that consume have a series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_event_consumer_up{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}",
+          "legendFormat": "{{job}} · {{queue}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no consumers",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "LOST",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ATTACHED",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Application dead-lettered — parked in <queue>.dead (since start)",
+      "description": "APPLICATION dead-letter outcomes from `nawara_events_consumed_total`, per service, queue and outcome, since each process started: messages a Core consumer gave up on and parked (malformed, permanent failure, retries exhausted; `dead_letter_unannotated`: parked by the broker's dead-lettering without the annotated copy). This is the permanent dead-letter signal. It is NOT the broker dead-letter counter below, and not the dead-letter queue depth (per-queue depth is deferred; `nawara-check-dlq` remains the tool). \"none observed\": nothing parked since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 10,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (job, queue, outcome) (nawara_events_consumed_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",outcome=~\"dead_lettered_malformed|dead_lettered_permanent|dead_lettered_retries_exhausted|dead_letter_unannotated\"})",
+          "legendFormat": "{{job}} · {{queue}} · {{outcome}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Dead-letter deferred (since start)",
+      "description": "`dead_letter_deferred`: the dead-letter copy could not be confirmed, so the message was held and requeued (not parked, not lost). Recurring: the broker is refusing the copy. \"none observed\": none since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (job, queue) (nawara_events_consumed_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",outcome=\"dead_letter_deferred\"})",
+          "legendFormat": "{{job}} · {{queue}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 5,
+      "title": "Selected queue: $queue",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Consumed by outcome",
+      "description": "`sum by (outcome) (rate(nawara_events_consumed_total[5m]))` for the selected queue. processed = the handler completed (a later acknowledgement failure is counted separately as a settle failure). An outcome appears once it first happened (not yet observed before). No data: nothing consumed since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(nawara_events_consumed_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"}[5m]))",
+          "legendFormat": "{{outcome}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "none observed",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Handler duration p95 / p99 (histogram estimate)",
+      "description": "`nawara_event_handler_duration_seconds` for the selected queue, 5-minute window (buckets 5 ms … 60 s; precise only to the bucket bounds). Blank when nothing was handled in the window.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 10,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(nawara_event_handler_duration_seconds_bucket{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"}[5m]))) and on () (sum(rate(nawara_event_handler_duration_seconds_count{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"}[5m])) > 0)",
+          "legendFormat": "p95",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(nawara_event_handler_duration_seconds_bucket{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"}[5m]))) and on () (sum(rate(nawara_event_handler_duration_seconds_count{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"}[5m])) > 0)",
+          "legendFormat": "p99",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no deliveries in window",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 8,
+      "title": "Consumer incidents (since start)",
+      "description": "For the selected queue, since its consumer process started: losses, recoveries, broker redeliveries and settle failures (acknowledgements that could not be sent; the broker redelivers). A line appears once it first happened: \"none observed\" means none since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 17,
+        "y": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(nawara_event_consumer_losses_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"})",
+          "legendFormat": "losses",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum(nawara_event_consumer_recoveries_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"})",
+          "legendFormat": "recoveries",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum(nawara_event_redeliveries_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"})",
+          "legendFormat": "redeliveries",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "sum(nawara_event_settle_failures_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\",queue=\"$queue\"})",
+          "legendFormat": "settle failures",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 9,
+      "title": "Application publishing (all Core publishers)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Publish outcomes",
+      "description": "`sum by (job, outcome) (rate(nawara_events_published_total[5m]))`: confirmed by the broker, failed, or confirm_timeout (state unknown; the outbox republishes). An outcome appears once it first happened. No data: no Core service has published since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (job, outcome) (rate(nawara_events_published_total{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}[5m]))",
+          "legendFormat": "{{job}} {{outcome}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "none observed",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Publish confirm p95 (histogram estimate)",
+      "description": "`histogram_quantile(0.95, …nawara_event_publish_duration_seconds…)` per service: publish until the broker confirmed, failed or timed out (buckets 1 ms … 10 s; precise only to the bucket bounds). Blank for a service that published nothing in the window.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (job, le) (rate(nawara_event_publish_duration_seconds_bucket{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}[5m]))) and on (job) (sum by (job) (rate(nawara_event_publish_duration_seconds_count{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}[5m])) > 0)",
+          "legendFormat": "{{job}} p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no publish in window",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 12,
+      "title": "RabbitMQ broker (aggregate node totals; no queue identified)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "Broker target up",
+      "description": "`up{job=\"rabbitmq\"}`: the broker's native metrics endpoint (15692, aggregated).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 27
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "up{job=\"rabbitmq\"}",
+          "legendFormat": "rabbitmq",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 14,
+      "title": "Resource alarms",
+      "description": "`rabbitmq_alarms_*`: 1 while the broker blocks publishers because memory is above its watermark, free disk is below its limit, or file descriptors are exhausted.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 4,
+        "y": 27
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rabbitmq_alarms_memory_used_watermark{job=\"rabbitmq\"}",
+          "legendFormat": "memory",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "rabbitmq_alarms_free_disk_space_watermark{job=\"rabbitmq\"}",
+          "legendFormat": "disk",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "rabbitmq_alarms_file_descriptor_limit{job=\"rabbitmq\"}",
+          "legendFormat": "file descriptors",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ALARM",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 15,
+      "title": "Connections, channels, consumers, queues",
+      "description": "Node totals: `rabbitmq_connections`, `rabbitmq_channels`, `rabbitmq_consumers`, `rabbitmq_queues` (retry and dead-letter queues are queues too).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rabbitmq_connections{job=\"rabbitmq\"}",
+          "legendFormat": "connections",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "rabbitmq_channels{job=\"rabbitmq\"}",
+          "legendFormat": "channels",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "rabbitmq_consumers{job=\"rabbitmq\"}",
+          "legendFormat": "consumers",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "rabbitmq_queues{job=\"rabbitmq\"}",
+          "legendFormat": "queues",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Aggregate broker backlog (all queues, incl. retry and dead-letter)",
+      "description": "Node totals of `rabbitmq_queue_messages_ready`, `_unacked` and `rabbitmq_queue_messages` across ALL queues: main queues, `<queue>.retry` delay queues AND `<queue>.dead` dead-letter queues. It is not the active work backlog: parked messages stay in it until removed. No queue is identified; per-queue / DLQ depth is deferred.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(rabbitmq_queue_messages_ready{job=\"rabbitmq\"})",
+          "legendFormat": "ready",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum(rabbitmq_queue_messages_unacked{job=\"rabbitmq\"})",
+          "legendFormat": "unacked",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum(rabbitmq_queue_messages{job=\"rabbitmq\"})",
+          "legendFormat": "total",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Broker message rates",
+      "description": "Node totals, per second over 5 minutes: received from publishers, routed to queues, delivered to consumers, acknowledged, and redelivered. Retry cycling (`<queue>.retry` → `<queue>`) and dead-letter copies are broker traffic too.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(rate(rabbitmq_global_messages_received_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "received",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum(rate(rabbitmq_global_messages_routed_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "routed",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum(rate(rabbitmq_global_messages_delivered_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "delivered",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "sum(rate(rabbitmq_global_messages_acknowledged_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "acknowledged",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "E",
+          "expr": "sum(rate(rabbitmq_global_messages_redelivered_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "redelivered",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Broker dead-letter mechanics (not parked messages)",
+      "description": "BROKER dead-lettering by reason, node totals per second. `expired` is mostly Core's retry delay: a `<queue>.retry` message whose TTL ends is dead-lettered BACK into its main queue, so it rises with every retry. `rejected` is a message nacked without requeue (the `dead_letter_unannotated` path). Neither is \"messages parked in a DLQ\": use the application dead-lettered panel above for that.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(rate(rabbitmq_global_messages_dead_lettered_expired_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "expired (TTL; retry cycling)",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum(rate(rabbitmq_global_messages_dead_lettered_rejected_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "rejected",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum(rate(rabbitmq_global_messages_dead_lettered_maxlen_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "max length",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "sum(rate(rabbitmq_global_messages_dead_lettered_delivery_limit_total{job=\"rabbitmq\"}[5m]))",
+          "legendFormat": "delivery limit",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Broker memory vs limit",
+      "description": "`rabbitmq_process_resident_memory_bytes` against `rabbitmq_resident_memory_limit_bytes` (the memory alarm watermark).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rabbitmq_process_resident_memory_bytes{job=\"rabbitmq\"}",
+          "legendFormat": "resident",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "rabbitmq_resident_memory_limit_bytes{job=\"rabbitmq\"}",
+          "legendFormat": "limit (watermark)",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Broker free disk vs limit",
+      "description": "`rabbitmq_disk_space_available_bytes` against `rabbitmq_disk_space_available_limit_bytes` (below the limit, the disk alarm blocks publishers).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rabbitmq_disk_space_available_bytes{job=\"rabbitmq\"}",
+          "legendFormat": "available",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "rabbitmq_disk_space_available_limit_bytes{job=\"rabbitmq\"}",
+          "legendFormat": "limit",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    }
+  ]
+}
