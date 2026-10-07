@@ -1794,3 +1794,58 @@ export function checkEnvReaderClis(files) {
   }
   return problems;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A15.2: one Node major for developers, CI and the images.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/** The major of a Node version declaration (`22`, `22.x`, `v22.4.1`, `^22.12.0`, `~22.1`), or undefined when it is not a single major. */
+export function nodeMajor(declaration) {
+  const m = /^[v^~]?(\d+)(?:\.(?:x|\d+)){0,2}$/.exec(String(declaration ?? '').trim());
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * The Node major is declared in four places, and a developer, CI and the images must run the same one: `.nvmrc` (the reference),
+ * the root `package.json` `engines.node`, every Node version of Core CI (`NODE_VERSION` and any literal `node-version`), and the base
+ * image of every application Dockerfile (`FROM node:<major>…`). `dockerfiles` maps a path to its text. Advisory for developers (npm
+ * only warns on another major); the point of the guard is that the four cannot drift apart silently.
+ */
+export function checkNodeToolchain({ nvmrc, packageJson, ciText, dockerfiles }) {
+  const expected = nodeMajor(nvmrc);
+  if (expected === undefined) return ['.nvmrc is missing or does not name one Node major (for example "22"); the Node toolchain cannot be checked'];
+  const problems = [];
+  const mismatch = (where, declared) => {
+    const major = nodeMajor(declared);
+    if (major === undefined) problems.push(`${where} does not name one Node major (got "${declared ?? 'nothing'}"); .nvmrc says ${expected}`);
+    else if (major !== expected) problems.push(`${where} says Node ${major}, but .nvmrc says ${expected}: developers, CI and the images must use the same Node major`);
+  };
+  let engines;
+  try { engines = JSON.parse(packageJson ?? '').engines?.node; } catch { engines = undefined; }
+  mismatch('package.json engines.node', engines);
+
+  const ci = parse(ciText ?? '');
+  const versions = [];
+  if (ci?.env?.NODE_VERSION !== undefined) versions.push(['core-ci.yml NODE_VERSION', String(ci.env.NODE_VERSION)]);
+  for (const [jobId, job] of Object.entries(ci?.jobs ?? {})) {
+    if (job?.env?.NODE_VERSION !== undefined) versions.push([`core-ci.yml job "${jobId}" NODE_VERSION`, String(job.env.NODE_VERSION)]);
+    for (const step of asArray(job?.steps)) {
+      const v = step?.with?.['node-version'];
+      if (v !== undefined && !String(v).includes('${{')) versions.push([`core-ci.yml job "${jobId}" node-version`, String(v)]);
+    }
+  }
+  if (versions.length === 0) problems.push('core-ci.yml declares no Node version (NODE_VERSION or a literal node-version); the CI Node major cannot be checked');
+  for (const [where, declared] of versions) mismatch(where, declared);
+
+  const files = Object.entries(dockerfiles ?? {});
+  if (files.length === 0) problems.push('no application Dockerfile was found; the image Node major cannot be checked');
+  for (const [path, text] of files) {
+    const images = String(text).split('\n').filter((l) => /^FROM\s/i.test(l)).map((l) => l.trim().split(/\s+/)[1] ?? '');
+    for (const image of new Set(images)) { // one finding per distinct base image of a file (build and runtime stages usually share it)
+      const m = /^node:([^@\s]+)/.exec(image);
+      if (!m) { problems.push(`${path}: base image ${image.split('@')[0]} is not a Node image; the image Node major cannot be checked`); continue; }
+      mismatch(`${path} (FROM node:${m[1]})`, m[1].split('-')[0]);
+    }
+  }
+  return problems;
+}

@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1892,4 +1892,51 @@ test('V2 A15.1: the runner checks the migrated operator CLIs', () => {
   assert.equal(calls.length, 1, 'checkEnvReaderClis is called once');
   assert.ok(ts.isSpreadElement(calls[0].parent) && calls[0].parent.parent.expression.getText() === 'problems.push', 'its problems are reported');
   assert.equal(calls[0].arguments[0].getText(), 'Object.fromEntries([...ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS].map((rel) => [rel, readOrUndefined(rel)]))', 'every listed CLI and the resolvers are read from the repository');
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A15.2: one Node major for developers, CI and the images.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test('V2 A15.2: .nvmrc, engines, Core CI and every application Dockerfile name the same Node major', () => {
+  const ci = (version = "'22'", extra = '') => `name: Core CI\non: pull_request\nenv:\n  NODE_VERSION: ${version}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-node@x\n        with:\n          node-version: \${{ env.NODE_VERSION }}\n${extra}`;
+  const dockerfile = (major = '22') => `FROM node:${major}-alpine@sha256:${'a'.repeat(64)} AS build\nRUN true\nFROM node:${major}-alpine@sha256:${'a'.repeat(64)} AS runtime\n`;
+  const input = (o = {}) => ({ nvmrc: '22\n', packageJson: '{"engines":{"node":"22.x"}}', ciText: ci(), dockerfiles: { 'apps/x-service/Dockerfile': dockerfile(), 'apps/y-service/Dockerfile': dockerfile() }, ...o });
+  assert.deepEqual(checkNodeToolchain(input()), []);
+  // Other spellings of the same major pass: the guard compares majors, not text.
+  assert.deepEqual(checkNodeToolchain(input({ nvmrc: 'v22.14.0\n', packageJson: '{"engines":{"node":"^22.12.0"}}', ciText: ci('22.x') })), []);
+  for (const [text, major] of [['22', 22], ['22.x', 22], ['v22.4.1', 22], ['^22.12.0', 22], ['~22.1', 22], [' 20 ', 20], ['>=22', undefined], ['22 || 24', undefined], ['lts/*', undefined], ['', undefined]]) {
+    assert.equal(nodeMajor(text), major, text);
+  }
+
+  const one = (o, pattern) => {
+    const problems = checkNodeToolchain(input(o));
+    assert.equal(problems.length, 1, JSON.stringify(problems));
+    assert.match(problems[0], pattern);
+  };
+  one({ packageJson: '{"engines":{"node":"24.x"}}' }, /^package\.json engines\.node says Node 24, but \.nvmrc says 22: developers, CI and the images must use the same Node major$/);
+  one({ packageJson: '{"name":"x"}' }, /^package\.json engines\.node does not name one Node major \(got "nothing"\); \.nvmrc says 22$/);
+  one({ packageJson: '{"engines":{"node":">=22"}}' }, /^package\.json engines\.node does not name one Node major \(got ">=22"\)/);
+  one({ packageJson: 'not json' }, /^package\.json engines\.node does not name one Node major/);
+  one({ ciText: ci("'24'") }, /^core-ci\.yml NODE_VERSION says Node 24, but \.nvmrc says 22/);
+  one({ ciText: ci("'22'", '  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-node@x\n        with:\n          node-version: 20\n') }, /^core-ci\.yml job "b" node-version says Node 20, but \.nvmrc says 22/);
+  one({ ciText: ci("'22'", '  b:\n    runs-on: ubuntu-latest\n    env:\n      NODE_VERSION: 24\n    steps: []\n') }, /^core-ci\.yml job "b" NODE_VERSION says Node 24/);
+  one({ ciText: 'name: Core CI\non: pull_request\njobs: {}\n' }, /^core-ci\.yml declares no Node version/);
+  one({ dockerfiles: { 'apps/x-service/Dockerfile': dockerfile(), 'apps/y-service/Dockerfile': dockerfile().replace(/node:22-alpine(@\S+) AS runtime/, 'node:24-alpine$1 AS runtime') } },
+    /^apps\/y-service\/Dockerfile \(FROM node:24-alpine\) says Node 24, but \.nvmrc says 22/);
+  one({ dockerfiles: { 'apps/x-service/Dockerfile': 'FROM alpine:3.20\n' } }, /^apps\/x-service\/Dockerfile: base image alpine:3\.20 is not a Node image/);
+  one({ dockerfiles: {} }, /^no application Dockerfile was found/);
+  // .nvmrc is the reference: moving it alone reports every other source; a missing or unusable one stops the check with one message.
+  assert.equal(checkNodeToolchain(input({ nvmrc: '20\n' })).length, 1 + 1 + 2); // engines, CI, one per Dockerfile
+  for (const nvmrc of [undefined, '', 'lts/iron\n']) assert.deepEqual(checkNodeToolchain(input({ nvmrc })), ['.nvmrc is missing or does not name one Node major (for example "22"); the Node toolchain cannot be checked']);
+  // The digest of a pinned image never reaches a diagnostic.
+  for (const p of checkNodeToolchain(input({ nvmrc: '20\n' }))) assert.doesNotMatch(p, /sha256/);
+});
+
+test('V2 A15.2: the real repository declares one Node major, and the runner checks it', () => {
+  const dockerfiles = Object.fromEntries(['auth', 'billing', 'payment', 'organization', 'notification', 'file', 'audit', 'release'].map((s) => [`apps/${s}-service/Dockerfile`, repoFile(`apps/${s}-service/Dockerfile`)]));
+  assert.deepEqual(checkNodeToolchain({ nvmrc: repoFile('.nvmrc'), packageJson: repoFile('package.json'), ciText: repoFile('.github/workflows/core-ci.yml'), dockerfiles }), []);
+  const runner = repoFile('scripts/check-repo.mjs');
+  assert.equal(runner.split('checkNodeToolchain(').length - 1, 1, 'checkNodeToolchain is called once');
+  assert.match(runner, /problems\.push\(\.\.\.checkNodeToolchain\(\{ nvmrc: readOrUndefined\('\.nvmrc'\), packageJson: readOrUndefined\('package\.json'\), ciText: readOrUndefined\('\.github\/workflows\/core-ci\.yml'\), dockerfiles \}\)\);/);
 });

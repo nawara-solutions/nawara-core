@@ -1,6 +1,9 @@
 {
   "name": "nawara-core",
   "private": true,
+  "engines": {
+    "node": "22.x"
+  },
   "workspaces": [
     "apps/*",
     "libs/*",
