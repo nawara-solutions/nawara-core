@@ -1172,6 +1172,9 @@ const isCreateRequireCall = (node) => {
  * `EnvReader` method called on `reader` (or Auth's `src`), a name passed to one of the known configuration helpers
  * (`CONFIG_NAME_HELPERS`: `readKey(reader, 'X_KEY', …)`, `int(env, 'X_TTL', …)`), and `env.X` / `env['X']`. A computed name (a
  * template with substitutions, or a prefix a helper completes) is not literal and is not listed: the list is high-confidence, not complete.
+ *
+ * V2 A15.1 splits the process-environment accesses in two: `envReaderUses` counts `new EnvReader(process.env)` (the environment handed
+ * whole to the kit's reader), `directEnvUses` every other access (a named read, a bracket read, a destructuring, a spread, a write).
  */
 export function sourceFacts(relPath, text) {
   // One parse per file and run: the source guards and the A2.5 README coverage read the same facts (callers never mutate them).
@@ -1197,9 +1200,15 @@ function parseSourceFacts(relPath, text) {
   let usesCallerPolicy = false;
   const policyReads = [];
   let readsProcessEnv = false;
+  let envReaderUses = 0;
+  let directEnvUses = 0;
   const configNames = new Set();
   const visit = (node) => {
-    if (isProcessEnvAccess(node)) readsProcessEnv = true;
+    if (isProcessEnvAccess(node)) {
+      readsProcessEnv = true;
+      if (isEnvReaderArgument(node)) envReaderUses += 1;
+      else directEnvUses += 1;
+    }
     for (const name of literalConfigNames(node)) configNames.add(name);
     let spec;
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
@@ -1229,7 +1238,7 @@ function parseSourceFacts(relPath, text) {
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return { specifiers, usesCallerPolicy, policyReads, readsProcessEnv, configNames: [...configNames] };
+  return { specifiers, usesCallerPolicy, policyReads, readsProcessEnv, envReaderUses, directEnvUses, configNames: [...configNames] };
 }
 const CALLER_POLICY_PARSER = 'parseCallerPolicy';
 const CONFIG_READS = new Set(['get', 'required', 'optional']); // the kit ConfigReader's string reads
@@ -1261,6 +1270,13 @@ function isProcessEnvAccess(node) {
     return !!named && ts.isNamedImports(named) && named.elements.some((el) => (el.propertyName ?? el.name).text === 'env');
   }
   return false;
+}
+/** V2 A15.1: `process.env` as the first argument of `new EnvReader(...)`: the whole environment handed to the kit's reader. */
+function isEnvReaderArgument(node) {
+  let child = node;
+  let parent = node.parent;
+  while (parent && ts.isParenthesizedExpression(parent)) { child = parent; parent = parent.parent; }
+  return !!parent && ts.isNewExpression(parent) && ts.isIdentifier(parent.expression) && parent.expression.text === 'EnvReader' && parent.arguments?.[0] === child;
 }
 const ENV_NAME = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/;
 const ENV_READER_METHODS = new Set(['get', 'required', 'optional', 'int', 'bool', 'oneOf', 'secret', 'url']); // the kit's EnvReader
@@ -1736,3 +1752,45 @@ export function checkReadmeEnvironmentCoverage(app, readmeText, sources) {
 /** The source files the README coverage reads: a service's non-test `src` TypeScript outside its command-line tools. */
 export const isServiceConfigSource = (app, relPath) => relPath.startsWith(`apps/${app}/src/`) && !relPath.startsWith(`apps/${app}/src/cli/`)
   && /\.ts$/.test(relPath) && !relPath.endsWith('.d.ts') && !/(^|\/)test\//.test(relPath) && !/\.(e2e-|int-)?spec\.ts$/.test(relPath);
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A15.1: the operator CLIs that read their configuration through the kit's EnvReader stay on it.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * The generic operator CLIs migrated by A15.1. Each reads its settings through `new EnvReader(process.env)` (surrounding whitespace
+ * removed, `NAME` or `NAME_FILE`, both together refused, value-free errors) and reaches the process environment in no other way.
+ * The path allowlist (`PROCESS_ENV_BOUNDARY`) still admits every CLI directory: Auth's CLIs (A4) and the Organization ownership CLI
+ * (A5 / F6 / F7) are not listed here and keep their own reads until those stages.
+ */
+export const ENV_READER_CLIS = [
+  'libs/service-kit/src/cli/migrate.ts',
+  'libs/service-kit/src/cli/dlq.ts',
+  'libs/service-kit/src/cli/check-dlq-depth.ts',
+  'libs/service-kit/src/cli/check-outbox-lag.ts',
+  'apps/notification-service/src/cli/secret-keys.ts',
+  'apps/audit-service/src/cli/retention.ts',
+];
+/** The kit CLIs' shared resolvers: they take a reader and never reach the process environment themselves. */
+export const ENV_READER_CLI_RESOLVERS = 'libs/service-kit/src/cli/cli-config.ts';
+
+/** `files` maps each listed path (and the resolvers' path) to its text, or undefined when the file is missing. */
+export function checkEnvReaderClis(files) {
+  const problems = [];
+  const resolvers = files[ENV_READER_CLI_RESOLVERS];
+  if (resolvers === undefined) problems.push(`${ENV_READER_CLI_RESOLVERS} (the operator CLIs' configuration resolvers) is missing; update ENV_READER_CLI_RESOLVERS if it moved`);
+  else if (sourceFacts(ENV_READER_CLI_RESOLVERS, resolvers).readsProcessEnv) {
+    problems.push(`${ENV_READER_CLI_RESOLVERS}: reads process.env; the resolvers read only through the EnvReader they are given (V2 A15.1)`);
+  }
+  for (const relPath of ENV_READER_CLIS) {
+    const text = files[relPath];
+    if (text === undefined) { problems.push(`${relPath} (an operator CLI that reads its configuration through EnvReader) is missing; update ENV_READER_CLIS if it moved`); continue; }
+    const facts = sourceFacts(relPath, text);
+    if (facts.directEnvUses > 0) {
+      problems.push(`${relPath}: reads process.env directly; this operator CLI reads its configuration through the kit's EnvReader (new EnvReader(process.env)), which gives NAME_FILE, trimming and the NAME + NAME_FILE refusal (V2 A15.1)`);
+    } else if (facts.envReaderUses === 0) {
+      problems.push(`${relPath}: does not read its configuration through new EnvReader(process.env); update ENV_READER_CLIS (scripts/lib/checks.mjs) only if the CLI no longer reads the environment (V2 A15.1)`);
+    }
+  }
+  return problems;
+}
