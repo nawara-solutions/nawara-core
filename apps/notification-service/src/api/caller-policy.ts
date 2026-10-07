@@ -1,4 +1,4 @@
-import { ConfigError } from '@nawara/service-kit';
+import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';
 import { TEMPLATE_KEY } from '../templates/catalog.js';
 
 /** Channels a caller may request in V1 (SDD §7.2). `IN_APP` exists in the model but no V1 path creates it; `PUSH` does not exist yet. */
@@ -29,35 +29,21 @@ export class NotificationCallerPolicy {
   private constructor(private readonly callers: ReadonlyMap<string, CallerPolicy>) {}
 
   static parse(raw: string | undefined, registered: readonly string[]): NotificationCallerPolicy {
-    if (raw === undefined || raw.trim() === '') {
-      if (registered.length > 0) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY is required: every registered caller needs an explicit entry (deny by default): ${registered.join(', ')}`);
-      return new NotificationCallerPolicy(new Map());
-    }
-    let doc: unknown;
-    try {
-      doc = JSON.parse(raw);
-    } catch {
-      throw new ConfigError('NOTIFICATION_SERVICE_POLICY must be valid JSON');
-    }
-    const callers = (doc as { callers?: unknown } | null)?.callers;
-    if (typeof callers !== 'object' || callers === null || Array.isArray(callers) || Object.keys(doc as object).length !== 1) {
-      throw new ConfigError('NOTIFICATION_SERVICE_POLICY must be {"callers": {...}}');
-    }
-    const map = new Map<string, CallerPolicy>();
-    for (const [name, entry] of Object.entries(callers as Record<string, unknown>)) {
-      if (!registered.includes(name)) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY names "${name}", which has no registered service token`);
-      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: the entry for "${name}" must be an object`);
-      const e = entry as Record<string, unknown>;
-      for (const k of Object.keys(e)) if (!KEYS.has(k)) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: "${name}" has an unknown property "${k}"`);
-      if (!Array.isArray(e.templates) || e.templates.length === 0) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: "${name}" needs an explicit, non-empty templates list (no wildcard)`);
-      for (const t of e.templates) if (typeof t !== 'string' || !TEMPLATE_KEY.test(t)) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: "${name}" lists an invalid template key`);
-      if (!Array.isArray(e.channels) || e.channels.length === 0) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: "${name}" needs an explicit, non-empty channels list`);
-      for (const c of e.channels) if (!(API_CHANNELS as readonly unknown[]).includes(c)) throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: "${name}" lists a channel other than ${API_CHANNELS.join(' / ')}`);
-      if (e.organizations !== 'none' && e.organizations !== 'request') throw new ConfigError(`NOTIFICATION_SERVICE_POLICY: "${name}".organizations must be "none" or "request"`);
-      map.set(name, { templates: new Set(e.templates as string[]), channels: new Set(e.channels as ApiChannel[]), organizations: e.organizations });
-    }
-    for (const r of registered) if (!map.has(r)) throw new ConfigError(`registered caller "${r}" has no NOTIFICATION_SERVICE_POLICY entry (deny by default)`);
-    return new NotificationCallerPolicy(map);
+    // V2 A1.3: the document (envelope, registration cross-check both ways, unknown and duplicate keys at any depth) is the kit's
+    // shared parser (ADR-0052, ADR-0056 §11); the templates / channels / organizations dimensions below are unchanged.
+    const map = parseCallerPolicy<CallerPolicy>(raw, registered, {
+      variable: 'NOTIFICATION_SERVICE_POLICY',
+      keys: [...KEYS],
+      entry: (at, e) => {
+        if (!Array.isArray(e.templates) || e.templates.length === 0) throw new ConfigError(`${at} needs an explicit, non-empty templates list (no wildcard)`);
+        for (const t of e.templates) if (typeof t !== 'string' || !TEMPLATE_KEY.test(t)) throw new ConfigError(`${at} lists an invalid template key`);
+        if (!Array.isArray(e.channels) || e.channels.length === 0) throw new ConfigError(`${at} needs an explicit, non-empty channels list`);
+        for (const c of e.channels) if (!(API_CHANNELS as readonly unknown[]).includes(c)) throw new ConfigError(`${at} lists a channel other than ${API_CHANNELS.join(' / ')}`);
+        if (e.organizations !== 'none' && e.organizations !== 'request') throw new ConfigError(`${at}.organizations must be "none" or "request"`);
+        return { templates: new Set(e.templates as string[]), channels: new Set(e.channels as ApiChannel[]), organizations: e.organizations };
+      },
+    });
+    return new NotificationCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
   }
 
   /** The caller's policy, or undefined (then every request is refused). */
