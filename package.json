@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "prepare": "husky",
+    "build:libs": "npm run build -w @nawara/service-kit -w @nawara/audit-contract",
     "check:repo": "node scripts/check-repo.mjs",
     "test:repo": "node --test scripts/check-repo.test.mjs",
     "test:deploy": "node --test scripts/deploy-tests/*.test.mjs",
