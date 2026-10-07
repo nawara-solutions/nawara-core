@@ -24,6 +24,23 @@ beyond what the deploy asserts; rotate a caller token by deleting its file; rest
 
 ## 2. Deploy (G1; the deployment part of F1)
 
+**Pre-deploy check: `SERVICE_POLICY` strictness (V2 A1.3, OD-A1-3a).** From the first image built with A1.3, `SERVICE_POLICY` must
+have exactly one top-level key `callers`, only the entry properties `capabilities` / `allowedPlatforms`, and no repeated JSON key at
+any depth; anything else refuses to boot (the replacement is then removed and the previous container restored, §5). Policies written by
+`deploy/register-caller.sh` already conform; a hand edit may not. Before the first such deploy, on the server, let the **candidate**
+image's own parser read the same `.env` the service runs with. It prints only `OK` or `REFUSED`, never the value:
+
+```bash
+NEW=ghcr.io/<owner>/nawara-core-organization-service@sha256:<64 hex>   # the digest about to be deployed
+docker run --rm --env-file "$HOME/nawara-core/organization-service/.env" --entrypoint node "$NEW" --input-type=module -e '
+import { ServicePolicy } from "./dist/authorization/service-policy.js";
+const callers = (process.env.SERVICE_TOKENS ?? "").split(",").filter(Boolean).map((t) => t.split(":")[0]);
+try { ServicePolicy.parse(process.env.SERVICE_POLICY, callers); console.log("OK  SERVICE_POLICY is accepted by this image"); }
+catch { console.log("REFUSED  this image would not boot with SERVICE_POLICY: fix it before deploying"); process.exit(1); }'
+```
+
+On `REFUSED`, do not deploy: rebuild the policy with `deploy/register-caller.sh` (§4) or correct the hand edit, and run the check again.
+
 **By exact digest (V2 A0).** A merge to `main` that changes an input of the image only builds it (`organization-service-image.yml`:
 `sha-<commit>`, revision label, index digest in the run summary). Deploying selects one such digest:
 

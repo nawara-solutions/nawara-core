@@ -20,8 +20,8 @@ describe('NOTIFICATION_SERVICE_POLICY (SDD §11.2): parsed at startup, deny by d
   });
   it.each([
     ['a registered caller without an entry', undefined, ['a'], /required/],
-    ['a registered caller missing from the policy', policy({ a: entry() }), ['a', 'b'], /"b" has no NOTIFICATION_SERVICE_POLICY entry/],
-    ['an entry for a caller with no token', policy({ a: entry(), x: entry() }), ['a'], /"x", which has no registered service token/],
+    ['a registered caller missing from the policy', policy({ 'core-a': entry() }), ['core-a', 'core-b'], /"core-b" has no NOTIFICATION_SERVICE_POLICY entry/],
+    ['an entry for a caller with no token', policy({ 'core-a': entry(), 'core-x': entry() }), ['core-a'], /"core-x", which has no registered service token/],
     ['invalid JSON', '{callers', ['a'], /valid JSON/],
     ['no callers object', JSON.stringify({ a: entry() }), ['a'], /\{"callers"/],
     ['an extra top-level key', JSON.stringify({ callers: { a: entry() }, admin: true }), ['a'], /\{"callers"/],
@@ -30,10 +30,53 @@ describe('NOTIFICATION_SERVICE_POLICY (SDD §11.2): parsed at startup, deny by d
     ['IN_APP', policy({ a: entry({ channels: ['IN_APP'] }) }), ['a'], /channel other than EMAIL \/ SMS/],
     ['PUSH', policy({ a: entry({ channels: ['PUSH'] }) }), ['a'], /channel other than/],
     ['an unknown organizations mode', policy({ a: entry({ organizations: 'any' }) }), ['a'], /"none" or "request"/],
-    ['an unknown property (a category)', policy({ a: entry({ categories: ['SECURITY'] }) }), ['a'], /unknown property "categories"/],
+    ['an unknown property (a category)', policy({ a: entry({ categories: ['SECURITY'] }) }), ['a'], /unknown property \(allowed: templates, channels, organizations\)/],
   ])('refuses %s', (_l, raw, registered, message) => {
     expect(() => NotificationCallerPolicy.parse(raw as string | undefined, registered as string[])).toThrow(ConfigError);
     expect(() => NotificationCallerPolicy.parse(raw as string | undefined, registered as string[])).toThrow(message as RegExp);
+  });
+});
+
+describe('V2 A1.3: NOTIFICATION_SERVICE_POLICY on the kit parser (ADR-0056 §11)', () => {
+  const refusesRepeat = (raw: string, registered: string[]) => {
+    let error: unknown;
+    try {
+      NotificationCallerPolicy.parse(raw, registered);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as Error).message).toMatch(/must not repeat a key/);
+    expect((error as Error).message).not.toContain('membership.approved'); // the refusal never echoes policy content
+  };
+
+  // Raw JSON on purpose: JSON.stringify can never produce a repeated key, and JSON.parse would silently keep the last one.
+  it('refuses a repeated caller key (the second entry would silently replace a narrower first one)', () => {
+    refusesRepeat('{"callers":{"core-a":{"templates":["membership.approved"],"channels":["EMAIL"],"organizations":"none"},"core-a":{"templates":["membership.approved"],"channels":["EMAIL","SMS"],"organizations":"request"}}}', ['core-a']);
+  });
+
+  it('refuses a repeated entry property', () => {
+    refusesRepeat('{"callers":{"core-a":{"templates":["membership.approved"],"channels":["EMAIL"],"organizations":"none","organizations":"request"}}}', ['core-a']);
+  });
+
+  it('refuses a repeated top-level key', () => {
+    refusesRepeat('{"callers":{},"callers":{"core-a":{"templates":["membership.approved"],"channels":["EMAIL"],"organizations":"none"}}}', ['core-a']);
+  });
+
+  it('a whitespace-only value is no policy: empty when nothing is registered, refused when a caller is', () => {
+    expect(NotificationCallerPolicy.parse(' \n\t ', []).of('core-a')).toBeUndefined();
+    expect(() => NotificationCallerPolicy.parse(' \n\t ', ['core-a'])).toThrow(/required/);
+  });
+
+  it('repeated templates or channels inside a list stay tolerated, exactly as before (a Set)', () => {
+    const p = NotificationCallerPolicy.parse(policy({ 'core-a': entry({ templates: ['membership.approved', 'membership.approved'], channels: ['EMAIL', 'EMAIL'] }) }), ['core-a']);
+    expect([...p.of('core-a')!.templates]).toEqual(['membership.approved']);
+    expect([...p.of('core-a')!.channels]).toEqual(['EMAIL']);
+  });
+
+  it('the image smoke document still parses to the same policy', () => {
+    const p = NotificationCallerPolicy.parse('{"callers":{"smoke-caller":{"templates":["membership.approved"],"channels":["EMAIL"],"organizations":"none"}}}', ['smoke-caller']);
+    expect(p.of('smoke-caller')).toEqual({ templates: new Set(['membership.approved']), channels: new Set(['EMAIL']), organizations: 'none' });
   });
 });
 

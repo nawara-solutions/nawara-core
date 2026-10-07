@@ -62,3 +62,43 @@ describe('FILE_SERVICE_POLICY', () => {
     expect([...FILE_MEDIA_TYPES]).toEqual(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
   });
 });
+
+describe('V2 A1.3: FILE_SERVICE_POLICY on the kit parser (ADR-0056 §11)', () => {
+  const refusesRepeat = (raw: string, registered: string[]) => {
+    let error: unknown;
+    try {
+      FileCallerPolicy.parse(raw, registered, CEILING);
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as Error).message).toMatch(/must not repeat a key/);
+    expect((error as Error).message).not.toContain('application/pdf'); // the refusal never echoes policy content
+  };
+
+  // Raw JSON on purpose: JSON.stringify can never produce a repeated key, and JSON.parse would silently keep the last one.
+  it('refuses a repeated caller key (the second entry would silently replace a narrower first one)', () => {
+    refusesRepeat('{"callers":{"core-drive":{"operations":["read"],"organizations":"none"},"core-drive":{"operations":["upload","read"],"organizations":"request","mediaTypes":["application/pdf"],"maxBytes":10}}}', ['core-drive']);
+  });
+
+  it('refuses a repeated entry property', () => {
+    refusesRepeat('{"callers":{"core-drive":{"operations":["read"],"organizations":"none","operations":["upload","read"]}}}', ['core-drive']);
+    refusesRepeat('{"callers":{"core-drive":{"operations":["upload"],"organizations":"none","mediaTypes":["image/png"],"maxBytes":10,"maxBytes":26214400}}}', ['core-drive']);
+  });
+
+  it('refuses a repeated top-level key', () => {
+    refusesRepeat('{"callers":{},"callers":{"core-drive":{"operations":["read"],"organizations":"none"}}}', ['core-drive']);
+  });
+
+  it('a whitespace-only value is no policy: empty when nothing is registered, refused when a caller is', () => {
+    expect(FileCallerPolicy.parse(' \n\t ', [], CEILING).of('core-drive')).toBeUndefined();
+    expect(() => FileCallerPolicy.parse(' \n\t ', ['core-drive'], CEILING)).toThrow(/required/);
+  });
+
+  it('the image smoke document still parses to the same policy', () => {
+    const p = FileCallerPolicy.parse('{"callers":{"smoke-caller":{"operations":["upload","read"],"organizations":"request","mediaTypes":["application/pdf"],"maxBytes":1048576}}}', ['smoke-caller'], CEILING);
+    expect(p.of('smoke-caller')).toEqual({ operations: new Set(['upload', 'read']), organizations: 'request', mediaTypes: new Set(['application/pdf']), maxBytes: 1_048_576 });
+    expect(p.allows('smoke-caller', 'upload')).toBe(true);
+    expect(p.allows('smoke-caller', 'delete')).toBe(false);
+  });
+});

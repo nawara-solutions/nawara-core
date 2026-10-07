@@ -1,4 +1,4 @@
-import { ConfigError } from '@nawara/service-kit';
+import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';
 import { REGISTRY_KEY } from '../domain/model.js';
 
 /**
@@ -32,44 +32,29 @@ export class ReleaseCallerPolicy {
   private constructor(private readonly callers: ReadonlyMap<string, CallerPolicy>) {}
 
   static parse(raw: string | undefined, registered: readonly string[]): ReleaseCallerPolicy {
-    if (raw === undefined || raw.trim() === '') {
-      if (registered.length > 0) throw new ConfigError(`RELEASE_SERVICE_POLICY is required: every registered caller needs an explicit entry (deny by default): ${registered.join(', ')}`);
-      return new ReleaseCallerPolicy(new Map());
-    }
-    let doc: unknown;
-    try {
-      doc = JSON.parse(raw);
-    } catch {
-      throw new ConfigError('RELEASE_SERVICE_POLICY must be valid JSON');
-    }
-    const callers = (doc as { callers?: unknown } | null)?.callers;
-    if (typeof callers !== 'object' || callers === null || Array.isArray(callers) || Object.keys(doc as object).length !== 1) {
-      throw new ConfigError('RELEASE_SERVICE_POLICY must be {"callers": {...}}');
-    }
-    const map = new Map<string, CallerPolicy>();
-    for (const [name, entry] of Object.entries(callers as Record<string, unknown>)) {
-      const at = `RELEASE_SERVICE_POLICY: "${name}"`;
-      if (!registered.includes(name)) throw new ConfigError(`RELEASE_SERVICE_POLICY names "${name}", which has no registered service token`);
-      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new ConfigError(`${at} must be an object`);
-      const e = entry as Record<string, unknown>;
-      for (const k of Object.keys(e)) if (k !== 'products') throw new ConfigError(`${at} has an unknown property "${k}"`);
-      const products = e.products;
-      if (typeof products !== 'object' || products === null || Array.isArray(products) || Object.keys(products).length === 0) {
-        throw new ConfigError(`${at}.products must be an explicit, non-empty object of product key → capabilities`);
-      }
-      const scoped = new Map<string, ReadonlySet<ReleaseCapability>>();
-      for (const [product, caps] of Object.entries(products as Record<string, unknown>)) {
-        if (!REGISTRY_KEY.test(product)) throw new ConfigError(`${at}.products has a key that is not a product registry key`);
-        if (!Array.isArray(caps) || caps.length === 0) throw new ConfigError(`${at}.products.${product} must be an explicit, non-empty list`);
-        for (const c of caps) if (!(RELEASE_CAPABILITIES as readonly unknown[]).includes(c)) throw new ConfigError(`${at}.products.${product} lists a value other than ${RELEASE_CAPABILITIES.join(' / ')}`);
-        const set = new Set(caps as ReleaseCapability[]);
-        if (set.size !== caps.length) throw new ConfigError(`${at}.products.${product} lists a capability twice`);
-        scoped.set(product, set);
-      }
-      map.set(name, { products: scoped });
-    }
-    for (const r of registered) if (!map.has(r)) throw new ConfigError(`registered caller "${r}" has no RELEASE_SERVICE_POLICY entry (deny by default)`);
-    return new ReleaseCallerPolicy(map);
+    // V2 A1.3: the document (envelope, registration cross-check both ways, unknown and duplicate keys at any depth) is the kit's
+    // shared parser (ADR-0052, ADR-0056 §11); the product → capabilities dimension below is unchanged.
+    const map = parseCallerPolicy<CallerPolicy>(raw, registered, {
+      variable: 'RELEASE_SERVICE_POLICY',
+      keys: ['products'],
+      entry: (at, e) => {
+        const products = e.products;
+        if (typeof products !== 'object' || products === null || Array.isArray(products) || Object.keys(products).length === 0) {
+          throw new ConfigError(`${at}.products must be an explicit, non-empty object of product key → capabilities`);
+        }
+        const scoped = new Map<string, ReadonlySet<ReleaseCapability>>();
+        for (const [product, caps] of Object.entries(products as Record<string, unknown>)) {
+          if (!REGISTRY_KEY.test(product)) throw new ConfigError(`${at}.products has a key that is not a product registry key`);
+          if (!Array.isArray(caps) || caps.length === 0) throw new ConfigError(`${at}.products.${product} must be an explicit, non-empty list`);
+          for (const c of caps) if (!(RELEASE_CAPABILITIES as readonly unknown[]).includes(c)) throw new ConfigError(`${at}.products.${product} lists a value other than ${RELEASE_CAPABILITIES.join(' / ')}`);
+          const set = new Set(caps as ReleaseCapability[]);
+          if (set.size !== caps.length) throw new ConfigError(`${at}.products.${product} lists a capability twice`);
+          scoped.set(product, set);
+        }
+        return { products: scoped };
+      },
+    });
+    return new ReleaseCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
   }
 
   /** Deny by default: an unknown caller, a capability it holds for no product, is false. */
