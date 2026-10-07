@@ -2,7 +2,7 @@
 
 LOCAL development only. Nothing here is production configuration, and it neither performs nor authorizes any production action:
 production observability is A12.10, behind its own decision gate (D2). Record:
-[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D–§3I, §4G–§4P.
+[core-v2-a12-observability.md](../architecture/core-v2-a12-observability.md) §3D–§3I, §4G–§4R.
 
 ## What it is
 
@@ -110,8 +110,8 @@ Latency panels (p95 / p99) are histogram estimates, precise only to the bucket b
 
 Prometheus evaluates the rules in `infra/observability/prometheus/rules/` every 30 s. **There is no Alertmanager**: nothing is sent
 anywhere. Read alerts at `http://127.0.0.1:9090/alerts` (pending = the condition holds but not yet for its `for` duration; firing).
-Grafana is not configured for alerting; its view of these Prometheus rules is checked in the A12.6.3 runtime proof. Thresholds are
-LOCAL validation values, not production ones.
+Grafana is not configured for alerting (no Grafana-managed rules), but it shows these Prometheus rules read-only, as datasource rules
+(verified in A12.6.4). Prometheus stays the rule authority. Thresholds are LOCAL validation values, not production ones.
 
 | Alert | Fires when | Severity |
 |---|---|---|
