@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import pg from 'pg';
 import { redactString } from '../logging/redact.js';
-import { ConfigError } from '../config/config.js';
+import { ConfigError, EnvReader } from '../config/config.js';
+import { DATABASE_URL_FLAG_DEPRECATION, outboxDatabaseUrl } from './cli-config.js';
 import { describeCliFailure } from '../logging/cli-failure.js';
 
 /**
@@ -17,18 +18,22 @@ import { describeCliFailure } from '../logging/cli-failure.js';
  * stores only the error class and a redacted, truncated message there; never a payload). Exit codes are unchanged:
  * 0 = no pending row older than the threshold, 1 = threshold exceeded or the check itself failed.
  *
- * Usage: nawara-check-outbox-lag --database-url <url> [--max-age-seconds 60]
+ * Usage: DATABASE_URL=<url> nawara-check-outbox-lag [--max-age-seconds 60]      (or DATABASE_URL_FILE=<path>)
+ *
+ * V2 A15.1: `--database-url <url>` still works and still wins, but is DEPRECATED (a credential on the command line is visible to
+ * other processes): using it prints one fixed warning on stderr. Output on stdout and the exit codes are unchanged.
  */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  let url: string | undefined = process.env.DATABASE_URL;
+  let flag: string | undefined;
   let maxAgeSeconds = 60;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--database-url' && args[i + 1]) url = args[++i];
+    if (args[i] === '--database-url' && args[i + 1]) flag = args[++i];
     else if (args[i] === '--max-age-seconds' && args[i + 1]) maxAgeSeconds = Number(args[++i]);
     else throw new ConfigError(`unknown argument: ${args[i]}`);
   }
-  if (!url) throw new ConfigError('--database-url (or DATABASE_URL) is required');
+  if (flag !== undefined) console.error(DATABASE_URL_FLAG_DEPRECATION); // fixed text: never the URL
+  const url = outboxDatabaseUrl(new EnvReader(process.env), flag);
   if (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0) throw new ConfigError('--max-age-seconds must be a non-negative number');
 
   // Bounded, so an unreachable or silent database fails the check (exit 1) instead of hanging a cron or runbook step (the client-side
