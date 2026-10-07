@@ -52,11 +52,12 @@ describe('V2 A2.1: the published development secret catalog (OD-A2-2)', () => {
     expect(isPublishedDevelopmentSecret(createHash('sha256').update(template.get('BILLING_TO_PAYMENT_TOKEN')!).digest('hex'))).toBe(false);
   });
 
-  it('keeps the three fingerprints Notification already refuses (migrated, not changed)', () => {
-    const notification = readFileSync(new URL('../../../apps/notification-service/src/config/notification-config.ts', import.meta.url), 'utf8');
-    const block = notification.slice(notification.indexOf('KNOWN_DEVELOPMENT_KEY_FINGERPRINTS = new Set')).split(']);')[0];
-    const fingerprints = [...block.matchAll(/[0-9a-f]{64}/g)].map((m) => m[0]);
-    expect(fingerprints.length).toBe(3);
-    for (const f of fingerprints) expect(DEVELOPMENT_SECRET_FINGERPRINTS.has(f)).toBe(true);
+  it('covers the three Notification keys Notification used to refuse with its own list (migrated in A2.1; its copy removed in A2.2)', () => {
+    const labels = [...DEVELOPMENT_SECRET_FINGERPRINTS.values()];
+    for (const name of ['NOTIFICATION_SECRET_KEYS', 'NOTIFICATION_REQUEST_HASH_KEY', 'NOTIFICATION_DESTINATION_LIMIT_KEY']) {
+      expect(labels.filter((l) => l === name), name).toHaveLength(1);
+      const [, , kind] = PUBLISHED.find(([template]) => template === name)!;
+      expect(isPublishedDevelopmentSecret(material(template.get(name)!, kind)), name).toBe(true);
+    }
   });
 });

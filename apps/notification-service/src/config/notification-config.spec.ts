@@ -101,7 +101,7 @@ describe('notification-service configuration', () => {
     }
   });
 
-  it.each(['postgres', 'root', 'notification_migrator'])('refuses the %s database user in production (superuser / schema owner), without echoing the URL', (user) => {
+  it.each(['postgres', 'root', 'notification_migrator', 'notification_admin', 'x_admin'])('refuses the %s database user in production (superuser / schema owner / bootstrap admin), without echoing the URL', (user) => {
     try {
       loadNotificationConfig(env({ NODE_ENV: 'production', DATABASE_URL: `postgres://${user}:s3cret-value@db:5432/notification` }));
       throw new Error('no throw');
@@ -109,6 +109,32 @@ describe('notification-service configuration', () => {
       expect(e).toBeInstanceOf(ConfigError);
       expect((e as Error).message).toMatch(/least-privilege runtime role/);
       expect((e as Error).message).not.toContain('s3cret-value');
+    }
+  });
+
+  it('V2 A2.2: every key is canonical standard base64 (the kit rule); the lenient decoder that dropped invalid characters is gone', () => {
+    const url = randomBytes(32).toString('base64url').replace(/^./, '-');
+    const garbled = `${HASH_KEY.slice(0, 20)}*${HASH_KEY.slice(20)}`;
+    const cases: Array<[NodeJS.ProcessEnv, RegExp, string]> = [
+      [{ NOTIFICATION_SECRET_KEYS: `k1:${url}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1' }, /^NOTIFICATION_SECRET_KEYS must be standard base64/, url],
+      [{ NOTIFICATION_REQUEST_HASH_KEY: garbled }, /^NOTIFICATION_REQUEST_HASH_KEY must be standard base64/, garbled],
+      [{ NOTIFICATION_REQUEST_HASH_KEY: `${HASH_KEY}\u0000` }, /standard base64/, HASH_KEY],
+      [{ NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS: `${randomBytes(32).toString('base64')}=` }, /^NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS must be standard base64/, ''],
+      [{ NOTIFICATION_SECRET_KEYS: `k1:${KEY},k1:${randomBytes(32).toString('base64')}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1' }, /^NOTIFICATION_SECRET_KEYS must not repeat a key id$/, KEY],
+      [{ NOTIFICATION_SECRET_KEYS: `k1:${KEY},k2:${KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1' }, /^NOTIFICATION_SECRET_KEYS must not repeat a key$/, KEY],
+      [{ NOTIFICATION_SECRET_KEYS: `k1:${randomBytes(31).toString('base64')}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1' }, /^NOTIFICATION_SECRET_KEYS must decode to exactly 32 bytes$/, ''],
+      [{ NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k9' }, /^NOTIFICATION_SECRET_ACTIVE_KEY_ID does not name a key in NOTIFICATION_SECRET_KEYS$/, ''],
+    ];
+    for (const [over, message, secret] of cases) {
+      let err: unknown;
+      try {
+        loadNotificationConfig(env(over));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, JSON.stringify(Object.keys(over))).toBeInstanceOf(ConfigError);
+      expect((err as Error).message).toMatch(message);
+      if (secret) expect((err as Error).message).not.toContain(secret);
     }
   });
 
