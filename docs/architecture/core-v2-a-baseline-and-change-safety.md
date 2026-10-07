@@ -284,3 +284,12 @@ Appended. [V2-A.3 record (A3.1 to A3.3)](core-v2-a-3-ci-and-ruleset.md).
   and the organization secrets must later be restricted; the production-access proof and that restriction are deferred.
 - **§7.** "V2-A.3 authorization (`main` ruleset)" is done; "Creating a protected `production` environment" remains open.
 - **Unchanged:** G6 deferred; G7, F6 and F7 locked; Final Core Validation absolute last.
+
+## 12. Later status: V2-A.3 certified (2026-10-07)
+
+Appended. §7 ("Creating a protected `production` environment" open) and §11 ("`production` environment … not started") describe the
+state when they were written. The environment was created and every production SSH job bound to it in A3.4 / A3.5, and **V2-A.3 is
+certified records-based by A3.8** ([V2-A.3 record §8](core-v2-a-3-ci-and-ruleset.md#8-a38-certification-2026-10-07)) with **A3.6
+(production access proof, D-3) and A3.7 (organization-secret restriction, D-4) deferred**. The environment has not been proven as the
+sole production credential holder. Stage A0 is therefore certified with those two items deferred. Unchanged: G6 deferred; G7, F6, F7
+locked; Final Core Validation absolute last.

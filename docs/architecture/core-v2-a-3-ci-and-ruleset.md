@@ -4,6 +4,8 @@
   ruleset), written 2026-10-04. **V2-A.3 is not complete and is not certified by this record:** A3.4 and A3.5 are not started, A3.6
   and A3.7 are deferred, and the first pull-request-level observation of the ruleset is recorded separately (§5). It authorizes
   nothing further. **Later status:** A3.4 and A3.5 were completed afterwards; see the appended [§7](#7-later-status-a34-and-a35-2026-10-04).
+  **A3.8 (2026-10-07): V2-A.3 FORMALLY CERTIFIED LOCALLY / RECORDS-BASED, with A3.6 and A3.7 DEFERRED** (owner decisions D-3, D-4);
+  see [§8](#8-a38-certification-2026-10-07). §1 and §6 below are the record as first written and are superseded by §7 and §8.
 - **Scope:** GitHub control-plane protection of `main`. No application, deployment or production change.
 - **Related:** [roadmap](../CORE-ROADMAP.md), [V2-A record](core-v2-a-baseline-and-change-safety.md) §6,
   [V2-A.2 certification](core-v2-a-2-certification.md), [production readiness](production-readiness.md) (finding F2).
@@ -183,3 +185,83 @@ observed at the first separately authorized production action (A3.6 is the natur
 **Still open:** until **A3.7** the organization-level `DEPLOY_SSH_*` secrets remain readable by any workflow run in this repository that
 does not declare the environment, including a workflow pushed on a feature branch (the ruleset protects `main` only and the repository
 checks report rather than prevent). **A3.6** (production proof) and **A3.7** stay deferred; A3.8 certification has not started.
+
+## 8. A3.8 certification (2026-10-07)
+
+**V2-A.3 / A3.8: FORMALLY CERTIFIED LOCALLY / RECORDS-BASED.** Owner decision D-3 permits certifying V2-A.3 "with the explicit
+limitation that the environment has not been proven as the sole production credential holder". That limitation is part of this
+certification.
+- **What it rests on:** the existing evidence of §2–§5 and §7, and a fresh read-only readback at `main` `4279203` (PR #217 merge)
+  on 2026-10-07T10:28Z.
+- **Readback scope:** GitHub API GETs of the ruleset, the effective rules on `main`, the `production` environment, its branch policy
+  and its secret **names**, plus a parse of the workflow files. No secret value was read. Nothing was changed, dispatched or deployed.
+- **No production action was performed.**
+
+**Superseded status.** §1 shows A3.4 and A3.5 as "not started" and A3.8 as "not started". §6 says no `production` environment exists.
+That was the state when those sections were written. A3.4 and A3.5 were completed (§7), and A3.8 is this section. Current status:
+
+```text
+V2-A.3
+  A3.1  discovery and design, owner decisions       ✅ certified
+  A3.2  core-ci-passed aggregate check              ✅ certified
+  A3.3  main ruleset                                ✅ certified (pull-request behaviour observed on PR #190)
+  A3.4  production environment                      ✅ certified (configuration)
+  A3.5  environment on every production SSH job     ✅ certified (bindings, dispatch-only, guards)
+  A3.6  production access proof                     ⏸ DEFERRED (owner decision D-3)
+  A3.7  organization-secret restriction             ⏸ DEFERRED (owner decision D-4): required eventually, not waived
+  A3.8  certification                               ✅ this section
+```
+
+**Fresh readback (2026-10-07), compared with §4 and §7:**
+
+| Subject | Read back | Matches the record |
+|---|---|---|
+| Ruleset `24453879` `main` | `enforcement: active`; target branch, include `refs/heads/main`, no exclude; rules `deletion`, `non_fast_forward`, `pull_request`, `required_status_checks`; pull request: 0 required approvals, review-thread resolution required, no code-owner / last-push / stale-dismissal requirement; required check `core-ci-passed` (integration `15368`), strict; bypass exactly `RepositoryRole` 5 with `bypass_mode: pull_request`; `updated_at` 2026-10-04T12:32:20+01:00 (the activation: unchanged since) | yes |
+| Effective rules on `main` | `deletion`, `non_fast_forward`, `pull_request`, `required_status_checks` | yes |
+| Environment `production` (`23422013679`) | the only environment; `required_reviewers`: the owner (`User` `32715188`), `prevent_self_review: false`, no wait timer; `can_admins_bypass: false`; custom branch policies, policy `main` (type branch) only; `updated_at` 2026-10-04T13:59:27Z (unchanged since A3.4) | yes |
+| Environment secret names | `DEPLOY_SSH_HOST`, `DEPLOY_SSH_PASSWORD`, `DEPLOY_SSH_PORT`, `DEPLOY_SSH_USER` (`DEPLOY_SSH_KEY` absent, as recorded) | yes |
+| Production SSH jobs (`.github/workflows`) | `auth-service-deploy` → `deploy`, `organization-service-deploy` → `deploy`, `audit-service-deploy` → `deploy`, `core-rabbitmq-provision` → `provision`, `auth-db-credential-rotate` → `rotate`, `core-backup` → `backup`: each `environment: production`, each workflow triggered by `workflow_dispatch` only; Auth's `verify` job holds no production credential | yes (the deploy workflows were reworked by A0 and the other workflows touched by A13 / A14 / later work, each passing the A3.5 guards) |
+| `core-ci-passed` (`.github/workflows/core-ci.yml`) | `if: always()`, needs all seven other jobs; `check:repo` (`checkCiAggregate`, the A3.5 production-job guards) passes | yes |
+
+**Certification matrix:**
+
+| # | Requirement | Evidence | Result | Limitation |
+|---|---|---|---|---|
+| 1 | Design and owner decisions | §2 (D-1 to D-5) | **PASS** | — |
+| 2 | Stable `core-ci-passed` aggregate | §3: PR #189 (merge `946a578`), Core CI 24/24 before and after the merge, `checkCiAggregate`, ten mutations detected; the aggregate is required on every later pull request; static re-check above | **PASS** | a real run with a failed dependency has not been observed on GitHub (local tests and negative controls cover it) |
+| 3 | Active and correct `main` ruleset | §4 API readback; fresh readback above (unchanged since activation) | **PASS** | direct push, force push and deletion were not attempted (the protections rest on readback); a repository administrator can edit or disable the ruleset (the recorded recovery path and residual risk) |
+| 4 | Pull-request-level protection behaviour | §7: PR #190 blocked while `core-ci-passed` was pending, mergeable with zero approvals once it succeeded, merged through the normal path with no bypass; the unexpected `require_extra_approval_for_unattributed_changes` field had no effect | **PASS** | — |
+| 5 | `production` environment configured | §7; fresh readback above | **PASS** | the secret values have not been proven against the server (A3.6) |
+| 6 | Every production SSH job gated by `production` and dispatch-only | §7; fresh workflow parse and `check:repo` above | **PASS** | the repository checks report rather than prevent; a workflow on a feature branch is not covered by the ruleset (A3.7) |
+| 7 | Production access proof (A3.6) | — | **DEFERRED — D-3** | **the environment has not been proven as the sole production credential holder** |
+| 8 | Organization-secret restriction (A3.7) | — | **DEFERRED — D-4** | the organization-level `DEPLOY_SSH_*` secrets remain readable by any workflow run in this repository that does not declare the environment, until A3.7 restricts them |
+| 9 | V2 protocol fit (V2-A record §8) | design gate (A3.1); negative controls (A3.2 mutations, A3.5 guard tests); repository checks and green Core CI on every change; no service code, so no service regression applies; this short record | **PASS** | — |
+
+**Certified:**
+- the `core-ci-passed` aggregate and its guard;
+- the `main` ruleset;
+- the `production` environment's configuration;
+- the production workflows' environment bindings and dispatch-only policy;
+- the observed pull-request protection behaviour;
+- the repository guards that enforce them.
+
+**Not certified (deferred production evidence):**
+
+| Not proven | Deferred to |
+|---|---|
+| That production credentials work through the environment | A3.6 |
+| A sole owner approving their own run | A3.6 |
+| Whether a run waiting for approval holds the `production-deploy-core-api` queue | A3.6 |
+| Environment secrets taking precedence over the same-named organization secrets | A3.6 |
+| A first real digest deployment through this approval path | A3.6 |
+| That the environment is the sole production credential holder | A3.6 and A3.7 |
+| The restriction of the organization secrets | A3.7 |
+
+**Built ≠ deployed:** no digest deployment of any service has been performed. A3.6 needs its own explicit owner authorization; it is
+a production action, not a G6 dependency. A3.7 follows it, also separately authorized.
+
+**Stage A0.** With this certification, stage A0 (baseline and change safety: V2-A.1, V2-A.2, V2-A.3 and the immutable-digest deployment
+work certified in [`core-v2-a0-immutable-deployments.md`](core-v2-a0-immutable-deployments.md)) is **certified with A3.6 and A3.7
+deferred**. The immutable-digest deployment work is unchanged by this section.
+
+**Unchanged:** A3.6 and A3.7 deferred; G6 deferred; G7, F6 and F7 locked; A12.10 not started; Final Core Validation absolute last.

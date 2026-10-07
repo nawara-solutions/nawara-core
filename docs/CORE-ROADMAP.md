@@ -4,7 +4,8 @@
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-04, `main` at `4979407` (V2-A.3: A3.1–A3.5 done; V2 A0 certified).
+- **Last verified:** 2026-10-07, `main` at `4279203` (V2-A.3 certified by A3.8 with A3.6 / A3.7 deferred; A12 local observability
+  certified).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -31,7 +32,7 @@ NAWARA CORE
 │
 ├── CORE V1   CURRENT / REAL       implemented, partly in production; stabilization and refactor active
 │
-└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; V2-A.1 and V2-A.2 certified, V2-A.3 in progress; services NOT YET IMPLEMENTED
+└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; A0 certified (A3.6 / A3.7 deferred), A13, A14 and A12 local observability certified; most stages NOT STARTED
 ```
 
 ---
@@ -144,15 +145,26 @@ Core V2 has started with **V2-A, baseline and change safety** ([V2-A record](arc
 V2-A  Baseline and change safety
   V2-A.1  Documentation formalization          ✅ CLOSED / CERTIFIED
   V2-A.2  Auth deployment safety transition    ✅ CLOSED / CERTIFIED (build ≠ deploy; no production deployment performed)
-  V2-A.3  main ruleset, production environment 🔄 IN PROGRESS (not certified)
+  V2-A.3  main ruleset, production environment ✅ CLOSED / CERTIFIED (records-based, A3.8; A3.6 and A3.7 deferred)
     A3.1  design and owner decisions           ✅
     A3.2  core-ci-passed aggregate check       ✅ verified on main
-    A3.3  main ruleset                         ✅ active; verified by API readback (first PR behaviour recorded separately)
+    A3.3  main ruleset                         ✅ active; verified by API readback; pull-request behaviour observed (PR #190)
     A3.4  production environment               ✅ created and verified (secrets entered by the owner; not yet used)
     A3.5  environment on production SSH jobs   ✅ implemented: all six bound to `production` (Auth verify → deploy; backup manual only)
-    A3.6  production access proof              ⏸ deferred
-    A3.7  organization-secret restriction      ⏸ deferred
-    A3.8  certification                        not started
+    A3.6  production access proof              ⏸ DEFERRED (D-3)
+    A3.7  organization-secret restriction      ⏸ DEFERRED (D-4; required eventually, not waived)
+    A3.8  certification                        ✅ certified 2026-10-07 (limitation: the environment is not proven as the sole
+                                                  production credential holder)
+  A0 immutable-digest deployment (Org, Audit)  ✅ CLOSED / CERTIFIED
+A0  stage (V2-A.1 – V2-A.3 + immutable digests) ✅ CERTIFIED, with A3.6 and A3.7 deferred
+A12 Observability
+  A12.2 – A12.5                                ✅ CLOSED (A12.5: local collection certified)
+  A12.6 dashboards, alerting, integration      ✅ LOCAL OBSERVABILITY FORMALLY CERTIFIED / CLOSED ON MAIN (PR #217)
+  A12.7 – A12.9                                scope not yet defined
+  A12.10 production observability              not started (production scope)
+A13 Audit backup / restore                     ✅ certified (tooling, local, CI; production evidence gated)
+A14 Supply chain and build provenance          ✅ certified
+Next foundation: A1 Architecture (not started)
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -162,18 +174,25 @@ V2.0 discovery and the V2-A design are accepted. V2-A.1 formalized them, and V2-
 merge, deploy an exact index digest only on owner authorization; [runbook](runbooks/auth-service-deploy.md)). Both are certified in
 the [V2-A.2 certification record](architecture/core-v2-a-2-certification.md), which also records what stays open: no digest
 deployment has been performed yet, and production still runs a legacy image. V2-A.3 has added the stable `core-ci-passed` check, the `main` ruleset,
-the protected `production` environment and its approval on every production SSH job ([record](architecture/core-v2-a-3-ci-and-ruleset.md));
-the organization-level credentials still coexist until A3.7. Every change to `main` goes through a pull request with a green
-`core-ci-passed`. **V2 A0** extends exact-digest deployment to organization-service and audit-service and is certified
+the protected `production` environment and its approval on every production SSH job, and is **certified records-based by A3.8**
+([record](architecture/core-v2-a-3-ci-and-ruleset.md) §8) with A3.6 (production access proof) and A3.7 (organization-secret
+restriction) deferred: the environment has not been proven as the sole production credential holder, and the organization-level
+credentials still coexist until A3.7. Every change to `main` goes through a pull request with a green `core-ci-passed`. **A0's
+immutable-digest deployment work** extends exact-digest deployment to organization-service and audit-service and is certified
 ([record](architecture/core-v2-a0-immutable-deployments.md): PR #192, first labelled artifacts of all three services built on the
-merge); no digest deployment of any of them has been performed (built ≠ deployed; the first one is A3.6, deferred). **V2 A13** (Audit
+merge); no digest deployment of any of them has been performed (built ≠ deployed; the first one is A3.6, deferred). With V2-A.1 to
+V2-A.3, **stage A0 is certified, with A3.6 and A3.7 deferred**. **V2 A13** (Audit
 backup and restore coverage) is certified for its tooling, local proof and CI (PR #194, [record](architecture/core-v2-a13-audit-backup.md)
 §9); production Audit backup and restore evidence is **not** complete: no production Audit backup or drill has been performed, the first
 one is blocked until an authorized Audit deployment applies migration 0004, and scheduled backups stay G6-gated. **V2 A14** (supply chain
 and build provenance) is certified (PR #196, [record](architecture/core-v2-a14-supply-chain.md) §12): the post-merge Auth,
 Organization and Audit images carry verified GitHub artifact attestations and SBOMs, and the strict verifier refuses every pre-A14
 image; built / attested ≠ deployed: no post-A14 image has been deployed (A3.6-class), and its GitHub settings (secret scanning, push
-protection, full-SHA requirement) are not enabled.
+protection, full-SHA requirement) are not enabled. **V2 A12** (observability): the kit metrics, service and messaging metrics, logging
+and PII contract (A12.2–A12.4) and the local collection layer (A12.5) are closed, and the **A12.6 local observability** layer (Grafana
+dashboards, Prometheus alert rules, the allowlisted self-scrape, integrated validation) is **formally certified and closed on `main`**
+(PR #217, [record](architecture/core-v2-a12-observability.md) §4R). It is LOCAL only: production observability (A12.10) has not
+started, and the scope of A12.7–A12.9 is not yet defined. The next foundation is **A1 Architecture**.
 
 ### Compatibility and safety rules for V1 work
 
@@ -232,7 +251,7 @@ Core V2 is the next platform architecture. It may redesign contracts deliberatel
 The G6 labels are defined under [G6](#g6-production-like-rehearsal); the reasons are in the
 [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §4. A0 includes **V2-A.2** (the Auth deployment transition:
 a merge builds an immutable image, and production is deployed only by an explicit, owner-authorized deployment of an exact digest)
-and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is in progress: A3.1 to A3.5 are done (ruleset, environment, gating), A3.6 and A3.7 are deferred ([record](architecture/core-v2-a-3-ci-and-ruleset.md)). **A0 (Organization and Audit immutable-digest deployment)** follows the Auth model and is certified, with no production deployment ([record](architecture/core-v2-a0-immutable-deployments.md)). The items left open by the retired 21.R1/21.R2 umbrella are placed in
+and **V2-A.3** (the `main` ruleset and the `production` environment). V2-A.2 is certified ([record](architecture/core-v2-a-2-certification.md)); V2-A.3 is certified records-based by A3.8, with A3.6 and A3.7 deferred ([record](architecture/core-v2-a-3-ci-and-ruleset.md) §8). **A0's immutable-digest deployment work (Organization and Audit)** follows the Auth model and is certified, with no production deployment ([record](architecture/core-v2-a0-immutable-deployments.md)). Stage A0 as a whole is certified with A3.6 and A3.7 deferred. The items left open by the retired 21.R1/21.R2 umbrella are placed in
 A1, A3, A6, A12, A13, A14, A15 and A16 by the [V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §5.
 
 **Ordering.** Stages are numbered by theme, not by order. Work is sequenced by dependency: A0 first; foundations (A1, A2, A3, A15)
@@ -409,7 +428,8 @@ project's concern. Core's localized `message` is for display only. Application b
 | Core V1 refactor certification (R11) | [`core-v1-refactor-certification.md`](architecture/core-v1-refactor-certification.md) |
 | Core V2 baseline, G6 labels, V2 scope, 21.R1/21.R2 disposition, deployment and `main` risks, V2 validation protocol | [`core-v2-a-baseline-and-change-safety.md`](architecture/core-v2-a-baseline-and-change-safety.md) |
 | V2-A.1 closure and V2-A.2 certification (Auth build ≠ deploy; gate history; production evidence) | [`core-v2-a-2-certification.md`](architecture/core-v2-a-2-certification.md) |
-| V2-A.3 A3.1 to A3.3: owner decisions, the `core-ci-passed` check, the `main` ruleset | [`core-v2-a-3-ci-and-ruleset.md`](architecture/core-v2-a-3-ci-and-ruleset.md) |
+| V2-A.3 A3.1 to A3.8: owner decisions, the `core-ci-passed` check, the `main` ruleset, the `production` environment, the A3.8 certification (A3.6 / A3.7 deferred) | [`core-v2-a-3-ci-and-ruleset.md`](architecture/core-v2-a-3-ci-and-ruleset.md) |
 | V2 A0: Organization and Audit immutable-digest deployment; generic build and deploy guards | [`core-v2-a0-immutable-deployments.md`](architecture/core-v2-a0-immutable-deployments.md) |
 | V2 A14: supply chain and build provenance (SHA-pinned actions, pinned bases, SBOM, GitHub artifact attestations, attestation-verifying deploys) | [`core-v2-a14-supply-chain.md`](architecture/core-v2-a14-supply-chain.md) |
 | V2 A13: Audit backup and restore coverage (O1–O6, the O3-B privilege finding, design, evidence) | [`core-v2-a13-audit-backup.md`](architecture/core-v2-a13-audit-backup.md) |
+| V2 A12: observability (kit metrics, logging and PII, local collection, Grafana dashboards, alert rules, integration, local certification) | [`core-v2-a12-observability.md`](architecture/core-v2-a12-observability.md) |
