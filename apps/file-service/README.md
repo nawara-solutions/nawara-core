@@ -114,13 +114,12 @@ Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`. `mediaTypes` (
 ## Run
 
 ```bash
-npm run build -w @nawara/service-kit && npm run build -w file-service
+npm run build:libs && npm run build -w file-service                                           # shared setup and the test environment: docs/DEVELOPMENT.md
 MIGRATION_DATABASE_URL=postgres://file_migrator:…@host/file npm run migrate -w file-service   # the kit baseline + the file schema
 npm run start:prod -w file-service                                                             # or: docker compose --profile db up -d file-service
 npm test -w file-service                                                                       # unit
 docker compose --profile storage-test up -d s3-test                                             # the S3-protocol TEST server (Stage 17.4)
-TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres \
-  TEST_S3_ENDPOINT=http://127.0.0.1:9000 TEST_S3_ACCESS_KEY_ID=… TEST_S3_SECRET_ACCESS_KEY=… npm run test:e2e -w file-service
+TEST_S3_ENDPOINT=http://127.0.0.1:9000 TEST_S3_ACCESS_KEY_ID=… TEST_S3_SECRET_ACCESS_KEY=… npm run test:e2e -w file-service   # plus TEST_DATABASE_ADMIN_URL
 # Stage 17.9 operational probes (slow, measurements; never part of test / test:e2e): the BUILT service, same environment variables
 OPS_REPORT=/tmp/file-ops.txt npm run test:ops -w file-service
 ```

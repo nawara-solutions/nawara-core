@@ -243,9 +243,10 @@ connection (Stage 15.3, invariant I9).
 
 ```bash
 npm test -w @nawara/service-kit                      # unit: no external services
-TEST_DATABASE_ADMIN_URL=postgres://postgres:pw@127.0.0.1:5432/postgres \
-TEST_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672 \
-  npm run test:integration -w @nawara/service-kit    # real PostgreSQL and RabbitMQ
+npm run test:integration -w @nawara/service-kit      # real PostgreSQL and RabbitMQ: TEST_DATABASE_ADMIN_URL, TEST_RABBITMQ_URL
 ```
+
+The test environment (the local values of both variables; Compose publishes PostgreSQL on port 5433) is described once, in the
+[developer guide](../../docs/DEVELOPMENT.md#6-test-environment).
 
 Locally a missing service skips its integration suite with a notice. With `CI=true` a missing service is a **failure**, so CI can never silently skip what it claims to cover.

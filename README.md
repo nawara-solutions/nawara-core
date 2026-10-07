@@ -53,18 +53,16 @@ nawara-core/
 └── README.md
 ```
 
-## Local development and checks
+## Developing
+
+**Start with the [developer guide](docs/DEVELOPMENT.md)**: prerequisites, first run, running a service, what to test before a pull
+request, the local equivalent of every CI job, and troubleshooting. In short (Node 22, see `.nvmrc`):
 
 ```bash
 npm ci
-cp .env.example .env                                          # local development credentials only
-docker compose --profile db up -d --wait postgres             # PostgreSQL 16 on 127.0.0.1:5433
-docker compose up -d rabbitmq                                 # RabbitMQ on 127.0.0.1:5672
-bash infra/postgres/verify.sh                                 # proves the least-privilege roles
-
-npm run build -w @nawara/service-kit                          # services consume the kit's built output
-npm run lint|typecheck|test|build -w <workspace>              # what Core CI runs per workspace
-npm run check:repo && npm run test:repo                       # static workflow-safety and architecture checks
+npm run build:libs                                            # the shared libraries; rebuild them after changing them
+npm run check:repo && npm run test:repo                       # the repository's own checks
+npm run lint|typecheck|test -w <workspace>                    # per workspace, as Core CI does
 ```
 
 See [`docs/architecture/service-foundations.md`](docs/architecture/service-foundations.md) for what is implemented versus

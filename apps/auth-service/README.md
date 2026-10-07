@@ -18,14 +18,15 @@ It does **not** own commercial state — Subscription and effective entitlement 
 cd apps/auth-service
 cp .env.example .env         # local development ONLY; generate every secret: openssl rand -base64 32
 set -a; . ./.env; set +a     # nothing loads .env for you: export it into this shell before starting
-# apply db/migrations/0001..0007 to your database, then:
+(cd ../.. && npm run build:libs && npm run build -w auth-service)   # the shared libraries, and Auth: its migration runner is the built CLI
+MIGRATION_DATABASE_URL=postgres://auth_migrator:…@127.0.0.1:5433/auth npm run migrate   # every migration in db/migrations, as the schema owner
 npm run start:dev
 ```
 
 **`NODE_ENV` must be set for a local run** (the template sets `NODE_ENV=development`). Unset, it means **production** (V2 A2.3): the
 service then demands the production settings (WebAuthn origins, the runtime database role, a broker) and refuses to start without them.
 The service never reads a `.env` file itself; the configuration comes from the process environment only (Compose, `docker run
---env-file`, or the `set -a` line above). Because the shell reads the file, a value that contains spaces, quotes or braces (a JSON policy) must be wrapped in single quotes there.
+--env-file`, or the `set -a` line above). Shell quoting and the rest of the shared setup: [developer guide](../../docs/DEVELOPMENT.md#2-first-run).
 
 The process **refuses to start** if any secret is missing, weak or duplicated. Secrets come from the
 environment or from files (`NAME_FILE=/run/secrets/name`); see `.env.example` and the key-management
@@ -167,4 +168,4 @@ npm run test:all -w auth-service         # unit + integration
 ```
 
 The integration tests start a throw-away local PostgreSQL if binaries are installed, or use
-`TEST_DATABASE_ADMIN_URL` (e.g. a CI service container).
+`TEST_DATABASE_ADMIN_URL` (e.g. a CI service container): [developer guide](../../docs/DEVELOPMENT.md#6-test-environment).

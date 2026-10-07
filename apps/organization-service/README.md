@@ -200,13 +200,14 @@ docker compose --profile db up -d organization-service
 ## Tests
 
 ```bash
-npm run build -w @nawara/service-kit                    # the service consumes the kit's built output
+npm run build:libs                                      # the service consumes the libraries' built output
 npm test -w organization-service                        # unit: config, input validation, pagination, OpenAPI, static boundary
-TEST_DATABASE_ADMIN_URL=postgres://postgres:pw@127.0.0.1:5432/postgres npm run test:e2e -w organization-service   # real PostgreSQL
-PGHOST=127.0.0.1 PGUSER=postgres PGPASSWORD=pw npm run test:db -w organization-service                            # psql invariants
+npm run test:e2e -w organization-service                # real PostgreSQL (TEST_DATABASE_ADMIN_URL: developer guide §6)
+PGHOST=127.0.0.1 PGPORT=5433 PGUSER=postgres PGPASSWORD=… npm run test:db -w organization-service   # psql invariants (Compose publishes 5433)
 npm run lint -w organization-service && npm run typecheck -w organization-service && npm run build -w organization-service
 ```
 
+Shared setup (Node 22, `npm run build:libs`, the environment, the test environment variables): [developer guide](../../docs/DEVELOPMENT.md).
 Locally a missing PostgreSQL skips the e2e suites with a notice; with `CI=true` it is a failure. The e2e suites cover the three
 entities (create/read/list/update, invalid and conflicting data, idempotency, pagination), security (deny-by-default over every
 route, user-token refusal, tampering, attribution), health/readiness/graceful shutdown, migrations/integrity/import
