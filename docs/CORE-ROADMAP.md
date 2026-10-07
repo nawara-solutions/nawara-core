@@ -171,14 +171,21 @@ A1 Architecture                                ✅ CERTIFIED / CLOSED (PR #222, 
   A1.3  caller-policy migration                ✅ closed on main (PR #220)
   A1.4  architecture guards                    ✅ closed on main (PR #221)
   A1.5  certification                          ✅ closed on main (PR #222)
-A2 Configuration & Secrets                     🔄 OPEN until the certification PR merges (then CERTIFIED / CLOSED)
+A2 Configuration & Secrets                     ✅ CERTIFIED / CLOSED (PR #228, merge 869100d)
   A2.0  discovery, owner decisions             ✅ complete
   A2.1  service-kit configuration hardening    ✅ closed on main (PR #223)
   A2.2  seven-service adoption                 ✅ closed on main (PR #224)
   A2.3  targeted Auth hardening                ✅ closed on main (PR #225)
   A2.4  hygiene, environment reference, rotation ✅ closed on main (PR #226)
   A2.5  repository guards                      ✅ closed on main (PR #227)
-  A2.6  certification                          certification PR pending merge
+  A2.6  certification                          ✅ closed on main (PR #228)
+A15 Developer / Platform Experience            🔄 OPEN
+  A15.0  discovery, owner decisions            ✅ complete (owner-reviewed)
+  A15.1  generic CLI configuration hygiene     complete locally; owner review pending
+  A15.2  developer path (guide, Node version)  not started
+  A15.3  local environment, test determinism   not started
+  A15.4  new-service checklist, localization   not started
+  A15.5  certification                         not started
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -221,7 +228,9 @@ adopted them in the seven kit-based services (PR #224), A2.3 hardened Auth insid
 A4), A2.4 fixed the ignore policy, the environment reference and the rotation runbook (PR #226), and A2.5 guards those invariants in
 `check:repo` (PR #227). The A2.6 certification (record §10) found no A2-owned blocker; **A2 is open until its certification PR is
 merged, and is certified and closed by that merge.** It is repository and local: activating A2 in the deployed services stays
-separately authorized production work, and A2 has no G6 dependency.
+separately authorized production work, and A2 has no G6 dependency. (The certification PR, #228, has since merged: A2 is certified and
+closed.) **A15 Developer / Platform Experience** is open ([record](architecture/core-v2-a15-developer-experience.md)): A15.0 fixed its
+scope and decisions, and A15.1 puts the generic operator CLIs on the kit's configuration reader.
 
 ### Compatibility and safety rules for V1 work
 
@@ -464,3 +473,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A12: observability (kit metrics, logging and PII, local collection, Grafana dashboards, alert rules, integration, local certification) | [`core-v2-a12-observability.md`](architecture/core-v2-a12-observability.md) |
 | V2 A1: architecture (scope, A1.0 findings, owner decisions OD-A1-1 to OD-A1-6, the review of every Proposed ADR, A1 targets) | [`core-v2-a1-architecture.md`](architecture/core-v2-a1-architecture.md) |
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
+| V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
