@@ -1,8 +1,8 @@
 # Core V2 A2: configuration and secrets
 
 - **Status:** RECORD of A2.0 discovery and A2.1.0 design (both read-only, owner-reviewed, 2026-10-07, on `main` at `321ec0b`, the
-  PR #222 merge) and of **A2.1: service-kit configuration hardening**, **complete locally, owner review pending** (§4). **A2 is OPEN.**
-  A2.2 to A2.6 are not started.
+  PR #222 merge), of **A2.1: service-kit configuration hardening** (**closed on `main`**: PR #223, merge `b6a8402`; §4) and of
+  **A2.2: seven-service adoption** (**complete locally, owner review pending**; §6). **A2 is OPEN.** A2.3 to A2.6 are not started.
 - **Scope of A2** ([roadmap](../CORE-ROADMAP.md) A2): typed and validated configuration; environment separation; secret lifecycle and
   rotation; deployment contracts. **Not A2:** Auth loader convergence and JWT key-ring verification (A4); the Organization ownership
   CLI and its production gate (A5 / F6 / F7); production credential restriction (A3.6 / A3.7); production deploy-script changes
@@ -87,9 +87,50 @@ database-role guard with `*_admin`, the docs-credential reader. No new dependenc
 ```text
 A2.0  discovery                         ✅ complete (owner-reviewed)
 A2.1.0  kit design                      ✅ complete (owner-reviewed)
-A2.1  service-kit hardening             ✅ complete locally; owner review pending
-A2.2 – A2.6                             not started
+A2.1  service-kit hardening             ✅ closed on main (PR #223, merge b6a8402)
+A2.2.0  adoption plan                   ✅ complete (owner-reviewed)
+A2.2  seven-service adoption            ✅ complete locally; owner review pending (§6)
+A2.3 – A2.6                             not started
 ```
 
 A2 is OPEN. Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6 and F7 locked; Final Core Validation
 absolute last.
+
+## 6. A2.2: seven-service adoption (2026-10-07, local)
+
+- **Owner decisions:** OD-A2.2-1 = A (a service holding token digests refuses, in production, the digest of a published development
+  token: the kit's `assertNoPublishedServiceTokens`, the callee side; the caller refuses the raw token); OD-A2.2-2 = A (the
+  candidate-image configuration checks below).
+- **Kit addition (additive):** `assertNoPublishedServiceTokens(entries, { isProduction })`. A service-token digest is exactly the token's
+  catalog fingerprint, so no plaintext is needed; the catalog stays off the runtime entry point; the error names the caller only.
+
+| Service | Database role | Docs credentials | Keys | Published-secret refusal | Deployed |
+|---|---|---|---|---|---|
+| Billing | kit helper | kit helper | none | `PAYMENT_SERVICE_TOKEN` (caller, raw) | no: GREEN |
+| Payment | kit helper | kit helper | none | `SERVICE_TOKENS` digests (callee) | no: GREEN |
+| Organization | kit helper | kit helper | none | none (no published value) | **yes: YELLOW** |
+| Audit | kit helper | kit helper | none | none | **yes: YELLOW** |
+| Release | kit helper | kit helper | `RELEASE_RATE_LIMIT_KEY` (`readOptionalKey`; still required in production, random elsewhere) | none (not published) | no: GREEN |
+| File | kit helper | kit helper | request-hash and rate-limit keys, previous keys (`readKey`, `decodeKey`, `assertDistinctKeys`) | both keys | no: GREEN |
+| Notification | kit helper | kit helper | secret ring, request-hash and destination-limit keys and their previous keys (`readKeyRing`, `readKey`, `readOptionalKey`, `decodeKey`, `assertDistinctKeys`) | ring, request-hash, destination-limit keys (now from the kit catalog) | no: GREEN |
+
+- **Pure deduplication:** the docs credentials (all seven); the purpose separation of Notification and File (same rule, kit wording);
+  Notification's published-key and low-entropy refusals (now the kit's, same three fingerprints).
+- **Intentional hardening:** production refuses a `*_admin` bootstrap superuser as the runtime database user (all seven; a malformed
+  user encoding is a `ConfigError`); canonical standard base64 for every key (Notification, File, Release); production refusal of
+  published development keys and of non-random keys in File and of non-random keys in Release; File's previous keys may not repeat;
+  Billing refuses the published raw token and Payment its published digest, in production only.
+- **Deleted copies:** seven database-role constants and checks, seven docs rules, Notification's fingerprint list, `checkKey`,
+  `keyMaterial`, `secretKeyRing` and purpose loop, File's and Release's private decoders.
+- **Tests:** each service's configuration spec gains the `*_admin` refusal and its hardening cases; test fixtures that used a constant
+  (non-random) key under production defaults now use random keys (Release `release-config.spec.ts` and `http-server.spec.ts`, File
+  `file-config.spec.ts`); the kit test that proved the A2.1 migration from Notification's own list now checks the catalog directly.
+  Untouched: Auth, the Organization ownership CLI, Audit backup and retention, File storage configuration.
+- **Evidence (local):** per service, the configuration spec and unit suite green, and negative controls (the database-role call bypassed
+  for all seven; Billing's token refusal; Payment's digest refusal; Release's old alphabet-only decoding; File's production key refusals;
+  Notification's lenient decoding), each red when weakened and restored byte-for-byte; the kit control (digest refusal bypassed) the same.
+- **Production (YELLOW, PRODUCTION VERIFICATION DEFERRED):** Organization and Audit activate the `*_admin` refusal and the A2.1
+  normalization with their next owner-authorized deploy. Mitigation (OD-A2.2-2, documented, not run): the candidate image's own loader
+  reads the server's `.env` and prints only `OK` or `REFUSED` ([Organization runbook](../runbooks/organization-production.md) §2;
+  [digest deployments](../runbooks/digest-deployments.md) §2 for Audit), proven locally against synthetic configurations (`*_app`: OK;
+  `*_admin`, a malformed policy: REFUSED). No G6 dependency; RED: none.
