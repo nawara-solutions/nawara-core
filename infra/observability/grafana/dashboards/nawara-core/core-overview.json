@@ -1017,7 +1017,7 @@
       "type": "timeseries",
       "id": 19,
       "title": "Outbox — oldest pending age",
-      "description": "`nawara_outbox_oldest_pending_age_seconds` per job (0 when nothing is pending). Services without an outbox show nothing (not applicable).",
+      "description": "`nawara_outbox_oldest_pending_age_seconds` per job (0 when nothing is pending). Services without an outbox show nothing (not applicable). Shown only once the relay has read the outbox aggregate (`nawara_outbox_stats_timestamp_seconds` > 0): before that the kit exports 0, which is not a real zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "nawara-prometheus"
@@ -1035,7 +1035,7 @@
             "uid": "nawara-prometheus"
           },
           "refId": "A",
-          "expr": "nawara_outbox_oldest_pending_age_seconds{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}",
+          "expr": "nawara_outbox_oldest_pending_age_seconds{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"} and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"} > 0)",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
@@ -1075,7 +1075,7 @@
       "type": "timeseries",
       "id": 20,
       "title": "Outbox — pending and retrying",
-      "description": "`nawara_outbox_pending_events` and `nawara_outbox_retrying_events` per job.",
+      "description": "`nawara_outbox_pending_events` and `nawara_outbox_retrying_events` per job. Shown only once the relay has read the outbox aggregate (`nawara_outbox_stats_timestamp_seconds` > 0): before that the kit exports 0, which is not a real zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "nawara-prometheus"
@@ -1093,7 +1093,7 @@
             "uid": "nawara-prometheus"
           },
           "refId": "A",
-          "expr": "nawara_outbox_pending_events{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}",
+          "expr": "nawara_outbox_pending_events{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"} and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"} > 0)",
           "legendFormat": "{{job}} pending",
           "instant": false,
           "range": true
@@ -1104,7 +1104,7 @@
             "uid": "nawara-prometheus"
           },
           "refId": "B",
-          "expr": "nawara_outbox_retrying_events{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}",
+          "expr": "nawara_outbox_retrying_events{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"} and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"} > 0)",
           "legendFormat": "{{job}} retrying",
           "instant": false,
           "range": true

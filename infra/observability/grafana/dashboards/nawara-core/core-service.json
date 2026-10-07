@@ -1,0 +1,2035 @@
+{
+  "uid": "nawara-core-service",
+  "title": "Core · Service",
+  "description": "V2 A12.6.2: one Core service in detail (choose it with \"Core service\"), LOCAL observability. Provisioned from the repository; edits in the UI are not saved.",
+  "tags": [
+    "nawara-core",
+    "local"
+  ],
+  "editable": false,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "job",
+        "label": "Core service",
+        "description": "The Prometheus scrape job of a Core service (the eight jobs only).",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "nawara-prometheus"
+        },
+        "definition": "label_values(nawara_service_info{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}, job)",
+        "query": "label_values(nawara_service_info{job=~\"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service\"}, job)",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Availability ($job)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Target up",
+      "description": "Prometheus `up` for the selected job (kit metrics listener, 9464). DOWN: Prometheus could not scrape it. Every other panel on this dashboard is empty while it is down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "up{job=\"$job\"}",
+          "legendFormat": "{{job}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Uptime",
+      "description": "`time() - process_start_time_seconds`: time since the process started. Counters shown \"since start\" below reset when it restarts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - process_start_time_seconds{job=\"$job\"}",
+          "legendFormat": "uptime",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Readiness — last result",
+      "description": "`nawara_readiness_ready` from the LAST /ready run (1 ready, 0 not ready, including draining), only once a run happened (last-run timestamp > 0). The kit exports 0 before the first run; \"not run\" means /ready has not been called since start (Compose healthchecks call /health), NOT that the service is unready. Dashboard only: no readiness alert.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_readiness_ready{job=\"$job\"} and on (job, instance) (nawara_readiness_last_run_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "readiness",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "not run",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "NOT READY",
+                  "color": "orange",
+                  "index": 0
+                },
+                "1": {
+                  "text": "READY",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Readiness — age of last run",
+      "description": "`time() - nawara_readiness_last_run_timestamp_seconds`, for a run that happened (timestamp > 0). Large: the result is old, not wrong. \"not run\": /ready has not been called since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - (nawara_readiness_last_run_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "not run",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Readiness — checks in last run",
+      "description": "`nawara_readiness_check_up` per named check in the last /ready run (1 passed, 0 failed), only once a run happened. Shows which dependency failed when the result is NOT READY.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_readiness_check_up{job=\"$job\"} and on (job, instance) (nawara_readiness_last_run_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "{{check}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "not run",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "FAILED",
+                  "color": "orange",
+                  "index": 0
+                },
+                "1": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 7,
+      "title": "HTTP (application port; probes excluded)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "Request rate by status class",
+      "description": "`sum by (status_class) (rate(nawara_http_server_requests_total[5m]))`. Probe routes (/health, /ready, /auth/health) are excluded by the kit. No data: no request since start.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (status_class) (rate(nawara_http_server_requests_total{job=\"$job\"}[5m]))",
+          "legendFormat": "{{status_class}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "no requests observed",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "5xx ratio (≥ 1 request/min)",
+      "description": "Share of 5xx answers over 5 minutes, computed only when the service served at least 1 request per minute in that window; below that it is blank (not applicable), never 0. 0 means traffic with no 5xx.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "(sum(rate(nawara_http_server_requests_total{job=\"$job\",status_class=\"5xx\"}[5m])) or (0 * sum(rate(nawara_http_server_requests_total{job=\"$job\"}[5m])))) / (sum(rate(nawara_http_server_requests_total{job=\"$job\"}[5m])) >= (1/60))",
+          "legendFormat": "5xx ratio",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "below 1 request/min",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Latency p95 / p99 (histogram estimate)",
+      "description": "`histogram_quantile` over `nawara_http_server_request_duration_seconds` (buckets 5 ms … 60 s), all routes, 5-minute window. An estimate interpolated inside a bucket: precise only to the bucket bounds. Blank when there was no request in the window (never 0).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(nawara_http_server_request_duration_seconds_bucket{job=\"$job\"}[5m]))) and on () (sum(rate(nawara_http_server_request_duration_seconds_count{job=\"$job\"}[5m])) > 0)",
+          "legendFormat": "p95",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(nawara_http_server_request_duration_seconds_bucket{job=\"$job\"}[5m]))) and on () (sum(rate(nawara_http_server_request_duration_seconds_count{job=\"$job\"}[5m])) > 0)",
+          "legendFormat": "p99",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no requests in window",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 11,
+      "title": "Busiest routes (5m, top 10)",
+      "description": "`topk(10, sum by (method, route) (rate(nawara_http_server_requests_total[5m])))`. `route` is the matched route TEMPLATE (bounded by the routes the service declares; `__unmatched__` for no route), never the raw path.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 10,
+        "x": 0,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "topk(10, sum by (method, route) (rate(nawara_http_server_requests_total{job=\"$job\"}[5m])))",
+          "legendFormat": "{{method}} {{route}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "noValue": "no requests observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 12,
+      "title": "Routes answering 5xx (5m)",
+      "description": "Routes with a 5xx rate above 0 over 5 minutes. Empty (\"no 5xx\"): no route answered 5xx in the window, including when there was no traffic at all (see the request rate).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 10,
+        "x": 10,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "topk(10, sum by (method, route) (rate(nawara_http_server_requests_total{job=\"$job\",status_class=\"5xx\"}[5m])) > 0)",
+          "legendFormat": "{{method}} {{route}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 3,
+          "noValue": "no 5xx in window",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "In-flight requests",
+      "description": "`nawara_http_server_requests_in_flight`: requests being handled now, probes included. Sustained > 0 without traffic suggests stuck requests.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 15
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_http_server_requests_in_flight{job=\"$job\"}",
+          "legendFormat": "in flight",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no data",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 14,
+      "title": "Database pool (client side)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "Pool clients",
+      "description": "`nawara_db_pool_*` per pool: open (in use + idle), idle, waiting (requests queued for a client) and the configured maximum (DB_POOL_MAX). Sustained waiting > 0 is saturation. No data: the service has no database pool (not applicable).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 23
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_db_pool_connections{job=\"$job\"}",
+          "legendFormat": "{{pool}} open",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "nawara_db_pool_idle_connections{job=\"$job\"}",
+          "legendFormat": "{{pool}} idle",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "nawara_db_pool_waiting_clients{job=\"$job\"}",
+          "legendFormat": "{{pool}} waiting",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "nawara_db_pool_max_connections{job=\"$job\"}",
+          "legendFormat": "{{pool}} max",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no pool (not applicable)",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 16,
+      "title": "Pool in use / max",
+      "description": "(open − idle) / max per pool: the share of the pool maximum checked out right now. No data: no pool (not applicable).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 23
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "(nawara_db_pool_connections{job=\"$job\"} - nawara_db_pool_idle_connections{job=\"$job\"}) / (nawara_db_pool_max_connections{job=\"$job\"} > 0)",
+          "legendFormat": "{{pool}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no pool (not applicable)",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.95
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 17,
+      "title": "Pool errors (since start)",
+      "description": "`nawara_db_pool_errors_total` by pool and bounded failure kind (idle-client errors), since the process started. \"none observed\": no error since start, or no pool.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 23
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (pool, kind) (nawara_db_pool_errors_total{job=\"$job\"})",
+          "legendFormat": "{{pool}} {{kind}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 18,
+      "title": "Outbox (relay)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Outbox pending and retrying",
+      "description": "`nawara_outbox_pending_events` and `nawara_outbox_retrying_events` (the `nawara-check-outbox-lag` aggregate), shown only once the relay has read it (stats timestamp > 0): before the first read the kit exports 0, which is not a real zero. No data: the service has no outbox (audit-service, notification-service: not applicable) or the aggregate has not been read yet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_outbox_pending_events{job=\"$job\"} and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "pending",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "nawara_outbox_retrying_events{job=\"$job\"} and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "retrying",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no outbox (not applicable)",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "id": 20,
+      "title": "Oldest pending age",
+      "description": "`nawara_outbox_oldest_pending_age_seconds` (0 when nothing is pending), once the aggregate has been read. No data: no outbox (not applicable) or not read yet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_outbox_oldest_pending_age_seconds{job=\"$job\"} and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "oldest pending",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no outbox",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 21,
+      "title": "Outbox stats age",
+      "description": "`time() - nawara_outbox_stats_timestamp_seconds`: how old the outbox figures are. The relay re-reads them at most every 15 s while it polls; a growing age means the read is failing or the relay stopped, so the figures to the left are stale. No data: no outbox (not applicable) or not read yet.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 16,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - (nawara_outbox_stats_timestamp_seconds{job=\"$job\"} > 0)",
+          "legendFormat": "stats age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no outbox",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 22,
+      "title": "Relay pass failures (since start)",
+      "description": "`nawara_outbox_relay_pass_failures_total` by bounded failure kind, since the process started. \"none observed\": no failed pass since start, or no outbox.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 20,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (kind) (nawara_outbox_relay_pass_failures_total{job=\"$job\"})",
+          "legendFormat": "{{kind}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "row",
+      "id": 23,
+      "title": "Messaging (this service)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 24,
+      "title": "Consumers attached",
+      "description": "`nawara_event_consumer_up` per queue this service consumes: 1 consuming, 0 lost or closed. No data: the service consumes nothing (not applicable), never a failure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nawara_event_consumer_up{job=\"$job\"}",
+          "legendFormat": "{{queue}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "no consumer (not applicable)",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "LOST",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ATTACHED",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 25,
+      "title": "Consumer incidents (since start)",
+      "description": "Per queue, since the process started: consumer losses and recoveries, broker redeliveries, and acknowledgements that could not be sent (settle failures; the broker redelivers those, so a delivery can count as processed AND as a settle failure). Each line appears once it first happened: \"none observed\" means none since start, or the service consumes nothing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 10,
+        "x": 6,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (queue) (nawara_event_consumer_losses_total{job=\"$job\"})",
+          "legendFormat": "{{queue}} losses",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum by (queue) (nawara_event_consumer_recoveries_total{job=\"$job\"})",
+          "legendFormat": "{{queue}} recoveries",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum by (queue) (nawara_event_redeliveries_total{job=\"$job\"})",
+          "legendFormat": "{{queue}} redeliveries",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "D",
+          "expr": "sum by (queue) (nawara_event_settle_failures_total{job=\"$job\"})",
+          "legendFormat": "{{queue}} settle failures",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "stat",
+      "id": 26,
+      "title": "Publish outcomes (since start)",
+      "description": "`nawara_events_published_total` by outcome (confirmed, failed, confirm_timeout), since the process started. An outcome appears once it first happened: \"none observed\" means this service has not published since start (or does not publish).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (outcome) (nawara_events_published_total{job=\"$job\"})",
+          "legendFormat": "{{outcome}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none observed",
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 27,
+      "title": "Consumed by outcome",
+      "description": "`sum by (queue, outcome) (rate(nawara_events_consumed_total[5m]))`. processed = the handler completed; retry_scheduled; dead_lettered_* = parked in `<queue>.dead` by the application; dead_letter_deferred = the dead-letter copy could not be confirmed, requeued. An outcome appears once it first happened (not yet observed before). No data: nothing consumed since start, or no consumer.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (queue, outcome) (rate(nawara_events_consumed_total{job=\"$job\"}[5m]))",
+          "legendFormat": "{{queue}} {{outcome}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "noValue": "none observed",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 28,
+      "title": "Handler duration p95 (histogram estimate)",
+      "description": "`histogram_quantile(0.95, …nawara_event_handler_duration_seconds…)` per queue over 5 minutes (buckets 5 ms … 60 s; precise only to the bucket bounds). Blank when the queue handled nothing in the window.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (queue, le) (rate(nawara_event_handler_duration_seconds_bucket{job=\"$job\"}[5m]))) and on (queue) (sum by (queue) (rate(nawara_event_handler_duration_seconds_count{job=\"$job\"}[5m])) > 0)",
+          "legendFormat": "{{queue}} p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no deliveries in window",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "id": 29,
+      "title": "Runtime (Node.js process)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "CPU",
+      "description": "`rate(process_cpu_seconds_total[5m])`: CPU seconds used per second (1 = one full core).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(process_cpu_seconds_total{job=\"$job\"}[5m])",
+          "legendFormat": "cpu",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Memory",
+      "description": "Resident set size and the V8 heap (used, total).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "process_resident_memory_bytes{job=\"$job\"}",
+          "legendFormat": "rss",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "nodejs_heap_size_used_bytes{job=\"$job\"}",
+          "legendFormat": "heap used",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "C",
+          "expr": "nodejs_heap_size_total_bytes{job=\"$job\"}",
+          "legendFormat": "heap total",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "Event loop lag",
+      "description": "`nodejs_eventloop_lag_p99_seconds` and `_max_seconds` (sampled between scrapes). Sustained high lag: the process is CPU-bound or blocked.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "nodejs_eventloop_lag_p99_seconds{job=\"$job\"}",
+          "legendFormat": "p99",
+          "instant": false,
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "B",
+          "expr": "nodejs_eventloop_lag_max_seconds{job=\"$job\"}",
+          "legendFormat": "max",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 33,
+      "title": "GC time share",
+      "description": "`sum by (kind) (rate(nodejs_gc_duration_seconds_sum[5m]))`: fraction of wall time spent in garbage-collection pauses, by GC kind.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "nawara-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 57
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "nawara-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (kind) (rate(nodejs_gc_duration_seconds_sum{job=\"$job\"}[5m]))",
+          "legendFormat": "{{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "no data",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    }
+  ]
+}

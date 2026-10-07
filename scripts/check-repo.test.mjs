@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
-import { CI_AGGREGATE, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
+import { CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PRODUCTION_GROUP, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -994,14 +994,15 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
   const OVERVIEW_PATH = 'infra/observability/grafana/dashboards/nawara-core/core-overview.json';
   const OVERVIEW = read(OVERVIEW_PATH);
   const ENV = read('.env.example');
-  const DASH = { [OVERVIEW_PATH]: OVERVIEW };
+  const DASH_DIR = 'infra/observability/grafana/dashboards/nawara-core';
+  const DASH = Object.fromEntries(['core-overview', 'core-service', 'core-messaging', 'core-postgresql'].map((n) => [`${DASH_DIR}/${n}.json`, read(`${DASH_DIR}/${n}.json`)]));
   const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
   const check = ({ overlay = OVERLAY, ds = DS, pv = PV, dash = DASH, env = ENV } = {}) => checkLocalGrafana(overlay, ds, pv, dash, env);
   const grafanaEnv = (from, to) => OVERLAY.replace(from, to);
   const withExpr = (expr) => {
     const d = JSON.parse(OVERVIEW);
     d.panels.find((p) => p.targets).targets[0].expr = expr;
-    return { [OVERVIEW_PATH]: JSON.stringify(d) };
+    return { ...DASH, [OVERVIEW_PATH]: JSON.stringify(d) };
   };
 
   test('A12.6.1: the repository Grafana service, provisioning, dashboards and placeholder pass', () => {
@@ -1090,5 +1091,138 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
     assert.deepEqual(core.sort(), ['audit-service', 'auth-service', 'billing-service', 'file-service', 'notification-service', 'organization-service', 'payment-service', 'release-service']);
     const ids = d.panels.map((p) => p.id);
     assert.equal(new Set(ids).size, ids.length);
+  });
+}
+
+// ---- V2 A12.6.2: operational dashboards ---------------------------------------------------------------------------------------------
+{
+  const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const OVERLAY = read('docker-compose.observability.yml');
+  const DS = read('infra/observability/grafana/provisioning/datasources/prometheus.yml');
+  const PV = read('infra/observability/grafana/provisioning/dashboards/nawara-core.yml');
+  const ENV = read('.env.example');
+  const DIR = 'infra/observability/grafana/dashboards/nawara-core';
+  const FILES = { overview: `${DIR}/core-overview.json`, service: `${DIR}/core-service.json`, messaging: `${DIR}/core-messaging.json`, postgresql: `${DIR}/core-postgresql.json` };
+  const DASH = Object.fromEntries(Object.values(FILES).map((f) => [f, read(f)]));
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected a problem matching ${pattern}, got ${JSON.stringify(problems)}`);
+  const check = (dash = DASH) => checkLocalGrafana(OVERLAY, DS, PV, dash, ENV);
+  // A copy of the dashboards with one of them changed by `edit` (which mutates a parsed copy).
+  const mutate = (key, edit) => {
+    const d = JSON.parse(DASH[FILES[key]]);
+    edit(d);
+    return { ...DASH, [FILES[key]]: JSON.stringify(d) };
+  };
+  const exprs = (key) => JSON.parse(DASH[FILES[key]]).panels.flatMap((p) => (p.targets ?? []).map((t) => t.expr));
+  const panel = (d, title) => d.panels.find((p) => p.title === title);
+  const setExpr = (key, title, expr) => mutate(key, (d) => { panel(d, title).targets[0].expr = expr; });
+
+  test('A12.6.2: the four provisioned dashboards pass, with fixed uids and titles', () => {
+    assert.deepEqual(check(), []);
+    const found = Object.fromEntries(Object.values(DASH).map((t) => JSON.parse(t)).map((d) => [d.uid, d.title]));
+    assert.deepEqual(found, GRAFANA_DASHBOARDS);
+    for (const [key, uid] of [['service', 'nawara-core-service'], ['messaging', 'nawara-core-messaging'], ['postgresql', 'nawara-core-postgresql']]) {
+      const rest = { ...DASH };
+      delete rest[FILES[key]];
+      fails(check(rest), new RegExp(`uid ${uid}\\) is missing`));
+    }
+    fails(check(mutate('service', (d) => { d.title = 'Service'; })), /title must be "Core · Service"/);
+    fails(check(mutate('messaging', (d) => { d.uid = 'nawara-core-overview'; })), /uid nawara-core-overview is also used/);
+  });
+  test('A12.6.2: dashboards stay deterministic, local and credential-free', () => {
+    fails(check(mutate('service', (d) => { d.version = 2; })), /top-level "version" is not allowed/);
+    fails(check(mutate('messaging', (d) => { d.gnetId = 10991; })), /gnetId is not allowed/);
+    fails(check(mutate('postgresql', (d) => { d.links = [{ title: 'docs', url: 'https://grafana.com' }]; })), /links must be empty/);
+    fails(check(mutate('postgresql', (d) => { d.panels.at(-1).options.content += '\nsee https://example.com'; })), /must not contain a URL/);
+    fails(check(mutate('service', (d) => { d.panels[1].datasource = { type: 'postgres', uid: 'pg' }; })), /must be \{"type":"prometheus","uid":"nawara-prometheus"\}/);
+    fails(check(mutate('postgresql', (d) => { d.panels[1].targets[0].rawSql = 'SELECT 1'; })), /rawSql is not allowed/);
+    fails(check(mutate('service', (d) => { d.panels[1].options.password = 'x'; })), /password is not allowed/);
+    fails(check(mutate('service', (d) => { d.panels[1].type = 'grafana-clock-panel'; })), /no plugin panel/);
+    fails(check(mutate('service', (d) => { d.panels[2].id = d.panels[1].id; })), /reuses a panel id/);
+    fails(check(mutate('service', (d) => { d.editable = true; })), /editable must be false/);
+  });
+  test('A12.6.2: each operational dashboard has one bounded, single-valued variable', () => {
+    const v = (key) => JSON.parse(DASH[FILES[key]]).templating.list;
+    assert.deepEqual(v('service').map((x) => [x.name, x.definition]), [['job', `label_values(nawara_service_info{job=~"${CORE_JOBS.join('|')}"}, job)`]]);
+    assert.match(v('messaging')[0].definition, /^label_values\(nawara_event_consumer_up\{job=~"[^"]+"\}, queue\)$/);
+    assert.match(v('postgresql')[0].definition, /^label_values\(pg_database_size_bytes\{job="postgres",datname=~"[a-z|]+"\}, datname\)$/);
+    const setVar = (key, change) => mutate(key, (d) => { Object.assign(d.templating.list[0], change); });
+    fails(check(setVar('service', { multi: true })), /must be single-valued/);
+    fails(check(setVar('messaging', { includeAll: true, allValue: '.*' })), /must be single-valued/);
+    fails(check(setVar('postgresql', { type: 'textbox' })), /must be a query variable/);
+    fails(check(setVar('service', { regex: '/.*/' })), /must not post-filter/);
+    const def = (key, definition) => setVar(key, { definition, query: definition });
+    fails(check(def('service', 'label_values(up, job)')), /must be label_values\(<metric>\{<bounded selector>\}/);
+    fails(check(def('service', 'label_values(up{job=~".+"}, job)')), /must read the label "job" from nawara_service_info/);
+    fails(check(def('service', 'label_values(nawara_service_info{job=~".+"}, job)')), /must be a literal alternation/);
+    fails(check(def('service', 'label_values(nawara_service_info{job=~"auth-service|rabbitmq"}, job)')), /bounded to the eight Core jobs/);
+    fails(check(def('messaging', 'label_values(nawara_event_consumer_up, queue)')), /must be label_values/);
+    fails(check(def('postgresql', 'label_values(pg_database_size_bytes{job="postgres",datname=~"auth|template1"}, datname)')), /without template databases/);
+    fails(check(def('postgresql', 'label_values(pg_database_size_bytes{job="postgres"}, datname)')), /bounded to an explicit list of databases/);
+    fails(check(setVar('service', { definition: 'label_values(nawara_service_info{job=~"x"}, job)' })), /the same in "query" and "definition"/);
+    fails(check(mutate('overview', (d) => { d.templating.list = [JSON.parse(DASH[FILES.service]).templating.list[0]]; })), /must define no variable/);
+    fails(check(mutate('messaging', (d) => { d.templating.list[0].name = 'q'; })), /must define exactly the variable "queue"/);
+  });
+  test('A12.6.2: panels use the variable as an exact match only, and the Service dashboard filters every series by job', () => {
+    assert.ok(exprs('service').every((e) => e.includes('job="$job"')));
+    assert.ok(exprs('messaging').some((e) => e.includes('queue="$queue"')));
+    assert.ok(exprs('postgresql').some((e) => e.includes('datname="$datname"')));
+    fails(check(setExpr('service', 'Target up', 'up{job=~"$job"}')), /other than as the exact match job="\$job"/);
+    fails(check(setExpr('service', 'Target up', 'up{job=~"${job}.*"}')), /other than as the exact match/);
+    fails(check(setExpr('service', 'Target up', 'up{job="auth-service"}')), /up must select job="\$job"/);
+    fails(check(setExpr('service', 'Uptime', 'time() - process_start_time_seconds')), /process_start_time_seconds must select job="\$job"/);
+    fails(check(setExpr('service', 'Target up', 'up{job="$job",instance="$instance"}')), /unknown variable \$instance/);
+    fails(check(setExpr('messaging', 'Consumed by outcome', 'sum by (outcome) (rate(nawara_events_consumed_total{queue=~"$queue"}[5m]))')), /other than as the exact match queue="\$queue"/);
+    fails(check(setExpr('messaging', 'Consumed by outcome', 'sum by (outcome) (rate(nawara_events_consumed_total{queue="$queue"}[5m]))')), /must be bounded to the Core jobs/);
+    fails(check(setExpr('postgresql', 'Size', 'pg_database_size_bytes{job="postgres",datname=~"$datname"}')), /exact match datname="\$datname"/);
+    fails(check(mutate('postgresql', (d) => { for (const p of d.panels) for (const t of p.targets ?? []) t.expr = t.expr.split('datname="$datname"').join('datname="auth"'); })), /never filter by datname="\$datname"/);
+    fails(check(setExpr('service', 'Target up', 'up{job="$job"} or vector(0)')), /or vector/);
+  });
+  test('A12.6.2: readiness and outbox are read only once they ran; no-data states are never fabricated', () => {
+    const ready = exprs('service').filter((e) => e.includes('nawara_readiness_'));
+    assert.ok(ready.length >= 3 && ready.every((e) => /nawara_readiness_last_run_timestamp_seconds\{job="\$job"\} > 0/.test(e)));
+    fails(check(setExpr('service', 'Readiness — last result', 'nawara_readiness_ready{job="$job"}')), /reads readiness without/);
+    const outbox = exprs('service').filter((e) => /nawara_outbox_(pending|retrying|oldest)/.test(e));
+    assert.ok(outbox.length === 3 && outbox.every((e) => e.includes('nawara_outbox_stats_timestamp_seconds{job="$job"} > 0')));
+    for (const e of [...exprs('service'), ...exprs('messaging'), ...exprs('postgresql')]) assert.doesNotMatch(e, /or\s+vector\s*\(/);
+  });
+  test('A12.6.2 owner correction: no dashboard shows outbox gauges before the stats were read', () => {
+    const gauges = (key) => exprs(key).filter((e) => /nawara_outbox_(pending_events|retrying_events|oldest_pending_age_seconds)/.test(e));
+    assert.equal(gauges('overview').length, 3);
+    assert.equal(gauges('service').length, 3);
+    const strip = (e) => e.replace(/ and on \(job, instance\) \(nawara_outbox_stats_timestamp_seconds\{[^}]*\} > 0\)/, '');
+    for (const [key, title] of [['overview', 'Outbox — oldest pending age'], ['overview', 'Outbox — pending and retrying'], ['service', 'Oldest pending age'], ['service', 'Outbox pending and retrying']]) {
+      const original = JSON.parse(DASH[FILES[key]]);
+      const at = panel(original, title).targets.length - 1;
+      fails(check(mutate(key, (d) => { const t = panel(d, title).targets[at]; t.expr = strip(t.expr); })), /reads outbox gauges without "and on \(job, instance\) \(nawara_outbox_stats_timestamp_seconds > 0\)"/);
+    }
+    // Not a substitute: a filter that does not require a successful read, or that drops the instance match.
+    const swap = (from, to) => mutate('overview', (d) => { const t = panel(d, 'Outbox — oldest pending age').targets[0]; t.expr = t.expr.replace(from, to); });
+    fails(check(swap('> 0)', '>= 0)')), /reads outbox gauges without/);
+    fails(check(swap('on (job, instance)', 'on (job)')), /reads outbox gauges without/);
+    fails(check(swap(/ and on .*$/, ' or vector(0)')), /or vector/);
+  });
+  test('A12.6.2: broker metrics stay aggregate, and broker dead-lettering is never shown as parked messages', () => {
+    const m = exprs('messaging');
+    assert.ok(m.some((e) => e.includes('nawara_events_consumed_total') && e.includes('dead_lettered_permanent')), 'the application dead-letter outcome is shown');
+    assert.ok(m.some((e) => e.includes('rabbitmq_global_messages_dead_lettered_expired_total')), 'broker dead-letter mechanics are shown');
+    fails(check(mutate('messaging', (d) => { panel(d, 'Broker dead-letter mechanics (not parked messages)').title = 'DLQ messages'; })), /title must say "mechanics" and never "DLQ"/);
+    fails(check(mutate('messaging', (d) => { panel(d, 'Aggregate broker backlog (all queues, incl. retry and dead-letter)').title = 'Backlog'; })), /must say "aggregate"/);
+    fails(check(setExpr('messaging', 'Broker target up', 'sum by (queue) (rabbitmq_queue_messages_ready{job="rabbitmq"})')), /groups broker metrics by a per-object label/);
+    fails(check(setExpr('messaging', 'Broker target up', 'rabbitmq_queue_messages{job="rabbitmq",queue="billing.payment-events.dead"}')), /per-object label "queue"/);
+    fails(check(setExpr('messaging', 'Broker target up', 'rabbitmq_detailed_queue_messages{job="rabbitmq"}')), /detailed endpoint is not scraped/);
+    fails(check(setExpr('messaging', 'Broker target up', 'rabbitmq_connections')), /must select job="rabbitmq"/);
+    fails(check(mutate('messaging', (d) => { panel(d, 'Consumers attached').targets.push({ ...panel(d, 'Consumers attached').targets[0], refId: 'B', expr: 'sum(rabbitmq_consumers{job="rabbitmq"})' }); })), /mixes broker/);
+  });
+  test('A12.6.2: PostgreSQL panels use only the collected server and per-database statistics', () => {
+    for (const e of ['pg_stat_statements_calls_total{job="postgres"}', 'pg_stat_user_tables_seq_scan{job="postgres"}', 'pg_statio_user_indexes_idx_blks_hit_total{job="postgres"}',
+      'rate(pg_stat_database_blk_read_time{job="postgres",datname="$datname"}[5m])', 'sum by (query) (pg_stat_activity_count{job="postgres"})']) {
+      fails(check(setExpr('postgresql', 'Size', e)), /not collected/);
+    }
+    fails(check(setExpr('postgresql', 'Size', 'pg_database_size_bytes{datname="$datname"}')), /must select job="postgres"/);
+    const p = exprs('postgresql');
+    for (const needle of ['pg_up', 'pg_stat_database_numbackends', 'pg_settings_max_connections', 'pg_stat_activity_count', 'pg_stat_database_xact_commit', 'pg_stat_database_xact_rollback',
+      'pg_locks_count', 'pg_stat_database_deadlocks', 'pg_database_size_bytes', 'pg_stat_database_tup_inserted', 'pg_stat_database_blks_hit', 'pg_stat_database_blks_read']) {
+      assert.ok(p.some((e) => e.includes(needle)), `no PostgreSQL panel uses ${needle}`);
+    }
   });
 }

@@ -11,9 +11,11 @@
   local only), with an A12.3 post-certification correction (§3D); **A12.5.2 RabbitMQ broker metrics MERGED** (PR #210, `77b2cc7`;
   §3E, §4H); **A12.5.3 PostgreSQL exporter MERGED** (PR #211, `331bc98`; §3F, §4I); **A12.5.4
   integrated observability and security validation MERGED** (PR #212, `879ea44`; §4J); **A12.5 FORMALLY CLOSED** for the LOCAL
-  collection layer by the A12.5.5 certification (§4K). A12.6: the A12.6.0 decisions are recorded (§3G, D6a), and **A12.6.1 LOCAL
-  Grafana foundation and Core overview proven locally and owner-reviewed (readiness dashboard filter approved, no kit change), PR
-  pending** (§3G, §4L); **A12.6 OPEN**: A12.6.2 (other dashboards) not started, rules and self-scrape follow (A12.6.3). Production
+  collection layer by the A12.5.5 certification (§4K). A12.6: the A12.6.0 decisions are recorded (§3G, D6a); **A12.6.1 LOCAL
+  Grafana foundation and Core overview MERGED** (PR #214, merge `8d5aa7a`; §3G, §4L); **A12.6.2 operational dashboards (Core ·
+  Service, Core · Messaging, Core · PostgreSQL) proven locally and owner-reviewed, with one owner-approved Core · Overview outbox
+  correction resolved locally; pending finalization** (§3H, §4M); **A12.6 OPEN**: rules and
+  self-scrape follow (A12.6.3, not started). Production
   observability (A12.10) not started; G4 and G6 deferred, not certified; Final Core Validation not run. Metrics are **off by default**
   (`METRICS_ENABLED=false`): no service changes behaviour until a deployment sets it. Nothing here is deployed, scraped in production
   or alerted on; Prometheus, the PostgreSQL exporter and Grafana exist only in the opt-in LOCAL overlay (A12.5.1, A12.5.3, A12.6.1), and
@@ -361,6 +363,93 @@ scrape targets are the Compose-network Core services only; host and container me
   - `test:repo`: 83 tests, 8 for Grafana.
 - **Not in A12.6.1:** other dashboards (A12.6.2), alert or recording rules and rule files, Prometheus self-scrape (A12.6.3),
   Alertmanager (deferred), any production Grafana (A12.10).
+
+## 3H. A12.6.2 operational dashboards (local)
+
+Three dashboards beside the overview, from the A12.5-certified metrics only: no new metric, exporter, scrape job, datasource, folder,
+plugin or provisioning change; no kit or service change. Core · Overview is unchanged. They sit in the existing "Nawara Core" folder,
+loaded by the A12.6.1 file provider, as deterministic JSON (`infra/observability/grafana/dashboards/nawara-core/`):
+
+| Dashboard | uid | Variable | Answers |
+|---|---|---|---|
+| Core · Service | `nawara-core-service` | `job`: `label_values(nawara_service_info{job=~"<the 8 Core jobs>"}, job)` | is this service up and ready, its traffic, errors and latency, pool pressure, outbox, messaging and runtime |
+| Core · Messaging | `nawara-core-messaging` | `queue`: `label_values(nawara_event_consumer_up{job=~"<the 8 Core jobs>"}, queue)` | are consumers attached, what consumers decided (incl. parked messages), publishing, and the broker's aggregate state |
+| Core · PostgreSQL | `nawara-core-postgresql` | `datname`: `label_values(pg_database_size_bytes{job="postgres",datname=~"<9 service databases>\|postgres"}, datname)` | availability, connection capacity, sessions, transactions, locks and waits, deadlocks, size, tuples, cache, key settings |
+
+- **One reusable dashboard per subject.** The service dashboard is selected by the scrape `job`, the authoritative Core identity
+  (only `nawara_service_info` carries `service`). No metric gains a label; no dashboard is duplicated per service.
+- **Bounded variables.** Each is a single-valued query variable (no multi-value, "All", custom or free text) read from a bounded
+  source: the eight Core jobs (never `rabbitmq`, `postgres`, Prometheus or Grafana), the consumer queues the kit registers (at most 16 per
+  process), and an explicit list of databases. Panels use them only as exact matches (`job="$job"`, `queue="$queue"`,
+  `datname="$datname"`), never as a regular expression. The `postgres` maintenance database is offered: it holds the exporter's and any
+  administrative sessions, which use connection capacity. Template databases are excluded.
+- **No-data semantics.** No `or vector(0)`. Each empty state names itself (`noValue`):
+  - *not applicable*: the series does not exist for this service. No outbox on audit-service and notification-service; no consumer
+    except billing, notification and audit; no pool;
+  - *not run*: readiness before the first `/ready` (the A12.6.1 `last_run > 0` filter, kept on every readiness query);
+  - *not read yet*: the outbox gauges are shown only once the relay has read the aggregate (`nawara_outbox_stats_timestamp_seconds > 0`).
+    Before that the kit exports 0, which is not a real zero. A separate stats-age panel makes a stale reading visible;
+  - *none observed*: a labelled counter (a consume or publish outcome, a loss, a pool or relay failure) exists only once it first
+    happened. These rare events are shown as the counter **since process start** (exact, beside an uptime panel), because `rate()` and
+    `increase()` cannot see a series' first increment;
+  - *zero* is shown only where it is real: a gauge or exporter series that exists, or a ratio over actual traffic.
+    - The 5xx ratio needs at least 1 request per minute; the rollback ratio needs at least 1 transaction per minute; the cache-hit
+      ratio needs a block access. Below that they are blank.
+    - "Sessions waiting on a lock" is `… or (0 * <the sessions observed>)`: 0 only when sessions were observed and none waits.
+- **Latency.** p95 / p99 by `histogram_quantile` over the existing buckets (HTTP and handler 5 ms … 60 s, publish 1 ms … 10 s), shown
+  only when the window had observations, and labelled as estimates: precise to the bucket bounds only.
+- **Application vs broker dead-lettering.** The application dead-letter outcome (`nawara_events_consumed_total{outcome=~"dead_lettered_*|
+  dead_letter_unannotated"}`) is the permanent "parked in `<queue>.dead`" signal. `dead_letter_deferred` (copy not confirmed, requeued) is
+  shown apart. Broker counters (`rabbitmq_global_messages_dead_lettered_*_total`) are a separate panel titled "dead-letter mechanics (not
+  parked messages)": `expired` rises with every retry, because a `<queue>.retry` message whose TTL ends is dead-lettered back into its
+  main queue. Core's annotated dead-letter copies are republished, not broker-dead-lettered, so they do not appear there. No panel
+  mixes broker and application metrics, and none is called "DLQ".
+- **Aggregate backlog.** Broker ready, unacknowledged and total messages are labelled "aggregate broker backlog (all queues, incl. retry
+  and dead-letter)": parked messages stay in it. Per-queue / DLQ depth remains deferred; the broker's aggregated endpoint only (no
+  detailed or per-object metrics, no queue or vhost label).
+- **PostgreSQL limits.** Not shown, and named in a text panel: statements, query latency or text (`pg_stat_statements` not installed),
+  blocker → waiter pairs, per-table / per-index activity (collectors off), and block I/O timing (`track_io_timing` off). Settings are a
+  short list (capacity, memory, timeouts, `track_io_timing`), not a dump.
+- **Guard** (`checkLocalGrafana` → `checkDashboardSemantics`, `npm run check:repo`). It requires the four dashboards with their fixed
+  uids and titles, and, for every dashboard:
+  - `editable: false`; no link, URL, Grafana.com id, SQL or credential-like key; panel types `row`, `stat`, `timeseries` and `text` only;
+    unique panel ids;
+  - variables: only the expected one per dashboard, single-valued, a `label_values()` over its own metric bounded by literal
+    alternations (the eight Core jobs; databases without templates), used only as an exact match;
+  - on the Service dashboard, every series selects `job="$job"`; on the other operational dashboards, every Core metric is bounded to
+    the Core jobs;
+  - broker metrics select `job="rabbitmq"`, never a detailed metric or a per-object label, and never sit in a panel with application
+    metrics; a broker dead-letter panel says "mechanics" and never "DLQ"; a broker queue-total panel says "aggregate";
+  - PostgreSQL metrics select `job="postgres"`, and no expression uses statements, query text, per-table / per-index or I/O-timing data;
+  - the A12.6.1 rules (datasource by uid, no `or vector(`, readiness `last_run > 0`, `job` not `service`) apply to all four, and so
+    does the outbox rule: an expression that reads `nawara_outbox_pending_events`, `_retrying_events` or `_oldest_pending_age_seconds`
+    must carry `and on (job, instance) (nawara_outbox_stats_timestamp_seconds{…} > 0)`.
+
+  The A12.6.1 Grafana test fixture now carries all four dashboards (the new missing-dashboard rule needs them); its assertions are
+  unchanged. `test:repo`: 91 tests (8 new for A12.6.2).
+- **Not in A12.6.2:** alert or recording rules, Prometheus self-scrape (A12.6.3), Alertmanager (deferred), per-queue / DLQ broker
+  metrics (deferred), any production Grafana (A12.10).
+
+**Dashboard gaps (A12.6), recorded, not fixed: A12.5 stays closed and no metric changed.**
+
+| Operator question | Missing | Why the existing metrics are not enough | Recommendation |
+|---|---|---|---|
+| How many messages are parked in a given `<queue>.dead` now? | per-queue broker depth | the broker endpoint is aggregate by decision; the application counts parking events, not current depth | the deferred per-queue / DLQ decision; until then `nawara-check-dlq` |
+| How often did an outcome first occur in this window? | pre-initialised outcome series | prom-client creates a labelled series at its first increment, which `rate()` / `increase()` cannot see | **owner decision: DEFERRED.** Known telemetry / dashboard gap; mitigated by since-start counts. No kit change; A12.3 and A12.5 are not reopened |
+| Is Prometheus itself healthy (rule evaluation, TSDB, scrape load)? | Prometheus self-metrics | not scraped | A12.6.3 (approved allowlisted self-scrape) |
+
+**Core · Overview outbox initialisation: owner-approved correction, resolved locally.** The A12.6.2 review found that the overview's
+two outbox panels read `nawara_outbox_pending_events`, `_retrying_events` and `_oldest_pending_age_seconds` without the stats-timestamp
+filter. Those gauges are unlabelled and the kit exports 0 until the relay's first successful aggregate read, so a service whose read had
+not yet succeeded (for example, the database unreachable from start) showed 0 pending and age 0 instead of no data. The owner decided to
+fix it now. Each of the three queries gained `and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=~"<Core jobs>"} > 0)`,
+the filter Core · Service already uses: timestamp 0 (never read) → no series (no data); timestamp > 0 → the gauge as is, so 0 is a real
+zero. Nothing else in the overview changed (its two outbox descriptions say so). No kit change was required; A12.5 stays closed. The
+guard now refuses an outbox gauge without the filter on any dashboard (§4M, correction).
+
+**Other owner decisions (A12.6.2 review):** pre-creating outcome series is **DEFERRED** (gap table above); the PostgreSQL `datname`
+selector is **APPROVED as implemented**: the nine service databases plus `postgres` (its exporter and administrative sessions use the
+same server's connection capacity), `template0` / `template1` excluded.
 
 ## 4. Evidence (A12.2, local)
 
@@ -742,6 +831,42 @@ Finding, fixed in the dashboard: the readiness gauges are 0 before the first `/r
 service NOT READY with an age of about 56 years. The fix and its guard are in §3G. No kit, service or Prometheus change was made.
 
 Not done: other dashboards, rules, self-scrape, Alertmanager (out of scope); CI (not run: no push).
+
+## 4M. Evidence (A12.6.2, local)
+
+Branch `feature/core-v2-a12-operational-dashboards` from `main` at `8d5aa7a` (PR #214 merge), 2026-10-07. Disposable Compose project
+`a1262-obs`: fresh volumes and a scratch copy of `.env.example` (never the developer's `.env`). Services were migrated, and the full
+overlay stack was healthy with ten targets UP. Torn down afterwards: its containers, network, volumes and built images were removed.
+Earlier retained evidence volumes and the developer's own volume were not touched.
+
+| Proof | Result |
+|---|---|
+| Static | `check:repo` PASS; `test:repo` 90/90; the four dashboard files parse; regenerating the three new files gives byte-identical output (SHA-256); `core-overview.json` byte-identical to `origin/main`; normal and observability Compose resolve; the normal file has no Prometheus, Grafana or exporter |
+| Provisioning | after `--force-recreate grafana`: one folder (Nawara Core, `nawara-core`) with exactly `nawara-core-overview`, `nawara-core-service`, `nawara-core-messaging`, `nawara-core-postgresql`; one datasource (`nawara-prometheus`, health OK); saving over or deleting a provisioned dashboard → 400 |
+| Variables | resolved through Grafana's Prometheus datasource (`label/<name>/values?match[]=<the variable's selector>`, as `label_values()` does): `job` = the eight Core jobs exactly (Prometheus also has `rabbitmq`, `postgres`, which are excluded); `queue` = `audit-service.audit`, `billing.payment-events`, `notification.events`; `datname` = the nine service databases and `postgres` (`template0` / `template1` excluded) |
+| Queries | every panel target through Grafana `/api/ds/query` with the variable substituted, 0 errors. Service: 38 targets for each of five jobs (billing, audit, release, notification, payment). Messaging: 36 for each of the three queues. PostgreSQL: 35 for each of four databases (release, accounting, postgres, auth) |
+| Service selection | billing: consumer `billing.payment-events` ATTACHED, outbox figures, readiness READY after one `/ready` (checks database, migrations, rabbitmq, rabbitmq-consumer). audit: consumer ATTACHED, every outbox panel empty (not applicable). release: HTTP figures, no consumer (not applicable). The data changes with the job |
+| HTTP | release at about 1.3 requests/s (the public compatibility route, 4xx): rate by status class, 5xx ratio = 0 (real: traffic, no 5xx), p95 ≈ 18 ms, p99 ≈ 24 ms, busiest route by template. payment with 2 requests (0.004/s, below 1/min): rate shown, 5xx ratio **blank** |
+| Readiness | release never had `/ready`: raw `nawara_readiness_ready` 0 and last-run 0, while every readiness panel shows **not run**. billing and audit after one `/ready`: READY, age about 30 s |
+| Messaging | three proof messages on the disposable broker: one malformed (no envelope) and one well-formed with an empty payload to `payment.succeeded`, one well-formed to `audit.local_proof`. Application outcome: billing `dead_lettered_malformed` 1 and `dead_lettered_permanent` 1, audit `dead_lettered_permanent` 1, all in their `<queue>.dead`. Broker: aggregate backlog total 3 (the parked messages), every `dead_lettered_*` reason 0 (the copies are republished, not broker-dead-lettered). So the application dead-letter panel and the broker dead-letter-mechanics panel answer different questions, as designed |
+| Broker | target UP, alarms OK, 3 connections / 3 channels / 3 consumers / 9 queues (main, retry and dead for three consumers), message rates, memory and disk against their limits |
+| PostgreSQL | `pg_up` 1; 9 connections of 100 (3 superuser-reserved); sessions by state; release: about 5 commits/s, rollback ratio 0, cache hit ≈ 1.0, locks by mode, 0 waiting, 0 deadlocks in range, tuple rates, size. accounting (no service) still has background transactions (about one every 27 s), so its ratios are real; settings: `track_io_timing` off, timeouts off (0) |
+| Security regression | published host ports are loopback only: the application ports, 5433, 5672, 15672, 9090 and 3100. 9464, 15692 and 9187 are not published. Anonymous and `admin/admin` → 401 on the user, search, datasource and dashboard APIs. Anonymous access and sign-up are off; reporting and update checks are off; plugin preinstall is disabled. No installed plugin (the plugin directory is empty; only bundled plugins). No established outbound socket at the sample. Grafana: user 472, read-only root, `CapDrop ALL`, `no-new-privileges`, not privileged |
+
+Finding (recorded in §3H, not a defect of these dashboards): a labelled counter is created at its first increment, so `rate()` shows 0 for
+that first event; the dashboards therefore show rare events as since-start counts. Observation on the overview's outbox panels: §3H.
+
+Not done: alert rules, self-scrape, Alertmanager, per-queue metrics (out of scope); CI (not run: no push).
+
+**Owner-approved correction (Core · Overview outbox, §3H), focused validation only.** Core · Overview differs from `origin/main` only in
+panels 19 and 20: three expressions gained the stats-timestamp filter, and the two descriptions gained one sentence; uid, title, layout,
+datasource and every other panel are unchanged. The edit is deterministic (re-applying it gives the same SHA-256), and the three new
+dashboards still regenerate byte-identically. `check:repo` PASS; `test:repo` 91/91. The join semantics were proved with
+`promtool test rules` (the pinned Prometheus image, no network, synthetic series), running the overview's exact expressions. With
+auth-service never read (timestamp 0, gauges 0), billing-service read with nothing pending, and payment-service read with pending 5,
+retrying 2 and age 42 s, each query returns only billing 0 and payment's value. auth-service is absent (no data), and labels and
+legends are unchanged. The same test with the `origin/main` expressions fails: auth-service appears as a false 0. No stack was
+started.
 
 ## 5. Open
 
