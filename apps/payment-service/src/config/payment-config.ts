@@ -1,6 +1,6 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, loadBaseConfig, loadOrganizationReferenceConfig,
-  parseServiceTokens, registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertNoPublishedServiceTokens, assertRuntimeDatabaseRole,
+  loadBaseConfig, loadOrganizationReferenceConfig, parseServiceTokens, readDocsCredentials, registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
 
@@ -36,9 +36,6 @@ export interface PaymentConfig extends BaseConfig {
   docs: { username: string; password?: string };
 }
 
-/** Database users that must never run the service in production: the default superuser name and any schema-owner role (same rule as billing-service and organization-service). */
-const FORBIDDEN_RUNTIME_DB_USER = /^(postgres|root|.+_migrator)$/;
-
 export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): PaymentConfig {
   const reader = new EnvReader(env);
   const base = loadBaseConfig('payment-service', env, reader);
@@ -54,10 +51,8 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     throw new ConfigError('RABBITMQ_URL is required in production (the in-memory event bus is for development and tests only)');
   }
   const databaseUrl = reader.url('DATABASE_URL', ['postgres:', 'postgresql:']);
-  if (base.isProduction && FORBIDDEN_RUNTIME_DB_USER.test(decodeURIComponent(new URL(databaseUrl).username))) {
-    // ADR-0032: the runtime role is DML-only. Refuse a superuser or schema-owner login rather than run with DDL rights.
-    throw new ConfigError('DATABASE_URL must use the least-privilege runtime role in production, not a superuser or migrator role');
-  }
+  // ADR-0032: the runtime role is DML-only; production refuses a superuser, schema-owner or bootstrap-admin login (V2 A2.2: the kit rule).
+  assertRuntimeDatabaseRole(databaseUrl, { isProduction: base.isProduction });
   const supportedCurrencies = (reader.optional('PAYMENT_SUPPORTED_CURRENCIES', 'TND') ?? '')
     .split(',')
     .map((s) => s.trim().toUpperCase())
@@ -66,6 +61,8 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     throw new ConfigError('PAYMENT_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
   }
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
+  // V2 A2.2 (OD-A2.2-1, the callee side): production refuses a registered digest of a token published in this repository.
+  assertNoPublishedServiceTokens(serviceTokens, { isProduction: base.isProduction });
   return {
     ...base,
     databaseUrl,
@@ -86,10 +83,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
       createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),
       attemptPerMinute: reader.int('PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE', { default: 30, min: 1, max: 100_000 }),
     },
-    docs: {
-      username: reader.optional('SWAGGER_USERNAME', 'docs') as string,
-      // A password that protects financial API documentation must not be trivial (same rule as billing-service and organization-service).
-      password: reader.get('SWAGGER_PASSWORD') === undefined ? undefined : reader.secret('SWAGGER_PASSWORD', 16),
-    },
+    // A password that protects financial API documentation must not be trivial: at least 16 characters (the kit rule).
+    docs: readDocsCredentials(reader),
   };
 }
