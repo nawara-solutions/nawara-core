@@ -8,12 +8,20 @@
 #
 # Another workload (for example `nawara-ia` or a product) is added later as its own job pointing at its own metrics endpoint.
 # Its code never comes into this repository.
+#
+# V2 A12.6.3: Prometheus also evaluates the LOCAL alert rules (rule_files below) and scrapes a narrow allowlist of its own metrics
+# (job `prometheus`). There is no `alerting:` block: Alertmanager is deferred (D6a), so alerts are read in the Prometheus UI and Grafana.
 global:
   # Local development, not live monitoring: a 30 s interval keeps eight targets cheap, with 10 s to answer.
   scrape_interval: 30s
   scrape_timeout: 10s
-  # No rules are loaded before A12.6; the interval is set explicitly anyway.
+  # Rule evaluation (A12.6.3) at the scrape interval.
   evaluation_interval: 30s
+
+# V2 A12.6.3: the alert rules, mounted read-only from infra/observability/prometheus/rules. Their promtool tests live in
+# infra/observability/prometheus/tests, which is never mounted.
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml
 
 scrape_configs:
   - job_name: auth-service
@@ -64,3 +72,16 @@ scrape_configs:
   - job_name: postgres
     static_configs:
       - targets: ['postgres-exporter:9187']
+
+  # V2 A12.6.3: Prometheus itself, on its own port inside its container (nothing new is published). Only what the Prometheus alerts and
+  # the rule-health evidence need is kept: configuration reload state, rule evaluation failures, last evaluation and missed iterations
+  # per rule group (`rule_group` = "<rule file>;<group>", bounded by the repository's groups), process start and memory, and the head
+  # series count. Everything else (Go runtime, HTTP handlers, service discovery, notifications, TSDB internals) is dropped. Prometheus
+  # still writes `up` and the scrape_* series for this job (metric relabelling does not apply to them).
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'prometheus_config_last_reload_successful|prometheus_config_last_reload_success_timestamp_seconds|prometheus_rule_evaluation_failures_total|prometheus_rule_group_last_evaluation_timestamp_seconds|prometheus_rule_group_iterations_missed_total|process_start_time_seconds|process_resident_memory_bytes|prometheus_tsdb_head_series'
+        action: keep

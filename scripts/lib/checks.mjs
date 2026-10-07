@@ -507,6 +507,12 @@ export function checkImagePins(dockerfiles, deployScripts) {
  * - Prometheus gets no admin, lifecycle or remote-write-receiver flag, no Docker socket and no privileged mode;
  * - the scrape configuration holds no credential and no remote write, and has one job for each Core service plus `rabbitmq` and
  *   `postgres`.
+ * V2 A12.6.3 (alerting foundation), when `rules` / `ruleTests` (the rule file and its promtool tests, text) are given, see
+ * `checkAlertRules`; always:
+ * - no `alerting:` block and no Alertmanager (deferred, D6a); `rule_files` is exactly the read-only rules directory glob;
+ * - exactly one self-scrape job `prometheus` (localhost:9090, plain /metrics) keeping exactly the approved families through one
+ *   `metric_relabel_configs` keep rule, and no other job scraping Prometheus;
+ * - the rules directory is mounted read-only, the tests directory never, and every Prometheus bind mount is read-only.
  */
 export const KIT_METRICS_PORT = 9464;
 export const RABBITMQ_PROMETHEUS_PORT = 15692;
@@ -531,7 +537,7 @@ function forbiddenKeys(node, path = '') {
   if (node === null || typeof node !== 'object') return [];
   return Object.entries(node).flatMap(([k, v]) => [...(FORBIDDEN_SCRAPE_KEYS.has(k) ? [`${path}${k}`] : []), ...forbiddenKeys(v, `${path}${k}.`)]);
 }
-export function checkLocalObservability(base, overlay, prometheus) {
+export function checkLocalObservability(base, overlay, prometheus, rules, ruleTests) {
   const problems = [];
   let b, o, p;
   try { b = parse(base); o = parse(overlay); p = parse(prometheus); } catch (e) { return [`observability configuration is not valid YAML: ${e.message}`]; }
@@ -577,6 +583,191 @@ export function checkLocalObservability(base, overlay, prometheus) {
   else {
     const jobs = new Set(p.scrape_configs.map((j) => j?.job_name));
     for (const job of LOCAL_SCRAPE_JOBS) if (!jobs.has(job)) problems.push(`infra/observability/prometheus/prometheus.yml: no scrape job ${job}`);
+  }
+  problems.push(...checkPrometheusAlerting(prom, p));
+  if (rules !== undefined || ruleTests !== undefined) problems.push(...checkAlertRules(rules, ruleTests));
+  return problems;
+}
+
+/** V2 A12.6.3: the Prometheus families the self-scrape keeps (the Prometheus alerts and rule-health evidence need nothing else). */
+export const PROMETHEUS_SELF_METRICS = ['prometheus_config_last_reload_successful', 'prometheus_config_last_reload_success_timestamp_seconds',
+  'prometheus_rule_evaluation_failures_total', 'prometheus_rule_group_last_evaluation_timestamp_seconds', 'prometheus_rule_group_iterations_missed_total',
+  'process_start_time_seconds', 'process_resident_memory_bytes', 'prometheus_tsdb_head_series'];
+export const PROMETHEUS_RULE_GLOB = '/etc/prometheus/rules/*.rules.yml';
+const PROMETHEUS_RULES_MOUNT = './infra/observability/prometheus/rules:/etc/prometheus/rules:ro';
+function checkPrometheusAlerting(prom, p) {
+  const problems = [];
+  const where = 'infra/observability/prometheus/prometheus.yml';
+  if (p && typeof p === 'object') {
+    if ('alerting' in p || /alertmanager/i.test(JSON.stringify(p))) problems.push(`${where}: no alerting block or Alertmanager (deferred until a concrete receiver exists, D6a)`);
+    const files = asArray(p.rule_files);
+    if (files.length !== 1 || files[0] !== PROMETHEUS_RULE_GLOB) problems.push(`${where}: rule_files must be exactly ["${PROMETHEUS_RULE_GLOB}"]`);
+    const jobs = asArray(p.scrape_configs);
+    const self = jobs.filter((j) => j?.job_name === 'prometheus');
+    if (self.length !== 1) problems.push(`${where}: exactly one self-scrape job "prometheus" is required (found ${self.length})`);
+    else {
+      const j = self[0];
+      const targets = asArray(j.static_configs).flatMap((c) => asArray(c?.targets));
+      if (asArray(j.static_configs).length !== 1 || targets.length !== 1 || targets[0] !== 'localhost:9090') problems.push(`${where}: the prometheus job must scrape exactly localhost:9090 (its own port, nothing published)`);
+      for (const k of Object.keys(j)) if (!['job_name', 'static_configs', 'metric_relabel_configs'].includes(k)) problems.push(`${where}: the prometheus job must not set ${k} (plain http /metrics, no relabelling of targets)`);
+      const keep = asArray(j.metric_relabel_configs);
+      const rule = keep[0] ?? {};
+      if (keep.length !== 1 || rule.action !== 'keep' || JSON.stringify(rule.source_labels) !== '["__name__"]' || Object.keys(rule).some((k) => !['source_labels', 'regex', 'action'].includes(k))
+        || !sameSet(String(rule.regex ?? '').split('|'), PROMETHEUS_SELF_METRICS)) {
+        problems.push(`${where}: the prometheus job must keep exactly ${PROMETHEUS_SELF_METRICS.join(', ')} (one metric_relabel_configs keep rule on __name__)`);
+      }
+    }
+    for (const j of jobs) {
+      if (j?.job_name === 'prometheus') continue;
+      const targets = asArray(j?.static_configs).flatMap((c) => asArray(c?.targets)).map(String);
+      if (targets.some((t) => /^(localhost|127\.0\.0\.1|prometheus):9090$/.test(t))) problems.push(`${where}: job ${j?.job_name} scrapes Prometheus; only the allowlisted "prometheus" job may`);
+    }
+  }
+  if (prom) {
+    const mounts = asArray(prom.volumes).map((v) => (typeof v === 'object' ? `${v.source}:${v.target}${v.read_only ? ':ro' : ''}` : String(v)));
+    if (mounts.filter((m) => m === PROMETHEUS_RULES_MOUNT).length !== 1) problems.push(`docker-compose.observability.yml: prometheus must mount the rules exactly once, read-only (${PROMETHEUS_RULES_MOUNT})`);
+    for (const m of mounts) {
+      if (/prometheus\/tests/.test(m)) problems.push(`docker-compose.observability.yml: prometheus must not mount the rule tests (${m})`);
+      if (m.startsWith('./') && !m.endsWith(':ro')) problems.push(`docker-compose.observability.yml: prometheus bind mount ${m} must be read-only`);
+      if (m.includes('/etc/prometheus/rules') && m !== PROMETHEUS_RULES_MOUNT) problems.push(`docker-compose.observability.yml: prometheus rules mount ${m} must be ${PROMETHEUS_RULES_MOUNT}`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * V2 A12.6.3: the LOCAL alert rules (`rules`: infra/observability/prometheus/rules/nawara-core.rules.yml) and their promtool tests
+ * (`ruleTests`: infra/observability/prometheus/tests/nawara-core.rules.test.yml), as text.
+ * - exactly the approved catalog (`ALERT_CATALOG`: 16 alerts in four groups), no deferred or rejected alert (SettleFailures, readiness,
+ *   self-scrape, DLQ depth, broker backlog, long transactions, TSDB);
+ * - alert rules only (no recording rule yet), unique CamelCase names in named groups; keys alert, expr, for, labels, annotations;
+ * - labels: `severity` only, critical or warning; annotations: `summary` / `description`, static text with only `$value` and the
+ *   approved labels (job, instance, rule_group), no URL;
+ * - expressions: no `or vector(`, no readiness metric (dashboard only, A12.6.0), no detailed broker metric, no label_replace/label_join;
+ *   every series bounded to its job (`up` / `nawara_*` to the eight Core jobs or rabbitmq / postgres / prometheus; `pg_*` postgres,
+ *   `rabbitmq_*` rabbitmq, `prometheus_*` prometheus); matchers and groupings only on approved labels; outbox gauges read only once
+ *   their stats were read (the A12.6.2 rule); A12.6.3.2: labels job, instance, queue, pool, datname, alarm, rule_group; selection-only
+ *   matchers outcome (dead-letter outcomes), status_class ("5xx", !="aborted"), wait_event_type ("Lock"); no bare `{…}` selector and
+ *   no label_replace except BrokerResourceAlarm's exact form over the three aggregate alarm families; HttpServerErrorRatio has both a
+ *   ratio and an absolute 5xx floor; PgLockWaits counts waiting sessions, never locks held; no uncollected PostgreSQL data;
+ * - tests load exactly the rule file, and every alert has a test where it fires and one where it does not; no test names an unknown alert.
+ */
+export const ALERT_SEVERITIES = ['critical', 'warning'];
+const ALERT_LABELS = new Set(['job', 'instance', 'queue', 'pool', 'datname', 'alarm', 'rule_group']);
+const ALERT_JOBS = new Set(['rabbitmq', 'postgres', 'prometheus']);
+/** V2 A12.6.3: the complete approved alert catalog (A12.6.3.1 + A12.6.3.2), in its four groups. */
+export const ALERT_CATALOG = {
+  'core-services': ['CoreServiceDown', 'DbPoolWaiting', 'HttpServerErrorRatio'],
+  'core-messaging': ['ConsumerDetached', 'MessagesDeadLettered', 'OutboxBacklogAging', 'OutboxStatsStale'],
+  infrastructure: ['RabbitMQDown', 'PostgreSQLDown', 'PostgresExporterDown', 'BrokerResourceAlarm', 'PgConnectionPressure', 'PgDeadlocks', 'PgLockWaits'],
+  prometheus: ['PrometheusRuleFailures', 'PrometheusConfigReloadFailed'],
+};
+// Deferred or rejected by the owner (A12.6.3.0): never an alert here.
+const DEFERRED_ALERTS = /SettleFailure|Readiness|NotReady|SelfScrape|DLQ|Dlq|DeadLetterQueue|Depth|Backlog(?!Aging)|LongTransaction|LongRunning|Tsdb|TSDB|Alertmanager/;
+const DEAD_LETTER_OUTCOMES = ['dead_lettered_malformed', 'dead_lettered_permanent', 'dead_lettered_retries_exhausted', 'dead_letter_unannotated'];
+// Labels a rule may SELECT on (never propagate: each rule aggregates them away), with the only values allowed.
+const SELECTION_MATCHERS = {
+  outcome: (x) => x.op === '=~' && x.value.split('|').every((v) => DEAD_LETTER_OUTCOMES.includes(v)),
+  status_class: (x) => (x.op === '=' && x.value === '5xx') || (x.op === '!=' && x.value === 'aborted'),
+  wait_event_type: (x) => x.op === '=' && x.value === 'Lock',
+};
+export const BROKER_ALARMS = ['memory_used_watermark', 'free_disk_space_watermark', 'file_descriptor_limit'];
+// The one reviewed label transformation: BrokerResourceAlarm names which of the three aggregate alarm families is raised.
+const BROKER_ALARM_EXPR = /^label_replace\(\{__name__=~"rabbitmq_alarms_\(([a-z_|]+)\)",job="rabbitmq"\}, "alarm", "\$1", "__name__", "rabbitmq_alarms_\(\.\+\)"\) == 1$/;
+const RULES_FILE = 'infra/observability/prometheus/rules/nawara-core.rules.yml';
+const RULE_TESTS_FILE = 'infra/observability/prometheus/tests/nawara-core.rules.test.yml';
+export function checkAlertRules(rulesText, testsText) {
+  const problems = [];
+  let r, t;
+  try { r = parse(String(rulesText ?? '')); } catch (e) { return [`${RULES_FILE}: not valid YAML (${e.message})`]; }
+  try { t = parse(String(testsText ?? '')); } catch (e) { return [`${RULE_TESTS_FILE}: not valid YAML (${e.message})`]; }
+  const groups = asArray(r?.groups);
+  if (groups.length === 0) problems.push(`${RULES_FILE}: no rule group`);
+  const found = Object.fromEntries(groups.map((g) => [g?.name, asArray(g?.rules).map((x) => x?.alert)]));
+  if (!sameSet(Object.keys(found), Object.keys(ALERT_CATALOG))) problems.push(`${RULES_FILE}: the groups must be exactly ${Object.keys(ALERT_CATALOG).join(', ')}`);
+  for (const [group, names] of Object.entries(ALERT_CATALOG)) {
+    for (const n of names) if (!asArray(found[group]).includes(n)) problems.push(`${RULES_FILE}: alert ${n} is missing from group ${group}`);
+  }
+  const allAlerts = Object.values(found).flat();
+  for (const n of allAlerts) {
+    if (DEFERRED_ALERTS.test(String(n))) problems.push(`${RULES_FILE}: ${n} is deferred or rejected (A12.6.3.0); not an alert here`);
+    else if (!Object.values(ALERT_CATALOG).flat().includes(n)) problems.push(`${RULES_FILE}: ${n} is not in the approved alert catalog`);
+  }
+  const groupNames = new Set();
+  const alerts = new Set();
+  for (const g of groups) {
+    if (typeof g?.name !== 'string' || !/^[a-z][a-z0-9-]*$/.test(g.name) || groupNames.has(g.name)) problems.push(`${RULES_FILE}: group "${g?.name}" needs a unique lowercase name`);
+    groupNames.add(g?.name);
+    for (const k of Object.keys(g ?? {})) if (!['name', 'rules'].includes(k)) problems.push(`${RULES_FILE}: group ${g?.name} must not set ${k} (the global 30 s evaluation interval applies)`);
+    for (const rule of asArray(g?.rules)) {
+      const at = `${RULES_FILE}: ${rule?.alert ?? rule?.record ?? '?'}`;
+      if (!('alert' in (rule ?? {}))) { problems.push(`${at}: alert rules only`); continue; }
+      if (!/^[A-Z][A-Za-z0-9]+$/.test(String(rule.alert)) || alerts.has(rule.alert)) problems.push(`${at}: needs a unique CamelCase alert name`);
+      alerts.add(rule.alert);
+      for (const k of Object.keys(rule)) if (!['alert', 'expr', 'for', 'labels', 'annotations'].includes(k)) problems.push(`${at}: must not set ${k}`);
+      const labels = rule.labels ?? {};
+      if (Object.keys(labels).join() !== 'severity' || !ALERT_SEVERITIES.includes(labels.severity)) problems.push(`${at}: labels must be exactly severity: critical | warning`);
+      for (const [k, v] of Object.entries(rule.annotations ?? {})) {
+        if (!['summary', 'description'].includes(k)) problems.push(`${at}: annotation ${k} is not allowed (summary, description)`);
+        const text = String(v);
+        if (text.includes('://')) problems.push(`${at}: annotation ${k} must not contain a URL`);
+        for (const [, inner] of text.matchAll(/\{\{([^}]*)\}\}/g)) {
+          const m = /^\s*(\$value|\$labels\.([a-z_]+))\s*$/.exec(inner);
+          if (!m || (m[2] && !ALERT_LABELS.has(m[2]))) problems.push(`${at}: annotation ${k} may use only $value and $labels.${[...ALERT_LABELS].join(' / ')} ({{${inner}}})`);
+        }
+      }
+      const e = String(rule.expr ?? '');
+      if (/\bor\s+vector\s*\(/.test(e)) problems.push(`${at}: uses "or vector(...)" (a fabricated value)`);
+      if (/\bnawara_readiness_/.test(e)) problems.push(`${at}: readiness is dashboard only, never an alert (its gauges change only when /ready is called)`);
+      if (/\brabbitmq_detailed_/.test(e)) problems.push(`${at}: detailed broker metrics are not scraped`);
+      const broker = BROKER_ALARM_EXPR.exec(e.trim());
+      const brokerOk = rule.alert === 'BrokerResourceAlarm' && broker && sameSet(broker[1].split('|'), BROKER_ALARMS);
+      if (rule.alert === 'BrokerResourceAlarm' && !brokerOk) problems.push(`${at}: must be exactly label_replace({__name__=~"rabbitmq_alarms_(${BROKER_ALARMS.join('|')})",job="rabbitmq"}, "alarm", "$1", "__name__", "rabbitmq_alarms_(.+)") == 1`);
+      // The exact BrokerResourceAlarm form is verified above; its quoted __name__ regex is not a series to scan.
+      const scanned = brokerOk ? '' : e;
+      if (!brokerOk && /\blabel_(replace|join)\s*\(/.test(e)) problems.push(`${at}: must not create labels (label_replace / label_join; only BrokerResourceAlarm's reviewed form may)`);
+      if (!brokerOk && /(^|[^A-Za-z0-9_\s])\s*\{/.test(e)) problems.push(`${at}: selects series without a metric name (a bare {…} selector)`);
+      if (UNSUPPORTED_POSTGRES.test(e)) problems.push(`${at}: uses PostgreSQL data that is not collected (statements, query text, per-table / per-index, I/O timing)`);
+      if (rule.alert === 'HttpServerErrorRatio') {
+        if (!/\)\s*>\s*0?\.\d+/.test(e) || !/\bincrease\(nawara_http_server_requests_total\{[^}]*status_class="5xx"[^}]*\}\[5m\]\)\)\s*>=\s*[1-9]/.test(e)) {
+          problems.push(`${at}: needs both an error ratio threshold and an absolute 5xx floor (increase(...status_class="5xx"...[5m]) >= N)`);
+        }
+      }
+      if (rule.alert === 'PgLockWaits' && (!/\bpg_stat_activity_count\{[^}]*wait_event_type="Lock"/.test(e) || /\bpg_locks_count\b/.test(e))) problems.push(`${at}: must count sessions waiting on a lock (pg_stat_activity_count{wait_event_type="Lock"}), not locks held`);
+      for (const [, , list] of e.matchAll(/\b(by|without|on|ignoring)\s*\(([^)]*)\)/g)) {
+        for (const l of list.split(',').map((x) => x.trim()).filter(Boolean)) if (!ALERT_LABELS.has(l)) problems.push(`${at}: groups or matches on "${l}" (approved: ${[...ALERT_LABELS].join(', ')})`);
+      }
+      const bounded = (s, allowed) => s.matchers.some((x) => x.label === 'job' && allowed(x));
+      for (const s of selectorsOf(scanned, 'up\\b')) if (!bounded(s, (x) => isCoreJobs(x) && x.value !== '$job' || (x.op === '=' && ALERT_JOBS.has(x.value)))) problems.push(`${at}: up must select the Core jobs (exact list) or job rabbitmq / postgres / prometheus`);
+      for (const s of selectorsOf(scanned, 'nawara_')) if (!bounded(s, (x) => isCoreJobs(x) && x.value !== '$job')) problems.push(`${at}: ${s.metric} must be bounded to the Core jobs`);
+      for (const [prefix, job] of [['pg_', 'postgres'], ['rabbitmq_', 'rabbitmq'], ['prometheus_', 'prometheus'], ['process_', null]]) {
+        for (const s of selectorsOf(scanned, prefix)) if (!bounded(s, (x) => (job ? x.op === '=' && x.value === job : isCoreJobs(x) && x.value !== '$job' || (x.op === '=' && ALERT_JOBS.has(x.value))))) problems.push(`${at}: ${s.metric} must select ${job ? `job="${job}"` : 'a bounded job'}`);
+      }
+      for (const s of [...selectorsOf(scanned, '[a-z_]')]) {
+        for (const x of s.matchers) {
+          if (x.label === 'job' || ALERT_LABELS.has(x.label)) continue;
+          if (SELECTION_MATCHERS[x.label]?.(x)) continue;
+          problems.push(`${at}: ${s.metric} matches on "${x.label}${x.op}\"${x.value}\"" (approved: ${[...ALERT_LABELS].join(', ')}; selection only: outcome=~<dead-letter outcomes>, status_class="5xx" / !="aborted", wait_event_type="Lock")`);
+        }
+      }
+      if (/\bnawara_outbox_(pending_events|retrying_events|oldest_pending_age_seconds)\b/.test(e)
+        && !/\band\s+on\s*\(\s*job\s*,\s*instance\s*\)\s*\(\s*nawara_outbox_stats_timestamp_seconds(\{[^}]*\})?\s*>\s*0\s*\)/.test(e)) {
+        problems.push(`${at}: reads outbox gauges without "and on (job, instance) (nawara_outbox_stats_timestamp_seconds > 0)"`);
+      }
+    }
+  }
+  if (JSON.stringify(t?.rule_files) !== '["../rules/nawara-core.rules.yml"]') problems.push(`${RULE_TESTS_FILE}: rule_files must be exactly ["../rules/nawara-core.rules.yml"]`);
+  const fires = new Set();
+  const quiet = new Set();
+  for (const test of asArray(t?.tests)) {
+    for (const a of asArray(test?.alert_rule_test)) {
+      if (!alerts.has(a?.alertname)) problems.push(`${RULE_TESTS_FILE}: tests the unknown alert ${a?.alertname}`);
+      (asArray(a?.exp_alerts).length ? fires : quiet).add(a?.alertname);
+    }
+  }
+  for (const a of alerts) {
+    if (!fires.has(a)) problems.push(`${RULE_TESTS_FILE}: no test where ${a} fires`);
+    if (!quiet.has(a)) problems.push(`${RULE_TESTS_FILE}: no test where ${a} does not fire`);
   }
   return problems;
 }

@@ -1,0 +1,189 @@
+# V2 A12.6.3: LOCAL alert rules, evaluated by Prometheus (the rule authority). No Alertmanager (deferred until a concrete receiver
+# exists, decision D6a): alerts are read in the Prometheus UI (127.0.0.1:9090/alerts) and in Grafana. Thresholds and `for` durations are
+# LOCAL validation values, not production ones (A12.10). Loaded from /etc/prometheus/rules (read-only mount); tested by
+# infra/observability/prometheus/tests (promtool, never mounted). Readiness has no alert: its gauges change only when /ready is called.
+#
+# Labels: `severity` (critical | warning) plus the series' own bounded labels (job, instance, queue, pool, datname, alarm, rule_group);
+# every rule aggregates the others away. Annotations: static text, those labels and $value only. Runbook: docs/runbooks/local-observability.md.
+groups:
+  - name: core-services
+    rules:
+      # The eight Core jobs are static scrape targets, so `up` exists even when a container is gone (the scrape fails: 0).
+      - alert: CoreServiceDown
+        expr: up{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Core service {{ $labels.job }} is down
+          description: Prometheus has not been able to scrape {{ $labels.job }} ({{ $labels.instance }}) for 2 minutes.
+      # A sustained queue for a pool client (all clients busy). The gauge is read at scrape, so only a wait seen at every evaluation
+      # for 3 minutes fires; a service without a pool has no series.
+      - alert: DbPoolWaiting
+        expr: nawara_db_pool_waiting_clients{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} > 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: Database pool of {{ $labels.job }} has waiting requests
+          description: Requests have been waiting for a {{ $labels.pool }} pool client in {{ $labels.job }} ({{ $labels.instance }}) for 3 minutes; the pool is saturated.
+      # LOCAL validation thresholds (not production, A12.10): more than 5 % of the answered requests are 5xx over 5 minutes AND at least
+      # 3 5xx answers in that window, so a single 5xx at low traffic never fires. 4xx and client-aborted requests are not errors here
+      # (aborted is left out of the denominator too). No 5xx series: no result.
+      - alert: HttpServerErrorRatio
+        expr: |
+          (
+            sum by (job) (rate(nawara_http_server_requests_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",status_class="5xx"}[5m]))
+            /
+            sum by (job) (rate(nawara_http_server_requests_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",status_class!="aborted"}[5m]))
+          ) > 0.05
+          and on (job)
+          sum by (job) (increase(nawara_http_server_requests_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",status_class="5xx"}[5m])) >= 3
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} is answering 5xx"
+          description: More than 5 % of {{ $labels.job }}'s requests (and at least 3) answered 5xx over 5 minutes, for 3 minutes.
+
+  - name: core-messaging
+    rules:
+      # Only consumers have this gauge (set when they subscribe), so a service that consumes nothing can never fire.
+      - alert: ConsumerDetached
+        expr: nawara_event_consumer_up{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is not consuming {{ $labels.queue }}"
+          description: The {{ $labels.queue }} consumer of {{ $labels.job }} ({{ $labels.instance }}) has been detached for 2 minutes; its events wait in the broker.
+      # Messages a Core consumer parked in <queue>.dead in the last 10 minutes (malformed, permanent failure, retries exhausted, or
+      # parked by the broker without the annotated copy). A labelled counter is created at its FIRST increment, which increase() cannot
+      # see, so the second branch also fires for a dead-letter series that exists now but did not exist 10 minutes ago. A restart
+      # (counter reset) followed by a new dead letter is seen by increase(). Known residual limits: a restarted process whose count
+      # equals its predecessor's within the window is not seen, and a series older than Prometheus' own history fires once as new.
+      # The dashboards' since-start counts stay the reference. `outcome` is folded: the action (inspect <queue>.dead) is the same.
+      - alert: MessagesDeadLettered
+        expr: |
+          sum by (job, instance, queue) (increase(nawara_events_consumed_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",outcome=~"dead_lettered_malformed|dead_lettered_permanent|dead_lettered_retries_exhausted|dead_letter_unannotated"}[10m])) > 0
+          or
+          count by (job, instance, queue) (
+            nawara_events_consumed_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",outcome=~"dead_lettered_malformed|dead_lettered_permanent|dead_lettered_retries_exhausted|dead_letter_unannotated"}
+            unless
+            nawara_events_consumed_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",outcome=~"dead_lettered_malformed|dead_lettered_permanent|dead_lettered_retries_exhausted|dead_letter_unannotated"} offset 10m
+          )
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} dead-lettered messages from {{ $labels.queue }}"
+          description: "{{ $labels.job }} parked messages in {{ $labels.queue }}.dead in the last 10 minutes; inspect them with nawara-check-dlq."
+      # The outbox gauges count only once the relay has read the outbox (stats timestamp > 0, the A12.6.2 rule): before that they are 0.
+      # 60 s is nawara-check-outbox-lag's own "needs manual review" age.
+      - alert: OutboxBacklogAging
+        expr: nawara_outbox_oldest_pending_age_seconds{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} > 60 and on (job, instance) (nawara_outbox_stats_timestamp_seconds{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} > 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox of {{ $labels.job }} is not draining
+          description: The oldest pending outbox event of {{ $labels.job }} ({{ $labels.instance }}) has been older than 60 seconds for 5 minutes.
+      # The relay re-reads the outbox aggregate at most every 15 s. Stale: read before, but not for 2 minutes. Never read: still 0
+      # 5 minutes after the process started (for example the database unreachable from start). Services without an outbox have no series.
+      - alert: OutboxStatsStale
+        expr: |
+          (time() - (nawara_outbox_stats_timestamp_seconds{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} > 0)) > 120
+          or
+          (nawara_outbox_stats_timestamp_seconds{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"} == 0) and on (job, instance) ((time() - process_start_time_seconds{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service"}) > 300)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox figures of {{ $labels.job }} are stale
+          description: The outbox aggregate of {{ $labels.job }} ({{ $labels.instance }}) has not been read for over 2 minutes, or never since start; its outbox figures cannot be trusted.
+
+  - name: infrastructure
+    rules:
+      - alert: RabbitMQDown
+        expr: up{job="rabbitmq"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: RabbitMQ is down
+          description: Prometheus has not been able to scrape the broker's metrics endpoint ({{ $labels.instance }}) for 2 minutes.
+      # pg_up exists only while the exporter answers: an exporter outage is PostgresExporterDown, never this alert.
+      - alert: PostgreSQLDown
+        expr: pg_up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: PostgreSQL is unreachable
+          description: postgres-exporter is up but has not reached PostgreSQL for 2 minutes.
+      - alert: PostgresExporterDown
+        expr: up{job="postgres"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: postgres-exporter is down
+          description: PostgreSQL metrics have not been collected for 5 minutes ({{ $labels.instance }}). Monitoring is blind; the database itself is not shown to be down.
+      # The three aggregate alarm families only (no queue, vhost or other object label); `alarm` names which one.
+      - alert: BrokerResourceAlarm
+        expr: label_replace({__name__=~"rabbitmq_alarms_(memory_used_watermark|free_disk_space_watermark|file_descriptor_limit)",job="rabbitmq"}, "alarm", "$1", "__name__", "rabbitmq_alarms_(.+)") == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: RabbitMQ resource alarm {{ $labels.alarm }}
+          description: The broker has raised its {{ $labels.alarm }} alarm for 1 minute; publishers are blocked until it clears.
+      # Server-wide: client backends against the slots a non-superuser can use. LOCAL threshold (A12.10 sets production).
+      - alert: PgConnectionPressure
+        expr: |
+          sum by (job, instance) (pg_stat_database_numbackends{job="postgres"})
+          / on (job, instance)
+          (max by (job, instance) (pg_settings_max_connections{job="postgres"}) - max by (job, instance) (pg_settings_superuser_reserved_connections{job="postgres"}))
+          > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: PostgreSQL connections above 80 % of capacity
+          description: Client backends have used more than 80 % of the non-reserved connection slots for 5 minutes.
+      # Deadlocks PostgreSQL detected (and resolved by aborting a transaction) in the last 10 minutes; template databases excluded.
+      - alert: PgDeadlocks
+        expr: sum by (job, instance, datname) (increase(pg_stat_database_deadlocks{job="postgres",datname!~"template0|template1"}[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Deadlocks in {{ $labels.datname }}
+          description: PostgreSQL resolved deadlocks in the {{ $labels.datname }} database in the last 10 minutes.
+      # Sessions actually waiting on a heavyweight lock at every evaluation for 5 minutes: sustained contention, not "locks exist".
+      # Which session blocks which is not collected.
+      - alert: PgLockWaits
+        expr: sum by (job, instance, datname) (pg_stat_activity_count{job="postgres",datname!~"template0|template1",wait_event_type="Lock"}) >= 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Lock waits in {{ $labels.datname }}
+          description: Sessions in the {{ $labels.datname }} database have been waiting on locks for 5 minutes.
+
+  - name: prometheus
+    rules:
+      # The counter is created at 0 when a rule group loads, so the first failure is visible to increase().
+      - alert: PrometheusRuleFailures
+        expr: increase(prometheus_rule_evaluation_failures_total{job="prometheus"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Prometheus rule evaluation is failing
+          description: Rule group {{ $labels.rule_group }} had evaluation failures in the last 10 minutes; its alerts may be wrong or missing.
+      # Set to 1 at startup and on every successful reload; an invalid configuration at startup stops Prometheus instead.
+      - alert: PrometheusConfigReloadFailed
+        expr: prometheus_config_last_reload_successful{job="prometheus"} == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Prometheus configuration reload failed
+          description: The last configuration reload failed; Prometheus keeps running with the previous configuration and rules.

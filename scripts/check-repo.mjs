@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
+// A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
+const readOptional = (path) => { try { return readFileSync(path, 'utf8'); } catch { return ''; } };
 const problems = [];
 
 function* walk(dir) {
@@ -72,6 +74,9 @@ problems.push(...checkLocalObservability(
   readFileSync(join(root, 'docker-compose.yml'), 'utf8'),
   readFileSync(join(root, 'docker-compose.observability.yml'), 'utf8'),
   readFileSync(join(root, 'infra/observability/prometheus/prometheus.yml'), 'utf8'),
+  // V2 A12.6.3: the alert rules and their promtool tests (a missing file is reported, not thrown).
+  readOptional(join(root, 'infra/observability/prometheus/rules/nawara-core.rules.yml')),
+  readOptional(join(root, 'infra/observability/prometheus/tests/nawara-core.rules.test.yml')),
 ));
 // V2 A12.6.1: local Grafana: loopback-only, no default or anonymous access, no call home, one Prometheus datasource, deterministic dashboards.
 {
@@ -126,4 +131,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local Grafana');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana');
