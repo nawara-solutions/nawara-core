@@ -1,4 +1,4 @@
-import { ConfigError } from '@nawara/service-kit';
+import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';
 import { AUDIT_CATEGORIES, type AuditCategory } from './categories.js';
 
 /**
@@ -37,40 +37,25 @@ export class AuditCallerPolicy {
   private constructor(private readonly callers: ReadonlyMap<string, CallerPolicy>) {}
 
   static parse(raw: string | undefined, registered: readonly string[]): AuditCallerPolicy {
-    if (raw === undefined || raw.trim() === '') {
-      if (registered.length > 0) throw new ConfigError(`AUDIT_SERVICE_POLICY is required: every registered caller needs an explicit entry (deny by default): ${registered.join(', ')}`);
-      return new AuditCallerPolicy(new Map());
-    }
-    let doc: unknown;
-    try {
-      doc = JSON.parse(raw);
-    } catch {
-      throw new ConfigError('AUDIT_SERVICE_POLICY must be valid JSON');
-    }
-    const callers = (doc as { callers?: unknown } | null)?.callers;
-    if (typeof callers !== 'object' || callers === null || Array.isArray(callers) || Object.keys(doc as object).length !== 1) {
-      throw new ConfigError('AUDIT_SERVICE_POLICY must be {"callers": {...}}');
-    }
-    const map = new Map<string, CallerPolicy>();
-    for (const [name, entry] of Object.entries(callers as Record<string, unknown>)) {
-      const at = `AUDIT_SERVICE_POLICY: "${name}"`;
-      if (!registered.includes(name)) throw new ConfigError(`AUDIT_SERVICE_POLICY names "${name}", which has no registered service token`);
-      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new ConfigError(`${at} must be an object`);
-      const e = entry as Record<string, unknown>;
-      for (const k of Object.keys(e)) if (!KEYS.has(k)) throw new ConfigError(`${at} has an unknown property "${k}"`);
-      const operations = distinct<AuditOperation>(e.operations, AUDIT_OPERATIONS, `${at}.operations`);
-      const categories = distinct<AuditCategory>(e.categories, AUDIT_CATEGORIES, `${at}.categories`);
-      let sourceServices: Set<string> | undefined;
-      if (e.sourceServices !== undefined) {
-        if (!Array.isArray(e.sourceServices) || e.sourceServices.length === 0) throw new ConfigError(`${at}.sourceServices must be a non-empty list when present`);
-        for (const s of e.sourceServices) if (typeof s !== 'string' || !SERVICE_NAME.test(s)) throw new ConfigError(`${at}.sourceServices lists something that is not a service name`);
-        sourceServices = new Set(e.sourceServices as string[]);
-        if (sourceServices.size !== e.sourceServices.length) throw new ConfigError(`${at}.sourceServices lists a service twice`);
-      }
-      map.set(name, { operations, categories, sourceServices });
-    }
-    for (const r of registered) if (!map.has(r)) throw new ConfigError(`registered caller "${r}" has no AUDIT_SERVICE_POLICY entry (deny by default)`);
-    return new AuditCallerPolicy(map);
+    // V2 A1.3: the document (envelope, registration cross-check both ways, unknown and duplicate keys at any depth) is the kit's
+    // shared parser (ADR-0052, ADR-0056 §11); the operations / categories / sourceServices dimensions below are unchanged.
+    const map = parseCallerPolicy<CallerPolicy>(raw, registered, {
+      variable: 'AUDIT_SERVICE_POLICY',
+      keys: [...KEYS],
+      entry: (at, e) => {
+        const operations = distinct<AuditOperation>(e.operations, AUDIT_OPERATIONS, `${at}.operations`);
+        const categories = distinct<AuditCategory>(e.categories, AUDIT_CATEGORIES, `${at}.categories`);
+        let sourceServices: Set<string> | undefined;
+        if (e.sourceServices !== undefined) {
+          if (!Array.isArray(e.sourceServices) || e.sourceServices.length === 0) throw new ConfigError(`${at}.sourceServices must be a non-empty list when present`);
+          for (const s of e.sourceServices) if (typeof s !== 'string' || !SERVICE_NAME.test(s)) throw new ConfigError(`${at}.sourceServices lists something that is not a service name`);
+          sourceServices = new Set(e.sourceServices as string[]);
+          if (sourceServices.size !== e.sourceServices.length) throw new ConfigError(`${at}.sourceServices lists a service twice`);
+        }
+        return { operations, categories, sourceServices };
+      },
+    });
+    return new AuditCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
   }
 
   /** The caller's policy, or undefined (then every request is refused). */

@@ -61,3 +61,33 @@ describe('AUDIT_SERVICE_POLICY', () => {
     expect([...AUDIT_CATEGORIES]).toEqual(['security', 'business', 'commercial', 'administrative']);
   });
 });
+
+describe('V2 A1.3: AUDIT_SERVICE_POLICY on the kit parser (ADR-0052, ADR-0056 §11)', () => {
+  // Raw JSON on purpose: a JavaScript object would collapse a repeated key before the parser ever saw it.
+  it.each([
+    ['a repeated caller key', '{"callers":{"a":{"operations":["read_organization"],"categories":["business"]},"a":{"operations":["read_organization","read_platform"],"categories":["security"]}}}'],
+    ['a repeated entry property', '{"callers":{"a":{"operations":["read_organization"],"operations":["read_platform"],"categories":["business"]}}}'],
+    ['a repeated top-level key', '{"callers":{},"callers":{"a":{"operations":["read_platform"],"categories":["security"]}}}'],
+  ])('refuses %s instead of keeping the last one', (_label, raw) => {
+    let err: unknown;
+    try {
+      AuditCallerPolicy.parse(raw, ['a']);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(/must not repeat a key/);
+  });
+
+  it('an empty or whitespace policy with a registered caller still refuses to boot (no permissive fallback)', () => {
+    expect(() => AuditCallerPolicy.parse(' \n ', ['a'])).toThrow(/required/);
+    expect(() => AuditCallerPolicy.parse('{"callers":{}}', ['a'])).toThrow(/has no AUDIT_SERVICE_POLICY entry \(deny by default\)/);
+  });
+
+  it('the repository smoke document (scripts/smoke-core-image.sh) keeps exactly its authority', () => {
+    const p = AuditCallerPolicy.parse('{"callers":{"smoke-caller":{"operations":["read_organization"],"categories":["business"]}}}', ['smoke-caller']);
+    expect(p.allows('smoke-caller', 'read_organization')).toBe(true);
+    expect(p.allows('smoke-caller', 'read_platform')).toBe(false);
+    expect(p.of('smoke-caller')).toEqual({ operations: new Set(['read_organization']), categories: new Set(['business']), sourceServices: undefined });
+  });
+});
