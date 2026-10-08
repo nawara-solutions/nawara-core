@@ -335,3 +335,12 @@ the deployed services (Auth, Organization, Audit) stays separately authorized pr
 configuration checks. Deferred with owners: Auth loader convergence and the JWT key ring (A4), generic CLI hygiene (A15), the
 Organization ownership tooling (A5 / F6 / F7), general secret scanning (A14). Unchanged: A3.6 and A3.7 deferred; A12.10 not started;
 G4 and G6 deferred; G7, F6, F7 locked; Final Core Validation absolute last.
+
+## 16. Later status: F9 resolved (2026-10-08)
+
+Appended. §5 lists F9 (`rabbitmq-diagnostics` health checks run as root) as STILL OPEN (low) → A15. A15 first accepted it unchanged
+(OD-A15-3 = B). A15.3 then found it to be the cause of an intermittent RabbitMQ start failure, also seen in Core CI: a root
+`rabbitmq-diagnostics` that runs before the broker has written its Erlang cookie creates the cookie as root, and the broker cannot read
+it. By OD-A15.3-5 the health checks of `docker-compose.yml` and of the four RabbitMQ services of `core-ci.yml` stay, and run as the
+broker's user (`su-exec rabbitmq rabbitmq-diagnostics -q ping`). F9 is resolved; production is not involved
+([A15 record](core-v2-a15-developer-experience.md) §6).

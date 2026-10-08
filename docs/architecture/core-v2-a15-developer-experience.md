@@ -34,7 +34,7 @@
 |---|---|
 | OD-A15-1 | **A:** `nawara-check-outbox-lag --database-url` stays compatible and is deprecated; the environment or `_FILE` is the documented way |
 | OD-A15-2 | **A, narrow:** Audit's `retention` CLI is included for how `RETENTION_DATABASE_URL` is read, and nothing else (A13 stays closed) |
-| OD-A15-3 | **B:** F9 is **accepted** as low-risk local and CI behaviour. The Compose health check and the four CI service definitions are not changed. Disposition recorded here; the item is closed |
+| OD-A15-3 | **B:** F9 is **accepted** as low-risk local and CI behaviour. The Compose health check and the four CI service definitions are not changed. Disposition recorded here; the item is closed. **Revised by OD-A15.3-5** (§6): A15.3 showed the root health check causing a broker start failure, so the checks stay but run as the broker's user |
 | OD-A15-4 | **A:** no formatting enforcement (no format gate in CI) |
 | OD-A15-5 | **A:** the Node 22 declaration (`engines`, `.nvmrc`) is part of A15.2 |
 | OD-A15-6 | **A:** A15.4 is small: a new-service checklist and the localization convention; no generator or template framework |
@@ -175,7 +175,8 @@ unchanged, and no service runtime changed.
 
 - **Owner decisions:** OD-A15.3-1 = A (one bounded local diagnosis of the broker start failure first); OD-A15.3-2 = A (fix all
   twelve copies of the test infrastructure gate); OD-A15.3-3 = A (tests delete the broker resources they declare, plus a documented
-  local reset); OD-A15.3-4 = A (close the items without evidence; re-home `auth_timeout` to A12).
+  local reset); OD-A15.3-4 = A (close the items without evidence; re-home `auth_timeout` to A12); OD-A15.3-5 = yes (the RabbitMQ
+  readiness checks run `rabbitmq-diagnostics` as the `rabbitmq` user; revises F9 / OD-A15-3 narrowly).
 - **The broker start failure (`.erlang.cookie: eacces`), diagnosed.** Seen three times locally and once in Core CI on `main` (run
   37628789313, the RabbitMQ service container of the shared-platform job). Two bounded starts of the Compose image
   (`rabbitmq:3.13-management-alpine`, image `1031d41f…`, the same image that started normally on 2026-10-05):
@@ -191,10 +192,19 @@ unchanged, and no service runtime changed.
   and CI's first check can fire before a slow broker has written its cookie (it fails intermittently, as observed). It is not an image
   regression (no pin is justified: the same image starts when nothing races it) and needs no host change.
 
-  **Not fixed here.** The fix is to run the health check as the broker's user (for example `su-exec rabbitmq rabbitmq-diagnostics -q
-  ping`) in `docker-compose.yml` and in the four service definitions of `core-ci.yml`. Those are exactly the health checks OD-A15-3 = B
-  (F9) decided not to change, so this needs a new owner decision: F9 was accepted as a low-risk root health check, and is now evidenced
-  as the cause of a CI failure. The developer guide's troubleshooting explains the local symptom meanwhile.
+  **Fixed by OD-A15.3-5 (F9 revised narrowly).** F9 had been accepted as a low-risk root health check (OD-A15-3 = B); it is now
+  evidenced as the cause of a CI failure. The readiness check stays, RabbitMQ-aware as before (`rabbitmq-diagnostics -q ping`, same
+  intervals and retries), but runs as the broker's user: `su-exec rabbitmq rabbitmq-diagnostics -q ping` in `docker-compose.yml` and in
+  the four RabbitMQ service definitions of `core-ci.yml` (`su-exec` and the `rabbitmq` user are in both images used). No image pin, no
+  host change, no cookie handling; production RabbitMQ is not involved (these are local and CI test brokers). Proof on throwaway
+  containers: the old path (a root `rabbitmq-diagnostics` as the container starts) left a `0400` cookie owned by `0:0` and the broker
+  exited with `eacces`; the corrected health check, with an extra probe as `rabbitmq` fired immediately, left the cookie owned by
+  `100:101` and the broker healthy, on both `rabbitmq:3.13-management-alpine` and `rabbitmq:3.13-alpine`; the Compose service itself,
+  started alone in an isolated project, became healthy (last check exit 0, cookie `100:101`, no `eacces`). The real GitHub-hosted
+  proof is the pull request's CI. This is a determinism correction, not a reduction of readiness checking.
+  **Also corrected** in `docker-compose.yml`, which this change touches: the `auth-migrate` comment that said Auth uses a bespoke
+  mechanism and "does not depend on" the kit (A15.2 had deferred it). Auth depends on `@nawara/service-kit`, and its migration CLI is
+  built on the kit's `runMigrations` with Auth's own options.
 - **Skipped suites ran their setup.** All twelve copies of `describeWithEnv` (`apps/*/test/support`, `libs/*/test/support`,
   `test/*/support`) skipped a suite with missing variables as `describe.skip(title, () => body({}))`. Vitest runs a describe callback
   while collecting, even for a skipped describe, so the body ran with no configuration: the six kit files that build a `URL` from

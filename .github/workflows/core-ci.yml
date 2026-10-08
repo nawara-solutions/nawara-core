@@ -106,7 +106,7 @@ jobs:
           - 5672:5672
           - 15672:15672
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+          --health-cmd "su-exec rabbitmq rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
     env:
       # Integration suites FAIL (never skip) in CI when a service they need is missing.
       TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
@@ -172,7 +172,7 @@ jobs:
         ports:
           - 5672:5672
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+          --health-cmd "su-exec rabbitmq rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: build the production image
@@ -215,7 +215,7 @@ jobs:
         ports:
           - 5672:5672
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+          --health-cmd "su-exec rabbitmq rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
     env:
       TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
       TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
@@ -286,7 +286,7 @@ jobs:
         ports:
           - 5672:5672
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
+          --health-cmd "su-exec rabbitmq rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
     env:
       TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
       TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
