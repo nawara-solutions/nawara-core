@@ -84,6 +84,17 @@ function run(args) {
   const image = args[i];
   const get = (f) => o.flags.filter(([k]) => k === f).map(([, v]) => v);
   if (image.startsWith('amazon/aws-cli')) s3(o, get, image, args.slice(i + 1));
+  // V2 A4.8: Auth's configuration check (dist/cli/check-config.js). Records the image, network and the NAMES of the env-file it was given
+  // (never a value); valid unless a test sets `configCheck: { exit, output }`. Independent of `failRm`, which simulates migration failures.
+  if (o.rm && args.slice(i + 1).includes('dist/cli/check-config.js')) {
+    const envFile = get('--env-file')[0];
+    const names = envFile ? readFileSync(envFile, 'utf8').split('\n').filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l)).map((l) => l.slice(0, l.indexOf('='))) : [];
+    state.configChecks = [...(state.configChecks ?? []), { image, network: get('--network')[0], envFile, names }];
+    const C = state.configCheck ?? {};
+    if (C.exit) { process.stderr.write(`${C.output ?? 'configuration invalid'}\n`); exit(C.exit); }
+    out(`${C.output ?? 'configuration valid; JWT: legacy only (JWT_SECRET signs and verifies)'}\n`);
+    exit(0);
+  }
   if (o.rm) { // one-off containers (migrations): succeed unless told otherwise
     const cmd = args.slice(i + 1);
     if (cmd.some((a) => a.includes('migrate.js')) && !state.failRm?.[image]) {

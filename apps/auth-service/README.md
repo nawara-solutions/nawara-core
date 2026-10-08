@@ -166,6 +166,11 @@ How the two CLIs read their inputs (V2 A4.3):
   **exactly** as given: `BOOTSTRAP_OWNER_PASSWORD` verbatim (surrounding whitespace is part of it), or `BOOTSTRAP_OWNER_PASSWORD_FILE`
   (the file's content without its final line break), never both. Exit codes: 0 when the owner is created, 1 when an owner already
   exists (`an owner already exists: nothing changed`) or on any refusal.
+- `node dist/cli/check-config.js` (V2 A4.8) validates the configuration with the service's own loader (every setting and key rule,
+  including the JWT key ring; `_FILE` accepted, never both) and prints one line: `configuration valid; JWT: <mode and key counts>` or
+  `configuration invalid: <rule>`, never a value or a ring id; exit 0 or 1. It opens no connection and generates nothing. The production
+  deploy runs it with `--network none` before any migration ([deploy runbook](../../docs/runbooks/auth-service-deploy.md) §2); JWT key
+  rotation: [rotation runbook](../../docs/runbooks/secret-rotation.md) §4.
 
 ### Hierarchy authority (ADR-0040): the ownership transition from auth-service's side
 

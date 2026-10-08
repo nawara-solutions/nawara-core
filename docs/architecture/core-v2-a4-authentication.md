@@ -4,8 +4,9 @@
   closed A3M.7) and of **A4.1: the A4 architecture record**. **A4 is OPEN.** A4.2 to A4.5 are merged (PRs #244 to #247, `main` at
   `e039ed6`); their sections keep the text they were approved with. **A4.6** (§10 design,
   [ADR-0058](../adr/0058-access-token-signing-key-ring.md)) is merged (PR #248, `8d62b3f`), and ADR-0058 is **Accepted** (2026-10-08).
-  **A4.7** (§10 implementation, §10.11) is implemented on `feature/core-v2-a4-7-jwt-key-ring`, pending owner review and merge; it
-  deploys and activates nothing. Nothing in §10 is on `main` unless it is labelled **[CURRENT]**.
+  **A4.7** (§10 implementation, §10.11) is merged (PR #250, `f95956b`). **A4.8** (§11, §11.1) is implemented on
+  `feature/core-v2-a4-8-jwt-deployment-readiness`, pending owner review and merge. Neither deploys, generates or activates anything.
+  Nothing in §10 or §11 is on `main` unless it is labelled **[CURRENT]** or stated as merged.
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET]**: approved by an owner decision, implemented by the named stage.
   **[PENDING DESIGN]**: approved in direction only; the named stage must design it and the owner must review it before code.
 - **Scope of A4** ([roadmap](../CORE-ROADMAP.md) Core V2 table): sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service
@@ -306,7 +307,7 @@ in one change; its tokens are rejected at once and clients refresh.
 1. At least **3600 s + 5 min** have passed since the last token signed with it, that is, since the restart that made a ring key active,
    with no return to `legacy` since (D5). 3600 s is the largest accepted `ACCESS_TOKEN_TTL_SEC`, so the rule does not depend on the
    configured lifetime.
-2. The A4.8 provisioning change is merged (D6): `deploy/provision-and-deploy.sh` no longer generates `JWT_SECRET` when the ring is
+2. The A4.8 provisioning change is merged (D6): `apps/auth-service/deploy/provision-and-deploy.sh` no longer generates `JWT_SECRET` when the ring is
    configured, so a later provisioning cannot silently reintroduce a legacy key.
 3. A4.8's configuration check (§11) passes on the target configuration without `JWT_SECRET`, printing no value.
 4. The owner authorizes the step explicitly, acknowledging the §10.7 image-rollback limit after retirement.
@@ -342,7 +343,7 @@ This design, ADR-0058 and A4.7 authorize **no** production key generation, deliv
 rotation step of §10.6 and the first deployment of a ring-capable image are separate, owner-authorized production checkpoints (§17)
 under the protected `production` environment.
 
-### 10.11 A4.7 implementation [TARGET: on merge of A4.7]
+### 10.11 A4.7 implementation (merged, PR #250)
 
 Implemented as designed in §10.3–§10.5, test-first as §10.9 states; production is unchanged (no image deployed, no ring configured).
 
@@ -353,10 +354,10 @@ Implemented as designed in §10.3–§10.5, test-first as §10.9 states; product
 | Tokens | `src/tokens/token.service.ts`: the active key signs (`{"alg":"HS256"}` for `legacy`, `{"alg":"HS256","kid":"<id>"}` for a ring key); jose's key resolver selects exactly one key from the verified protected header, with no fallback; `algorithms: ['HS256']` kept |
 | Tests | kit `key-material.spec.ts`; Auth `app-config.spec.ts`, new `token.service.spec.ts` (characterization first, then the ring, the §10.6 rotation matrix and the image-rollback boundary); `tokens.e2e-spec.ts` (unknown and `legacy` kids, a ring app with `JWT_SECRET` retired) |
 
-**Still pending (A4.8 and later, not implemented by A4.7):** the provisioning-script change (D6), the configuration-check CLI and the
-rotation runbook (§11); the A4.6 acceptance-review follow-ups for that runbook: an emergency procedure for a compromised legacy key
-before D6 is in use, never reusing a retired key value, measuring the §10.8 delay from the restart of the last Auth instance, and the
-exact script path `apps/auth-service/deploy/provision-and-deploy.sh`. Every production step stays an owner-authorized checkpoint (§10.10).
+**Left to A4.8 by A4.7** (now §11.1): the provisioning-script change (D6), the configuration-check CLI and the rotation runbook; the
+A4.6 acceptance-review follow-ups: an emergency procedure for a compromised legacy key before D6 is in use, never reusing a retired key
+value, measuring the §10.8 delay from the last Auth instance, and the exact script path `apps/auth-service/deploy/provision-and-deploy.sh`.
+Every production step stays an owner-authorized checkpoint (§10.10).
 
 ## 11. Deployment readiness (A4.8) [TARGET]
 
@@ -368,20 +369,39 @@ A future deployment needs its own explicit approval and a compatibility review c
 - **Strict parsing:** exact `NODE_ENV`, `AUTH_EVENTS` (`on` / `off`), `REQUIRE_CONTACT_VERIFICATION` (`true` / `false`), published
   development keys refused, runtime database role.
 - **`NAME` and `NAME_FILE` conflicts:** refused after A4.2. The deploy script writes direct values only
-  (`deploy/provision-and-deploy.sh` `ensure`).
+  (`apps/auth-service/deploy/provision-and-deploy.sh` `ensure`).
 - **`TRUST_PROXY=true`:** the deploy script writes it; it must keep meaning one hop.
 - **Unknown and stale keys:** `PAYMENT_SERVICE_TOKEN` and `PAYMENT_SERVICE_URL` may remain in a server `.env` (`ensure` never
   removes a key); Auth must keep ignoring unknown keys. Removing them is a separate production action.
 - **JWT:** the existing `JWT_SECRET` must be accepted unchanged (§10.3).
-- **JWT provisioning (D6):** `deploy/provision-and-deploy.sh` `ensure`s `JWT_SECRET`, generating one when it is absent. A4.8 makes it
-  skip `JWT_SECRET` when `JWT_SIGNING_KEYS` is configured, and documents the §10.6 rotation procedure in
-  [`docs/runbooks/secret-rotation.md`](../runbooks/secret-rotation.md) §4. No production retirement of `JWT_SECRET` before this
+- **JWT provisioning (D6):** `apps/auth-service/deploy/provision-and-deploy.sh` `ensure`d `JWT_SECRET`, generating one whenever it
+  was absent. A4.8 generates it only when **none** of the six JWT variable forms is present (`JWT_SECRET`, `JWT_SECRET_FILE`,
+  `JWT_SIGNING_KEYS`, `JWT_SIGNING_KEYS_FILE`, `JWT_ACTIVE_KEY_ID`, `JWT_ACTIVE_KEY_ID_FILE`), refuses a duplicate or malformed JWT
+  line before changing anything, and documents the §10.6 rotation procedure in
+  [`docs/runbooks/secret-rotation.md`](../runbooks/secret-rotation.md) §4 (§11.1). No production retirement of `JWT_SECRET` before this
   change (§10.8).
 - **WebAuthn:** `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGINS` (production: `nawara-solutions.com`, `https://admin.nawara-solutions.com`)
   stay valid under the same startup checks.
 - **Secret-safe validation:** A4.8 adds a configuration-check CLI that loads the configuration and prints only success or the
   `ConfigError` text, never a value, plus a runbook for a names-only audit of the server `.env` (owner-run).
 - **Rollback:** limited once a new JWT key is active (§10.7).
+
+### 11.1 A4.8 implementation [TARGET: on merge of A4.8]
+
+Local tooling and documentation only; no production deployment, key change or workflow change.
+
+| Part | Implementation |
+|---|---|
+| Provisioning (D6) | `apps/auth-service/deploy/provision-and-deploy.sh` generates `JWT_SECRET` only when **none** of `JWT_SECRET`, `JWT_SECRET_FILE`, `JWT_SIGNING_KEYS`, `JWT_SIGNING_KEYS_FILE`, `JWT_ACTIVE_KEY_ID`, `JWT_ACTIVE_KEY_ID_FILE` is present (wider than "when `JWT_SIGNING_KEYS` is configured": a `_FILE` form or a lone active id also means the keys are managed deliberately). Before anything changes, a JWT variable declared twice or not as a plain `NAME=value` line (leading whitespace, `export`, a space before `=`, a bare name) is refused, reporting line numbers and names only. The shell never repairs a JWT configuration; the loader decides |
+| Configuration check | `src/config/config-check.ts` (`checkConfig`, pure) and `src/cli/check-config.ts` (`node dist/cli/check-config.js`): the service's `loadConfig`, one value-free line (`configuration valid; JWT: <mode and counts>` or `configuration invalid: <rule>`), exit 0 or 1; no connection, nothing generated |
+| Deploy ordering | the runtime role's password and the `.env` are completed **before** the migrations (neither depends on them; the role is still created and granted after them), then `docker run --rm --network none --env-file .env <image> dist/cli/check-config.js`; a refusal stops the deploy before any migration and before the running service is touched |
+| Runbooks | [rotation runbook](../runbooks/secret-rotation.md) §4 (steps 0–4, rollback, the waiting period from the last instance, retirement, ring-to-ring rotation, never reusing keys or ids, older images, emergencies, owner checkpoints); [deploy runbook](../runbooks/auth-service-deploy.md) §2 (the check, the §11 compatibility review, a names-only `.env` audit) and §3 |
+| Tests | `config-check.spec.ts`; `scripts/deploy-tests/auth-deploy.test.mjs` with the fake Docker CLI (generation guard for each JWT shape, duplicate and malformed JWT lines refused before any change, the check's image, network, env-file and position before migrations and the stop, a refusal changing nothing, no secret printed) |
+
+**Not preventable by A4.8:** an older image brings its own deploy script (before A4.8: regenerates an absent `JWT_SECRET`, no check)
+and an image before A4.7 cannot verify ring tokens. A gate refusing such a digest once a ring is configured would be a workflow and
+production-policy change requiring separate authorization; until then the image floor is the owner's check at dispatch
+([rotation runbook](../runbooks/secret-rotation.md) §4.11).
 
 ## 12. Stages
 
