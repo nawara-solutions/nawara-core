@@ -125,6 +125,34 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     expect(JSON.stringify(t.logs)).not.toContain(CODE);
   });
 
+  it('V2 A3M.6: an event from an UNMAPPED source is dead-lettered once (unmapped_event), never retried, nothing written, no payload leaked', async () => {
+    const t = await start();
+    await ready(t);
+    const before = await count();
+    const deliveries = async () => (await sql<{ n: number }>(db.url, 'SELECT count(*)::int AS n FROM notification_delivery'))[0].n;
+    const deliveriesBefore = await deliveries();
+    const deadBefore = await depth(DEAD);
+    // A routing key Notification binds, a valid payload, but asserted by a producer the intake has no mapping for.
+    const e = event('membership.approved', { source: 'evil-service' }, { userId: 'u-unmapped', channel: 'phone', destination: PHONE, organizationId: randomUUID(), timestamp: new Date().toISOString() });
+    await publisher.publish(e);
+    await until(async () => (await depth(DEAD)) === deadBefore + 1);
+    const dead = await ch.get(DEAD, { noAck: true });
+    expect(dead).not.toBe(false);
+    const h = (dead && dead.properties.headers) || {};
+    expect(dead && dead.properties.messageId).toBe(e.id);
+    expect(h['x-nawara-failure']).toBe('permanent');
+    expect(h['x-nawara-failure-reason']).toBe('unmapped_event');
+    expect(Number(h['x-nawara-retry-count'] ?? 0)).toBe(0); // permanent: it went straight to the dead-letter queue
+    expect(await depth(`${INTAKE_QUEUE}.retry`)).toBe(0);
+    expect(await depth(INTAKE_QUEUE)).toBe(0);
+    expect(await count()).toBe(before); // no intent
+    expect(await count('"sourceEventId" = $1', [e.id])).toBe(0);
+    expect(await deliveries()).toBe(deliveriesBefore); // no delivery
+    // the annotations carry codes only, and no log line carries the destination
+    expect(JSON.stringify(Object.entries(h).filter(([k]) => k.startsWith('x-nawara-')))).not.toContain(PHONE);
+    expect(JSON.stringify(t.logs)).not.toContain(PHONE);
+  });
+
   it('CRASH WINDOW: committed but not acknowledged (the handler fails after the commit) → redelivered → recognized as a duplicate → still one intent', async () => {
     const t = await start();
     await ready(t);

@@ -8,8 +8,9 @@
   of **A3M.2: event contracts and versioning** (**closed on `main`**: PR #236, merge `27d1f1c80a9a6ca3efb9bf7cf0657d335135cad4`; §11)
   and of **A3M.3: producer and consumer conventions, G11** (**closed on `main`**: PR #237, merge
   `06e471aa2ed0dca41a8abe274ac406fb38cbf842`; §12), of the **rest of A3M.4: the idempotency matrix** (**closed on `main`**: PR #239,
-  merge `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724`; §13) and of **A3M.5: outbox and de-duplication retention** (**implemented
-  locally, pending review and merge**; §14). **A3M is OPEN.** No retention cleanup runs anywhere.
+  merge `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724`; §13) , of **A3M.5: outbox and de-duplication retention** (**closed on `main`**: PR #240,
+  merge `b6ce5a2534f85053e0683e7590f180d4c21e58bc`; §14) and of **A3M.6: deterministic broker evidence** (**implemented locally,
+  pending review and merge**; §15). **A3M is OPEN.** No retention cleanup runs anywhere.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -122,8 +123,8 @@ G7     isolated broker proof               ✅ G7 confirmed locally (§7)
 A3M.2  event contracts and versioning      ✅ closed on main (PR #236, merge 27d1f1c)
 A3M.3  producer and consumer conventions   ✅ closed on main (PR #237, merge 06e471a; G11 fixed, S21-5 aligned)
 A3M.4  retry, dead letters, idempotency    ✅ closed on main (G7 slice PR #235; idempotency matrix PR #239, merge 4c07643)
-A3M.5  outbox and de-duplication retention policy and manual dry-run-first CLI: implemented locally; pending review and merge (§14)
-A3M.6  deterministic broker tests          not started
+A3M.5  outbox and de-duplication retention ✅ closed on main (PR #240, merge b6ce5a2; runs nowhere)
+A3M.6  deterministic broker evidence       16-scenario matrix and four new real-broker cases: implemented locally; pending review and merge (§15)
 A3M.7  local certification                 not started
 A3M.8  production messaging                not started (separately authorized)
 ```
@@ -403,7 +404,7 @@ F1 and F2 are **not resolved** by A3M.4; they are recorded so that no production
   (PR #235 G7, PR #236 contracts, PR #237 G11, PR #238 R11).
 - **Production:** none. Documentation and one Notification test: Core CI only, no image build, nothing deploys.
 
-## 14. A3M.5: outbox and de-duplication retention (2026-10-08, local)
+## 14. A3M.5: outbox and de-duplication retention (2026-10-08; closed on `main`, PR #240, merge `b6ce5a2`)
 
 - **Owner decisions:** OD-A3M5-1 = B (the retention policy plus a manually invoked, dry-run-first CLI); OD-A3M5-2 = every Billing
   payment receipt is kept, non-applied outcomes included; OD-A3M5-3 = Notification intents, deliveries and attempts are kept;
@@ -519,3 +520,80 @@ release its event id; deleting a Notification intent would let a replayed event 
   a retention-safety review.
 - Billing receipts and Notification history: legal and product decisions (retention register).
 - The `publishedAt` index, and any scheduling or run against a real database: separately authorized.
+
+## 15. A3M.6: deterministic broker evidence (2026-10-08, local)
+
+- **Owner decisions:** OD-A3M6-1 = the four Billing cases over a real broker; OD-A3M6-2 = Notification's unmapped-source case;
+  OD-A3M6-3 = a broker container restarted mid-flow stays a documented limitation, not a test; OD-A3M6-4 = the matrix below is the
+  input to A3M.7.
+- **What changed:** tests and this record only. No runtime, kit, contract, event id, topology, grant, schema or retention change.
+- **Gap closed:** Billing's permanent refusals (A3M.2 version check, A3M.3 source check) and the G11 fix (migration 0016) were proven
+  on the in-memory bus only. They are now proven with Billing and Payment as two built processes over a real RabbitMQ.
+
+### 15.1 Scenario matrix (real-broker evidence)
+
+Paths are relative to the repository root; `kit` is `libs/service-kit/test/`, `rb` is `test/e2e-real-broker/`.
+
+| # | Scenario | Real-broker evidence | Status | A3M.6 addition / rationale |
+|---|---|---|---|---|
+| 1 | Publish confirmed | kit `rabbitmq.int-spec.ts`; every producer in `test/e2e-audit-producers/` | covered | none |
+| 2 | Confirm timeout, then resend | kit `async-resilience.int-spec.ts` (F4: bounded publish failure, row stays pending, delivered after recovery); `apps/auth-service/test/events-real-broker.e2e-spec.ts` (stalled broker) | covered | none |
+| 3 | Broker unavailable while publishing | kit `rabbitmq.int-spec.ts`; Auth `events-real-broker`; rb `stage12-7-real-broker-subscription` (D) | covered | none |
+| 4 | Crash after publish, before the stamp | rb `stage21c2-auth-outbox-durability` (the duplicate creates no second notification) | covered | none |
+| 5 | Consumer crash before commit | `apps/audit-service/test/ingestion-broker.e2e-spec.ts`; Notification `event-intake-broker`; kit `rabbitmq-consumer-recovery.int-spec.ts` | covered | none |
+| 6 | Crash after commit, before ack | Audit `ingestion-broker`; Notification `event-intake-broker` (crash window); rb `stage4-real-broker` (Billing redelivery) | covered | case D adds Billing's replay of an applied receipt |
+| 7 | Duplicate deliveries | kit `rabbitmq.int-spec.ts`; Notification (10 copies, one intent); Audit (60 concurrent duplicates); rb `stage4-real-broker` | covered | case D |
+| 8 | Concurrency and ordering | Audit (concurrent duplicates and conflicts, out of order, backpressure at `prefetch`) | covered by design | ordering is not guaranteed (ADR-0037, ADR-0057 §7); Billing and Notification concurrency is proven at the database (`FOR UPDATE`, unique keys), which a broker does not change |
+| 9 | Retry and bounded attempts | kit `rabbitmq-dlq-retry.int-spec.ts`; rb `stage4-real-broker-dlq-replay`; Audit (retry exhaustion) | covered | none |
+| 10 | Dead-letter isolation and redaction | kit `rabbitmq-dead-letter-isolation.int-spec.ts` (G7); `apps/audit-service/test/dead-letter-privacy.e2e-spec.ts` | covered | cases A, B and the Notification case check the annotations |
+| 11 | Dead-letter copy failure | kit `rabbitmq-dead-letter-isolation.int-spec.ts` and `rabbitmq-dlq-retry.int-spec.ts` (R1: unconfirmed copy held and requeued) | covered | none |
+| 12 | Unsupported version | Notification `event-intake-broker` (poison); Audit DLQ matrix | **gap closed** | **case A** (Billing) |
+| 13 | Malformed payload | kit; Notification; Audit; Auth (pre-16.2 message); rb `stage4-real-broker` | covered | none |
+| 14 | Wrong asserted source | Audit producer admission; rb `stage12-7` (B: another organization's request is a conflict) | **gap closed** | **case B** (Billing `wrong_source`), **case C** (G11), Notification unmapped source |
+| 15 | Manual replay | kit `rabbitmq-dlq-retry.int-spec.ts`; rb `stage4-real-broker-dlq-replay` (applied exactly once); Audit (replay refused again) | covered | none |
+| 16 | Restart and shutdown | kit `async-resilience` (F6 drain), `rabbitmq-consumer-recovery`; Notification; Audit; Auth; rb `stage21c2` (killed process) | covered | see §15.3 |
+
+### 15.2 New tests
+
+`test/e2e-real-broker/a3m6-billing-consumer-refusals.e2e-spec.ts` uses the Stage 4 harness: built Billing and Payment processes on
+their own ports (13121, 13122), real HTTP and a real broker. Each case starts from a payment request that the real dispatcher has sent
+to the real Payment API (`requested`).
+- **A, unsupported version** (`payment.succeeded`, version 2) and **B, wrong source** (`source: evil-service`): exactly one copy in
+  `billing.payment-events.dead` with `x-nawara-failure=permanent`, the reason (`unsupported_version`, `wrong_source`),
+  `x-nawara-consumer=billing.payment-events` and no retry count. The retry queue is empty, no receipt exists for the id, the request
+  stays `requested` and no `paid` transition exists.
+- **C, G11 forged first:** a `payment.cancelled` with the right name, the right `source` header and the id Payment's own event will
+  carry (its deterministic id, computed from Payment's namespace read from source text, not imported), but a wrong amount. Under the
+  accepted contract (ADR-0057 §7) a well-formed message that does not apply is **acknowledged and recorded, not dead-lettered**: one
+  `conflict` / `amount_mismatch` receipt, no dead letter, request still `requested`. Billing then cancels through Payment's real API, and
+  Payment's real relay publishes the genuine event under the same id: the request becomes `cancelled`, the receipts are `conflict` then
+  `applied`, and there is one `cancelled` transition. A second `applied` row for the id is refused by migration 0016's unique index
+  (`23505`). This also proves the computed id is the one Payment uses.
+- **D, genuine redelivery:** the same event published again is handled (awaited on Billing's log line for that id), acknowledged, not
+  dead-lettered; no new receipt, still one `cancelled` transition.
+
+`apps/notification-service/test/event-intake-broker.e2e-spec.ts` gains one case: `membership.approved` (a bound routing key, a valid
+payload) asserted by `evil-service`. One dead letter (`permanent`, `unmapped_event`, no retry count), empty intake and retry queues, no
+intent, no delivery, and neither the annotations nor the logs carry the destination.
+
+Determinism: every wait polls broker or database state (queue depth, receipts, transitions, a log line naming the event id). A fixed
+delay never decides a result. Isolation: the queue names are fixed by ADR-0053, so, as in Stage 4, the file purges the three Billing
+queues before and after; the package runs its files one at a time (`fileParallelism: false`); each run creates and drops its own
+databases.
+
+### 15.3 Known limitation: a broker restarted mid-flow
+
+No test stops the RabbitMQ container in the middle of a Billing or Notification flow (OD-A3M6-3). This is **not directly tested**. The
+behaviour it would exercise is covered piecewise. A connection lost or a consumer cancelled is recovered and the in-flight message
+redelivered (kit `rabbitmq-consumer-recovery`, rb `stage4-real-broker-consumer-recovery`). A broker lost and then answering again at
+runtime is covered for Notification and Audit, through a severable proxy. A publish during an outage stays pending and is delivered
+later (kit, Auth, rb `stage12-7` D). Restarting a container in CI would add process orchestration and timing sensitivity without
+exercising a different code path.
+
+### 15.4 Evidence (local, disposable PostgreSQL 16 and RabbitMQ 3.13, removed afterwards; Docker state unchanged)
+
+- `a3m6-billing-consumer-refusals`: 3 passed (A and B are one parametrized test; C and D are one test, because D needs C's state).
+- `event-intake-broker`: 10 tests, with the new case passing. The two broker-loss tests use `BrokerProxy`, whose URL has fixed `guest`
+  credentials; against a broker with another user they fail (`/ready` 503), and they pass against a broker accepting `guest`, as in
+  CI. That is a property of the local setup, not a regression.
+- Builds of the kit, the audit contract, Billing, Payment and Notification; typecheck, lint, `check:repo`, `git diff --check`.

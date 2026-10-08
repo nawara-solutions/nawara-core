@@ -142,6 +142,10 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   `malformed_payload`), an unsupported version (`unsupported_version`), an unexpected source (`wrong_source`, Billing), an identifier
   the database refuses (`invalid_identifier`). Transient: anything else (a lost connection, a deadlock, a timeout). A business outcome
   that changes nothing (ignored, deferred, a state conflict) is not a failure: it is acknowledged and recorded.
+- **[CURRENT]** (A3M.6) These refusals are proven over a real broker: Billing dead-letters `unsupported_version` and `wrong_source` once,
+  before any receipt; a forged message carrying a genuine Payment event id is recorded as a conflict and does not stop the genuine event
+  from applying (G11); Notification dead-letters an unmapped source. The 16-scenario evidence matrix and its one documented limitation
+  (a broker restarted mid-flow) are in the [A3M record](../architecture/core-v2-a3m-messaging.md) §15.
 
 ### 8. Retry and dead letters (as implemented)
 
@@ -223,7 +227,7 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
 
 - One reviewable statement of how Core services exchange events; [CURRENT] rules describe `main`, so this ADR changes no behaviour.
 - New work has a convention to follow: versioned payloads with supported-version checks, per-service catalogs and a guard (A3M.2),
-  consumer conventions and Payment's readiness (A3M.3), the G7 proof and its remedy (A3M.4), retention design (A3M.5).
+  consumer conventions and Payment's readiness (A3M.3), the G7 proof and its remedy (A3M.4), retention design (A3M.5), real-broker evidence (A3M.6).
 - ADR-0018 and ADR-0037 gain forward notes to this ADR; their content and status are unchanged, and their disposition remains an
   explicit owner decision (OD-A3M-2). On acceptance of this ADR the owner may mark them partially superseded.
 - G7 is confirmed and remedied in code (A3M.4, R1); the production topology residuals of §8 stay recorded.
