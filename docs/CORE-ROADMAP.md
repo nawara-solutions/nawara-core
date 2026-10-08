@@ -195,8 +195,19 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.4  retry, dead letters, idempotency      ✅ closed on main (G7 PR #235; idempotency matrix PR #239)
   A3M.5  outbox / de-duplication retention     ✅ closed on main (PR #240; manual dry-run CLI, runs nowhere)
   A3M.6  deterministic broker evidence         ✅ closed on main (PR #241)
-  A3M.7  local certification                   certification record prepared locally; pending CI and owner merge
+  A3M.7  local certification                   ✅ closed on main (PR #242)
   A3M.8  production messaging                  not started (each item separately authorized)
+A4 Authentication                              🔄 OPEN (record: core-v2-a4-authentication.md; no deployment in A4)
+  A4.0  discovery                              ✅ complete (owner-reviewed; OD-A4-1 to OD-A4-8 approved)
+  A4.1  architecture record                    record prepared; pending CI and owner merge
+  A4.2  configuration convergence              not started
+  A4.3  CLI configuration                      not started
+  A4.4  bootstrap convergence (kit filter option) not started
+  A4.5  genericity exemption narrowing         not started
+  A4.6  JWT key-ring design                    not started
+  A4.7  JWT key-ring implementation            not started
+  A4.8  deployment-readiness tooling           not started
+  A4.9  local certification                    not started
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -260,10 +271,15 @@ security prerequisites to review before the corresponding production activation 
 retention policy (every consumer de-duplication record is kept) and adds a manual, dry-run-first `nawara-outbox-retention` CLI for
 published outbox rows; it runs nowhere and is not scheduled. A3M.6 (PR #241) records the 16-scenario real-broker
 evidence matrix and proves Billing's version and source refusals and the G11 fix over a real broker, plus Notification's refusal of an
-unmapped source; a broker restarted mid-flow stays a documented limitation (A3M record §15). A3M.7 (record prepared locally,
-pending CI and owner merge) certifies the local and repository implementation on reused CI evidence, keeps F1 and F2 open, and
+unmapped source; a broker restarted mid-flow stays a documented limitation (A3M record §15). A3M.7 (PR #242) certifies the local and repository implementation on reused CI evidence, keeps F1 and F2 open, and
 certifies nothing in production (A3M record §16). A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
 retention activation) is separately authorized (A3M.8).
+
+A4 (authentication; [A4 record](architecture/core-v2-a4-authentication.md)) converges the existing Auth implementation on the kit
+(configuration, CLIs, bootstrap with its exception filter, the genericity exemption) and adds a JWT signing-key ring designed in A4.6
+before it is built in A4.7 (OD-A4-1 to OD-A4-8). It adds no new authentication feature, deploys nothing (each merge only builds an Auth
+image) and leaves `AUTH_EVENTS` to A3M.8. Production Auth still runs a pre-V2-A.2 image; its next deployment is a separate,
+owner-authorized checkpoint with its own compatibility review.
 
 ### Compatibility and safety rules for V1 work
 
@@ -507,4 +523,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A1: architecture (scope, A1.0 findings, owner decisions OD-A1-1 to OD-A1-6, the review of every Proposed ADR, A1 targets) | [`core-v2-a1-architecture.md`](architecture/core-v2-a1-architecture.md) |
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
 | V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene, A15.2 developer path, A15.3 test determinism, A15.4 conventions, the A15 certification) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
+| V2 A4: authentication (A4.0 inventory, preserved guarantees, owner decisions OD-A4-1 to OD-A4-8, convergence and key-ring requirements, the A4.1 to A4.9 stages, validation, deployment exclusion) | [`core-v2-a4-authentication.md`](architecture/core-v2-a4-authentication.md) |
 | V2 A3M: messaging (A3M.0 inventory and findings G1–G10, owner decisions OD-A3M-0 to OD-A3M-7, the A3M.0 to A3M.8 phases, the G7 proof, A3M.1 records and policy) | [`core-v2-a3m-messaging.md`](architecture/core-v2-a3m-messaging.md) |
