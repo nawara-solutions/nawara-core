@@ -367,3 +367,26 @@ Each pull request merged with a green `core-ci-passed` and no unsuccessful check
 
 **No A15-owned blocker.** **A15 is certified and closed when the A15.5 certification pull request is merged; it is open until
 then.** Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G6 deferred; G7, F6, F7 locked; Final Core Validation absolute last.
+
+## 9. Later status: R11 teardown race observed and fixed (2026-10-08)
+
+Appended; the A15 certification (§8) and its evidence are unchanged. A15.3 closed the R11 "Billing `57P01` teardown race" without
+change because no failing test or run had been located (OD-A15.3-4), and recorded that it reopens on a new observed failure. It was
+observed in Core CI on PR #237 (run 37766312026, `billing-service` job): all tests passed, but Vitest caught one uncaught `57P01` while
+`test/invoices.e2e-spec.ts` tore down.
+
+- **Root cause.** `pg.Pool#end()` (pg-pool 3.14.0) resolves once its clients are removed, before their sockets have closed (`_remove`
+  starts `client.end()` without waiting). The kit's `createTestDatabase().drop()` then ran `pg_terminate_backend` on every remaining
+  session of the scratch database at once; a still-closing client received the FATAL and, its pool having no `'error'` listener,
+  raised an uncaught exception. Intermittent (absent from the seven previous Billing CI runs), and independent of the change under test.
+- **Fix** (test support only; no runtime, schema or workflow change): `drop()` now observes `pg_stat_activity` and waits, bounded
+  (default 2 s), for closing sessions to disappear; only sessions still connected after the bound are terminated (the cleanup guarantee
+  is kept, so a leaking suite never hangs), and they are reported on stderr by state (`test_database_leaked_connections ...`, no
+  connection string) and in the returned report. No test is skipped, no error is silenced, no assertion is weakened.
+- **Evidence (local, disposable PostgreSQL):** `libs/service-kit/test/test-db.int-spec.ts`. Before the fix, the controlled
+  delayed-disconnect case failed deterministically (the closing client received `57P01`); after it, all four cases pass: a closing
+  session is never terminated, ten rounds of `pool.end()` followed at once by `drop()` raise no pool error, a really retained idle and
+  in-transaction session are terminated after the bound and reported (`idle:1`, `idle_in_transaction:1`), and an empty database is
+  dropped without waiting. The existing `db.int-spec.ts` and the kit unit suite pass.
+- **Policy** (A15.3 §6, unchanged in spirit): teardown closes clients before dropping a scratch database; the drop now also tolerates
+  a pool whose `end()` returned before its sockets closed.
