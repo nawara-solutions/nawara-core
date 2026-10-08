@@ -387,8 +387,20 @@ SELECT pg_temp.expect_error('RECEIPT', 'a payment event receipt cannot be change
 SELECT pg_temp.expect_error('RECEIPT', 'a payment event receipt cannot be deleted', $$DELETE FROM payment_event_receipt$$, '23514');
 SELECT pg_temp.expect_error('RECEIPT', 'an outcome outside applied/ignored/conflict/deferred is refused', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType") VALUES (gen_random_uuid(), 'payment.succeeded', 'bound', 'payment_event')$$, '23514', 'payment_event_receipt_outcome_valid');
 SELECT pg_temp.expect_error('RECEIPT', 'an event that is not one of the four consumed is refused', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType") VALUES (gen_random_uuid(), 'payment.created', 'ignored', 'payment_event')$$, '23514', 'payment_event_receipt_event_name_valid');
-SELECT pg_temp.expect_error('RECEIPT', 'one receipt per event: a second receipt for the same event id is refused', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType")
-  SELECT "eventId", "eventName", 'ignored', "causeType" FROM payment_event_receipt LIMIT 1$$, '23505', 'payment_event_receipt_event_unique');
+-- V2 A3M.3 (finding G11, migration 0016): only an APPLIED receipt claims an event id. A second applied receipt for one event id is refused
+-- by the applied-only unique index; ignored, deferred and conflict receipts for that id are all recorded and claim nothing, and an
+-- applied receipt may still follow them (exactly once). Fixed ids, used nowhere else; the receipt has no foreign key.
+INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType") VALUES ('00000000-0000-4000-8000-0000000a3301', 'payment.succeeded', 'applied', 'payment_event');
+SELECT pg_temp.expect_error('RECEIPT', 'one applied receipt per event: a second applied receipt for the same event id is refused', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType")
+  VALUES ('00000000-0000-4000-8000-0000000a3301', 'payment.succeeded', 'applied', 'payment_event')$$, '23505', 'payment_event_receipt_applied_event_unique');
+SELECT pg_temp.expect_ok('RECEIPT', 'a non-applied receipt claims nothing: ignored, deferred and conflict receipts for one event id are all recorded', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType")
+  VALUES ('00000000-0000-4000-8000-0000000a3302', 'payment.succeeded', 'ignored', 'payment_event'),
+         ('00000000-0000-4000-8000-0000000a3302', 'payment.succeeded', 'deferred', 'payment_event'),
+         ('00000000-0000-4000-8000-0000000a3302', 'payment.succeeded', 'conflict', 'payment_event')$$);
+SELECT pg_temp.expect_ok('RECEIPT', 'an applied receipt may follow non-applied receipts of the same event id', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType")
+  VALUES ('00000000-0000-4000-8000-0000000a3302', 'payment.succeeded', 'applied', 'payment_event')$$);
+SELECT pg_temp.expect_error('RECEIPT', 'once applied after non-applied receipts, a second applied receipt for that event id is refused', $$INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType")
+  VALUES ('00000000-0000-4000-8000-0000000a3302', 'payment.succeeded', 'applied', 'payment_event')$$, '23505', 'payment_event_receipt_applied_event_unique');
 SELECT pg_temp.expect_ok('RECEIPT', 'a `deferred` receipt is recorded with no paymentId bound', $$INSERT INTO payment_event_receipt ("eventId", "eventName", "paymentRequestId", outcome, "causeType") VALUES (gen_random_uuid(), 'payment.succeeded', gen_random_uuid(), 'deferred', 'payment_event')$$);
 SELECT pg_temp.expect_error('IDEMPOTENCY', 'the same (producer, invoiceRequestId) twice is refused at the database', format($$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
