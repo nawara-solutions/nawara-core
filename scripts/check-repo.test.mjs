@@ -1325,7 +1325,7 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
   const C = CORE_JOBS.join('|');
 
   test('A12.6.3.2: exactly the approved catalog; deferred and rejected alerts stay out', () => {
-    assert.equal(Object.values(ALERT_CATALOG).flat().length, 16);
+    assert.equal(Object.values(ALERT_CATALOG).flat().length, 17);
     assert.deepEqual(checkAlertRules(RULES, TESTS), []);
     fails(withRule('PgLockWaits', (r, doc) => { doc.groups[2].rules = doc.groups[2].rules.filter((x) => x.alert !== 'PgLockWaits'); }), /alert PgLockWaits is missing from group infrastructure/);
     for (const name of ['SettleFailures', 'CoreServiceNotReady', 'PrometheusSelfScrapeDown', 'DlqDepthHigh', 'BrokerBacklogHigh', 'PgLongTransaction']) {
@@ -1337,6 +1337,8 @@ test('A14.2a C2: another digest, another generator, a floating or missing genera
   test('A12.6.3.2: labels stay bounded; selection-only labels never widen', () => {
     fails(withExpr('ConsumerDetached', () => `sum by (job, queue, outcome) (nawara_events_consumed_total{job=~"${C}"}) > 0`), /groups or matches on "outcome"/);
     fails(withExpr('MessagesDeadLettered', (e) => e.replaceAll('dead_lettered_malformed|', 'processed|')), /matches on "outcome=~/);
+    fails(withExpr('DeadLetterCopyFailing', (e) => e.replace('outcome="dead_letter_deferred"', 'outcome="processed"')), /matches on "outcome="/);
+    fails(withExpr('DeadLetterCopyFailing', (e) => e.replace('outcome="dead_letter_deferred"', 'outcome=~"dead_letter_deferred|processed"')), /matches on "outcome=~/);
     fails(withExpr('DbPoolWaiting', () => `nawara_db_pool_waiting_clients{job=~"${C}",route="/x"} > 0`), /matches on "route="/);
     fails(withExpr('HttpServerErrorRatio', (e) => e.replace('status_class!="aborted"', 'status_class!="4xx"')), /matches on "status_class!=/);
     fails(withExpr('PgLockWaits', (e) => e.replace('wait_event_type="Lock"', 'wait_event_type=~".+"')), /matches on "wait_event_type=~/);

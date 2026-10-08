@@ -318,6 +318,55 @@ tests:
         alertname: MessagesDeadLettered
         exp_alerts: []
 
+  - name: DeadLetterCopyFailing — no deferral, one isolated deferral, other outcomes never fire; sustained deferrals fire and resolve
+    interval: 30s
+    input_series:
+      # parked and processed messages are MessagesDeadLettered's or nobody's business here
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="dead_lettered_permanent"}'
+        values: '0+1x70'
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="processed"}'
+        values: '0+1x70'
+      # healthy: no deferral at all
+      - series: 'nawara_events_consumed_total{job="billing-service",instance="billing-service:9464",queue="billing.payment-events",outcome="dead_letter_deferred"}'
+        values: '0x70'
+      # one isolated deferral at 5m30 (a broker hiccup): never fires
+      - series: 'nawara_events_consumed_total{job="audit-service",instance="audit-service:9464",queue="audit-service.audit",outcome="dead_letter_deferred"}'
+        values: '0x10 1x60'
+      # notification: a deferral every 30 s from 3m30 to 20m30 (its .dead refuses copies), then the path recovers
+      - series: 'nawara_events_consumed_total{job="notification-service",instance="notification-service:9464",queue="notification.events",outcome="dead_letter_deferred"}'
+        values: '0x6 1+1x34 35x30'
+    alert_rule_test:
+      # 6m: deferring for 2m30, below `for`; the isolated deferral is inside its window: nothing fires
+      - eval_time: 6m
+        alertname: DeadLetterCopyFailing
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: DeadLetterCopyFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: notification-service
+              instance: notification-service:9464
+              queue: notification.events
+            exp_annotations:
+              summary: notification-service cannot dead-letter messages from notification.events
+              description: notification-service has kept deferring failed messages of notification.events for 5 minutes because their copy to notification.events.dead is not confirmed; they stay in notification.events. Check notification.events.dead and the broker.
+      - eval_time: 20m
+        alertname: DeadLetterCopyFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: notification-service
+              instance: notification-service:9464
+              queue: notification.events
+            exp_annotations:
+              summary: notification-service cannot dead-letter messages from notification.events
+              description: notification-service has kept deferring failed messages of notification.events for 5 minutes because their copy to notification.events.dead is not confirmed; they stay in notification.events. Check notification.events.dead and the broker.
+      # resolved once deferrals stop (no increase over the last 2 minutes)
+      - eval_time: 25m
+        alertname: DeadLetterCopyFailing
+        exp_alerts: []
+
   - name: OutboxBacklogAging — uninitialised zero, real zero, short and sustained ageing, recovery; no outbox
     interval: 30s
     input_series:

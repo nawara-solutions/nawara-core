@@ -1185,3 +1185,16 @@ committed, so A12.6 is not yet closed on `main`.
 - Auth registry readiness metrics are stale in production unless something probes Auth's `/ready` (its Docker healthcheck probes
   `/auth/health`, unchanged under D5).
 - A12.3–A12.10 per the A12.1 phase plan; production rollout only after the A12.1 production decision gate.
+
+## 6. Later status: a seventeenth alert, `DeadLetterCopyFailing` (2026-10-08, V2 A3M.4)
+
+Appended; the sections above, including the A12.6 certification evidence (§4O to §4R), are unchanged. The A12.6 local certification
+covered **16 alerts** (`ALERT_CATALOG`, four groups). V2 A3M.4 remedies the messaging finding G7
+([A3M record](core-v2-a3m-messaging.md) §7; [ADR-0057](../adr/0057-messaging-conventions.md) §8): a consumer whose dead-letter copy is
+not confirmed now holds and requeues the message (`dead_letter_deferred`) instead of letting the broker dead-letter it
+(`dead_letter_unannotated`, which `MessagesDeadLettered` alerts on). So that a broken dead-letter path is still alerted, A3M.4 adds a
+**seventeenth alert**, `DeadLetterCopyFailing` (`core-messaging`, warning): `dead_letter_deferred` increasing in every 2-minute window
+for 5 minutes, on the existing `nawara_events_consumed_total` family and labels, with its promtool test; `check:repo` admits exactly this
+alert and this outcome. The sixteen existing alerts, their expressions and tests, the metric families and labels (including
+`dead_letter_unannotated`, now no longer produced) and the dashboards are unchanged. This is a narrow forward change: the A12
+certification is **not reopened or invalidated**, and none of its evidence was rerun.

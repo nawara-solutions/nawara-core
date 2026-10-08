@@ -2,8 +2,10 @@
 
 - **Status:** RECORD of the **A3M.0 discovery** (read-only, owner-reviewed, 2026-10-08, on `main` at
   `e2adc20253bf1afaa41394b05b9b56e88db507b4`, the PR #233 merge that certified A15), of the A3M decision review (read-only,
-  owner-reviewed) and of **A3M.1: messaging records and policy** (documentation only; **implemented locally, pending review and merge**;
-  §5). **A3M is OPEN.** No A3M runtime, test or guard change has been made.
+  owner-reviewed), of **A3M.1: messaging records and policy** (**closed on `main`**: PR #234, merge
+  `38f262e065f032fe8c792f3588874a36758e0909`; §6), of the **G7 proof** (G7 **confirmed** locally; §7) and of the **A3M.4 G7 slice**
+  (R1 remediation, regression tests, one alert; **implemented locally, pending review and merge**; §7). **A3M is OPEN**; A3M.4 as a whole
+  is not complete.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -54,8 +56,9 @@ Read from `main` at `e2adc20` (code and records only; nothing was run).
  consumer: Q (x-dead-letter-exchange = nawara.events.dlx) ── handler → durable de-duplication + effect, one transaction → ack
            transient failure → confirmed copy in Q.retry (expires back into Q), up to maxRetries
            permanent / malformed / exhausted → confirmed annotated copy in Q.dead → ack
-           copy not confirmed: with a deadLetterPolicy → held, then requeued; without one → nack(requeue=false) → broker DLX
-           nawara.events.dlx (fanout) ──▶ every Q.dead in the vhost            (finding G7)
+           copy not confirmed → held for the retry delay, then requeued to Q    (every consumer since A3M.4; before it, a consumer
+                                                                                without a policy nacked without requeue: finding G7)
+           nawara.events.dlx (fanout) ──▶ every Q.dead in the vhost            (no longer reached by the kit; residual, §7)
  operator: nawara-dlq inspect / replay one message → the work queue of that .dead queue; nawara-check-dlq; nawara-check-outbox-lag
 ```
 
@@ -69,7 +72,7 @@ Read from `main` at `e2adc20` (code and records only; nothing was run).
 | G4 | No event catalog outside audit events; nothing checks that a consumer binding matches a real producer | missing convention | OD-A3M-7; ADR-0057 §11; implemented in A3M.2 |
 | G5 | Versioning rule only in a code comment; only Notification refuses an unsupported version | missing convention | ADR-0057 §5; consumers adopt it in A3M.2 / A3M.3 |
 | G6′ | Queue names follow no pattern; production names are fixed by ADR-0053 | missing convention | ADR-0057 §9: new queues only |
-| G7 | The shared fanout dead-letter exchange may copy an unannotated original into every consumer's `.dead` queue when a consumer without a dead-letter policy cannot confirm its dead-letter copy | **potential defect, unverified** | OD-A3M-5; the proof of §7 follows A3M.1 |
+| G7 | The shared fanout dead-letter exchange copied an unannotated original into every consumer's `.dead` queue when a consumer without a dead-letter policy could not confirm its dead-letter copy | **defect, confirmed locally** (raw cross-consumer delivery; message lost to its owner) | OD-A3M-5; remedied in code by A3M.4 R1 (§7); topology residuals stay |
 | G8 | S21-5: Payment, a producer, makes the broker a readiness dependency | pending alignment | OD-A3M-4; A3M.3 |
 | G9 | F12: published outbox rows and inbox rows are never deleted (except Auth's code-bearing rows) | retention | OD-A3M-6; A3M.5, off by default |
 | G10 | Ordering is not guaranteed and no convention says how consumers validate state | missing convention | ADR-0057 §7 |
@@ -109,18 +112,19 @@ what would put its broader de-duplication reading of ADR-0056 §7 in force, §6)
 
 ```text
 A3M.0  discovery, decision review          ✅ complete (owner-reviewed)
-A3M.1  records and policy (ADR-0057)       implemented locally; pending review and merge
-G7     isolated broker proof               next technical safety checkpoint (not started)
+A3M.1  records and policy (ADR-0057)       ✅ closed on main (PR #234, merge 38f262e)
+G7     isolated broker proof               ✅ G7 confirmed locally (§7)
 A3M.2  event contracts and versioning      not started
 A3M.3  producer and consumer conventions   not started
-A3M.4  retry, dead letters, idempotency    not started
+A3M.4  retry, dead letters, idempotency    G7 slice (R1, regression tests, DeadLetterCopyFailing) implemented locally; pending
+                                           review and merge; the rest of A3M.4 (idempotency matrix) not started
 A3M.5  outbox and de-duplication retention not started
 A3M.6  deterministic broker tests          not started
 A3M.7  local certification                 not started
 A3M.8  production messaging                not started (separately authorized)
 ```
 
-## 6. A3M.1: messaging records and policy (2026-10-08, local)
+## 6. A3M.1: messaging records and policy (2026-10-08; closed on `main`, PR #234, merge `38f262e`)
 
 - **Changes:** [ADR-0057](../adr/0057-messaging-conventions.md) (new, Proposed); forward notes in
   [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md) and [ADR-0037](../adr/0037-reliable-events-outbox-inbox.md) (text and status
@@ -135,13 +139,13 @@ A3M.8  production messaging                not started (separately authorized)
   ADR-0056). Proposed ADR-0057 does not override Accepted ADR-0056.
 - **Production:** none. Documentation only: Core CI, no image build, nothing deploys. No G6 dependency.
 
-## 7. G7 proof (next safety checkpoint, after A3M.1)
+## 7. G7: proof and A3M.4 remediation (2026-10-08)
 
-Designed in the decision review; **not implemented and not run** in A3M.1.
+The design below was fixed in the decision review and its preflight; the results follow it.
 
-- **Harness:** a new `describeWithEnv` block next to the Stage 18.9 suite in `libs/service-kit/test/rabbitmq-dlq-retry.int-spec.ts`,
-  gated by `TEST_RABBITMQ_URL` and `TEST_RABBITMQ_MGMT_URL`; a unique exchange `nawara.events.g7<hex>`, so its `.dlx` is private to the
-  test.
+- **Harness:** a new file, `libs/service-kit/test/rabbitmq-dead-letter-isolation.int-spec.ts` (the certified Stage 18.9 suite is left
+  untouched), gated by `TEST_RABBITMQ_URL` and `TEST_RABBITMQ_MGMT_URL`; a unique exchange `nawara.events.g7<hex>`, so its `.dlx` is
+  private to the test.
 - **Consumers:** A (`q.g7a.<hex>`, binds `payment.#`, the handler always throws `PermanentEventFailure`, **no** dead-letter policy,
   `maxRetries: 0`); bystander B (`q.g7b.<hex>`, binds `nomatch.#`, never handles anything, Audit-like redacting `deadLetterPolicy`).
 - **Fault:** the existing technique: a management policy `max-length: 0`, `overflow: reject-publish` on `A.dead` only, in force once a
@@ -154,6 +158,41 @@ Designed in the decision review; **not implemented and not run** in A3M.1.
 - **Controls:** A with a dead-letter policy (expected: deferred, `B.dead` empty); after any remedy, the confirming scenario must give
   "deferred, `B.dead` empty, message still in A".
 - **Determinism:** bounded waits on notices and broker state only; every queue, exchange and policy deleted afterwards (A15.3).
+- **Infrastructure:** one disposable local broker per run (`rabbitmq:3.13-management-alpine`, already present locally, never pulled;
+  its own container and network, a tmpfs data directory so no volume, a 512 MB limit, loopback-only ports, a throwaway credential),
+  removed afterwards; the existing containers, networks and volumes were compared before and after each run and were unchanged.
+- **Proof (on `main` at `38f262e`, one run): G7 CONFIRMED.** Test 1 failed with `G7_EVIDENCE`: one `annotated=false` notice; the
+  bystander's dead-letter queue held the event (same `messageId`, body with the **raw** secret and marker, `x-nawara-body-redacted`
+  absent although the bystander's policy redacts, no `x-nawara-consumer`, `x-death[0].queue` = A's queue, reason `rejected`); the
+  bystander's handler was never called; A's work queue and A's own dead-letter queue were **both empty**: the only copy was in another
+  consumer's queue. Test 2 (normal path) and test 3 (A with a policy under the same fault: deferred, isolated, kept) passed.
+- **Remediation (A3M.4, R1, code only).** `RabbitMqEventBus.onFailure` no longer calls `nack(requeue = false)` when the dead-letter copy
+  is not confirmed: every consumer now holds the delivery for its retry delay (cut short by a stopping consumer) and requeues it to its
+  own queue, the Stage 18.9 path, reported as `dead_letter_deferred`. Publisher confirms, the topology, the queue arguments and the
+  grants are unchanged. `dead_letter_unannotated` stays a declared outcome (no longer produced) so the metric labels, dashboards and
+  `MessagesDeadLettered` stay unchanged. The one kit unit expectation that encoded the old behaviour
+  (`metrics-messaging-semantics.spec.ts`: the no-policy case now `dead_letter_deferred`, `nack` with requeue) was updated.
+- **Regression evidence (one run each, disposable broker):** the G7 file 3 of 3 passed; the existing dead-letter suite
+  (`rabbitmq-dlq-retry.int-spec.ts`, which covers the changed path) 15 of 15; kit messaging unit tests 29 of 29; typecheck and lint.
+  Observation: the existing Stage 18.9 suite leaves its exchange `nawara.events.m18<hex>` and its `.dlx` behind after a run (it deletes
+  its queues and policy only); not changed here.
+- **Reliability and liveness.** No message leaves its consumer on this path and none is lost. While a dead-letter queue keeps refusing
+  copies, a failing message cycles instead of being parked: at most `prefetch` deferrals per retry delay (no busy loop), each holding one
+  prefetch slot; if every in-flight delivery is such a message the consumer stalls and its queue grows, until the dead-letter queue
+  accepts copies again. `retryCount` does not grow on a requeue. A copy that was stored but not confirmed in time can later appear twice
+  in `.dead` (replay and consumer de-duplication handle it). Shutdown stays bounded.
+- **Monitoring (narrow forward change to the certified A12 alert catalog).** R1 turns this case from `dead_letter_unannotated` (which
+  `MessagesDeadLettered` alerts on) into `dead_letter_deferred` (not parked, so not that alert's concern), which would have left a broken
+  dead-letter path unalerted, as it already was for Audit. One warning alert is added to the `core-messaging` group,
+  **`DeadLetterCopyFailing`**: `sum by (job, instance, queue) (increase(nawara_events_consumed_total{<Core jobs>,
+  outcome="dead_letter_deferred"}[2m])) > 0` for 5 minutes (the existing 2-minute and 5-minute conventions of ConsumerDetached and
+  OutboxBacklogAging): one isolated deferral stays under `for`; deferrals sustained for 5 minutes fire. Existing metric family and labels
+  only; `MessagesDeadLettered`, the outcome labels and the dashboards are unchanged. Its promtool test (healthy, one isolated deferral,
+  other outcomes, sustained, resolution) passes with the other rule tests; `check:repo`'s alert catalog (17 alerts) and outcome matcher
+  admit exactly this alert and this outcome, with two new negative cases in `test:repo` (126 passed). A12 is not reopened: no other
+  rule, metric, dashboard or certification evidence changed.
+- **Production:** none. Activating R1 in production is the separately authorized deployment of a later image of each consuming service
+  (Audit's behaviour does not change: it already had a policy); the fanout and the DLX write grant stay as residuals (§8).
 
 ## 8. Production work, separately authorized
 
@@ -161,7 +200,8 @@ None of this is A3M.1 to A3M.7; each item needs its own owner authorization unde
 
 - enabling `AUTH_EVENTS` in production (widens Auth's broker grant; gates Auth-triggered notifications, A8);
 - broker identities and grants for Notification, Billing and Payment when they are deployed;
-- any change to the production topology: the dead-letter exchange (R2, R3), exchange or queue names and arguments;
+- any change to the production topology: the dead-letter exchange (R2, R3, the G7 residuals of §7), exchange or queue names and arguments;
+- deploying images that contain A3M.4's R1 (merging builds the Auth, Organization and Audit images; nothing deploys);
 - enabling outbox or de-duplication retention in a deployed service;
 - the [V2-A.3](core-v2-a-3-ci-and-ruleset.md) A3.6 and A3.7 items stay deferred (D-3, D-4) and are not part of A3M.
 
@@ -176,7 +216,7 @@ G6 stays deferred; Final Core Validation stays the absolute last validation.
 | A7 Audit | the audit catalog, envelope validation and the redacting dead-letter policy stay ADR-0049's; A3M only checks they are respected |
 | A8 Notification | intake mappings and delivery semantics are A8's; A3M supplies the conventions it follows |
 | A10 Billing, A11 Payment | payment and billing event semantics are theirs; A3M adds the catalog, version check and readiness alignment only |
-| A12 Observability | A3M reuses the existing messaging and outbox metrics and CLIs; it adds no endpoint (OD-A3M-4) |
+| A12 Observability | A3M reuses the existing messaging and outbox metrics and CLIs; it adds no endpoint (OD-A3M-4) and one alert, `DeadLetterCopyFailing` (A3M.4, §7) |
 | A13 Backup | audit record retention and backups are A13 and ADR-0049 §10; F12 is A3M.5 and stays off by default |
 
 ## 10. Certification policy
