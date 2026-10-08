@@ -1,7 +1,7 @@
 import {
   ConfigError, DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader,
   HTTP_DRAIN_TIMEOUT_BOUNDS, LOG_LEVELS, NODE_ENVS, RABBITMQ_HEARTBEAT_BOUNDS, assertDistinctKeys, assertRuntimeDatabaseRole, loadMetricsConfig,
-  loadTrustProxyHops, parseCorsOrigins, readDocsCredentials, readKey, readKeyRing, type FileReader, type LogLevel, type MetricsConfig,
+  loadTrustProxyHops, parseCorsOrigins, readDocsCredentials, readKey, readKeyRing, readOptionalKey, readOptionalKeyEntries, type FileReader, type LogLevel, type MetricsConfig,
 } from '@nawara/service-kit';
 
 /**
@@ -103,7 +103,11 @@ export interface AppConfig {
   /** V2 A12.2: METRICS_ENABLED (off), METRICS_HOST (loopback), METRICS_PORT (9464, never PORT); the kit's rule. */
   metrics: MetricsConfig;
   baselineRateLimitPerMinute: number;
-  jwt: { secret: Uint8Array; issuer: string; audience: string; accessTtlSec: number };
+  /**
+   * V2 A4.7 (ADR-0058): `legacyKey` is `JWT_SECRET` (absent only once retired); `ring` is `JWT_SIGNING_KEYS` (empty when unset);
+   * `activeKeyId` is `JWT_ACTIVE_KEY_ID`, or `legacy` (JWT_LEGACY_KEY_ID) when the ring is unset.
+   */
+  jwt: { legacyKey?: Uint8Array; ring: ReadonlyMap<string, Uint8Array>; activeKeyId: string; issuer: string; audience: string; accessTtlSec: number };
   refreshTtlSec: number;
   bcryptCost: number;
   secrets: {
@@ -168,6 +172,35 @@ function rule(reader: EnvReader, name: string, limit: number, windowSec: number)
   };
 }
 
+/** The reserved `JWT_ACTIVE_KEY_ID` value meaning `JWT_SECRET` (ADR-0058 rule 1); refused as a ring id in any letter case. */
+export const JWT_LEGACY_KEY_ID = 'legacy';
+/** ADR-0058 rule 3 (D4). */
+const JWT_RING_MAX_KEYS = 3;
+
+/**
+ * V2 A4.7 (ADR-0058 rules 1 to 3, A4 record §10.3). Neither ring variable set: exactly the former behaviour (`JWT_SECRET` required,
+ * active `legacy`). Both set: the ring is active. Exactly one set: refused. Distinctness from every other purpose is checked by the caller.
+ */
+function readJwtKeys(reader: EnvReader, isProduction: boolean): { legacyKey?: Buffer; ring: Map<string, Buffer>; activeKeyId: string } {
+  const legacyKey = readOptionalKey(reader, 'JWT_SECRET', { isProduction });
+  const ring = readOptionalKeyEntries(reader, 'JWT_SIGNING_KEYS', { isProduction }, { maxEntries: JWT_RING_MAX_KEYS });
+  const activeKeyId = reader.get('JWT_ACTIVE_KEY_ID');
+  if ((ring === undefined) !== (activeKeyId === undefined)) throw new ConfigError('JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together');
+  if (ring === undefined || activeKeyId === undefined) {
+    if (legacyKey === undefined) reader.required('JWT_SECRET'); // the existing refusal: JWT_SECRET is required
+    return { legacyKey, ring: new Map(), activeKeyId: JWT_LEGACY_KEY_ID };
+  }
+  if ([...ring.keys()].some((id) => id.toLowerCase() === JWT_LEGACY_KEY_ID)) {
+    throw new ConfigError(`JWT_SIGNING_KEYS must not use the reserved key id ${JWT_LEGACY_KEY_ID}`);
+  }
+  if (activeKeyId === JWT_LEGACY_KEY_ID) {
+    if (legacyKey === undefined) throw new ConfigError(`JWT_ACTIVE_KEY_ID is ${JWT_LEGACY_KEY_ID} but JWT_SECRET is not set`);
+  } else if (!ring.has(activeKeyId)) {
+    throw new ConfigError('JWT_ACTIVE_KEY_ID does not name a key in JWT_SIGNING_KEYS');
+  }
+  return { legacyKey, ring, activeKeyId };
+}
+
 /** `auth`: the database owner the production deploy creates (apps/auth-service/deploy/provision-and-deploy.sh); never the runtime role. */
 const AUTH_DATABASE_OWNER = 'auth';
 
@@ -180,7 +213,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
 
   // The kit's key rules (V2 A2.3): canonical standard base64 of at least 32 bytes; in production, no development key published in this
   // repository and no key that does not look random. Never echoed.
-  const jwtSecret = readKey(reader, 'JWT_SECRET', { isProduction });
+  const jwt = readJwtKeys(reader, isProduction);
   // V2 A4.2: the kit's key ring (same id rule, size, repeat and active-id checks as Auth's former parser).
   const totp = readKeyRing(reader, 'TOTP_ENCRYPTION_KEYS', 'TOTP_ENCRYPTION_ACTIVE_KEY_ID', { isProduction, exactBytes: 32 });
   const operatorCodePepper = readKey(reader, 'OPERATOR_CODE_PEPPER', { isProduction });
@@ -190,7 +223,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
 
   // Domain separation: one compromised/leaked secret must not unlock another purpose (errors name the variables, never the material).
   assertDistinctKeys([
-    ['JWT_SECRET', jwtSecret],
+    ...(jwt.legacyKey ? [['JWT_SECRET', jwt.legacyKey] as const] : []),
+    ...[...jwt.ring.values()].map((k) => ['JWT_SIGNING_KEYS', k] as const),
     ['OPERATOR_CODE_PEPPER', operatorCodePepper],
     ['SECRET_KEY_PEPPER', secretKeyPepper],
     ['THROTTLE_KEY_PEPPER', throttlePepper],
@@ -279,7 +313,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
     metrics: loadMetricsConfig(reader, port, nodeEnv),
     baselineRateLimitPerMinute: reader.int('BASELINE_RATE_LIMIT_PER_MINUTE', { default: 100, min: 1, max: 1_000_000 }),
     jwt: {
-      secret: new Uint8Array(jwtSecret),
+      ...(jwt.legacyKey ? { legacyKey: new Uint8Array(jwt.legacyKey) } : {}),
+      ring: new Map([...jwt.ring].map(([id, k]) => [id, new Uint8Array(k)])),
+      activeKeyId: jwt.activeKeyId,
       issuer: reader.optional('JWT_ISSUER', 'nawara-auth') as string,
       audience: reader.optional('JWT_AUDIENCE', 'nawara') as string,
       accessTtlSec: reader.int('ACCESS_TOKEN_TTL_SEC', { default: 900, min: 30, max: 3600 }),

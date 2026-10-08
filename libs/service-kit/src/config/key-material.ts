@@ -76,8 +76,34 @@ export function readKeyRing(
   activeIdName: string,
   rules: KeyRules,
 ): { keys: Map<string, Buffer>; activeKeyId: string } {
+  const keys = parseKeyEntries(name, reader.required(name), rules);
+  const activeKeyId = reader.required(activeIdName);
+  if (!keys.has(activeKeyId)) throw new ConfigError(`${activeIdName} does not name a key in ${name}`);
+  return { keys, activeKeyId };
+}
+
+/**
+ * V2 A4.7 (ADR-0058 rule 4): an optional ring `id:base64[,id:base64]` with no active id; undefined when unset. Same id rule, key rules,
+ * repeat checks and messages as `readKeyRing`. `maxEntries` is opt-in, so no existing ring gains a cap. Which entry is active, and any
+ * reserved id, are the caller's rules.
+ */
+export function readOptionalKeyEntries(
+  reader: EnvReader,
+  name: string,
+  rules: KeyRules,
+  options: { maxEntries?: number } = {},
+): Map<string, Buffer> | undefined {
+  const raw = reader.get(name);
+  if (raw === undefined) return undefined;
+  if (options.maxEntries !== undefined && raw.split(',').length > options.maxEntries) {
+    throw new ConfigError(`${name} must hold at most ${options.maxEntries} keys`);
+  }
+  return parseKeyEntries(name, raw, rules);
+}
+
+function parseKeyEntries(name: string, raw: string, rules: KeyRules): Map<string, Buffer> {
   const keys = new Map<string, Buffer>();
-  for (const entry of reader.required(name).split(',')) {
+  for (const entry of raw.split(',')) {
     const i = entry.indexOf(':');
     const id = i < 0 ? '' : entry.slice(0, i).trim();
     if (!KEY_ID.test(id)) throw new ConfigError(`${name} must be "id:base64[,id:base64]" with ids of 1 to 32 letters, digits, _ or -`);
@@ -85,9 +111,7 @@ export function readKeyRing(
     keys.set(id, decodeKey(name, entry.slice(i + 1).trim(), rules));
   }
   assertDistinctKeys([...keys.values()].map((key) => [name, key] as const));
-  const activeKeyId = reader.required(activeIdName);
-  if (!keys.has(activeKeyId)) throw new ConfigError(`${activeIdName} does not name a key in ${name}`);
-  return { keys, activeKeyId };
+  return keys;
 }
 
 /** One key, one purpose: no key material may appear twice, within one variable or across variables. */
