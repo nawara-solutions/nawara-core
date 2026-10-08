@@ -197,17 +197,18 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.6  deterministic broker evidence         ✅ closed on main (PR #241)
   A3M.7  local certification                   ✅ closed on main (PR #242)
   A3M.8  production messaging                  not started (each item separately authorized)
-A4 Authentication                              🔄 OPEN (record: core-v2-a4-authentication.md; no deployment in A4)
+A4 Authentication                              🔄 OPEN until A4.9 merges (record: core-v2-a4-authentication.md; nothing deployed in A4)
   A4.0  discovery                              ✅ complete (owner-reviewed; OD-A4-1 to OD-A4-8 approved)
-  A4.1  architecture record                    record prepared; pending CI and owner merge
-  A4.2  configuration convergence              not started
-  A4.3  CLI configuration                      not started
-  A4.4  bootstrap convergence (kit filter option) not started
-  A4.5  genericity exemption narrowing         not started
-  A4.6  JWT key-ring design                    not started
-  A4.7  JWT key-ring implementation            not started
-  A4.8  deployment-readiness tooling           not started
-  A4.9  local certification                    not started
+  A4.1  architecture record                    ✅ closed on main (PR #243)
+  A4.2  configuration convergence              ✅ closed on main (PR #244)
+  A4.3  CLI configuration                      ✅ closed on main (PR #245)
+  A4.4  bootstrap convergence (kit filter option) ✅ closed on main (PR #246)
+  A4.5  genericity exemption narrowing         ✅ closed on main (PR #247)
+  A4.6  JWT key-ring design                    ✅ closed on main (PR #248; ADR-0058 Accepted, PR #249)
+  A4.7  JWT key-ring implementation            ✅ closed on main (PR #250)
+  A4.8  deployment-readiness tooling           ✅ closed on main (PR #251)
+  A4.9  local certification                    record prepared (§18); certified once its PR passes CI (real-image check) and merges
+  A4 production checkpoints                    not started (Auth deploy, minimum-image gate, JWT ring activation: each separately authorized)
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -278,8 +279,10 @@ retention activation) is separately authorized (A3M.8).
 A4 (authentication; [A4 record](architecture/core-v2-a4-authentication.md)) converges the existing Auth implementation on the kit
 (configuration, CLIs, bootstrap with its exception filter, the genericity exemption) and adds a JWT signing-key ring designed in A4.6
 before it is built in A4.7 (OD-A4-1 to OD-A4-8). It adds no new authentication feature, deploys nothing (each merge only builds an Auth
-image) and leaves `AUTH_EVENTS` to A3M.8. Production Auth still runs a pre-V2-A.2 image; its next deployment is a separate,
-owner-authorized checkpoint with its own compatibility review.
+image) and leaves `AUTH_EVENTS` to A3M.8. A4.1 to A4.8 are merged (PRs #243 to #251, ADR-0058 Accepted); A4.9 certifies them on
+repository, CI and local evidence (record §18), not on production evidence. Production Auth still runs a pre-V2-A.2 image; its next
+deployment is a separate, owner-authorized checkpoint with its own compatibility review, and a production JWT key ring is not
+activated before a separately authorized minimum-image gate exists (record §15, §18.7).
 
 ### Compatibility and safety rules for V1 work
 

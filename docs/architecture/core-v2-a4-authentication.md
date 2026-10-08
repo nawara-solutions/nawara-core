@@ -1,12 +1,14 @@
 # Core V2 A4: authentication
 
 - **Status:** RECORD of the A4.0 discovery (read-only, owner-reviewed, 2026-10-08, on `main` at `16476f9`, the PR #242 merge that
-  closed A3M.7) and of **A4.1: the A4 architecture record**. **A4 is OPEN.** A4.2 to A4.5 are merged (PRs #244 to #247, `main` at
+  closed A3M.7) and of **A4.1: the A4 architecture record** (PR #243). A4.2 to A4.5 are merged (PRs #244 to #247, `main` at
   `e039ed6`); their sections keep the text they were approved with. **A4.6** (§10 design,
-  [ADR-0058](../adr/0058-access-token-signing-key-ring.md)) is merged (PR #248, `8d62b3f`), and ADR-0058 is **Accepted** (2026-10-08).
-  **A4.7** (§10 implementation, §10.11) is merged (PR #250, `f95956b`). **A4.8** (§11, §11.1) is implemented on
-  `feature/core-v2-a4-8-jwt-deployment-readiness`, pending owner review and merge. Neither deploys, generates or activates anything.
-  Nothing in §10 or §11 is on `main` unless it is labelled **[CURRENT]** or stated as merged.
+  [ADR-0058](../adr/0058-access-token-signing-key-ring.md)) is merged (PR #248, `8d62b3f`), and ADR-0058 is **Accepted** (2026-10-08,
+  PR #249). **A4.7** (§10 implementation, §10.11) is merged (PR #250, `f95956b`); **A4.8** (§11, §11.1) is merged (PR #251,
+  `d3dd2fd`). **A4.9** (§18, local certification) is prepared on `feature/core-v2-a4-9-local-certification`: A4 is **locally certified
+  on repository and CI evidence** once its pull request passes Core CI (including the real-image check of §18.5) and the owner merges
+  it. **Nothing in A4 is deployed**: production Auth still runs the pre-A4 image, no JWT key ring is configured anywhere, and every
+  production step stays a separate, owner-authorized checkpoint (§17).
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET]**: approved by an owner decision, implemented by the named stage.
   **[PENDING DESIGN]**: approved in direction only; the named stage must design it and the owner must review it before code.
 - **Scope of A4** ([roadmap](../CORE-ROADMAP.md) Core V2 table): sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service
@@ -386,7 +388,7 @@ A future deployment needs its own explicit approval and a compatibility review c
   `ConfigError` text, never a value, plus a runbook for a names-only audit of the server `.env` (owner-run).
 - **Rollback:** limited once a new JWT key is active (§10.7).
 
-### 11.1 A4.8 implementation [TARGET: on merge of A4.8]
+### 11.1 A4.8 implementation (merged, PR #251)
 
 Local tooling and documentation only; no production deployment, key change or workflow change.
 
@@ -415,8 +417,8 @@ production-policy change requiring separate authorization; until then the image 
 | A4.5 | genericity exemption narrowing (§9) | `feature/core-v2-a4-5-auth-genericity` | OD-A4-5 ✅ | no |
 | A4.6 | JWT key-ring design (§10) | `feature/core-v2-a4-6-jwt-key-ring-design` | D1–D7 ✅ (§10.2); ADR-0058 written as Proposed; owner review of the design | no |
 | A4.7 | JWT key-ring implementation (§10) | `feature/core-v2-a4-7-jwt-key-ring` | A4.6 reviewed and merged | no |
-| A4.8 | deployment-readiness tooling (§11) | `feature/core-v2-a4-8-auth-deploy-readiness` | D6 (§10.2) | no |
-| A4.9 | A4 local certification (§16) | `feature/core-v2-a4-9-certification` | – | no |
+| A4.8 | deployment-readiness tooling (§11) | `feature/core-v2-a4-8-jwt-deployment-readiness` (planned as `…-a4-8-auth-deploy-readiness`) | D6 (§10.2) | no |
+| A4.9 | A4 local certification (§16, §18) | `feature/core-v2-a4-9-local-certification` (planned as `…-a4-9-certification`) | – | no |
 
 Each stage is one pull request from `origin/main`, merged by the owner with green Core CI. No stage mixes unrelated features.
 
@@ -458,12 +460,15 @@ Reused, not repeated: the A1, A2, A15 and A3M evidence. Not part of A4: G6, prod
 | The first Auth deployment after A4 carries every change since `97f78cb` | owner, at the deployment checkpoint (§11, §17) |
 | A loader change could refuse production's configuration at startup | A4.2 (characterization), A4.8 (configuration check), owner review before deploy |
 | Image rollback rejects ring-signed tokens once a new JWT key is active | §10.7; the rotation runbook (A4.8); owner at each rotation step |
-| A re-provisioning reintroduces a generated `JWT_SECRET` after retirement | A4.8 (D6), before any retirement (§10.8) |
+| A re-provisioning reintroduces a generated `JWT_SECRET` after retirement | mitigated in the repository by A4.8 (D6, six-variable guard, duplicate and malformed JWT lines refused; PR #251); effective in production only once an A4.8 (or later) image is deployed |
+| An image older than A4.8 is redeployed after a ring is configured (its script regenerates `JWT_SECRET`, runs no check; before A4.7 it cannot verify ring tokens) | owner at dispatch (rotation runbook §4.11). A workflow-side minimum-image gate needs **separate authorization** and is a prerequisite before any production ring activation (§18.7, D5) |
+| Retained `-previous-*` containers and `.env` backups keep old JWT keys | rotation runbook §4.6, §4.10; owner at retirement and after an emergency |
+| The real Auth image's `dist/cli/check-config.js` (A4.8 review F5) | the A4.9 core-image smoke (§18.5); proven only by that CI run |
 | ADR-0058 acceptance | resolved: Accepted by the owner on 2026-10-08 |
 | F1 (forged Auth events to Notification) | P-A1 / A14; `AUTH_EVENTS` stays off (A3M.8) |
 | Peppers cannot be rotated (A2 accepted limitation) | recorded; A4 does not change it |
 | Passkeys enrolled under the former RP ID no longer work | product integration (re-enrollment UI) |
-| ADR-0023 and ADR-0026 remain Proposed | owner review (OD-A4-8) |
+| ADR-0023 and ADR-0026 remain Proposed | owner review (OD-A4-8), **carried forward open** by A4.9 (D4); statuses unchanged |
 | ADR-0017 | A5 |
 
 ## 16. Local certification criteria (A4.9)
@@ -481,3 +486,101 @@ A4 certifies the repository and local evidence only. Deploying an Auth image bui
 key, cleaning a server `.env`, and enabling `AUTH_EVENTS` are each a separate, owner-authorized production checkpoint under the
 [Auth deployment runbook](../runbooks/auth-service-deploy.md) and the protected `production` environment. G6 stays deferred; Final Core
 Validation stays the absolute last validation.
+
+## 18. A4.9: local certification (2026-10-08; prepared, closes when its pull request merges)
+
+- **Owner decisions:** D1 = the real Auth image's configuration check joins the existing core-image smoke (§18.5); D2 = one defensive
+  test of the check's non-`ConfigError` path; D3 = ADR-0056 is **not** edited (its §12 `[TARGET: A4]` is shown met here, §18.4);
+  D4 = the OD-A4-8 review of ADR-0023 and ADR-0026 is **carried forward open**, statuses unchanged; D5 = a workflow-side minimum-image
+  gate (§15) needs **separate authorization** and is a prerequisite before any production JWT ring activation; it is not built here.
+- **What changed:** this record, the [roadmap](../CORE-ROADMAP.md), `scripts/smoke-core-image.sh` (auth-service only) and one test in
+  `apps/auth-service/src/config/config-check.spec.ts`. No runtime, workflow, deploy-script, migration or ADR change.
+- **Kinds of evidence:** **CI** = Core CI on the merged pull request (`core-ci-passed` and the 23 other required checks); **local** =
+  runs recorded during the stage (not re-run here); **production** = none: A4 deployed, generated and activated nothing.
+
+### 18.1 Completion matrix
+
+Every A4 pull request merged with 24 of 24 checks passing, `core-ci-passed` included (verified on GitHub on 2026-10-08):
+
+| Stage | Done when (§13) | Pull request, merge | `core-ci-passed` run | Status |
+|---|---|---|---|---|
+| A4.1 | this record and the roadmap structure merged | #243, `ddafe69a42b006a2b0f86ffee1f85aa391b9150c` | 37790834331 | ✅ merged |
+| A4.2 | configuration through `EnvReader`, characterization first, production refusals unchanged | #244, `dd35aac8bdff3bc1a2915bb9b3741f88f86b5da5` | 37794123750 | ✅ merged |
+| A4.3 | both CLIs on `EnvReader`, F4 bootstrap rules unchanged | #245, `b066cc4175c26cfbc6993cb353aa9a1bd6bca084` | 37797728378 | ✅ merged |
+| A4.4 | kit filter option; Auth starts through `configureApp`; §2.1 HTTP contracts unchanged | #246, `73397a631364e7be7c4ce4b051becae4fc6edfa2` | 37831705512 | ✅ merged |
+| A4.5 | the exemption names only the two migrations | #247, `e039ed628798e6394d59627faa5e2e63f07d2eeb` | 37836294708 | ✅ merged |
+| A4.6 | §10 and ADR-0058 written and owner-reviewed | #248, `8d62b3fb2afe176b04b9ecdc33c79b56b30ef614` | 37838534960 | ✅ merged |
+| (ADR-0058) | acceptance, by explicit owner authorization | #249, `5964697b29a4b895d0cb4fb41445f809b865daf6` | 37841230733 | ✅ Accepted |
+| A4.7 | §10.9 tests, kit behaviour unchanged, legacy `JWT_SECRET` unchanged, no key generated | #250, `f95956b90927d9ea46bab046580d3919efd811e1` | 37844836922 | ✅ merged |
+| A4.8 | value-free check CLI, deploy runbook review, D6, rotation runbook | #251, `d3dd2fdb7c1c869e2efb47336043e707f1891a47` | 37849083293 | ✅ merged |
+| A4.9 | §16 met (§18.2) | this pull request | pending | prepared |
+
+Across A4 (`16476f9`..`d3dd2fd`) only `apps/auth-service/**`, three kit files (`bootstrap.ts`, `config/key-material.ts`, `index.ts`),
+documentation, `scripts/**` and ADR-0058 (with its index row) changed: no other service, audit contract, workflow or migration.
+
+### 18.2 Certification criteria (§16)
+
+| # | Criterion | Evidence | Kind | Result |
+|---|---|---|---|---|
+| 1 | A4.2 to A4.8 closed on `main` with green Core CI, each meeting §13 | §18.1 | CI | **met** |
+| 2 | ADR-0056 §12 `[TARGET: A4]`: Auth uses the kit's configuration reader and `configureApp` | §18.4 | CI, repository | **met** |
+| 3 | every §2.1 guarantee shown unchanged by existing tests | §18.3 | CI | **met** |
+| 4 | the key ring works with the legacy `JWT_SECRET`; no production key generated or activated | §18.5; no production run (§18.6) | CI, local | **met** |
+| 5 | no Auth deployment; `AUTH_EVENTS` unchanged; F1 and F2 untouched; ADR statuses unchanged unless authorized | no `auth-service-deploy.yml` run since 2026-09-30 and no production workflow run during A4 (last: core backup 2026-10-04); the deploy script's `AUTH_EVENTS off` line unchanged; no audit, notification or event-contract change (§18.1); only ADR-0058's status changed, by explicit authorization (#249) | GitHub, repository | **met** |
+| 6 | this record lists what was not run and the open risks | §18.6, §18.7 | record | **met** |
+| – | (D1) the real Auth image contains and runs `dist/cli/check-config.js` as the deploy does | §18.5 | CI of **this** pull request | **UNVERIFIED until that run passes** |
+
+### 18.3 The §2.1 guarantees and the tests that show them
+
+All files run in Core CI's `auth-service` job (`npm test` and `npm run test:e2e` with PostgreSQL and RabbitMQ; CI sets
+`TEST_RABBITMQ_URL`, so the broker-gated `events-real-broker` suite runs). `e2e` is `apps/auth-service/test/`, `unit` is
+`apps/auth-service/src/`. Each mapping below was checked against the test's content, not its name.
+
+| Guarantee | Tests |
+|---|---|
+| `GET /auth/health` 200, or 503 `unavailable` | e2e `health-readiness.e2e-spec.ts` |
+| localized validation errors en / fr / ar, English by default | e2e `auth-localization.e2e-spec.ts` |
+| the error shape and field order (`reason` after `code`, before `requestId`), opaque 500s | e2e `auth-localization.e2e-spec.ts` (exact key order including `reason`; a 500 per locale); the kit's `localization.spec.ts` |
+| the JWT: claims, issuer, audience, HS256, expiry, session-ceiling clamp, `invalid_token` | unit `tokens/token.service.spec.ts` (characterization and ring); e2e `tokens.e2e-spec.ts` |
+| refresh rotation, family revocation on reuse, the session ceiling, logout | e2e `tokens.e2e-spec.ts`, `concurrency.e2e-spec.ts`, `operator.e2e-spec.ts` (`session_ceiling_reached`) |
+| the live session and user check in `AuthGuard` | e2e `tokens.e2e-spec.ts` (inactive user, revoked session), `member-security.e2e-spec.ts` |
+| owner MFA (TOTP, WebAuthn), step-up, recovery (ADR-0025) | e2e `owner-auth.e2e-spec.ts`, `webauthn.e2e-spec.ts`, `step-up.e2e-spec.ts`, `step-up-verify.e2e-spec.ts`, `recovery.e2e-spec.ts` |
+| the 29 throttling buckets, their variables and defaults | unit `config/app-config.spec.ts` ("every default, including all 29 rate buckets"); e2e 429 cases in `tokens`, `owner-auth`, `operator`, `recovery`, `onboarding`, `admin-invitation`, `client-address` |
+| service authentication contracts | e2e `platform-authz.e2e-spec.ts` (`/auth/me`, `/auth/platform-access/:platformId`), `grants.e2e-spec.ts`, `hierarchy-reference.e2e-spec.ts` (the Organization client); the cross-service `stage10-1-auth-organization-wire-contract.e2e-spec.ts` (CI job `test:e2e:auth-organization`) |
+| `AUTH_EVENTS` semantics and the code-event purge | unit `config/app-config.spec.ts` (exactly `on` / `off`); e2e `domain-events-outbox.e2e-spec.ts` (`CodeEventPurge`, rows only when on), `events-real-broker.e2e-spec.ts` |
+| production refusals; no value echoed | unit `config/app-config.spec.ts` (published and non-random keys, cross-purpose reuse, runtime role, WebAuthn RP and https origins, `RABBITMQ_URL`, strict `NODE_ENV`, `AUTH_EVENTS`, `REQUIRE_CONTACT_VERIFICATION`, the `refused` helper's no-value assertion), `config/config-check.spec.ts`; e2e `secrets.e2e-spec.ts`, `runtime-role.e2e-spec.ts` |
+
+### 18.4 ADR-0056 §12: configuration and bootstrap convergence
+
+- **Configuration:** `apps/auth-service/src/config/app-config.ts` reads every value through the kit's `EnvReader` (`NAME` or
+  `NAME_FILE`, both refused, trimmed) and the kit's key helpers (`readKey`, `readOptionalKey`, `readKeyRing`, `readOptionalKeyEntries`,
+  `assertDistinctKeys`); `src/cli/migrate.ts` reads through `EnvReader` (guarded by `check:repo`'s operator-CLI rule).
+- **Bootstrap:** `src/main.ts` starts through `src/http/configure-auth-app.ts`, which calls the kit's `configureApp` with Auth's filter
+  option (A4.4); the e2e application uses the same pipeline.
+- ADR-0056 itself is not edited (D3).
+
+### 18.5 JWT key ring and deployment readiness
+
+| Evidence | Kind |
+|---|---|
+| unit `token.service.spec.ts` (16: legacy header byte-exact, a plain `jwtVerify` standing for an image without the ring, `kid` selection, no fallback, unknown / retired / reserved / malformed / non-string `kid`, header-carried keys, algorithm confusion, the §10.6 rotation matrix and the image-rollback boundary) | CI |
+| unit `app-config.spec.ts` (the §10.3 table, reserved id in every case, cap of 3, distinctness, production rules, `_FILE`); kit `key-material.spec.ts` (`readOptionalKeyEntries`, `readKeyRing` unchanged); Notification's configuration tests | CI |
+| e2e `tokens.e2e-spec.ts` (unknown and `legacy` kids refused; a ring app with `JWT_SECRET` retired) | CI |
+| unit `config-check.spec.ts` (9, including D2's non-`ConfigError` path); `scripts/deploy-tests/auth-deploy.test.mjs` with the fake Docker CLI (the six-variable guard, duplicate and malformed JWT lines refused before any change, the check's image, network and position before migrations and the stop, no secret printed) | CI (`test:deploy`) |
+| 8 of 8 security mutants caught (A4.7); the six focused Auth e2e suites (76 tests); the built CLI smoke (8 cases); the runbook's `.env` editing procedure run on a throwaway file (A4.8) | local |
+| **real image** (D1): `scripts/smoke-core-image.sh` runs `dist/cli/check-config.js` in the built `auth-service` image as the deploy does (`--rm --network none --entrypoint node`, the image's working directory): the valid production configuration gives `configuration valid; JWT: legacy only (JWT_SECRET signs and verifies)`, a pepper equal to `JWT_SECRET` is refused with exit 1, no configuration value appears | CI of this pull request, **UNVERIFIED until it passes** |
+
+### 18.6 Not run
+
+Final Core Validation; the G6 production-like recovery drill; any production check, deployment, key generation, activation, rotation or
+retirement; `AUTH_EVENTS` or A3M.8 activation; the on-demand real-broker deploy certification (`test:deploy:real-broker`); local Docker
+image builds and image smoke runs (the real-image evidence is the CI core-image job); a broad local platform campaign (the merged pull
+requests' CI is the evidence, §14). Nothing from A2, A3M, A15 or earlier stages was re-run.
+
+### 18.7 Open risks after A4
+
+The §15 table, in particular: the first Auth deployment after A4 carries every change since `97f78cb` and needs its own compatibility
+review (deploy runbook §2); a production JWT ring must not be activated before the minimum-image gate is separately authorized and in
+place (D5), and every rotation step follows the [rotation runbook](../runbooks/secret-rotation.md) §4 with the owner's authorization;
+retained containers and `.env` backups keep old keys; the OD-A4-8 review stays open (D4). Production readiness has **not** been
+operationally proven: A4 is certified on repository, CI and local evidence only.

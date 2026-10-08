@@ -121,6 +121,19 @@ describe('V2 A4.8: checkConfig (the deploy-time configuration check)', () => {
     expect(bad).toEqual({ ok: false, exitCode: 1, line: 'configuration invalid: JWT_SECRET_FILE is set but the file cannot be read' });
   });
 
+  it('V2 A4.9 (A4.8 review F7): an unexpected, non-ConfigError failure exits 1 with a generic line, never the error text or a key', () => {
+    const k = b64();
+    const env = new Proxy(good(), { get: () => { throw new TypeError(`unexpected reader failure carrying ${k} and s3cret-detail`); } });
+    const r = checkConfig(env as NodeJS.ProcessEnv);
+    expect(r.ok).toBe(false);
+    expect(r.exitCode).toBe(1);
+    expect(r.line).toMatch(/^configuration check failed: /);
+    expect(r.line).not.toContain(k);
+    expect(r.line).not.toContain('s3cret-detail');
+    expect(r.line).not.toContain('unexpected reader failure');
+    expect(r.line).not.toMatch(/^configuration (valid|invalid)/);
+  });
+
   it('touches nothing beyond configuration: the module imports only the configuration loader and the kit', () => {
     const src = readFileSync(new URL('./config-check.ts', import.meta.url), 'utf8');
     const imports = [...src.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]);
