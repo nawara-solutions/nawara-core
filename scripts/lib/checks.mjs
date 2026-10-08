@@ -1770,8 +1770,9 @@ export const isServiceConfigSource = (app, relPath) => relPath.startsWith(`apps/
 /**
  * The generic operator CLIs migrated by A15.1. Each reads its settings through `new EnvReader(process.env)` (surrounding whitespace
  * removed, `NAME` or `NAME_FILE`, both together refused, value-free errors) and reaches the process environment in no other way.
- * The path allowlist (`PROCESS_ENV_BOUNDARY`) still admits every CLI directory: Auth's CLIs (A4) and the Organization ownership CLI
- * (A5 / F6 / F7) are not listed here and keep their own reads until those stages.
+ * The path allowlist (`PROCESS_ENV_BOUNDARY`) still admits every CLI directory. V2 A4.3 added Auth's migration CLI; Auth's `main.ts` is
+ * not listed (it hands an environment copy to the service loader and reads the bootstrap password byte for byte, OD-A4.3-1), nor is the
+ * Organization ownership CLI (A5 / F6 / F7).
  */
 export const ENV_READER_CLIS = [
   'libs/service-kit/src/cli/migrate.ts',
@@ -1781,6 +1782,7 @@ export const ENV_READER_CLIS = [
   'libs/service-kit/src/cli/outbox-retention.ts',
   'apps/notification-service/src/cli/secret-keys.ts',
   'apps/audit-service/src/cli/retention.ts',
+  'apps/auth-service/src/cli/migrate.ts',
 ];
 /** The kit CLIs' shared resolvers: they take a reader and never reach the process environment themselves. */
 export const ENV_READER_CLI_RESOLVERS = 'libs/service-kit/src/cli/cli-config.ts';

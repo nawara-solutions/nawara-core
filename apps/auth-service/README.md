@@ -146,6 +146,18 @@ unset BOOTSTRAP_OWNER_PASSWORD
 npm run cli -w auth-service -- reseal-totp-keys     # remove the old key only when "still under an old key: 0"
 ```
 
+How the two CLIs read their inputs (V2 A4.3):
+- `npm run migrate` (`dist/cli/migrate.js`) needs `MIGRATION_DATABASE_URL` or `MIGRATION_DATABASE_URL_FILE` (the schema owner; never
+  both), read through the kit's `EnvReader` (trimmed; blank is unset). There is **no fallback to `DATABASE_URL`** (the runtime role):
+  without a migration URL it stops with `migration failed: MIGRATION_DATABASE_URL is required (the schema owner, not the runtime role)`.
+  Its last line, `migrations: N applied, M already applied, K checksum(s) recorded`, is read by the restore drill: keep it exact.
+- `npm run cli` (`dist/cli/main.js`) loads the service configuration (so `AUTH_EVENTS` is forced off for the CLI only; a CLI never
+  writes domain events) and reports a configuration error as one line, exit 1. `bootstrap-owner` reads `BOOTSTRAP_COMPANY_NAME`,
+  `BOOTSTRAP_OWNER_EMAIL` and `BOOTSTRAP_COMPANY_ID` through `EnvReader` (`_FILE` accepted, never both, trimmed). The password is taken
+  **exactly** as given: `BOOTSTRAP_OWNER_PASSWORD` verbatim (surrounding whitespace is part of it), or `BOOTSTRAP_OWNER_PASSWORD_FILE`
+  (the file's content without its final line break), never both. Exit codes: 0 when the owner is created, 1 when an owner already
+  exists (`an owner already exists: nothing changed`) or on any refusal.
+
 ### Hierarchy authority (ADR-0040): the ownership transition from auth-service's side
 
 Migration `0008` adds `hierarchy_authority` and write guards on `company`, `platform` and `organization`. It is **inert** (mode `local`).

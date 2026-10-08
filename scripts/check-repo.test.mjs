@@ -1883,10 +1883,17 @@ test('V2 A15.1: a migrated operator CLI hands process.env to EnvReader and reads
   }
   assert.match(checkEnvReaderClis(files({ [ENV_READER_CLI_RESOLVERS]: undefined })).join(), /cli-config\.ts \(the operator CLIs' configuration resolvers\) is missing/);
 
-  // The inventory is the six A15.1 CLIs; Auth's CLIs (A4) and the Organization ownership CLI (A5 / F6 / F7) are not in it, and the
-  // path boundary of A2.5 still admits every CLI directory (nothing was removed from it).
-  assert.equal(ENV_READER_CLIS.length, 7); // V2 A3M.5 added nawara-outbox-retention
-  assert.ok(!ENV_READER_CLIS.some((rel) => /auth-service|organization-service/.test(rel)));
+  // The inventory is the six A15.1 CLIs, A3M.5's retention CLI and (V2 A4.3) Auth's migration CLI; Auth's main.ts and the Organization
+  // ownership CLI (A5 / F6 / F7) are not in it, and the path boundary of A2.5 still admits every CLI directory (nothing was removed).
+  assert.equal(ENV_READER_CLIS.length, 8); // V2 A3M.5 added nawara-outbox-retention; V2 A4.3 added Auth's migrate.ts
+  assert.deepEqual(ENV_READER_CLIS.filter((rel) => /auth-service|organization-service/.test(rel)), ['apps/auth-service/src/cli/migrate.ts']);
+  // V2 A4.3: the forms Auth's migration CLI had before (and would drift back to) are refused for it.
+  for (const text of [
+    "const url = process.env.MIGRATION_DATABASE_URL; if (!url) throw new MigrationError('x');",
+    "const url = new EnvReader(process.env).get('MIGRATION_DATABASE_URL') ?? process.env.DATABASE_URL;",
+  ]) {
+    assert.deepEqual(checkEnvReaderClis(files({ 'apps/auth-service/src/cli/migrate.ts': text })).map((p) => p.split(':')[0]), ['apps/auth-service/src/cli/migrate.ts'], text);
+  }
   for (const rel of [...ENV_READER_CLIS, 'apps/auth-service/src/cli/main.ts', 'apps/organization-service/src/cli/ownership.ts']) {
     assert.ok(PROCESS_ENV_BOUNDARY.some((allowed) => allowed.test(rel)), rel);
     assert.deepEqual(checkSource(rel, "const v = process.env.X_VALUE;"), [], rel); // A2.5 is unchanged: the new rule is a separate check
