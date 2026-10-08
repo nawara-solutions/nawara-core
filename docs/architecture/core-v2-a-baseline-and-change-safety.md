@@ -344,3 +344,32 @@ Appended. §5 lists F9 (`rabbitmq-diagnostics` health checks run as root) as STI
 it. By OD-A15.3-5 the health checks of `docker-compose.yml` and of the four RabbitMQ services of `core-ci.yml` stay, and run as the
 broker's user (`su-exec rabbitmq rabbitmq-diagnostics -q ping`). F9 is resolved; production is not involved
 ([A15 record](core-v2-a15-developer-experience.md) §6).
+
+## 17. Later status: A15 Developer / Platform Experience (2026-10-08; certification pending merge)
+
+Appended. §4 lists A15 as GREEN work, and §5 hands it F9, the ADD drift and the R11 record's test and environment follow-ups. A15.0 to
+A15.4 are complete and on `main` ([A15 record](core-v2-a15-developer-experience.md)): generic CLI configuration hygiene (PR #229), the
+canonical developer path and Node 22 (PR #230), local environment and test determinism (PR #231) and the new-service checklist with two
+repository guards (PR #232), each merged with 24 of 24 checks green. The certification baseline is `main` at
+`3bc14a41c73ab78eb4eafaf3b4eef405c6d047db`, the PR #232 merge.
+
+The A15.5 certification (A15 record §8) found no A15-owned blocker; **A15 is certified and closed when its certification pull request
+is merged, and is open until then.** It is repository and local and has no production or G6 dependency.
+
+Dispositions of the §5 items handed to A15, as A15.3 recorded them (A15 record §6); the §5 table above is kept as written:
+
+- **F9:** resolved (§16).
+- **ADD drift** (events described as not delivered): **closed** by A15.3. `docs/add/auth-service.md` now describes the transactional
+  outbox and its relay, and `docs/add/payment-service.md`'s outbox open question is marked resolved.
+- **R11 follow-ups:**
+  - the Billing `57P01` teardown race: **closed without change** (OD-A15.3-4; no failing test or run located), reopened only by a new
+    observed failure;
+  - timer-dependent tests: the Payment `expiry-sweeper` window and the Notification overlap precondition (§10) **fixed**, by state and
+    by a two-party barrier, with no retry;
+  - the Audit and Release `auth_timeout` attribution: **re-homed to A12** (an outcome-label question, not determinism);
+  - the local RabbitMQ development-environment issue: **fixed** (the root health check that created the Erlang cookie; the skipped
+    suites that ran their body; broker resources left behind by tests);
+  - the D10 policy and the deferred R4 variants: not A15 items (§5 assigns D10 to A1, which decided it for new code, OD-A1-5); A15 did
+    not change them.
+
+Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G4 and G6 deferred; G7, F6, F7 locked; Final Core Validation absolute last.

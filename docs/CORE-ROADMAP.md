@@ -179,13 +179,13 @@ A2 Configuration & Secrets                     ✅ CERTIFIED / CLOSED (PR #228, 
   A2.4  hygiene, environment reference, rotation ✅ closed on main (PR #226)
   A2.5  repository guards                      ✅ closed on main (PR #227)
   A2.6  certification                          ✅ closed on main (PR #228)
-A15 Developer / Platform Experience            🔄 OPEN
+A15 Developer / Platform Experience            🔄 OPEN (certification prepared; certified and closed when its PR merges)
   A15.0  discovery, owner decisions            ✅ complete (owner-reviewed)
   A15.1  generic CLI configuration hygiene     ✅ closed on main (PR #229)
   A15.2  developer path (guide, Node version)  ✅ closed on main (PR #230)
   A15.3  local environment, test determinism   ✅ closed on main (PR #231)
-  A15.4  new-service checklist, localization   complete locally; owner review pending
-  A15.5  certification                         not started
+  A15.4  new-service checklist, localization   ✅ closed on main (PR #232)
+  A15.5  certification                         prepared (record §8); pull request pending
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -232,7 +232,9 @@ separately authorized production work, and A2 has no G6 dependency. (The certifi
 closed.) **A15 Developer / Platform Experience** is open ([record](architecture/core-v2-a15-developer-experience.md)): A15.0 fixed its
 scope and decisions, A15.1 put the generic operator CLIs on the kit's configuration reader (PR #229), A15.2 added the canonical
 [developer guide](DEVELOPMENT.md) and declared Node 22 (PR #230), A15.3 made the infrastructure test suites deterministic (PR #231),
-and A15.4 adds the [new-service checklist](NEW-SERVICE-CHECKLIST.md).
+and A15.4 added the [new-service checklist](NEW-SERVICE-CHECKLIST.md) and two repository guards (PR #232). The A15.5 certification
+(record §8) found no A15-owned blocker; **A15 is open until its certification PR is merged, and is certified and closed by that
+merge.** It is repository and local, with no production work and no G6 dependency.
 
 ### Compatibility and safety rules for V1 work
 
@@ -475,4 +477,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A12: observability (kit metrics, logging and PII, local collection, Grafana dashboards, alert rules, integration, local certification) | [`core-v2-a12-observability.md`](architecture/core-v2-a12-observability.md) |
 | V2 A1: architecture (scope, A1.0 findings, owner decisions OD-A1-1 to OD-A1-6, the review of every Proposed ADR, A1 targets) | [`core-v2-a1-architecture.md`](architecture/core-v2-a1-architecture.md) |
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
-| V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
+| V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene, A15.2 developer path, A15.3 test determinism, A15.4 conventions, the A15 certification) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
