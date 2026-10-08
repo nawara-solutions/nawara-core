@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_LEGACY_EXEMPT, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -2047,17 +2047,85 @@ test('V2 A15.4: every application and library workspace is in the Core CI matrix
   assert.match(runner, /checkCiWorkspaceCoverage\(readOrUndefined\('\.github\/workflows\/core-ci\.yml'\), \{ workspaces: \[\.\.\.appPackages\.keys\(\), \.\.\.libWorkspaces\], imageApps \}\)/);
 });
 
-test('V2 A15.4: the product-term check covers every application under apps/ automatically, with Auth as the one named exemption', () => {
-  // A service that exists in no list anywhere is checked, in its source and its migrations.
-  for (const rel of ['apps/booking-service/src/a.ts', 'apps/zz-new-service/db/migrations/0001_x.sql', 'apps/accounting-service/src/b.ts']) {
+test('V2 A15.4 / A4.5: the product-term check covers every application under apps/ automatically, Auth included: no application is exempt', () => {
+  // A service that exists in no list anywhere is checked, in its source and its migrations; so is Auth (V2 A4.5).
+  for (const rel of ['apps/booking-service/src/a.ts', 'apps/zz-new-service/db/migrations/0001_x.sql', 'apps/accounting-service/src/b.ts', 'apps/auth-service/src/a.ts', 'apps/auth-service/db/migrations/0012_x.sql']) {
     assert.match(checkSource(rel, '// a student books a lesson').join(), /product-specific term/, rel);
   }
-  // Outside src and migrations nothing changes; Auth is exempt by name, and only Auth.
+  // Outside src and migrations nothing changes, for any service.
   assert.deepEqual(checkSource('apps/booking-service/test/a.e2e-spec.ts', '// a student books').filter((p) => /product-specific/.test(p)), []);
-  assert.deepEqual(checkSource('apps/auth-service/src/a.ts', '// a student registers').filter((p) => /product-specific/.test(p)), []);
-  assert.deepEqual([...GENERICITY_LEGACY_EXEMPT], ['auth-service']);
+  assert.deepEqual(checkSource('apps/auth-service/test/a.e2e-spec.ts', '// a student books').filter((p) => /product-specific/.test(p)), []);
   // Generic text stays clean.
   assert.deepEqual(checkSource('apps/booking-service/src/a.ts', 'export const capacity = 3; // a booking for an organization member').filter((p) => /product-specific/.test(p)), []);
+});
+
+/** Every real Auth file the product-term check reads (`src/**` and `db/migrations/**`), as repository-relative paths. */
+const authGenericityFiles = () => ['apps/auth-service/src', 'apps/auth-service/db/migrations'].flatMap((dir) =>
+  readdirSync(new URL(`../${dir}`, import.meta.url), { recursive: true, withFileTypes: true }).filter((e) => e.isFile())
+    .map((e) => `${e.parentPath.slice(e.parentPath.indexOf(dir))}/${e.name}`)).sort();
+
+test('V2 A4.5: Auth\'s real files: only the two historical migrations use a product term, and only in their reviewed lines', () => {
+  const termed = (rel, text) => checkSource(rel, text).some((p) => /product-specific term/.test(p));
+  // Read as another service's files (no historical line set aside): the rule itself finds exactly the two migrations. Before A4.5 it
+  // also found src/onboarding/dto.ts (an OpenAPI example, reworded by OD-A4.5-3).
+  assert.deepEqual(authGenericityFiles().filter((rel) => termed(rel.replace('apps/auth-service/', 'apps/zz-probe-service/'), repoFile(rel))), [
+    'apps/auth-service/db/migrations/0004_organization_join_codes_and_membership.sql',
+    'apps/auth-service/db/migrations/0007_multi_organization_membership.sql',
+  ]);
+  // Read at their real paths, every Auth file passes: the two migrations unchanged, thanks to their exact reviewed lines.
+  assert.deepEqual(authGenericityFiles().filter((rel) => termed(rel, repoFile(rel))), []);
+  // The rule for the other services is unchanged: source, migrations and identifier shapes.
+  for (const [rel, text] of [['apps/billing-service/src/a.ts', 'const studentId = 1;'], ['apps/file-service/db/migrations/0009_x.sql', 'CREATE TABLE lesson_slots (id uuid);'], ['libs/service-kit/src/a.ts', '// drivers']]) {
+    assert.match(checkSource(rel, text).join(), /product-specific term/, rel);
+  }
+});
+
+test('V2 A4.5: the historical-line exception is exact (path and whole line) and can never become a general exemption', () => {
+  const [M0004, M0007] = [...GENERICITY_HISTORICAL_LINES.keys()];
+  const [L0004] = GENERICITY_HISTORICAL_LINES.get(M0004);
+  const [L0007] = GENERICITY_HISTORICAL_LINES.get(M0007);
+  const termed = (rel, text) => checkSource(rel, text).some((p) => /product-specific term/.test(p));
+  // The inventory: exactly two reviewed lines, in exactly the two applied migrations, each still present verbatim (not stale).
+  assert.deepEqual([...GENERICITY_HISTORICAL_LINES.keys()], [
+    'apps/auth-service/db/migrations/0004_organization_join_codes_and_membership.sql',
+    'apps/auth-service/db/migrations/0007_multi_organization_membership.sql',
+  ]);
+  for (const [rel, lines] of GENERICITY_HISTORICAL_LINES) {
+    assert.match(rel, /^apps\/auth-service\/db\/migrations\/\d{4}_[a-z0-9_]+\.sql$/, `${rel}: only a top-level migration file`);
+    assert.equal(lines.length, 1, `${rel}: one reviewed line`);
+    for (const line of lines) assert.ok(repoFile(rel).split('\n').includes(line), `${rel}: the reviewed line still exists verbatim`);
+  }
+  assert.equal(termed(M0004, repoFile(M0004)), false);
+  assert.equal(termed(M0007, repoFile(M0007)), false);
+  // 1, 2: new terminology in Auth source or in a new Auth migration.
+  assert.ok(termed('apps/auth-service/src/onboarding/dto.ts', "description: 'e.g. \"student\"'"));
+  assert.ok(termed('apps/auth-service/db/migrations/0012_audience.sql', 'ALTER TABLE x ADD COLUMN "driverId" uuid;'));
+  // 3: any other term inside the historical migration (another line) is reported.
+  assert.ok(termed(M0004, `${repoFile(M0004)}\n-- a lesson`));
+  // 4: the reviewed line modified or with an appended term is no longer the reviewed line.
+  assert.ok(termed(M0004, repoFile(M0004).replace(L0004, `${L0004} (and instructor)`)));
+  assert.ok(termed(M0007, repoFile(M0007).replace(L0007, L0007.replace('"driver"', '"vehicle"'))));
+  assert.ok(termed(M0004, repoFile(M0004).replace(L0004, L0004.trimStart()))); // even its indentation is part of the line
+  // 5: the reviewed text copied into another file (another migration, the other historical migration, a source file).
+  assert.ok(termed('apps/auth-service/db/migrations/0012_x.sql', L0004));
+  assert.ok(termed(M0007, `${repoFile(M0007)}\n${L0004}`));
+  assert.ok(termed('apps/auth-service/src/x.ts', L0007));
+  // 6: the same path under src/, a down/ migration or another service never carries the exception.
+  assert.ok(termed('apps/auth-service/src/0004_organization_join_codes_and_membership.sql', L0004));
+  assert.ok(termed('apps/auth-service/db/migrations/down/0004_organization_join_codes_and_membership.down.sql', L0004));
+  assert.ok(termed(M0004.replace('auth-service', 'billing-service'), L0004));
+});
+
+test('V2 A4.5: no service-wide genericity exemption exists or can return', () => {
+  const checks = repoFile('scripts/lib/checks.mjs');
+  // 7, 8: the former mechanism is gone, and no application-level exemption is consulted by the product-term check.
+  assert.doesNotMatch(checks, /GENERICITY_LEGACY_EXEMPT/);
+  const sf = ts.createSourceFile('checks.mjs', checks, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const fn = sf.statements.find((st) => ts.isFunctionDeclaration(st) && st.name?.text === 'checkSource');
+  const inScope = fn?.body?.statements.find((st) => ts.isVariableStatement(st) && st.declarationList.declarations[0]?.name.getText(sf) === 'inNewCore');
+  assert.ok(inScope, 'checkSource decides the product-term scope in one inNewCore declaration');
+  assert.equal(inScope.getText(sf), "const inNewCore = coreApp !== undefined || relPath.startsWith('libs/audit-contract/');");
+  for (const app of ['auth-service', 'billing-service', 'zz-new-service']) assert.ok(checkSource(`apps/${app}/src/a.ts`, '// classroom').join().includes('product-specific term'), app);
 });
 
 // V2 A3M.2: per-service event contracts.
