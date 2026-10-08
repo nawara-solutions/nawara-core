@@ -10,8 +10,9 @@
   `06e471aa2ed0dca41a8abe274ac406fb38cbf842`; §12), of the **rest of A3M.4: the idempotency matrix** (**closed on `main`**: PR #239,
   merge `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724`; §13), of **A3M.5: outbox and de-duplication retention** (**closed on `main`**: PR #240,
   merge `b6ce5a2534f85053e0683e7590f180d4c21e58bc`; §14), of **A3M.6: deterministic broker evidence** (**closed on `main`**: PR #241,
-  merge `9d1fa0ceaed28c674a7bb26b07c10649e044d7fc`; §15) and of **A3M.7: local messaging certification** (**certification record
-  prepared locally; pending CI and owner merge**; §16). **A3M is OPEN.** No retention cleanup runs anywhere.
+  merge `9d1fa0ceaed28c674a7bb26b07c10649e044d7fc`; §15) and of **A3M.7: local messaging certification** (**closed on `main`**: PR #242,
+  merge `16476f99c4690c341a889836be3ae7b39a82fca0`, 24 of 24 checks green; §16). **A3M is OPEN:** A3M.8 is not started and is separately
+  gated. No retention cleanup runs anywhere.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -126,7 +127,7 @@ A3M.3  producer and consumer conventions   ✅ closed on main (PR #237, merge 06
 A3M.4  retry, dead letters, idempotency    ✅ closed on main (G7 slice PR #235; idempotency matrix PR #239, merge 4c07643)
 A3M.5  outbox and de-duplication retention ✅ closed on main (PR #240, merge b6ce5a2; runs nowhere)
 A3M.6  deterministic broker evidence       ✅ closed on main (PR #241, merge 9d1fa0c)
-A3M.7  local certification                 certification record prepared locally; pending CI and owner merge (§16)
+A3M.7  local certification                 ✅ closed on main (PR #242, merge 16476f9; locally certified, §16)
 A3M.8  production messaging                not started (separately authorized)
 ```
 
@@ -599,14 +600,15 @@ exercising a different code path.
   CI. That is a property of the local setup, not a regression.
 - Builds of the kit, the audit contract, Billing, Payment and Notification; typecheck, lint, `check:repo`, `git diff --check`.
 
-## 16. A3M.7: local messaging certification (2026-10-08; record prepared locally, pending CI and owner merge)
+## 16. A3M.7: local messaging certification (2026-10-08; closed on `main`, PR #242, merge `16476f9`)
 
 - **Owner decisions:** OD-A3M7-1 = the risk classification of §16.3, every production security gate and residual kept;
   OD-A3M7-2 = the ADR-0056 §7 inbox wording and ADR-0057's de-duplication policy are recorded as a tension, not resolved here;
   OD-A3M7-3 = certification reuses the merged pull requests' CI and the recorded local runs (§10); no broker or database campaign is run
   again.
 - **What changed:** this record, the roadmap and a pointer in ADR-0057. No source, test, workflow, migration or configuration change.
-- **Status:** A3M.7 is closed only when this record's pull request passes the required CI and the owner merges it.
+- **Status:** closed: PR #242 passed all 24 required checks (`core-ci-passed` included) and the owner merged it
+  (`16476f99c4690c341a889836be3ae7b39a82fca0`). A3M.8 is not started and stays separately gated.
 
 ### 16.1 Phase completion
 
