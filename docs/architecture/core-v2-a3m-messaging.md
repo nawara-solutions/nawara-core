@@ -222,6 +222,17 @@ G6 stays deferred; Final Core Validation stays the absolute last validation.
 | A12 Observability | A3M reuses the existing messaging and outbox metrics and CLIs; it adds no endpoint (OD-A3M-4) and one alert, `DeadLetterCopyFailing` (A3M.4, §7) |
 | A13 Backup | audit record retention and backups are A13 and ADR-0049 §10; F12 is A3M.5 and stays off by default |
 
+## 9A. Later status: PR #237 blocked by the R11 test-teardown race (2026-10-08)
+
+Appended. Core CI on PR #237 (A3M.3, head `a0e88a6`, run 37766312026) failed the `billing-service` job although all 18 e2e files and
+345 tests passed (the G11 suite 8 of 8): Vitest recorded one uncaught PostgreSQL `57P01` ("terminating connection due to administrator
+command"), attributed to `test/invoices.e2e-spec.ts`, a file A3M.3 did not change. Cause, pre-existing (the R11 "Billing 57P01
+teardown race", [A15 record](core-v2-a15-developer-experience.md) §9): `pg.Pool#end()` resolves before its clients' sockets close, and
+the kit's scratch-database `drop()` terminated every remaining session at once, so a closing test-pool client received the FATAL with
+no error listener. Not an A3M.3 defect (migration 0016, the G11 fix and Payment readiness are not involved). The fix is a separate,
+narrow change to the kit's test helper (`libs/service-kit/src/testing/test-db.ts`: wait, bounded, for closing sessions before
+terminating what is left, and report leaks); PR #237 is unchanged and is re-run once that fix is on `main`.
+
 ## 10. Certification policy
 
 - A3M is certified by A3M.7, against the criteria of §5, on `main`, with green Core CI for every A3M pull request.
