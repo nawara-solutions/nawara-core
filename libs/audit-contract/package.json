@@ -38,7 +38,7 @@
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "oxlint": "^1.58.0",
-    "oxlint-tsgolint": "^7.0.2001",
+    "oxlint-tsgolint": "^7.0.2003",
     "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "typescript": "^6.0.2",
