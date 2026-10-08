@@ -4,8 +4,10 @@
   certified A2), of the A15.1.0 design (read-only, owner-reviewed), of **A15.1: generic CLI configuration hygiene** (**closed on `main`**:
   PR #229, merge `a7c56643a72c9b1b829c1b89521f7f8165aaa7f0`; §4), of **A15.2: the canonical developer path and toolchain**
   (**closed on `main`**: PR #230, merge `fa569d8f54d7c96c97a8aae2fcfc21c3a05cdc18`; §5) and of **A15.3: local environment and test
-  determinism** (**closed on `main`**: PR #231, merge `7dde589ba1d200ffc1ce57a53c74b9ec43a058ce`, 24 of 24 checks green; §6) and of
-  **A15.4: conventions** (**complete locally, owner review pending**; §7). **A15 is OPEN.** A15.5 (certification) is not started.
+  determinism** (**closed on `main`**: PR #231, merge `7dde589ba1d200ffc1ce57a53c74b9ec43a058ce`, 24 of 24 checks green; §6), of
+  **A15.4: conventions** (**closed on `main`**: PR #232, merge `3bc14a41c73ab78eb4eafaf3b4eef405c6d047db`, 24 of 24 checks green; §7)
+  and of **A15.5: the A15 certification** (§8). **A15 is OPEN until the A15.5 certification pull request is merged, and is certified
+  and closed by that merge.**
 - **Scope of A15** ([roadmap](../CORE-ROADMAP.md) A15): service templates, shared libraries, local environment, testing and CI
   conventions, documentation, generators, localization conventions. The roadmap gives no subphases or completion criteria; §3 does.
   **Not A15:** Auth's CLIs and loader (A4); the Organization ownership tooling (A5 / F6 / F7); observability capabilities (A12);
@@ -63,8 +65,8 @@ A15.2  developer path and toolchain     ✅ closed on main (PR #230, merge fa569
 A15.3.0  determinism discovery          ✅ complete (owner-reviewed)
 A15.3  local environment, determinism   ✅ closed on main (PR #231, merge 7dde589; §6)
 A15.4.0  conventions discovery          ✅ complete (owner-reviewed)
-A15.4  new-service checklist, guards    complete locally; owner review pending (§7)
-A15.5  certification                    not started
+A15.4  new-service checklist, guards    ✅ closed on main (PR #232, merge 3bc14a4; §7)
+A15.5  certification                    prepared (§8); A15 certified and closed when its pull request merges
 ```
 
 ## 4. A15.1: generic CLI configuration hygiene (2026-10-07; closed on `main`, PR #229, merge `a7c5664`)
@@ -252,7 +254,7 @@ unchanged, and no service runtime changed.
 - **Production:** none. GREEN to implement and to merge (tests and documentation; the kit test paths make the Auth, Organization and
   Audit image workflows build; nothing deploys). No G6 dependency.
 
-## 7. A15.4: conventions (2026-10-08, local)
+## 7. A15.4: conventions (2026-10-08; closed on `main`, PR #232, merge `3bc14a4`, 24 of 24 checks green)
 
 - **Owner decisions:** OD-A15.4-1 = B (a dedicated [new-service checklist](../NEW-SERVICE-CHECKLIST.md), linked from the developer
   guide); OD-A15.4-2 = A (two narrow repository guards, below). No localization parity guard: the catalog type, every service's
@@ -283,3 +285,85 @@ unchanged, and no service runtime changed.
   directory that is in no list is caught, while the same term in Auth is not.
 - **Production:** none. Documentation and `scripts/**` only: Core CI, no image build, nothing deploys. No G6 dependency; Drive is
   not affected (no API, event or contract changed).
+
+## 8. A15 certification (A15.5, 2026-10-08)
+
+**Scope certified:** the A15 stage of the [roadmap](../CORE-ROADMAP.md) as bounded in the header of this record, against the
+completion criteria of §3. The certification is repository and local: it certifies the code, the guards, the tests and the
+documentation on `main`. No A15 work touched production, and A15 has no G6 dependency. The certification reuses the recorded evidence
+of §4 to §7 and the green pull-request checks; it reran nothing.
+
+### 8.1 Baseline
+
+`main` at `3bc14a41c73ab78eb4eafaf3b4eef405c6d047db`, the PR #232 merge. The reviewed A15.4 head `df6afad` was merged with an
+identical tree; Core CI passed on the merge commit (run 37752759852), no image workflow ran for it, and nothing deployed.
+
+### 8.2 Completed phases
+
+| Phase | What | Pull request | Merge | Checks |
+|---|---|---|---|---|
+| A15.0 | discovery and owner decisions (§1, §2) | – (read-only) | – | – |
+| A15.1 | generic CLI configuration hygiene (§4) | #229 | `a7c56643a72c9b1b829c1b89521f7f8165aaa7f0` | 24 of 24 (run 37682252666) |
+| A15.2 | the canonical developer path and toolchain (§5) | #230 | `fa569d8f54d7c96c97a8aae2fcfc21c3a05cdc18` | 24 of 24 (run 37684960987) |
+| A15.3 | local environment and test determinism (§6) | #231 | `7dde589ba1d200ffc1ce57a53c74b9ec43a058ce` | 24 of 24 (run 37746940651) |
+| A15.4 | conventions: new-service checklist, repository guards (§7) | #232 | `3bc14a41c73ab78eb4eafaf3b4eef405c6d047db` | 24 of 24 (run 37752023752) |
+
+Each pull request merged with a green `core-ci-passed` and no unsuccessful check.
+
+### 8.3 Completion criteria
+
+| Phase | Done when (§3) | Evidence | Result |
+|---|---|---|---|
+| A15.1 | the generic operator CLIs read through the kit's reader; no documented command puts a credential in an argument | §4: `nawara-migrate`, `nawara-dlq`, `nawara-check-dlq`, `nawara-check-outbox-lag`, Notification `secret-keys` and Audit `retention` read through `EnvReader`; `--database-url` deprecated with a fixed value-free warning, the documented commands use the environment or `_FILE`; local unit and CLI suites, CI for the broker suites | MET |
+| A15.2 | one canonical developer guide linked from the READMEs; Node 22 declared; no contradictory setup or test recipe | §5: [`DEVELOPMENT.md`](../DEVELOPMENT.md) linked from the root and service READMEs; `.nvmrc` and `engines.node` `22.x`, guarded by `checkNodeToolchain`; `build:libs`; one integration-test environment; `test:repo` 124 | MET |
+| A15.3 | the recorded timer-dependent tests, the local broker issue and the ADD drift each fixed or re-homed with a reason | §6: the broker start failure diagnosed and fixed (F9 revised, OD-A15.3-5); the twelve `describeWithEnv` helpers; broker resources deleted by their tests; the Payment `expiry-sweeper` and Notification `delivery-engine` tests deterministic; the Auth and Payment ADDs corrected; the two items without evidence closed and `auth_timeout` re-homed (OD-A15.3-4) | MET |
+| A15.4 | a new-service checklist from ADR-0056; the localization convention stated (ADR-0054) | §7: [`NEW-SERVICE-CHECKLIST.md`](../NEW-SERVICE-CHECKLIST.md), linked from the developer guide and the [error localization guide](core-error-localization.md); `checkCiWorkspaceCoverage` and the generic genericity scope; `test:repo` 126; two negative controls | MET |
+| A15.5 | the criteria of each phase met; boundaries to A3, A4, A5, A12 and A14 unchanged; production untouched | this section | MET |
+
+### 8.4 Boundaries
+
+| Boundary | Result |
+|---|---|
+| A3 (messaging conventions) | unchanged: A15.3 made broker tests clean up after themselves; versioning, retry and dead-letter policy across services stay A3 (checklist §8) |
+| A4 (Auth convergence) | unchanged: Auth's CLIs and loader were not adopted (§4); Auth's bootstrap, filter and runner stay legacy, with the named `GENERICITY_LEGACY_EXEMPT` (§7) |
+| A5 / F6 / F7 (Organization ownership) | unchanged: the ownership CLI keeps its reads (§4) |
+| A12 (observability) | unchanged: no capability added; the `auth_timeout` attribution question is A12's (§6) |
+| A14 (supply chain) | unchanged: no workflow, dependency, action pin or base image changed |
+| Production | untouched: no deployment, no production command; the image builds triggered by the merges of PR #229, #230 and #231 deployed nothing |
+
+### 8.5 Owner decisions
+
+| Decision | Final state |
+|---|---|
+| OD-A15-1 = A | implemented (A15.1): `--database-url` compatible and deprecated |
+| OD-A15-2 = A, narrow | implemented (A15.1): Audit `retention` reads `RETENTION_DATABASE_URL` through the reader; A13 not reopened |
+| OD-A15-3 = B | revised by OD-A15.3-5: the health checks stay and run as the broker's user; F9 resolved |
+| OD-A15-4 = A | honoured: no format gate |
+| OD-A15-5 = A | implemented (A15.2) |
+| OD-A15-6 = A | honoured: a checklist, no generator or template framework |
+| OD-A15-7 = A | honoured: `MIGRATION_DATABASE_URL` still falls back to `DATABASE_URL` |
+| OD-A15.1-1 to OD-A15.1-3 | implemented |
+| OD-A15.2-1 = A, OD-A15.2-2 = B, OD-A15.2-3 = A, OD-A15.2-4 = A | implemented |
+| OD-A15.3-1 to OD-A15.3-4 = A, OD-A15.3-5 = yes | implemented |
+| OD-A15.4-1 = B, OD-A15.4-2 = A | implemented |
+
+**Unresolved A15-owned decisions: none.**
+
+### 8.6 Accepted exceptions and deferred items
+
+- **Accepted exceptions:** the deprecated `--database-url` option (OD-A15-1); the migration fallback (OD-A15-7); no formatting
+  enforcement (OD-A15-4); Auth exempt from the genericity scope by name until A4 converges it (§7).
+- **Deferred, with owners:** a service generator or template (OD-A15-6; not planned); Auth's CLIs, loader and legacy bootstrap (A4);
+  the Organization ownership tooling (A5 / F6 / F7); messaging conventions (A3); the `auth_timeout` attribution (A12).
+- **Closed without change** (OD-A15.3-4): the Billing `57P01` teardown race and the Billing audit-regex flake; either reopens on a new
+  observed failure.
+- **Superseded entry in the A12 record.** The [A12 record](core-v2-a12-observability.md) §5 lists the Payment `expiry-sweeper` 150 ms
+  real-clock window as "A15 technical debt (CI)". A15.3 fixed it (§6), so that entry is superseded. The A12 record is not edited: it is
+  A12's history, and this record is the disposition.
+- **Observation, not A15's:** the anchor check flags a heading that contains a link in
+  [`core-error-localization.md`](core-error-localization.md); it predates A15 and the links are valid.
+
+### 8.7 Result
+
+**No A15-owned blocker.** **A15 is certified and closed when the A15.5 certification pull request is merged; it is open until
+then.** Unchanged: A3.6 and A3.7 deferred; A12.10 not started; G6 deferred; G7, F6, F7 locked; Final Core Validation absolute last.
