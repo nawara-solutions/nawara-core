@@ -100,8 +100,9 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
 - **[CURRENT]** Events only through the outbox, in the business transaction; one relay per producing service, stamping its `source`.
 - **[NEW]** Each event a service produces is listed in that service's own event catalog (§11).
 - **[CURRENT]** An outbox-backed producer stays **ready while the broker is unavailable**: durable local acceptance (the outbox write)
-  still works and the backlog is relayed when the broker returns. Payment's broker readiness check is the one exception (finding S21-5);
-  aligning it is later A3M work (OD-A3M-4).
+  still works and the backlog is relayed when the broker returns. Payment, the one exception (finding S21-5), was aligned in A3M.3:
+  its broker check is removed; broker trouble shows in the outbox metrics and alerts (`OutboxBacklogAging`, `OutboxStatsStale`) and
+  `nawara-check-outbox-lag`, never in a producer's `/ready`. Consumers keep reporting the broker.
 
 ### 7. Consumer responsibilities and deduplication
 
@@ -109,8 +110,17 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   (`min(10, max(1, floor(poolMax / 2)))` in Audit, Notification and Billing), so a backlog never takes the whole pool.
 - **[CURRENT]** Every consumer de-duplicates **durably**: Audit by `(sourceService, eventId)` (`insertOnce`, required by ADR-0049 §5),
   Notification by `(sourceService, sourceEventId)` (after matching the event to its expected source, `mappingFor(source, name)`), Billing
-  by `eventId` in `payment_event_receipt` (and it refuses a `source` other than `payment-service` as a conflict). No service uses the
-  kit's `InboxService`.
+  by `eventId` in `payment_event_receipt`, **where only an `applied` receipt claims the event id** (since A3M.3, migration 0016; G11),
+  after refusing a `source` other than `payment-service` before any receipt. No service uses the kit's `InboxService`.
+- **[CURRENT]** **Only an applied effect claims an event id** (A3M.3, finding G11): a delivery that does not apply (ignored, deferred,
+  conflict) may be recorded, but it never makes a later delivery of the same id a replay; that delivery is decided on its own merits.
+  Event ids can be predictable (deterministic ids) and any publisher can set any header, so a record that blocks later deliveries is
+  written only once the effect is applied, in the same transaction.
+- **[CURRENT]** **The `source` header is asserted, not authenticated.** Checking it (Billing, Notification) filters obvious mistakes;
+  it is not producer identity: RabbitMQ does not validate headers, and a consumer identity may publish to any queue through
+  `amq.default` (ADR-0053 §4). Integrity rests on each consumer's own facts (Billing applies an outcome only if it matches what Billing
+  recorded through its authenticated calls) and on the rule above. Broker-enforced publisher identity (AMQP `user_id`, signing) would be
+  new authentication infrastructure and needs its own decision (P-A1 / A14).
 - **Binding today (Accepted ADRs, unchanged by this ADR):** [ADR-0056](./0056-core-architecture-and-api-conventions.md) §7 states, as
   [CURRENT], that a consumer's idempotency contract is its de-duplication "by event id in an inbox"; ADR-0049 §5 requires Audit's
   `(sourceService, eventId)` uniqueness. Those texts govern until changed by an Accepted ADR.
@@ -120,12 +130,15 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   effect**. The kit `InboxService` stays available and optional. Under this policy the "inbox" of ADR-0056 §7 would mean any durable
   de-duplication record meeting both conditions. That interpretation is **not in force**: it takes effect only if the owner explicitly
   accepts this ADR (or amends ADR-0056); until then this ADR does not override ADR-0056. Whether each existing consumer meets both
-  conditions (for example Billing keys its receipt on `eventId` alone and checks the source separately) is assessed in A3M.3, not assumed.
+  conditions was assessed in A3M.3: Billing now refuses a wrong source before any receipt and claims the id only on an applied effect.
 - **[CURRENT]** **Ordering is not guaranteed** (ADR-0037): redelivery, retry delays and several relay instances reorder events. A
   consumer validates the state it is about to change (for example Billing applies a payment outcome only to a payment request in a state
   that accepts it) and never assumes the previous event arrived first.
 - **[CURRENT]** A handler signals "can never succeed as it stands" with `PermanentEventFailure` and a short stable reason code (no payload
-  data); any other error is treated as possibly transient.
+  data); any other error is treated as possibly transient. Permanent today: a malformed envelope or payload (`malformed_envelope`,
+  `malformed_payload`), an unsupported version (`unsupported_version`), an unexpected source (`wrong_source`, Billing), an identifier
+  the database refuses (`invalid_identifier`). Transient: anything else (a lost connection, a deadlock, a timeout). A business outcome
+  that changes nothing (ignored, deferred, a state conflict) is not a failure: it is acknowledged and recorded.
 
 ### 8. Retry and dead letters (as implemented)
 

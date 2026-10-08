@@ -3,7 +3,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import type { Request } from 'express';
 import {
-  AUTH_CLIENT, DbModule, EventsModule, HealthModule, InMemoryEventBus, JsonLogger, RateLimitModule, ReadinessRegistry, ServiceAuthModule,
+  AUTH_CLIENT, DbModule, EventsModule, HealthModule, InMemoryEventBus, JsonLogger, RateLimitModule, ReadinessRegistry, ServiceAuthModule, type EventBus,
   configureApp, kitMigrationsDir, type AuthClient, type OrganizationReferenceResolver, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { AttemptsModule } from '../../src/attempts/attempts.module.js';
@@ -70,6 +70,8 @@ export async function createTestApp(opts: {
   migrationsDirs?: string[];
   /** Replaces the Organization reference source (default: `anyOrganizationReference`). */
   reference?: OrganizationReferenceResolver;
+  /** The event bus (default: in memory). V2 A3M.3: a RabbitMQ bus, to prove readiness does not depend on the broker. */
+  bus?: EventBus;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
   const config = loadPaymentConfig({
@@ -90,7 +92,7 @@ export async function createTestApp(opts: {
       TestAuthClientModule.forRoot(opts.authClient ?? noopAuthClient),
       PaymentConfigModule.forRoot(config),
       CallerAdmissionModule.forRoot(config, opts.reference ?? anyOrganizationReference),
-      EventsModule.forRoot({ source: 'payment-service', bus: new InMemoryEventBus() }),
+      EventsModule.forRoot({ source: 'payment-service', bus: opts.bus ?? new InMemoryEventBus() }),
       RateLimitModule,
       ProvidersModule,
       PaymentsModule,

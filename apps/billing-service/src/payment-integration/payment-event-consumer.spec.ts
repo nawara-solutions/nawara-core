@@ -67,6 +67,19 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     expect(logs.join('\n')).toContain('payment_event_replay_rejected replays=1 classification=permanent reason=unsupported_version');
   });
 
+  it('V2 A3M.3 (G11): a source other than payment-service is a permanent failure before any parsing, receipt or decision', async () => {
+    const apply = vi.fn();
+    const handler = await build(apply).start();
+    for (const source of ['evil-service', '', 'billing-service']) {
+      const err = await handler(envelope({}, { source })).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PermanentEventFailure);
+      expect((err as PermanentEventFailure).reason).toBe('wrong_source');
+    }
+    expect(apply).not.toHaveBeenCalled(); // no receipt, no state change
+    expect(logs.join('\n')).toContain('payment_event_dead_letter classification=permanent reason=wrong_source eventId=e1111111');
+    expect(logs.join('\n')).not.toContain('evil-service'); // the asserted header is never echoed
+  });
+
   it('V2 A3M.2: version 1, the only version Payment publishes, still reaches applyPaymentEvent', async () => {
     const apply = vi.fn(async () => ({ outcome: 'applied', detail: null, firstDelivery: true, subscription: null }));
     const handler = await build(apply).start();

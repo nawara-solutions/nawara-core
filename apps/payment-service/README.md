@@ -27,7 +27,8 @@ no production traffic can reach any of this (the test provider refuses to start 
 ### Implemented in Phase 1
 
 - Service foundation on `@nawara/service-kit`: configuration, database connection/migration wiring,
-  `/health`/`/ready`, service-token authentication, a combined service-token-or-user guard, the event
+  `/health`/`/ready` (readiness is the database and migrations; since V2 A3M.3 it never depends on the broker: events wait in the
+  outbox while RabbitMQ is unavailable, S21-5), service-token authentication, a combined service-token-or-user guard, the event
   bus (RabbitMQ by configuration and **required when `NODE_ENV=production`**; the in-memory bus is for development and tests only), a generic rate limiter, OpenAPI at
   `/payment/docs` (basic auth, unmounted unless a password is configured), and raw-body capture for
   the webhook route (Nest's `rawBody: true`, no kit change needed).

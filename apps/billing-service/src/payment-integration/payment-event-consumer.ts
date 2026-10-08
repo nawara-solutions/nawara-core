@@ -8,6 +8,8 @@ import { PaymentRequestRepository } from '../invoices/payment-request.repository
 /** V2 A3M.2: the consumed names and their supported versions come from the event catalog (`events/event-catalog.ts`). */
 const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.map((c) => c.name);
 const SUPPORTED_VERSION: ReadonlyMap<string, number> = new Map(CATALOG.map((c) => [c.name, c.version]));
+/** V2 A3M.3 (G11): the only source each consumed event may come from. A sanity filter on an ASSERTED header, never authentication. */
+const EXPECTED_SOURCE: ReadonlyMap<string, string> = new Map(CATALOG.map((c) => [c.name, c.source]));
 
 class MalformedPaymentEventError extends PermanentEventFailure {
   constructor() {
@@ -143,6 +145,15 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
       const version = Number.isSafeInteger(event.headers.version) ? event.headers.version : '-';
       this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=unsupported_version version=${version}`, who);
       throw new PermanentEventFailure('unsupported_version');
+    }
+    // V2 A3M.3 (G11, ADR-0057 §7): a message whose `source` header is not the event's producer is refused before any receipt and any
+    // decision, permanently (dead-lettered for an operator). The header is asserted by whoever publishes, so this only filters the
+    // obvious case; what protects the outcome is that a message that does not apply never claims the event id (migration 0016) and
+    // that application requires Billing's own recorded facts (decidePaymentEvent).
+    const expectedSource = EXPECTED_SOURCE.get(event.name);
+    if (expectedSource !== undefined && event.headers.source !== expectedSource) {
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=wrong_source`, who);
+      throw new PermanentEventFailure('wrong_source');
     }
     let facts: PaymentEventFacts;
     let settledAt: Date;
