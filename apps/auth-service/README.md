@@ -59,6 +59,13 @@ Read once at startup by `src/config/app-config.ts` through the kit's `EnvReader`
 or invalid value stops the process, and no error repeats a value. This table is the reference for Auth's variables;
 [`.env.example`](./.env.example) is a local-development template. Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
 
+HTTP bootstrap (V2 A4.4): `src/main.ts` and the e2e tests start Auth through one pipeline, `src/http/configure-auth-app.ts`, which is the
+kit's `configureApp` with Auth's `AuthExceptionFilter`. Auth keeps two settings of its own: CORS runs before the body parser (a body
+refused while parsed, 400 or 413, still carries an allowed origin's CORS headers), and URL-encoded bodies are parsed as well as JSON,
+both under `BODY_LIMIT_KB` (100 KB by default, the former limit). **With no `CORS_ORIGINS` there is no CORS at all**: before A4.4 an
+unconfigured Auth answered `Access-Control-Allow-Origin: *`. CORS never allows credentials. The API docs (`/auth/docs`, `/auth/docs-json`,
+`src/docs/mount-docs.ts`) are mounted only with `SWAGGER_PASSWORD`, behind Basic authentication.
+
 Reading rules (the kit's, since A4.2):
 - **Every variable** may be given as `NAME_FILE=/path` instead of `NAME` (secrets marked **file** should be). Setting **both** is
   refused at startup (`set NAME or NAME_FILE, not both`); before A4.2 the file silently won.
@@ -71,7 +78,7 @@ Reading rules (the kit's, since A4.2):
 | Variable | Required | Default | Secret | Meaning |
 |---|---|---|---|---|
 | `NODE_ENV` | no | `production` | no | `development`, `test` or `production`; unset means production |
-| `PORT`, `LOG_LEVEL`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS` (or the older `TRUST_PROXY`), `HTTP_DRAIN_TIMEOUT_MS`, `METRICS_*` | no | 3000, `info`, none, 0, 5000, off | no | HTTP baseline (same rules as the kit); CORS takes exact origins only |
+| `PORT`, `LOG_LEVEL`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS` (or the older `TRUST_PROXY`), `BODY_LIMIT_KB`, `HTTP_DRAIN_TIMEOUT_MS`, `METRICS_*` | no | 3000, `info`, none, 0, 100, 5000, off | no | HTTP baseline (same rules as the kit); CORS takes exact origins only |
 | `DATABASE_URL` | yes | none | **yes, file** (password) | the runtime role `auth_app`; in production `postgres`, `root`, `auth`, `*_migrator` and `*_admin` are refused, also when read from `DATABASE_URL_FILE` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | no | 10, 5000, 30000, 60000, statement + 5000 | no | bounded database limits |
 | `JWT_SECRET` | yes | none | **yes, file** | HS256 signing key: canonical base64 of at least 32 bytes |

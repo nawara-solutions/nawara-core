@@ -6,15 +6,16 @@ import { generateSync } from 'otplib';
 import pg from 'pg';
 import request from 'supertest';
 import { inject } from 'vitest';
-import { InMemoryEventBus, JsonLogger, LocalizedValidationPipe, installMetrics, requestContextMiddleware, type EventBus as KitEventBus } from '@nawara/service-kit';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import { InMemoryEventBus, JsonLogger, type EventBus as KitEventBus } from '@nawara/service-kit';
 import { AppModule } from '../../src/app.module.js';
-import { AuthExceptionFilter } from '../../src/errors.js';
 import { auditEventBus } from '../../src/audit/central-audit.js';
 import { CLOCK, DOMAIN_EVENTS, type Clock, type DomainEvents } from '../../src/common/ports.js';
 import { APP_CONFIG, loadConfig, type AppConfig } from '../../src/config/app-config.js';
 import { generateJoinCode, hashJoinCode } from '../../src/crypto/join-code.js';
 import { PasswordService } from '../../src/crypto/password.js';
 import { DbService } from '../../src/db/db.service.js';
+import { configureAuthApp } from '../../src/http/configure-auth-app.js';
 import { UsersService } from '../../src/users/users.service.js';
 
 export class FakeClock implements Clock {
@@ -97,18 +98,14 @@ export async function createTestApp(overrides: Record<string, string> = {}, extr
     .overrideProvider(CLOCK).useValue(clock);
   if (!extra.realEvents) builder.overrideProvider(DOMAIN_EVENTS).useValue(bus);
   const moduleRef = await builder.setLogger(logger).compile();
-  const app = moduleRef.createNestApplication();
-  app.useLogger(logger);
-  // Same HTTP baseline main.ts wires (Stage 13.2): request-context first, then the additive exception
-  // filter. A SEPARATE real JsonLogger (not the CapturingLogger above) feeds the filter, exactly as
-  // production does; its structured JSON lines are captured here for tests that need to inspect them.
+  const app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
+  // V2 A4.4: THE production HTTP pipeline (src/http/configure-auth-app.ts, also used by main.ts), not a copy of it. A real JsonLogger
+  // feeds the filter and the kit baseline, exactly as production does; its structured JSON lines are captured for tests that inspect them.
   const jsonLogs: Record<string, unknown>[] = [];
   const jsonLogger = new JsonLogger('auth-service', 'debug', (l) => jsonLogs.push(JSON.parse(l)));
-  app.use(requestContextMiddleware);
-  installMetrics(app, { serviceName: 'auth-service', metrics: cfg.metrics }, jsonLogger); // as main.ts (V2 A12.2); off unless METRICS_ENABLED
-  app.useGlobalPipes(new LocalizedValidationPipe({ whitelist: true, forbidNonWhitelisted: true })); // as main.ts (ADR-0054 R5)
-  app.useGlobalFilters(new AuthExceptionFilter(jsonLogger));
-  app.enableShutdownHooks();
+  configureAuthApp(app, cfg, jsonLogger);
+  // Test-only: Nest's own logger stays the CapturingLogger (configureApp set the JsonLogger), as before; tests read `ctx.logger.lines`.
+  app.useLogger(logger);
   await app.init();
 
   const db = new pg.Pool({ connectionString: databaseUrl, max: 3 });

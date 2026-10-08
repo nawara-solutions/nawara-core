@@ -597,18 +597,79 @@ test('V2 A12.2a: the metrics-client guard is syntax-aware (security review H-1)'
   assert.deepEqual(checkMetricsClientImport(where, "const n = 'prom-' + 'client'; await import(n);"), []);
 });
 
-test('V2 A12.2a: auth-service installs the metrics foundation right after its request-context middleware (security review P4)', () => {
-  const text = readFileSync(new URL('../apps/auth-service/src/main.ts', import.meta.url), 'utf8');
-  const sf = ts.createSourceFile('main.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const fn = sf.statements.find((st) => ts.isFunctionDeclaration(st) && st.name?.text === 'bootstrap');
-  assert.ok(fn?.body, 'bootstrap() exists');
-  const calls = fn.body.statements.filter(ts.isExpressionStatement).map((st) => st.expression.getText(sf).replace(/\s+/g, ' '));
-  const at = (prefix) => calls.findIndex((c) => c.startsWith(prefix));
-  const ctx = at('app.use(requestContextMiddleware)');
-  const metrics = at("installMetrics(app, { serviceName: 'auth-service', metrics: cfg.metrics }, logger)");
-  assert.ok(ctx >= 0 && metrics === ctx + 1, `installMetrics directly after app.use(requestContextMiddleware): ${calls.join(' | ')}`);
-  assert.equal(calls[metrics + 1], 'app.use(helmet())');
-  assert.ok(at('app.use(shutdownAdmission(') < ctx, 'shutdown admission still first');
+/**
+ * V2 A12.2a / A4.4 (security review P4): the HTTP pipeline installs, in this order and adjacent, shutdown admission, the request context,
+ * the metrics foundation and helmet. Since A4.4 the order lives in the kit's `configureApp` (every service), Auth's `main.ts` calls only
+ * `configureAuthApp`, and `configureAuthApp` calls only `configureApp` (then the docs). Each check reads the named function's own
+ * statements (TypeScript AST), never text elsewhere in the file. Returns the violations (empty when P4 holds).
+ */
+function p4Problems({ main, authApp, kit }) {
+  const statementsOf = (text, name) => {
+    const sf = ts.createSourceFile('x.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const fn = sf.statements.find((st) => ts.isFunctionDeclaration(st) && st.name?.text === name);
+    return fn?.body ? fn.body.statements.filter(ts.isExpressionStatement).map((st) => st.expression.getText(sf).replace(/\s+/g, ' ')) : undefined;
+  };
+  const problems = [];
+  const boot = statementsOf(main, 'bootstrap');
+  if (!boot) problems.push('main.ts: bootstrap() not found');
+  else {
+    const configured = boot.indexOf('configureAuthApp(app, cfg, logger)');
+    const listening = boot.findIndex((c) => c.startsWith('await app.listen('));
+    if (configured < 0) problems.push('main.ts: bootstrap() does not call configureAuthApp(app, cfg, logger)');
+    else if (listening >= 0 && listening < configured) problems.push('main.ts: bootstrap() listens before configureAuthApp');
+    for (const c of boot) if (/^(app\.use\(|app\.useGlobal|app\.enableCors\(|installMetrics\(|configureApp\()/.test(c)) problems.push(`main.ts: bootstrap() wires the pipeline itself: ${c}`);
+  }
+  const auth = statementsOf(authApp, 'configureAuthApp');
+  const expected = 'configureApp(app, authBaseConfig(cfg), logger, { exceptionFilter: new AuthExceptionFilter(logger), corsBeforeBodyParser: true, urlencodedBodies: true })';
+  if (!auth) problems.push('configure-auth-app.ts: configureAuthApp() not found');
+  else if (JSON.stringify(auth) !== JSON.stringify([expected, 'mountDocs(app, cfg)'])) {
+    problems.push(`configure-auth-app.ts: configureAuthApp() must be exactly the kit's configureApp with Auth's options, then mountDocs: ${auth.join(' | ')}`);
+  }
+  const kitCalls = statementsOf(kit, 'configureApp');
+  if (!kitCalls) problems.push('bootstrap.ts: configureApp() not found');
+  else {
+    const at = (prefix) => kitCalls.findIndex((c) => c.startsWith(prefix));
+    const [shutdown, ctx, metrics, helmet] = [at('app.use(shutdownAdmission('), at('app.use(requestContextMiddleware)'), at('installMetrics(app, config, logger)'), at('app.use(helmet())')];
+    if (shutdown < 0 || ctx !== shutdown + 1 || metrics !== ctx + 1 || helmet !== metrics + 1) {
+      problems.push(`bootstrap.ts: configureApp() must run shutdown admission, request context, metrics, helmet in this order and adjacent: ${kitCalls.join(' | ')}`);
+    }
+    if (shutdown >= 0 && kitCalls.slice(0, shutdown).some((c) => c.startsWith('app.use('))) problems.push('bootstrap.ts: configureApp() installs middleware before shutdown admission');
+  }
+  return problems;
+}
+
+test('V2 A12.2a / A4.4: P4, the order shutdown admission, request context, metrics, helmet, holds for Auth through the kit (security review P4)', () => {
+  const real = {
+    main: readFileSync(new URL('../apps/auth-service/src/main.ts', import.meta.url), 'utf8'),
+    authApp: readFileSync(new URL('../apps/auth-service/src/http/configure-auth-app.ts', import.meta.url), 'utf8'),
+    kit: readFileSync(new URL('../libs/service-kit/src/bootstrap.ts', import.meta.url), 'utf8'),
+  };
+  assert.deepEqual(p4Problems(real), []);
+  const swap = (text, a, b) => {
+    const [ia, ib] = [text.indexOf(a), text.indexOf(b)];
+    assert.ok(ia >= 0 && ib > ia, `fixture lines exist in order: ${a} / ${b}`);
+    return text.slice(0, ia) + b + text.slice(ia + a.length, ib) + a + text.slice(ib + b.length);
+  };
+  const SHUTDOWN = 'app.use(shutdownAdmission(app.get(ShutdownState)));';
+  const CTX = 'app.use(requestContextMiddleware);';
+  const METRICS = 'installMetrics(app, config, logger);';
+  const HELMET = 'app.use(helmet());';
+  const broken = {
+    'request context after metrics': { ...real, kit: swap(real.kit, CTX, METRICS) },
+    'metrics before shutdown admission': { ...real, kit: swap(real.kit, SHUTDOWN, METRICS) },
+    'helmet before metrics': { ...real, kit: swap(real.kit, METRICS, HELMET) },
+    'another middleware before shutdown admission': { ...real, kit: real.kit.replace(SHUTDOWN, `app.use(cors());\n  ${SHUTDOWN}`) },
+    'Auth bypasses configureAuthApp': { ...real, main: real.main.replace('configureAuthApp(app, cfg, logger);', 'configureApp(app, authBaseConfig(cfg), logger);') },
+    'Auth wires a middleware itself': { ...real, main: real.main.replace('configureAuthApp(app, cfg, logger);', 'configureAuthApp(app, cfg, logger);\n  app.use(helmet());') },
+    'Auth listens before configuring': { ...real, main: swap(real.main, 'configureAuthApp(app, cfg, logger);', 'await app.listen(cfg.port);') },
+    'configureAuthApp bypasses configureApp': { ...real, authApp: real.authApp.replace(/configureApp\(app, authBaseConfig\(cfg\), logger, \{[^}]*\}\);/, 'app.use(helmet());') },
+    'configureAuthApp drops an Auth option': { ...real, authApp: real.authApp.replace('corsBeforeBodyParser: true, ', '') },
+    'configureAuthApp wires a middleware before configureApp': { ...real, authApp: real.authApp.replace('  configureApp(app, authBaseConfig', '  app.use(requestContextMiddleware);\n  configureApp(app, authBaseConfig') },
+  };
+  for (const [label, files] of Object.entries(broken)) {
+    assert.notDeepEqual(JSON.stringify(files), JSON.stringify(real), `${label}: the fixture differs from the real files`);
+    assert.ok(p4Problems(files).length > 0, `${label}: P4 must be reported`);
+  }
 });
 
 test('architecture: product terms, financial declarations and cross-service imports are refused', () => {
