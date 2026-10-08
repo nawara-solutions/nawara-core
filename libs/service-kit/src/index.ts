@@ -1,7 +1,7 @@
 // @nawara/service-kit: technical foundations shared by Nawara Core services. NO business logic lives here.
 export { ConfigError, EnvReader, type FileReader } from './config/config.js';
 // V2 A2.1: shared configuration primitives (adopted by the services in A2.2 and A2.3).
-export { assertDistinctKeys, decodeKey, readKey, readKeyRing, readOptionalKey, type KeyRules } from './config/key-material.js';
+export { assertDistinctKeys, decodeKey, readKey, readKeyRing, readOptionalKey, readOptionalKeyEntries, type KeyRules } from './config/key-material.js';
 export { isPublishedDevelopmentSecret } from './config/development-keys.js';
 export { assertRuntimeDatabaseRole } from './config/db-role.js';
 export { readDocsCredentials, type DocsCredentials } from './config/docs-credentials.js';

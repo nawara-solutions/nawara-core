@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, EnvReader, assertDistinctKeys, decodeKey, readKey, readKeyRing, readOptionalKey } from '../src/index.js';
+import { ConfigError, EnvReader, assertDistinctKeys, decodeKey, readKey, readKeyRing, readOptionalKey, readOptionalKeyEntries } from '../src/index.js';
 
 const reader = (env: Record<string, string | undefined>) => new EnvReader(env as NodeJS.ProcessEnv, () => { throw new Error('ENOENT'); });
 const b64 = (bytes: Buffer) => bytes.toString('base64');
@@ -123,6 +123,59 @@ describe('V2 A2.1: readKeyRing', () => {
   it('production refuses a published development key inside the ring', () => {
     const published = templateValue('NOTIFICATION_SECRET_KEYS');
     refused(() => readKeyRing(reader({ R: published, R_ACTIVE: published.split(':')[0] }), 'R', 'R_ACTIVE', { ...prod, exactBytes: 32 }), /published development key/, published.split(':')[1]);
+  });
+});
+
+describe('V2 A4.7: readOptionalKeyEntries (an optional ring without an active id)', () => {
+  const ring = (...entries: Array<[string, Buffer]>) => entries.map(([id, k]) => `${id}:${b64(k)}`).join(',');
+
+  it('is undefined when the variable is unset or blank, and reads the entries in order, tolerating spaces', () => {
+    expect(readOptionalKeyEntries(reader({}), 'R', local)).toBeUndefined();
+    expect(readOptionalKeyEntries(reader({ R: '  ' }), 'R', local)).toBeUndefined();
+    const [a, b] = [key32(), key32()];
+    const r = readOptionalKeyEntries(reader({ R: ` k1:${b64(a)} , k-2_X:${b64(b)} ` }), 'R', local)!;
+    expect([...r.keys()]).toEqual(['k1', 'k-2_X']);
+    expect(r.get('k1')!.equals(a) && r.get('k-2_X')!.equals(b)).toBe(true);
+  });
+
+  it('reads NAME_FILE through EnvReader, and refuses NAME together with NAME_FILE', () => {
+    const a = key32();
+    const files: Record<string, string> = { '/run/secrets/r': `k1:${b64(a)}\n` };
+    const fileReader = (env: Record<string, string>) => new EnvReader(env as NodeJS.ProcessEnv, (p) => {
+      if (!(p in files)) throw new Error('ENOENT');
+      return files[p];
+    });
+    expect(readOptionalKeyEntries(fileReader({ R_FILE: '/run/secrets/r' }), 'R', local)!.get('k1')!.equals(a)).toBe(true);
+    refused(() => readOptionalKeyEntries(fileReader({ R: `k1:${b64(a)}`, R_FILE: '/run/secrets/r' }), 'R', local), /^set R or R_FILE, not both$/, b64(a));
+  });
+
+  it('refuses a malformed entry, a bad id, a repeated id or key, and a bad key, with the readKeyRing messages and no value', () => {
+    const [a, b] = [key32(), key32()];
+    refused(() => readOptionalKeyEntries(reader({ R: b64(a) }), 'R', local), /^R must be "id:base64\[,id:base64\]" with ids of 1 to 32 letters, digits, _ or -$/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: `:${b64(a)}` }), 'R', local), /must be "id:base64/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: `bad id:${b64(a)}` }), 'R', local), /must be "id:base64/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: `${'x'.repeat(33)}:${b64(a)}` }), 'R', local), /must be "id:base64/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: `${ring(['k1', a])},` }), 'R', local), /must be "id:base64/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: ring(['k1', a], ['k1', b]) }), 'R', local), /^R must not repeat a key id$/, b64(a), b64(b));
+    refused(() => readOptionalKeyEntries(reader({ R: ring(['k1', a], ['k2', a]) }), 'R', local), /^R must not repeat a key$/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: `k1:${b64(randomBytes(31))}` }), 'R', local), /^R must decode to at least 32 bytes$/);
+    refused(() => readOptionalKeyEntries(reader({ R: `k1:${b64(a)}!` }), 'R', local), /^R must be standard base64/, b64(a));
+    refused(() => readOptionalKeyEntries(reader({ R: `k1:${b64(a).replace(/\+/g, '-').replace(/\//g, '_')}x` }), 'R', local), /^R must be standard base64/);
+  });
+
+  it('enforces an entry cap only when one is requested', () => {
+    const four = ring(['a', key32()], ['b', key32()], ['c', key32()], ['d', key32()]);
+    expect(readOptionalKeyEntries(reader({ R: four }), 'R', local)!.size).toBe(4);
+    refused(() => readOptionalKeyEntries(reader({ R: four }), 'R', local, { maxEntries: 3 }), /^R must hold at most 3 keys$/);
+    expect(readOptionalKeyEntries(reader({ R: ring(['a', key32()], ['b', key32()], ['c', key32()]) }), 'R', local, { maxEntries: 3 })!.size).toBe(3);
+  });
+
+  it('production refuses a published development key and a non-random key; development accepts them', () => {
+    const published = templateValue('NOTIFICATION_SECRET_KEYS');
+    const [id, value] = published.split(':');
+    refused(() => readOptionalKeyEntries(reader({ R: published }), 'R', prod), /^R is a published development key and is refused in production$/, value);
+    refused(() => readOptionalKeyEntries(reader({ R: `k1:${b64(Buffer.alloc(32, 7))}` }), 'R', prod), /^R does not look random and is refused in production$/);
+    expect(readOptionalKeyEntries(reader({ R: published }), 'R', local)!.has(id)).toBe(true);
   });
 });
 

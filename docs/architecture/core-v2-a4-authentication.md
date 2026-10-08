@@ -4,7 +4,8 @@
   closed A3M.7) and of **A4.1: the A4 architecture record**. **A4 is OPEN.** A4.2 to A4.5 are merged (PRs #244 to #247, `main` at
   `e039ed6`); their sections keep the text they were approved with. **A4.6** (§10 design,
   [ADR-0058](../adr/0058-access-token-signing-key-ring.md)) is merged (PR #248, `8d62b3f`), and ADR-0058 is **Accepted** (2026-10-08).
-  Nothing in §10 is implemented unless it is labelled **[CURRENT]**.
+  **A4.7** (§10 implementation, §10.11) is implemented on `feature/core-v2-a4-7-jwt-key-ring`, pending owner review and merge; it
+  deploys and activates nothing. Nothing in §10 is on `main` unless it is labelled **[CURRENT]**.
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET]**: approved by an owner decision, implemented by the named stage.
   **[PENDING DESIGN]**: approved in direction only; the named stage must design it and the owner must review it before code.
 - **Scope of A4** ([roadmap](../CORE-ROADMAP.md) Core V2 table): sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service
@@ -173,7 +174,7 @@ product-term check. Without it the check would report three places:
   (`strictHistory`) and are never edited.
 - `test:repo` proves both directions: a product term elsewhere in Auth is reported, and the two files are not.
 
-## 10. JWT key ring (A4.6 design, A4.7 implementation) [TARGET: A4.7]
+## 10. JWT key ring (A4.6 design, A4.7 implementation) [TARGET: A4.7, implemented in §10.11]
 
 Designed in A4.6 under the owner's decisions of §10.2 and stated as [ADR-0058](../adr/0058-access-token-signing-key-ring.md)
 (**Accepted** on 2026-10-08 by a separate, explicit owner decision after the design was merged). Nothing in §10.3–§10.9 is
@@ -340,6 +341,22 @@ Tests are written first and fail before the implementation.
 This design, ADR-0058 and A4.7 authorize **no** production key generation, delivery, activation or retirement and no deployment. Each
 rotation step of §10.6 and the first deployment of a ring-capable image are separate, owner-authorized production checkpoints (§17)
 under the protected `production` environment.
+
+### 10.11 A4.7 implementation [TARGET: on merge of A4.7]
+
+Implemented as designed in §10.3–§10.5, test-first as §10.9 states; production is unchanged (no image deployed, no ring configured).
+
+| Part | Implementation |
+|---|---|
+| Kit (D2) | `readOptionalKeyEntries(reader, name, rules, { maxEntries? })` in `libs/service-kit/src/config/key-material.ts`: undefined when unset; `readKeyRing`'s id rule, key rules, repeat checks and messages; the cap only when requested (`<NAME> must hold at most <n> keys`). `readKeyRing` and the other helpers are unchanged |
+| Configuration | `src/config/app-config.ts`: `jwt.legacyKey` (`JWT_SECRET`, optional), `jwt.ring` (`JWT_SIGNING_KEYS`, empty when unset), `jwt.activeKeyId` (`JWT_ACTIVE_KEY_ID`, or `legacy`); the §10.3 table with the quoted messages; ring keys in the one `assertDistinctKeys` call |
+| Tokens | `src/tokens/token.service.ts`: the active key signs (`{"alg":"HS256"}` for `legacy`, `{"alg":"HS256","kid":"<id>"}` for a ring key); jose's key resolver selects exactly one key from the verified protected header, with no fallback; `algorithms: ['HS256']` kept |
+| Tests | kit `key-material.spec.ts`; Auth `app-config.spec.ts`, new `token.service.spec.ts` (characterization first, then the ring, the §10.6 rotation matrix and the image-rollback boundary); `tokens.e2e-spec.ts` (unknown and `legacy` kids, a ring app with `JWT_SECRET` retired) |
+
+**Still pending (A4.8 and later, not implemented by A4.7):** the provisioning-script change (D6), the configuration-check CLI and the
+rotation runbook (§11); the A4.6 acceptance-review follow-ups for that runbook: an emergency procedure for a compromised legacy key
+before D6 is in use, never reusing a retired key value, measuring the §10.8 delay from the restart of the last Auth instance, and the
+exact script path `apps/auth-service/deploy/provision-and-deploy.sh`. Every production step stays an owner-authorized checkpoint (§10.10).
 
 ## 11. Deployment readiness (A4.8) [TARGET]
 

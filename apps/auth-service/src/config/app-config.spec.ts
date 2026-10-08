@@ -49,7 +49,7 @@ describe('configuration and key management fail closed', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sec-'));
     const f = join(dir, 'jwt'); const secret = b64(); writeFileSync(f, secret + '\n');
     const e = good(); delete e.JWT_SECRET; e.JWT_SECRET_FILE = f;
-    expect(Buffer.from(loadConfig(e).jwt.secret).toString('base64')).toBe(secret);
+    expect(Buffer.from(loadConfig(e).jwt.legacyKey!).toString('base64')).toBe(secret);
   });
   it('production demands https WebAuthn origins and an RP id', () => {
     const p = { ...good(), NODE_ENV: 'production' };
@@ -419,7 +419,7 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
       const value = good()[name]!;
       const direct = loadConfig({ ...good(), [name]: value });
       const fromFile = loadConfig({ ...good(), [name]: undefined, [`${name}_FILE`]: secretFile(`${value}\n`) });
-      const pick = (c: ReturnType<typeof loadConfig>) => (name === 'JWT_SECRET' ? Buffer.from(c.jwt.secret) : c.secrets[({
+      const pick = (c: ReturnType<typeof loadConfig>) => (name === 'JWT_SECRET' ? Buffer.from(c.jwt.legacyKey!) : c.secrets[({
         OPERATOR_CODE_PEPPER: 'operatorCodePepper', SECRET_KEY_PEPPER: 'secretKeyPepper', THROTTLE_KEY_PEPPER: 'throttlePepper', JOIN_CODE_PEPPER: 'joinCodePepper',
       } as const)[name as 'OPERATOR_CODE_PEPPER']]);
       expect(pick(fromFile).equals(pick(direct))).toBe(true);
@@ -443,8 +443,8 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
   it('JWT: HS256 material, issuer nawara-auth, audience nawara, access 900 s, refresh 14 days by default; each overridable', () => {
     const c = loadConfig(good());
     expect(c.jwt).toMatchObject({ issuer: 'nawara-auth', audience: 'nawara', accessTtlSec: 900 });
-    expect(c.jwt.secret).toBeInstanceOf(Uint8Array);
-    expect(c.jwt.secret).toHaveLength(32);
+    expect(c.jwt.legacyKey!).toBeInstanceOf(Uint8Array);
+    expect(c.jwt.legacyKey!).toHaveLength(32);
     expect(c.refreshTtlSec).toBe(14 * 86_400);
     expect(loadConfig({ ...good(), JWT_ISSUER: 'iss', JWT_AUDIENCE: 'aud', ACCESS_TOKEN_TTL_SEC: '600', REFRESH_TOKEN_TTL_SEC: '3600' }))
       .toMatchObject({ jwt: { issuer: 'iss', audience: 'aud', accessTtlSec: 600 }, refreshTtlSec: 3600 });
@@ -638,7 +638,7 @@ describe('V2 A4.2: EnvReader conversion (intended changes)', () => {
 
   it('a direct secret is trimmed before validation (formerly refused as non-canonical); inner whitespace is still refused', () => {
     const v = good().JWT_SECRET!;
-    expect(Buffer.from(loadConfig({ ...good(), JWT_SECRET: `  ${v}\n` }).jwt.secret).equals(Buffer.from(v, 'base64'))).toBe(true);
+    expect(Buffer.from(loadConfig({ ...good(), JWT_SECRET: `  ${v}\n` }).jwt.legacyKey!).equals(Buffer.from(v, 'base64'))).toBe(true);
     expect(loadConfig({ ...good(), ...cred, ORGANIZATION_SERVICE_TOKEN: ` ${cred.ORGANIZATION_SERVICE_TOKEN} ` }).hierarchy.client?.token).toBe(cred.ORGANIZATION_SERVICE_TOKEN);
     refused({ ...good(), JWT_SECRET: `${v.slice(0, 10)} ${v.slice(10)}` }, /^JWT_SECRET must be standard base64/, v);
   });
@@ -656,7 +656,144 @@ describe('V2 A4.2: EnvReader conversion (intended changes)', () => {
       if (!(p in files)) throw new Error('ENOENT');
       return files[p]!;
     });
-    expect(Buffer.from(c.jwt.secret).toString('base64')).toBe(files['/virtual/jwt']!.trim());
+    expect(Buffer.from(c.jwt.legacyKey!).toString('base64')).toBe(files['/virtual/jwt']!.trim());
     refused({ ...good(), JWT_SECRET: undefined, JWT_SECRET_FILE: '/virtual/missing' }, /^JWT_SECRET_FILE is set but the file cannot be read$/, '/virtual/missing');
+  });
+});
+
+/** V2 A4.7 (ADR-0058 rules 1 to 3, A4 record §10.3): the optional JWT signing-key ring and the legacy key. */
+describe('V2 A4.7: JWT signing-key ring configuration', () => {
+  const PROD_BASE = {
+    DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672',
+    WEBAUTHN_RP_ID: 'example.com', WEBAUTHN_ORIGINS: 'https://app.example.com',
+  };
+  const refused = (env: NodeJS.ProcessEnv, message: RegExp, ...secrets: string[]) => {
+    let err: unknown;
+    try {
+      loadConfig(env);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(message);
+    for (const v of secrets) expect((err as Error).message).not.toContain(v);
+  };
+  const secretFile = (content: string) => {
+    const f = join(mkdtempSync(join(tmpdir(), 'a47-')), 'secret');
+    writeFileSync(f, content);
+    return f;
+  };
+  const template = (name: string) => readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8').split('\n').find((l) => l.startsWith(`${name}=`))!.slice(name.length + 1).trim();
+  const ring = (...entries: Array<[string, string]>) => entries.map(([id, k]) => `${id}:${k}`).join(',');
+  const eq = (a: Uint8Array | undefined, b64value: string) => a !== undefined && Buffer.from(a).equals(Buffer.from(b64value, 'base64'));
+
+  it('legacy only (an unchanged .env): JWT_SECRET signs and verifies, active id legacy, empty ring', () => {
+    const e = good();
+    const c = loadConfig(e);
+    expect(c.jwt.activeKeyId).toBe('legacy');
+    expect(c.jwt.ring.size).toBe(0);
+    expect(eq(c.jwt.legacyKey, e.JWT_SECRET!)).toBe(true);
+    expect(c.jwt.legacyKey).toBeInstanceOf(Uint8Array);
+  });
+
+  it('every row of the §10.3 table', () => {
+    const [k1, k2] = [b64(), b64()];
+    const noSecret = { ...good(), JWT_SECRET: undefined };
+    // – – –: the existing refusal
+    refused(noSecret, /^JWT_SECRET is required$/);
+    // exactly one ring variable: refused, with or without JWT_SECRET
+    for (const base of [good(), noSecret]) {
+      refused({ ...base, JWT_SIGNING_KEYS: ring(['k1', k1]) }, /^JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together$/, k1);
+      refused({ ...base, JWT_ACTIVE_KEY_ID: 'k1' }, /^JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together$/);
+      refused({ ...base, JWT_ACTIVE_KEY_ID: 'legacy' }, /^JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together$/);
+    }
+    // set, ring, legacy: JWT_SECRET signs; ring keys verify only
+    const a = loadConfig({ ...good(), JWT_SIGNING_KEYS: ring(['k1', k1]), JWT_ACTIVE_KEY_ID: 'legacy' });
+    expect(a.jwt.activeKeyId).toBe('legacy');
+    expect(a.jwt.legacyKey).toBeDefined();
+    expect(eq(a.jwt.ring.get('k1'), k1)).toBe(true);
+    // –, ring, legacy: refused
+    refused({ ...noSecret, JWT_SIGNING_KEYS: ring(['k1', k1]), JWT_ACTIVE_KEY_ID: 'legacy' }, /^JWT_ACTIVE_KEY_ID is legacy but JWT_SECRET is not set$/, k1);
+    // set, ring, ring id: that key signs; JWT_SECRET still verifies kid-less tokens
+    const b = loadConfig({ ...good(), JWT_SIGNING_KEYS: ring(['k1', k1], ['k2', k2]), JWT_ACTIVE_KEY_ID: 'k2' });
+    expect(b.jwt.activeKeyId).toBe('k2');
+    expect(b.jwt.legacyKey).toBeDefined();
+    expect([...b.jwt.ring.keys()]).toEqual(['k1', 'k2']);
+    // –, ring, ring id: legacy retired
+    const c = loadConfig({ ...noSecret, JWT_SIGNING_KEYS: ring(['k1', k1]), JWT_ACTIVE_KEY_ID: 'k1' });
+    expect(c.jwt.activeKeyId).toBe('k1');
+    expect(c.jwt.legacyKey).toBeUndefined();
+    expect(eq(c.jwt.ring.get('k1'), k1)).toBe(true);
+    // any, ring, not legacy and not in the ring: refused
+    for (const base of [good(), noSecret]) {
+      for (const active of ['k9', 'K1', 'Legacy', 'LEGACY']) {
+        refused({ ...base, JWT_SIGNING_KEYS: ring(['k1', k1]), JWT_ACTIVE_KEY_ID: active }, /^JWT_ACTIVE_KEY_ID does not name a key in JWT_SIGNING_KEYS$/, k1);
+      }
+    }
+  });
+
+  it('the reserved id legacy is refused as a ring id in any letter case, with or without JWT_SECRET', () => {
+    const k1 = b64();
+    for (const id of ['legacy', 'LEGACY', 'Legacy', 'lEgAcY']) {
+      for (const active of [id, 'k1', 'legacy']) {
+        refused({ ...good(), JWT_SIGNING_KEYS: ring(['k1', b64()], [id, k1]), JWT_ACTIVE_KEY_ID: active }, /^JWT_SIGNING_KEYS must not use the reserved key id legacy$/, k1);
+      }
+    }
+  });
+
+  it('key material: malformed entry, bad id, short or non-canonical key, repeated id or key, more than three keys', () => {
+    const [a, b] = [b64(), b64()];
+    const r = (v: string) => ({ ...good(), JWT_SIGNING_KEYS: v, JWT_ACTIVE_KEY_ID: 'k1' });
+    refused(r(a), /^JWT_SIGNING_KEYS must be "id:base64\[,id:base64\]" with ids of 1 to 32 letters, digits, _ or -$/, a);
+    refused(r(`bad id:${a}`), /^JWT_SIGNING_KEYS must be "id:base64/, a);
+    refused(r(`${'k'.repeat(33)}:${a}`), /^JWT_SIGNING_KEYS must be "id:base64/, a);
+    refused(r(`k1:${randomBytes(31).toString('base64')}`), /^JWT_SIGNING_KEYS must decode to at least 32 bytes$/);
+    refused(r(`k1:${a}!`), /^JWT_SIGNING_KEYS must be standard base64/, a);
+    refused(r(ring(['k1', a], ['k1', b])), /^JWT_SIGNING_KEYS must not repeat a key id$/, a, b);
+    refused(r(ring(['k1', a], ['k2', a])), /^JWT_SIGNING_KEYS must not repeat a key$/, a);
+    expect(loadConfig(r(ring(['k1', a], ['k2', b], ['k3', b64()]))).jwt.ring.size).toBe(3);
+    refused(r(ring(['k1', a], ['k2', b], ['k3', b64()], ['k4', b64()])), /^JWT_SIGNING_KEYS must hold at most 3 keys$/, a, b);
+    // JWT_SECRET keeps its own rules when the ring is configured
+    refused({ ...r(ring(['k1', a])), JWT_SECRET: randomBytes(31).toString('base64') }, /^JWT_SECRET must decode to at least 32 bytes$/, a);
+  });
+
+  it('one key, one purpose: a ring key equal to JWT_SECRET, a pepper or a TOTP key is refused, naming variables only', () => {
+    const e = good();
+    const totpKey = e.TOTP_ENCRYPTION_KEYS!.split(':')[1];
+    const withRing = (k: string) => ({ ...e, JWT_SIGNING_KEYS: ring(['k1', b64()], ['k2', k]), JWT_ACTIVE_KEY_ID: 'k1' });
+    refused(withRing(e.JWT_SECRET!), /^JWT_SIGNING_KEYS must differ from JWT_SECRET \(one key, one purpose\)$/, e.JWT_SECRET!);
+    for (const pepper of ['OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'JOIN_CODE_PEPPER']) {
+      refused(withRing(e[pepper]!), new RegExp(`^${pepper} must differ from JWT_SIGNING_KEYS \\(one key, one purpose\\)$`), e[pepper]!);
+    }
+    refused(withRing(totpKey), /^TOTP_ENCRYPTION_KEYS must differ from JWT_SIGNING_KEYS \(one key, one purpose\)$/, totpKey);
+    // with JWT_SECRET removed, the ring is still separated from every other purpose
+    refused({ ...withRing(e.OPERATOR_CODE_PEPPER!), JWT_SECRET: undefined }, /^OPERATOR_CODE_PEPPER must differ from JWT_SIGNING_KEYS/, e.OPERATOR_CODE_PEPPER!);
+  });
+
+  it('production refuses a published development key and a non-random key in the ring', () => {
+    const published = template('AUTH_JWT_SECRET');
+    const prod = (k: string) => ({ ...good(), ...PROD_BASE, NODE_ENV: 'production', JWT_SIGNING_KEYS: ring(['k1', k]), JWT_ACTIVE_KEY_ID: 'k1' });
+    refused(prod(published), /^JWT_SIGNING_KEYS is a published development key and is refused in production$/, published);
+    refused(prod(Buffer.alloc(32, 9).toString('base64')), /^JWT_SIGNING_KEYS does not look random and is refused in production$/);
+    expect(loadConfig(prod(b64())).jwt.activeKeyId).toBe('k1');
+    expect(loadConfig({ ...good(), JWT_SIGNING_KEYS: ring(['k1', published]), JWT_ACTIVE_KEY_ID: 'k1' }).jwt.ring.size).toBe(1); // development accepts it
+  });
+
+  it('both ring variables accept NAME_FILE; NAME together with NAME_FILE is refused for each', () => {
+    const k1 = b64();
+    const c = loadConfig({ ...good(), JWT_SECRET: undefined, JWT_SIGNING_KEYS_FILE: secretFile(`k1:${k1}\n`), JWT_ACTIVE_KEY_ID_FILE: secretFile('k1\n') });
+    expect(c.jwt.activeKeyId).toBe('k1');
+    expect(eq(c.jwt.ring.get('k1'), k1)).toBe(true);
+    const f = secretFile(`k1:${k1}`);
+    refused({ ...good(), JWT_SIGNING_KEYS: `k1:${k1}`, JWT_SIGNING_KEYS_FILE: f, JWT_ACTIVE_KEY_ID: 'k1' }, /^set JWT_SIGNING_KEYS or JWT_SIGNING_KEYS_FILE, not both$/, k1);
+    refused({ ...good(), JWT_SIGNING_KEYS: `k1:${k1}`, JWT_ACTIVE_KEY_ID: 'k1', JWT_ACTIVE_KEY_ID_FILE: secretFile('k1') }, /^set JWT_ACTIVE_KEY_ID or JWT_ACTIVE_KEY_ID_FILE, not both$/, k1);
+    refused({ ...good(), JWT_SECRET: undefined, JWT_SIGNING_KEYS_FILE: '/nonexistent/a47', JWT_ACTIVE_KEY_ID: 'k1' }, /^JWT_SIGNING_KEYS_FILE is set but the file cannot be read$/);
+  });
+
+  it('surrounding whitespace is trimmed; a blank ring variable counts as unset', () => {
+    const k1 = b64();
+    expect(loadConfig({ ...good(), JWT_SIGNING_KEYS: ` k1:${k1} `, JWT_ACTIVE_KEY_ID: ' k1 ' }).jwt.activeKeyId).toBe('k1');
+    expect(loadConfig({ ...good(), JWT_SIGNING_KEYS: '  ', JWT_ACTIVE_KEY_ID: ' ' }).jwt.activeKeyId).toBe('legacy');
+    refused({ ...good(), JWT_SIGNING_KEYS: '  ', JWT_ACTIVE_KEY_ID: 'k1' }, /^JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together$/);
   });
 });
