@@ -3,7 +3,11 @@ import amqp from 'amqplib';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { PublisherConfirmTimeoutError, RabbitMqEventBus, describeFailure, type EventEnvelope } from '../src/index.js';
 import { BrokerProxy } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 
 /**
  * Stage 15.3, invariant I9, against a REAL RabbitMQ: when an established broker connection goes silent (the proxy's `freeze()` stops the
@@ -41,7 +45,7 @@ describeWithEnv('RabbitMQ bus on a silent broker (real RabbitMQ, frozen connecti
   let proxy: BrokerProxy;
   const closers: (() => Promise<unknown>)[] = [];
   const bus = (o: Partial<ConstructorParameters<typeof RabbitMqEventBus>[0]> = {}) => {
-    const b = new RabbitMqEventBus({ url: proxy.url, exchange: `nawara.events.silent${uniq()}`, connectTimeoutMs: 1500, ...o });
+    const b = new RabbitMqEventBus({ url: proxy.url, exchange: owned.exchange(`nawara.events.silent${uniq()}`), connectTimeoutMs: 1500, ...o });
     closers.push(() => b.close());
     return b;
   };
@@ -84,7 +88,7 @@ describeWithEnv('RabbitMQ bus on a silent broker (real RabbitMQ, frozen connecti
   });
 
   it('a consumer on a frozen broker is detected as lost within ~3 heartbeats, re-attaches once the broker answers, and exactly one consumer remains', async () => {
-    const queue = `test.silent.${uniq()}`;
+    const queue = owned.queue(`test.silent.${uniq()}`);
     const b = bus({ heartbeatS: 1, consumerReconnect: { baseDelayMs: 100, maxDelayMs: 500 } });
     const got: string[] = [];
     await b.subscribe({ queue, bindings: ['probe.#'], handler: async (e) => void got.push(e.id) });
@@ -111,7 +115,7 @@ describeWithEnv('RabbitMQ bus on a silent broker (real RabbitMQ, frozen connecti
     await publisherOnly.publish(envelope('probe.warm'));
     const both = bus({ heartbeatS: 1 });
     await both.publish(envelope('probe.warm'));
-    await both.subscribe({ queue: `test.silent.${uniq()}`, bindings: ['probe.#'], handler: async () => undefined });
+    await both.subscribe({ queue: owned.queue(`test.silent.${uniq()}`), bindings: ['probe.#'], handler: async () => undefined });
     proxy.freeze();
     const [a, b] = await Promise.all([within(publisherOnly.close(), 12_000), within(both.close(), 12_000)]);
     proxy.thaw();
@@ -122,7 +126,7 @@ describeWithEnv('RabbitMQ bus on a silent broker (real RabbitMQ, frozen connecti
   });
 
   it('a directly constructed bus requests the kit default heartbeat (10 s), which the broker accepts (the smaller value wins)', async () => {
-    const b = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange: `nawara.events.silent${uniq()}` });
+    const b = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange: owned.exchange(`nawara.events.silent${uniq()}`) });
     closers.push(() => b.close());
     await b.publish(envelope('probe.warm'));
     expect(internals(b).connection?.connection.heartbeat).toBe(10);

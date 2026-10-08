@@ -182,8 +182,8 @@ A2 Configuration & Secrets                     ✅ CERTIFIED / CLOSED (PR #228, 
 A15 Developer / Platform Experience            🔄 OPEN
   A15.0  discovery, owner decisions            ✅ complete (owner-reviewed)
   A15.1  generic CLI configuration hygiene     ✅ closed on main (PR #229)
-  A15.2  developer path (guide, Node version)  complete locally; owner review pending
-  A15.3  local environment, test determinism   not started
+  A15.2  developer path (guide, Node version)  ✅ closed on main (PR #230)
+  A15.3  local environment, test determinism   complete locally; owner review pending
   A15.4  new-service checklist, localization   not started
   A15.5  certification                         not started
 
@@ -230,8 +230,8 @@ A4), A2.4 fixed the ignore policy, the environment reference and the rotation ru
 merged, and is certified and closed by that merge.** It is repository and local: activating A2 in the deployed services stays
 separately authorized production work, and A2 has no G6 dependency. (The certification PR, #228, has since merged: A2 is certified and
 closed.) **A15 Developer / Platform Experience** is open ([record](architecture/core-v2-a15-developer-experience.md)): A15.0 fixed its
-scope and decisions, A15.1 put the generic operator CLIs on the kit's configuration reader (PR #229), and A15.2 adds the canonical
-[developer guide](DEVELOPMENT.md) and declares Node 22.
+scope and decisions, A15.1 put the generic operator CLIs on the kit's configuration reader (PR #229), A15.2 added the canonical
+[developer guide](DEVELOPMENT.md) and declared Node 22 (PR #230), and A15.3 makes the infrastructure test suites deterministic.
 
 ### Compatibility and safety rules for V1 work
 

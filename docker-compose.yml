@@ -28,7 +28,9 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     healthcheck:
-      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      # V2 A15.3 (OD-A15.3-5): run as the broker's user. Run as root before the broker has written its Erlang cookie, the CLI creates
+      # it as root in the broker's home (HOME=/var/lib/rabbitmq), and the broker then cannot read it and exits (eacces).
+      test: ['CMD', 'su-exec', 'rabbitmq', 'rabbitmq-diagnostics', '-q', 'ping']
       interval: 10s
       timeout: 5s
       retries: 10
@@ -70,8 +72,8 @@ services:
       timeout: 5s
       retries: 20
 
-  # One-shot: applies auth-service's migrations (its own bespoke tracked-SQL mechanism, not the kit's `nawara-migrate` —
-  # auth-service predates @nawara/service-kit and does not depend on it) to the shared postgres. Never runs at
+  # One-shot: applies auth-service's migrations (its own migration CLI, `dist/cli/migrate.js`, built on the kit's migration runner
+  # with Auth's own options, rather than the generic `nawara-migrate`) to the shared postgres. Never runs at
   # container startup; an operator (or this Compose file's own usage comment) invokes it explicitly, exactly once
   # per empty database, mirroring production's "migrations are an explicit step" policy.
   auth-migrate:

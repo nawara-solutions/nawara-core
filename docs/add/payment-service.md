@@ -346,9 +346,12 @@ elsewhere on this entity — never inferred or looked up from `auth-service`.
   suspension/logout (e.g. a few days of leeway)~~ — resolved by
   [`ADR-0008`](../adr/0008-automatic-grace-license-on-license-lapse.md): a single, automatic,
   24-hour grace `License` on first lapse per renewal cycle.
-- A retry/outbox strategy for reliably publishing the six lifecycle events once RabbitMQ
+- ~~A retry/outbox strategy for reliably publishing the six lifecycle events once RabbitMQ
   infrastructure actually exists, so a crash between suspending a subscription and publishing
-  its event doesn't silently drop the notification.
+  its event doesn't silently drop the notification.~~ — resolved: RabbitMQ exists, and Core services
+  publish through the kit's transactional outbox and relay (the event is written in the same
+  transaction as its change and published at least once); payment-service and billing-service both
+  use it.
 - Building `payment-service`'s own JWT verification/`RolesGuard` capability, and how it obtains
   the JWT signing secret/key given the still-unsolved secret-distribution gap (see Non-functional
   constraints above and `docs/add/auth-service.md`'s own open item on the same gap).

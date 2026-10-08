@@ -3,7 +3,11 @@ import amqp from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DbService, InboxService, OutboxRelay, OutboxService, RabbitMqEventBus, kitMigrationsDir, runMigrations, type EventEnvelope } from '../src/index.js';
 import { createTestDatabase, type TestDatabase } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 
 const uniq = () => randomBytes(4).toString('hex');
 const envelope = (name: string, extra: Partial<EventEnvelope> = {}): EventEnvelope => {
@@ -29,7 +33,7 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
     return b;
   };
   beforeAll(() => {
-    exchange = `nawara.events.test${uniq()}`;
+    exchange = owned.exchange(`nawara.events.test${uniq()}`);
     bus = make();
   });
   afterAll(async () => {
@@ -42,7 +46,7 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
   });
 
   it('delivers a published event to a bound consumer with payload and headers intact', async () => {
-    const queue = `q.deliver.${uniq()}`;
+    const queue = owned.queue(`q.deliver.${uniq()}`);
     const got: EventEnvelope[] = [];
     const sub = await bus.subscribe({ queue, bindings: ['payment.*'], handler: async (e) => void got.push(e) });
     const ev = envelope('payment.succeeded');
@@ -57,7 +61,7 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
   });
 
   it('dead-letters an event whose consumer fails, instead of dropping it or looping on it', async () => {
-    const queue = `q.dead.${uniq()}`;
+    const queue = owned.queue(`q.dead.${uniq()}`);
     let calls = 0;
     // `maxRetries: 0`: this test is about the dead-letter hop itself; retry behaviour has its own suite (rabbitmq-dlq-retry.int-spec.ts).
     const noRetry = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange, retry: { maxRetries: 0 } });
@@ -80,7 +84,7 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
   });
 
   it('publishes persistent messages that a durable queue holds until a consumer arrives', async () => {
-    const queue = `q.durable.${uniq()}`;
+    const queue = owned.queue(`q.durable.${uniq()}`);
     const sub = await bus.subscribe({ queue, bindings: ['audit.#'], handler: async () => undefined });
     await sub.close(); // cancelled but the queue remains bound
     await bus.publish(envelope('audit.event'));
@@ -110,7 +114,7 @@ describeWithEnv('RabbitMQ event bus (real broker)', ['TEST_RABBITMQ_URL', 'TEST_
     it('a business change reaches the consumer exactly once in effect, even when the broker delivers it twice', async () => {
       const inbox = new InboxService();
       const outbox = new OutboxService();
-      const queue = `q.e2e.${uniq()}`;
+      const queue = owned.queue(`q.e2e.${uniq()}`);
       const sub = await bus.subscribe({ queue, bindings: ['payment.succeeded'], handler: (e) => inbox.handle(db, e, (q) => q.query('INSERT INTO effects VALUES (1)') as Promise<any>).then(() => undefined) });
 
       await db.tx((q) => outbox.enqueue(q, { name: 'payment.succeeded', payload: { paymentId: 'p-e2e' } }));

@@ -9,7 +9,11 @@ import {
   kitMigrationsDir, runMigrations, type EventBus, type EventEnvelope, type NoticeLevel,
 } from '../src/index.js';
 import { BrokerProxy, createTestDatabase, type TestDatabase } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 
 /**
  * Stage 14.7, against REAL PostgreSQL and RabbitMQ: each Stage 14.4-14.6 failure produces an operational signal that names the
@@ -235,7 +239,7 @@ describeWithEnv('operational observability (real RabbitMQ)', ['TEST_RABBITMQ_URL
 
   it('a stalled confirm is reported with the event identity and "unconfirmed" (not "failed") wording, at warn', async () => {
     const notices: Array<[NoticeLevel, string]> = [];
-    const bus = new RabbitMqEventBus({ url: proxy.url, exchange: `nawara.events.obs${uniq()}`, confirmTimeoutMs: 500, connectTimeoutMs: 1500, onNotice: (m, l) => notices.push([l, m]) });
+    const bus = new RabbitMqEventBus({ url: proxy.url, exchange: owned.exchange(`nawara.events.obs${uniq()}`), confirmTimeoutMs: 500, connectTimeoutMs: 1500, onNotice: (m, l) => notices.push([l, m]) });
     closers.push(() => bus.close());
     await bus.publish(envelope('probe.warmup'));
     proxy.freeze();
@@ -250,8 +254,8 @@ describeWithEnv('operational observability (real RabbitMQ)', ['TEST_RABBITMQ_URL
 
   it('a lost consumer is a warn, its recovery an info, and a dead-letter an error', async () => {
     const notices: Array<[NoticeLevel, string]> = [];
-    const exchange = `nawara.events.obs${uniq()}`;
-    const queue = `observ.q${uniq()}`;
+    const exchange = owned.exchange(`nawara.events.obs${uniq()}`);
+    const queue = owned.queue(`observ.q${uniq()}`);
     const bus = new RabbitMqEventBus({ url: proxy.url, exchange, connectTimeoutMs: 500, consumerReconnect: { baseDelayMs: 50, maxDelayMs: 200 }, onNotice: (m, l) => notices.push([l, m]) });
     closers.push(() => bus.close());
     const handled: string[] = [];

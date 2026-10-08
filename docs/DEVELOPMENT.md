@@ -141,9 +141,10 @@ broker suites before the merge. That is not a reason to ignore a broker suite th
 | Compose does not know `postgres` or a service | `--profile db` is required on every invocation that touches them |
 | a spec file fails to load, or broker tests fail | `TEST_RABBITMQ_URL` is unset or the broker is not reachable (section 6) |
 | `npm warn EBADENGINE` | your Node is not 22: `nvm use` |
+| a fresh RabbitMQ container exits at start with `.erlang.cookie: eacces` | a `rabbitmq-diagnostics` command ran as **root** before the broker had created its cookie, and wrote it as root. The repository's health checks run it as the broker's user, so this comes from a command of your own: run it as `docker exec <container> su-exec rabbitmq rabbitmq-diagnostics …`, and recreate the container |
+| the local broker is slow to start or holds many old queues | its state outlives the container (the image keeps it in a volume). To start over **locally**: `docker compose rm -sfv rabbitmq`, then `docker compose up -d rabbitmq`. Tests delete the resources they create; this is only for state left by older runs |
 
-Known and tracked, not yours to debug: a few timing-dependent tests fail occasionally, and a local RabbitMQ can become slow or fail
-to start after many test runs ([A15 record](architecture/core-v2-a15-developer-experience.md), A15.3).
+Background on these: [A15 record](architecture/core-v2-a15-developer-experience.md) §6.
 
 ## 9. Where things are
 

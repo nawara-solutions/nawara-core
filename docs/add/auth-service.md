@@ -951,10 +951,10 @@ The client-to-auth-service contract for joining an organization changed; the ser
   resolve 200 / 404 (any invalid reason, one answer) / 429; accept 201 / 403 (any refusal, one answer) / 409
   (contact already registered; the invitation is not consumed); revoke 204 / 404 (unknown, already used or revoked).
   `accept` publishes `user.registered` and `membership.admin_provisioned` (`{ userId, organizationId,
-  invitationType, timestamp }`); like the other new events these are **not delivered yet**, and no event carries
-  the code.
-- **New async events** (published on the existing bus; **nothing delivers them yet**, and a transactional outbox
-  is the recommended delivery design once a broker exists): `membership.requested`
+  invitationType, timestamp }`), and no event carries the code.
+- **New async events** (written to Auth's transactional outbox in the same transaction as the change and relayed to RabbitMQ
+  by the kit relay since Stage 21.C.2; notification-service consumes the ones that carry a destination and deliberately not
+  `user.registered`, `membership.requested` or `membership.admin_provisioned`): `membership.requested`
   `{ userId, organizationId, audience, timestamp }`, `membership.approved`, `membership.rejected` and
   `membership.revoked` (ADR-0030)
   `{ userId, organizationId, channel, destination, timestamp }`, and

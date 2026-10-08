@@ -809,16 +809,27 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
     });
 
     it('two deliveries of one intent finishing at the same moment: the last one purges (the intent lock serializes the check)', async () => {
-      const both = async (m: RenderedMessage, ctx: { reference: string; attemptId: string }) => {
-        await sleep(40);
-        return accept(m, ctx);
-      };
+      // V2 A15.3: the overlap is enforced, not timed. Each provider call waits at a two-party barrier until the other call has arrived,
+      // so neither delivery can finish before both are in flight (this replaces a "started within 40 ms" wall-clock check). The bound
+      // only stops a broken barrier from hanging the test; it is not the assertion.
       for (let i = 0; i < 5; i++) {
+        let arrived = 0;
+        let release!: () => void;
+        const together = new Promise<void>((r) => (release = r));
+        const both = async (m: RenderedMessage, ctx: { reference: string; attemptId: string }) => {
+          arrived += 1;
+          if (arrived === 2) release();
+          let bound: ReturnType<typeof setTimeout> | undefined;
+          const met = await Promise.race([together.then(() => true), new Promise<boolean>((r) => (bound = setTimeout(() => r(false), 10_000)))]);
+          clearTimeout(bound);
+          if (!met) throw new Error(`round ${i}: the other delivery never reached the barrier (no overlap)`);
+          return accept(m, ctx);
+        };
         email.behavior = both;
         sms.behavior = both;
         const nid = await code();
         await worker.passOnce();
-        expect(Math.abs(email.calls.at(-1)!.at - sms.calls.at(-1)!.at)).toBeLessThan(40); // the two calls overlapped
+        expect(arrived, `round ${i}: both deliveries were in flight together`).toBe(2);
         expect((await deliveries(nid)).map((d) => d.status)).toEqual(['SENT', 'SENT']);
         expect(await secret(nid), `round ${i}`).toEqual({ c: null, k: null }); // at once, not left to the purge loop
       }

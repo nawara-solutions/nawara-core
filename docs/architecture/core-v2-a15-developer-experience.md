@@ -2,8 +2,9 @@
 
 - **Status:** RECORD of the A15.0 discovery (read-only, owner-reviewed, 2026-10-07, on `main` at `869100d`, the PR #228 merge that
   certified A2), of the A15.1.0 design (read-only, owner-reviewed), of **A15.1: generic CLI configuration hygiene** (**closed on `main`**:
-  PR #229, merge `a7c56643a72c9b1b829c1b89521f7f8165aaa7f0`; §4) and of **A15.2: the canonical developer path and toolchain**
-  (**complete locally, owner review pending**; §5). **A15 is OPEN.** A15.3 to A15.5 are not started.
+  PR #229, merge `a7c56643a72c9b1b829c1b89521f7f8165aaa7f0`; §4), of **A15.2: the canonical developer path and toolchain**
+  (**closed on `main`**: PR #230, merge `fa569d8f54d7c96c97a8aae2fcfc21c3a05cdc18`; §5) and of **A15.3: local environment and test
+  determinism** (**complete locally, owner review pending**; §6). **A15 is OPEN.** A15.4 and A15.5 are not started.
 - **Scope of A15** ([roadmap](../CORE-ROADMAP.md) A15): service templates, shared libraries, local environment, testing and CI
   conventions, documentation, generators, localization conventions. The roadmap gives no subphases or completion criteria; §3 does.
   **Not A15:** Auth's CLIs and loader (A4); the Organization ownership tooling (A5 / F6 / F7); observability capabilities (A12);
@@ -33,7 +34,7 @@
 |---|---|
 | OD-A15-1 | **A:** `nawara-check-outbox-lag --database-url` stays compatible and is deprecated; the environment or `_FILE` is the documented way |
 | OD-A15-2 | **A, narrow:** Audit's `retention` CLI is included for how `RETENTION_DATABASE_URL` is read, and nothing else (A13 stays closed) |
-| OD-A15-3 | **B:** F9 is **accepted** as low-risk local and CI behaviour. The Compose health check and the four CI service definitions are not changed. Disposition recorded here; the item is closed |
+| OD-A15-3 | **B:** F9 is **accepted** as low-risk local and CI behaviour. The Compose health check and the four CI service definitions are not changed. Disposition recorded here; the item is closed. **Revised by OD-A15.3-5** (§6): A15.3 showed the root health check causing a broker start failure, so the checks stay but run as the broker's user |
 | OD-A15-4 | **A:** no formatting enforcement (no format gate in CI) |
 | OD-A15-5 | **A:** the Node 22 declaration (`engines`, `.nvmrc`) is part of A15.2 |
 | OD-A15-6 | **A:** A15.4 is small: a new-service checklist and the localization convention; no generator or template framework |
@@ -57,8 +58,10 @@ A15.0  discovery, owner decisions       ✅ complete (owner-reviewed)
 A15.1.0  CLI hygiene design             ✅ complete (owner-reviewed)
 A15.1  generic CLI configuration hygiene   ✅ closed on main (PR #229, merge a7c5664; §4)
 A15.2.0  developer-path design          ✅ complete (owner-reviewed)
-A15.2  developer path and toolchain     complete locally; owner review pending (§5)
-A15.3 – A15.5                           not started
+A15.2  developer path and toolchain     ✅ closed on main (PR #230, merge fa569d8; §5)
+A15.3.0  determinism discovery          ✅ complete (owner-reviewed)
+A15.3  local environment, determinism   complete locally; owner review pending (§6)
+A15.4 – A15.5                           not started
 ```
 
 ## 4. A15.1: generic CLI configuration hygiene (2026-10-07; closed on `main`, PR #229, merge `a7c5664`)
@@ -125,7 +128,7 @@ unchanged, and no service runtime changed.
   nothing deploys (deploy workflows are dispatch-only). **YELLOW, later and separate:** the new CLI behaviour reaches production with
   the next owner-authorized deploy of each image. RED: none; no G6 dependency.
 
-## 5. A15.2: the canonical developer path and toolchain (2026-10-07, local)
+## 5. A15.2: the canonical developer path and toolchain (2026-10-07; closed on `main`, PR #230, merge `fa569d8`, 24 of 24 checks green)
 
 - **Owner decisions:** OD-A15.2-1 = A (`engines.node` `22.x` and `.nvmrc` `22`: parity with CI and the images; advisory, no
   `engine-strict`, no npm declaration); OD-A15.2-2 = B (the guide is `docs/DEVELOPMENT.md`, linked from the root README);
@@ -167,3 +170,81 @@ unchanged, and no service runtime changed.
 - **Production:** none. GREEN to implement and to merge: the root `package.json` and the Auth, Audit and library paths make the
   Auth, Organization and Audit image workflows **build**; nothing deploys, and nothing changes at runtime. No G6 dependency. Drive
   does not depend on this: no API, event or contract changed.
+
+## 6. A15.3: local environment and test determinism (2026-10-08, local)
+
+- **Owner decisions:** OD-A15.3-1 = A (one bounded local diagnosis of the broker start failure first); OD-A15.3-2 = A (fix all
+  twelve copies of the test infrastructure gate); OD-A15.3-3 = A (tests delete the broker resources they declare, plus a documented
+  local reset); OD-A15.3-4 = A (close the items without evidence; re-home `auth_timeout` to A12); OD-A15.3-5 = yes (the RabbitMQ
+  readiness checks run `rabbitmq-diagnostics` as the `rabbitmq` user; revises F9 / OD-A15-3 narrowly).
+- **The broker start failure (`.erlang.cookie: eacces`), diagnosed.** Seen three times locally and once in Core CI on `main` (run
+  37628789313, the RabbitMQ service container of the shared-platform job). Two bounded starts of the Compose image
+  (`rabbitmq:3.13-management-alpine`, image `1031d41f…`, the same image that started normally on 2026-10-05):
+  1. started while a readiness loop ran `rabbitmq-diagnostics` through `docker exec` right away: the node exited with `eacces`, and
+     `/var/lib/rabbitmq/.erlang.cookie` was mode `0400`, owned by **root** (`0:0`), with Erlang's midnight timestamp;
+  2. started with nothing run in the container until the log said `Server startup complete`: it started, and the cookie was owned by
+     `rabbitmq` (`100:101`); a root `rabbitmq-diagnostics ping` afterwards succeeded.
+
+  **Cause:** the image sets `HOME=/var/lib/rabbitmq` for every user, so a `rabbitmq-diagnostics` command run as root **before the
+  broker has created its cookie** creates it, as root, in the broker's home; the broker then runs as `rabbitmq` and cannot read it.
+  Only a container's first start is exposed (a reused container already has its cookie). Classification: **B, repository
+  configuration**: the health checks of Compose and of the four Core CI RabbitMQ services run `rabbitmq-diagnostics -q ping` as root,
+  and CI's first check can fire before a slow broker has written its cookie (it fails intermittently, as observed). It is not an image
+  regression (no pin is justified: the same image starts when nothing races it) and needs no host change.
+
+  **Fixed by OD-A15.3-5 (F9 revised narrowly).** F9 had been accepted as a low-risk root health check (OD-A15-3 = B); it is now
+  evidenced as the cause of a CI failure. The readiness check stays, RabbitMQ-aware as before (`rabbitmq-diagnostics -q ping`, same
+  intervals and retries), but runs as the broker's user: `su-exec rabbitmq rabbitmq-diagnostics -q ping` in `docker-compose.yml` and in
+  the four RabbitMQ service definitions of `core-ci.yml` (`su-exec` and the `rabbitmq` user are in both images used). No image pin, no
+  host change, no cookie handling; production RabbitMQ is not involved (these are local and CI test brokers). Proof on throwaway
+  containers: the old path (a root `rabbitmq-diagnostics` as the container starts) left a `0400` cookie owned by `0:0` and the broker
+  exited with `eacces`; the corrected health check, with an extra probe as `rabbitmq` fired immediately, left the cookie owned by
+  `100:101` and the broker healthy, on both `rabbitmq:3.13-management-alpine` and `rabbitmq:3.13-alpine`; the Compose service itself,
+  started alone in an isolated project, became healthy (last check exit 0, cookie `100:101`, no `eacces`). The real GitHub-hosted
+  proof is the pull request's CI. This is a determinism correction, not a reduction of readiness checking.
+  **Also corrected** in `docker-compose.yml`, which this change touches: the `auth-migrate` comment that said Auth uses a bespoke
+  mechanism and "does not depend on" the kit (A15.2 had deferred it). Auth depends on `@nawara/service-kit`, and its migration CLI is
+  built on the kit's `runMigrations` with Auth's own options.
+- **Skipped suites ran their setup.** All twelve copies of `describeWithEnv` (`apps/*/test/support`, `libs/*/test/support`,
+  `test/*/support`) skipped a suite with missing variables as `describe.skip(title, () => body({}))`. Vitest runs a describe callback
+  while collecting, even for a skipped describe, so the body ran with no configuration: the six kit files that build a `URL` from
+  `TEST_RABBITMQ_URL` at the top of their broker block failed to load instead of skipping, and `observability.int-spec.ts` lost its
+  PostgreSQL tests too. Now the skipped suite registers one skipped placeholder (`needs <VARIABLE>`) and the body is never run. Unchanged:
+  with the variables set the suite runs as before, and with `CI=true` a missing variable is still a failing test. A new kit unit test
+  (`test/describe-with-env.spec.ts`) checks the three paths.
+- **Broker resources owned.** The kit's bus declares durable exchanges and queues (a consumer queue brings `.retry` and `.dead`, an
+  exchange its `.dlx`). Seven kit integration files named them uniquely per test but never deleted most of them, so a long-lived local
+  broker kept every one (over a thousand queues had accumulated). A small helper (`libs/service-kit/test/support/broker-resources.ts`)
+  records each name a file declares and deletes exactly those, with their companions, when the file ends; nothing unregistered, no
+  wildcard. The rabbitmq-dlq-retry file already cleaned up and is unchanged; the fixed-name service and cross-service suites already
+  delete or purge their queues and were not changed.
+- **Two timing tests made deterministic.** Payment `expiry-sweeper` ("refuses to expire a payment with money in flight"): the payment
+  expired 150 ms after creation, so a slow runner reached `startAttempt` after expiry (409, run 37310414915). Now it is created with a
+  far expiry, the attempt starts, and only then is `expiresAt` moved into the past, by the scratch database's owner, in one transaction
+  that disables and re-enables the immutability trigger (as other Payment tests already do for other immutable columns). Notification
+  `delivery-engine` ("two deliveries of one intent finishing at the same moment"): the test required the two provider calls to start
+  within 40 ms (failed at 62 ms, run 37078342692). Now both fake providers wait at a two-party barrier, so both are in flight before
+  either finishes; the bounded wait only stops a broken barrier from hanging. Same five rounds, same functional assertions.
+- **Documentation drift corrected.** `docs/add/auth-service.md` said the newer Auth events were "not delivered yet" and that an outbox
+  was the future design; they are written to the transactional outbox and relayed (Notification consumes the ones with a destination,
+  and deliberately not `user.registered`, `membership.requested`, `membership.admin_provisioned`). `docs/add/payment-service.md`'s open
+  question about an outbox "once RabbitMQ exists" is marked resolved.
+- **Closed without change (OD-A15.3-4):** the Billing `57P01` teardown race (no failing test or run located; Billing's teardowns close
+  the app before dropping the database; the only concrete record is a printed, non-failing Auth message) and the "Billing audit-regex
+  flake" (no test, run or symptom recorded). Either reopens on a new observed failure. **Re-homed to A12:** the Audit and Release
+  `auth_timeout` attribution question (an outcome-label semantics question, not determinism).
+- **Policy** (from these findings only): tests delete the broker resources they declare; a suite skipped for missing infrastructure
+  never runs its body; a test does not use a wall-clock gap as its correctness condition when state or synchronization can make it
+  deterministic; teardown closes clients before dropping a scratch database.
+- **Coverage.** No test was deleted, skipped or weakened, and no retry was added. A local skip that used to crash is now a skip; CI,
+  which sets every variable and fails on a missing one, runs exactly what it ran.
+- **Evidence (local, throwaway PostgreSQL and RabbitMQ).** `observability.int-spec.ts`: with PostgreSQL only, 6 passed and 1 skipped
+  (before: the file failed to load); with `CI=true` and no broker URL, the clear "must be set in CI" failure; with both, 8 passed. All
+  eight kit broker files: 51 passed, and the broker's queues and exchanges were the same set before and after the run (nothing left,
+  nothing else removed). Payment `expiry-sweeper` 5 of 5 and Notification `delivery-engine` 58 of 58 as whole files; the two formerly
+  flaky tests five runs each, all passed. Kit unit suite 514 passed. Negative controls, each restored byte-for-byte: running the body in
+  the skip path again (the observability file fails to load, "Invalid URL"); one exchange left unregistered (five `dispose` exchanges
+  remain after the run); the old 150 ms expiry with a 300 ms scheduling delay (409), while the new setup with the same delay passes; one
+  provider skipping the barrier ("both deliveries were in flight together": expected 1 to be 2).
+- **Production:** none. GREEN to implement and to merge (tests and documentation; the kit test paths make the Auth, Organization and
+  Audit image workflows build; nothing deploys). No G6 dependency.
