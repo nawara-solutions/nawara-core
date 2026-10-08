@@ -6,8 +6,9 @@
   `38f262e065f032fe8c792f3588874a36758e0909`; §6), of the **G7 proof** (G7 **confirmed** locally; §7) and of the **A3M.4 G7 slice**
   (R1 remediation, regression tests, one alert; **closed on `main`**: PR #235, merge `9c8d69caabdec32647c6bb11817b2c2d3decd02e`; §7) and
   of **A3M.2: event contracts and versioning** (**closed on `main`**: PR #236, merge `27d1f1c80a9a6ca3efb9bf7cf0657d335135cad4`; §11)
-  and of **A3M.3: producer and consumer conventions, G11** (**implemented locally, pending review and merge**; §12). **A3M is OPEN**;
-  A3M.4 as a whole is not complete.
+  and of **A3M.3: producer and consumer conventions, G11** (**closed on `main`**: PR #237, merge
+  `06e471aa2ed0dca41a8abe274ac406fb38cbf842`; §12) and of the **rest of A3M.4: the idempotency matrix** (**implemented locally,
+  pending review and merge**; §13). **A3M is OPEN.**
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -118,9 +119,9 @@ A3M.0  discovery, decision review          ✅ complete (owner-reviewed)
 A3M.1  records and policy (ADR-0057)       ✅ closed on main (PR #234, merge 38f262e)
 G7     isolated broker proof               ✅ G7 confirmed locally (§7)
 A3M.2  event contracts and versioning      ✅ closed on main (PR #236, merge 27d1f1c)
-A3M.3  producer and consumer conventions   G11 proof and fix, S21-5, conventions: implemented locally; pending review and merge (§12)
-A3M.4  retry, dead letters, idempotency    G7 slice (R1, regression tests, DeadLetterCopyFailing) ✅ closed on main (PR #235);
-                                           the rest of A3M.4 (idempotency matrix) not started
+A3M.3  producer and consumer conventions   ✅ closed on main (PR #237, merge 06e471a; G11 fixed, S21-5 aligned)
+A3M.4  retry, dead letters, idempotency    G7 slice ✅ closed on main (PR #235); the idempotency matrix and its evidence (§13)
+                                           implemented locally; pending review and merge
 A3M.5  outbox and de-duplication retention not started
 A3M.6  deterministic broker tests          not started
 A3M.7  local certification                 not started
@@ -289,7 +290,7 @@ terminating what is left, and report leaks); PR #237 is unchanged and is re-run 
 - **Production:** none. Merging builds the Auth image (its workflow matches `apps/auth-service/**`); Billing, Payment and Notification
   have no image workflow; nothing deploys. No topology, grant, payload or `AUTH_EVENTS` change.
 
-## 12. A3M.3: producer and consumer conventions, G11 (2026-10-08, local)
+## 12. A3M.3: producer and consumer conventions, G11 (2026-10-08; closed on `main`, PR #237, merge `06e471a`)
 
 - **Owner decisions:** OD-A3M3-1 = C + A (only an applied outcome claims an event id; a wrong source is refused before any receipt);
   OD-A3M3-2 = Billing migration 0016; OD-A3M3-3 = `wrong_source` is a permanent dead letter, no longer a recorded conflict;
@@ -330,3 +331,74 @@ terminating what is left, and report leaks); PR #237 is unchanged and is re-run 
 - **Infrastructure:** one disposable PostgreSQL (`postgres:16-alpine`, already local, never pulled; its own container and network, tmpfs
   data, loopback port, throwaway credential), removed afterwards; containers, networks and volumes compared before and after: unchanged.
 - **Production:** none. Billing and Payment have no image workflow and no production database; nothing deploys.
+
+## 13. A3M.4: idempotency matrix and evidence (2026-10-08, local)
+
+- **Owner decisions:** OD-A3M4-1 = the rest of A3M.4 is closed by this matrix and existing evidence, with no runtime change;
+  OD-A3M4-2 = A (one focused Notification test for F3); OD-A3M4-3 = the stale kit comments wait for the next kit change;
+  OD-A3M4-4 = F1 is recorded under P-A1 / A14 and F2 under A7 / P-A1, with no A3M code; OD-A3M4-5 = the outbox retry behaviour is
+  documented, no poison-row parking.
+- **Two levels, kept apart.** *Transport* is **at least once**: an event can be delivered more than once and in any order. *Business
+  effect* is **idempotent per consumer**: each consumer applies an event's effect at most once from its own durable record. Nothing
+  here is exactly-once delivery, and **an external notification send is never claimed to be exactly once** (below).
+
+### 13.1 Transport (the kit, shared by every service)
+
+| Guarantee | Behaviour | Evidence |
+|---|---|---|
+| Outbox | the event is written in the business transaction (`OutboxService.enqueue`); it exists if and only if the change commits; a supplied id makes a retried operation write one row | `libs/service-kit/test/outbox.int-spec.ts` (same-id idempotency) |
+| Relay | claims rows with `FOR UPDATE SKIP LOCKED`, publishes persistent messages with publisher confirms (bounded at 5 s), stamps a row only after its confirm; a failed or unconfirmed publish stays pending and is retried with exponential backoff up to 15 s; a row that can never be published is retried indefinitely (F4) | `async-resilience.int-spec.ts` (F4 confirm timeout, recovery), `metrics-outbox.int-spec.ts` |
+| Crash between publish and stamp | the same event id is published again; consumers de-duplicate | `test/e2e-real-broker/stage21c2-auth-outbox-durability` |
+| Consumer retry | a rejected delivery is retried through `Q.retry` (default 3 × 5 s), then copied, annotated, to `Q.dead`; a permanent failure skips the retries | `rabbitmq-dlq-retry.int-spec.ts`, `stage4-real-broker-dlq-replay` |
+| Dead-letter copy not confirmed | held for the retry delay and requeued to the consumer's own queue, for every consumer (G7, §7) | `rabbitmq-dead-letter-isolation.int-spec.ts` |
+| Shutdown and consumer loss | bounded drain; an unacknowledged delivery is redelivered; a lost consumer re-attaches | `async-resilience.int-spec.ts` (F6), `stage4-real-broker-consumer-recovery` |
+| Replay | an operator replays one dead-lettered message, with its original id, into its own work queue | `rabbitmq-dlq-retry.int-spec.ts`, `stage4-real-broker-dlq-replay` |
+
+### 13.2 Producers
+
+| Producer | Event identity | Outbox | A retried operation | Evidence |
+|---|---|---|---|---|
+| auth-service, domain events | the outbox row id (random); version 1 | on the caller's transaction, only while `AUTH_EVENTS=on` | a new operation is a new event; a relay re-publish keeps the id | `apps/auth-service/test/domain-events-outbox.e2e-spec.ts`, `stage21c2`, `stage21c3` |
+| auth-service, organization-service, audit events | random unless the caller supplies an id | same transaction, through `AuditEventWriter` | as above | `test/e2e-audit-producers/auth`, `organization` |
+| payment-service | deterministic: `(paymentId, event name)` | same transaction as the state change | writes one row (outbox id conflict) | `payment-events.spec.ts`, `event-catalog.spec.ts` |
+| billing-service, `invoice.created` and audit events | deterministic: `(invoiceId, name)`, `(resource, action, …)` | same transaction (`invoice.repository.ts`) | one row | `deterministic-id.spec.ts`, `event-catalog.spec.ts`, `test/e2e-audit-producers/billing` |
+| file-service, release-service, audit events | deterministic | same transaction | one row | `test/e2e-audit-producers/file`, `release` |
+
+### 13.3 Consumers
+
+| Consumer | De-duplication key | Atomicity | A duplicate | A delivery that does not apply | Permanent failures | Concurrency and ordering | Crash recovery | Evidence |
+|---|---|---|---|---|---|---|---|---|
+| billing-service ← Payment (`billing.payment-events`) | `eventId`, claimed **only by an `applied` receipt** (migration 0016) | receipt and state change in one transaction, under the invoice and request locks | applied once; a later copy is a replay of the applied receipt | ignored, deferred, conflict: acknowledged, recorded, claim nothing; the next delivery is decided on its own merits | malformed, unsupported version, wrong source, an identifier the database refuses: dead-lettered | state validated under lock; a success racing a failure gives one applied and one conflict | a rollback writes no receipt, so the redelivery applies; the reconciler settles a missed outcome from Payment's authenticated API | `payment-event-source.e2e-spec.ts` (G11, 8), `invoices.e2e-spec.ts` (six concurrent copies, races), `payment-integration.e2e-spec.ts`, `db/tests` (251 invariants), `stage4-*`, `stage12-7` |
+| notification-service ← Auth (`notification.events`) | `(sourceService, sourceEventId)`, unique | intent and delivery row in one transaction | recorded once; **identity alone decides**: the same id with different content is also a duplicate, the first intent is kept unchanged, with no conflict signal (F3) | – | unmapped event, unsupported version, malformed payload, no destination, unknown template, invalid template data: dead-lettered | every event is independent; delivery claims use `FOR UPDATE SKIP LOCKED` and a lease token | a committed but unacknowledged event is recognized as a duplicate on redelivery | `intake.e2e-spec.ts` (replay × 5, 12 concurrent copies, the F3 test), `event-intake-broker.e2e-spec.ts` (crash window, restart replay), `stage16-5`, `stage21c2`, `stage21c3` |
+| audit-service ← every producer (`audit-service.audit`) | `(sourceService, eventId)`, `insertOnce` | one autocommit insert | an exact duplicate is an idempotent success; different evidence is a permanent `event_id_conflict`, the stored record is never overwritten (F2) | – | a contract refusal, a conflict, a record the schema refuses: dead-lettered through the redacting policy | records are independent | a crash before the insert is redelivered; a crash after the commit is recognized as a duplicate | `ingestion.service.spec.ts`, `ingestion-broker.e2e-spec.ts` (duplicate, conflict replay, both crash windows), `dead-letter-privacy.e2e-spec.ts` |
+
+**The external send is at least once.** Notification's delivery worker commits a STARTED attempt before every provider call, makes
+the call outside any transaction, and writes the outcome conditionally on its lease token. A worker lost after the provider accepted
+the message leaves an AMBIGUOUS attempt, decided from that evidence; the provider may have delivered a message whose answer was lost
+(`delivery-worker.ts`; `certification.e2e-spec.ts` "nothing lost, nothing duplicated" covers the internal processing, not the provider).
+The kit's `InboxService` is tested and used by no service.
+
+### 13.4 Findings
+
+| Id | Severity | Finding | Owner | Disposition | Deployment implication |
+|---|---|---|---|---|---|
+| F1 | medium, **open** | A message forged as an Auth event makes Notification send to a destination the forger chose: the payload carries the destination and the code, `source` is asserted only, and any consumer identity can write to `notification.events` through `amq.default` (ADR-0053 §4) | **P-A1 / A14** | not resolved; no A3M runtime change (it needs publisher identity, a separate architecture decision) | **a security prerequisite to review before Notification is activated in production** (and before `AUTH_EVENTS=on`) |
+| F2 | medium, **open** (accepted residual) | Audit keeps the first writer of `(sourceService, eventId)`; with deterministic producer ids a forged first message makes the genuine one a visible `event_id_conflict` dead letter | **A7 / P-A1** | not resolved; ADR-0053's accepted residual is preserved | a security review before the relevant production activation (a second audit producer identity able to forge another's source) |
+| F3 | low | Notification treats a same-id event with different content as a plain duplicate, with no conflict signal (Auth's ids are random, so the id is not predictable) | A3M.4 | behaviour pinned by a focused test (§13.5); no code change (OD-A3M4-2) | none |
+| F4 | low | An outbox row that can never be published is retried indefinitely (backoff up to 15 s); there is no poison-row parking | A3M.4 | intended and documented (OD-A3M4-5): the outbox stays the source of truth; `OutboxBacklogAging`, `OutboxStatsStale` and `nawara-check-outbox-lag` report it. This is ADR-0053's intended behaviour for an Auth domain event its broker grant refuses | operators watch the outbox alerts |
+| F5 | low | Billing's non-applied receipts grow by one row per delivery that does not apply | **A3M.5** | tracked with retention | none before retention is designed |
+| F6 | low | Kit comments still say consumers de-duplicate "via the inbox" (`outbox-relay.ts`, `types.ts`) | next kit change | deferred (OD-A3M4-3): a comment-only kit change would build three images | none |
+| F7 | info | An event dead-lettered by Notification after its retries is recovered only by an operator replay (no reconciler) | A8 / operations | intentional; `MessagesDeadLettered` alerts on it | the dead-letter runbook applies |
+
+F1 and F2 are **not resolved** by A3M.4; they are recorded so that no production activation proceeds without their review.
+
+### 13.5 A3M.4 evidence (local)
+
+- **New test** (`apps/notification-service/test/intake.e2e-spec.ts`, "V2 A3M.4 (F3)"): a valid `membership.approved` event is accepted;
+  the same source and event id with another recipient, channel, destination and organization is classified `duplicate`; exactly one
+  intent and one delivery exist and they equal the first event's rows field for field; the second payload under its own event id is
+  accepted as an independent intent; the first is still unchanged. The observed behaviour matched the discovery; no runtime code changed.
+  The file: 43 passed (one disposable PostgreSQL, removed afterwards; Docker state unchanged). Notification unit suite 330 passed.
+- **Reused, not rerun:** every other row of §13.1 to §13.3 points at an existing test that ran green in Core CI on `main` at `06e471a`
+  (PR #235 G7, PR #236 contracts, PR #237 G11, PR #238 R11).
+- **Production:** none. Documentation and one Notification test: Core CI only, no image build, nothing deploys.
