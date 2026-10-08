@@ -153,6 +153,7 @@ Background on these: [A15 record](architecture/core-v2-a15-developer-experience.
 | a service's settings, API, commands and operations | `apps/<service>/README.md` |
 | the shared infrastructure library and its operator CLIs | [`libs/service-kit/README.md`](../libs/service-kit/README.md) |
 | the audit contract and its catalog | [`libs/audit-contract/README.md`](../libs/audit-contract/README.md) |
+| adding a new Core service | [new-service checklist](NEW-SERVICE-CHECKLIST.md) |
 | architecture and API conventions | [ADR-0056](adr/0056-core-architecture-and-api-conventions.md); every decision: [`docs/adr`](adr) |
 | what is built, planned and deferred | [roadmap](CORE-ROADMAP.md) |
 | local metrics, dashboards and alerts | [local observability runbook](runbooks/local-observability.md) |

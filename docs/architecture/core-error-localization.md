@@ -185,6 +185,8 @@ proves the header does not change it. The two functions share a name but not a r
 
 ## 12. Checklist: adding or changing a localized error
 
+A new service starts with a catalog, its completeness test and a localization e2e suite: [new-service checklist](../NEW-SERVICE-CHECKLIST.md) §5.
+
 1. Decide whether the message may be localized: it must be safe public information, and any parameter must be server-computed (§5,
    §8). A path excluded by §9 stays as it is.
 2. Add the entry to the owning service's catalog. For an existing message, `en` is the current English, byte for byte.

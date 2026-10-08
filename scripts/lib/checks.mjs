@@ -1087,6 +1087,11 @@ export function checkCiCoverage(fileName, text) {
   return problems;
 }
 
+/**
+ * V2 A15.4: applications outside the product-term check, by directory. Auth predates the rule (it was never in the list this replaced)
+ * and its convergence with the shared conventions is A4's; it is the only exemption. A new service is never added here.
+ */
+export const GENERICITY_LEGACY_EXEMPT = new Set(['auth-service']);
 const PRODUCT_TERMS = /\b(student|teacher|driver|lesson|classroom|instructor|vehicle)s?\b/i;
 /**
  * Identifiers split into words before matching (Stage 17.3): `instructorId`, `student_documents`, `driverPhoto` and plurals were
@@ -1431,8 +1436,9 @@ export function checkSource(relPath, text, { appPackages } = {}) {
   const problems = [];
   if (BIDI_CONTROL.test(text) && !BIDI_ALLOWLIST.has(relPath)) problems.push(`${relPath}: contains an invisible bidirectional control character (write it as an escape)`);
   const inKit = relPath.startsWith('libs/service-kit/');
-  const inNewCore = /^apps\/(billing|payment|accounting|notification|organization|file|audit|release)-service\/(src|db\/migrations)\//.test(relPath)
-    || relPath.startsWith('libs/audit-contract/');
+  // V2 A15.4: every application under apps/ is in scope (a new service enters it automatically), except the named legacy exemptions.
+  const coreApp = /^apps\/([a-z0-9-]+)\/(?:src|db\/migrations)\//.exec(relPath)?.[1];
+  const inNewCore = (coreApp !== undefined && !GENERICITY_LEGACY_EXEMPT.has(coreApp)) || relPath.startsWith('libs/audit-contract/');
   if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {
     problems.push(`${relPath}: declares a financial-domain concept; the service-kit holds technical infrastructure only`);
@@ -1846,6 +1852,34 @@ export function checkNodeToolchain({ nvmrc, packageJson, ciText, dockerfiles }) 
       if (!m) { problems.push(`${path}: base image ${image.split('@')[0]} is not a Node image; the image Node major cannot be checked`); continue; }
       mismatch(`${path} (FROM node:${m[1]})`, m[1].split('-')[0]);
     }
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A15.4: a new workspace cannot silently miss Core CI.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Every application and library workspace (`apps/*`, `libs/*`, by package name) has an entry in Core CI's per-workspace matrix (job
+ * `node`: lint, typecheck, unit tests, build and its integration suite), and every application with a Dockerfile has one in the image
+ * smoke matrix (job `images`: build the image and boot it with a production-shaped configuration). This is CI coverage only: it never
+ * asks for an image publishing or deployment workflow, which only a production-bound service gets, by separate owner-authorized work.
+ * The `test/*` packages are not per-workspace jobs: each is run by its own cross-service job.
+ */
+export function checkCiWorkspaceCoverage(ciText, { workspaces, imageApps }) {
+  const doc = parse(ciText ?? '');
+  const node = asArray(doc?.jobs?.node?.strategy?.matrix?.include).map((e) => String(e?.workspace ?? ''));
+  const images = asArray(doc?.jobs?.images?.strategy?.matrix?.service).map(String);
+  const problems = [];
+  if (node.length === 0) problems.push('core-ci.yml: job "node" has no matrix.include workspaces; the per-workspace coverage cannot be checked');
+  if (images.length === 0) problems.push('core-ci.yml: job "images" has no matrix.service list; the image smoke coverage cannot be checked');
+  if (problems.length > 0) return problems;
+  for (const ws of workspaces) {
+    if (!node.includes(ws)) problems.push(`core-ci.yml: workspace ${ws} is not in the "node" matrix: CI would never lint, type-check, test or build it (add it; see docs/NEW-SERVICE-CHECKLIST.md)`);
+  }
+  for (const app of imageApps) {
+    if (!images.includes(app)) problems.push(`core-ci.yml: apps/${app} has a Dockerfile but is not in the "images" matrix: CI would never build or boot its image (add it, and its case in scripts/smoke-core-image.sh)`);
   }
   return problems;
 }
