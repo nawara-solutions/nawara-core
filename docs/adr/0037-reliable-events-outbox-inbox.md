@@ -8,6 +8,14 @@
 > The project owner accepted RabbitMQ for the financial services on 2026-09-19; this ADR adds message headers, an outbox and an inbox.
 > ADR-0018 needs a back-pointer; its "production deployment deferred" still holds. auth-service's fire-and-forget publisher is unchanged.
 
+> **Forward note (2026-10-08, Core V2 A3M.1):** [ADR-0057](./0057-messaging-conventions.md) (Proposed) states the current messaging
+> conventions and reconciles this ADR: the transactional outbox, the headers and at-least-once delivery are kept; it proposes that a
+> consumer may de-duplicate with a domain-specific durable record instead of the `inbox` table, under the conditions stated there (in
+> force only on its acceptance; the Accepted ADR-0056 §7 governs until then); the event-family
+> list below is historical (the events published today are listed in the [A3M record](../architecture/core-v2-a3m-messaging.md));
+> Auth no longer publishes fire-and-forget (it uses this outbox since Stage 21.C.2). This ADR's text and status are unchanged; its
+> disposition is an explicit owner decision (OD-A3M-2).
+
 ## Context
 
 Accounting must neither miss nor double-count `payment.succeeded`. Today RabbitMQ runs only in the local `docker-compose.yml`, not in production, and events are published

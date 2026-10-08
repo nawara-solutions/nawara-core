@@ -1,0 +1,188 @@
+# Core V2 A3M: messaging
+
+- **Status:** RECORD of the **A3M.0 discovery** (read-only, owner-reviewed, 2026-10-08, on `main` at
+  `e2adc20253bf1afaa41394b05b9b56e88db507b4`, the PR #233 merge that certified A15), of the A3M decision review (read-only,
+  owner-reviewed) and of **A3M.1: messaging records and policy** (documentation only; **implemented locally, pending review and merge**;
+  §5). **A3M is OPEN.** No A3M runtime, test or guard change has been made.
+- **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
+  dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
+  (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
+  (production access proof) and A3.7 (organization-secret restriction) stay deferred** under owner decisions D-3 and D-4 and are not A3M.
+- **Conventions:** [ADR-0057](../adr/0057-messaging-conventions.md), **Proposed** (OD-A3M-1). It reconciles ADR-0018 and ADR-0037 by
+  forward notes (OD-A3M-2) and follows the Accepted ADR-0046 rule 17, ADR-0049, ADR-0052, ADR-0053 and ADR-0056.
+- **Not A3M:** Auth convergence (A4); Organization authority (A5, F6, F7); audit semantics and audit record retention (A7, ADR-0049 §10,
+  A13); notification, billing and payment domain behaviour (A8, A10, A11); new observability capabilities (A12); production work of any
+  kind unless separately authorized (§8).
+
+## 1. A3M.0 discovery inventory
+
+Read from `main` at `e2adc20` (code and records only; nothing was run).
+
+| Service | Produces (outbox → `nawara.events`) | Version | Consumes (queue → bindings) | De-duplication | Deployed |
+|---|---|---|---|---|---|
+| auth-service | domain events, written only with `AUTH_EVENTS=on`: `user.registered`, `member.contact_verification_requested`, `admin.operator_code_issued`, `admin.operator_confirmation_code_issued`, `admin.owner_recovery_requested`, `admin.owner_recovery_completed`, `admin.owner_login_from_new_device`, `membership.requested`, `membership.approved`, `membership.rejected`, `membership.revoked`, `membership.admin_provisioned` (names found in Auth's source; the A3M.2 catalog makes the list authoritative); `audit.*` always | 1 (`AUTH_EVENT_VERSION`) | – | – | **production** (Auth → Audit relay; `AUTH_EVENTS=off` there) |
+| payment-service | `payment.created`, `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired`; `audit.*` | 1 | – | – | no |
+| billing-service | `invoice.created`; `audit.*` | 1 | `billing.payment-events` → `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` | `payment_event_receipt` (unique `eventId`); a `source` other than `payment-service` is a conflict | no |
+| organization-service, file-service, release-service | `audit.*` only | 1 | – | – | Organization in production; File and Release no |
+| notification-service | – | – | `notification.events` → the names of its `EVENT_MAP` (Auth events, matched by `source` and name) | unique `(sourceService, sourceEventId)`; refuses an unsupported `version` | no |
+| audit-service | – | – | `audit-service.audit` → `audit.#`, with a redacting `deadLetterPolicy` | `insertOnce` on `(sourceService, eventId)` | **production** |
+
+- **Kit components** (`libs/service-kit/src/events/`): `OutboxService` (transactional enqueue, name grammar, 64 KiB payload bound,
+  optional producer-supplied id), `OutboxRelay` (claim with `FOR UPDATE SKIP LOCKED`, confirmed publish, exponential backoff up to 15 s,
+  batches of 50), `RabbitMqEventBus` (topic exchange, persistent messages, publisher confirms bounded at 5 s, prefetch, retry 3 × 5 s by
+  default, annotated dead letters, optional `deadLetterPolicy`), `InMemoryEventBus`, `InboxService` (unused by every service; the kit
+  migration creates its table), the `nawara-dlq`, `nawara-check-dlq` and `nawara-check-outbox-lag` CLIs, and the A12 messaging and outbox
+  metrics.
+- **Deterministic event ids:** Billing, File and Payment derive event ids (`deterministicEventId`), so a retried business operation
+  writes its event once (the outbox ignores the second row).
+- **Tests:** the kit's real-broker suites (`rabbitmq-dlq-retry`, the Stage 18.8 and 18.9 dead-letter policy and refused-copy suites, and
+  the other broker integration files made deterministic and self-cleaning by A15.3), each service's consumer suites, and the
+  cross-service packages under `test/`.
+
+## 2. Messaging architecture as implemented
+
+```text
+ producer: business transaction ─┬─ state change
+                                 └─ OutboxService.enqueue → outbox row
+           OutboxRelay ── claim (SKIP LOCKED) → publish with confirm → stamp publishedAt  (at least once)
+                                     │
+                                     ▼
+ RabbitMQ  nawara.events (topic, durable); routing key = event name; body = flat JSON payload;
+           properties messageId/type/timestamp; headers eventId, occurredAt, correlationId, source, version
+                                     │ bindings of each consumer queue Q
+                                     ▼
+ consumer: Q (x-dead-letter-exchange = nawara.events.dlx) ── handler → durable de-duplication + effect, one transaction → ack
+           transient failure → confirmed copy in Q.retry (expires back into Q), up to maxRetries
+           permanent / malformed / exhausted → confirmed annotated copy in Q.dead → ack
+           copy not confirmed: with a deadLetterPolicy → held, then requeued; without one → nack(requeue=false) → broker DLX
+           nawara.events.dlx (fanout) ──▶ every Q.dead in the vhost            (finding G7)
+ operator: nawara-dlq inspect / replay one message → the work queue of that .dead queue; nawara-check-dlq; nawara-check-outbox-lag
+```
+
+## 3. Findings
+
+| Id | Finding | Kind | Disposition |
+|---|---|---|---|
+| G1 | ADR-0018 names a client library no service uses and defers retry, dead letters and versioning, which the kit implements | records drift | reconciled by ADR-0057 and a forward note (A3M.1) |
+| G2 | ADR-0037 lists event families nobody emits and says Auth publishes fire-and-forget | records drift | reconciled by ADR-0057 and a forward note (A3M.1) |
+| G3 | The kit inbox is unused; every consumer de-duplicates with its own durable record | convention gap | OD-A3M-3; written in ADR-0057 §7; no table or migration change |
+| G4 | No event catalog outside audit events; nothing checks that a consumer binding matches a real producer | missing convention | OD-A3M-7; ADR-0057 §11; implemented in A3M.2 |
+| G5 | Versioning rule only in a code comment; only Notification refuses an unsupported version | missing convention | ADR-0057 §5; consumers adopt it in A3M.2 / A3M.3 |
+| G6′ | Queue names follow no pattern; production names are fixed by ADR-0053 | missing convention | ADR-0057 §9: new queues only |
+| G7 | The shared fanout dead-letter exchange may copy an unannotated original into every consumer's `.dead` queue when a consumer without a dead-letter policy cannot confirm its dead-letter copy | **potential defect, unverified** | OD-A3M-5; the proof of §7 follows A3M.1 |
+| G8 | S21-5: Payment, a producer, makes the broker a readiness dependency | pending alignment | OD-A3M-4; A3M.3 |
+| G9 | F12: published outbox rows and inbox rows are never deleted (except Auth's code-bearing rows) | retention | OD-A3M-6; A3M.5, off by default |
+| G10 | Ordering is not guaranteed and no convention says how consumers validate state | missing convention | ADR-0057 §7 |
+
+(G6′ is written with a prime so it is not confused with the production gate G6.)
+
+## 4. Owner decisions
+
+| Id | Decision | Conditions |
+|---|---|---|
+| OD-A3M-0 | **Approved:** the messaging substages are A3M.0 to A3M.8 | V2-A.3's A3.6 and A3.7 stay deferred (D-3, D-4) and are not A3M |
+| OD-A3M-1 | **Approved:** one canonical messaging ADR, ADR-0057, created **Proposed** | creating it is approved, accepting it is a separate explicit decision; it follows ADR-0046, 0049, 0052, 0053, 0056 |
+| OD-A3M-2 | **Approved:** ADR-0018 and ADR-0037 are reconciled with ADR-0057 by forward notes | their text and status are unchanged; neither is marked Accepted; their final disposition stays an explicit owner review |
+| OD-A3M-3 | **Approved** as the policy ADR-0057 proposes: domain-specific durable de-duplication is permitted; `InboxService` stays optional (in force as a convention only on ADR-0057's acceptance; ADR-0056 §7 stays binding until then, §6) | the identity includes the event id and a verified source; de-duplication and the business effect commit atomically; Audit's ADR-0049 requirements stay binding; no inbox table is removed and no migration is created in this phase |
+| OD-A3M-4 | **Approved:** an outbox-backed producer's readiness does not depend solely on temporary broker availability while durable local acceptance works | consumers keep reporting the broker through their existing readiness; messaging health is observed through the existing A12 metrics and operator tools; no new HTTP endpoint; Payment's alignment is later A3M work |
+| OD-A3M-5 | **Approved:** G7 stays an unverified potential defect until a deterministic multi-consumer broker test establishes it | if confirmed, prefer R1 (code only: remove the `nack(requeue=false)` fallback, use the bounded hold-and-requeue); keep message ownership, no cross-consumer dead-letter delivery; verify the reliability and liveness trade-offs before accepting the remedy; production topology unchanged; R2 / R3 need separate explicit authorization |
+| OD-A3M-6 | **Approved:** retention is designed off by default | Auth's `CodeEventPurge` stays an active security control; producer outbox retention is coordinated with consumer de-duplication retention and the longest deterministic-event-id re-emission period; no arbitrary durations; Audit record retention is not F12; activation in production is separately authorized |
+| OD-A3M-7 | **Approved:** per-service event catalogs and a repository guard | the guard checks consistency without cross-application source imports; no domain event contract in `libs/service-kit`; no shared event-contract library without its own architecture decision; catalogs and guard are A3M.2, not A3M.1 |
+
+**Unresolved A3M decisions before A3M.2:** none. Open owner decisions that do not block A3M.2: ADR-0057's acceptance (which is also
+what would put its broader de-duplication reading of ADR-0056 §7 in force, §6) and the dispositions of ADR-0018 and ADR-0037.
+
+## 5. Phases
+
+| Phase | Objective | Done when | Depends on | Risk | Authorization |
+|---|---|---|---|---|---|
+| A3M.0 | discovery | inventory, findings G1–G10 and the decision review owner-reviewed | – | – | read-only ✅ |
+| A3M.1 | records and policy | ADR-0057 (Proposed) states the current behaviour and the approved conventions; forward notes on ADR-0018 and ADR-0037; this record; the roadmap and the new-service checklist point at them; no code, test or guard change | A3M.0, OD-A3M-0 to -7 | low | local, documentation |
+| **G7 proof** | establish G7 | the deterministic multi-consumer broker test of §7 runs in isolation and its result (confirmed or refuted) is recorded | A3M.1 | low (test only) | local / CI; separately authorized |
+| A3M.2 | event contracts and versioning | a catalog in every producing and consuming service; a `check:repo` guard (every outbox name cataloged, every consumer binding matched by a cataloged producer and version) with negative controls; consumers check `version`; no payload or name changed | A3M.1 | low to medium (Billing's version check must accept today's version 1) | local |
+| A3M.3 | producer and consumer conventions | the ADR-0057 consumer rules applied (verified source, atomic de-duplication, `PermanentEventFailure` use, prefetch rule); Payment's readiness aligned with OD-A3M-4; existing queue names unchanged | A3M.1, A3M.2 | low | local (Payment is not deployed) |
+| A3M.4 | retry, dead letters, idempotency | G7 remedied if the proof confirmed it (R1, its reliability and liveness trade-offs verified with broker tests) or closed with evidence if refuted; the idempotency matrix recorded | G7 proof, OD-A3M-5 | medium (kit change; builds the Auth, Organization and Audit images on merge, deploys nothing) | local; topology change separate |
+| A3M.5 | outbox and de-duplication retention | a kit cleanup that is off by default, excludes Auth's code purge, and enforces the OD-A3M-6 ordering rule; proven locally | OD-A3M-6 | medium (data deletion) | local; activation separate |
+| A3M.6 | deterministic broker tests | the A3M suites in Core CI: topology, the G7 regression, version refusal, catalog consumers; self-cleaning (A15.3 rules), no retries | A3M.2 to A3M.5 | low | local / CI |
+| A3M.7 | local certification | the criteria of each phase met; boundaries of §9 unchanged; production untouched; certification pull request merged | A3M.1 to A3M.6 | low | local |
+| A3M.8 | production messaging | each item of §8, one authorization at a time | A3M.7 and owner authorization | high | **production** |
+
+```text
+A3M.0  discovery, decision review          ✅ complete (owner-reviewed)
+A3M.1  records and policy (ADR-0057)       implemented locally; pending review and merge
+G7     isolated broker proof               next technical safety checkpoint (not started)
+A3M.2  event contracts and versioning      not started
+A3M.3  producer and consumer conventions   not started
+A3M.4  retry, dead letters, idempotency    not started
+A3M.5  outbox and de-duplication retention not started
+A3M.6  deterministic broker tests          not started
+A3M.7  local certification                 not started
+A3M.8  production messaging                not started (separately authorized)
+```
+
+## 6. A3M.1: messaging records and policy (2026-10-08, local)
+
+- **Changes:** [ADR-0057](../adr/0057-messaging-conventions.md) (new, Proposed); forward notes in
+  [ADR-0018](../adr/0018-rabbitmq-as-async-message-broker.md) and [ADR-0037](../adr/0037-reliable-events-outbox-inbox.md) (text and status
+  otherwise unchanged); the [ADR index](../adr/README.md); this record; the [roadmap](../CORE-ROADMAP.md); one reference in the
+  [new-service checklist](../NEW-SERVICE-CHECKLIST.md) §8 (A15 is not reopened).
+- **What ADR-0057 does:** labels each rule **[CURRENT]** (what `main` does), **[NEW]** (approved for later A3M work) or **[OPEN]** (G7),
+  so it changes no behaviour. **De-duplication, kept apart:** (1) existing behaviour: Audit, Notification and Billing each de-duplicate
+  durably with their own record, and no service uses `InboxService` (§1); (2) binding today: the Accepted ADR-0056 §7 ("consumers (by
+  event id in an inbox)") and ADR-0049 §5, unchanged and not edited; (3) proposed: ADR-0057 §7's broader policy (a domain record whose
+  identity includes the event id and a verified source, committed atomically with the effect) and its reading of ADR-0056's "inbox" as
+  any such record; (4) **owner decision needed:** that reading takes effect only when the owner explicitly accepts ADR-0057 (or amends
+  ADR-0056). Proposed ADR-0057 does not override Accepted ADR-0056.
+- **Production:** none. Documentation only: Core CI, no image build, nothing deploys. No G6 dependency.
+
+## 7. G7 proof (next safety checkpoint, after A3M.1)
+
+Designed in the decision review; **not implemented and not run** in A3M.1.
+
+- **Harness:** a new `describeWithEnv` block next to the Stage 18.9 suite in `libs/service-kit/test/rabbitmq-dlq-retry.int-spec.ts`,
+  gated by `TEST_RABBITMQ_URL` and `TEST_RABBITMQ_MGMT_URL`; a unique exchange `nawara.events.g7<hex>`, so its `.dlx` is private to the
+  test.
+- **Consumers:** A (`q.g7a.<hex>`, binds `payment.#`, the handler always throws `PermanentEventFailure`, **no** dead-letter policy,
+  `maxRetries: 0`); bystander B (`q.g7b.<hex>`, binds `nomatch.#`, never handles anything, Audit-like redacting `deadLetterPolicy`).
+- **Fault:** the existing technique: a management policy `max-length: 0`, `overflow: reject-publish` on `A.dead` only, in force once a
+  probe publish to it is refused.
+- **Steps:** subscribe A and B; assert `B.dead` empty; apply the fault; publish one event with a marker field; wait (bounded) for the
+  `event_dead_lettered … annotated=false` notice; inspect `B.dead` with `basic.get` in a bounded loop.
+- **Verdict:** **confirmed** if `B.dead` holds the event (same `messageId`, the **raw** marker in the body, no `x-nawara-consumer`,
+  `x-death[0].queue = q.g7a.<hex>`), also recording that A's own `.dead` refused it; **refuted** if `B.dead` stays empty past the bound
+  after the notice.
+- **Controls:** A with a dead-letter policy (expected: deferred, `B.dead` empty); after any remedy, the confirming scenario must give
+  "deferred, `B.dead` empty, message still in A".
+- **Determinism:** bounded waits on notices and broker state only; every queue, exchange and policy deleted afterwards (A15.3).
+
+## 8. Production work, separately authorized
+
+None of this is A3M.1 to A3M.7; each item needs its own owner authorization under ADR-0053 and the `production` environment:
+
+- enabling `AUTH_EVENTS` in production (widens Auth's broker grant; gates Auth-triggered notifications, A8);
+- broker identities and grants for Notification, Billing and Payment when they are deployed;
+- any change to the production topology: the dead-letter exchange (R2, R3), exchange or queue names and arguments;
+- enabling outbox or de-duplication retention in a deployed service;
+- the [V2-A.3](core-v2-a-3-ci-and-ruleset.md) A3.6 and A3.7 items stay deferred (D-3, D-4) and are not part of A3M.
+
+G6 stays deferred; Final Core Validation stays the absolute last validation.
+
+## 9. Boundaries
+
+| Stage | Boundary |
+|---|---|
+| A4 Authentication | Auth's event emission, `AUTH_EVENTS` semantics and code purge are unchanged by A3M; Auth's convergence is A4 |
+| A5 Organization | no organization authority or ownership event is designed in A3M |
+| A7 Audit | the audit catalog, envelope validation and the redacting dead-letter policy stay ADR-0049's; A3M only checks they are respected |
+| A8 Notification | intake mappings and delivery semantics are A8's; A3M supplies the conventions it follows |
+| A10 Billing, A11 Payment | payment and billing event semantics are theirs; A3M adds the catalog, version check and readiness alignment only |
+| A12 Observability | A3M reuses the existing messaging and outbox metrics and CLIs; it adds no endpoint (OD-A3M-4) |
+| A13 Backup | audit record retention and backups are A13 and ADR-0049 §10; F12 is A3M.5 and stays off by default |
+
+## 10. Certification policy
+
+- A3M is certified by A3M.7, against the criteria of §5, on `main`, with green Core CI for every A3M pull request.
+- Evidence is reused, not repeated: merged pull-request checks, recorded local runs and the A15.3 deterministic broker suites. A broker
+  campaign runs only where a phase changes broker behaviour (the G7 proof, A3M.4, A3M.6), bounded and self-cleaning.
+- Certification is repository and local; it certifies nothing in production. Merge is not ADR acceptance (ADR README): ADR-0057's
+  acceptance is a separate owner decision.
