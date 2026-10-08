@@ -150,6 +150,36 @@ describeWithEnv('event intake: canonical event → durable intent (real PostgreS
       expect(await count('notification_delivery d JOIN notification n ON n.id = d."notificationId"', 'n."sourceEventId" = $1', [e.id])).toBe(1);
     });
 
+    it('V2 A3M.4 (F3): the same source and event id with a DIFFERENT payload is a duplicate: the first intent stays, nothing is overwritten', async () => {
+      const name = 'membership.approved';
+      const first = envelope(name, payloadFor(name, 'email'));
+      // the same event id and source, but another recipient, channel and destination: not a redelivery of the same content
+      const second: EventEnvelope = { ...structuredClone(first), payload: { ...payloadFor(name, 'phone'), organizationId: randomUUID() } };
+      expect(second.id).toBe(first.id);
+      expect(second.payload.userId).not.toBe(first.payload.userId);
+
+      expect((await t.intake.handle(structuredClone(first))).kind).toBe('accepted');
+      const stored = await rowsOf(first.id);
+      expect((await t.intake.handle(structuredClone(second))).kind).toBe('duplicate'); // classified by identity alone; no conflict signal
+      const after = await rowsOf(first.id);
+
+      // exactly one intent and one delivery, and they are the FIRST event's, byte for byte
+      expect(await count('notification', '"sourceEventId" = $1', [first.id])).toBe(1);
+      expect(after.d).toHaveLength(1);
+      expect(after.n).toEqual(stored.n);
+      expect(after.d).toEqual(stored.d);
+      expect(after.n).toMatchObject({ recipientId: first.payload.userId, organizationId: ORG });
+      expect(after.d[0]).toMatchObject({ channel: 'EMAIL', destination: EMAIL });
+
+      // the second payload under its OWN event id is an independent intent
+      const distinct = envelope(name, second.payload);
+      expect((await t.intake.handle(structuredClone(distinct))).kind).toBe('accepted');
+      const other = await rowsOf(distinct.id);
+      expect(other.n).toMatchObject({ recipientId: second.payload.userId, organizationId: second.payload.organizationId });
+      expect(other.d[0]).toMatchObject({ channel: 'SMS', destination: PHONE });
+      expect((await rowsOf(first.id)).n).toEqual(stored.n); // and the first is still untouched
+    });
+
     it('12 CONCURRENT copies of one event: one intent, one delivery, 11 duplicates, no error', async () => {
       const e = envelope('member.contact_verification_requested', payloadFor('member.contact_verification_requested', 'phone'));
       const outcomes = await Promise.all(Array.from({ length: 12 }, () => t.intake.handle(structuredClone(e))));

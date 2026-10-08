@@ -121,6 +121,9 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   `amq.default` (ADR-0053 §4). Integrity rests on each consumer's own facts (Billing applies an outcome only if it matches what Billing
   recorded through its authenticated calls) and on the rule above. Broker-enforced publisher identity (AMQP `user_id`, signing) would be
   new authentication infrastructure and needs its own decision (P-A1 / A14).
+- **[CURRENT]** The per-component idempotency matrix (event identity, atomicity, duplicates, failures, crash recovery, with the test
+  behind each row) and the open findings F1 to F7 are in the [A3M record](../architecture/core-v2-a3m-messaging.md) §13. Transport is
+  at least once; business effects are idempotent per consumer; an external notification send is never exactly once.
 - **Binding today (Accepted ADRs, unchanged by this ADR):** [ADR-0056](./0056-core-architecture-and-api-conventions.md) §7 states, as
   [CURRENT], that a consumer's idempotency contract is its de-duplication "by event id in an inbox"; ADR-0049 §5 requires Audit's
   `(sourceService, eventId)` uniqueness. Those texts govern until changed by an Accepted ADR.

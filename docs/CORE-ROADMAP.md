@@ -191,8 +191,8 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.1  records and policy (ADR-0057 Proposed) ✅ closed on main (PR #234)
   G7 proof  isolated dead-letter broker test   ✅ complete: G7 confirmed locally
   A3M.2  event contracts and versioning        ✅ closed on main (PR #236)
-  A3M.3  producer and consumer conventions     G11 fixed, S21-5 aligned: implemented locally; pending review and merge
-  A3M.4  retry, dead letters, idempotency      G7 remediation ✅ closed on main (PR #235); the rest of A3M.4 not started
+  A3M.3  producer and consumer conventions     ✅ closed on main (PR #237; G11 fixed, S21-5 aligned)
+  A3M.4  retry, dead letters, idempotency      G7 remediation ✅ (PR #235); idempotency matrix implemented locally; pending PR
   A3M.5  outbox / de-duplication retention     not started (off by default)
   A3M.6  deterministic broker tests            not started
   A3M.7  local certification                   not started
@@ -252,9 +252,11 @@ deferred A3.6 and A3.7): A3M.0 inventoried the messaging implementation and foun
 A3M.1 (documentation only, PR #234) added [ADR-0057](adr/0057-messaging-conventions.md), **Proposed**, which states the current
 conventions and reconciles ADR-0018 and ADR-0037 by forward notes. An isolated broker proof then **confirmed G7** (a cross-consumer
 dead-letter copy through the shared fanout exchange); its code remediation (A3M.4, R1) merged with PR #235, and the rest of A3M.4 is not
-started. A3M.2 (per-service event catalogs, a contract guard, Billing's version check) merged with PR #236. A3M.3 (pending its PR) proved
+started. A3M.2 (per-service event catalogs, a contract guard, Billing's version check) merged with PR #236. A3M.3 (PR #237) proved
 and fixed finding G11 (a forged message could claim a Payment event id in Billing and block the genuine outcome) and removed Payment's
-broker readiness dependency (S21-5). A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
+broker readiness dependency (S21-5). The rest of A3M.4 (pending its PR) records the idempotency matrix of every producer and consumer
+and the open findings F1 to F7; F1 (forged events to Notification) and F2 (Audit's first-writer residual) are **not resolved** and are
+security prerequisites to review before the corresponding production activation (P-A1 / A14, A7). A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
 retention activation) is separately authorized (A3M.8).
 
 ### Compatibility and safety rules for V1 work
