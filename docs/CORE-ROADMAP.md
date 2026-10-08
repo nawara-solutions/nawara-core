@@ -179,13 +179,24 @@ A2 Configuration & Secrets                     ✅ CERTIFIED / CLOSED (PR #228, 
   A2.4  hygiene, environment reference, rotation ✅ closed on main (PR #226)
   A2.5  repository guards                      ✅ closed on main (PR #227)
   A2.6  certification                          ✅ closed on main (PR #228)
-A15 Developer / Platform Experience            🔄 OPEN (certification prepared; certified and closed when its PR merges)
+A15 Developer / Platform Experience            ✅ CERTIFIED / CLOSED (PR #233, merge e2adc20)
   A15.0  discovery, owner decisions            ✅ complete (owner-reviewed)
   A15.1  generic CLI configuration hygiene     ✅ closed on main (PR #229)
   A15.2  developer path (guide, Node version)  ✅ closed on main (PR #230)
   A15.3  local environment, test determinism   ✅ closed on main (PR #231)
   A15.4  new-service checklist, localization   ✅ closed on main (PR #232)
-  A15.5  certification                         prepared (record §8); pull request pending
+  A15.5  certification                         ✅ closed on main (PR #233)
+A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
+  A3M.0  discovery, decision review            ✅ complete (owner-reviewed; OD-A3M-0 to OD-A3M-7 approved)
+  A3M.1  records and policy (ADR-0057 Proposed) implemented locally; pending review and merge
+  G7 proof  isolated dead-letter broker test   next safety checkpoint after A3M.1; not started
+  A3M.2  event contracts and versioning        not started
+  A3M.3  producer and consumer conventions     not started
+  A3M.4  retry, dead letters, idempotency      not started (G7 remedy if confirmed)
+  A3M.5  outbox / de-duplication retention     not started (off by default)
+  A3M.6  deterministic broker tests            not started
+  A3M.7  local certification                   not started
+  A3M.8  production messaging                  not started (each item separately authorized)
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -234,7 +245,14 @@ scope and decisions, A15.1 put the generic operator CLIs on the kit's configurat
 [developer guide](DEVELOPMENT.md) and declared Node 22 (PR #230), A15.3 made the infrastructure test suites deterministic (PR #231),
 and A15.4 added the [new-service checklist](NEW-SERVICE-CHECKLIST.md) and two repository guards (PR #232). The A15.5 certification
 (record §8) found no A15-owned blocker; **A15 is open until its certification PR is merged, and is certified and closed by that
-merge.** It is repository and local, with no production work and no G6 dependency.
+merge.** It is repository and local, with no production work and no G6 dependency. (The certification PR, #233, has since merged: A15
+is certified and closed.) **A3 Messaging** is open as **A3M**
+([record](architecture/core-v2-a3m-messaging.md); the substages are named A3M.0 to A3M.8 so they are never confused with V2-A.3's
+deferred A3.6 and A3.7): A3M.0 inventoried the messaging implementation and found G1–G10, and the owner approved OD-A3M-0 to OD-A3M-7.
+A3M.1 (documentation only, pending merge) adds [ADR-0057](adr/0057-messaging-conventions.md), **Proposed**, which states the current
+conventions and reconciles ADR-0018 and ADR-0037 by forward notes. The next safety checkpoint is an isolated broker proof of G7 (a
+possible cross-consumer dead-letter copy through the shared fanout exchange; unverified). A3M is local; every production messaging
+change (`AUTH_EVENTS`, broker identities, topology, retention activation) is separately authorized (A3M.8).
 
 ### Compatibility and safety rules for V1 work
 
@@ -478,3 +496,4 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A1: architecture (scope, A1.0 findings, owner decisions OD-A1-1 to OD-A1-6, the review of every Proposed ADR, A1 targets) | [`core-v2-a1-architecture.md`](architecture/core-v2-a1-architecture.md) |
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
 | V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene, A15.2 developer path, A15.3 test determinism, A15.4 conventions, the A15 certification) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
+| V2 A3M: messaging (A3M.0 inventory and findings G1–G10, owner decisions OD-A3M-0 to OD-A3M-7, the A3M.0 to A3M.8 phases, the G7 proof, A3M.1 records and policy) | [`core-v2-a3m-messaging.md`](architecture/core-v2-a3m-messaging.md) |

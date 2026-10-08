@@ -13,6 +13,12 @@
 > **Forward note (2026-09-27):** [ADR-0053](./0053-core-v1-production-rabbitmq.md) ends the "local-dev-only" deferral for production: one
 > private RabbitMQ node on the Core VPS (internal Docker network, no published port, no management UI), per-service least-privilege
 > identities, and audit-service deployed before any producer relays. The exchange and the routing-key convention are unchanged.
+
+> **Forward note (2026-10-08, Core V2 A3M.1):** [ADR-0057](./0057-messaging-conventions.md) (Proposed) states the current messaging
+> conventions and reconciles this ADR: the exchange `nawara.events`, the routing key (the event name, verbatim) and the flat body are
+> kept; the client library named here is no longer used (the kit's `RabbitMqEventBus`), and the retry, dead-letter and versioning
+> rules this ADR deferred are described there. This ADR's text and status are unchanged; its disposition is an explicit owner decision
+> (OD-A3M-2, [A3M record](../architecture/core-v2-a3m-messaging.md)).
 - **GitHub issue:** https://github.com/nawara-solutions/nawara-core/issues/17
 
 ## Context
