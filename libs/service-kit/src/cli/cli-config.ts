@@ -36,3 +36,13 @@ export function outboxDatabaseUrl(reader: EnvReader, flag: string | undefined): 
   if (url === undefined) throw new ConfigError('DATABASE_URL (or DATABASE_URL_FILE) is required');
   return url;
 }
+
+/**
+ * V2 A3M.5: the database of the manual outbox retention: `DATABASE_URL` (or `DATABASE_URL_FILE`) only. No argument can carry it (a
+ * credential on the command line is visible to other processes), and the CLI additionally checks the database's name.
+ */
+export function retentionDatabaseUrl(reader: EnvReader): string {
+  const url = reader.get('DATABASE_URL');
+  if (url === undefined) throw new ConfigError('DATABASE_URL (or DATABASE_URL_FILE) is required');
+  return url;
+}

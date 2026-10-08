@@ -7,8 +7,9 @@
   (R1 remediation, regression tests, one alert; **closed on `main`**: PR #235, merge `9c8d69caabdec32647c6bb11817b2c2d3decd02e`; §7) and
   of **A3M.2: event contracts and versioning** (**closed on `main`**: PR #236, merge `27d1f1c80a9a6ca3efb9bf7cf0657d335135cad4`; §11)
   and of **A3M.3: producer and consumer conventions, G11** (**closed on `main`**: PR #237, merge
-  `06e471aa2ed0dca41a8abe274ac406fb38cbf842`; §12) and of the **rest of A3M.4: the idempotency matrix** (**implemented locally,
-  pending review and merge**; §13). **A3M is OPEN.**
+  `06e471aa2ed0dca41a8abe274ac406fb38cbf842`; §12), of the **rest of A3M.4: the idempotency matrix** (**closed on `main`**: PR #239,
+  merge `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724`; §13) and of **A3M.5: outbox and de-duplication retention** (**implemented
+  locally, pending review and merge**; §14). **A3M is OPEN.** No retention cleanup runs anywhere.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -120,9 +121,8 @@ A3M.1  records and policy (ADR-0057)       ✅ closed on main (PR #234, merge 38
 G7     isolated broker proof               ✅ G7 confirmed locally (§7)
 A3M.2  event contracts and versioning      ✅ closed on main (PR #236, merge 27d1f1c)
 A3M.3  producer and consumer conventions   ✅ closed on main (PR #237, merge 06e471a; G11 fixed, S21-5 aligned)
-A3M.4  retry, dead letters, idempotency    G7 slice ✅ closed on main (PR #235); the idempotency matrix and its evidence (§13)
-                                           implemented locally; pending review and merge
-A3M.5  outbox and de-duplication retention not started
+A3M.4  retry, dead letters, idempotency    ✅ closed on main (G7 slice PR #235; idempotency matrix PR #239, merge 4c07643)
+A3M.5  outbox and de-duplication retention policy and manual dry-run-first CLI: implemented locally; pending review and merge (§14)
 A3M.6  deterministic broker tests          not started
 A3M.7  local certification                 not started
 A3M.8  production messaging                not started (separately authorized)
@@ -332,7 +332,7 @@ terminating what is left, and report leaks); PR #237 is unchanged and is re-run 
   data, loopback port, throwaway credential), removed afterwards; containers, networks and volumes compared before and after: unchanged.
 - **Production:** none. Billing and Payment have no image workflow and no production database; nothing deploys.
 
-## 13. A3M.4: idempotency matrix and evidence (2026-10-08, local)
+## 13. A3M.4: idempotency matrix and evidence (2026-10-08; closed on `main`, PR #239, merge `4c07643`)
 
 - **Owner decisions:** OD-A3M4-1 = the rest of A3M.4 is closed by this matrix and existing evidence, with no runtime change;
   OD-A3M4-2 = A (one focused Notification test for F3); OD-A3M4-3 = the stale kit comments wait for the next kit change;
@@ -402,3 +402,120 @@ F1 and F2 are **not resolved** by A3M.4; they are recorded so that no production
 - **Reused, not rerun:** every other row of §13.1 to §13.3 points at an existing test that ran green in Core CI on `main` at `06e471a`
   (PR #235 G7, PR #236 contracts, PR #237 G11, PR #238 R11).
 - **Production:** none. Documentation and one Notification test: Core CI only, no image build, nothing deploys.
+
+## 14. A3M.5: outbox and de-duplication retention (2026-10-08, local)
+
+- **Owner decisions:** OD-A3M5-1 = B (the retention policy plus a manually invoked, dry-run-first CLI); OD-A3M5-2 = every Billing
+  payment receipt is kept, non-applied outcomes included; OD-A3M5-3 = Notification intents, deliveries and attempts are kept;
+  OD-A3M5-4 = the `publishedAt` index migration is deferred; OD-A3M5-5 = no built-in age, an explicit one is required;
+  OD-A3M5-6 = the deterministic-id producers are verified before anything of theirs is eligible.
+- **Status in one line:** a CLI capability exists; **it runs nowhere**, nothing schedules it, no duration is chosen, and running it
+  against any real database needs a separate, explicit authorization.
+
+### 14.1 Why consumer records are kept
+
+A duplicate effect needs an event to arrive again after its consumer has forgotten it. Three things can deliver an event again: the
+relay (never: it does not re-read a row it stamped published), a producer writing the same id again (below), and the broker with an
+operator: a dead-lettered message is kept until someone replays it, with its original id, at any later time. That last horizon has no
+bound, so **no safe deletion horizon exists for a consumer's de-duplication record**. Deleting one of Billing's applied receipts would
+release its event id; deleting a Notification intent would let a replayed event create a second intent and a second external send.
+
+### 14.2 Retention policy
+
+| Data | Decision | Reason |
+|---|---|---|
+| Unpublished outbox rows | **KEEP, always** | the only copy of an undelivered event |
+| Published outbox rows with a random (version 4) id, **of an approved service** (auth-service, organization-service) | may be deleted **manually**, older than an explicit age | the relay never re-reads them; these services let the outbox generate their ids, so no row is what stops an event being written twice; every consumer keeps its own record |
+| Published outbox rows of any other service | **KEEP** (the CLI refuses the service) | not reviewed for retention |
+| Published outbox rows with a derived (version 5) id | **KEEP** (protected by the CLI, no option includes them) | the row is what stops a repeated operation from publishing the id again (§14.3) |
+| Auth code-bearing outbox rows | unchanged: `CodeEventPurge`, always on, no switch | security control (ADR-0052 decision 5), not retention |
+| Billing `payment_event_receipt`, applied and non-applied | **KEEP** | de-duplication record and commercial evidence; append-only by trigger; its retention is a legal decision (retention register) |
+| Notification intents, deliveries, attempts | **KEEP** | de-duplication record, the evidence the provider-ambiguity rules need, and personal-data history whose retention is a product / legal decision |
+| Audit records | unchanged: the Audit retention CLI, its own role and its owner-written policy | ADR-0049 §10 / A13; never A3M |
+| Broker dead letters | **KEEP** until an operator inspects and replays them | runbook; never purged unseen |
+| Kit `inbox` | nothing: no service writes to it | – |
+
+### 14.3 Producers that derive their event id (OD-A3M5-6)
+
+| Producer | Can the same id be written again once its published row is gone? | Consumer evidence | Eligible |
+|---|---|---|---|
+| payment-service, `payment.*` and its audit events | not found: each event is written in the transaction of a one-way, state-guarded transition (create is an insert on a unique request id; cancel, succeed, fail and expire check the state under a row lock) | Billing's applied receipts (kept) | **no (protected)**: safe by analysis, but making it eligible is a separate decision |
+| billing-service, `invoice.created` | not found: only on `draft -> open`, a re-issue of an open invoice returns without writing | no Core consumer | **no (protected)** |
+| billing-service, audit events | **not proven**: twelve call sites, ids from `(resource, action[, identity])`; not every action was shown to happen once per resource | Audit records (kept by Audit's own policy) | **no (protected)** |
+| file-service, audit events | **yes**: `file.integrity_incident` uses one id per file and reason and is recorded on every detection (a download check or a reconcile run), so the outbox row is what collapses repeats into one event; after a deletion a repeat would be published again, and Audit would see an exact duplicate or an `event_id_conflict` dead letter (the detector differs) | Audit records | **no (protected)** |
+| release-service, audit events | not found: written only when a release is really created or changed; the policy change carries its version in the id | Audit records | **no (protected)** |
+| auth-service domain and audit events, organization-service audit events | random ids: the outbox row is never what prevents a second event | Notification intents, Audit records (kept) | **yes**, the only eligible rows |
+
+**Eligibility is all four together: an approved service AND a version-4 id AND published AND older than the explicitly selected age.**
+
+- **A version-4 id is not in itself evidence of safety.** The outbox accepts any id a caller supplies, and the audit writer any
+  well-formed uuid: a producer could supply a *stable* version-4 id (a row's own key, say) and rely on the outbox to write a repeated
+  operation's event once. Deleting that row would remove a real guarantee, and nothing in the database tells such an id from a
+  generated one (the retention test suite shows it).
+- **So eligibility is also a reviewed list,** `OUTBOX_RETENTION_VERIFIED_SERVICES` in the kit: exactly auth-service and
+  organization-service, the two services verified to let the outbox generate every event id. Every other service is refused, with no
+  option that widens the list.
+- **`check:repo` keeps the list honest** (`checkOutboxRetentionEligibility`): the kit's list must equal the approved one; the CLI must
+  require `--service`, check the database owner and have no bypass; an approved service's source may not use `deterministicEventId`,
+  supply an `id` to `.enqueue`, build an `eventId`, or pass a spread object to those calls. It reads syntax and is **not a proof of
+  every data flow** (an `id` placed in an event object built elsewhere and passed in a variable is not seen): **a producer that changes
+  how it makes its event ids needs a retention-safety review**, and its removal from the list first.
+- Making any derived-id producer, or any further service, eligible is an **open architecture decision**, not an option of the CLI.
+
+### 14.4 The CLI (`nawara-outbox-retention`, in the kit)
+
+- **Manual only.** No scheduler, no worker, no service starts it. `libs/service-kit/src/cli/outbox-retention.ts` over
+  `src/events/outbox-retention.ts`.
+- **Scope is explicit.** One service database per run. `--service <name>` is required (a dry run included) and must be on the reviewed
+  list, or the run is refused before a connection is opened. `DATABASE_URL` (or `DATABASE_URL_FILE`) comes through the kit's
+  `EnvReader` (both together refused; no argument carries a URL). `--database <name>` is required and must equal the database the
+  connection really opens.
+- **The service is tied to the database, not trusted.** A `--service` argument is an operator's statement, **not an authenticated
+  identity**. What binds it is a database fact: the database must be **owned by the role provisioned for that service**
+  (`<svc>_migrator`, ADR-0032: `infra/postgres/init/01-service-databases.sh` and the provisioning scripts), which a runtime role cannot
+  change. A mismatch, or a database not provisioned that way, is refused before anything is read (fail closed). **Limit:** this proves
+  the database was provisioned for the service, not who is running the command; and an installation whose database predates that
+  layout (the Auth deploy script mentions such installs) is refused until its ownership is aligned, which is the intended outcome.
+- **No default age.** `--older-than` is required (`30d`, `12h`, `45m`).
+- **Dry run unless `--apply`.** A dry run prints counts and deletes nothing.
+- **What it deletes:** rows with `publishedAt` set, published before the cutoff, with a random id; oldest first.
+- **Bounded:** `--batch-size` (default 500, at most 5000) and `--max-batches` (default 20, at most 1000); each batch is one statement that
+  locks only what it deletes and skips rows another session holds (`FOR UPDATE SKIP LOCKED`), so it never waits for the relay or for
+  Auth's purge. It says when it stopped at its limit; the next manual run continues.
+- **Output:** counts only (`eligible`, `protectedDeterministic`, `retainedRecent`, `unpublished`, the oldest eligible age, `deleted`,
+  `batches`, `more`): never an event id, a name, a payload, an error text or a connection string.
+- **Exit codes:** 0 done; 1 the run failed (nothing is retried); 2 refused arguments or configuration, decided before any connection.
+- **Not built:** an index on `publishedAt` (OD-A3M5-4): the eligibility scan reads the table, which is acceptable for a manual run on
+  today's sizes; a kit migration would reach every service database, the production ones at their next authorized migration.
+
+### 14.5 Evidence (local, one disposable PostgreSQL, removed afterwards; Docker state unchanged)
+
+- `libs/service-kit/test/outbox-retention.int-spec.ts`, 12 passed, with the built CLI: unpublished, recent and derived-id rows are
+  never deleted, even at a one-minute age; a dry run reports counts and changes nothing; `--apply` deletes exactly the eligible rows;
+  a missing or malformed age, a missing, malformed or wrong database name, a `--database-url` argument, out-of-range batch settings, a
+  repeated argument and `DATABASE_URL` with `DATABASE_URL_FILE` are each refused with exit 2, nothing deleted; a row held by another
+  session is skipped without waiting, that session can still delete it, and a later run finds nothing; batch limits hold and a second
+  run continues; a database failure exits 1 with no value printed; no output contains a payload, an event name, a password or a
+  connection string.
+- **Allowlist and identity:** only auth-service and organization-service are accepted; a missing service and ten other names (the six
+  other Core services included) are refused before any connection (proved with a closed port); `--all-services`,
+  `--include-deterministic` and `--force` are refused; an approved name on a database owned by another service's role, and on a database
+  with no provisioned owner, is refused with nothing deleted.
+- **Ids:** versions 5, 7, 1 and 3, the nil uuid and an all-ones uuid are protected, with `--apply`; only the version-4 row is deleted.
+- **The limitation, shown on purpose:** a version-4 id *supplied* by a caller is deleted, and the same operation then writes the id
+  again, unpublished: the reason for the service list and the repository guard.
+- `test:repo` 128 passed: the guard's fixtures (an approved producer supplying an id at the call, through the audit writer or in an
+  options object, passing a spread, or using `deterministicEventId`; an extra, a missing or a non-literal list; a CLI that no longer
+  requires or checks `--service`, lost the owner check, gained a bypass; a widened id rule) and the one flow it does not see.
+- Auth's own purge tests (`apps/auth-service/test/domain-events-outbox.e2e-spec.ts`, 11 passed) run unchanged; Auth's code is untouched.
+- Kit unit suite 514 passed; the new CLI is in the `EnvReader` CLI guard; `check:repo`; typecheck and lint.
+- **Unchanged controls:** Auth `CodeEventPurge`, the Audit retention CLI and policy, Billing's append-only receipts, Notification's
+  workers. No migration, no topology or grant change.
+
+### 14.6 Still open
+
+- The age to use, per service: an owner decision (forensics and replay), none is suggested here.
+- Eligibility of the derived-id producers, and of any service beyond the two approved (§14.3): a separate architecture decision, after
+  a retention-safety review.
+- Billing receipts and Notification history: legal and product decisions (retention register).
+- The `publishedAt` index, and any scheduling or run against a real database: separately authorized.

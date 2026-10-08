@@ -2502,10 +2502,10 @@ This section is the **current** register at the close of Phase C.
 
 | Data | Status | Safe-deletion condition (when a duration exists) | Owner |
 |---|---|---|---|
-| Published outbox rows | TECHNICALLY SAFE BUT POLICY OPEN | `publishedAt` set and older than the replay / forensics horizon (the relay reads unpublished rows only) | SRE |
+| Published outbox rows | TECHNICALLY SAFE BUT POLICY OPEN | `publishedAt` set and older than the replay / forensics horizon (the relay reads unpublished rows only). **2026-10-08 (V2 A3M.5):** a manual, dry-run-first `nawara-outbox-retention` CLI exists for rows with a random id only (a derived id is protected); no duration is chosen and it runs nowhere ([A3M record](core-v2-a3m-messaging.md) §14) | SRE |
 | Unpublished outbox rows | DECIDED: never deleted | – | – |
 | Kit `inbox` | DECIDED: not used by any consumer today; a horizon is needed only when one adopts it | after the broker can no longer redeliver that id | SRE |
-| `payment_event_receipt`, `billing_transition` (commercial evidence) | LEGAL DECISION | a legal retention period, then archival; append-only today | legal |
+| `payment_event_receipt` (applied and, since V2 A3M.3, non-applied receipts; kept by V2 A3M.5), `billing_transition` (commercial evidence) | LEGAL DECISION | a legal retention period, then archival; append-only today | legal |
 | Invoices, payment requests, payments, attempts, subscriptions | LEGAL DECISION (B-032, O-17) | never by a technical job | legal / product |
 | Payment `idempotency_key` | TECHNICALLY SAFE BUT POLICY OPEN (D1) | `expiresAt < now()` (24 h configured). Today `expiresAt` is written, never read: an old key replays (stricter than the SDD, safe) | engineering |
 | Organization `idempotency_key` | PRODUCT DECISION | no expiry column and no retry horizon yet | product / API |

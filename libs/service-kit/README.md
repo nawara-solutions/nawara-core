@@ -218,6 +218,21 @@ when the check itself fails (connect is bounded at 10 s). Retries stay unlimited
 has been retrying for a long time, not a brief broker blip. `nawara-migrate` prints a line when it has to wait for another runner's
 migration lock (the wait itself is unchanged).
 
+**Manual outbox retention (V2 A3M.5).** `DATABASE_URL=<url> nawara-outbox-retention --service <name> --database <name> --older-than <age>`
+(or `DATABASE_URL_FILE=<path>`; an age is a whole number and a unit: `30d`, `12h`, `45m`) is a **dry run**: it prints counts
+(`eligible`, `protectedDeterministic`, `retainedRecent`, `unpublished`) and deletes nothing. Adding `--apply` deletes the eligible rows
+in bounded batches (`--batch-size`, default 500; `--max-batches`, default 20), skipping any row another session holds. **Eligible means
+all of: an approved service, a random (version 4) id, published, and older than the age.** The approved services are
+`OUTBOX_RETENTION_VERIFIED_SERVICES` (auth-service and organization-service): every other service is refused, dry run included, and no
+option widens the list. `--service` is an operator's statement, not an authenticated identity: the command also requires the database
+to be owned by the role provisioned for that service (`<svc>_migrator`, ADR-0032) and refuses any other database. An unpublished row is
+never deleted, and neither is a row whose id is not version 4 (a derived version 5 in particular). A version-4 id is not by itself
+proof of safety: a service is approved because the outbox generates its ids, `check:repo` refuses an approved service that supplies or
+derives one, and a producer that changes how it makes event ids needs a retention-safety review. There is **no default age**,
+`--database` must name the database the connection really opens, and no argument carries a URL. Nothing schedules this command and no service runs it; running it against a real database is a separately
+authorized operation. Exit `0` done, `1` the run failed (nothing is retried), `2` refused arguments or configuration. Output is counts
+only. Consumer de-duplication records (Billing receipts, Notification intents, Audit records) are never touched by it.
+
 **Operator CLI configuration (V2 A15.1).** `nawara-migrate`, `nawara-dlq`, `nawara-check-dlq` and `nawara-check-outbox-lag` read their
 connection settings through the kit's `EnvReader`, like the services: surrounding whitespace is removed, a blank value is unset, a
 setting may be given as `NAME` or as `NAME_FILE` (a mounted secret), and both together are refused. `nawara-migrate` uses

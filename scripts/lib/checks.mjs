@@ -1775,6 +1775,7 @@ export const ENV_READER_CLIS = [
   'libs/service-kit/src/cli/dlq.ts',
   'libs/service-kit/src/cli/check-dlq-depth.ts',
   'libs/service-kit/src/cli/check-outbox-lag.ts',
+  'libs/service-kit/src/cli/outbox-retention.ts',
   'apps/notification-service/src/cli/secret-keys.ts',
   'apps/audit-service/src/cli/retention.ts',
 ];
@@ -1994,6 +1995,84 @@ export function checkEventContracts(contracts, required) {
       for (const [name, req] of Object.entries(e.requires)) {
         const why = incompatibility(req, producer.event.payload?.[name]);
         if (why) problems.push(`${at}: the required field ${name} ${why}`);
+      }
+    }
+  }
+  return problems;
+}
+
+/**
+ * V2 A3M.5 (A3M record §14): the manual outbox retention deletes only rows of a service on the kit's reviewed list
+ * (`OUTBOX_RETENTION_VERIFIED_SERVICES`), and only rows with a random id. A random id is safe to delete only because the OUTBOX generated
+ * it: a producer that supplies or derives its event id relies on the outbox row to write a repeated operation's event once. This guard
+ * keeps the list honest:
+ * - the kit's list is exactly the approved one here (adding a service is a reviewed change in both places);
+ * - the CLI requires `--service`, checks it against that list and has no option that widens the scope;
+ * - an approved service's (non-test) source never derives an event id (`deterministicEventId`) and never supplies one: no `id` property in
+ *   the event passed to `.enqueue(...)`, no `eventId` property built anywhere, no spread object at those calls.
+ * Limits: this reads syntax. It is not a proof of every possible data flow: an `id` put into an event object that is built elsewhere and
+ * passed to `.enqueue` in a variable is not seen. A producer that changes how it makes its
+ * event ids needs a retention-safety review; the guard catches the direct forms, the review covers the rest.
+ */
+export const OUTBOX_RETENTION_APPROVED_SERVICES = ['auth-service', 'organization-service'];
+const RETENTION_CORE = 'libs/service-kit/src/events/outbox-retention.ts';
+const RETENTION_CLI = 'libs/service-kit/src/cli/outbox-retention.ts';
+const RETENTION_BYPASS = /--all-services|--include-deterministic|--any-service|--force\b/;
+
+/** The ways one source file supplies or derives an outbox event id, as short descriptions (empty when it does neither). */
+export function outboxIdSources(relPath, text) {
+  const sf = ts.createSourceFile(relPath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const found = [];
+  const at = (node) => `line ${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}`;
+  const propertyNamed = (obj, name) => obj.properties.some((p) => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && p.name && p.name.getText(sf) === name);
+  const visit = (node) => {
+    if (ts.isIdentifier(node) && node.text === 'deterministicEventId') found.push(`${at(node)}: uses deterministicEventId (a derived event id)`);
+    // Anywhere, not only at the call: an options object built first and passed on is caught too.
+    if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && node.name.getText(sf) === 'eventId') {
+      found.push(`${at(node)}: builds an eventId (an event id supplied to the audit writer)`);
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const method = node.expression.name.text;
+      for (const arg of node.arguments) {
+        if (!ts.isObjectLiteralExpression(arg)) continue;
+        if (method === 'enqueue' && propertyNamed(arg, 'id')) found.push(`${at(arg)}: supplies an id to the outbox (.enqueue({ id }))`);
+        if ((method === 'enqueue' || method === 'write') && arg.properties.some((p) => ts.isSpreadAssignment(p))) {
+          found.push(`${at(arg)}: passes a spread object to .${method}(...); an id inside it cannot be ruled out`);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/**
+ * `kit`: { core, cli } source texts of the retention module and its CLI. `serviceSources`: approved service -> { relPath: text } of its
+ * non-test source.
+ */
+export function checkOutboxRetentionEligibility(kit, serviceSources) {
+  const problems = [];
+  if (kit?.core === undefined || kit?.cli === undefined) return [`${RETENTION_CORE} or ${RETENTION_CLI} is missing; update the outbox retention guard if they moved`];
+  const m = /OUTBOX_RETENTION_VERIFIED_SERVICES\s*=\s*\[([^\]]*)\]\s*as const/.exec(kit.core);
+  const listed = m ? [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]) : undefined;
+  if (listed === undefined) problems.push(`${RETENTION_CORE}: OUTBOX_RETENTION_VERIFIED_SERVICES must be a literal list (\`[...] as const\`) so the reviewed services can be read`);
+  else if (listed.join('|') !== OUTBOX_RETENTION_APPROVED_SERVICES.join('|')) {
+    problems.push(`${RETENTION_CORE}: OUTBOX_RETENTION_VERIFIED_SERVICES is [${listed.join(', ')}] but the approved list is [${OUTBOX_RETENTION_APPROVED_SERVICES.join(', ')}]: a service becomes eligible for outbox retention only after a retention-safety review (A3M record §14), recorded in both places`);
+  }
+  if (!/--service <name> is required/.test(kit.cli) || !/isRetentionService\(service\)/.test(kit.cli)) {
+    problems.push(`${RETENTION_CLI}: must require --service and check it against OUTBOX_RETENTION_VERIFIED_SERVICES before opening a connection`);
+  }
+  if (!/retentionDatabaseOwner\(args\.service\)/.test(kit.cli)) problems.push(`${RETENTION_CLI}: must check that the database is owned by the role provisioned for --service (ADR-0032)`);
+  const bypass = RETENTION_BYPASS.exec(kit.cli) ?? RETENTION_BYPASS.exec(kit.core);
+  if (bypass) problems.push(`${RETENTION_CLI}: has an option that widens the retention scope (${bypass[0]}); none is allowed`);
+  if (!/substring\(id::text from 15 for 1\) = '4'/.test(kit.core)) problems.push(`${RETENTION_CORE}: eligibility must stay restricted to random (version 4) ids`);
+  for (const service of OUTBOX_RETENTION_APPROVED_SERVICES) {
+    const sources = serviceSources?.[service];
+    if (!sources || Object.keys(sources).length === 0) { problems.push(`apps/${service}/src was not found: an approved outbox-retention service must exist and be checked`); continue; }
+    for (const [relPath, text] of Object.entries(sources)) {
+      for (const why of outboxIdSources(relPath, text)) {
+        problems.push(`${relPath}: ${why}. ${service} is approved for outbox retention because the outbox generates its event ids; a supplied or derived id needs a retention-safety review and the service's removal from the approved list first (A3M record §14)`);
       }
     }
   }

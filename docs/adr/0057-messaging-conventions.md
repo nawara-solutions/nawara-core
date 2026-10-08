@@ -187,6 +187,16 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   de-duplication retention is never shorter than the producer's: deleting a published row while its business operation can still be
   retried would publish the event again, and only the consumer's de-duplication record would stop the duplicate. No duration is chosen
   here; durations follow the retention / RPO decision (production-readiness §3). Audit record retention is ADR-0049 §10 and A13, never F12.
+- **[CURRENT]** (A3M.5) Consumer de-duplication records are **kept**: a dead-lettered message can be replayed at any later time, so no
+  safe deletion horizon exists for them (Billing receipts, Notification intents, Audit records each stay under their own rules). The
+  only cleanup that exists is manual: `nawara-outbox-retention`, a dry run unless `--apply`. A row is eligible only when **all** of
+  these hold: its service is on the reviewed list (auth-service and organization-service, deny by default), its id is a random
+  version-4 uuid, it is published, and it is older than an age the operator must give (no duration is selected here). The `--service`
+  argument is an assertion, not authenticated publisher identity: the CLI ties it to the database through the owner role ADR-0032
+  provisions. A version-4 id is not in itself evidence of deletion safety (a producer could supply a stable one), so a producer that
+  changes how it makes its event ids needs a retention-safety review; `check:repo` catches the direct forms. Nothing schedules the
+  command and no automatic cleanup exists; every deletion on a real database is separately authorized
+  ([A3M record](../architecture/core-v2-a3m-messaging.md) §14).
 
 ### 11. Event catalogs (OD-A3M-7)
 
