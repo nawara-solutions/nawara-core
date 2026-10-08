@@ -55,6 +55,27 @@ explicit, owner-authorized production mutation
    ```
 
    On `REFUSED`, do not deploy: correct the `.env` (or regenerate the value the way `provision-and-deploy.sh` does) and run it again.
+
+   **From A4.8 on, the candidate image carries the check as a command** (`dist/cli/check-config.js`, the service's own loader, every
+   setting and key rule including the JWT key ring; no network, no database, nothing generated or written). It prints one line,
+   `configuration valid; JWT: <mode and key counts>` or `configuration invalid: <rule>`, never a value or a ring id, and exits 1 on a
+   refusal. The deploy script runs exactly this before any migration; running it first on the server shows the result without
+   dispatching:
+
+   ```bash
+   docker run --rm --network none --env-file "$HOME/nawara-core/auth-service/.env" --entrypoint node "$NEW" dist/cli/check-config.js
+   ```
+
+   The earlier `loadConfig` snippet stays for a candidate image older than A4.8 (it has no `check-config.js`).
+
+   **Compatibility review before the first deployment of an A4 image** (A4 record §11; every Auth change since the last automatic
+   deployment ships together): the check passes on the server's `.env` (strict parsing: exact `NODE_ENV`, `AUTH_EVENTS` `on` / `off`,
+   `REQUIRE_CONTACT_VERIFICATION` `true` / `false`, no published development key, the runtime database role); no variable is set both
+   as `NAME` and `NAME_FILE`; `TRUST_PROXY=true` still means one hop; unknown or stale keys (`PAYMENT_SERVICE_*`) stay ignored; the
+   existing `JWT_SECRET` is accepted unchanged (`JWT: legacy only`); `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGINS` keep the production values.
+   A names-only audit of the server `.env`, run by the owner: `sed 's/=.*//' "$HOME/nawara-core/auth-service/.env" | sort`, never the
+   values. JWT key changes follow the [rotation runbook](secret-rotation.md) §4: one owner-authorized deploy per step, never a
+   `docker restart` (it does not apply an edited `.env`).
 2. Dispatch:
 
    ```bash
@@ -65,9 +86,11 @@ explicit, owner-authorized production mutation
 4. The run refuses, before any approval and before any SSH (in `verify`): a malformed digest; a digest not in the auth-service repository; an image without the revision label
    (every image built before V2-A.2, OD-3); a revision that is not an ancestor of `main` (pull-request builds such as `:develop`); a
    confirmation other than exactly `deploy auth-service` (the job is skipped).
-5. The server side is the unchanged `provision-and-deploy.sh` from that same image: its pre-checks (rotation journal, broker, networks,
-   the ADR-0053 audit-binding ordering rule), migrations before the running service is touched, the previous container retained as
-   `nawara-core-auth-service-previous-<timestamp>`, and the health gate that restores the previous container on failure.
+5. The server side is `apps/auth-service/deploy/provision-and-deploy.sh` from that same image: its pre-checks (rotation journal,
+   broker, networks, the ADR-0053 audit-binding ordering rule); from A4.8 on, the `.env` completed (the legacy `JWT_SECRET` generated
+   only when no JWT key variable of any form is present) and the configuration check above **before any migration** (a refusal stops
+   the deploy: no migration, the running service untouched); migrations before the running service is touched; the previous container
+   retained as `nawara-core-auth-service-previous-<timestamp>`; and the health gate that restores the previous container on failure.
 
 **Approval (V2-A.3 / A3.5).** The production job of this workflow is bound to the protected GitHub environment `production`. After the
 dispatch the run **waits**: approve it in GitHub (the run → **Review deployments** → `production` → **Approve and deploy**). Only then
@@ -86,6 +109,10 @@ exist and are readable by a workflow that does not declare the environment.
   through the workflow (OD-3). Use the retained-container procedure (rename a `-previous-*` container back) or a separately
   owner-authorized emergency procedure.
 - Migrations are forward-only: a container rollback does not undo an applied migration.
+- **JWT keys (ADR-0058).** A retained container runs the keys and the active key **it was created with**; an image older than A4.7
+  cannot verify ring-signed tokens; an image older than A4.8 brings its own deploy script, which regenerates `JWT_SECRET` when it is
+  absent. Once a JWT key ring is configured, deploy only images from A4.8 on and check the limits in the
+  [rotation runbook](secret-rotation.md) §4.6 and §4.11 before any rollback.
 
 ## 4. The transition merge (one time)
 

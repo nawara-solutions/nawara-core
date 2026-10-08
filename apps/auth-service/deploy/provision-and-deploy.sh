@@ -50,6 +50,21 @@ mkdir -p "$DIR"; chmod 700 "$DIR"
 # AUTH_APP_PASSWORD to the role, which in the middle of a rotation may not be the password .env holds.
 [ ! -e "$DIR/.rotation-journal" ] \
   || die "an auth_app credential rotation was interrupted ($DIR/.rotation-journal): re-run auth-db-credential-rotate.yml to finish it before deploying; nothing was changed"
+# V2 A4.8 (ADR-0058): Docker's --env-file decides what a JWT key line means, so each JWT variable must be one plain `NAME=value` line at
+# the start of a line, at most once. Leading whitespace, `export`, spaces before `=`, a bare name (Docker would take its value from this
+# shell) or a second declaration (only one would take effect) is refused here, before anything changes, and never repaired. Only line
+# numbers and names are reported, never a value. Editing procedure: docs/runbooks/secret-rotation.md §4.2.1.
+JWT_VARS='JWT_(SECRET|SIGNING_KEYS|ACTIVE_KEY_ID)(_FILE)?'
+if [ -f "$APP_ENV" ]; then
+  bad=$({ grep -nE "^[[:space:]]*(export[[:space:]]+)?${JWT_VARS}[[:space:]]*(=|\$)" "$APP_ENV" || true; } \
+    | { grep -vE "^[0-9]+:${JWT_VARS}=" || true; } | cut -d: -f1 | tr '\n' ' ')
+  [ -z "$bad" ] \
+    || die "$APP_ENV: malformed JWT declaration on line(s) ${bad% }: each JWT variable must be one NAME=value line at the start of a line (no whitespace, no export, no space before =); nothing was changed"
+  for n in JWT_SECRET JWT_SECRET_FILE JWT_SIGNING_KEYS JWT_SIGNING_KEYS_FILE JWT_ACTIVE_KEY_ID JWT_ACTIVE_KEY_ID_FILE; do
+    [ "$(grep -c "^$n=" "$APP_ENV" || true)" -le 1 ] \
+      || die "$APP_ENV declares $n more than once: keep exactly one line per JWT variable (docs/runbooks/secret-rotation.md §4.2.1); nothing was changed"
+  done
+fi
 # Stage 18.7.5: the central audit relay publishes Auth's audit evidence to RabbitMQ, and the service refuses to start in production
 # without RABBITMQ_URL (independent of AUTH_EVENTS). Checked BEFORE anything is migrated or stopped, so a missing broker can never turn
 # a deploy into an outage. Sources, first found wins and is never echoed: RABBITMQ_URL on the deploy command, "$APP_ENV", or (ADR-0053)
@@ -99,45 +114,12 @@ PGPASS=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$DB_ENV")
 psql_db() { docker exec "$DB" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDB" "$@"; }
 psql_stdin() { docker exec -i "$DB" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDB" -f -; }
 
-# ---------------------------------------------------------------- migrations (tracked)
-# Stage 14.5: the service-kit migration runner, run FROM THIS EXACT IMAGE as the database owner ($PGUSER), never as auth_app:
-# one advisory lock for the whole run (released by PostgreSQL if the runner dies), each migration and its bookkeeping row in ONE
-# transaction, a stored checksum that must match on every later run, and a refusal of any history this release cannot explain
-# (an unknown or out-of-order applied migration). Rows recorded by the previous runner get their checksum recorded once (logged).
-# A refusal or failure stops the deploy BEFORE the running service is touched.
-log "applying pending migrations from the image"
-MIG_ENV=$(mktemp "$DIR/.migrate.XXXXXX")
-trap 'rm -f "$MIG_ENV"' EXIT
-printf 'MIGRATION_DATABASE_URL=postgres://%s:%s@%s:5432/%s\n' "$PGUSER" "$PGPASS" "$DB" "$PGDB" >"$MIG_ENV"
-docker run --rm --network "$NET" --env-file "$MIG_ENV" --entrypoint node "$IMAGE" dist/cli/migrate.js \
-  || die "migrations failed or were refused; the running service was not touched"
-rm -f "$MIG_ENV"
-
-# ---------------------------------------------------------------- runtime role (least privilege)
-# Re-applied on every deploy, after the migrations, so a table a new migration created is covered too. The password is
-# generated once and fed to psql on stdin (never on a command line, never printed).
+# ---------------------------------------------------------------- runtime role credential
+# V2 A4.8: generated (once) before the application environment, which needs it for DATABASE_URL, so the whole .env exists before the
+# configuration check below. The role itself is created and re-granted after the migrations (runtime role section).
 APP_ROLE=auth_app
 ensure "$DB_ENV" AUTH_APP_PASSWORD "$(openssl rand -hex 24)"
 APP_PASS=$(sed -n 's/^AUTH_APP_PASSWORD=//p' "$DB_ENV")
-log "ensuring the least-privilege runtime role $APP_ROLE"
-{
-  printf '%s\n' 'DO $role$ BEGIN'
-  printf "  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s; END IF;\n" "$APP_ROLE" "$APP_ROLE"
-  printf '%s\n' 'END $role$;'
-  printf "ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '%s';\n" "$APP_ROLE" "$APP_PASS"
-  printf 'REVOKE ALL ON DATABASE %s FROM PUBLIC;\n' "$PGDB"
-  printf 'GRANT CONNECT ON DATABASE %s TO %s;\n' "$PGDB" "$APP_ROLE"
-  printf 'REVOKE ALL ON SCHEMA public FROM PUBLIC;\n'
-  printf 'GRANT USAGE ON SCHEMA public TO %s;\n' "$APP_ROLE"
-  printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s;\n' "$APP_ROLE"
-  printf 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s;\n' "$APP_ROLE"
-  # the deploy's own migration bookkeeping is not application data: READ-only, so /ready can see whether this release's
-  # migrations are applied (Stage 14.5); never written by the runtime role
-  printf 'REVOKE ALL ON TABLE schema_migrations FROM %s;\n' "$APP_ROLE"
-  printf 'GRANT SELECT ON TABLE schema_migrations TO %s;\n' "$APP_ROLE"
-  printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s;\n' "$PGUSER" "$APP_ROLE"
-  printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s;\n' "$PGUSER" "$APP_ROLE"
-} | psql_stdin
 
 # ---------------------------------------------------------------- application environment
 log "ensuring $APP_ENV (existing values are never overwritten, except below)"
@@ -155,7 +137,12 @@ if grep -q "^DATABASE_URL=postgres://$PGUSER:" "$APP_ENV"; then
   log "  ~ DATABASE_URL (moved from the database owner to the runtime role $APP_ROLE)"
 fi
 ensure "$APP_ENV" DATABASE_URL "$RUNTIME_DB_URL"
-ensure "$APP_ENV" JWT_SECRET "$(b64)"
+# V2 A4.8 (ADR-0058, A4 record §10.8, D6): the legacy JWT key is generated only for a configuration with no JWT key of any form. A ring
+# (either variable, direct or _FILE) or JWT_SECRET_FILE means the JWT keys are managed deliberately: never generated, never repaired here;
+# an incomplete or invalid JWT configuration is refused by the configuration check below. Rotation: docs/runbooks/secret-rotation.md §4.
+if ! grep -qE '^(JWT_SECRET|JWT_SECRET_FILE|JWT_SIGNING_KEYS|JWT_SIGNING_KEYS_FILE|JWT_ACTIVE_KEY_ID|JWT_ACTIVE_KEY_ID_FILE)=' "$APP_ENV"; then
+  ensure "$APP_ENV" JWT_SECRET "$(b64)"
+fi
 ensure "$APP_ENV" OPERATOR_CODE_PEPPER "$(b64)"
 ensure "$APP_ENV" SECRET_KEY_PEPPER "$(b64)"
 ensure "$APP_ENV" THROTTLE_KEY_PEPPER "$(b64)"
@@ -188,6 +175,52 @@ ensure "$APP_ENV" REQUIRE_CONTACT_VERIFICATION false
 # Swagger UI at /auth/docs (basic auth). Read the password on the server:  grep ^SWAGGER_ "$APP_ENV"
 ensure "$APP_ENV" SWAGGER_USERNAME docs
 ensure "$APP_ENV" SWAGGER_PASSWORD "$(openssl rand -hex 24)"
+
+# ---------------------------------------------------------------- configuration check
+# V2 A4.8 (A4 record §11): the image being deployed validates the effective .env with the service's own configuration loader (every
+# setting and key rule, including the JWT key ring) BEFORE any migration runs and before the running service is touched. No network
+# (--network none), no database, no key generated or changed; it prints one line: "configuration valid" with the JWT mode and key
+# counts, or the refusal, which names variables and rules only (never a value or a ring id).
+log "checking the configuration with the image's own loader"
+docker run --rm --network none --env-file "$APP_ENV" --entrypoint node "$IMAGE" dist/cli/check-config.js \
+  || die "the configuration was refused by the image's configuration check; no migration ran and the running service was not touched"
+
+# ---------------------------------------------------------------- migrations (tracked)
+# Stage 14.5: the service-kit migration runner, run FROM THIS EXACT IMAGE as the database owner ($PGUSER), never as auth_app:
+# one advisory lock for the whole run (released by PostgreSQL if the runner dies), each migration and its bookkeeping row in ONE
+# transaction, a stored checksum that must match on every later run, and a refusal of any history this release cannot explain
+# (an unknown or out-of-order applied migration). Rows recorded by the previous runner get their checksum recorded once (logged).
+# A refusal or failure stops the deploy BEFORE the running service is touched.
+log "applying pending migrations from the image"
+MIG_ENV=$(mktemp "$DIR/.migrate.XXXXXX")
+trap 'rm -f "$MIG_ENV"' EXIT
+printf 'MIGRATION_DATABASE_URL=postgres://%s:%s@%s:5432/%s\n' "$PGUSER" "$PGPASS" "$DB" "$PGDB" >"$MIG_ENV"
+docker run --rm --network "$NET" --env-file "$MIG_ENV" --entrypoint node "$IMAGE" dist/cli/migrate.js \
+  || die "migrations failed or were refused; the running service was not touched"
+rm -f "$MIG_ENV"
+
+# ---------------------------------------------------------------- runtime role (least privilege)
+# Re-applied on every deploy, after the migrations, so a table a new migration created is covered too. The password (generated once,
+# above) is fed to psql on stdin (never on a command line, never printed).
+log "ensuring the least-privilege runtime role $APP_ROLE"
+{
+  printf '%s\n' 'DO $role$ BEGIN'
+  printf "  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %s; END IF;\n" "$APP_ROLE" "$APP_ROLE"
+  printf '%s\n' 'END $role$;'
+  printf "ALTER ROLE %s WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '%s';\n" "$APP_ROLE" "$APP_PASS"
+  printf 'REVOKE ALL ON DATABASE %s FROM PUBLIC;\n' "$PGDB"
+  printf 'GRANT CONNECT ON DATABASE %s TO %s;\n' "$PGDB" "$APP_ROLE"
+  printf 'REVOKE ALL ON SCHEMA public FROM PUBLIC;\n'
+  printf 'GRANT USAGE ON SCHEMA public TO %s;\n' "$APP_ROLE"
+  printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s;\n' "$APP_ROLE"
+  printf 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s;\n' "$APP_ROLE"
+  # the deploy's own migration bookkeeping is not application data: READ-only, so /ready can see whether this release's
+  # migrations are applied (Stage 14.5); never written by the runtime role
+  printf 'REVOKE ALL ON TABLE schema_migrations FROM %s;\n' "$APP_ROLE"
+  printf 'GRANT SELECT ON TABLE schema_migrations TO %s;\n' "$APP_ROLE"
+  printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s;\n' "$PGUSER" "$APP_ROLE"
+  printf 'ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %s;\n' "$PGUSER" "$APP_ROLE"
+} | psql_stdin
 
 # ---------------------------------------------------------------- application container
 PREV=""

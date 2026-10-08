@@ -183,3 +183,178 @@ test('digest deployment: a failed migration stops the deploy before the running 
   assert.equal(w.state().containers[APP].id, running);
   assert.equal(w.state().containers[APP].running, true);
 });
+
+// ---------------------------------------------------------------- V2 A4.8: JWT key provisioning (D6) and the configuration check
+// ADR-0058 / A4 record §10.8 and §11. The script generates JWT_SECRET only for a configuration with no JWT key of any form, never repairs
+// one, and has the image's own loader (dist/cli/check-config.js) validate the effective .env before any migration or container change.
+const authDir = (w) => join(w.home, 'nawara-core/auth-service');
+const seedEnv = (w, text) => { mkdirSync(authDir(w), { recursive: true }); writeFileSync(join(authDir(w), '.env'), text, { mode: 0o600 }); };
+const linesOf = (w, name) => envFile(w).split('\n').filter((l) => l.startsWith(`${name}=`));
+const key = (c) => Buffer.alloc(32, c).toString('base64');
+const JWT_NAMES = ['JWT_SECRET', 'JWT_SECRET_FILE', 'JWT_SIGNING_KEYS', 'JWT_SIGNING_KEYS_FILE', 'JWT_ACTIVE_KEY_ID', 'JWT_ACTIVE_KEY_ID_FILE'];
+const jwtLines = (w) => envFile(w).split('\n').filter((l) => JWT_NAMES.some((n) => l.startsWith(`${n}=`)));
+
+test('A4.8 fresh legacy installation: one generated JWT_SECRET (base64 of 32 bytes) and no ring variable', () => {
+  const w = auditBound();
+  const r = deploy(w);
+  assert.equal(r.code, 0, r.out);
+  const secret = linesOf(w, 'JWT_SECRET');
+  assert.equal(secret.length, 1);
+  assert.equal(Buffer.from(secret[0].slice('JWT_SECRET='.length), 'base64').length, 32);
+  assert.deepEqual(jwtLines(w), secret, 'no ring variable is ever written by the deploy');
+  assert.match(r.out, /\+ JWT_SECRET \(new\)/);
+});
+
+test('A4.8 existing legacy installation: JWT_SECRET is kept byte for byte across deploys', () => {
+  const w = auditBound();
+  seedEnv(w, `JWT_SECRET=${key(1)}\n`);
+  assert.equal(deploy(w).code, 0);
+  assert.equal(deploy(w).code, 0);
+  assert.deepEqual(jwtLines(w), [`JWT_SECRET=${key(1)}`]);
+});
+
+test('A4.8 ring configured with legacy active: the three JWT lines are left exactly as they are', () => {
+  const w = auditBound();
+  const lines = [`JWT_SECRET=${key(1)}`, `JWT_SIGNING_KEYS=k2026-10:${key(2)}`, 'JWT_ACTIVE_KEY_ID=legacy'];
+  seedEnv(w, `${lines.join('\n')}\n`);
+  assert.equal(deploy(w).code, 0);
+  assert.deepEqual(jwtLines(w), lines);
+});
+
+test('A4.8 D6: a ring key active with JWT_SECRET retired is never given a regenerated JWT_SECRET', () => {
+  const w = auditBound();
+  const lines = [`JWT_SIGNING_KEYS=k2026-10:${key(2)}`, 'JWT_ACTIVE_KEY_ID=k2026-10'];
+  seedEnv(w, `${lines.join('\n')}\n`);
+  const r = deploy(w);
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(jwtLines(w), lines, 'the retired legacy key stays retired');
+  assert.doesNotMatch(r.out, /\+ JWT_SECRET \(new\)/);
+});
+
+test('A4.8 JWT_SECRET_FILE only: no JWT_SECRET is added next to it (NAME + NAME_FILE would be refused at startup)', () => {
+  const w = auditBound();
+  seedEnv(w, 'JWT_SECRET_FILE=/run/secrets/jwt\n');
+  assert.equal(deploy(w).code, 0);
+  assert.deepEqual(jwtLines(w), ['JWT_SECRET_FILE=/run/secrets/jwt']);
+});
+
+for (const name of JWT_NAMES.filter((n) => n !== 'JWT_SECRET' && n !== 'JWT_SECRET_FILE')) {
+  test(`A4.8 incomplete ring (only ${name}): never repaired, no JWT_SECRET generated; the image's check refuses it before anything changes`, () => {
+    const w = auditBound();
+    assert.equal(deploy(w).code, 0); // a running installation
+    const running = w.state().containers[APP].id;
+    const line = `${name}=${name.startsWith('JWT_SIGNING_KEYS') && !name.endsWith('_FILE') ? `k1:${key(3)}` : name.endsWith('_FILE') ? '/run/secrets/x' : 'k1'}`;
+    writeFileSync(join(authDir(w), '.env'), envFile(w).split('\n').filter((l) => !l.startsWith('JWT_SECRET=')).concat(line).join('\n') + '\n', { mode: 0o600 });
+    w.patch((s) => { s.configCheck = { exit: 1, output: 'configuration invalid: JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together' }; });
+    const before = w.state().calls.length;
+    const r = deploy(w, { IMAGE: DIGEST_IMAGE });
+    assert.notEqual(r.code, 0);
+    assert.deepEqual(jwtLines(w), [line], 'the shell decides only whether to generate; it never repairs a JWT configuration');
+    assert.match(r.out, /configuration invalid: JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together/);
+    assert.match(r.out, /refused by the image's configuration check; no migration ran and the running service was not touched/);
+    const after = w.state().calls.slice(before);
+    assert.equal(after.filter((a) => a[0] === 'run' && a.includes('dist/cli/migrate.js')).length, 0, 'no migration ran');
+    assert.deepEqual(after.filter((a) => (['stop', 'rename', 'start', 'rm'].includes(a[0]) && a.includes(APP)) || (a[0] === 'run' && a.includes('-d'))), []);
+    assert.equal(after.filter((a) => a[0] === 'exec' && a.includes('psql')).length, 0, 'the runtime role was not touched');
+    assert.equal(w.state().containers[APP].id, running);
+    assert.equal(w.state().containers[APP].running, true);
+  });
+}
+
+test('A4.8 the configuration check runs the exact image, offline, on the effective .env, before the migrations and the swap', () => {
+  const w = auditBound();
+  assert.equal(deploy(w).code, 0);
+  const before = w.state().calls.length;
+  const checksBefore = (w.state().configChecks ?? []).length;
+  const r = deploy(w, { IMAGE: DIGEST_IMAGE });
+  assert.equal(r.code, 0, r.out);
+  const calls = w.state().calls.slice(before);
+  const checkAt = calls.findIndex((a) => a[0] === 'run' && a.includes('dist/cli/check-config.js'));
+  const migrateAt = calls.findIndex((a) => a[0] === 'run' && a.includes('dist/cli/migrate.js'));
+  const roleAt = calls.findIndex((a) => a[0] === 'exec' && a.includes('psql'));
+  const stopAt = calls.findIndex((a) => a[0] === 'stop' && a.includes(APP));
+  assert.ok(checkAt >= 0, 'the configuration check ran');
+  assert.ok(checkAt < migrateAt && checkAt < roleAt && checkAt < stopAt, 'validation precedes the migrations, the role and the stop');
+  const argv = calls[checkAt];
+  assert.deepEqual(argv.slice(0, 2), ['run', '--rm']);
+  assert.equal(argv[argv.indexOf('--network') + 1], 'none', 'no network: no database, broker or production connection');
+  assert.equal(argv[argv.indexOf('--env-file') + 1], join(authDir(w), '.env'));
+  assert.equal(argv[argv.indexOf('--entrypoint') + 1], 'node');
+  assert.deepEqual(argv.slice(-2), [DIGEST_IMAGE, 'dist/cli/check-config.js'], 'the image being deployed checks its own configuration');
+  const check = w.state().configChecks.slice(checksBefore)[0];
+  for (const n of ['NODE_ENV', 'DATABASE_URL', 'JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'TOTP_ENCRYPTION_KEYS', 'RABBITMQ_URL', 'WEBAUTHN_RP_ID', 'AUTH_EVENTS']) {
+    assert.ok(check.names.includes(n), `the check saw the complete .env (${n})`);
+  }
+  assert.match(r.out, /configuration valid; JWT: legacy only/);
+});
+
+test('A4.8 a fresh installation is checked too, after its .env is written and before its first migration', () => {
+  const w = auditBound();
+  const r = deploy(w);
+  assert.equal(r.code, 0, r.out);
+  const calls = w.state().calls;
+  const checkAt = calls.findIndex((a) => a[0] === 'run' && a.includes('dist/cli/check-config.js'));
+  const migrateAt = calls.findIndex((a) => a[0] === 'run' && a.includes('dist/cli/migrate.js'));
+  assert.ok(checkAt >= 0 && checkAt < migrateAt);
+  assert.ok(w.state().configChecks[0].names.includes('JWT_SECRET'));
+});
+
+test('A4.8 secret-safe on refusal: no key in the output or in any docker argv, and the check never receives a value on its command line', () => {
+  const w = auditBound();
+  seedEnv(w, `JWT_SECRET=${key(1)}\nJWT_SIGNING_KEYS=k2026-10:${key(2)}\nJWT_ACTIVE_KEY_ID=k2026-10\n`);
+  w.patch((s) => { s.configCheck = { exit: 1, output: 'configuration invalid: JWT_SIGNING_KEYS must differ from JWT_SECRET (one key, one purpose)' }; });
+  const r = deploy(w);
+  assert.notEqual(r.code, 0);
+  const argv = JSON.stringify(w.state().calls);
+  for (const s of [key(1), key(2), ...w.secrets()]) {
+    assert.ok(!r.out.includes(s), 'a secret was printed');
+    assert.ok(!argv.includes(s), 'a secret was passed on a command line');
+  }
+});
+
+// V2 A4.8 (review F3): Docker's --env-file decides what a JWT line means, so the deploy accepts only one plain `NAME=value` line at the
+// start of a line per JWT variable. Anything else is refused before anything changes, never normalized, and never printed.
+const MALFORMED = [
+  ['leading whitespace', `  JWT_SECRET=${key(1)}`],
+  ['a leading tab', `\tJWT_SIGNING_KEYS=k1:${key(2)}`],
+  ['an export prefix', `export JWT_SECRET=${key(1)}`],
+  ['a space before =', `JWT_ACTIVE_KEY_ID =k1`],
+  ['a bare name (Docker would take it from the deploy shell)', 'JWT_SECRET'],
+  ['a bare _FILE name with trailing spaces', 'JWT_SIGNING_KEYS_FILE   '],
+];
+for (const [label, line] of MALFORMED) {
+  test(`A4.8 F3: a malformed JWT declaration (${label}) is refused before anything changes, the .env untouched, no value printed`, () => {
+    const w = auditBound();
+    const text = `NODE_ENV=production\n${line}\nJWT_ISSUER=nawara-auth\n`;
+    seedEnv(w, text);
+    const r = deploy(w);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, /malformed JWT declaration on line\(s\) 2: each JWT variable must be one NAME=value line .*nothing was changed/);
+    assert.equal(envFile(w), text, 'never normalized or repaired');
+    assertNothingChanged(assert, w);
+    assert.ok(!r.out.includes(key(1)) && !r.out.includes(key(2)), 'no value printed');
+  });
+}
+
+for (const name of JWT_NAMES) {
+  test(`A4.8 F3: ${name} declared twice is refused (only one would take effect), the .env untouched`, () => {
+    const w = auditBound();
+    const v = name.endsWith('_FILE') ? '/run/secrets/x' : name === 'JWT_ACTIVE_KEY_ID' ? 'k1' : name === 'JWT_SECRET' ? key(1) : `k1:${key(2)}`;
+    const text = `${name}=${v}\nAUTH_EVENTS=off\n${name}=${v.replace(/k1/, 'k2')}\n`;
+    seedEnv(w, text);
+    const r = deploy(w);
+    assert.notEqual(r.code, 0);
+    assert.match(r.out, new RegExp(`declares ${name} more than once: keep exactly one line per JWT variable .*nothing was changed`));
+    assert.equal(envFile(w), text);
+    assertNothingChanged(assert, w);
+    assert.ok(!r.out.includes(key(1)) && !r.out.includes(key(2)));
+  });
+}
+
+test('A4.8 F3: comments, other JWT_* settings and similar names are not JWT key declarations and pass', () => {
+  const w = auditBound();
+  seedEnv(w, `# JWT_SECRET=old (comment)\n  # JWT_SIGNING_KEYS=x\nJWT_ISSUER=nawara-auth\nJWT_AUDIENCE=nawara\nJWT_SECRET_NOTES=x\nJWT_SECRET=${key(1)}\n`);
+  const r = deploy(w);
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(jwtLines(w), [`JWT_SECRET=${key(1)}`]);
+});
