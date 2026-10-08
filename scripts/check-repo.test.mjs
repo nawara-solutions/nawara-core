@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_LEGACY_EXEMPT } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_LEGACY_EXEMPT, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1978,4 +1978,58 @@ test('V2 A15.4: the product-term check covers every application under apps/ auto
   assert.deepEqual([...GENERICITY_LEGACY_EXEMPT], ['auth-service']);
   // Generic text stays clean.
   assert.deepEqual(checkSource('apps/booking-service/src/a.ts', 'export const capacity = 3; // a booking for an organization member').filter((p) => /product-specific/.test(p)), []);
+});
+
+// V2 A3M.2: per-service event contracts.
+test('V2 A3M.2: event contracts agree across services; every app with event traffic declares one', () => {
+  const f = (type, more = {}) => ({ type, ...more });
+  const producer = (produces, service = 'p-service') => JSON.stringify({ service, produces, consumes: [] });
+  const consumer = (consumes, service = 'c-service') => JSON.stringify({ service, produces: [], consumes });
+  const paid = { name: 'thing.paid', version: 1, payload: { id: f('uuid'), amount: f('integer'), org: f('string', { nullable: true }), kind: f('enum', { values: ['a', 'b'] }), at: f('datetime', { optional: true }) } };
+  const needs = (requires, more = {}) => ({ source: 'p-service', name: 'thing.paid', version: 1, requires, ...more });
+  const run = (contracts, required = Object.keys(contracts)) => checkEventContracts(contracts, required);
+  const ok = { 'p-service': producer([paid]), 'c-service': consumer([needs({ id: f('id'), amount: f('integer'), org: f('string', { nullable: true }), kind: f('enum', { values: ['a', 'b', 'c'] }) })]) };
+  assert.deepEqual(run(ok), []);
+
+  const fails = (contracts, pattern, required) => assert.match(run(contracts, required).join('\n'), pattern);
+  // a field the consumer requires is missing at the producer
+  fails({ ...ok, 'c-service': consumer([needs({ id: f('id'), missing: f('string') })]) }, /the required field missing is not declared by the producer/);
+  // an incompatible version, and an unknown event or source
+  fails({ ...ok, 'c-service': consumer([needs({ id: f('id') }, { version: 2 })]) }, /publishes thing\.paid at version 1, not 2/);
+  fails({ ...ok, 'c-service': consumer([needs({ id: f('id') }, { name: 'thing.unknown' })]) }, /p-service publishes no event named thing\.unknown/);
+  fails({ ...ok, 'c-service': consumer([needs({ id: f('id') }, { source: 'x-service' })]) }, /x-service publishes no event named thing\.paid/);
+  // nullability, optionality and type mismatches
+  fails({ ...ok, 'c-service': consumer([needs({ org: f('string') })]) }, /field org may be null at the producer but the consumer requires a value/);
+  fails({ ...ok, 'c-service': consumer([needs({ at: f('datetime') })]) }, /field at may be absent at the producer/);
+  fails({ ...ok, 'c-service': consumer([needs({ amount: f('string') })]) }, /field amount is a integer at the producer but the consumer requires a string/);
+  fails({ ...ok, 'c-service': consumer([needs({ kind: f('enum', { values: ['a'] }) })]) }, /field kind may be b, which the consumer does not accept/);
+  // two producers for one name; an audit event; a code-bearing event outside auth-service; bad grammar and versions
+  fails({ ...ok, 'q-service': producer([paid], 'q-service') }, /already published by p-service: an event has exactly one producer/);
+  fails({ 'p-service': producer([{ ...paid, name: 'audit.thing.paid' }]) }, /audit events are governed by @nawara\/audit-contract/);
+  fails({ 'p-service': producer([{ ...paid, codeBearing: true }]) }, /only auth-service may publish a code-bearing event/);
+  assert.deepEqual(run({ 'auth-service': producer([{ ...paid, codeBearing: true }], 'auth-service') }), []);
+  fails({ 'p-service': producer([{ ...paid, name: 'Thing' }]) }, /the name must be dotted lowercase/);
+  fails({ 'p-service': producer([{ ...paid, version: 0 }]) }, /the version must be a positive integer/);
+  fails({ 'p-service': producer([{ ...paid, payload: { id: f('number') } }]) }, /type must be one of/);
+  fails({ 'p-service': producer([{ ...paid, payload: { k: f('enum') } }]) }, /an enum must list its string values/);
+  fails({ 'p-service': '{ not json' }, /not valid JSON/);
+  fails({ 'p-service': producer([paid], 'other-service') }, /"service" must be "p-service"/);
+  // registration: an app with event traffic and no contract; the named exemption
+  fails({ ...ok, 'n-service': undefined }, /apps\/n-service\/contracts\/events\.json is missing/, ['p-service', 'c-service', 'n-service']);
+  assert.deepEqual(run(ok, [...Object.keys(ok), 'audit-service']), []);
+  assert.deepEqual([...EVENT_CONTRACT_EXEMPT.keys()], ['audit-service']);
+  // the presence scan (a scan of source text, not a proof: emit sites are bound by each producer's compile-time typing)
+  assert.equal(usesEventTraffic(['await this.outbox.enqueue(q, ev);']), true);
+  assert.equal(usesEventTraffic(['const sub = await this.bus.subscribe({ queue: Q, bindings, handler });']), true);
+  assert.equal(usesEventTraffic(['await this.writer.write(q, input);']), false);
+
+  // The real contracts agree, and they hold the inventory: 18 produced events, 13 consumed entries.
+  const real = Object.fromEntries(['auth-service', 'payment-service', 'billing-service', 'notification-service'].map((a) => [a, repoFile(`apps/${a}/contracts/events.json`)]));
+  assert.deepEqual(checkEventContracts(real, ['auth-service', 'payment-service', 'billing-service', 'notification-service', 'audit-service']), []);
+  const all = Object.values(real).map((t) => JSON.parse(t));
+  assert.equal(all.flatMap((c) => c.produces).length, 18);
+  assert.equal(all.flatMap((c) => c.consumes).length, 13);
+  const runner = repoFile('scripts/check-repo.mjs');
+  assert.equal(runner.split('checkEventContracts(').length - 1, 1);
+  assert.match(runner, /if \(usesEventTraffic\(texts\)\) required\.push\(app\);/);
 });

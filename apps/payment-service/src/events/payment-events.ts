@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getRequestContext, type NewEvent } from '@nawara/service-kit';
 import { deterministicEventId } from './deterministic-id.js';
+import type { PaymentEventName } from './event-catalog.js';
 import type { PaymentRow } from '../payments/payment.types.js';
 
 /** Who caused a state change (SDD section 11: `actor{type,id}`). */
@@ -47,7 +48,8 @@ export function webhookContext(providerId: string, webhookEventId: string): Even
   return { actor: { type: 'provider', id: providerId }, cause: { type: 'webhook_event', id: webhookEventId }, correlationId: webhookEventId };
 }
 
-export type PaymentEventName = 'payment.created' | 'payment.succeeded' | 'payment.failed' | 'payment.cancelled' | 'payment.expired';
+/** V2 A3M.2: the names come from the event catalog (`event-catalog.ts`), the one place the published contract is declared. */
+export type { PaymentEventName };
 
 /**
  * Builds a payment event exactly as SDD section 11 defines it: the common payload (opaque ids and plain facts, never a

@@ -60,7 +60,7 @@ export class OperatorCodeService {
     return code;
   }
 
-  private contactOf(u: UserRow) {
+  private contactOf(u: UserRow): { channel: 'email' | 'phone'; destination: string | null } {
     return { channel: u.email ? 'email' : 'phone', destination: u.email ?? u.phone };
   }
 

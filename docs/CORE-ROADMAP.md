@@ -190,10 +190,9 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.0  discovery, decision review            ✅ complete (owner-reviewed; OD-A3M-0 to OD-A3M-7 approved)
   A3M.1  records and policy (ADR-0057 Proposed) ✅ closed on main (PR #234)
   G7 proof  isolated dead-letter broker test   ✅ complete: G7 confirmed locally
-  A3M.2  event contracts and versioning        not started
-  A3M.3  producer and consumer conventions     not started
-  A3M.4  retry, dead letters, idempotency      G7 remediation (R1, regression tests, one alert) implemented locally;
-                                               pending PR; the rest of A3M.4 not started
+  A3M.2  event contracts and versioning        implemented locally; pending review and merge
+  A3M.3  producer and consumer conventions     not started (includes G11, HIGH)
+  A3M.4  retry, dead letters, idempotency      G7 remediation ✅ closed on main (PR #235); the rest of A3M.4 not started
   A3M.5  outbox / de-duplication retention     not started (off by default)
   A3M.6  deterministic broker tests            not started
   A3M.7  local certification                   not started
@@ -252,8 +251,9 @@ is certified and closed.) **A3 Messaging** is open as **A3M**
 deferred A3.6 and A3.7): A3M.0 inventoried the messaging implementation and found G1–G10, and the owner approved OD-A3M-0 to OD-A3M-7.
 A3M.1 (documentation only, PR #234) added [ADR-0057](adr/0057-messaging-conventions.md), **Proposed**, which states the current
 conventions and reconciles ADR-0018 and ADR-0037 by forward notes. An isolated broker proof then **confirmed G7** (a cross-consumer
-dead-letter copy through the shared fanout exchange); its code remediation (A3M.4, R1) is implemented locally and pending its PR, and
-the rest of A3M.4 is not started. A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
+dead-letter copy through the shared fanout exchange); its code remediation (A3M.4, R1) merged with PR #235, and the rest of A3M.4 is not
+started. A3M.2 (per-service event catalogs, a contract guard, Billing's version check) is implemented locally and pending its PR;
+finding G11 (Billing receipts keyed on the event id alone) is HIGH and assigned to A3M.3. A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
 retention activation) is separately authorized (A3M.8).
 
 ### Compatibility and safety rules for V1 work

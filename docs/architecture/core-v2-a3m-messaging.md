@@ -4,8 +4,9 @@
   `e2adc20253bf1afaa41394b05b9b56e88db507b4`, the PR #233 merge that certified A15), of the A3M decision review (read-only,
   owner-reviewed), of **A3M.1: messaging records and policy** (**closed on `main`**: PR #234, merge
   `38f262e065f032fe8c792f3588874a36758e0909`; §6), of the **G7 proof** (G7 **confirmed** locally; §7) and of the **A3M.4 G7 slice**
-  (R1 remediation, regression tests, one alert; **implemented locally, pending review and merge**; §7). **A3M is OPEN**; A3M.4 as a whole
-  is not complete.
+  (R1 remediation, regression tests, one alert; **closed on `main`**: PR #235, merge `9c8d69caabdec32647c6bb11817b2c2d3decd02e`; §7) and
+  of **A3M.2: event contracts and versioning** (**implemented locally, pending review and merge**; §11). **A3M is OPEN**; A3M.4 as a
+  whole is not complete.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -76,6 +77,7 @@ Read from `main` at `e2adc20` (code and records only; nothing was run).
 | G8 | S21-5: Payment, a producer, makes the broker a readiness dependency | pending alignment | OD-A3M-4; A3M.3 |
 | G9 | F12: published outbox rows and inbox rows are never deleted (except Auth's code-bearing rows) | retention | OD-A3M-6; A3M.5, off by default |
 | G10 | Ordering is not guaranteed and no convention says how consumers validate state | missing convention | ADR-0057 §7 |
+| G11 | Billing writes its `payment_event_receipt` keyed on `eventId` alone, even for an event it rejects as `wrong_source`; Payment's event ids are deterministic, so a publisher on the vhost that knows a payment id could occupy the receipt first and the genuine event would be treated as a replay | **security finding, HIGH** (found in A3M.2 discovery; mitigated today by Billing and Payment not being deployed and by ADR-0053's per-identity grants) | **A3M.3**; proof and remedy required before Billing or Payment production readiness; not changed by A3M.2 (§11) |
 
 (G6′ is written with a prime so it is not confused with the production gate G6.)
 
@@ -114,10 +116,10 @@ what would put its broader de-duplication reading of ADR-0056 §7 in force, §6)
 A3M.0  discovery, decision review          ✅ complete (owner-reviewed)
 A3M.1  records and policy (ADR-0057)       ✅ closed on main (PR #234, merge 38f262e)
 G7     isolated broker proof               ✅ G7 confirmed locally (§7)
-A3M.2  event contracts and versioning      not started
-A3M.3  producer and consumer conventions   not started
-A3M.4  retry, dead letters, idempotency    G7 slice (R1, regression tests, DeadLetterCopyFailing) implemented locally; pending
-                                           review and merge; the rest of A3M.4 (idempotency matrix) not started
+A3M.2  event contracts and versioning      implemented locally; pending review and merge (§11)
+A3M.3  producer and consumer conventions   not started (includes G11, HIGH)
+A3M.4  retry, dead letters, idempotency    G7 slice (R1, regression tests, DeadLetterCopyFailing) ✅ closed on main (PR #235);
+                                           the rest of A3M.4 (idempotency matrix) not started
 A3M.5  outbox and de-duplication retention not started
 A3M.6  deterministic broker tests          not started
 A3M.7  local certification                 not started
@@ -226,3 +228,51 @@ G6 stays deferred; Final Core Validation stays the absolute last validation.
   campaign runs only where a phase changes broker behaviour (the G7 proof, A3M.4, A3M.6), bounded and self-cleaning.
 - Certification is repository and local; it certifies nothing in production. Merge is not ADR acceptance (ADR README): ADR-0057's
   acceptance is a separate owner decision.
+
+## 11. A3M.2: event contracts and versioning (2026-10-08, local)
+
+- **Owner decisions:** OD-A3M2-1 = A (a TypeScript catalog per service, rendered to a committed JSON artifact, compared by a JSON-only
+  guard); OD-A3M2-2 = names, versions, payload field types and nullability; OD-A3M2-3 = A (Auth's emission typed at compile time, no
+  runtime change); OD-A3M2-4 = Billing refuses an unsupported version before any receipt or decision; OD-A3M2-5 = events with no Core
+  consumer are catalogued as published contracts; OD-A3M2-6 = one registration line in the new-service checklist.
+- **Catalogs** (`apps/<service>/src/events/event-catalog.ts`, local types, no shared library, nothing in the kit, no cross-application
+  import) and their artifacts (`apps/<service>/contracts/events.json`, rendered by `renderEventContract()`; each service's
+  `event-catalog.spec.ts` compares them with `toMatchFileSnapshot`, regenerated only by `vitest -u` after a deliberate change):
+
+  | Service | Produces | Consumes |
+  |---|---|---|
+  | auth-service | 12 (three code-bearing, exactly `CODE_BEARING_EVENTS`) | – |
+  | payment-service | 5 (`payment.created`, `.succeeded`, `.failed`, `.cancelled`, `.expired`) | – |
+  | billing-service | 1 (`invoice.created`) | 4 payment outcomes (what `parseFacts` requires) |
+  | notification-service | – | 9, **rendered from the intake's `EVENT_MAP`** (no second definition) |
+
+  18 produced events and 13 consumed entries, matching the A3M.2 inventory; every one is version 1, and no name, payload, event id,
+  source or version changed. Five published events have no Core consumer (`user.registered`, `membership.requested`,
+  `membership.admin_provisioned`, `payment.created`, `invoice.created`).
+- **Producer typing.** Auth: `DomainEvents.emit<N>(q, name: N, payload: AuthEventPayload<N>)` is derived from the catalog, so an emit
+  site with an undeclared name, an undeclared or missing field, a channel outside `email | phone` or a null where none is allowed does not
+  compile (a runtime-selected name, `approved | rejected`, is checked as its union). The typing found one site whose `channel` was widened
+  to `string` (`operator-code.service.ts` `contactOf`): fixed with a return type, no runtime change. Compile-time negative controls
+  (`@ts-expect-error`) in Auth's `event-catalog.spec.ts` fail the typecheck if the typing loosens. Payment: `PaymentEventName` is the
+  catalog's keys; a builder test checks every event, with the extras each call site passes, against its catalog entry. Billing: a
+  builder test does the same for `invoice.created`; the consumer's bound names and versions come from its catalog.
+- **Billing version check.** `PaymentEventConsumer` refuses a version other than the catalog's (1) **before** the payload is parsed,
+  before any receipt and before any decision: a permanent failure `unsupported_version`, dead-lettered, logged without echoing a
+  malformed version. Version 1 (Payment's only version; a message without the header reads as 1) is unchanged. Unit tests: versions 2, 0
+  and NaN refused with `applyPaymentEvent` never called (no receipt, no effect), a malformed payload at version 2 refused for its
+  version, the replay naming, and version 1 still applied.
+- **Guard** (`checkEventContracts`, `npm run check:repo`; JSON only): name grammar, never `audit.*`, positive integer versions, a closed
+  field-type set, one producer per name, code-bearing events only from auth-service, every consumed `(source, name, version)` published by
+  that source at that version, every required field declared there with a compatible type and nullability, and a contract file for
+  every application whose source writes to the outbox or subscribes to the bus (audit-service exempt: it consumes only `audit.*`).
+  **Limit:** registration is a presence scan of source text, not a proof that every emit site is catalogued; emit sites are bound by
+  the producers' compile-time typing and builder tests.
+- **Evidence (local).** `test:repo` 127 passed (fixtures for each rule and the real contracts: 18 and 13). Eight negative controls on
+  in-memory copies of the real contracts (no repository file modified; contract hashes and the working tree verified unchanged), each
+  red for exactly its violation: a missing field, an incompatible version, an unknown event, a duplicate producer, an audit event, a
+  missing contract, a nullability mismatch, a code-bearing event outside Auth. Unit suites with `CI=true` (artifacts compared, never
+  rewritten): auth 144, payment 112, billing 356, notification 330. `tsc --noEmit` and `oxlint` on the four services; `check:repo`.
+- **G11** is unchanged by A3M.2 (Billing's source verification and receipt key are untouched); the version check runs before the
+  receipt, so it adds no new way to occupy one. G11 is A3M.3, HIGH.
+- **Production:** none. Merging builds the Auth image (its workflow matches `apps/auth-service/**`); Billing, Payment and Notification
+  have no image workflow; nothing deploys. No topology, grant, payload or `AUTH_EVENTS` change.

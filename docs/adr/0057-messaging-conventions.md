@@ -93,7 +93,7 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   publishes both versions until every consumer handles the new one, and the transition is planned per event, never by changing a
   published version in place.
 - **[NEW]** A consumer **checks `version`** and refuses a version it does not support as a permanent failure (dead-lettered for an
-  operator, never retried). Notification does so today (`unsupported_version`); the other consumers adopt it in A3M.2 and A3M.3.
+  operator, never retried). Notification does so today (`unsupported_version`); Billing since A3M.2 (before any receipt or decision).
 
 ### 6. Producer responsibilities
 
@@ -179,6 +179,9 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   between them **as text**, without cross-application imports (ADR-0056 §2). Domain event contracts never go into `libs/service-kit`
   (technical infrastructure only); a shared event-contract library would need its own architecture decision. Audit events keep their
   existing catalog in `@nawara/audit-contract`.
+- **A3M.2 status:** implemented as `apps/<service>/src/events/event-catalog.ts` rendered to `apps/<service>/contracts/events.json`
+  (auth, payment, billing, notification; Notification's rendered from its intake `EVENT_MAP`), Auth's emission typed from its catalog,
+  and `checkEventContracts` in `check:repo` ([A3M record](../architecture/core-v2-a3m-messaging.md) §11). This ADR stays Proposed.
 
 ### 12. Binding production constraints (ADR-0053)
 
