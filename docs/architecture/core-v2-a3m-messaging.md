@@ -8,9 +8,10 @@
   of **A3M.2: event contracts and versioning** (**closed on `main`**: PR #236, merge `27d1f1c80a9a6ca3efb9bf7cf0657d335135cad4`; §11)
   and of **A3M.3: producer and consumer conventions, G11** (**closed on `main`**: PR #237, merge
   `06e471aa2ed0dca41a8abe274ac406fb38cbf842`; §12), of the **rest of A3M.4: the idempotency matrix** (**closed on `main`**: PR #239,
-  merge `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724`; §13) , of **A3M.5: outbox and de-duplication retention** (**closed on `main`**: PR #240,
-  merge `b6ce5a2534f85053e0683e7590f180d4c21e58bc`; §14) and of **A3M.6: deterministic broker evidence** (**implemented locally,
-  pending review and merge**; §15). **A3M is OPEN.** No retention cleanup runs anywhere.
+  merge `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724`; §13), of **A3M.5: outbox and de-duplication retention** (**closed on `main`**: PR #240,
+  merge `b6ce5a2534f85053e0683e7590f180d4c21e58bc`; §14), of **A3M.6: deterministic broker evidence** (**closed on `main`**: PR #241,
+  merge `9d1fa0ceaed28c674a7bb26b07c10649e044d7fc`; §15) and of **A3M.7: local messaging certification** (**certification record
+  prepared locally; pending CI and owner merge**; §16). **A3M is OPEN.** No retention cleanup runs anywhere.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -124,8 +125,8 @@ A3M.2  event contracts and versioning      ✅ closed on main (PR #236, merge 27
 A3M.3  producer and consumer conventions   ✅ closed on main (PR #237, merge 06e471a; G11 fixed, S21-5 aligned)
 A3M.4  retry, dead letters, idempotency    ✅ closed on main (G7 slice PR #235; idempotency matrix PR #239, merge 4c07643)
 A3M.5  outbox and de-duplication retention ✅ closed on main (PR #240, merge b6ce5a2; runs nowhere)
-A3M.6  deterministic broker evidence       16-scenario matrix and four new real-broker cases: implemented locally; pending review and merge (§15)
-A3M.7  local certification                 not started
+A3M.6  deterministic broker evidence       ✅ closed on main (PR #241, merge 9d1fa0c)
+A3M.7  local certification                 certification record prepared locally; pending CI and owner merge (§16)
 A3M.8  production messaging                not started (separately authorized)
 ```
 
@@ -521,7 +522,7 @@ release its event id; deleting a Notification intent would let a replayed event 
 - Billing receipts and Notification history: legal and product decisions (retention register).
 - The `publishedAt` index, and any scheduling or run against a real database: separately authorized.
 
-## 15. A3M.6: deterministic broker evidence (2026-10-08, local)
+## 15. A3M.6: deterministic broker evidence (2026-10-08; closed on `main`, PR #241, merge `9d1fa0c`)
 
 - **Owner decisions:** OD-A3M6-1 = the four Billing cases over a real broker; OD-A3M6-2 = Notification's unmapped-source case;
   OD-A3M6-3 = a broker container restarted mid-flow stays a documented limitation, not a test; OD-A3M6-4 = the matrix below is the
@@ -597,3 +598,117 @@ exercising a different code path.
   credentials; against a broker with another user they fail (`/ready` 503), and they pass against a broker accepting `guest`, as in
   CI. That is a property of the local setup, not a regression.
 - Builds of the kit, the audit contract, Billing, Payment and Notification; typecheck, lint, `check:repo`, `git diff --check`.
+
+## 16. A3M.7: local messaging certification (2026-10-08; record prepared locally, pending CI and owner merge)
+
+- **Owner decisions:** OD-A3M7-1 = the risk classification of §16.3, every production security gate and residual kept;
+  OD-A3M7-2 = the ADR-0056 §7 inbox wording and ADR-0057's de-duplication policy are recorded as a tension, not resolved here;
+  OD-A3M7-3 = certification reuses the merged pull requests' CI and the recorded local runs (§10); no broker or database campaign is run
+  again.
+- **What changed:** this record, the roadmap and a pointer in ADR-0057. No source, test, workflow, migration or configuration change.
+- **Status:** A3M.7 is closed only when this record's pull request passes the required CI and the owner merges it.
+
+### 16.1 Phase completion
+
+Every A3M pull request merged with 24 of 24 checks passing, `core-ci-passed` included (verified on GitHub on 2026-10-08):
+
+| Phase | Done when (§5) | Pull request, merge | `core-ci-passed` run | Evidence | Status |
+|---|---|---|---|---|---|
+| A3M.0 | inventory, findings G1–G10, decision review owner-reviewed | none (read-only) | – | §§1–4; OD-A3M-0 to -7 approved | ✅ |
+| A3M.1 | ADR-0057 (Proposed), forward notes on ADR-0018 and ADR-0037, this record, roadmap and checklist pointers | #234, `38f262e065f032fe8c792f3588874a36758e0909` | 37758411778 | §6; `docs/adr/0057-messaging-conventions.md` | ✅ |
+| G7 proof | the multi-consumer broker test run in isolation, result recorded | recorded locally (§7) | – | G7 confirmed (§7) | ✅ |
+| A3M.2 | catalogs in every producing and consuming service; `check:repo` guard with negative controls; consumers check `version` | #236, `27d1f1c80a9a6ca3efb9bf7cf0657d335135cad4` | 37763836812 | §11; `src/events/event-catalog.ts` and `contracts/events.json` per service; `checkEventContracts` in `scripts/lib/checks.mjs`, fixtures in `scripts/check-repo.test.mjs` | ✅ |
+| A3M.3 | consumer rules applied (verified source, atomic de-duplication, `PermanentEventFailure`, prefetch); Payment readiness per OD-A3M-4; queue names unchanged | #237, `06e471aa2ed0dca41a8abe274ac406fb38cbf842` (after R11, #238, `cd0e068a105073d6fc7b4aa99a51cc4baec5866f`, run 37768324535) | 37770041950 | §12; migration `0016_payment_event_receipt_applied_claim.sql`; `apps/billing-service/test/payment-event-source.e2e-spec.ts` | ✅ |
+| A3M.4 | G7 remedied (R1) with broker tests; idempotency matrix recorded | #235, `9c8d69caabdec32647c6bb11817b2c2d3decd02e`; #239, `4c07643dd4f27a91b4d20a29c5fd92d3b50c1724` | 37761070173; 37771787550 | §7, §13; `libs/service-kit/test/rabbitmq-dead-letter-isolation.int-spec.ts`; alert `DeadLetterCopyFailing` | ✅ |
+| A3M.5 | cleanup off by default, Auth's code purge excluded, OD-A3M-6 ordering enforced, proven locally | #240, `b6ce5a2534f85053e0683e7590f180d4c21e58bc` | 37775305696 | §14; `libs/service-kit/src/cli/outbox-retention.ts`; `libs/service-kit/test/outbox-retention.int-spec.ts`; `checkOutboxRetentionEligibility` | ✅ |
+| A3M.6 | A3M suites in Core CI (topology, G7 regression, version refusal, catalog consumers), self-cleaning, no retries | #241, `9d1fa0ceaed28c674a7bb26b07c10649e044d7fc` | 37785602962 | §15; in that run `a3m6-billing-consumer-refusals.e2e-spec.ts` ran 3 tests and `event-intake-broker.e2e-spec.ts` 10 tests, all passing | ✅ |
+
+The §9 boundaries are unchanged: Auth's emission, `AUTH_EVENTS` and code purge (A4), the audit catalog and redacting dead-letter
+policy (A7), Notification's intake mappings and delivery semantics (A8), and Billing and Payment event semantics (A10, A11) are
+as their owners defined them. A3M added one alert (A12) and no endpoint. Production was not touched by any A3M phase.
+
+### 16.2 Control matrix
+
+`kit` is `libs/service-kit/test/`, `rb` is `test/e2e-real-broker/`, `notif` is `apps/notification-service/test/`, `audit` is
+`apps/audit-service/test/`. Every file below runs in Core CI and passed on the merged pull requests of §16.1. **Tested** means a test
+asserts the behaviour; **limit** means an intended architectural limitation that no test can or should prove.
+
+| Control | Evidence | Kind |
+|---|---|---|
+| Transactional outbox integrity | kit `outbox.int-spec.ts`, `rabbitmq.int-spec.ts` (broker unreachable, relay delivers later); rb `stage21c2-auth-outbox-durability.e2e-spec.ts` (process killed, restarted: delivered once) | tested |
+| Producer event identity | `apps/auth-service/test/events-real-broker.e2e-spec.ts` (ids are outbox row ids); §13.2 matrix; rb `a3m6-billing-consumer-refusals.e2e-spec.ts` case C (Payment's deterministic id) | tested; the id is **not authenticated publisher identity** (F1, F2) |
+| Publisher confirms and retries | kit `async-resilience.int-spec.ts` (F4: bounded confirm timeout, row stays pending, delivered after recovery); Auth `events-real-broker` (stalled broker) | tested |
+| Broker outage and recovery | kit `rabbitmq-consumer-recovery.int-spec.ts`, `rabbitmq-silent-broker.int-spec.ts`, `rabbitmq-transport-disposal.int-spec.ts`; notif `event-intake-broker.e2e-spec.ts` and audit `ingestion-broker.e2e-spec.ts` (broker lost at runtime, down at startup); rb `stage4-real-broker-consumer-recovery.e2e-spec.ts`, `stage12-7-real-broker-subscription.e2e-spec.ts` | tested, except a container restarted mid-flow (§15.3) |
+| Consumer idempotency | notif `event-intake-broker` (10 copies, one intent); audit `ingestion-broker` (60 concurrent duplicates); rb `stage4-real-broker.e2e-spec.ts`, `a3m6-billing-consumer-refusals` case D | tested: **effectively-once effect under at-least-once delivery, not exactly-once delivery** |
+| Transaction boundaries, crash windows | audit `ingestion-broker` (crash before insert; after commit, before ack); notif `event-intake-broker` (crash window); rb `stage21c2` (crash between publish and stamp) | tested |
+| G7 dead-letter isolation | kit `rabbitmq-dead-letter-isolation.int-spec.ts`, `rabbitmq-dlq-retry.int-spec.ts` (R1: unconfirmed copy held and requeued) | tested in code; production topology and grant residuals (§16.3) |
+| G11 Billing event protection | `apps/billing-service/test/payment-event-source.e2e-spec.ts` (in-memory bus); rb `a3m6-billing-consumer-refusals` case C (real broker); applied-only invariants in `apps/billing-service/db/tests/invariants.sql` (Billing `test:db`) | tested |
+| Event-version refusal | notif `event-intake-broker` (poison); audit `ingestion-broker` (DLQ matrix); rb `a3m6-billing-consumer-refusals` case A; `apps/billing-service/src/payment-integration/payment-event-consumer.spec.ts` | tested |
+| Wrong-source refusal | rb `a3m6-billing-consumer-refusals` case B; audit `ingestion-broker` (producer admission); notif `event-intake-broker` (unmapped source) | tested against the **asserted** `source` header only |
+| Malformed messages | kit `rabbitmq-dlq-retry.int-spec.ts`; notif and audit broker suites; Auth `events-real-broker` (pre-16.2 message); rb `stage4-real-broker` | tested |
+| Retry and dead-letter replay | kit `rabbitmq-dlq-retry.int-spec.ts`; rb `stage4-real-broker-dlq-replay.e2e-spec.ts` (applied once after replay); audit `ingestion-broker` (retry exhaustion, replay refused again) | tested |
+| Notification delivery ambiguity | notif `delivery-engine.e2e-spec.ts`, `persistence.e2e-spec.ts` (`AMBIGUOUS`, `worker_lost`), `provider-adapters.e2e-spec.ts` | tested (A8 semantics); no production delivery |
+| Audit ingestion and idempotency | audit `ingestion-broker.e2e-spec.ts`, `ingestion-pipeline.e2e-spec.ts`; `test/e2e-audit-producers/*.e2e-spec.ts` | tested; first-writer residual F2 |
+| Sensitive-data redaction | audit `dead-letter-privacy.e2e-spec.ts`; `libs/audit-contract/test/dead-letter-screen.spec.ts`; Auth `events-real-broker` (no secrets in logs); notif `event-intake-broker` (code and destination absent); rb `stage21c2` (no one-time code in logs) | tested |
+| Graceful shutdown | kit `async-resilience.int-spec.ts` (F6 bounded drain); notif and audit broker suites (shutdown with an in-flight delivery); Auth `events-real-broker` (bounded shutdown) | tested |
+| Monitoring and alerts | kit `metrics-messaging.int-spec.ts`, `metrics-outbox.int-spec.ts`, `metrics-messaging-semantics.spec.ts`; `infra/observability/prometheus/tests/nawara-core.rules.test.yml` (promtool in Core CI) for `MessagesDeadLettered`, `DeadLetterCopyFailing`, `ConsumerDetached`, `OutboxBacklogAging`, `OutboxStatsStale`, `RabbitMQDown`, `BrokerResourceAlarm` | tested locally; not exercised in production |
+| Retention protections | kit `outbox-retention.int-spec.ts`; `checkOutboxRetentionEligibility` and its fixtures in `scripts/check-repo.test.mjs`; Auth `domain-events-outbox.e2e-spec.ts` (code purge unchanged) | tested; never run on a real database |
+| Operator CLI safety | kit `outbox-retention.int-spec.ts` (dry run by default, allowlist, owner check); kit `rabbitmq-dlq-retry.int-spec.ts` (replay); kit `cli-config.int-spec.ts`, `cli-failure.spec.ts`; `check:repo` operator CLI configuration | tested |
+| Ordering | ADR-0037, ADR-0057 §7: consumers validate state | limit: not guaranteed |
+| Unpublishable outbox row | F4: retried indefinitely, alerted by `OutboxBacklogAging` | limit |
+
+### 16.3 Open risks and owners
+
+Nothing here is closed or downgraded by this certification.
+
+| Risk | Classification | Owner |
+|---|---|---|
+| **F1:** a message forged as an Auth event makes Notification send to a destination the forger chose (`source` is asserted; any consumer identity can publish to `notification.events`) | **production blocker** for Auth-triggered notifications | P-A1 / A14 |
+| **F2:** Audit keeps the first writer of `(sourceService, eventId)`; a forged first message turns the genuine one into an `event_id_conflict` dead letter | **accepted residual** (ADR-0053), reviewed in security before further production producers | A7 / P-A1 |
+| G7 production residuals: the shared fanout `nawara.events.dlx` and its write grant | blocks production activation only | A3M.8 |
+| `AUTH_EVENTS` in production; broker identities and grants for Notification, Billing, Payment | blocks production activation only | A3M.8 |
+| Running `nawara-outbox-retention` on any real database | separately authorized; nothing schedules it | owner |
+| Retention of Billing receipts and Notification history | legal and product decision (retention register) before production retention | owner |
+| A broker container restarted mid-flow is not directly tested | accepted residual (§15.3) | A3M |
+| `BrokerProxy` (`libs/service-kit/src/testing/broker-proxy.ts`) has fixed `guest` credentials: its tests need a broker accepting `guest` | nonblocking follow-up; CI unaffected | next kit change |
+| Billing logs `payment_event_applied` again when a non-replay duplicate of an applied event arrives (no write happens) | nonblocking follow-up (log wording only) | A10 |
+| F3: Notification has no conflict signal for a same-id event with different content | nonblocking; pinned by a test (§13.5) | A8 |
+| F4: an unpublishable outbox row is retried indefinitely | nonblocking; intended, alerted | A3M (recorded) |
+| F5: Billing's non-applied receipts grow by one row per delivery | nonblocking; kept by OD-A3M5-2 | retention register |
+| F6: stale kit comments about the inbox | nonblocking; next kit change | next kit change |
+| F7: Notification's dead letters are recovered only by an operator replay | nonblocking; intended, `MessagesDeadLettered` alerts | A8 / operations |
+| ADR-0056 §7 (Accepted) names consumer de-duplication "by event id in an inbox"; consumers use durable domain records (G3), the policy ADR-0057 (Proposed) states; ADR-0056 governs until ADR-0057 is accepted (OD-A3M-3) | recorded tension, unresolved (OD-A3M7-2) | owner |
+| ADR-0018 and ADR-0037 final disposition (OD-A3M-2); ADR-0057 acceptance (OD-A3M-1) | open owner decisions | owner |
+| Eligibility of deterministic-id producers for retention; the `publishedAt` index (§14.6) | open owner decisions | owner |
+
+### 16.4 What A3M.7 certifies
+
+A3M.7 certifies the **local and repository** messaging implementation on `main` at `9d1fa0c` and the CI evidence of §16.1 and §16.2.
+It guarantees an effectively-once business effect under at-least-once delivery for the consumers named in §16.2. It claims neither
+exactly-once delivery nor authenticated publisher identity.
+
+It does **not** certify:
+- the production RabbitMQ topology;
+- production publisher identity;
+- production credentials or grants;
+- the activation of any service or of `AUTH_EVENTS` in production;
+- any production data migration;
+- the execution of any retention cleanup;
+- production notification delivery;
+- Final Core platform readiness.
+
+ADR-0057 remains **Proposed**; merging this record is not its acceptance.
+
+### 16.5 Production hand-off (A3M.8)
+
+A3M.8 is independently gated: each item of §8 needs its own owner authorization under ADR-0053 and the protected `production`
+environment, one at a time. This record starts none of them. Prerequisites before the corresponding activation:
+- **Auth-triggered notifications (`AUTH_EVENTS`):** F1 resolved or explicitly accepted with a compensating control (P-A1 / A14);
+  Notification deployed with its own broker identity and grants.
+- **Further production producers to Audit:** F2 reviewed (A7 / P-A1).
+- **Broker identities for Billing, Payment, Notification:** grants derived from what the kit does (ADR-0053), each a deliberate widening.
+- **Topology:** the G7 residuals (shared fanout dead-letter exchange, its write grant) decided before any change.
+- **Images with R1:** deployed by exact digest through the authorized deploy workflows; merging never deploys.
+- **Retention:** an age chosen by the owner, the retention-register decisions, and a separately authorized run.
+
+G6 stays deferred; Final Core Validation stays the absolute last validation.

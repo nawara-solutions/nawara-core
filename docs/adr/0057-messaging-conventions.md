@@ -227,7 +227,8 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
 
 - One reviewable statement of how Core services exchange events; [CURRENT] rules describe `main`, so this ADR changes no behaviour.
 - New work has a convention to follow: versioned payloads with supported-version checks, per-service catalogs and a guard (A3M.2),
-  consumer conventions and Payment's readiness (A3M.3), the G7 proof and its remedy (A3M.4), retention design (A3M.5), real-broker evidence (A3M.6).
+  consumer conventions and Payment's readiness (A3M.3), the G7 proof and its remedy (A3M.4), retention design (A3M.5), real-broker evidence (A3M.6); the local certification record is the
+  [A3M record](../architecture/core-v2-a3m-messaging.md) §16 (A3M.7). Certification is not acceptance: this ADR stays Proposed.
 - ADR-0018 and ADR-0037 gain forward notes to this ADR; their content and status are unchanged, and their disposition remains an
   explicit owner decision (OD-A3M-2). On acceptance of this ADR the owner may mark them partially superseded.
 - G7 is confirmed and remedied in code (A3M.4, R1); the production topology residuals of §8 stay recorded.
