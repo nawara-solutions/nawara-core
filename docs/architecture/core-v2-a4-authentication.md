@@ -3,7 +3,8 @@
 - **Status:** RECORD of the A4.0 discovery (read-only, owner-reviewed, 2026-10-08, on `main` at `16476f9`, the PR #242 merge that
   closed A3M.7) and of **A4.1: the A4 architecture record**. **A4 is OPEN.** A4.2 to A4.5 are merged (PRs #244 to #247, `main` at
   `e039ed6`); their sections keep the text they were approved with. **A4.6** (§10 design,
-  [ADR-0058](../adr/0058-access-token-signing-key-ring.md) Proposed) is **prepared; pending owner review and merge**. Nothing in §10 is implemented unless it is labelled **[CURRENT]**.
+  [ADR-0058](../adr/0058-access-token-signing-key-ring.md)) is merged (PR #248, `8d62b3f`), and ADR-0058 is **Accepted** (2026-10-08).
+  Nothing in §10 is implemented unless it is labelled **[CURRENT]**.
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET]**: approved by an owner decision, implemented by the named stage.
   **[PENDING DESIGN]**: approved in direction only; the named stage must design it and the owner must review it before code.
 - **Scope of A4** ([roadmap](../CORE-ROADMAP.md) Core V2 table): sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service
@@ -175,8 +176,9 @@ product-term check. Without it the check would report three places:
 ## 10. JWT key ring (A4.6 design, A4.7 implementation) [TARGET: A4.7]
 
 Designed in A4.6 under the owner's decisions of §10.2 and stated as [ADR-0058](../adr/0058-access-token-signing-key-ring.md)
-(**Proposed**; its acceptance is a separate decision). Nothing in §10.3–§10.9 is implemented until A4.7 merges. **No production key is
-generated, delivered, activated or retired by this design, by A4.7 or by any A4 stage (§10.10).**
+(**Accepted** on 2026-10-08 by a separate, explicit owner decision after the design was merged). Nothing in §10.3–§10.9 is
+implemented until A4.7 merges. **No production key is generated, delivered, activated or retired by this design, by A4.7 or by any A4
+stage (§10.10).**
 
 ### 10.1 Current behaviour [CURRENT]
 
@@ -420,7 +422,7 @@ Reused, not repeated: the A1, A2, A15 and A3M evidence. Not part of A4: G6, prod
 | A loader change could refuse production's configuration at startup | A4.2 (characterization), A4.8 (configuration check), owner review before deploy |
 | Image rollback rejects ring-signed tokens once a new JWT key is active | §10.7; the rotation runbook (A4.8); owner at each rotation step |
 | A re-provisioning reintroduces a generated `JWT_SECRET` after retirement | A4.8 (D6), before any retirement (§10.8) |
-| ADR-0058 remains Proposed | owner review |
+| ADR-0058 acceptance | resolved: Accepted by the owner on 2026-10-08 |
 | F1 (forged Auth events to Notification) | P-A1 / A14; `AUTH_EVENTS` stays off (A3M.8) |
 | Peppers cannot be rotated (A2 accepted limitation) | recorded; A4 does not change it |
 | Passkeys enrolled under the former RP ID no longer work | product integration (re-enrollment UI) |
