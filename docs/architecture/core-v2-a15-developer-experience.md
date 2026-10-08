@@ -4,7 +4,8 @@
   certified A2), of the A15.1.0 design (read-only, owner-reviewed), of **A15.1: generic CLI configuration hygiene** (**closed on `main`**:
   PR #229, merge `a7c56643a72c9b1b829c1b89521f7f8165aaa7f0`; §4), of **A15.2: the canonical developer path and toolchain**
   (**closed on `main`**: PR #230, merge `fa569d8f54d7c96c97a8aae2fcfc21c3a05cdc18`; §5) and of **A15.3: local environment and test
-  determinism** (**complete locally, owner review pending**; §6). **A15 is OPEN.** A15.4 and A15.5 are not started.
+  determinism** (**closed on `main`**: PR #231, merge `7dde589ba1d200ffc1ce57a53c74b9ec43a058ce`, 24 of 24 checks green; §6) and of
+  **A15.4: conventions** (**complete locally, owner review pending**; §7). **A15 is OPEN.** A15.5 (certification) is not started.
 - **Scope of A15** ([roadmap](../CORE-ROADMAP.md) A15): service templates, shared libraries, local environment, testing and CI
   conventions, documentation, generators, localization conventions. The roadmap gives no subphases or completion criteria; §3 does.
   **Not A15:** Auth's CLIs and loader (A4); the Organization ownership tooling (A5 / F6 / F7); observability capabilities (A12);
@@ -60,8 +61,10 @@ A15.1  generic CLI configuration hygiene   ✅ closed on main (PR #229, merge a7
 A15.2.0  developer-path design          ✅ complete (owner-reviewed)
 A15.2  developer path and toolchain     ✅ closed on main (PR #230, merge fa569d8; §5)
 A15.3.0  determinism discovery          ✅ complete (owner-reviewed)
-A15.3  local environment, determinism   complete locally; owner review pending (§6)
-A15.4 – A15.5                           not started
+A15.3  local environment, determinism   ✅ closed on main (PR #231, merge 7dde589; §6)
+A15.4.0  conventions discovery          ✅ complete (owner-reviewed)
+A15.4  new-service checklist, guards    complete locally; owner review pending (§7)
+A15.5  certification                    not started
 ```
 
 ## 4. A15.1: generic CLI configuration hygiene (2026-10-07; closed on `main`, PR #229, merge `a7c5664`)
@@ -171,7 +174,7 @@ unchanged, and no service runtime changed.
   Auth, Organization and Audit image workflows **build**; nothing deploys, and nothing changes at runtime. No G6 dependency. Drive
   does not depend on this: no API, event or contract changed.
 
-## 6. A15.3: local environment and test determinism (2026-10-08, local)
+## 6. A15.3: local environment and test determinism (2026-10-08; closed on `main`, PR #231, merge `7dde589`)
 
 - **Owner decisions:** OD-A15.3-1 = A (one bounded local diagnosis of the broker start failure first); OD-A15.3-2 = A (fix all
   twelve copies of the test infrastructure gate); OD-A15.3-3 = A (tests delete the broker resources they declare, plus a documented
@@ -248,3 +251,35 @@ unchanged, and no service runtime changed.
   provider skipping the barrier ("both deliveries were in flight together": expected 1 to be 2).
 - **Production:** none. GREEN to implement and to merge (tests and documentation; the kit test paths make the Auth, Organization and
   Audit image workflows build; nothing deploys). No G6 dependency.
+
+## 7. A15.4: conventions (2026-10-08, local)
+
+- **Owner decisions:** OD-A15.4-1 = B (a dedicated [new-service checklist](../NEW-SERVICE-CHECKLIST.md), linked from the developer
+  guide); OD-A15.4-2 = A (two narrow repository guards, below). No localization parity guard: the catalog type, every service's
+  `catalogProblems` test and the localization e2e suites already enforce it. No generator or template (OD-A15-6 stands).
+- **Checklist.** Fourteen short stages, each line tagged `[REQUIRED]`, `[IF DATABASE]`, `[IF CALLED BY SERVICES]`, `[IF MESSAGING]`,
+  `[IF AUDITABLE]` or `[IF IMAGE/DEPLOYABLE]` and linking its authoritative rule (ADR-0056, ADR-0054, the A2 record, ADR-0032/0033/
+  0037/0042/0049/0052, the kit and audit-contract READMEs, the A12, A14 and A0 records, the developer guide). New content is only what
+  existed nowhere: the exact files a new service is registered in (Core CI matrices, `scripts/smoke-core-image.sh`, the database init
+  script and `.env.example`, Compose, the Prometheus scrape configuration and the `check:repo` inventories), the A15.3 test principles,
+  and the reminder not to copy Auth (legacy, converged by A4).
+- **Localization.** The convention already exists: [ADR-0054](../adr/0054-localized-error-messages-and-stable-error-codes.md) and the
+  [error localization guide](core-error-localization.md) (`en` default and fallback, `fr`, `ar`; only the error `message` is localized;
+  codes, statuses, property names, enums, routes and event names never). A15.4 adds no localization architecture; the checklist states
+  what a new service starts with, and the guide links back to it.
+- **Guard: Core CI workspace coverage** (`checkCiWorkspaceCoverage`). Every application and library workspace, read from the
+  `apps/*` and `libs/*` manifests, has an entry in the `node` matrix of `core-ci.yml`, and every application with a Dockerfile has one
+  in the `images` matrix. Before, a new workspace left out of the matrix would never have been linted, type-checked, tested or built by
+  CI, silently. It never asks for an image publishing or deployment workflow; `test/*` packages are run by their own cross-service jobs.
+- **Guard: genericity scope.** The product-term check applied to a hard-coded list of services, so a new service escaped it. It now
+  applies to every application under `apps/` (source and migrations), with one named exemption, `GENERICITY_LEGACY_EXEMPT =
+  auth-service` (Auth was never in the list; its convergence is A4's). The terms themselves are unchanged.
+- **Conformance.** The existing services are not changed: Auth's legacy bootstrap, filter and runner; image and deploy workflows only
+  for the production-bound Auth, Organization and Audit; no audit events from Notification or Audit (the sink); README heading
+  differences. The real repository passes both guards.
+- **Evidence (local).** `test:repo` 126 passed (124 before: one test per guard, fixtures plus the real repository and the runner
+  wiring); `check:repo`; every path and script the checklist names exists; changed-document links and anchors. Negative controls,
+  restored byte-for-byte: a workspace removed from the `node` matrix makes `check:repo` red naming it; a product term in a service
+  directory that is in no list is caught, while the same term in Auth is not.
+- **Production:** none. Documentation and `scripts/**` only: Core CI, no image build, nothing deploys. No G6 dependency; Drive is
+  not affected (no API, event or contract changed).
