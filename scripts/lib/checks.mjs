@@ -1089,10 +1089,21 @@ export function checkCiCoverage(fileName, text) {
 }
 
 /**
- * V2 A15.4: applications outside the product-term check, by directory. Auth predates the rule (it was never in the list this replaced)
- * and its convergence with the shared conventions is A4's; it is the only exemption. A new service is never added here.
+ * V2 A4.5 (OD-A4.5-1, OD-A4.5-2): no application is exempt from the product-term check (A15.4 had exempted all of Auth). The only
+ * exceptions are two comment LINES of Auth migrations that are applied in production and can never be edited (the migration runner
+ * refuses a modified applied migration): each is exempt by its exact path and its exact full line, and nothing else in either file.
+ * Only a top-level migration file can carry an exception (see `historicalLinesRemoved`); an entry is added only after review.
  */
-export const GENERICITY_LEGACY_EXEMPT = new Set(['auth-service']);
+export const GENERICITY_HISTORICAL_LINES = new Map([
+  ['apps/auth-service/db/migrations/0004_organization_join_codes_and_membership.sql', ['  -- Opaque registration audience label chosen by the platform ("student", "teacher", ...). Auth never']],
+  ['apps/auth-service/db/migrations/0007_multi_organization_membership.sql', ['-- A platform-specific label ("teacher", "driver", ...) can never be stored on a user again.']],
+]);
+const HISTORICAL_MIGRATION = /^apps\/[a-z0-9-]+\/db\/migrations\/\d{4}_[a-z0-9_]+\.sql$/;
+/** The text with the reviewed historical lines of THIS file removed (whole-line equality only); any other file is returned unchanged. */
+function historicalLinesRemoved(relPath, text) {
+  const allowed = HISTORICAL_MIGRATION.test(relPath) ? GENERICITY_HISTORICAL_LINES.get(relPath) : undefined;
+  return allowed ? text.split('\n').filter((line) => !allowed.includes(line)).join('\n') : text;
+}
 const PRODUCT_TERMS = /\b(student|teacher|driver|lesson|classroom|instructor|vehicle)s?\b/i;
 /**
  * Identifiers split into words before matching (Stage 17.3): `instructorId`, `student_documents`, `driverPhoto` and plurals were
@@ -1440,10 +1451,11 @@ export function checkSource(relPath, text, { appPackages } = {}) {
   const problems = [];
   if (BIDI_CONTROL.test(text) && !BIDI_ALLOWLIST.has(relPath)) problems.push(`${relPath}: contains an invisible bidirectional control character (write it as an escape)`);
   const inKit = relPath.startsWith('libs/service-kit/');
-  // V2 A15.4: every application under apps/ is in scope (a new service enters it automatically), except the named legacy exemptions.
+  // V2 A15.4 / A4.5: every application under apps/ is in scope (a new service enters it automatically), Auth included; only the reviewed
+  // historical migration lines are set aside.
   const coreApp = /^apps\/([a-z0-9-]+)\/(?:src|db\/migrations)\//.exec(relPath)?.[1];
-  const inNewCore = (coreApp !== undefined && !GENERICITY_LEGACY_EXEMPT.has(coreApp)) || relPath.startsWith('libs/audit-contract/');
-  if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(text))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
+  const inNewCore = coreApp !== undefined || relPath.startsWith('libs/audit-contract/');
+  if ((inKit || inNewCore) && PRODUCT_TERMS.test(identifierWords(historicalLinesRemoved(relPath, text)))) problems.push(`${relPath}: contains a product-specific term (Core must stay generic)`);
   if (inKit && relPath.includes('/src/') && DOMAIN_DECLARATION.test(text) && !KIT_IDENTITY_CONTRACT_ALLOWLIST.has(relPath)) {
     problems.push(`${relPath}: declares a financial-domain concept; the service-kit holds technical infrastructure only`);
   }

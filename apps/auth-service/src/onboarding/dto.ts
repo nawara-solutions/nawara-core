@@ -12,7 +12,7 @@ export class VerifyContactDto {
 }
 
 export class CreateJoinCodeDto {
-  @ApiProperty({ description: 'Opaque registration audience label chosen by the platform (e.g. "student", "teacher"). Auth never interprets it; "admin" is reserved.' })
+  @ApiProperty({ description: 'Opaque registration audience label chosen by the platform (e.g. "member", "staff"). Auth never interprets it; "admin" is reserved.' })
   @IsString() @Matches(/^(?!admin$)[a-z][a-z0-9_-]{0,31}$/) audience!: string;
   @ApiProperty({ description: 'New members start as PENDING and need an organization decision.' })
   @IsBoolean() requiresApproval!: boolean;
