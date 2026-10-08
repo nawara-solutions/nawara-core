@@ -8,6 +8,8 @@
 #   3. the process is still alive, and still live, a few seconds later (no crash after boot);
 #   4. `GET /ready` is wired and answers 200 or 503. It is NOT required to pass: readiness depends on the database and its
 #      migrations, which this smoke deliberately does not provision (the /health vs /ready distinction is preserved).
+#   5. auth-service only (V2 A4.9): the image's own configuration check (`dist/cli/check-config.js`, which the production deploy runs
+#      before any migration) is present and behaves, run exactly as the deploy runs it, offline (`--network none`).
 # Needs a RabbitMQ broker on 127.0.0.1:5672 (billing-service's consumer attaches at startup in production). PostgreSQL is
 # deliberately unreachable. Uses host networking (Linux, as in CI). Exits non-zero, with the container's log, on any failure.
 set -euo pipefail
@@ -17,7 +19,7 @@ image="${2:?usage: smoke-core-image.sh <service> <image>}"
 name="smoke-${service}-$$"
 port=3000
 env_file="$(mktemp)"
-trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -f "$env_file"' EXIT
+trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -f "$env_file" "$env_file.invalid"' EXIT
 
 b64() { head -c "$1" /dev/urandom | base64 | tr -d '\n'; }
 hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -120,6 +122,33 @@ fail() {
 
 status() { curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$port$1" || true; }
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ]; }
+
+# V2 A4.9 (A4 record §18; A4.8 review F5): apps/auth-service/deploy/provision-and-deploy.sh validates the server .env with this image's
+# own loader before any migration or container change. Prove the command exists at the image's working directory and behaves, run as the
+# deploy runs it (--rm, --network none, --entrypoint node): the valid production configuration above is accepted with the expected line,
+# an invalid one (a pepper equal to JWT_SECRET) is refused with exit 1, and neither output contains a configuration value.
+if [ "$service" = auth-service ]; then
+  config_check() { docker run --rm --network none --env-file "$1" --entrypoint node "$image" dist/cli/check-config.js 2>&1; }
+  no_value_in() { # $1 = output; fails if any configuration value (or a TOTP key without its id) appears in it
+    local line value
+    while IFS= read -r line; do
+      value="${line#*=}"
+      for v in "$value" "${value#k1:}"; do
+        [ "${#v}" -ge 16 ] || continue
+        case "$1" in *"$v"*) fail "the configuration check printed a configuration value" ;; esac
+      done
+    done <"$env_file"
+  }
+  ok_out="$(config_check "$env_file")" || fail "the configuration check refused the valid production configuration (or dist/cli/check-config.js is missing)"
+  [ "$ok_out" = "configuration valid; JWT: legacy only (JWT_SECRET signs and verifies)" ] || fail "unexpected configuration-check output for the valid configuration"
+  no_value_in "$ok_out"
+  { grep -v '^JOIN_CODE_PEPPER=' "$env_file"; printf 'JOIN_CODE_PEPPER=%s\n' "$(sed -n 's/^JWT_SECRET=//p' "$env_file")"; } >"$env_file.invalid"
+  if bad_out="$(config_check "$env_file.invalid")"; then fail "the configuration check accepted a pepper equal to JWT_SECRET"; fi
+  [ "$bad_out" = "configuration invalid: JOIN_CODE_PEPPER must differ from JWT_SECRET (one key, one purpose)" ] \
+    || fail "unexpected configuration-check output for the invalid configuration"
+  no_value_in "$bad_out"
+  echo "config check ($service): valid accepted, invalid refused, no value printed"
+fi
 
 docker run -d --name "$name" --network host --env-file "$env_file" "$image" >/dev/null
 
