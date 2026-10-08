@@ -1884,3 +1884,118 @@ export function checkCiWorkspaceCoverage(ciText, { workspaces, imageApps }) {
   }
   return problems;
 }
+
+/**
+ * V2 A3M.2 (ADR-0057 §11, Proposed; A3M record §11): the per-service event contracts (`apps/<app>/contracts/events.json`, each the
+ * rendering of the service's own `src/events/event-catalog.ts`, kept equal by that service's unit test). Read as JSON only: no
+ * application source is imported or parsed. Checks:
+ * - grammar: event names as the kit's `EVENT_NAME`, never `audit.*` (audit events are governed by `@nawara/audit-contract`), versions
+ *   positive integers, fields typed from a closed set, `enum` with its values, flags only `true`;
+ * - ownership: one producer per event name; `codeBearing` (a one-time code in the payload, ADR-0052 decision 5) only from auth-service;
+ * - consumers: every consumed `(source, name, version)` is published by that source at that version, and every required field is
+ *   declared there with a compatible type, not nullable or optional unless the consumer accepts it;
+ * - registration: every application whose source writes to the outbox (`outbox.enqueue(`) or subscribes to the bus (`.subscribe({`)
+ *   has a contract file, except the named exemption.
+ * Limits: registration is a presence scan of source text, not a proof that every emit site is cataloged; emit sites are bound to their
+ * catalog by each producer's compile-time typing (Auth's `DomainEvents.emit`, Payment's `PaymentEventName`) and builder tests.
+ */
+export const EVENT_CONTRACT_EXEMPT = new Map([['audit-service', 'consumes only audit.* events, governed by @nawara/audit-contract (ADR-0049)']]);
+const CONTRACT_EVENT_NAME = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
+const CONTRACT_FIELD_TYPES = new Set(['id', 'uuid', 'string', 'datetime', 'integer', 'object', 'array', 'enum']);
+const CODE_BEARING_PRODUCER = 'auth-service';
+const EVENT_TRAFFIC = [/\boutbox\.enqueue\(/, /\.subscribe\(\{/];
+
+/** Whether an application's (non-test) source text writes events to the outbox or subscribes to the bus. */
+export function usesEventTraffic(sourceTexts) {
+  return sourceTexts.some((text) => EVENT_TRAFFIC.some((re) => re.test(text)));
+}
+
+function contractFieldProblems(where, fields) {
+  const problems = [];
+  if (fields === null || typeof fields !== 'object' || Array.isArray(fields) || Object.keys(fields).length === 0) return [`${where}: the payload must declare at least one field`];
+  for (const [name, f] of Object.entries(fields)) {
+    const at = `${where}.${name}`;
+    if (f === null || typeof f !== 'object' || !CONTRACT_FIELD_TYPES.has(f.type)) { problems.push(`${at}: type must be one of ${[...CONTRACT_FIELD_TYPES].join(', ')}`); continue; }
+    if (f.type === 'enum' && (!Array.isArray(f.values) || f.values.length === 0 || !f.values.every((v) => typeof v === 'string'))) problems.push(`${at}: an enum must list its string values`);
+    if (f.type !== 'enum' && f.values !== undefined) problems.push(`${at}: only an enum has values`);
+    for (const flag of ['nullable', 'optional']) if (f[flag] !== undefined && f[flag] !== true) problems.push(`${at}: ${flag} is either absent or true`);
+    for (const k of Object.keys(f)) if (!['type', 'values', 'nullable', 'optional'].includes(k)) problems.push(`${at}: unknown key "${k}"`);
+  }
+  return problems;
+}
+
+/** Why a producer field cannot satisfy a consumer requirement, or undefined when it can. */
+function incompatibility(required, produced) {
+  if (produced === undefined) return 'is not declared by the producer';
+  if (produced.nullable && !required.nullable) return 'may be null at the producer but the consumer requires a value';
+  if (produced.optional && !required.optional) return 'may be absent at the producer but the consumer requires it';
+  const r = required.type;
+  const p = produced.type;
+  if (r === p && r !== 'enum') return undefined;
+  if (r === 'id' && p === 'uuid') return undefined;
+  if (r === 'string' && ['string', 'id', 'uuid', 'datetime', 'enum'].includes(p)) return undefined;
+  if (r === 'enum' && p === 'enum') {
+    const extra = (produced.values ?? []).filter((v) => !(required.values ?? []).includes(v));
+    return extra.length === 0 ? undefined : `may be ${extra.join(', ')}, which the consumer does not accept`;
+  }
+  return `is a ${p} at the producer but the consumer requires a ${r}`;
+}
+
+/**
+ * `contracts`: application directory -> the text of its contracts/events.json (undefined when absent). `required`: the applications whose
+ * source has event traffic (`usesEventTraffic`).
+ */
+export function checkEventContracts(contracts, required) {
+  const problems = [];
+  const file = (app) => `apps/${app}/contracts/events.json`;
+  const parsed = new Map();
+  for (const app of required) {
+    if (EVENT_CONTRACT_EXEMPT.has(app)) continue;
+    if (contracts[app] === undefined) problems.push(`${file(app)} is missing: apps/${app} publishes or consumes events, so it declares them (src/events/event-catalog.ts, ADR-0057 §11)`);
+  }
+  for (const [app, text] of Object.entries(contracts)) {
+    if (text === undefined) continue;
+    let c;
+    try { c = JSON.parse(text); } catch (e) { problems.push(`${file(app)}: not valid JSON (${e.message})`); continue; }
+    if (c?.service !== app) problems.push(`${file(app)}: "service" must be "${app}"`);
+    if (!Array.isArray(c?.produces) || !Array.isArray(c?.consumes)) { problems.push(`${file(app)}: "produces" and "consumes" must be arrays`); continue; }
+    parsed.set(app, c);
+  }
+  const producers = new Map();
+  for (const [app, c] of parsed) {
+    for (const [i, e] of c.produces.entries()) {
+      const at = `${file(app)}: produces[${i}] ${e?.name ?? '?'}`;
+      if (typeof e?.name !== 'string' || !CONTRACT_EVENT_NAME.test(e.name)) { problems.push(`${at}: the name must be dotted lowercase (the kit's EVENT_NAME)`); continue; }
+      if (e.name.startsWith('audit.')) problems.push(`${at}: audit events are governed by @nawara/audit-contract, never declared here`);
+      if (!Number.isSafeInteger(e.version) || e.version < 1) problems.push(`${at}: the version must be a positive integer`);
+      if (e.codeBearing !== undefined && e.codeBearing !== true) problems.push(`${at}: codeBearing is either absent or true`);
+      if (e.codeBearing === true && app !== CODE_BEARING_PRODUCER) problems.push(`${at}: only ${CODE_BEARING_PRODUCER} may publish a code-bearing event (ADR-0052 decision 5)`);
+      problems.push(...contractFieldProblems(`${at} payload`, e.payload));
+      if (producers.has(e.name)) problems.push(`${at}: already published by ${producers.get(e.name).app}: an event has exactly one producer`);
+      else producers.set(e.name, { app, event: e });
+    }
+  }
+  for (const [app, c] of parsed) {
+    const seen = new Set();
+    for (const [i, e] of c.consumes.entries()) {
+      const at = `${file(app)}: consumes[${i}] ${e?.source ?? '?'} ${e?.name ?? '?'}`;
+      const key = `${e?.source}|${e?.name}|${e?.version}`;
+      if (seen.has(key)) problems.push(`${at}: declared twice`);
+      seen.add(key);
+      if (typeof e?.name !== 'string' || !CONTRACT_EVENT_NAME.test(e.name)) { problems.push(`${at}: the name must be dotted lowercase (the kit's EVENT_NAME)`); continue; }
+      if (e.name.startsWith('audit.')) { problems.push(`${at}: audit events are governed by @nawara/audit-contract, never declared here`); continue; }
+      if (!Number.isSafeInteger(e.version) || e.version < 1) problems.push(`${at}: the version must be a positive integer`);
+      const fieldProblems = contractFieldProblems(`${at} requires`, e.requires);
+      problems.push(...fieldProblems);
+      const producer = producers.get(e.name);
+      if (producer === undefined || producer.app !== e.source) { problems.push(`${at}: ${e.source} publishes no event named ${e.name}`); continue; }
+      if (producer.event.version !== e.version) { problems.push(`${at}: ${e.source} publishes ${e.name} at version ${producer.event.version}, not ${e.version}`); continue; }
+      if (fieldProblems.length > 0) continue;
+      for (const [name, req] of Object.entries(e.requires)) {
+        const why = incompatibility(req, producer.event.payload?.[name]);
+        if (why) problems.push(`${at}: the required field ${name} ${why}`);
+      }
+    }
+  }
+  return problems;
+}

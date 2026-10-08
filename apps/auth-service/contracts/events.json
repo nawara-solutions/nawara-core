@@ -1,0 +1,306 @@
+{
+  "service": "auth-service",
+  "produces": [
+    {
+      "name": "admin.operator_code_issued",
+      "version": 1,
+      "codeBearing": true,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "expiresAt": {
+          "type": "datetime"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "admin.operator_confirmation_code_issued",
+      "version": 1,
+      "codeBearing": true,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "expiresAt": {
+          "type": "datetime"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "admin.owner_login_from_new_device",
+      "version": 1,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "ipAddress": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "admin.owner_recovery_completed",
+      "version": 1,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "ipAddress": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "admin.owner_recovery_requested",
+      "version": 1,
+      "payload": {
+        "availableAt": {
+          "type": "datetime"
+        },
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "ipAddress": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "member.contact_verification_requested",
+      "version": 1,
+      "codeBearing": true,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "expiresAt": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "membership.admin_provisioned",
+      "version": 1,
+      "payload": {
+        "invitationType": {
+          "type": "string"
+        },
+        "organizationId": {
+          "type": "uuid"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "membership.approved",
+      "version": 1,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "organizationId": {
+          "type": "uuid"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "membership.rejected",
+      "version": 1,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "organizationId": {
+          "type": "uuid"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "membership.requested",
+      "version": 1,
+      "payload": {
+        "audience": {
+          "type": "string"
+        },
+        "organizationId": {
+          "type": "uuid"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "membership.revoked",
+      "version": 1,
+      "payload": {
+        "channel": {
+          "type": "enum",
+          "values": [
+            "email",
+            "phone"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "nullable": true
+        },
+        "organizationId": {
+          "type": "uuid"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    },
+    {
+      "name": "user.registered",
+      "version": 1,
+      "payload": {
+        "organizationId": {
+          "type": "uuid"
+        },
+        "role": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "datetime"
+        },
+        "userId": {
+          "type": "uuid"
+        }
+      }
+    }
+  ],
+  "consumes": []
+}

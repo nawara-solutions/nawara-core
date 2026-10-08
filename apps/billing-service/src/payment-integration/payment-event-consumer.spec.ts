@@ -49,6 +49,31 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     expect(logs.join('\n')).toContain('payment_event_dead_letter classification=permanent reason=malformed_payload eventId=e1111111');
   });
 
+  it('V2 A3M.2: an unsupported version is a permanent failure before any parsing, receipt or business decision', async () => {
+    const apply = vi.fn();
+    const handler = await build(apply).start();
+    for (const version of [2, 0, Number.NaN]) {
+      const err = await handler(envelope({}, { version })).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PermanentEventFailure);
+      expect((err as PermanentEventFailure).reason).toBe('unsupported_version');
+    }
+    // even a malformed payload at an unsupported version is refused for its version: the payload is never interpreted
+    const err = await handler(envelope({ payload: { paymentId: 1 } }, { version: 2 })).catch((e: unknown) => e);
+    expect((err as PermanentEventFailure).reason).toBe('unsupported_version');
+    expect(apply).not.toHaveBeenCalled(); // no receipt, no state change
+    expect(logs.join('\n')).toContain('payment_event_dead_letter classification=permanent reason=unsupported_version version=2 eventId=e1111111');
+    expect(logs.join('\n')).toContain('reason=unsupported_version version=- eventId=e1111111');
+    await expect(handler(envelope({}, { version: 2, replayCount: 1 }))).rejects.toBeInstanceOf(PermanentEventFailure);
+    expect(logs.join('\n')).toContain('payment_event_replay_rejected replays=1 classification=permanent reason=unsupported_version');
+  });
+
+  it('V2 A3M.2: version 1, the only version Payment publishes, still reaches applyPaymentEvent', async () => {
+    const apply = vi.fn(async () => ({ outcome: 'applied', detail: null, firstDelivery: true, subscription: null }));
+    const handler = await build(apply).start();
+    await handler(envelope());
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+
   it('an identifier PostgreSQL refuses (SQLSTATE class 22) is permanent: retrying cannot change it', async () => {
     const dbError = Object.assign(new Error(`invalid input syntax for type uuid: "${SECRET}"`), { code: '22P02' });
     const handler = await build(vi.fn().mockRejectedValue(dbError)).start();

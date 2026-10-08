@@ -86,6 +86,8 @@ The convention exists: [ADR-0054](adr/0054-localized-error-messages-and-stable-e
   ([ADR-0037](adr/0037-reliable-events-outbox-inbox.md); [kit README](../libs/service-kit/README.md) "Events" and "Dead letters").
   Production requires a broker; elsewhere the in-memory bus is used.
 - [IF MESSAGING] Broker suites gated by `TEST_RABBITMQ_URL`; they delete the queues and exchanges they declare.
+- [IF MESSAGING] Every event published or consumed is declared in `src/events/event-catalog.ts` and its rendered
+  `contracts/events.json` (`check:repo` refuses an app with event traffic and no contract; ADR-0057 §11, Proposed).
 - Messaging conventions still being designed (versioning, retry and DLQ policy across services) belong to A3, not to this list. Their
   current statement is [ADR-0057](adr/0057-messaging-conventions.md), **Proposed** (not yet Accepted; A3M).
 

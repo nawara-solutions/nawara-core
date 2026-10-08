@@ -2,9 +2,12 @@ import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnAppl
 import { EVENT_BUS, EVENT_NAME, PermanentEventFailure, pgCode, runWithEventContext, SAFE_ID, safeToken, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
+import { CONSUMED_EVENTS as CATALOG } from '../events/event-catalog.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
 
-const CONSUMED_EVENTS: readonly PaymentEventName[] = ['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired'];
+/** V2 A3M.2: the consumed names and their supported versions come from the event catalog (`events/event-catalog.ts`). */
+const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.map((c) => c.name);
+const SUPPORTED_VERSION: ReadonlyMap<string, number> = new Map(CATALOG.map((c) => [c.name, c.version]));
 
 class MalformedPaymentEventError extends PermanentEventFailure {
   constructor() {
@@ -132,6 +135,15 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     const who = { eventId: safeToken(event.id, SAFE_ID), eventType: safeToken(event.name, EVENT_NAME) };
     // An operator replay of a dead-lettered message is the same delivery in every respect but this marker, which only names the log lines.
     const tag = (base: string, replayed: string) => (replay > 0 ? `${replayed} replays=${replay}` : base);
+    // V2 A3M.2 (ADR-0057 §5): a version Billing does not support is refused before the payload is interpreted, before any receipt and
+    // before any business decision; permanent, so it is dead-lettered for an operator, never retried. Version 1, the only version
+    // Payment publishes (a message without the header reads as 1), passes unchanged.
+    const supported = SUPPORTED_VERSION.get(event.name);
+    if (supported !== undefined && event.headers.version !== supported) {
+      const version = Number.isSafeInteger(event.headers.version) ? event.headers.version : '-';
+      this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=unsupported_version version=${version}`, who);
+      throw new PermanentEventFailure('unsupported_version');
+    }
     let facts: PaymentEventFacts;
     let settledAt: Date;
     try {

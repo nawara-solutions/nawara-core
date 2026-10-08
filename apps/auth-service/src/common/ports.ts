@@ -1,4 +1,5 @@
 import type { Queryable } from '../db/db.service.js';
+import type { AuthEventName, AuthEventPayload } from '../events/event-catalog.js';
 
 /** Time source. Injected so session ceilings, expiries and shifts are testable without sleeping. */
 export interface Clock {
@@ -16,8 +17,9 @@ export class SystemClock implements Clock {
  * event exists if and only if its change commits (no lost event, no phantom event), then published by the one kit relay Auth runs, at least
  * once, and de-duplicated by the consumer on its event id. Nothing is sent to the broker from a request. `AUTH_EVENTS=off` writes no row.
  * Three events carry a one-time code for delivery; their rows are short-lived (deleted once published or expired) and never logged.
+ * V2 A3M.2: the name and the payload are typed from the event catalog (`events/event-catalog.ts`): compile-time only.
  */
 export interface DomainEvents {
-  emit(q: Queryable, name: string, payload: Record<string, unknown>): Promise<void>;
+  emit<N extends AuthEventName>(q: Queryable, name: N, payload: AuthEventPayload<N>): Promise<void>;
 }
 export const DOMAIN_EVENTS = Symbol('DOMAIN_EVENTS');

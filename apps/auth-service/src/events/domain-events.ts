@@ -3,6 +3,7 @@ import { OutboxService } from '@nawara/service-kit';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import type { Queryable } from '../db/db.service.js';
 import type { DomainEvents } from '../common/ports.js';
+import type { AuthEventName } from './event-catalog.js';
 
 /** Canonical envelope identity of every Auth event (Stage 16.2, ADR-0046 rule 17): the existing payloads are version 1. */
 export const AUTH_EVENT_VERSION = 1;
@@ -37,7 +38,8 @@ export class OutboxDomainEvents implements DomainEvents, OnApplicationBootstrap 
     new Logger('AuthDomainEvents').log(`auth_domain_events enabled=${this.enabled}`);
   }
 
-  async emit(q: Queryable, name: string, payload: Record<string, unknown>): Promise<void> {
+  // The port types the name and payload from the event catalog; the runtime path is unchanged.
+  async emit(q: Queryable, name: AuthEventName, payload: Record<string, unknown>): Promise<void> {
     if (!this.enabled) return;
     await this.outbox.enqueue(q, { name, payload, version: AUTH_EVENT_VERSION });
   }

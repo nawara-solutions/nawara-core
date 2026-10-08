@@ -1,0 +1,265 @@
+{
+  "service": "payment-service",
+  "produces": [
+    {
+      "name": "payment.cancelled",
+      "version": 1,
+      "payload": {
+        "actor": {
+          "type": "object"
+        },
+        "amount": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "object"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "payer": {
+          "type": "object"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "seller": {
+          "type": "object"
+        },
+        "sourceId": {
+          "type": "string"
+        },
+        "sourceType": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "payment.created",
+      "version": 1,
+      "payload": {
+        "actor": {
+          "type": "object"
+        },
+        "amount": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "object"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "payer": {
+          "type": "object"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "seller": {
+          "type": "object"
+        },
+        "sourceId": {
+          "type": "string"
+        },
+        "sourceType": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "payment.expired",
+      "version": 1,
+      "payload": {
+        "actor": {
+          "type": "object"
+        },
+        "amount": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "object"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "datetime"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "payer": {
+          "type": "object"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "seller": {
+          "type": "object"
+        },
+        "sourceId": {
+          "type": "string"
+        },
+        "sourceType": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "payment.failed",
+      "version": 1,
+      "payload": {
+        "actor": {
+          "type": "object"
+        },
+        "amount": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "object"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "failureCode": {
+          "type": "string",
+          "nullable": true
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "payer": {
+          "type": "object"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "seller": {
+          "type": "object"
+        },
+        "sourceId": {
+          "type": "string"
+        },
+        "sourceType": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "name": "payment.succeeded",
+      "version": 1,
+      "payload": {
+        "actor": {
+          "type": "object"
+        },
+        "amount": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "object"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "organizationId": {
+          "type": "string",
+          "nullable": true
+        },
+        "payer": {
+          "type": "object"
+        },
+        "paymentId": {
+          "type": "uuid"
+        },
+        "paymentRequestId": {
+          "type": "string"
+        },
+        "producer": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "seller": {
+          "type": "object"
+        },
+        "settledMethod": {
+          "type": "string"
+        },
+        "sourceId": {
+          "type": "string"
+        },
+        "sourceType": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "succeededAt": {
+          "type": "datetime",
+          "optional": true
+        }
+      }
+    }
+  ],
+  "consumes": []
+}
