@@ -3,7 +3,11 @@ import amqp from 'amqplib';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 import { RabbitMqEventBus, type EventEnvelope } from '../src/index.js';
 import { BrokerProxy } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 
 const uniq = () => randomBytes(4).toString('hex');
 const envelope = (name: string): EventEnvelope => {
@@ -21,7 +25,7 @@ const waitFor = async (cond: () => boolean | Promise<boolean>, ms = 10_000) => {
 
 describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored connection)', ['TEST_RABBITMQ_URL'], (env) => {
   const target = new URL(env.TEST_RABBITMQ_URL);
-  const exchange = `nawara.events.recovery${uniq()}`;
+  const exchange = owned.exchange(`nawara.events.recovery${uniq()}`);
   const buses: RabbitMqEventBus[] = [];
   const unhandled: unknown[] = [];
   const onUnhandled = (e: unknown) => void unhandled.push(e);
@@ -69,7 +73,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
     await fresh();
     const bus = consumerBus();
     const got: string[] = [];
-    await bus.subscribe({ queue: `q.start.${uniq()}`, bindings: ['payment.#'], handler: async (e) => void got.push(e.id) });
+    await bus.subscribe({ queue: owned.queue(`q.start.${uniq()}`), bindings: ['payment.#'], handler: async (e) => void got.push(e.id) });
     expect(bus.consumerStatus()).toEqual([expect.objectContaining({ state: 'consuming' })]);
     const ev = envelope('payment.succeeded');
     await publisher.publish(ev);
@@ -80,7 +84,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
     await fresh();
     const bus = consumerBus();
     const got: string[] = [];
-    const queue = `q.recover.${uniq()}`;
+    const queue = owned.queue(`q.recover.${uniq()}`);
     await bus.subscribe({ queue, bindings: ['payment.#'], handler: async (e) => void got.push(e.id) });
     const before = envelope('payment.succeeded');
     await publisher.publish(before);
@@ -113,7 +117,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
     await fresh();
     const bus = consumerBus();
     const got: string[] = [];
-    const queue = `q.cancel.${uniq()}`;
+    const queue = owned.queue(`q.cancel.${uniq()}`);
     await bus.subscribe({ queue, bindings: ['payment.#'], handler: async (e) => void got.push(e.id) });
     const c = await amqp.connect(env.TEST_RABBITMQ_URL);
     const ch = await c.createChannel();
@@ -135,7 +139,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
     const gate = new Promise<void>((resolve) => (release = resolve));
     const ev = envelope('payment.succeeded');
     await bus.subscribe({
-      queue: `q.inflight.${uniq()}`, bindings: ['payment.#'],
+      queue: owned.queue(`q.inflight.${uniq()}`), bindings: ['payment.#'],
       handler: async (e) => {
         seen.push(e.id);
         if (seen.length === 1) await gate; // first delivery is still running when the connection is severed
@@ -155,7 +159,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
   it('shutdown: closing the bus while the consumer is reconnecting stops the reconnect loop for good', async () => {
     await fresh();
     const bus = consumerBus();
-    await bus.subscribe({ queue: `q.shutdown.${uniq()}`, bindings: ['payment.#'], handler: async () => undefined });
+    await bus.subscribe({ queue: owned.queue(`q.shutdown.${uniq()}`), bindings: ['payment.#'], handler: async () => undefined });
     await proxy.sever();
     await waitFor(() => state(bus) === 'reconnecting');
     await bus.close();
@@ -169,7 +173,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
   it('shutdown while consuming cancels and closes; a later connection loss does not resurrect it', async () => {
     await fresh();
     const bus = consumerBus();
-    const sub = await bus.subscribe({ queue: `q.close.${uniq()}`, bindings: ['payment.#'], handler: async () => undefined });
+    const sub = await bus.subscribe({ queue: owned.queue(`q.close.${uniq()}`), bindings: ['payment.#'], handler: async () => undefined });
     await sub.close();
     expect(bus.consumerStatus()).toEqual([]);
     const accepted = proxy.accepted;
@@ -184,7 +188,7 @@ describeWithEnv('RabbitMQ consumer recovery (real broker, severed and restored c
     await fresh();
     const bus = consumerBus();
     await proxy.sever();
-    await expect(bus.subscribe({ queue: `q.failfast.${uniq()}`, bindings: ['payment.#'], handler: async () => undefined })).rejects.toBeDefined();
+    await expect(bus.subscribe({ queue: owned.queue(`q.failfast.${uniq()}`), bindings: ['payment.#'], handler: async () => undefined })).rejects.toBeDefined();
     expect(bus.consumerStatus()).toEqual([]);
   });
 });

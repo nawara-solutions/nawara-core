@@ -16,6 +16,10 @@ export function describeWithEnv(title: string, envNames: string[], body: (env: R
       });
     });
   } else {
-    describe.skip(`${title} (needs ${missing.join(', ')})`, () => body({}));
+    // V2 A15.3: the suite body is NOT run. Vitest runs a describe callback while collecting, even for a skipped describe, so running
+    // `body({})` here executed the suite's setup with no configuration (a `new URL(env.X)` threw and failed the whole file).
+    describe.skip(`${title} (needs ${missing.join(', ')})`, () => {
+      it(`needs ${missing.join(', ')}`, () => undefined);
+    });
   }
 }

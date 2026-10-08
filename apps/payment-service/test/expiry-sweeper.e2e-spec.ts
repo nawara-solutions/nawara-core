@@ -50,6 +50,24 @@ describeWithEnv('expiry sweeper (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
 
   const server = () => t.app.getHttpServer();
   const createPayment = (expiresAt?: string) => request(server()).post('/payment/payments').set('authorization', `Bearer ${billing.token}`).send(paymentBody(expiresAt));
+  /** Test-only (V2 A15.3): moves a payment's immutable expiresAt into the past, in one transaction that re-enables the trigger. */
+  const expirePaymentNow = async (paymentId: string) => {
+    const owner = new pg.Client({ connectionString: db.url });
+    await owner.connect();
+    try {
+      await owner.query('BEGIN');
+      await owner.query('ALTER TABLE payment DISABLE TRIGGER payment_snapshot_immutable');
+      const { rowCount } = await owner.query(`UPDATE payment SET "expiresAt" = now() - interval '1 minute' WHERE id = $1`, [paymentId]);
+      await owner.query('ALTER TABLE payment ENABLE TRIGGER payment_snapshot_immutable');
+      await owner.query('COMMIT');
+      expect(rowCount).toBe(1);
+    } catch (e) {
+      await owner.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await owner.end();
+    }
+  };
   const startAttempt = (paymentId: string, key: string, providerOptions: Record<string, unknown>) =>
     request(server()).post(`/payment/payments/${paymentId}/attempts`).set('authorization', 'Bearer user-1-jwt').set('idempotency-key', key).send({ providerOptions });
   const getPayment = (paymentId: string) => request(server()).get(`/payment/payments/${paymentId}`).set('authorization', 'Bearer user-1-jwt');
@@ -77,12 +95,13 @@ describeWithEnv('expiry sweeper (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
   });
 
   it('refuses to expire a payment with money in flight (an open attempt) until the attempt is resolved', async () => {
-    // expiresAt is immutable once set (FI-02), so to get "still valid when the attempt starts, expired by the time
-    // the sweeper runs" without waiting on a real clock elsewhere in the suite, this uses a short future expiry.
-    const soon = new Date(Date.now() + 150).toISOString();
-    const payment = (await createPayment(soon).expect(201)).body;
+    // "Still valid when the attempt starts, expired by the time the sweeper runs", with no clock race (V2 A15.3): the payment is created
+    // with a far expiry, so the attempt always starts on a valid payment, and only then is its expiry moved into the past. expiresAt is
+    // immutable (FI-02), so this test-only step disables the immutability trigger for that one statement, inside one transaction (the
+    // trigger is never off outside it), as the schema owner of this scratch database; the service's own role cannot do it.
+    const payment = (await createPayment(new Date(Date.now() + 3_600_000).toISOString()).expect(201)).body;
     await startAttempt(payment.id, 'expiry-key-1', { scenario: 'timeout_before_accept' }).expect(201);
-    await new Promise((r) => setTimeout(r, 200));
+    await expirePaymentNow(payment.id);
 
     const sweeper = t.app.get(ExpirySweeper);
     await sweeper.sweepOnce();

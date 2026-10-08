@@ -3,7 +3,11 @@ import type { ChannelModel } from 'amqplib';
 import { afterAll, afterEach, beforeAll, expect, it } from 'vitest';
 import { RabbitMqEventBus, type EventEnvelope } from '../src/index.js';
 import { BrokerProxy } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 
 /**
  * Stage 15.5 (F-H), against a REAL RabbitMQ behind a proxy that can go silent (`freeze()`: the broker hears the client, the client hears
@@ -36,7 +40,7 @@ describeWithEnv('RabbitMQ transport disposal (Stage 15.5, F-H; real RabbitMQ)', 
   let proxy: BrokerProxy;
   const notices: string[] = [];
   const bus = (heartbeatS: number) =>
-    new RabbitMqEventBus({ url: proxy.url, exchange: `nawara.events.dispose${randomUUID().slice(0, 8)}`, heartbeatS, connectTimeoutMs: 1500, confirmTimeoutMs: 300, onNotice: (m) => void notices.push(m) });
+    new RabbitMqEventBus({ url: proxy.url, exchange: owned.exchange(`nawara.events.dispose${randomUUID().slice(0, 8)}`), heartbeatS, connectTimeoutMs: 1500, confirmTimeoutMs: 300, onNotice: (m) => void notices.push(m) });
 
   beforeAll(async () => {
     proxy = new BrokerProxy({ host: target.hostname === 'localhost' ? '127.0.0.1' : target.hostname, port: Number(target.port || 5672) });

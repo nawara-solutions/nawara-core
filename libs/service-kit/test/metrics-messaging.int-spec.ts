@@ -5,7 +5,11 @@ import { PermanentEventFailure, PublisherConfirmTimeoutError, RabbitMqEventBus, 
 import { messagingMetrics } from '../src/metrics/messaging-metrics.js';
 import { BoundedMetrics } from '../src/metrics/metrics.js';
 import { BrokerProxy } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 import { seriesOf } from './support/metrics.js';
 
 /**
@@ -71,7 +75,7 @@ describeWithEnv('messaging metrics (real RabbitMQ)', ['TEST_RABBITMQ_URL'], (env
 
   it('publish: confirmed, confirm_timeout and failed, with a confirm-latency histogram', async () => {
     const m = new BoundedMetrics();
-    const { bus } = observedBus({ url: proxy.url, exchange: `a12.ex${uniq()}`, confirmTimeoutMs: 400, connectTimeoutMs: 1500 }, m);
+    const { bus } = observedBus({ url: proxy.url, exchange: owned.exchange(`a12.ex${uniq()}`), confirmTimeoutMs: 400, connectTimeoutMs: 1500 }, m);
     await bus.publish(envelope('probe.ok'));
     proxy.freeze();
     await expect(bus.publish(envelope('probe.stalled'))).rejects.toBeInstanceOf(PublisherConfirmTimeoutError);
@@ -87,8 +91,8 @@ describeWithEnv('messaging metrics (real RabbitMQ)', ['TEST_RABBITMQ_URL'], (env
 
   it('consume: processed, retry, dead-lettered (permanent, retries exhausted, malformed), consumer up/lost/recovered; notices unchanged', async () => {
     const run = async (metrics: BoundedMetrics | 'none') => {
-      const exchange = `a12.ex${uniq()}`;
-      const queue = `a12.q${uniq()}`;
+      const exchange = owned.exchange(`a12.ex${uniq()}`);
+      const queue = owned.queue(`a12.q${uniq()}`);
       const { bus, notices } = observedBus(
         { url: proxy.url, exchange, connectTimeoutMs: 500, retry: { maxRetries: 1, delayMs: 50 }, consumerReconnect: { baseDelayMs: 50, maxDelayMs: 200 } },
         metrics,

@@ -6,7 +6,11 @@ import {
   runMigrations, type EventBus, type EventEnvelope,
 } from '../src/index.js';
 import { BrokerProxy, createTestDatabase, type TestDatabase } from '../src/testing/index.js';
+import { ownedBrokerResources } from './support/broker-resources.js';
 import { describeWithEnv } from './support/env.js';
+
+// V2 A15.3: every exchange and queue this file declares is deleted when it ends.
+const owned = ownedBrokerResources();
 
 /**
  * Stage 14.6 (F4, F6), against a REAL RabbitMQ and PostgreSQL. The broker is reached through a TCP proxy that can freeze the
@@ -50,7 +54,7 @@ describeWithEnv('async runtime limits (real RabbitMQ + PostgreSQL)', ['TEST_RABB
   });
 
   it('F4: a publish whose confirm never arrives fails within confirmTimeoutMs; after the broker recovers, publishing works again', async () => {
-    const bus = new RabbitMqEventBus({ url: proxy.url, exchange: `nawara.events.cto${uniq()}`, confirmTimeoutMs: 500, connectTimeoutMs: 1500 });
+    const bus = new RabbitMqEventBus({ url: proxy.url, exchange: owned.exchange(`nawara.events.cto${uniq()}`), confirmTimeoutMs: 500, connectTimeoutMs: 1500 });
     closers.push(() => bus.close());
     await bus.publish(envelope('probe.warmup')); // normal confirm
     proxy.freeze();
@@ -62,13 +66,13 @@ describeWithEnv('async runtime limits (real RabbitMQ + PostgreSQL)', ['TEST_RABB
   });
 
   it('F4: the outbox relay keeps the event PENDING on a confirm timeout, releases its transaction, and delivers it after recovery (at least once)', async () => {
-    const exchange = `nawara.events.relay${uniq()}`;
+    const exchange = owned.exchange(`nawara.events.relay${uniq()}`);
     const bus = new RabbitMqEventBus({ url: proxy.url, exchange, confirmTimeoutMs: 500, connectTimeoutMs: 1500 });
     const consumerBus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange });
     const db = new DbService({ url: testDb.url, max: 4 });
     closers.push(() => bus.close(), () => consumerBus.close(), () => db.onApplicationShutdown());
     const received: string[] = [];
-    await consumerBus.subscribe({ queue: `q.relay.${uniq()}`, bindings: ['order.placed'], handler: async (e) => void received.push(e.id) });
+    await consumerBus.subscribe({ queue: owned.queue(`q.relay.${uniq()}`), bindings: ['order.placed'], handler: async (e) => void received.push(e.id) });
     await bus.publish(envelope('order.warmup')); // open the publisher channel through the proxy
 
     const id = await db.tx((q) => new OutboxService().enqueue(q, { name: 'order.placed', payload: { orderId: 'o-1' } }));
@@ -89,13 +93,13 @@ describeWithEnv('async runtime limits (real RabbitMQ + PostgreSQL)', ['TEST_RABB
   });
 
   it('F6: closing a consumer lets the delivery being handled finish and be acknowledged before the channel closes', async () => {
-    const exchange = `nawara.events.drain${uniq()}`;
+    const exchange = owned.exchange(`nawara.events.drain${uniq()}`);
     const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange, drainTimeoutMs: 10_000 });
     closers.push(() => bus.close());
     const gate = latch();
     const entered = latch();
     let handled = 0;
-    const queue = `q.drain.${uniq()}`;
+    const queue = owned.queue(`q.drain.${uniq()}`);
     const sub = await bus.subscribe({ queue, bindings: ['job.run'], handler: async () => {
       entered.open();
       await gate.opened;
@@ -119,11 +123,11 @@ describeWithEnv('async runtime limits (real RabbitMQ + PostgreSQL)', ['TEST_RABB
   });
 
   it('F6: the consumer drain is bounded; an unfinished delivery is redelivered afterwards (at least once)', async () => {
-    const exchange = `nawara.events.drainto${uniq()}`;
+    const exchange = owned.exchange(`nawara.events.drainto${uniq()}`);
     const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange, drainTimeoutMs: 300 });
     closers.push(() => bus.close());
     const entered = latch();
-    const queue = `q.drainto.${uniq()}`;
+    const queue = owned.queue(`q.drainto.${uniq()}`);
     const sub = await bus.subscribe({ queue, bindings: ['job.slow'], handler: async () => {
       entered.open();
       await new Promise(() => undefined); // never finishes
