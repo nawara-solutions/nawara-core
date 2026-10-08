@@ -194,8 +194,8 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.3  producer and consumer conventions     ✅ closed on main (PR #237; G11 fixed, S21-5 aligned)
   A3M.4  retry, dead letters, idempotency      ✅ closed on main (G7 PR #235; idempotency matrix PR #239)
   A3M.5  outbox / de-duplication retention     ✅ closed on main (PR #240; manual dry-run CLI, runs nowhere)
-  A3M.6  deterministic broker evidence         16-scenario matrix, Billing and Notification refusals over a real broker; local, pending PR
-  A3M.7  local certification                   not started
+  A3M.6  deterministic broker evidence         ✅ closed on main (PR #241)
+  A3M.7  local certification                   certification record prepared locally; pending CI and owner merge
   A3M.8  production messaging                  not started (each item separately authorized)
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
@@ -258,9 +258,11 @@ broker readiness dependency (S21-5). The rest of A3M.4 (PR #239) records the ide
 and the open findings F1 to F7; F1 (forged events to Notification) and F2 (Audit's first-writer residual) are **not resolved** and are
 security prerequisites to review before the corresponding production activation (P-A1 / A14, A7). A3M.5 (PR #240) records the
 retention policy (every consumer de-duplication record is kept) and adds a manual, dry-run-first `nawara-outbox-retention` CLI for
-published outbox rows; it runs nowhere and is not scheduled. A3M.6 (local, pending its PR) records the 16-scenario real-broker
+published outbox rows; it runs nowhere and is not scheduled. A3M.6 (PR #241) records the 16-scenario real-broker
 evidence matrix and proves Billing's version and source refusals and the G11 fix over a real broker, plus Notification's refusal of an
-unmapped source; a broker restarted mid-flow stays a documented limitation (A3M record §15). A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
+unmapped source; a broker restarted mid-flow stays a documented limitation (A3M record §15). A3M.7 (record prepared locally,
+pending CI and owner merge) certifies the local and repository implementation on reused CI evidence, keeps F1 and F2 open, and
+certifies nothing in production (A3M record §16). A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
 retention activation) is separately authorized (A3M.8).
 
 ### Compatibility and safety rules for V1 work
