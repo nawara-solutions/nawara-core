@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_LEGACY_EXEMPT, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_LEGACY_EXEMPT, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1873,7 +1873,7 @@ test('V2 A15.1: a migrated operator CLI hands process.env to EnvReader and reads
 
   // The inventory is the six A15.1 CLIs; Auth's CLIs (A4) and the Organization ownership CLI (A5 / F6 / F7) are not in it, and the
   // path boundary of A2.5 still admits every CLI directory (nothing was removed from it).
-  assert.equal(ENV_READER_CLIS.length, 6);
+  assert.equal(ENV_READER_CLIS.length, 7); // V2 A3M.5 added nawara-outbox-retention
   assert.ok(!ENV_READER_CLIS.some((rel) => /auth-service|organization-service/.test(rel)));
   for (const rel of [...ENV_READER_CLIS, 'apps/auth-service/src/cli/main.ts', 'apps/organization-service/src/cli/ownership.ts']) {
     assert.ok(PROCESS_ENV_BOUNDARY.some((allowed) => allowed.test(rel)), rel);
@@ -2032,4 +2032,46 @@ test('V2 A3M.2: event contracts agree across services; every app with event traf
   const runner = repoFile('scripts/check-repo.mjs');
   assert.equal(runner.split('checkEventContracts(').length - 1, 1);
   assert.match(runner, /if \(usesEventTraffic\(texts\)\) required\.push\(app\);/);
+});
+
+// V2 A3M.5: outbox retention eligibility.
+test('V2 A3M.5: outbox retention stays limited to reviewed services that let the outbox generate their event ids', () => {
+  const core = repoFile('libs/service-kit/src/events/outbox-retention.ts');
+  const cli = repoFile('libs/service-kit/src/cli/outbox-retention.ts');
+  const clean = { 'apps/auth-service/src/a.ts': 'await this.outbox.enqueue(q, { name, payload, version: 1 });', 'apps/auth-service/src/b.ts': 'await this.writer.write(q, input, options);' };
+  const sources = (over = {}) => ({ 'auth-service': { ...clean, ...over }, 'organization-service': { 'apps/organization-service/src/a.ts': 'await this.writer.write(q, { action });' } });
+  const run = (kit = {}, over = {}) => checkOutboxRetentionEligibility({ core, cli, ...kit }, sources(over));
+  const fails = (problems, pattern) => assert.match(problems.join('\n'), pattern);
+  assert.deepEqual(OUTBOX_RETENTION_APPROVED_SERVICES, ['auth-service', 'organization-service']);
+  assert.deepEqual(run(), []);
+
+  // an approved producer starting to supply a stable id: at the enqueue call, through the audit writer, or in an options object built first
+  fails(run({}, { 'apps/auth-service/src/x.ts': 'await this.outbox.enqueue(q, { id: user.id, name, payload });' }), /apps\/auth-service\/src\/x\.ts: line 1: supplies an id to the outbox/);
+  fails(run({}, { 'apps/auth-service/src/x.ts': 'await this.writer.write(q, input, { eventId: user.id });' }), /builds an eventId/);
+  fails(run({}, { 'apps/auth-service/src/x.ts': 'const options = { eventId };\nawait audit.record(q, input, options);' }), /line 1: builds an eventId/);
+  fails(run({}, { 'apps/auth-service/src/x.ts': 'await this.outbox.enqueue(q, { ...event });' }), /passes a spread object to \.enqueue/);
+  // an approved producer using a deterministic event-id generator
+  fails(run({}, { 'apps/auth-service/src/x.ts': "import { deterministicEventId } from './id.js';\nconst id = deterministicEventId(a, b);" }), /uses deterministicEventId \(a derived event id\)/);
+  assert.match(run({}, { 'apps/auth-service/src/x.ts': 'await this.outbox.enqueue(q, { id: user.id, name, payload });' }).join(), /needs a retention-safety review and the service's removal from the approved list/);
+  // an unapproved service added to the kit's list, a service removed, a list that is not a literal
+  fails(run({ core: core.replace("['auth-service', 'organization-service'] as const", "['auth-service', 'organization-service', 'payment-service'] as const") }), /OUTBOX_RETENTION_VERIFIED_SERVICES is \[auth-service, organization-service, payment-service\] but the approved list is \[auth-service, organization-service\]/);
+  fails(run({ core: core.replace("['auth-service', 'organization-service'] as const", "['auth-service'] as const") }), /but the approved list is/);
+  fails(run({ core: core.replace("['auth-service', 'organization-service'] as const", 'SERVICES') }), /must be a literal list/);
+  // the CLI no longer requiring or checking --service, losing the database-owner check, or gaining a bypass; the id rule weakened
+  fails(run({ cli: cli.replace('--service <name> is required', '--service is optional') }), /must require --service and check it/);
+  fails(run({ cli: cli.replace('isRetentionService(service)', 'true') }), /must require --service and check it/);
+  fails(run({ cli: cli.replace('retentionDatabaseOwner(args.service)', 'actual.owner') }), /must check that the database is owned by the role provisioned for --service/);
+  fails(run({ cli: `${cli}\n// else if (a === '--all-services') all = true;` }), /has an option that widens the retention scope \(--all-services\)/);
+  fails(run({ cli: `${cli}\n// '--include-deterministic'` }), /widens the retention scope \(--include-deterministic\)/);
+  fails(run({ core: core.replace("= '4'", "IN ('4', '5')") }), /eligibility must stay restricted to random \(version 4\) ids/);
+  // missing files and a missing approved service are reported, not thrown
+  assert.match(checkOutboxRetentionEligibility({ core: undefined, cli }, sources()).join(), /is missing/);
+  fails(checkOutboxRetentionEligibility({ core, cli }, { 'auth-service': clean }), /apps\/organization-service\/src was not found/);
+  // the scanner itself: what it sees, and one thing it does not (stated in the guard's own limits)
+  assert.deepEqual(outboxIdSources('a.ts', 'await outbox.enqueue(q, { name, payload });'), []);
+  assert.deepEqual(outboxIdSources('a.ts', 'const ev = { id: stable, name, payload };\nawait outbox.enqueue(q, ev);'), []); // not seen: an id in an event built elsewhere
+  // the real kit files, CLI and services pass, and the runner calls the check with the approved services' sources
+  const runner = repoFile('scripts/check-repo.mjs');
+  assert.equal(runner.split('checkOutboxRetentionEligibility(').length - 1, 1);
+  assert.match(runner, /for \(const service of OUTBOX_RETENTION_APPROVED_SERVICES\)/);
 });

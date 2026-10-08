@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic } from './lib/checks.mjs';
+import { checkActionPins, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic, checkOutboxRetentionEligibility, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -189,10 +189,29 @@ problems.push(...checkEnvReaderClis(Object.fromEntries([...ENV_READER_CLIS, ENV_
   }
   problems.push(...checkEventContracts(contracts, required));
 }
+// V2 A3M.5: the manual outbox retention stays limited to the reviewed services, which still let the outbox generate their event ids.
+{
+  const serviceSources = {};
+  for (const service of OUTBOX_RETENTION_APPROVED_SERVICES) {
+    const sources = {};
+    try {
+      for (const f of walk(join(root, 'apps', service, 'src'))) {
+        if (f.endsWith('.ts') && !f.endsWith('.spec.ts') && !f.endsWith('.d.ts')) sources[relative(root, f).split('\\').join('/')] = readFileSync(f, 'utf8');
+      }
+    } catch {
+      // reported by the check as a missing approved service
+    }
+    serviceSources[service] = sources;
+  }
+  problems.push(...checkOutboxRetentionEligibility(
+    { core: readOrUndefined('libs/service-kit/src/events/outbox-retention.ts'), cli: readOrUndefined('libs/service-kit/src/cli/outbox-retention.ts') },
+    serviceSources,
+  ));
+}
 
 if (problems.length > 0) {
   console.error(`repository checks failed (${problems.length}):`);
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts');
+console.log('repository checks passed: workflow safety, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, outbox retention eligibility');
