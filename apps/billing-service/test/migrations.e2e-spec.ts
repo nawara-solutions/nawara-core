@@ -27,8 +27,9 @@ const BILLING_MIGRATIONS = [
   '0010_product_producer.sql', '0011_payment_request_correlation_id.sql', '0012_payment_request_reconcile_index.sql', '0013_subscription.sql',
   '0014_drop_duplicate_transition_index.sql', // Stage 15.8: index only, no table
   '0015_subscription_billing_anchor.sql', // ADR-0044 B-025: a column, a function and a guard, no table
+  '0016_payment_event_receipt_applied_claim.sql', // V2 A3M.3 (G11): indexes only, no table
 ];
-/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index and 0014 drops one, not a table). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
+/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
   'billing_transition', 'currency', 'inbox', 'invoice', 'invoice_line', 'invoice_number_sequence', 'kit_rate_limit', 'outbox',
   'payment_event_receipt', 'payment_request', 'platform_currency', 'price', 'product', 'schema_migrations', 'subscription',
@@ -211,7 +212,7 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
       expect(before.map((r) => `${r.status}/${r.unit}`)).toEqual(['active/month', 'grace/month', 'expired/year', 'pending/month', 'active/week', 'active/day']);
 
       const result = await runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir]);
-      expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql']);
+      expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql', '0016_payment_event_receipt_applied_claim.sql']); // V2 A3M.3: 0016 (indexes only) follows
 
       expect((await c.query(SNAPSHOT)).rows).toEqual(before); // revision, updatedAt, graceUntil, period and history count: all unchanged
       const anchors = (await c.query(`SELECT "billingAnchorAt" FROM subscription ORDER BY "organizationId"`)).rows.map((r) => r.billingAnchorAt);

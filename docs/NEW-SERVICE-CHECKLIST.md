@@ -88,6 +88,9 @@ The convention exists: [ADR-0054](adr/0054-localized-error-messages-and-stable-e
 - [IF MESSAGING] Broker suites gated by `TEST_RABBITMQ_URL`; they delete the queues and exchanges they declare.
 - [IF MESSAGING] Every event published or consumed is declared in `src/events/event-catalog.ts` and its rendered
   `contracts/events.json` (`check:repo` refuses an app with event traffic and no contract; ADR-0057 §11, Proposed).
+- [IF MESSAGING] A consumer's de-duplication record claims an event id only once the effect is applied, in the same transaction; the
+  `source` header is checked but never trusted as identity; an outbox-backed producer's `/ready` never depends on the broker
+  (ADR-0057 §6–§7, Proposed).
 - Messaging conventions still being designed (versioning, retry and DLQ policy across services) belong to A3, not to this list. Their
   current statement is [ADR-0057](adr/0057-messaging-conventions.md), **Proposed** (not yet Accepted; A3M).
 

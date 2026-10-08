@@ -5,8 +5,9 @@
   owner-reviewed), of **A3M.1: messaging records and policy** (**closed on `main`**: PR #234, merge
   `38f262e065f032fe8c792f3588874a36758e0909`; §6), of the **G7 proof** (G7 **confirmed** locally; §7) and of the **A3M.4 G7 slice**
   (R1 remediation, regression tests, one alert; **closed on `main`**: PR #235, merge `9c8d69caabdec32647c6bb11817b2c2d3decd02e`; §7) and
-  of **A3M.2: event contracts and versioning** (**implemented locally, pending review and merge**; §11). **A3M is OPEN**; A3M.4 as a
-  whole is not complete.
+  of **A3M.2: event contracts and versioning** (**closed on `main`**: PR #236, merge `27d1f1c80a9a6ca3efb9bf7cf0657d335135cad4`; §11)
+  and of **A3M.3: producer and consumer conventions, G11** (**implemented locally, pending review and merge**; §12). **A3M is OPEN**;
+  A3M.4 as a whole is not complete.
 - **Scope of A3M** ([roadmap](../CORE-ROADMAP.md) stage **A3 Messaging**): broker conventions; event envelopes and versioning; retry,
   dead letters, idempotency; producer and consumer conventions; real-broker certification. The substages are named **A3M.0 to A3M.8**
   (OD-A3M-0) so they are never confused with V2-A.3's A3.1 to A3.8 ([V2-A.3 record](core-v2-a-3-ci-and-ruleset.md)), whose **A3.6
@@ -74,10 +75,10 @@ Read from `main` at `e2adc20` (code and records only; nothing was run).
 | G5 | Versioning rule only in a code comment; only Notification refuses an unsupported version | missing convention | ADR-0057 §5; consumers adopt it in A3M.2 / A3M.3 |
 | G6′ | Queue names follow no pattern; production names are fixed by ADR-0053 | missing convention | ADR-0057 §9: new queues only |
 | G7 | The shared fanout dead-letter exchange copied an unannotated original into every consumer's `.dead` queue when a consumer without a dead-letter policy could not confirm its dead-letter copy | **defect, confirmed locally** (raw cross-consumer delivery; message lost to its owner) | OD-A3M-5; remedied in code by A3M.4 R1 (§7); topology residuals stay |
-| G8 | S21-5: Payment, a producer, makes the broker a readiness dependency | pending alignment | OD-A3M-4; A3M.3 |
+| G8 | S21-5: Payment, a producer, makes the broker a readiness dependency | aligned | OD-A3M-4; A3M.3 removed the check (§12) |
 | G9 | F12: published outbox rows and inbox rows are never deleted (except Auth's code-bearing rows) | retention | OD-A3M-6; A3M.5, off by default |
 | G10 | Ordering is not guaranteed and no convention says how consumers validate state | missing convention | ADR-0057 §7 |
-| G11 | Billing writes its `payment_event_receipt` keyed on `eventId` alone, even for an event it rejects as `wrong_source`; Payment's event ids are deterministic, so a publisher on the vhost that knows a payment id could occupy the receipt first and the genuine event would be treated as a replay | **security finding, HIGH** (found in A3M.2 discovery; mitigated today by Billing and Payment not being deployed and by ADR-0053's per-identity grants) | **A3M.3**; proof and remedy required before Billing or Payment production readiness; not changed by A3M.2 (§11) |
+| G11 | Billing's `payment_event_receipt` claimed the event id for **any** first outcome (ignored, deferred, conflict); Payment's and the reconciler's event ids are deterministic and any publisher can set any header, so a forged message carrying the genuine id stopped the genuine outcome (and the reconciler) from ever applying | **security finding, HIGH, confirmed locally** (Billing and Payment not deployed) | **remedied by A3M.3** (C + A, migration 0016; §12) |
 
 (G6′ is written with a prime so it is not confused with the production gate G6.)
 
@@ -116,8 +117,8 @@ what would put its broader de-duplication reading of ADR-0056 §7 in force, §6)
 A3M.0  discovery, decision review          ✅ complete (owner-reviewed)
 A3M.1  records and policy (ADR-0057)       ✅ closed on main (PR #234, merge 38f262e)
 G7     isolated broker proof               ✅ G7 confirmed locally (§7)
-A3M.2  event contracts and versioning      implemented locally; pending review and merge (§11)
-A3M.3  producer and consumer conventions   not started (includes G11, HIGH)
+A3M.2  event contracts and versioning      ✅ closed on main (PR #236, merge 27d1f1c)
+A3M.3  producer and consumer conventions   G11 proof and fix, S21-5, conventions: implemented locally; pending review and merge (§12)
 A3M.4  retry, dead letters, idempotency    G7 slice (R1, regression tests, DeadLetterCopyFailing) ✅ closed on main (PR #235);
                                            the rest of A3M.4 (idempotency matrix) not started
 A3M.5  outbox and de-duplication retention not started
@@ -240,7 +241,7 @@ terminating what is left, and report leaks); PR #237 is unchanged and is re-run 
 - Certification is repository and local; it certifies nothing in production. Merge is not ADR acceptance (ADR README): ADR-0057's
   acceptance is a separate owner decision.
 
-## 11. A3M.2: event contracts and versioning (2026-10-08, local)
+## 11. A3M.2: event contracts and versioning (2026-10-08; closed on `main`, PR #236, merge `27d1f1c`)
 
 - **Owner decisions:** OD-A3M2-1 = A (a TypeScript catalog per service, rendered to a committed JSON artifact, compared by a JSON-only
   guard); OD-A3M2-2 = names, versions, payload field types and nullability; OD-A3M2-3 = A (Auth's emission typed at compile time, no
@@ -287,3 +288,45 @@ terminating what is left, and report leaks); PR #237 is unchanged and is re-run 
   receipt, so it adds no new way to occupy one. G11 is A3M.3, HIGH.
 - **Production:** none. Merging builds the Auth image (its workflow matches `apps/auth-service/**`); Billing, Payment and Notification
   have no image workflow; nothing deploys. No topology, grant, payload or `AUTH_EVENTS` change.
+
+## 12. A3M.3: producer and consumer conventions, G11 (2026-10-08, local)
+
+- **Owner decisions:** OD-A3M3-1 = C + A (only an applied outcome claims an event id; a wrong source is refused before any receipt);
+  OD-A3M3-2 = Billing migration 0016; OD-A3M3-3 = `wrong_source` is a permanent dead letter, no longer a recorded conflict;
+  OD-A3M3-4 = Payment's broker readiness removed (S21-5); OD-A3M3-5 = the G11 proof before the fix; OD-A3M3-6 = broker-enforced
+  publisher identity stays a separate architecture decision (P-A1 / A14).
+- **G11 proof (on `main` at `27d1f1c`, one run, disposable PostgreSQL).** `apps/billing-service/test/payment-event-source.e2e-spec.ts`
+  through the real consumer (in-memory bus) and the real reconciler: G11-1 (wrong-source message first), G11-2 (genuine source header,
+  forged amount), G11-3 (the event before Billing recorded the paymentId, delivered again afterwards), G11-4 (a forged message carrying the
+  reconciler's own deterministic id) and a forged-versus-genuine race: **all failed**, the request left `requested`, with the forged
+  message's receipt holding the id (`conflict wrong_source`, `conflict amount_mismatch`, `deferred payment_id_not_recorded`,
+  `conflict amount_mismatch`). The two genuine-only controls passed. The root cause was exactly the predicted one.
+- **Fix (C + A).**
+  - Migration `0016_payment_event_receipt_applied_claim.sql` (indexes only): the unique index on `"eventId"` becomes unique only
+    `WHERE outcome = 'applied'`, plus a plain index on `"eventId"`. Existing rows are unchanged (0007 allowed one per id).
+  - `applyPaymentEvent`: the replay lookup reads only `applied` receipts; the insert's conflict target is the applied-only index. The
+    receipt and the state change stay in one transaction under the invoice lock; non-applied outcomes leave one append-only row per
+    delivery (growth bounded by redeliveries; `payment_event_receipt_open_idx` still finds them; retention is A3M.5).
+  - `PaymentEventConsumer`: a `source` other than the catalog's (`payment-service`) is a permanent failure `wrong_source` before any
+    parsing, receipt or decision, logged without echoing the header. `decidePaymentEvent` keeps its own source check (the reconciler
+    path).
+- **After the fix:** the G11 file passes (8 of 8): the four G11 cases (each now with its exact receipt rows: the forged one recorded but
+  claiming nothing, then `applied`), the race (exactly one `paid` transition), both controls, and a schema test (two `applied` rows for
+  one id refused with 23505, non-applied rows repeatable, the old index gone). Existing suites on the changed paths, one run each:
+  `invoices`, `payment-integration`, `payment-subscription-integration`, `subscription-hardening`, `runtime-role`, `migrations` (one
+  expectation updated on purpose: the 0015 run now also applies 0016). Billing unit 357 (a new `wrong_source` test).
+- **S21-5.** `apps/payment-service/src/main.ts` no longer registers a broker readiness check, and `src/health/rabbitmq-readiness.ts` is
+  removed. `/ready` still checks the database and migrations. A new e2e test runs Payment with the real RabbitMQ bus pointed at a closed
+  port: `/ready` is 200, a payment is accepted (201) and its `payment.created` waits unpublished in the outbox, `/ready` stays 200 after
+  the failed publish; it also checks that `main.ts` registers no broker check. Payment health e2e 4 of 4, unit 112. `amqplib` stays in
+  Payment's `package.json` for now (removing it changes `package-lock.json`, which triggers the Auth, Organization and Audit image builds):
+  an unused-dependency follow-up.
+- **Conventions recorded** (ADR-0057, still Proposed): only an applied effect claims an event id; the `source` header is asserted, not
+  authenticated; the permanent-versus-transient table; producer readiness (§6); prefetch and queue naming were already stated (§7, §9).
+- **Trust boundary.** A forged message can no longer block a genuine outcome, and still cannot apply one (Billing's own recorded facts
+  decide). What remains: any publisher able to reach Billing's queue can add non-applied rows (bounded by what it sends) and dead letters;
+  broker-enforced publisher identity is the separate P-A1 / A14 decision. Audit's asserted-source residual stays as ADR-0053 accepts it
+  (A7 / P-A1).
+- **Infrastructure:** one disposable PostgreSQL (`postgres:16-alpine`, already local, never pulled; its own container and network, tmpfs
+  data, loopback port, throwaway credential), removed afterwards; containers, networks and volumes compared before and after: unchanged.
+- **Production:** none. Billing and Payment have no image workflow and no production database; nothing deploys.

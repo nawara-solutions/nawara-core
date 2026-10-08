@@ -1,11 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { JsonLogger, ReadinessRegistry, configureApp } from '@nawara/service-kit';
+import { JsonLogger, configureApp } from '@nawara/service-kit';
 import { AppModule } from './app.module.js';
 import { basicAuth } from './docs/basic-auth.js';
 import { loadPaymentConfig } from './config/payment-config.js';
-import { registerRabbitmqReadiness } from './health/rabbitmq-readiness.js';
 import { WEBHOOK_PATH_PREFIX } from './webhooks/webhooks.controller.js';
 
 async function bootstrap() {
@@ -17,7 +16,9 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false, rawBody: true, bufferLogs: true });
   configureApp(app, config, logger, { errorLocalizationExcludedPaths: [WEBHOOK_PATH_PREFIX] }); // ADR-0054 D12
 
-  if (config.rabbitmqUrl) registerRabbitmqReadiness(app.get(ReadinessRegistry), config.rabbitmqUrl);
+  // V2 A3M.3 (S21-5, OD-A3M-4): Payment is an outbox-backed producer, so its readiness does not depend on the broker: while the
+  // database accepts the outbox write, a payment and its event are durable and the relay publishes once the broker is back. Broker
+  // trouble is observed through the outbox metrics and alerts (OutboxBacklogAging, OutboxStatsStale) and `nawara-check-outbox-lag`.
 
   const document = new DocumentBuilder()
     .setTitle('payment-service API')

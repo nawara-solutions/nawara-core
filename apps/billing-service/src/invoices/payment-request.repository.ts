@@ -315,8 +315,11 @@ export class PaymentRequestRepository {
         request = (await q.query<PaymentRequestRow>(`SELECT * FROM payment_request WHERE id = $1 FOR UPDATE`, [event.paymentRequestId])).rows[0] ?? null;
       }
 
-      const seen = await q.query<{ outcome: string; detailCode: string | null }>(`SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = $1`, [eventId]);
-      if (seen.rows[0]) return { outcome: seen.rows[0].outcome as Decision['outcome'], detail: seen.rows[0].detailCode, firstDelivery: false, subscription: null };
+      // V2 A3M.3 (G11, migration 0016): only an APPLIED receipt makes a delivery a replay. A non-applied outcome (ignored, deferred,
+      // conflict) never claims the event id, so a message that did not apply (a forged one carrying the genuine, deterministic id
+      // included) cannot stop a later delivery from being decided on its own merits.
+      const seen = await q.query<{ outcome: string; detailCode: string | null }>(`SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = $1 AND outcome = 'applied'`, [eventId]);
+      if (seen.rows[0]) return { outcome: 'applied', detail: seen.rows[0].detailCode, firstDelivery: false, subscription: null };
 
       const decision = decidePaymentEvent(
         event,
@@ -327,10 +330,11 @@ export class PaymentRequestRepository {
         },
       );
 
-      // Record first: ON CONFLICT settles two concurrent deliveries of the same event with no error, so this transaction stays usable.
+      // Record first: ON CONFLICT settles two concurrent APPLIED deliveries of the same event with no error, so this transaction stays
+      // usable. Non-applied outcomes never conflict: each delivery leaves its own append-only row (G11).
       const receipt = await q.query(
         `INSERT INTO payment_event_receipt ("eventId", "eventName", "paymentRequestId", "paymentId", outcome, "detailCode", "paymentRevision", "causeType")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'payment_event') ON CONFLICT ("eventId") WHERE "eventId" IS NOT NULL DO NOTHING RETURNING id`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'payment_event') ON CONFLICT ("eventId") WHERE "eventId" IS NOT NULL AND outcome = 'applied' DO NOTHING RETURNING id`,
         [eventId, event.name, event.paymentRequestId, request ? request.paymentId : null, decision.outcome, 'detail' in decision ? decision.detail : null, event.revision],
       );
       const detail = 'detail' in decision ? decision.detail : null;
