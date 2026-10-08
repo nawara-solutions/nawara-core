@@ -118,3 +118,4 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0055](./0055-ai-service-repository-boundary.md) | AI service repository boundary: the AI runtime lives outside `nawara-core` (future `nawara-ia`); the Core scaffold is removed | Accepted (2026-10-06, owner decision; #208) |
 | [0056](./0056-core-architecture-and-api-conventions.md) | Core architecture and API conventions: **the current Core convention** (consolidated; supersedes 0034) | Accepted (2026-10-07, by the architecture owner, A1.2) |
 | [0057](./0057-messaging-conventions.md) | Messaging conventions: envelope, naming, versioning, delivery, de-duplication, retry and dead letters, catalogs (reconciles 0018 and 0037) | Proposed |
+| [0058](./0058-access-token-signing-key-ring.md) | Access-token signing key ring: HS256 keys selected by `kid`, the existing `JWT_SECRET` as a kid-less legacy key, no fallback, staged rotation with a stated rollback boundary | Proposed |

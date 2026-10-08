@@ -1,8 +1,9 @@
 # Core V2 A4: authentication
 
 - **Status:** RECORD of the A4.0 discovery (read-only, owner-reviewed, 2026-10-08, on `main` at `16476f9`, the PR #242 merge that
-  closed A3M.7) and of **A4.1: the A4 architecture record** (**prepared; pending CI and owner merge**). **A4 is OPEN.** No A4
-  implementation exists yet; nothing in §§6–10 is implemented unless it is labelled **[CURRENT]**.
+  closed A3M.7) and of **A4.1: the A4 architecture record**. **A4 is OPEN.** A4.2 to A4.5 are merged (PRs #244 to #247, `main` at
+  `e039ed6`); their sections keep the text they were approved with. **A4.6** (§10 design,
+  [ADR-0058](../adr/0058-access-token-signing-key-ring.md) Proposed) is **prepared; pending owner review and merge**. Nothing in §10 is implemented unless it is labelled **[CURRENT]**.
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET]**: approved by an owner decision, implemented by the named stage.
   **[PENDING DESIGN]**: approved in direction only; the named stage must design it and the owner must review it before code.
 - **Scope of A4** ([roadmap](../CORE-ROADMAP.md) Core V2 table): sessions, MFA/TOTP, recovery, WebAuthn, cookies, rate limits, service
@@ -171,30 +172,172 @@ product-term check. Without it the check would report three places:
   (`strictHistory`) and are never edited.
 - `test:repo` proves both directions: a product term elsewhere in Auth is reported, and the two files are not.
 
-## 10. JWT key ring (A4.6 design, A4.7 implementation) [PENDING DESIGN]
+## 10. JWT key ring (A4.6 design, A4.7 implementation) [TARGET: A4.7]
 
-**[CURRENT]** one HS256 secret, `JWT_SECRET`, held only by Auth; no `kid`. Replacing it ends every live access token (at most
-`ACCESS_TOKEN_TTL_SEC` later); refresh tokens are opaque database rows and are unaffected.
+Designed in A4.6 under the owner's decisions of §10.2 and stated as [ADR-0058](../adr/0058-access-token-signing-key-ring.md)
+(**Proposed**; its acceptance is a separate decision). Nothing in §10.3–§10.9 is implemented until A4.7 merges. **No production key is
+generated, delivered, activated or retired by this design, by A4.7 or by any A4 stage (§10.10).**
 
-**Direction (OD-A4-6):** a symmetric HS256 key ring with `kid`. Asymmetric signing is out of scope: no other service verifies user
-tokens (ADR-0033).
+### 10.1 Current behaviour [CURRENT]
 
-A4.6 must design, and the owner must review before A4.7 starts:
-- **Algorithm:** HS256 pinned on sign and verify; `none` and every other algorithm refused.
-- **Key ids:** format, where they come from, and that a token's `kid` selects exactly one configured key. An unknown or retired `kid`
-  is `invalid_token`, never a fallback to another key.
-- **Legacy compatibility:** the existing `JWT_SECRET` keeps working with an unchanged production `.env`. A token without `kid` verifies
-  only against the legacy key, and only while that key is configured.
-- **Configuration:** variable names, `_FILE` support, distinctness from every pepper and TOTP key, the production refusals, and no
-  value in any message or log.
-- **Staged rotation:** (1) deploy with the ring containing the current key, still active; (2) add the new key; (3) activate it;
-  (4) retire the old key after the longest access-token lifetime plus clock tolerance. Each step is a separate, authorized change.
-- **Rollback:** an image without key-ring support verifies only with `JWT_SECRET`; rollback is safe while the active key is still
-  `JWT_SECRET` and **unsafe once another key is active** (tokens signed with it would fail). The runbook states this limit.
-- **Preserved:** claims, issuer, audience, expiry, the session-ceiling clamp, refresh-token semantics, the live session check.
-- **Tests:** per-`kid` sign and verify, legacy token, unknown and retired `kid`, algorithm confusion, distinct-key and production
-  refusals, the rotation sequence and the rollback boundary.
-- A4 never selects, generates or activates a production signing key.
+- `src/tokens/token.service.ts` signs with jose `SignJWT`, protected header exactly `{"alg":"HS256"}` (no `kid`, no `typ`), claims
+  `sub`, `role`, `sid`, optional `adminTier`, `iss`, `aud`, `iat`, `exp`; `exp` is `ACCESS_TOKEN_TTL_SEC` (default 900, 30–3600) clamped
+  to the session ceiling.
+- It verifies with `jwtVerify(token, JWT_SECRET, { algorithms: ['HS256'], issuer, audience, currentDate })` (no clock tolerance), then
+  requires string `sub`, `sid` and `role`. Any failure is `401 invalid_token`. `AuthGuard` then re-reads the user (active, tier) and
+  requires the `sid` session to be live.
+- `JWT_SECRET` (or `JWT_SECRET_FILE`) is read by the kit's `readKey`: canonical standard base64, at least 32 bytes, in production no
+  published development key and no non-random key; `assertDistinctKeys` keeps it distinct from the four peppers and every TOTP key.
+  Errors name the variable, never the value.
+- One key, held only by Auth (ADR-0033). Replacing it rejects every live access token; refresh tokens are opaque database rows and are
+  unaffected, so clients recover by refreshing.
+
+### 10.2 Owner decisions (A4.6, approved 2026-10-08)
+
+| Id | Decision |
+|---|---|
+| D1 | `JWT_SIGNING_KEYS` and `JWT_ACTIVE_KEY_ID`, with the reserved active value `legacy` meaning `JWT_SECRET` |
+| D2 | A shared, optional key-ring parser in `libs/service-kit` (A4.7) that preserves every existing kit behaviour |
+| D3 | ADR-0058, Access-token Signing Key Ring, written with status Proposed |
+| D4 | The JWT signing ring holds at most three keys |
+| D5 | The legacy key is retired no earlier than 3600 s + 5 min after the last token signed with it, subject to §10.8 |
+| D6 | The Auth provisioning script is corrected in A4.8, before any production retirement of `JWT_SECRET` |
+| D7 | No per-key verification metric in A4.7 |
+
+### 10.3 Configuration [TARGET: A4.7]
+
+| Variable | Role |
+|---|---|
+| `JWT_SECRET` | unchanged; the **legacy key**: signs when the active id is `legacy`, verifies kid-less tokens while set |
+| `JWT_SIGNING_KEYS` | optional ring `id:base64[,id:base64]`, at most 3 entries (D4) |
+| `JWT_ACTIVE_KEY_ID` | a ring id, or `legacy`; required exactly when `JWT_SIGNING_KEYS` is set |
+
+All three accept `NAME_FILE` through `EnvReader`; `NAME` and `NAME_FILE` together are refused, as for every Auth variable.
+
+| `JWT_SECRET` | `JWT_SIGNING_KEYS` | `JWT_ACTIVE_KEY_ID` | Result |
+|---|---|---|---|
+| set | – | – | **today's behaviour**, byte for byte (an unchanged production `.env`) |
+| – | – | – | refused: `JWT_SECRET` is required (the existing refusal) |
+| any | set | – | refused: `JWT_SIGNING_KEYS and JWT_ACTIVE_KEY_ID must be set together` |
+| any | – | set | refused: the same message |
+| set | set | `legacy` | signs with `JWT_SECRET` (kid-less); ring keys verify only |
+| – | set | `legacy` | refused: `JWT_ACTIVE_KEY_ID is legacy but JWT_SECRET is not set` |
+| set | set | a ring id | signs with that key; `JWT_SECRET` still verifies kid-less tokens |
+| – | set | a ring id | signs with that key; kid-less tokens are refused (legacy retired) |
+| any | set | not `legacy`, not in the ring | refused: `JWT_ACTIVE_KEY_ID does not name a key in JWT_SIGNING_KEYS` |
+
+Key-material rules, all at startup:
+- Ring ids follow the kit's key-ring id rule (1–32 of `A-Z a-z 0-9 _ -`). `legacy` is **reserved**: refused as a ring id in any letter
+  case (`JWT_SIGNING_KEYS must not use the reserved key id legacy`). Ids are public (they appear in every token header) and must not
+  encode anything secret; a date-style id such as `k2026-10` is the convention.
+- No repeated id, no repeated key, more than 3 entries refused (`JWT_SIGNING_KEYS must hold at most 3 keys`).
+- Every ring key passes the same rules as `JWT_SECRET`: canonical standard base64, at least 32 bytes, and in production neither a
+  published development key nor non-random.
+- **Distinctness:** one `assertDistinctKeys` call covers `JWT_SECRET` (when set), every ring key, the four peppers and every TOTP key
+  (`<NAME> must differ from <NAME> (one key, one purpose)`).
+- **No value is ever echoed:** every refusal names variables and rules only, never a value, decoded bytes, a fingerprint or a key id
+  taken from the value. The quoted texts are the intended ones; A4.7 may adjust wording only where a test pins the final text.
+- **Shared parser (D2):** the kit gains an optional ring reader next to `readKeyRing`, reusing its id rule and `decodeKey`. Existing
+  helpers (`readKeyRing`, `readKey`, `readOptionalKey`, `decodeKey`, `assertDistinctKeys`) keep their behaviour and messages; any new
+  rule, such as the entry cap, is an opt-in option, so Notification's and Auth's TOTP rings are unaffected. The `legacy` and pairing
+  rules are Auth's, not the kit's.
+
+### 10.4 Signing and token compatibility [TARGET: A4.7]
+
+- HS256 only.
+- Active `legacy`: protected header exactly `{"alg":"HS256"}`, byte-compatible with today's tokens and with an image that has no ring.
+- Active ring id: `{"alg":"HS256","kid":"<id>"}`.
+- No other header parameter is added. Claims, `iss`, `aud`, `iat`, `exp`, the session-ceiling clamp and `expiresIn` are unchanged.
+- No other service is affected: none verifies user tokens (ADR-0033); clients treat the token as an opaque bearer.
+
+### 10.5 Verification [TARGET: A4.7]
+
+1. `algorithms: ['HS256']` stays pinned; a header `alg` other than `HS256` is refused before any key is chosen (`none`, `HS384`,
+   `HS512`, any asymmetric algorithm).
+2. The key is chosen from the protected header that jose verifies (jose's key-resolver form), never from a separately parsed header:
+   - no `kid` → the legacy key if `JWT_SECRET` is set, otherwise refused;
+   - a `kid` that is not a string, breaks the id rule, equals `legacy` in any case, or names no configured key → refused.
+3. The token is verified with **that one key only**. There is **no fallback** to the active key, the legacy key or any other key.
+4. Keys carried or referenced by the header (`jwk`, `jku`, `x5u`, `x5c`) are never used; unknown `crit` parameters stay refused (jose).
+5. Issuer, audience, expiry (no added clock tolerance) and the `sub` / `sid` / `role` checks are unchanged; `AuthGuard`'s live checks
+   are unchanged.
+6. Every failure is the existing `401 invalid_token`; nothing about the token, its `kid` or the chosen key is logged.
+
+**Unknown and retired keys:** a retired key is one removed from configuration, so its tokens fall under "names no configured key". No
+separate denylist exists.
+
+**Downgrade:** the protected header is part of the HMAC input, so removing or changing a `kid` invalidates the signature unless the
+attacker holds the key it would then select. The only downgrade target is the legacy key, for kid-less tokens; §10.8 bounds how long it
+stays configured.
+
+### 10.6 Staged rotation [TARGET: procedure; every step owner-authorized]
+
+Each step is a separate configuration change and Auth restart, authorized by the owner at that step. Steps 1 and 2 stay separate even
+though Auth runs one container, so the procedure stays correct with more than one instance.
+
+| Step | Change | Signs with | Verifies | Image rollback to a pre-ring image |
+|---|---|---|---|---|
+| 0 | deploy the A4.7 image, `.env` unchanged | `JWT_SECRET`, kid-less | kid-less | safe |
+| 1 | add `JWT_SIGNING_KEYS=<new>:…`, `JWT_ACTIVE_KEY_ID=legacy` | `JWT_SECRET`, kid-less | kid-less; `<new>` | safe |
+| 2 | `JWT_ACTIVE_KEY_ID=<new>` | `<new>` | kid-less; `<new>` | **rejects every `<new>` token** until clients refresh |
+| 3 | wait (§10.8) | `<new>` | as step 2 | as step 2 |
+| 4 | remove `JWT_SECRET` | `<new>` | `<new>` only | needs `JWT_SECRET` restored, and still rejects `<new>` tokens |
+
+A later rotation repeats steps 1–4 between ring keys: add the next key (active unchanged), activate it, wait the same delay measured
+from the activation, remove the previous key. **Emergency:** a compromised key is removed (and, if it was active, another key activated)
+in one change; its tokens are rejected at once and clients refresh.
+
+### 10.7 Rollback boundaries [TARGET]
+
+- **Image rollback** to an image without the ring is safe only while the active key is `legacy` (steps 0–1). After step 2 it rejects
+  every token signed with a ring key until clients refresh; after step 4 it also needs `JWT_SECRET` restored. An image without the ring
+  ignores `JWT_SIGNING_KEYS` and `JWT_ACTIVE_KEY_ID` (Auth ignores unknown keys, §6 item 5).
+- **Configuration rollback** (active back to `legacy` or to the previous ring key, the newer key kept in the ring) is safe at every step
+  before the previous key is removed. A return to `legacy` restarts the §10.8 delay.
+- **Sessions:** no rollback touches refresh tokens, families, the session ceiling or logout. A rejected access token is recovered by a
+  refresh, which signs with the then-active key.
+
+### 10.8 Legacy-key retirement (step 4) conditions [TARGET]
+
+`JWT_SECRET` is removed from production only when **all** hold:
+1. At least **3600 s + 5 min** have passed since the last token signed with it, that is, since the restart that made a ring key active,
+   with no return to `legacy` since (D5). 3600 s is the largest accepted `ACCESS_TOKEN_TTL_SEC`, so the rule does not depend on the
+   configured lifetime.
+2. The A4.8 provisioning change is merged (D6): `deploy/provision-and-deploy.sh` no longer generates `JWT_SECRET` when the ring is
+   configured, so a later provisioning cannot silently reintroduce a legacy key.
+3. A4.8's configuration check (§11) passes on the target configuration without `JWT_SECRET`, printing no value.
+4. The owner authorizes the step explicitly, acknowledging the §10.7 image-rollback limit after retirement.
+
+### 10.9 A4.7 test-first contract [TARGET: A4.7]
+
+Tests are written first and fail before the implementation.
+
+- **Kit** (`libs/service-kit/test/key-material.spec.ts`): the optional ring reader (unset → none; format, id rule, repeats, opt-in
+  entry cap, production rules); the existing `readKeyRing` and helper tests unchanged and green.
+- **Configuration** (`src/config/app-config.spec.ts`): the legacy-only `.env` and `JWT_SECRET_FILE` load as today; every row of the
+  §10.3 table; the reserved id in each letter case; malformed entry, short key, repeated id or key, more than 3 keys; each ring key
+  equal to `JWT_SECRET`, a pepper or a TOTP key; production published and non-random keys; `NAME` + `NAME_FILE` for both new variables;
+  no value, decoded key or id in any error (the existing `refused` pattern).
+- **Tokens** (new `src/tokens/token.service.spec.ts`, fixed clock):
+  - active `legacy`: header exactly `{"alg":"HS256"}`; a plain `jwtVerify(token, JWT_SECRET)`, standing for a pre-ring image, accepts it;
+  - active ring id: header carries the `kid`; the token verifies;
+  - a legacy token verifies while `JWT_SECRET` is set and is refused once it is removed;
+  - refused: unknown `kid`, retired `kid`, `kid` `legacy`, non-string `kid`, a legacy-signed token labelled with a ring `kid`, a ring
+    token with its `kid` removed, `alg` `none`, `HS384` / `HS512` signed with a configured key;
+  - the rotation sequence of §10.6: a token minted at each step checked against each later step; the rollback boundary (a step-2
+    token refused by a legacy-only verifier, accepted at step 1 configuration);
+  - claims, issuer, audience, expiry and the session-ceiling clamp unchanged.
+- **e2e:** `tokens.e2e-spec.ts` gains an unknown-`kid` forgery and follows the new configuration shape; `owner-auth`, `step-up`,
+  `step-up-verify`, `operator` and `concurrency` pass unchanged.
+- **Mutants** (each must fail a test): drop the algorithm pin; fall back to another key for an unknown `kid`; verify a kid-less token
+  with a ring key; accept `kid` `legacy`; drop the entry cap; drop a ring key from the distinctness check.
+- **Unchanged by A4.7:** the provisioning script, the rotation runbook, every production `.env`; no key generated or activated.
+
+### 10.10 Production: not authorized
+
+This design, ADR-0058 and A4.7 authorize **no** production key generation, delivery, activation or retirement and no deployment. Each
+rotation step of §10.6 and the first deployment of a ring-capable image are separate, owner-authorized production checkpoints (§17)
+under the protected `production` environment.
 
 ## 11. Deployment readiness (A4.8) [TARGET]
 
@@ -210,12 +353,16 @@ A future deployment needs its own explicit approval and a compatibility review c
 - **`TRUST_PROXY=true`:** the deploy script writes it; it must keep meaning one hop.
 - **Unknown and stale keys:** `PAYMENT_SERVICE_TOKEN` and `PAYMENT_SERVICE_URL` may remain in a server `.env` (`ensure` never
   removes a key); Auth must keep ignoring unknown keys. Removing them is a separate production action.
-- **JWT:** the existing `JWT_SECRET` must be accepted unchanged (§10).
+- **JWT:** the existing `JWT_SECRET` must be accepted unchanged (§10.3).
+- **JWT provisioning (D6):** `deploy/provision-and-deploy.sh` `ensure`s `JWT_SECRET`, generating one when it is absent. A4.8 makes it
+  skip `JWT_SECRET` when `JWT_SIGNING_KEYS` is configured, and documents the §10.6 rotation procedure in
+  [`docs/runbooks/secret-rotation.md`](../runbooks/secret-rotation.md) §4. No production retirement of `JWT_SECRET` before this
+  change (§10.8).
 - **WebAuthn:** `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGINS` (production: `nawara-solutions.com`, `https://admin.nawara-solutions.com`)
   stay valid under the same startup checks.
 - **Secret-safe validation:** A4.8 adds a configuration-check CLI that loads the configuration and prints only success or the
   `ConfigError` text, never a value, plus a runbook for a names-only audit of the server `.env` (owner-run).
-- **Rollback:** limited once a new JWT key is active (§10).
+- **Rollback:** limited once a new JWT key is active (§10.7).
 
 ## 12. Stages
 
@@ -227,9 +374,9 @@ A future deployment needs its own explicit approval and a compatibility review c
 | A4.3 | CLI configuration (§7) | `feature/core-v2-a4-3-auth-cli-config` | none | no |
 | A4.4 | bootstrap convergence, kit filter option (§8) | `feature/core-v2-a4-4-auth-bootstrap` | OD-A4-4 ✅ | no |
 | A4.5 | genericity exemption narrowing (§9) | `feature/core-v2-a4-5-auth-genericity` | OD-A4-5 ✅ | no |
-| A4.6 | JWT key-ring design (§10) | `feature/core-v2-a4-6-jwt-key-ring-design` | owner review of the design; an ADR if the design changes a binding decision | no |
+| A4.6 | JWT key-ring design (§10) | `feature/core-v2-a4-6-jwt-key-ring-design` | D1–D7 ✅ (§10.2); ADR-0058 written as Proposed; owner review of the design | no |
 | A4.7 | JWT key-ring implementation (§10) | `feature/core-v2-a4-7-jwt-key-ring` | A4.6 reviewed and merged | no |
-| A4.8 | deployment-readiness tooling (§11) | `feature/core-v2-a4-8-auth-deploy-readiness` | none | no |
+| A4.8 | deployment-readiness tooling (§11) | `feature/core-v2-a4-8-auth-deploy-readiness` | D6 (§10.2) | no |
 | A4.9 | A4 local certification (§16) | `feature/core-v2-a4-9-certification` | – | no |
 
 Each stage is one pull request from `origin/main`, merged by the owner with green Core CI. No stage mixes unrelated features.
@@ -243,9 +390,9 @@ Each stage is one pull request from `origin/main`, merged by the owner with gree
 | A4.3 | A4.2 | both CLIs on `EnvReader`; `MIGRATION_DATABASE_URL_FILE` works; F4 bootstrap rules and refusal messages unchanged |
 | A4.4 | A4.2 | the kit option exists and is tested; Auth starts through `configureApp`; every §2.1 HTTP contract passes its existing e2e tests unchanged; other services' behaviour unchanged |
 | A4.5 | A4.1 | the exemption names only the two migrations; `test:repo` shows both directions; no migration edited |
-| A4.6 | A4.2 | the design of §10 is written and owner-reviewed; any change to a binding decision is an ADR |
-| A4.7 | A4.6 | §10's tests pass; legacy `JWT_SECRET` works unchanged; no key generated or activated |
-| A4.8 | A4.2, A4.7 | the configuration-check CLI never prints a value (tested); the deploy runbook lists §11's review |
+| A4.6 | A4.2 | the design of §10 and ADR-0058 (Proposed) are written and owner-reviewed; no Accepted ADR changed |
+| A4.7 | A4.6 | §10.9's tests pass; existing kit key-material behaviour unchanged; legacy `JWT_SECRET` works unchanged; no key generated or activated |
+| A4.8 | A4.2, A4.7 | the configuration-check CLI never prints a value (tested); the deploy runbook lists §11's review; the provisioning script no longer generates `JWT_SECRET` when the ring is configured (D6); the rotation runbook states §10.6–§10.8 |
 | A4.9 | A4.2 to A4.8 | §16 met |
 
 ## 14. Validation per stage
@@ -259,8 +406,8 @@ proportionately:
 | A4.2, A4.3 | Auth lint and typecheck; `src/config/app-config.spec.ts` with deliberate mutants on the new rules; e2e `secrets`, `owner-tools`, `smoke`, `health-readiness`. No broker, cross-service or kit-dependent runs: neither the kit nor events change |
 | A4.4 (kit change) | kit build with fresh `dist/`; kit tests; Auth e2e `error-codes`, `auth-localization`, `logging`, `health-readiness`, `smoke`; the e2e suites of the other services that use `configureApp`; `test:e2e:auth-organization`. No broker campaign: messaging is unchanged |
 | A4.5 | `test:repo` with fixtures for both directions; `check:repo` |
-| A4.7 | Auth unit; e2e `tokens`, `owner-auth`, `step-up`, `operator`, `concurrency`; mutants for algorithm confusion, unknown `kid` and the legacy fallback |
-| A4.8 | CLI tests; `test:deploy` only if a deploy script changes |
+| A4.7 (kit change, D2) | kit build with fresh `dist/`; kit tests (`key-material`, `development-keys`); Auth unit (`app-config`, `token.service`); e2e `tokens`, `owner-auth`, `step-up`, `step-up-verify`, `operator`, `concurrency`; Notification's configuration tests (a `readKeyRing` user); the §10.9 mutants |
+| A4.8 | CLI tests; `test:deploy` for the provisioning change (D6) |
 | A4.9 | records-based; the merged pull requests' CI is the evidence |
 
 Reused, not repeated: the A1, A2, A15 and A3M evidence. Not part of A4: G6, production checks, Final Core Validation.
@@ -271,7 +418,9 @@ Reused, not repeated: the A1, A2, A15 and A3M evidence. Not part of A4: G6, prod
 |---|---|
 | The first Auth deployment after A4 carries every change since `97f78cb` | owner, at the deployment checkpoint (§11, §17) |
 | A loader change could refuse production's configuration at startup | A4.2 (characterization), A4.8 (configuration check), owner review before deploy |
-| Rollback is unsafe once a new JWT key is active | A4.6 runbook; owner at each rotation step |
+| Image rollback rejects ring-signed tokens once a new JWT key is active | §10.7; the rotation runbook (A4.8); owner at each rotation step |
+| A re-provisioning reintroduces a generated `JWT_SECRET` after retirement | A4.8 (D6), before any retirement (§10.8) |
+| ADR-0058 remains Proposed | owner review |
 | F1 (forged Auth events to Notification) | P-A1 / A14; `AUTH_EVENTS` stays off (A3M.8) |
 | Peppers cannot be rotated (A2 accepted limitation) | recorded; A4 does not change it |
 | Passkeys enrolled under the former RP ID no longer work | product integration (re-enrollment UI) |
