@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
-import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor } from './lib/checks.mjs';
+import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_LEGACY_EXEMPT } from './lib/checks.mjs';
 import ts from 'typescript';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
@@ -1939,4 +1939,41 @@ test('V2 A15.2: the real repository declares one Node major, and the runner chec
   const runner = repoFile('scripts/check-repo.mjs');
   assert.equal(runner.split('checkNodeToolchain(').length - 1, 1, 'checkNodeToolchain is called once');
   assert.match(runner, /problems\.push\(\.\.\.checkNodeToolchain\(\{ nvmrc: readOrUndefined\('\.nvmrc'\), packageJson: readOrUndefined\('package\.json'\), ciText: readOrUndefined\('\.github\/workflows\/core-ci\.yml'\), dockerfiles \}\)\);/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// V2 A15.4: new-service registration guards.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test('V2 A15.4: every application and library workspace is in the Core CI matrix, and every image in the smoke matrix', () => {
+  const ci = (node, images) => `name: Core CI\non: pull_request\njobs:\n  node:\n    strategy:\n      matrix:\n        include:\n${node.map((w) => `          - name: '${w}'\n            workspace: '${w}'\n`).join('')}  images:\n    strategy:\n      matrix:\n        service: [${images.join(', ')}]\n`;
+  const workspaces = ['@nawara/service-kit', 'x-service', 'y-service'];
+  assert.deepEqual(checkCiWorkspaceCoverage(ci(workspaces, ['x-service', 'y-service']), { workspaces, imageApps: ['x-service', 'y-service'] }), []);
+  // An app without a Dockerfile needs no image entry; a library never does.
+  assert.deepEqual(checkCiWorkspaceCoverage(ci(workspaces, ['x-service']), { workspaces, imageApps: ['x-service'] }), []);
+  assert.deepEqual(checkCiWorkspaceCoverage(ci(['@nawara/service-kit', 'x-service'], ['x-service', 'y-service']), { workspaces, imageApps: ['x-service', 'y-service'] }),
+    ['core-ci.yml: workspace y-service is not in the "node" matrix: CI would never lint, type-check, test or build it (add it; see docs/NEW-SERVICE-CHECKLIST.md)']);
+  assert.deepEqual(checkCiWorkspaceCoverage(ci(workspaces, ['x-service']), { workspaces, imageApps: ['x-service', 'y-service'] }),
+    ['core-ci.yml: apps/y-service has a Dockerfile but is not in the "images" matrix: CI would never build or boot its image (add it, and its case in scripts/smoke-core-image.sh)']);
+  assert.match(checkCiWorkspaceCoverage(ci(workspaces, ['x-service']), { workspaces: [...workspaces, '@nawara/new-lib'], imageApps: [] }).join(), /workspace @nawara\/new-lib is not in the "node" matrix/);
+  assert.match(checkCiWorkspaceCoverage('name: Core CI\njobs: {}\n', { workspaces, imageApps: [] }).join('\n'), /job "node" has no matrix\.include[\s\S]*job "images" has no matrix\.service/);
+  // The real workflow covers every real workspace, and the runner checks it with workspaces read from the manifests.
+  const apps = ['auth', 'billing', 'payment', 'organization', 'notification', 'file', 'audit', 'release'].map((s) => `${s}-service`);
+  assert.deepEqual(checkCiWorkspaceCoverage(repoFile('.github/workflows/core-ci.yml'), { workspaces: [...apps, '@nawara/service-kit', '@nawara/audit-contract'], imageApps: apps }), []);
+  const runner = repoFile('scripts/check-repo.mjs');
+  assert.equal(runner.split('checkCiWorkspaceCoverage(').length - 1, 1);
+  assert.match(runner, /checkCiWorkspaceCoverage\(readOrUndefined\('\.github\/workflows\/core-ci\.yml'\), \{ workspaces: \[\.\.\.appPackages\.keys\(\), \.\.\.libWorkspaces\], imageApps \}\)/);
+});
+
+test('V2 A15.4: the product-term check covers every application under apps/ automatically, with Auth as the one named exemption', () => {
+  // A service that exists in no list anywhere is checked, in its source and its migrations.
+  for (const rel of ['apps/booking-service/src/a.ts', 'apps/zz-new-service/db/migrations/0001_x.sql', 'apps/accounting-service/src/b.ts']) {
+    assert.match(checkSource(rel, '// a student books a lesson').join(), /product-specific term/, rel);
+  }
+  // Outside src and migrations nothing changes; Auth is exempt by name, and only Auth.
+  assert.deepEqual(checkSource('apps/booking-service/test/a.e2e-spec.ts', '// a student books').filter((p) => /product-specific/.test(p)), []);
+  assert.deepEqual(checkSource('apps/auth-service/src/a.ts', '// a student registers').filter((p) => /product-specific/.test(p)), []);
+  assert.deepEqual([...GENERICITY_LEGACY_EXEMPT], ['auth-service']);
+  // Generic text stays clean.
+  assert.deepEqual(checkSource('apps/booking-service/src/a.ts', 'export const capacity = 3; // a booking for an organization member').filter((p) => /product-specific/.test(p)), []);
 });
