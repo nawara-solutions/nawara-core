@@ -1,15 +1,15 @@
 # 0058. Access-token signing key ring
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-08, by the architecture owner, after the read-only A4.6 acceptance review of #248, `8d62b3f`)
 - **Date:** 2026-10-08
 - **Deciders:** Anwar (project owner, architecture owner)
 
 > **Core V2 A4.6** ([A4 record](../architecture/core-v2-a4-authentication.md) §10). The owner approved the design decisions D1–D7 and the
-> writing of this ADR; its acceptance is a separate, explicit decision. It implements the direction of OD-A4-6 and changes no Accepted
-> ADR: [ADR-0002](./0002-jwt-access-token-with-rotating-refresh-token.md) (short-lived access JWT, rotating refresh token) and
-> [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (only Auth verifies user tokens) stay as they are. Where this
-> ADR and an Accepted ADR differ, the Accepted ADR wins until this one is Accepted. Nothing here is implemented yet (A4.7), and nothing
-> here authorizes generating, delivering or activating a production key.
+> writing of this ADR, then accepted it on 2026-10-08 as a separate, explicit decision. It implements the direction of OD-A4-6 and
+> changes no Accepted ADR: [ADR-0002](./0002-jwt-access-token-with-rotating-refresh-token.md) (short-lived access JWT, rotating refresh
+> token) and [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (only Auth verifies user tokens) stay as they
+> are; the acceptance review found no conflict with either. Nothing here is implemented yet (A4.7), and nothing here authorizes
+> generating, delivering or activating a production key.
 
 ## Context
 
