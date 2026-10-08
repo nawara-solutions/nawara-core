@@ -455,6 +455,7 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
     expect({ ...c, jwt: undefined, secrets: undefined, databaseUrl: undefined, metrics: undefined }).toEqual({
       env: 'test', logLevel: 'info', port: 3000, databaseUrl: undefined,
       db: { poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000, queryTimeoutMs: 35000 },
+      bodyLimitKb: 100, // V2 A4.4: BODY_LIMIT_KB (OD-A4.4-4), the former effective limit
       httpDrainTimeoutMs: 5000, events: { enabled: true }, hierarchy: { source: 'local' },
       audit: { rabbitmqUrl: undefined, confirmTimeoutMs: 5000, heartbeatS: c.audit.heartbeatS },
       trustProxyHops: 0, corsOrigins: [], metrics: undefined, baselineRateLimitPerMinute: 100,
@@ -640,6 +641,13 @@ describe('V2 A4.2: EnvReader conversion (intended changes)', () => {
     expect(Buffer.from(loadConfig({ ...good(), JWT_SECRET: `  ${v}\n` }).jwt.secret).equals(Buffer.from(v, 'base64'))).toBe(true);
     expect(loadConfig({ ...good(), ...cred, ORGANIZATION_SERVICE_TOKEN: ` ${cred.ORGANIZATION_SERVICE_TOKEN} ` }).hierarchy.client?.token).toBe(cred.ORGANIZATION_SERVICE_TOKEN);
     refused({ ...good(), JWT_SECRET: `${v.slice(0, 10)} ${v.slice(10)}` }, /^JWT_SECRET must be standard base64/, v);
+  });
+
+  it('V2 A4.4 (OD-A4.4-4): BODY_LIMIT_KB is the kit\'s variable and rule: default 100, an integer between 1 and 10240', () => {
+    expect(loadConfig(good()).bodyLimitKb).toBe(100);
+    expect(loadConfig({ ...good(), BODY_LIMIT_KB: '1' }).bodyLimitKb).toBe(1);
+    expect(loadConfig({ ...good(), BODY_LIMIT_KB: '10240' }).bodyLimitKb).toBe(10_240);
+    for (const bad of ['0', '10241', '1e2', 'big']) refused({ ...good(), BODY_LIMIT_KB: bad }, /^BODY_LIMIT_KB must be an integer between 1 and 10240$/);
   });
 
   it('OD-A4-3: a test can still inject a file reader instead of the disk (the former SecretSource seam)', () => {

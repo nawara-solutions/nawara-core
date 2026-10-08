@@ -69,6 +69,8 @@ export interface AppConfig {
    * answer (default statement timeout + 5000, 1000-660000, must exceed DB_STATEMENT_TIMEOUT_MS). Every value is bounded; none may be "infinite".
    */
   db: { poolMax: number; connectionTimeoutMs: number; statementTimeoutMs: number; idleInTransactionTimeoutMs: number; queryTimeoutMs: number };
+  /** V2 A4.4: `BODY_LIMIT_KB`, the kit's variable, rule and default (100, 1-10240): the largest JSON or URL-encoded request body. */
+  bodyLimitKb: number;
   /** `HTTP_DRAIN_TIMEOUT_MS` (Stage 15.5), same default and bounds as the kit: once shutdown starts, how long running requests may finish. */
   httpDrainTimeoutMs: number;
   /**
@@ -267,6 +269,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
       idleInTransactionTimeoutMs: reader.int('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', { default: 60_000, min: 1_000, max: 3_600_000 }),
       queryTimeoutMs,
     },
+    bodyLimitKb: reader.int('BODY_LIMIT_KB', { default: 100, min: 1, max: 10_240 }),
     httpDrainTimeoutMs: reader.int('HTTP_DRAIN_TIMEOUT_MS', { default: DEFAULT_HTTP_DRAIN_TIMEOUT_MS, ...HTTP_DRAIN_TIMEOUT_BOUNDS }),
     events: { enabled: eventsEnabled },
     hierarchy: loadHierarchy(reader),
