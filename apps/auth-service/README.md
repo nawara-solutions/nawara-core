@@ -55,16 +55,24 @@ metadata). The CLI writes no central event and never runs a relay. See the
 
 ## Environment
 
-Read once at startup by `src/config/app-config.ts`; a missing or invalid value stops the process, and no error repeats a value. This
-table is the reference for Auth's variables; [`.env.example`](./.env.example) is a local-development template. Secrets marked **file**
-may be given as `NAME_FILE=/path` instead of `NAME` (Auth's `SecretSource`: the file wins when both are set). Rotation:
-[secret rotation runbook](../../docs/runbooks/secret-rotation.md).
+Read once at startup by `src/config/app-config.ts` through the kit's `EnvReader` (V2 A4.2), as in every other Core service; a missing
+or invalid value stops the process, and no error repeats a value. This table is the reference for Auth's variables;
+[`.env.example`](./.env.example) is a local-development template. Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
+
+Reading rules (the kit's, since A4.2):
+- **Every variable** may be given as `NAME_FILE=/path` instead of `NAME` (secrets marked **file** should be). Setting **both** is
+  refused at startup (`set NAME or NAME_FILE, not both`); before A4.2 the file silently won.
+- Surrounding whitespace is removed from the value, from the `_FILE` path and from the file's content; a blank value counts as unset
+  and takes the default. A direct secret with surrounding whitespace is therefore accepted (it was refused before A4.2).
+- Integers are plain signed decimals only: `1e3`, `0x10` or `5.0` are refused (they were accepted before A4.2).
+- A malformed `TOTP_ENCRYPTION_KEYS` entry is reported with the kit's wording (`must be "id:base64[,id:base64]" with ids of 1 to 32 …`).
+- Unknown variables are ignored, as before (a stale `PAYMENT_SERVICE_*` entry has no effect).
 
 | Variable | Required | Default | Secret | Meaning |
 |---|---|---|---|---|
 | `NODE_ENV` | no | `production` | no | `development`, `test` or `production`; unset means production |
 | `PORT`, `LOG_LEVEL`, `CORS_ORIGINS`, `TRUST_PROXY_HOPS` (or the older `TRUST_PROXY`), `HTTP_DRAIN_TIMEOUT_MS`, `METRICS_*` | no | 3000, `info`, none, 0, 5000, off | no | HTTP baseline (same rules as the kit); CORS takes exact origins only |
-| `DATABASE_URL` | yes | none | **yes** (password) | the runtime role `auth_app`; in production `postgres`, `root`, `auth`, `*_migrator` and `*_admin` are refused. No `_FILE` yet (A4) |
+| `DATABASE_URL` | yes | none | **yes, file** (password) | the runtime role `auth_app`; in production `postgres`, `root`, `auth`, `*_migrator` and `*_admin` are refused, also when read from `DATABASE_URL_FILE` |
 | `DB_POOL_MAX`, `DB_CONNECTION_TIMEOUT_MS`, `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_IN_TRANSACTION_TIMEOUT_MS`, `DB_QUERY_TIMEOUT_MS` | no | 10, 5000, 30000, 60000, statement + 5000 | no | bounded database limits |
 | `JWT_SECRET` | yes | none | **yes, file** | HS256 signing key: canonical base64 of at least 32 bytes |
 | `JWT_ISSUER`, `JWT_AUDIENCE`, `ACCESS_TOKEN_TTL_SEC`, `REFRESH_TOKEN_TTL_SEC` | no | `nawara-auth`, `nawara`, 900, 14 days | no | token claims and lifetimes (access 30 to 3600 s) |
@@ -78,9 +86,9 @@ may be given as `NAME_FILE=/path` instead of `NAME` (Auth's `SecretSource`: the 
 | `REQUIRE_CONTACT_VERIFICATION` | no | `false` | no | exactly `true` or `false` |
 | `RATE_<BUCKET>_LIMIT`, `RATE_<BUCKET>_WINDOW_SEC`, `BASELINE_RATE_LIMIT_PER_MINUTE` | no | per bucket (see `rate` in `app-config.ts`), 100 | no | throttling; buckets such as `LOGIN_IP`, `LOGIN_IDENTIFIER`, `REFRESH_IP`, `STEP_UP_OWNER` |
 | `AUTH_EVENTS` | no | `on` | no | exactly `on` or `off`: whether domain-event rows are written (production keeps `off`) |
-| `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes** (URL password) | the outbox relay's broker (audit evidence, independent of `AUTH_EVENTS`). No `_FILE` yet (A4) |
+| `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes, file** (URL password) | the outbox relay's broker (audit evidence, independent of `AUTH_EVENTS`); `RABBITMQ_URL_FILE` is accepted |
 | `AUTH_HIERARCHY_SOURCE`, `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_SERVICE_TOKEN`, `ORGANIZATION_SERVICE_TIMEOUT_MS` | no | `local`, none, none, 2000 | token: **yes, file** | Auth's Organization Service client; URL and token are set together |
-| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes, file** | API docs; mounted only with a password of at least 16 characters |
+| `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes, file** | API docs; mounted only with a password of at least 16 characters (the kit's `readDocsCredentials`) |
 
 ## Organization onboarding (join codes)
 

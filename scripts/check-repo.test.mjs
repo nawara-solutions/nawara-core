@@ -1766,6 +1766,18 @@ test('V2 A2.5: a README documents every literal variable its service reads (high
   assert.match(checkReadmeEnvironmentCoverage('x-service', readme([...names.filter((n) => n !== 'X_KEYS'), 'X_KEYS_PREVIOUS', 'X_STORAGE_*_TIMEOUT_MS', 'X_STORAGE_TIMEOUT_MS']), sources).join(), /^apps\/x-service\/README\.md does not document X_KEYS, which/);
   assert.match(checkReadmeEnvironmentCoverage('x-service', undefined, sources).join(), /README\.md is missing/);
   assert.match(checkReadmeEnvironmentCoverage('x-service', readme(names), { 'apps/x-service/src/a.ts': 'export const a = 1;' }).join(), /no literal configuration read was found/);
+  // V2 A4.2: the kit's readDocsCredentials reads SWAGGER_PASSWORD and SWAGGER_USERNAME for its caller: both must be documented.
+  const docsSources = { ...sources, 'apps/x-service/src/config/docs.ts': 'export const docs = (reader) => readDocsCredentials(reader);' };
+  assert.deepEqual(sourceFacts('apps/x-service/src/config/docs.ts', docsSources['apps/x-service/src/config/docs.ts']).configNames.sort(), ['SWAGGER_PASSWORD', 'SWAGGER_USERNAME']);
+  assert.deepEqual(checkReadmeEnvironmentCoverage('x-service', readme([...names, 'X_STORAGE_TIMEOUT_MS', 'SWAGGER_PASSWORD', 'SWAGGER_USERNAME']), docsSources), []);
+  assert.deepEqual(checkReadmeEnvironmentCoverage('x-service', readme([...names, 'X_STORAGE_TIMEOUT_MS', 'SWAGGER_PASSWORD']), docsSources), [
+    'apps/x-service/README.md does not document SWAGGER_USERNAME, which apps/x-service/src/config/docs.ts reads',
+  ]);
+  // Not a read: the helper merely named, a method of another object, or a look-alike function; and the other helpers are unchanged.
+  for (const text of ["const f = readDocsCredentials; const g = 'readDocsCredentials(reader)';", 'const c = kit.helpers.readDocsCredentialsX(reader);', 'const d = readDocsCredentialsFor(reader);']) {
+    assert.deepEqual(sourceFacts('apps/x-service/src/config/y.ts', text).configNames, [], text);
+  }
+  assert.deepEqual(sourceFacts('apps/x-service/src/config/z.ts', "const k = readKey(reader, 'X_HASH_KEY', rules); const d = readDocsCredentials(reader);").configNames.sort(), ['SWAGGER_PASSWORD', 'SWAGGER_USERNAME', 'X_HASH_KEY']);
   // What the runner feeds it: the service's non-test source outside its command-line tools.
   assert.equal(isServiceConfigSource('x-service', 'apps/x-service/src/storage/storage-config.ts'), true);
   for (const rel of ['apps/x-service/src/cli/main.ts', 'apps/x-service/src/config/x-config.spec.ts', 'apps/x-service/test/a.e2e-spec.ts', 'apps/y-service/src/a.ts', 'apps/x-service/src/a.d.ts', 'apps/x-service/README.md']) {
