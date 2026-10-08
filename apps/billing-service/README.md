@@ -236,8 +236,7 @@ MIGRATION_DATABASE_URL=postgres://billing_migrator:...@localhost:5433/billing np
 npm run start:dev -w billing-service
 ```
 
-Nothing migrates at service start; `/ready` fails while a migration is pending. The service never reads a `.env` file itself, and an
-unset `NODE_ENV` means **production**. Because the shell reads the file, a value that contains spaces, quotes or braces (a JSON policy) must be wrapped in single quotes there.
+Nothing migrates at service start; `/ready` fails while a migration is pending. Shared setup (Node 22, `npm run build:libs`, the environment, the test environment variables): [developer guide](../../docs/DEVELOPMENT.md).
 
 ## Tests
 
@@ -245,7 +244,7 @@ unset `NODE_ENV` means **production**. Because the shell reads the file, a value
 npm run lint -w billing-service
 npm run typecheck -w billing-service
 npm test -w billing-service                # unit
-npm run test:e2e -w billing-service        # integration, real PostgreSQL (needs TEST_DATABASE_ADMIN_URL; TEST_RABBITMQ_URL adds the broker case)
+npm run test:e2e -w billing-service        # integration, real PostgreSQL (TEST_DATABASE_ADMIN_URL; TEST_RABBITMQ_URL adds the broker case: developer guide §6)
 npm run build -w billing-service
 ```
 

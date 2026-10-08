@@ -180,10 +180,10 @@ its value.
 ## Run
 
 ```bash
-npm run build -w @nawara/service-kit && npm run build -w notification-service
+npm run build:libs && npm run build -w notification-service     # shared setup and the test environment: docs/DEVELOPMENT.md
 npm run start:prod -w notification-service                      # or: docker compose --profile db up -d notification-service
 npm test -w notification-service                                # unit
-TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w notification-service
+npm run test:e2e -w notification-service                        # needs TEST_DATABASE_ADMIN_URL
                                                                 # foundation, built process, and the real-PostgreSQL suites
 ```
 

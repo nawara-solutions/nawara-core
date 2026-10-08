@@ -149,9 +149,9 @@ bad input early with a bounded code.
 ## Run and test
 
 ```bash
-npm run build -w @nawara/service-kit -w @nawara/audit-contract && npm run build -w release-service
+npm run build:libs && npm run build -w release-service               # shared setup and the test environment: docs/DEVELOPMENT.md
 npm test -w release-service                                          # unit
-TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres npm run test:e2e -w release-service   # real PostgreSQL 16
+npm run test:e2e -w release-service                                  # real PostgreSQL 16 (TEST_DATABASE_ADMIN_URL)
 MIGRATION_DATABASE_URL=postgres://release_migrator:…@127.0.0.1:5433/release npm run migrate -w release-service
 ```
 

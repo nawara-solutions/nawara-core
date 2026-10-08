@@ -121,11 +121,10 @@ There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: r
 ## Run and test
 
 ```bash
-npm run build -w @nawara/service-kit -w @nawara/audit-contract && npm run build -w audit-service
+npm run build:libs && npm run build -w audit-service                 # shared setup and the test environment: docs/DEVELOPMENT.md
 npm test -w audit-service                                            # unit
-TEST_DATABASE_ADMIN_URL=postgres://postgres:…@127.0.0.1:5433/postgres TEST_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672 \
-  npm run test:e2e -w audit-service                                  # e2e (real PostgreSQL 16 + real RabbitMQ)
-TEST_DATABASE_ADMIN_URL=… npm run test:ops -w audit-service          # query plans at 500 000 rows (slow; measurements, not CI)
+npm run test:e2e -w audit-service                                    # e2e (real PostgreSQL 16 + real RabbitMQ: TEST_DATABASE_ADMIN_URL, TEST_RABBITMQ_URL)
+npm run test:ops -w audit-service                                    # query plans at 500 000 rows (slow; measurements, not CI)
 # local failure probes (restart / stop the named containers; never against shared infrastructure):
 TEST_RABBITMQ_CONTAINER=<broker container> TEST_POSTGRES_CONTAINER=<postgres container> … npm run test:chaos -w audit-service
 docker compose --profile db run --rm audit-service npm run migrate   # as audit_migrator

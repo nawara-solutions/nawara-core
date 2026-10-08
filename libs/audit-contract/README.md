@@ -91,7 +91,7 @@ lifecycle of an important object, money, privileged intervention — attributabl
 ```bash
 npm run build -w @nawara/audit-contract
 npm test -w @nawara/audit-contract                        # catalog, contract matrix, adversarial, envelope, writer (no services)
-TEST_DATABASE_ADMIN_URL=postgres://… npm run test:integration -w @nawara/audit-contract   # real PostgreSQL + kit outbox / relay
+npm run test:integration -w @nawara/audit-contract        # real PostgreSQL + kit outbox / relay (TEST_DATABASE_ADMIN_URL: docs/DEVELOPMENT.md §6)
 ```
 
 audit-service's `test/contract-persistence.e2e-spec.ts` proves every action against the real `audit_record` table.

@@ -133,7 +133,7 @@ docker compose --profile db up -d --wait postgres   # from the repo root
 npm run start:dev
 ```
 
-Unset, `NODE_ENV` means **production**: the service then requires a broker and the runtime database role. Because the shell reads the file, a value that contains spaces, quotes or braces (a JSON policy) must be wrapped in single quotes there.
+Unset, `NODE_ENV` means **production**: the service then requires a broker and the runtime database role. Shared setup (Node 22, `npm run build:libs`, the environment, the test environment variables): [developer guide](../../docs/DEVELOPMENT.md).
 
 ## Migrations
 
@@ -148,7 +148,7 @@ Nothing migrates automatically at service start; `/ready` fails while a migratio
 
 ```bash
 npm run test -w payment-service         # unit
-npm run test:e2e -w payment-service      # integration, against a real PostgreSQL (needs TEST_DATABASE_ADMIN_URL)
+npm run test:e2e -w payment-service      # integration, against a real PostgreSQL (TEST_DATABASE_ADMIN_URL: developer guide §6)
 npm run test:db -w payment-service       # database-level invariants and concurrency races (needs PGHOST/PGPORT/PGUSER/PGPASSWORD)
 npm run test:all -w payment-service      # all three
 ```
