@@ -193,8 +193,8 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.2  event contracts and versioning        ✅ closed on main (PR #236)
   A3M.3  producer and consumer conventions     ✅ closed on main (PR #237; G11 fixed, S21-5 aligned)
   A3M.4  retry, dead letters, idempotency      ✅ closed on main (G7 PR #235; idempotency matrix PR #239)
-  A3M.5  outbox / de-duplication retention     policy and manual dry-run CLI implemented locally; pending PR (runs nowhere)
-  A3M.6  deterministic broker tests            not started
+  A3M.5  outbox / de-duplication retention     ✅ closed on main (PR #240; manual dry-run CLI, runs nowhere)
+  A3M.6  deterministic broker evidence         16-scenario matrix, Billing and Notification refusals over a real broker; local, pending PR
   A3M.7  local certification                   not started
   A3M.8  production messaging                  not started (each item separately authorized)
 
@@ -256,9 +256,11 @@ started. A3M.2 (per-service event catalogs, a contract guard, Billing's version 
 and fixed finding G11 (a forged message could claim a Payment event id in Billing and block the genuine outcome) and removed Payment's
 broker readiness dependency (S21-5). The rest of A3M.4 (PR #239) records the idempotency matrix of every producer and consumer
 and the open findings F1 to F7; F1 (forged events to Notification) and F2 (Audit's first-writer residual) are **not resolved** and are
-security prerequisites to review before the corresponding production activation (P-A1 / A14, A7). A3M.5 (pending its PR) records the
+security prerequisites to review before the corresponding production activation (P-A1 / A14, A7). A3M.5 (PR #240) records the
 retention policy (every consumer de-duplication record is kept) and adds a manual, dry-run-first `nawara-outbox-retention` CLI for
-published outbox rows; it runs nowhere and is not scheduled. A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
+published outbox rows; it runs nowhere and is not scheduled. A3M.6 (local, pending its PR) records the 16-scenario real-broker
+evidence matrix and proves Billing's version and source refusals and the G11 fix over a real broker, plus Notification's refusal of an
+unmapped source; a broker restarted mid-flow stays a documented limitation (A3M record §15). A3M is local; every production messaging change (`AUTH_EVENTS`, broker identities, topology,
 retention activation) is separately authorized (A3M.8).
 
 ### Compatibility and safety rules for V1 work
