@@ -353,7 +353,8 @@ describe('V2 A2.3: targeted configuration hardening (OD-A2.3-1, OD-A2.3-2)', () 
     refused(ring(`k1:${a},k1:${b}`), /^TOTP_ENCRYPTION_KEYS must not repeat a key id$/, a, b); // was a silent overwrite
     refused(ring(`k1:${a},k2:${a}`), /^TOTP_ENCRYPTION_KEYS must not repeat a key$/, a);
     refused(ring(`k1:${a}`, 'k9'), /^TOTP_ENCRYPTION_ACTIVE_KEY_ID does not name a key in TOTP_ENCRYPTION_KEYS$/);
-    refused(ring(`bad id:${a}`), /^TOTP_ENCRYPTION_KEYS must be "id:base64\(32 bytes\)/, a);
+    // V2 A4.2: the kit's readKeyRing wording (approved change; Auth's former text was "id:base64(32 bytes)[,id:base64(32 bytes)]").
+    refused(ring(`bad id:${a}`), /^TOTP_ENCRYPTION_KEYS must be "id:base64\[,id:base64\]" with ids of 1 to 32 letters, digits, _ or -$/, a);
     refused(ring(a), /^TOTP_ENCRYPTION_KEYS must be "id:base64/, a);
     refused(ring(`k1:${randomBytes(33).toString('base64')}`), /^TOTP_ENCRYPTION_KEYS must decode to exactly 32 bytes$/);
     refused(ring(`k1:${a}!`), /^TOTP_ENCRYPTION_KEYS must be standard base64/, a);
@@ -377,5 +378,277 @@ describe('V2 A2.3: targeted configuration hardening (OD-A2.3-1, OD-A2.3-2)', () 
   it('a NAME_FILE that cannot be read is a value-free ConfigError (the path never appears)', () => {
     const path = '/run/secrets/very-sensitive-jwt-location';
     refused({ ...good(), JWT_SECRET: undefined, JWT_SECRET_FILE: path }, /^JWT_SECRET_FILE is set but the file cannot be read$/, path, 'very-sensitive');
+  });
+});
+
+/**
+ * V2 A4.2 (A4 record §6): characterization of the configuration contract before the loader moves to the kit's `EnvReader`. Everything in
+ * this block held before the conversion and must hold after it; the intended changes are in the next block.
+ */
+describe('V2 A4.2: configuration characterization (unchanged by the EnvReader conversion)', () => {
+  const refused = (env: NodeJS.ProcessEnv, message: RegExp, ...secrets: string[]) => {
+    let err: unknown;
+    try {
+      loadConfig(env);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(message);
+    for (const v of secrets) expect((err as Error).message).not.toContain(v);
+  };
+  const secretFile = (content: string) => {
+    const f = join(mkdtempSync(join(tmpdir(), 'a42-')), 'secret');
+    writeFileSync(f, content);
+    return f;
+  };
+  const cred = { ORGANIZATION_SERVICE_URL: 'http://organization:3000', ORGANIZATION_SERVICE_TOKEN: 'o'.repeat(48) };
+
+  it('TRUST_PROXY=true is one hop, TRUST_PROXY_HOPS wins over it, nothing set is zero', () => {
+    expect(loadConfig(good()).trustProxyHops).toBe(0);
+    expect(loadConfig({ ...good(), TRUST_PROXY: 'false' }).trustProxyHops).toBe(0);
+    expect(loadConfig({ ...good(), TRUST_PROXY: 'true' }).trustProxyHops).toBe(1);
+    expect(loadConfig({ ...good(), TRUST_PROXY: 'true', TRUST_PROXY_HOPS: '2' }).trustProxyHops).toBe(2);
+    expect(loadConfig({ ...good(), TRUST_PROXY: 'true', TRUST_PROXY_HOPS: '0' }).trustProxyHops).toBe(0);
+    refused({ ...good(), TRUST_PROXY_HOPS: '6' }, /^TRUST_PROXY_HOPS must be an integer between 0 and 5$/);
+  });
+
+  it.each(['JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'JOIN_CODE_PEPPER'])(
+    '%s from NAME_FILE (trailing newline) is byte-identical to the direct value',
+    (name) => {
+      const value = good()[name]!;
+      const direct = loadConfig({ ...good(), [name]: value });
+      const fromFile = loadConfig({ ...good(), [name]: undefined, [`${name}_FILE`]: secretFile(`${value}\n`) });
+      const pick = (c: ReturnType<typeof loadConfig>) => (name === 'JWT_SECRET' ? Buffer.from(c.jwt.secret) : c.secrets[({
+        OPERATOR_CODE_PEPPER: 'operatorCodePepper', SECRET_KEY_PEPPER: 'secretKeyPepper', THROTTLE_KEY_PEPPER: 'throttlePepper', JOIN_CODE_PEPPER: 'joinCodePepper',
+      } as const)[name as 'OPERATOR_CODE_PEPPER']]);
+      expect(pick(fromFile).equals(pick(direct))).toBe(true);
+      expect(pick(direct).equals(Buffer.from(value, 'base64'))).toBe(true);
+    },
+  );
+
+  it('the TOTP ring, its active id, the Organization token and the docs password are read from NAME_FILE too', () => {
+    const key = b64();
+    const c = loadConfig({
+      ...good(), ...cred, TOTP_ENCRYPTION_KEYS: undefined, TOTP_ENCRYPTION_ACTIVE_KEY_ID: undefined, ORGANIZATION_SERVICE_TOKEN: undefined,
+      TOTP_ENCRYPTION_KEYS_FILE: secretFile(`k7:${key}\n`), TOTP_ENCRYPTION_ACTIVE_KEY_ID_FILE: secretFile('k7\n'),
+      ORGANIZATION_SERVICE_TOKEN_FILE: secretFile(`${'t'.repeat(40)}\n`), SWAGGER_PASSWORD_FILE: secretFile(`${'p'.repeat(20)}\n`),
+    });
+    expect(c.secrets.totpActiveKeyId).toBe('k7');
+    expect(c.secrets.totpKeys.get('k7')!.equals(Buffer.from(key, 'base64'))).toBe(true);
+    expect(c.hierarchy.client?.token).toBe('t'.repeat(40));
+    expect(c.docs).toEqual({ username: 'docs', password: 'p'.repeat(20) });
+  });
+
+  it('JWT: HS256 material, issuer nawara-auth, audience nawara, access 900 s, refresh 14 days by default; each overridable', () => {
+    const c = loadConfig(good());
+    expect(c.jwt).toMatchObject({ issuer: 'nawara-auth', audience: 'nawara', accessTtlSec: 900 });
+    expect(c.jwt.secret).toBeInstanceOf(Uint8Array);
+    expect(c.jwt.secret).toHaveLength(32);
+    expect(c.refreshTtlSec).toBe(14 * 86_400);
+    expect(loadConfig({ ...good(), JWT_ISSUER: 'iss', JWT_AUDIENCE: 'aud', ACCESS_TOKEN_TTL_SEC: '600', REFRESH_TOKEN_TTL_SEC: '3600' }))
+      .toMatchObject({ jwt: { issuer: 'iss', audience: 'aud', accessTtlSec: 600 }, refreshTtlSec: 3600 });
+  });
+
+  it('every default, including all 29 rate buckets', () => {
+    const c = loadConfig(good());
+    expect({ ...c, jwt: undefined, secrets: undefined, databaseUrl: undefined, metrics: undefined }).toEqual({
+      env: 'test', logLevel: 'info', port: 3000, databaseUrl: undefined,
+      db: { poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000, queryTimeoutMs: 35000 },
+      httpDrainTimeoutMs: 5000, events: { enabled: true }, hierarchy: { source: 'local' },
+      audit: { rabbitmqUrl: undefined, confirmTimeoutMs: 5000, heartbeatS: c.audit.heartbeatS },
+      trustProxyHops: 0, corsOrigins: [], metrics: undefined, baselineRateLimitPerMinute: 100,
+      jwt: undefined, refreshTtlSec: 1_209_600, bcryptCost: 12, secrets: undefined,
+      totp: { issuer: 'Nawara', epochToleranceSec: 30 },
+      webauthn: { rpId: 'localhost', rpName: 'Nawara', origins: ['http://localhost:3000'] },
+      challengeTtlSec: 600, stepUp: { ttlSec: 300 },
+      recovery: { cooldownSec: 86_400, requestTtlSec: 604_800, enrollmentTtlSec: 1800 },
+      operator: { timezone: 'UTC', fallbackSessionSec: 28_800, confirmationTtlSec: 28_800 },
+      rate: {
+        login_ip: { limit: 60, windowSec: 900 }, login_identifier: { limit: 10, windowSec: 900 }, register_ip: { limit: 20, windowSec: 3600 },
+        refresh_ip: { limit: 120, windowSec: 900 }, owner_verify_owner: { limit: 8, windowSec: 300 }, owner_verify_ip: { limit: 30, windowSec: 300 },
+        step_up_owner: { limit: 10, windowSec: 300 }, step_up_ip: { limit: 30, windowSec: 300 }, factor_enroll_owner: { limit: 10, windowSec: 3600 },
+        recovery_ip: { limit: 10, windowSec: 3600 }, recovery_identifier: { limit: 5, windowSec: 3600 },
+        operator_request_identifier: { limit: 5, windowSec: 3600 }, operator_request_ip: { limit: 30, windowSec: 3600 },
+        operator_verify_identifier: { limit: 10, windowSec: 900 }, operator_verify_ip: { limit: 40, windowSec: 900 },
+        operator_verify_global: { limit: 600, windowSec: 60 }, operator_confirm_ip: { limit: 30, windowSec: 900 },
+        join_code_resolve_ip: { limit: 20, windowSec: 900 }, join_code_resolve_global: { limit: 1000, windowSec: 60 },
+        join_code_manage_actor: { limit: 30, windowSec: 3600 }, membership_op_actor: { limit: 120, windowSec: 900 },
+        membership_join_user: { limit: 10, windowSec: 3600 }, contact_request_user: { limit: 5, windowSec: 3600 },
+        contact_verify_user: { limit: 10, windowSec: 900 }, contact_verify_ip: { limit: 40, windowSec: 900 },
+        invitation_resolve_ip: { limit: 15, windowSec: 900 }, invitation_resolve_global: { limit: 500, windowSec: 60 },
+        invitation_accept_ip: { limit: 10, windowSec: 900 }, invitation_manage_actor: { limit: 20, windowSec: 3600 },
+      },
+      onboarding: { requireContactVerification: false, contactCodeTtlSec: 900, invitation: { minMinutes: 15, defaultMinutes: 1440, maxMinutes: 10_080 } },
+      docs: { username: 'docs', password: undefined },
+    });
+    expect(Object.keys(c.rate)).toHaveLength(29);
+    expect(c.secrets.totpActiveKeyId).toBe('k1');
+  });
+
+  // [variable, min, max]: each bound is accepted, one past it is refused with the same message; values are never echoed.
+  const BOUNDS: Array<[string, number, number]> = [
+    ['PORT', 1, 65_535], ['DB_POOL_MAX', 1, 100], ['DB_CONNECTION_TIMEOUT_MS', 100, 60_000], ['DB_STATEMENT_TIMEOUT_MS', 1000, 600_000],
+    ['DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 1000, 3_600_000], ['RABBITMQ_CONFIRM_TIMEOUT_MS', 100, 60_000], ['BASELINE_RATE_LIMIT_PER_MINUTE', 1, 1_000_000],
+    ['ACCESS_TOKEN_TTL_SEC', 30, 3600], ['REFRESH_TOKEN_TTL_SEC', 60, 90 * 86_400], ['BCRYPT_COST', 4, 15], ['TOTP_EPOCH_TOLERANCE_SEC', 0, 60],
+    ['CHALLENGE_TTL_SEC', 30, 1800], ['STEP_UP_TTL_SEC', 30, 900], ['RECOVERY_COOLDOWN_SEC', 1, 30 * 86_400], ['RECOVERY_REQUEST_TTL_SEC', 60, 60 * 86_400],
+    ['RECOVERY_ENROLLMENT_TTL_SEC', 60, 1800], ['OPERATOR_FALLBACK_SESSION_SEC', 60, 24 * 3600], ['OPERATOR_CONFIRMATION_TTL_SEC', 60, 7 * 86_400],
+    ['CONTACT_CODE_TTL_SEC', 60, 3600], ['INVITATION_MIN_MINUTES', 1, 1440],
+  ];
+  it.each(BOUNDS)('%s is an integer between %d and %d', (name, min, max) => {
+    expect(() => loadConfig({ ...good(), [name]: String(min) })).not.toThrow();
+    expect(() => loadConfig({ ...good(), [name]: String(max) })).not.toThrow();
+    for (const bad of [String(min - 1), String(max + 1), 'abc', '1.5']) refused({ ...good(), [name]: bad }, new RegExp(`^${name} must be an integer between ${min} and ${max}$`));
+  });
+  it('INVITATION_DEFAULT_MINUTES, INVITATION_MAX_MINUTES and ORGANIZATION_SERVICE_TIMEOUT_MS keep their bounds and ordering', () => {
+    for (const name of ['INVITATION_DEFAULT_MINUTES', 'INVITATION_MAX_MINUTES']) {
+      refused({ ...good(), [name]: '0' }, new RegExp(`^${name} must be an integer between 1 and 43200$`));
+      refused({ ...good(), [name]: '43201' }, new RegExp(`^${name} must be an integer between 1 and 43200$`));
+    }
+    refused({ ...good(), INVITATION_MIN_MINUTES: '60', INVITATION_DEFAULT_MINUTES: '30' }, /^INVITATION_MIN_MINUTES <= INVITATION_DEFAULT_MINUTES <= INVITATION_MAX_MINUTES must hold$/);
+    expect(loadConfig({ ...good(), INVITATION_DEFAULT_MINUTES: '43200', INVITATION_MAX_MINUTES: '43200' }).onboarding.invitation.maxMinutes).toBe(43_200);
+    refused({ ...good(), ...cred, ORGANIZATION_SERVICE_TIMEOUT_MS: '99' }, /^ORGANIZATION_SERVICE_TIMEOUT_MS must be an integer between 100 and 10000$/);
+    expect(loadConfig({ ...good(), ...cred, ORGANIZATION_SERVICE_TIMEOUT_MS: '10000' }).hierarchy.client?.timeoutMs).toBe(10_000);
+  });
+  it('every RATE_<BUCKET>_LIMIT (1-1000000) and RATE_<BUCKET>_WINDOW_SEC (1-86400) keeps its name and bounds', () => {
+    for (const bucket of Object.keys(loadConfig(good()).rate)) {
+      const n = bucket.toUpperCase();
+      expect(loadConfig({ ...good(), [`RATE_${n}_LIMIT`]: '1000000', [`RATE_${n}_WINDOW_SEC`]: '86400' }).rate[bucket as 'login_ip']).toEqual({ limit: 1_000_000, windowSec: 86_400 });
+      refused({ ...good(), [`RATE_${n}_LIMIT`]: '0' }, new RegExp(`^RATE_${n}_LIMIT must be an integer between 1 and 1000000$`));
+      refused({ ...good(), [`RATE_${n}_WINDOW_SEC`]: '86401' }, new RegExp(`^RATE_${n}_WINDOW_SEC must be an integer between 1 and 86400$`));
+    }
+  });
+
+  it('refusal messages are stable and never carry the value', () => {
+    refused({ ...good(), JWT_SECRET: undefined }, /^JWT_SECRET is required$/);
+    refused({ ...good(), TOTP_ENCRYPTION_ACTIVE_KEY_ID: undefined }, /^TOTP_ENCRYPTION_ACTIVE_KEY_ID is required$/);
+    refused({ ...good(), DATABASE_URL: undefined }, /^DATABASE_URL is required$/);
+    refused({ ...good(), DATABASE_URL: 'not a url s3cret' }, /^DATABASE_URL must be a valid URL$/, 's3cret');
+    refused({ ...good(), DATABASE_URL: 'mysql://u:s3cret@h/db' }, /^DATABASE_URL must use postgres: or postgresql:$/, 's3cret');
+    refused({ ...good(), RABBITMQ_URL: 'http://u:s3cret@mq' }, /^RABBITMQ_URL must be a valid amqp:\/\/ or amqps:\/\/ URL$/, 's3cret');
+    refused({ ...good(), SWAGGER_PASSWORD: 'short-s3cret' }, /^SWAGGER_PASSWORD must be at least 16 characters$/, 'short-s3cret');
+    refused({ ...good(), ...cred, ORGANIZATION_SERVICE_TOKEN: 'short-s3cret' }, /^ORGANIZATION_SERVICE_TOKEN must be at least 32 characters \(a generated service token\)$/, 'short-s3cret');
+    refused({ ...good(), ORGANIZATION_SERVICE_TOKEN: cred.ORGANIZATION_SERVICE_TOKEN }, /^ORGANIZATION_SERVICE_URL and ORGANIZATION_SERVICE_TOKEN must be set together$/, cred.ORGANIZATION_SERVICE_TOKEN);
+    refused({ ...good(), ...cred, ORGANIZATION_SERVICE_URL: 'ftp://u:s3cret@o' }, /^ORGANIZATION_SERVICE_URL must be a valid http:\/\/ or https:\/\/ URL$/, 's3cret');
+    refused({ ...good(), AUTH_HIERARCHY_SOURCE: 'remote' }, /^AUTH_HIERARCHY_SOURCE must be "local" or "organization-service"$/);
+    refused({ ...good(), DB_STATEMENT_TIMEOUT_MS: '40000', DB_QUERY_TIMEOUT_MS: '40000' }, /^DB_QUERY_TIMEOUT_MS must be greater than DB_STATEMENT_TIMEOUT_MS$/);
+  });
+
+  it('unknown and stale variables (PAYMENT_SERVICE_*, anything else) are ignored: the configuration is identical', () => {
+    const base = good();
+    expect(loadConfig({ ...base, PAYMENT_SERVICE_TOKEN: 'stale-token-value', PAYMENT_SERVICE_URL: 'http://payment:3000', SOMETHING_ELSE: 'x' })).toEqual(loadConfig(base));
+  });
+
+  it('a production configuration shaped like the deploy script\'s (direct values, TRUST_PROXY=true, AUTH_EVENTS=off) loads', () => {
+    const c = loadConfig({
+      NODE_ENV: 'production', DATABASE_URL: 'postgres://auth_app:pw@nawara-core-auth-db:5432/auth',
+      JWT_SECRET: b64(), OPERATOR_CODE_PEPPER: b64(), SECRET_KEY_PEPPER: b64(), THROTTLE_KEY_PEPPER: b64(), JOIN_CODE_PEPPER: b64(),
+      TOTP_ENCRYPTION_KEYS: `k1:${b64()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1',
+      WEBAUTHN_RP_ID: 'nawara-solutions.com', WEBAUTHN_ORIGINS: 'https://admin.nawara-solutions.com', WEBAUTHN_RP_NAME: 'Nawara',
+      TRUST_PROXY: 'true', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://auth-service:pw@rabbitmq:5672', ...cred,
+      WORK_TIMEZONE: 'Africa/Tunis', REQUIRE_CONTACT_VERIFICATION: 'false', SWAGGER_USERNAME: 'docs', SWAGGER_PASSWORD: 'f'.repeat(48),
+      PAYMENT_SERVICE_TOKEN: 'stale', PAYMENT_SERVICE_URL: 'http://stale',
+    });
+    expect(c).toMatchObject({
+      env: 'production', trustProxyHops: 1, events: { enabled: false }, operator: { timezone: 'Africa/Tunis' },
+      webauthn: { rpId: 'nawara-solutions.com', rpName: 'Nawara', origins: ['https://admin.nawara-solutions.com'] },
+      onboarding: { requireContactVerification: false }, docs: { username: 'docs' }, hierarchy: { source: 'local' },
+    });
+  });
+
+  it('production keeps refusing low-entropy, duplicated and published keys, unsafe roles and foreign WebAuthn origins', () => {
+    const prodEnv: NodeJS.ProcessEnv = { ...good(), NODE_ENV: 'production', DATABASE_URL: 'postgres://auth_app:pw@db:5432/auth', AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672', WEBAUTHN_RP_ID: 'example.com', WEBAUTHN_ORIGINS: 'https://app.example.com' };
+    expect(loadConfig(prodEnv).env).toBe('production');
+    refused({ ...prodEnv, JWT_SECRET: Buffer.alloc(32, 7).toString('base64') }, /^JWT_SECRET does not look random and is refused in production$/);
+    refused({ ...prodEnv, THROTTLE_KEY_PEPPER: prodEnv.JWT_SECRET }, /^THROTTLE_KEY_PEPPER must differ from JWT_SECRET \(one key, one purpose\)$/, prodEnv.JWT_SECRET!);
+    refused({ ...prodEnv, DATABASE_URL: 'postgres://auth:s3cret@db:5432/auth' }, /^DATABASE_URL must use the least-privilege runtime role in production/, 's3cret');
+    refused({ ...prodEnv, WEBAUTHN_ORIGINS: 'https://evil.test' }, /^every WEBAUTHN_ORIGINS host must be WEBAUTHN_RP_ID or a subdomain of it$/);
+    refused({ ...prodEnv, WEBAUTHN_ORIGINS: 'http://app.example.com' }, /^WEBAUTHN_ORIGINS must be https:\/\/ origins in production$/);
+    refused({ ...prodEnv, RABBITMQ_URL: undefined }, /^RABBITMQ_URL is required in production/);
+  });
+});
+
+/** V2 A4.2: the intended changes of the `EnvReader` conversion (OD-A4-2, OD-A4-3 and the A4.2 owner decisions 1 to 4). */
+describe('V2 A4.2: EnvReader conversion (intended changes)', () => {
+  const refused = (env: NodeJS.ProcessEnv, message: RegExp, ...secrets: string[]) => {
+    let err: unknown;
+    try {
+      loadConfig(env);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as Error).message).toMatch(message);
+    for (const v of secrets) expect((err as Error).message).not.toContain(v);
+  };
+  const secretFile = (content: string) => {
+    const f = join(mkdtempSync(join(tmpdir(), 'a42-')), 'value');
+    writeFileSync(f, content);
+    return f;
+  };
+  const cred = { ORGANIZATION_SERVICE_URL: 'http://organization:3000', ORGANIZATION_SERVICE_TOKEN: 'o'.repeat(48) };
+
+  it.each([
+    'JWT_SECRET', 'OPERATOR_CODE_PEPPER', 'SECRET_KEY_PEPPER', 'THROTTLE_KEY_PEPPER', 'JOIN_CODE_PEPPER', 'TOTP_ENCRYPTION_KEYS',
+    'TOTP_ENCRYPTION_ACTIVE_KEY_ID', 'DATABASE_URL', 'RABBITMQ_URL', 'ORGANIZATION_SERVICE_TOKEN', 'SWAGGER_PASSWORD', 'PORT', 'JWT_ISSUER',
+  ])('OD-A4-2: %s and its _FILE form together are refused (formerly the file won), naming neither value nor path', (name) => {
+    const env: NodeJS.ProcessEnv = { ...good(), ...cred, RABBITMQ_URL: 'amqp://mq:5672', SWAGGER_PASSWORD: 'p'.repeat(20), PORT: '3000', JWT_ISSUER: 'iss' };
+    const path = secretFile(env[name]!);
+    refused({ ...env, [`${name}_FILE`]: path }, new RegExp(`^set ${name} or ${name}_FILE, not both$`), env[name]!, path);
+  });
+
+  it('DATABASE_URL_FILE and RABBITMQ_URL_FILE are read (newly supported) and validated like the direct values', () => {
+    const c = loadConfig({
+      ...good(), DATABASE_URL: undefined, DATABASE_URL_FILE: secretFile('postgres://auth_app:pw@db:5432/auth\n'),
+      RABBITMQ_URL_FILE: secretFile('amqps://auth-service:pw@broker:5671\n'),
+    });
+    expect(c.databaseUrl).toBe('postgres://auth_app:pw@db:5432/auth');
+    expect(c.audit.rabbitmqUrl).toBe('amqps://auth-service:pw@broker:5671');
+    refused({ ...good(), DATABASE_URL: undefined, DATABASE_URL_FILE: secretFile('mysql://u:s3cret@h/db') }, /^DATABASE_URL must use postgres: or postgresql:$/, 's3cret');
+    refused({ ...good(), RABBITMQ_URL_FILE: secretFile('http://u:s3cret@mq') }, /^RABBITMQ_URL must be a valid amqp:\/\/ or amqps:\/\/ URL$/, 's3cret');
+    const missing = '/run/secrets/no-such-database-url';
+    refused({ ...good(), DATABASE_URL: undefined, DATABASE_URL_FILE: missing }, /^DATABASE_URL_FILE is set but the file cannot be read$/, missing);
+  });
+
+  it('production applies the runtime-role rule to a DATABASE_URL read from DATABASE_URL_FILE', () => {
+    const prodEnv: NodeJS.ProcessEnv = {
+      ...good(), NODE_ENV: 'production', DATABASE_URL: undefined, AUTH_EVENTS: 'off', RABBITMQ_URL: 'amqp://mq:5672',
+      WEBAUTHN_RP_ID: 'example.com', WEBAUTHN_ORIGINS: 'https://app.example.com',
+    };
+    expect(loadConfig({ ...prodEnv, DATABASE_URL_FILE: secretFile('postgres://auth_app:pw@db:5432/auth') }).databaseUrl).toContain('auth_app');
+    for (const user of ['auth', 'postgres', 'auth_migrator']) {
+      refused({ ...prodEnv, DATABASE_URL_FILE: secretFile(`postgres://${user}:s3cret-value@db:5432/auth`) }, /^DATABASE_URL must use the least-privilege runtime role in production/, 's3cret-value');
+    }
+  });
+
+  it('integers use the kit grammar: only signed decimals (1e3, 0x10, 5.0 and Infinity are refused); a blank value is the default', () => {
+    for (const bad of ['1e3', '0x10', '5.0', 'Infinity', '1_000']) refused({ ...good(), PORT: bad }, /^PORT must be an integer between 1 and 65535$/);
+    for (const bad of ['6e1', '6.0']) refused({ ...good(), RATE_LOGIN_IP_LIMIT: bad }, /^RATE_LOGIN_IP_LIMIT must be an integer between 1 and 1000000$/);
+    expect(loadConfig({ ...good(), PORT: '+8080' }).port).toBe(8080);
+    expect(loadConfig({ ...good(), PORT: ' 8080 ' }).port).toBe(8080);
+    expect(loadConfig({ ...good(), PORT: '   ', ACCESS_TOKEN_TTL_SEC: ' ', TOTP_EPOCH_TOLERANCE_SEC: '  ' })).toMatchObject({ port: 3000, jwt: { accessTtlSec: 900 }, totp: { epochToleranceSec: 30 } });
+  });
+
+  it('a blank defaulted string is unset and takes its documented default (formerly an empty string was kept)', () => {
+    const c = loadConfig({ ...good(), JWT_ISSUER: '', JWT_AUDIENCE: '  ', TOTP_ISSUER: '', WEBAUTHN_RP_NAME: ' ', WORK_TIMEZONE: '', AUTH_HIERARCHY_SOURCE: '' });
+    expect(c.jwt).toMatchObject({ issuer: 'nawara-auth', audience: 'nawara' });
+    expect(c).toMatchObject({ totp: { issuer: 'Nawara' }, webauthn: { rpName: 'Nawara' }, operator: { timezone: 'UTC' }, hierarchy: { source: 'local' } });
+  });
+
+  it('a direct secret is trimmed before validation (formerly refused as non-canonical); inner whitespace is still refused', () => {
+    const v = good().JWT_SECRET!;
+    expect(Buffer.from(loadConfig({ ...good(), JWT_SECRET: `  ${v}\n` }).jwt.secret).equals(Buffer.from(v, 'base64'))).toBe(true);
+    expect(loadConfig({ ...good(), ...cred, ORGANIZATION_SERVICE_TOKEN: ` ${cred.ORGANIZATION_SERVICE_TOKEN} ` }).hierarchy.client?.token).toBe(cred.ORGANIZATION_SERVICE_TOKEN);
+    refused({ ...good(), JWT_SECRET: `${v.slice(0, 10)} ${v.slice(10)}` }, /^JWT_SECRET must be standard base64/, v);
+  });
+
+  it('OD-A4-3: a test can still inject a file reader instead of the disk (the former SecretSource seam)', () => {
+    const files: Record<string, string> = { '/virtual/jwt': `${good().JWT_SECRET}\n` };
+    const c = loadConfig({ ...good(), JWT_SECRET: undefined, JWT_SECRET_FILE: '/virtual/jwt' }, (p) => {
+      if (!(p in files)) throw new Error('ENOENT');
+      return files[p]!;
+    });
+    expect(Buffer.from(c.jwt.secret).toString('base64')).toBe(files['/virtual/jwt']!.trim());
+    refused({ ...good(), JWT_SECRET: undefined, JWT_SECRET_FILE: '/virtual/missing' }, /^JWT_SECRET_FILE is set but the file cannot be read$/, '/virtual/missing');
   });
 });

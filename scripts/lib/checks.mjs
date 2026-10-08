@@ -1289,6 +1289,8 @@ const ENV_READER_METHODS = new Set(['get', 'required', 'optional', 'int', 'bool'
 const ENV_READERS = new Set(['reader', 'src']); // an EnvReader by convention; `src` is Auth's SecretSource (A4 converges it)
 /** Helper functions that take a literal variable name: the kit's key helpers, Auth's loader helpers, Notification's loader helpers. */
 const CONFIG_NAME_HELPERS = new Set(['readKey', 'readOptionalKey', 'readKeyRing', 'decodeKey', 'int', 'required', 'secretBytes', 'matching', 'providerUrl']);
+/** V2 A4.2: kit helpers that read fixed variable names of their own; a call to one is a read of those names by the calling service. */
+const KIT_HELPER_READS = new Map([['readDocsCredentials', ['SWAGGER_PASSWORD', 'SWAGGER_USERNAME']]]);
 const isEnvObject = (node) => {
   const n = unwrap(node);
   return !!n && ((ts.isIdentifier(n) && n.text === 'env') || isProcessEnvAccess(n));
@@ -1303,6 +1305,7 @@ function literalConfigNames(node) {
       const name = reads ? staticSpecifier(node.arguments[0]) : undefined;
       return name !== undefined && ENV_NAME.test(name) ? [name] : [];
     }
+    if (ts.isIdentifier(callee) && KIT_HELPER_READS.has(callee.text)) return [...KIT_HELPER_READS.get(callee.text)];
     if (ts.isIdentifier(callee) && CONFIG_NAME_HELPERS.has(callee.text)) return node.arguments.map(staticSpecifier).filter((a) => a !== undefined && ENV_NAME.test(a));
     return [];
   }
