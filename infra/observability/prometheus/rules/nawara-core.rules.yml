@@ -77,6 +77,18 @@ groups:
         annotations:
           summary: "{{ $labels.job }} dead-lettered messages from {{ $labels.queue }}"
           description: "{{ $labels.job }} parked messages in {{ $labels.queue }}.dead in the last 10 minutes; inspect them with nawara-check-dlq."
+      # V2 A3M.4 (finding G7, ADR-0057 §8): a consumer whose dead-letter copy is not confirmed (its <queue>.dead refuses publishes or
+      # the broker is in trouble) holds the delivery for its retry delay and requeues it to its own queue (dead_letter_deferred) instead
+      # of parking it, so MessagesDeadLettered does not see it while the message cycles. Deferrals in every 2-minute window for 5
+      # minutes mean the dead-letter path is broken; one isolated deferral (a broker hiccup) stays under `for` and never fires.
+      - alert: DeadLetterCopyFailing
+        expr: sum by (job, instance, queue) (increase(nawara_events_consumed_total{job=~"auth-service|billing-service|payment-service|organization-service|notification-service|file-service|audit-service|release-service",outcome="dead_letter_deferred"}[2m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }} cannot dead-letter messages from {{ $labels.queue }}"
+          description: "{{ $labels.job }} has kept deferring failed messages of {{ $labels.queue }} for 5 minutes because their copy to {{ $labels.queue }}.dead is not confirmed; they stay in {{ $labels.queue }}. Check {{ $labels.queue }}.dead and the broker."
       # The outbox gauges count only once the relay has read the outbox (stats timestamp > 0, the A12.6.2 rule): before that they are 0.
       # 60 s is nawara-check-outbox-lag's own "needs manual review" age.
       - alert: OutboxBacklogAging

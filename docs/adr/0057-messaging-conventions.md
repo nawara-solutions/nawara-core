@@ -136,20 +136,23 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   confirmed copy in `Q.retry`; a permanent failure, a malformed message or exhausted retries produce a **confirmed, annotated copy** in
   `Q.dead` (`x-nawara-failure`, `-failure-reason`, `-failure-error`, `-failed-at`, `-consumer`, `-retry-count`), then the original is
   acknowledged. A consumer that must not store untrusted content (Audit) sets a `deadLetterPolicy` that keeps only chosen headers and can
-  redact the body (Stage 18.8); for such a consumer, a copy that cannot be confirmed is **held for the retry delay and requeued**, never
-  dead-lettered raw (Stage 18.9).
+  redact the body (Stage 18.8). A copy that cannot be confirmed is **held for the retry delay and requeued** to the consumer's own queue,
+  never dead-lettered raw: since Stage 18.9 for a consumer with a policy, and since A3M.4 (G7, below) for every consumer.
 - **[CURRENT]** Operators inspect a `.dead` queue without consuming and replay **one** message into the work queue that the `.dead` name
   implies (`nawara-dlq`); `nawara-check-dlq` and `nawara-check-outbox-lag` report depth and lag; the A12 metrics cover publishes, consumer
   outcomes and outbox lag.
-- **[OPEN] G7.** For a consumer **without** a `deadLetterPolicy`, when the annotated copy cannot be confirmed, the bus calls
-  `nack(requeue = false)` and lets the broker dead-letter the original through `nawara.events.dlx`. Because that exchange is a fanout
-  shared by every `.dead` queue in the vhost, the original would be copied, unannotated, into **every** consumer's dead-letter queue,
-  including one whose policy redacts (Audit). This is **unverified**: it is a potential defect until a deterministic multi-consumer broker
-  test establishes the behaviour (A3M record §7). It is latent in production today, where Audit is the only consumer. If confirmed, the
-  preferred remedy is **R1, code only**: remove the `nack(requeue = false)` fallback and use the bounded hold-and-requeue of Stage 18.9
-  for every consumer, keeping each message with its own consumer and the production topology unchanged, after its reliability and
-  liveness trade-offs are verified (OD-A3M-5). A topology change (R2 a per-queue dead-letter exchange, R3 a non-fanout one) needs separate
-  owner authorization (§12).
+- **G7: confirmed, remedied in code by A3M.4 (R1).** Before A3M.4, for a consumer **without** a `deadLetterPolicy`, an annotated copy
+  that could not be confirmed made the bus call `nack(requeue = false)`, and the broker dead-lettered the original through
+  `nawara.events.dlx`, a fanout shared by every `.dead` queue in the vhost. A deterministic multi-consumer broker test reproduced it
+  locally (A3M record §7): the **raw** original (body unredacted) reached a bystander consumer's dead-letter queue whose policy
+  redacts, and **left its own consumer** (its work and dead-letter queues both empty). The remedy, R1, is code only: that fallback is
+  removed, and every consumer holds the delivery for its retry delay and requeues it to its own queue (`dead_letter_deferred`), the
+  Stage 18.9 behaviour; the same test now passes as a regression guard. The production topology is unchanged; it was latent in
+  production, where Audit (which has a policy) is the only consumer. **Residuals:** the fanout still exists, so a broker-side
+  dead-lettering that does not come from the kit (an operator's TTL or max-length policy on a work queue) would still fan out, and a
+  consumer identity may publish to `nawara.events.dlx` (ADR-0053 §4); a topology change (R2 a per-queue dead-letter exchange, R3 a
+  non-fanout one) needs separate owner authorization (§12). While a dead-letter queue keeps refusing copies, a failing message cycles
+  (one prefetch slot per retry delay) instead of being parked; the `DeadLetterCopyFailing` alert reports it (A3M record §7).
 
 ### 9. Queue naming
 
@@ -194,7 +197,7 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   consumer conventions and Payment's readiness (A3M.3), the G7 proof and its remedy (A3M.4), retention design (A3M.5).
 - ADR-0018 and ADR-0037 gain forward notes to this ADR; their content and status are unchanged, and their disposition remains an
   explicit owner decision (OD-A3M-2). On acceptance of this ADR the owner may mark them partially superseded.
-- G7 stays recorded as open until the broker test establishes it.
+- G7 is confirmed and remedied in code (A3M.4, R1); the production topology residuals of §8 stay recorded.
 
 ## Relationship to other ADRs
 

@@ -168,6 +168,7 @@ export type ConsumeOutcome =
   | 'dead_lettered_permanent'
   | 'dead_lettered_retries_exhausted'
   | 'dead_letter_deferred'
+  /** No longer produced since V2 A3M.4 (G7: an unconfirmed copy is deferred, never broker-dead-lettered); kept so the metric label set, dashboards and alert rules stay unchanged. */
   | 'dead_letter_unannotated';
 export type EventBusObservation =
   | { type: 'publish'; outcome: 'confirmed' | 'failed' | 'confirm_timeout'; durationMs: number }
@@ -518,7 +519,10 @@ export class RabbitMqEventBus implements EventBus {
     this.observe({ type: 'consume', queue: sub.queue, outcome: 'processed', handlerMs, redelivered });
   }
 
-  /** A failed delivery ends in exactly one of: a confirmed copy in `<queue>.retry`, or a confirmed copy in `<queue>.dead`, then an ack. */
+  /**
+   * A failed delivery ends in exactly one of: a confirmed copy in `<queue>.retry`, or a confirmed copy in `<queue>.dead`, then an ack; or,
+   * when that copy cannot be confirmed, a bounded hold and a requeue to its own queue (never a nack without requeue: G7).
+   */
   private async onFailure(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, event: EventEnvelope | undefined, error: unknown, retryCount: number, stopping?: AbortSignal): Promise<ConsumeOutcome> {
     const maxRetries = this.opts.retry?.maxRetries ?? 3;
     const delayMs = this.opts.retry?.delayMs ?? 5000;
@@ -557,22 +561,19 @@ export class RabbitMqEventBus implements EventBus {
       this.settle(() => ch.ack(msg), sub);
       return `dead_lettered_${failure}`;
     } catch {
-      if (copy) {
-        // Stage 18.8: a consumer with a dead-letter policy never lets the broker dead-letter the untouched original: requeued instead
-        // (redelivered, re-handled idempotently, dead-lettered through the policy once the broker confirms again).
-        // Stage 18.9: RabbitMQ redelivers a requeued message at once, so while the copy keeps failing an immediate requeue is a tight
-        // loop. The delivery is HELD (unacknowledged, occupying one prefetch slot) for the retry delay first: at most `prefetch`
-        // deferrals per delay, whatever the fault lasts. A stopping consumer ends the hold at once (shutdown stays bounded; the
-        // unacknowledged message is redelivered to the next instance either way).
-        this.notice(`event_dead_letter_deferred ${outcome} delayMs=${delayMs} — the copy could not be confirmed; requeued after the delay`, 'error');
-        await holdUnless(delayMs, stopping);
-        this.settle(() => ch.nack(msg, false, true), sub);
-        return 'dead_letter_deferred';
-      }
-      // the annotated copy could not be confirmed: the broker's own dead-lettering (the queue was just re-declared and bound) still moves the original, unannotated
-      this.notice(`event_dead_lettered ${outcome} annotated=false`, 'error');
-      this.settle(() => ch.nack(msg, false, false), sub);
-      return 'dead_letter_unannotated';
+      // The copy could not be confirmed: the original is never handed to the broker's own dead-lettering. Stage 18.8 did this for a
+      // consumer with a dead-letter policy; V2 A3M.4 (finding G7, ADR-0057 §8) does it for every consumer, because `<exchange>.dlx` is a
+      // fanout shared by every `<queue>.dead`: a `nack` without requeue copied the untouched original into EVERY consumer's dead-letter
+      // queue (a redacting one included) while the consumer's own refused it, so the message left its owner. Requeued instead
+      // (redelivered, re-handled idempotently, dead-lettered with its annotations once the broker confirms again).
+      // Stage 18.9: RabbitMQ redelivers a requeued message at once, so while the copy keeps failing an immediate requeue is a tight
+      // loop. The delivery is HELD (unacknowledged, occupying one prefetch slot) for the retry delay first: at most `prefetch`
+      // deferrals per delay, whatever the fault lasts. A stopping consumer ends the hold at once (shutdown stays bounded; the
+      // unacknowledged message is redelivered to the next instance either way).
+      this.notice(`event_dead_letter_deferred ${outcome} delayMs=${delayMs} — the copy could not be confirmed; requeued after the delay`, 'error');
+      await holdUnless(delayMs, stopping);
+      this.settle(() => ch.nack(msg, false, true), sub);
+      return 'dead_letter_deferred';
     }
   }
 

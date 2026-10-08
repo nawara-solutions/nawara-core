@@ -640,7 +640,7 @@ function checkPrometheusAlerting(prom, p) {
 /**
  * V2 A12.6.3: the LOCAL alert rules (`rules`: infra/observability/prometheus/rules/nawara-core.rules.yml) and their promtool tests
  * (`ruleTests`: infra/observability/prometheus/tests/nawara-core.rules.test.yml), as text.
- * - exactly the approved catalog (`ALERT_CATALOG`: 16 alerts in four groups), no deferred or rejected alert (SettleFailures, readiness,
+ * - exactly the approved catalog (`ALERT_CATALOG`: 17 alerts in four groups; V2 A3M.4 added DeadLetterCopyFailing), no deferred or rejected alert (SettleFailures, readiness,
  *   self-scrape, DLQ depth, broker backlog, long transactions, TSDB);
  * - alert rules only (no recording rule yet), unique CamelCase names in named groups; keys alert, expr, for, labels, annotations;
  * - labels: `severity` only, critical or warning; annotations: `summary` / `description`, static text with only `$value` and the
@@ -657,10 +657,10 @@ function checkPrometheusAlerting(prom, p) {
 export const ALERT_SEVERITIES = ['critical', 'warning'];
 const ALERT_LABELS = new Set(['job', 'instance', 'queue', 'pool', 'datname', 'alarm', 'rule_group']);
 const ALERT_JOBS = new Set(['rabbitmq', 'postgres', 'prometheus']);
-/** V2 A12.6.3: the complete approved alert catalog (A12.6.3.1 + A12.6.3.2), in its four groups. */
+/** V2 A12.6.3: the complete approved alert catalog (A12.6.3.1 + A12.6.3.2, plus A3M.4's DeadLetterCopyFailing), in its four groups. */
 export const ALERT_CATALOG = {
   'core-services': ['CoreServiceDown', 'DbPoolWaiting', 'HttpServerErrorRatio'],
-  'core-messaging': ['ConsumerDetached', 'MessagesDeadLettered', 'OutboxBacklogAging', 'OutboxStatsStale'],
+  'core-messaging': ['ConsumerDetached', 'MessagesDeadLettered', 'DeadLetterCopyFailing', 'OutboxBacklogAging', 'OutboxStatsStale'],
   infrastructure: ['RabbitMQDown', 'PostgreSQLDown', 'PostgresExporterDown', 'BrokerResourceAlarm', 'PgConnectionPressure', 'PgDeadlocks', 'PgLockWaits'],
   prometheus: ['PrometheusRuleFailures', 'PrometheusConfigReloadFailed'],
 };
@@ -669,7 +669,8 @@ const DEFERRED_ALERTS = /SettleFailure|Readiness|NotReady|SelfScrape|DLQ|Dlq|Dea
 const DEAD_LETTER_OUTCOMES = ['dead_lettered_malformed', 'dead_lettered_permanent', 'dead_lettered_retries_exhausted', 'dead_letter_unannotated'];
 // Labels a rule may SELECT on (never propagate: each rule aggregates them away), with the only values allowed.
 const SELECTION_MATCHERS = {
-  outcome: (x) => x.op === '=~' && x.value.split('|').every((v) => DEAD_LETTER_OUTCOMES.includes(v)),
+  // V2 A3M.4: DeadLetterCopyFailing selects the one deferral outcome, exactly (an unconfirmed dead-letter copy, held and requeued).
+  outcome: (x) => (x.op === '=~' && x.value.split('|').every((v) => DEAD_LETTER_OUTCOMES.includes(v))) || (x.op === '=' && x.value === 'dead_letter_deferred'),
   status_class: (x) => (x.op === '=' && x.value === '5xx') || (x.op === '!=' && x.value === 'aborted'),
   wait_event_type: (x) => x.op === '=' && x.value === 'Lock',
 };
@@ -749,7 +750,7 @@ export function checkAlertRules(rulesText, testsText) {
         for (const x of s.matchers) {
           if (x.label === 'job' || ALERT_LABELS.has(x.label)) continue;
           if (SELECTION_MATCHERS[x.label]?.(x)) continue;
-          problems.push(`${at}: ${s.metric} matches on "${x.label}${x.op}\"${x.value}\"" (approved: ${[...ALERT_LABELS].join(', ')}; selection only: outcome=~<dead-letter outcomes>, status_class="5xx" / !="aborted", wait_event_type="Lock")`);
+          problems.push(`${at}: ${s.metric} matches on "${x.label}${x.op}\"${x.value}\"" (approved: ${[...ALERT_LABELS].join(', ')}; selection only: outcome=~<dead-letter outcomes> or ="dead_letter_deferred", status_class="5xx" / !="aborted", wait_event_type="Lock")`);
         }
       }
       if (/\bnawara_outbox_(pending_events|retrying_events|oldest_pending_age_seconds)\b/.test(e)

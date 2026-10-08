@@ -70,7 +70,8 @@ const cases: Case[] = [
   { name: 'dead-lettered: retries exhausted', outcome: 'dead_lettered_retries_exhausted', republish: 'ok', handler: transient, msg: { retryCount: 2 } },
   { name: 'retry copy fails -> dead-lettered', outcome: 'dead_lettered_retries_exhausted', republish: 'retry-fails', handler: transient },
   { name: 'dead-letter deferred (policy, copy not confirmed)', outcome: 'dead_letter_deferred', republish: 'all-fail', handler: permanent, policy: true },
-  { name: 'dead-letter unannotated (no policy, copy not confirmed)', outcome: 'dead_letter_unannotated', republish: 'all-fail', handler: permanent },
+  // V2 A3M.4 (G7): without a policy too, an unconfirmed copy is deferred (held, requeued), never handed to the shared fanout dead-letter exchange.
+  { name: 'dead-letter deferred (no policy, copy not confirmed)', outcome: 'dead_letter_deferred', republish: 'all-fail', handler: permanent },
 ];
 
 describe('ack/nack semantics are unchanged by the observer (V2 A12.3)', () => {
@@ -105,7 +106,7 @@ describe('ack/nack semantics are unchanged by the observer (V2 A12.3)', () => {
       'dead-lettered: retries exhausted': 'ack',
       'retry copy fails -> dead-lettered': 'ack',
       'dead-letter deferred (policy, copy not confirmed)': 'nack:allUpTo=false:requeue=true',
-      'dead-letter unannotated (no policy, copy not confirmed)': 'nack:allUpTo=false:requeue=false',
+      'dead-letter deferred (no policy, copy not confirmed)': 'nack:allUpTo=false:requeue=true',
     });
   });
 
