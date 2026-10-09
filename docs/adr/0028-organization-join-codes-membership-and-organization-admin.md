@@ -18,10 +18,16 @@
 >    (`user_org_iff_member`), the membership's composite foreign key to `"user"(id, organizationId)`, `role` as the audience label,
 >    the `GET /auth/me` `membership` field and "revocation is future scope" describe the state before ADR-0030; they are not
 >    re-decided here and are reviewed with ADR-0030.
-> 3. **Events.** The membership and contact-verification events are written to Auth's transactional outbox in the same
->    transaction as the state change ([ADR-0052](./0052-core-v1-capability-closure.md), Accepted). Their delivery is not active
->    in production (`AUTH_EVENTS=off`; production messaging is A3M.8, separately authorized); "nothing delivers" and "not built
->    now" describe 2026-09-18.
+> 3. **Events** (corrected 2026-10-09, factual only, no decision changed). With `AUTH_EVENTS=on`, the membership and
+>    contact-verification domain events are written to Auth's transactional outbox in the same transaction as the state change
+>    ([ADR-0052](./0052-core-v1-capability-closure.md), Accepted). With `AUTH_EVENTS=off`, Auth writes no domain-event row;
+>    production currently runs `off`. Delivering written events depends on the separately gated messaging and relay
+>    infrastructure (A3M.8, separately authorized). The central audit intents that the membership and join-code administration
+>    operations write are independent of `AUTH_EVENTS`. "Nothing delivers" and "not built now" describe 2026-09-18.
+>    *(Original wording of this point: "The membership and contact-verification events are written to Auth's transactional outbox
+>    in the same transaction as the state change … Their delivery is not active in production (`AUTH_EVENTS=off`; production
+>    messaging is A3M.8, separately authorized)". It was inaccurate: `AUTH_EVENTS=off` writes no row, it does not merely withhold
+>    delivery.)*
 > 4. **Unresolved questions.** 1, 2 and 4 are moot for Auth under ADR-0026 decision 4; their platform-side answers belong to the
 >    platforms and Billing and are not decided here. 3 (delivery channel) stays open operationally. 5 is addressed for Auth by
 >    ADR-0030 (Proposed). 6 is resolved by ADR-0029.
