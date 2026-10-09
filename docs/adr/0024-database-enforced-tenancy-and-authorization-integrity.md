@@ -1,8 +1,18 @@
 # 0024. Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness)
 
-- **Status:** Proposed
+- **Status:** Proposed (acceptance explicitly deferred to A6, 2026-10-09, A5.3 closure owner disposition)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Disposition (2026-10-09, A5.3 closure, architecture-owner authorization).** This ADR stays **Proposed**; it is neither Accepted nor superseded, and its
+> acceptance is **explicitly deferred to A6** (authorization). Its text and the notes below are unchanged. The database-integrity
+> migrations that follow it remain implemented (Auth migrations `0001_identity_tenancy_platform_assignment.sql` and
+> `0002_owner_operator_hardening_and_owner_step_up.sql`), and its historical references and amendments remain valid. When it is finalized:
+> [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md) governs membership and
+> [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md) Owner cardinality and lifecycle (see the notes below);
+> [ADR-0060](./0060-company-platform-organization-lifecycle.md)'s lifecycle contract must be taken into account; and the open questions
+> of `Operator.companyId`, Owner `isActive` versus ADR-0059's owner status, and per-assignment permission sets are settled in A6. No
+> migration or constraint is changed by this disposition.
 
 > **Forward note (2026-10-09, A5.3 owner authorization; an amendment relationship, not a supersession).** Accepted
 > [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md) establishes the future Owner lifecycle and
