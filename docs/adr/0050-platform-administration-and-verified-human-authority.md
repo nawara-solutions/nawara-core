@@ -3,7 +3,19 @@
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (2026-09-26, by the owner, after the Stage 19.1 review:
   D2 to D7 approved, D1 verified, R1 resolved, see the [Stage 19.1 record](../architecture/stage-19/stage-19-1-decisions-and-roadmap.md) §14.
   **Acceptance is a decision about architecture only:** nothing is implemented until the Stage 19.2+ implementation stages are authorized.)
+  **Partly superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md)** (Accepted 2026-10-09, A5.3), on
+  the passages listed in the note below only.
 - **Date:** 2026-09-26
+
+> **Partly superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md)** (2026-10-09, A5.3 owner
+> authorization; metadata only, this ADR's text is unchanged). Only these historical Stage 19 scope passages are superseded: in
+> decision 12 ("Out of Stage 19"), the bullets "ownership transfer or emergency owner replacement beyond Auth's recovery" and
+> "break-glass, which is the single owner with cool-down recovery"; and, in Consequences, "an owner who has lost the password has no
+> approved recovery in Core V1 …". Core V2 decides ownership transfer and exceptional owner recovery in ADR-0059. **Every other decision
+> of this ADR stands and constrains ADR-0059**, in particular decision 7 (platform administration is a set of capabilities of the
+> services, not a second owner), decision 8 (no administrative database access), decision 9 (same-transaction audit) and decision 14 (no
+> privileged recovery CLI; direct database manipulation is not an approved recovery procedure); same-owner recovery (ADR-0025,
+> ADR-0027) is unchanged. ADR-0059 implements and activates nothing.
 - **Deciders:** Anwar (project owner). D2 to D7 were decided by the architecture owner on 2026-09-26.
 - **Amends:**
   - [ADR-0049](./0049-audit-trail-architecture.md) decisions A6, A36b and A57, for the one read path of decision 6; ADR-0049 is otherwise
