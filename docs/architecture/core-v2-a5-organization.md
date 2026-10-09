@@ -134,11 +134,29 @@ excluded. The production track (§7) is separate and owner-driven.
 
 | Id | Decision needed | Notes |
 |---|---|---|
-| OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision exists; organization-service has no status column or delete path |
+| OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision existed; organization-service has no status column or delete path. **Policy direction approved 2026-10-09** (§10.0; ADR-0060 Proposed) |
 | OD-A5-2 | **OPEN-5**: whether initial Platforms or Organizations must exist before activation in a fresh environment | ADR-0040 A2.8; not blocking Stage 10.1 |
 | OD-A5-3 | **Owner transfer**: in A5 scope or not | ADR-0017 keeps one owner per Company permanently; no transfer decision exists. **Decided 2026-10-09** (§10.1; ADR-0059) |
 | OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]` |
 | OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7 |
+
+### 10.0 OD-A5-1 design progress (2026-10-09)
+
+- **Policy direction approved by the owner:** `ACTIVE`, `SUSPENDED`, `ARCHIVED` for Company, Platform and Organization; no physical
+  deletion; independent local state with effective state derived from ancestors; restore lands in `SUSPENDED`; lifecycle independent of
+  Billing; organization-service is the authority after F6/F7; Owner-with-MFA for Company and Platform, Owner or assigned Operator for
+  Organization suspend and reactivate, Owner-only Organization archive and restore, never the Organization Admin; enforcement E4 + E1 +
+  E5 (E5 a narrow amendment of ADR-0040 decision 2 for Auth's access-granting administrative writes only); access-reducing actions always
+  available; an additive effective-status reference contract never memoized (OD-L5); closed reason codes (OD-L6); normal ADR-0059 transfer
+  denied for an archived Company, exceptional recovery unaffected.
+- **Proposed design:** [ADR-0060](../adr/0060-company-platform-organization-lifecycle.md) (**Proposed**, not accepted, nothing
+  implemented). Its relationships to ADR-0040, ADR-0042, ADR-0050, ADR-0023, ADR-0059 and ADR-0026 take effect only on acceptance; no
+  other ADR is changed.
+- **Recorded gaps:** redemption of earlier join codes and invitations (G1), the E5 concurrency window (G2), local Auth reads are not
+  lifecycle signals (G3), E1 consumer certification (G4), the reference-contract change (G5).
+- **Open:** retention and legal erasure; event-driven propagation (E3, after A3M.8); OD-L7 (commercial restrictions, a Billing/Payment
+  decision); an organization-scoped member restriction; the exact reason vocabulary and reference-contract shape.
+- **Blocked:** any lifecycle runtime until F6/F7 (§6, §7). A5.3 is not complete.
 
 ### 10.1 OD-A5-3 design progress (2026-10-09)
 
