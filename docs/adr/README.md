@@ -52,9 +52,10 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 - **Implementation is not approval.** Code, passing tests or a deployment that follow an ADR do not make it Accepted, and neither
   does another ADR building on it. The `Deciders` field names who decides, not that they have approved.
 - **Supersession takes effect when the superseding ADR is Accepted.** Older ADRs already marked (partially) superseded or amended by
-  an ADR that is still `Proposed` (for example 0009, 0016 → 0022; 0011, 0014 → 0023) keep that marker as historical record; the
-  supersession becomes formal when the newer ADR is Accepted. The markers pointing to ADR-0026 (0005; 0004 and 0006) and to ADR-0030
-  (0001) became formal with those ADRs' acceptance on 2026-10-09 (Core V2 A5.2).
+  an ADR that is still `Proposed` (for example 0009, 0016 → 0022) keep that marker as historical record; the supersession becomes
+  formal when the newer ADR is Accepted. The markers pointing to ADR-0026 (0005; 0004 and 0006) and to ADR-0030 (0001) became formal
+  with those ADRs' acceptance on 2026-10-09 (Core V2 A5.2), and those pointing to ADR-0023 (0011 and 0014, each **partly** superseded)
+  with ADR-0023's acceptance on 2026-10-09 (A5.2-I).
 - Status changes are made one ADR at a time, never in bulk. The current review of every Proposed ADR is in the
   [A1 record](../architecture/core-v2-a1-architecture.md) §3; the Organization ADRs reviewed in Core V2 A5.2 are in the
   [A5 record](../architecture/core-v2-a5-organization.md) §11.

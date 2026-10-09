@@ -186,6 +186,11 @@ Concretely:
   `Superseded by ADR-0023`, using this repo's standard mechanism (the same one already applied to
   ADR-0009/ADR-0016 → ADR-0022). No other text in either file is touched.
 
+  > **Correction note (2026-10-09, A5.2-I; factual only, no decision changed).** The bullet above, kept as written, describes the
+  > status lines as set to `Superseded by ADR-0023`. The authoritative relationship, consistent with this section, is **partial**:
+  > ADR-0011 and ADR-0014 are each `Accepted (partly superseded by ADR-0023)`, for business-day gating and for the
+  > platform-calendar combination respectively; their status lines, backlinks and index rows record this since ADR-0023's acceptance.
+
 ### 2. New endpoint: `GET /auth/platform-access/:platformId`
 
 Deliberately placed under `/auth/platform-access/...`, not `/auth/admin/platform-access/...` —

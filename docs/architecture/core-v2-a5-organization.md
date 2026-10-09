@@ -4,8 +4,9 @@
   **A5.1: the A5 architecture and scope record** (merged, PR #253, `ffdb604`, 24/24 checks), and of **A5.2: the ADR review record**
   (§11; read-only review on `main` at `ffdb604`, 2026-10-09). The review record (PR #254) changed no ADR status; the owner's
   subsequent, individually approved ADR decisions are recorded in **§11.9** (ADR-0039 Accepted on `main`, PR #255; ADR-0031, 0026,
-  0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request). **A5.2 is not complete**: ADR-0017,
-  0020, 0022, 0023 and 0024 remain Proposed.
+  0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request, merged as PR #256; ADR-0023 accepted on
+  2026-10-09 under A5.2-I on its own branch, pending its pull request). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remain
+  Proposed.
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -276,7 +277,9 @@ by the owner, changed separately and recorded in its own commit; this is not bul
 | [0029](../adr/0029-organization-admin-invitations.md) | Accepted with a note (no normative change); unresolved questions 1–3 stay open; partly superseded by ADR-0030 (metadata) | A5.2-G, A5.2-H |
 | [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) | Accepted after two in-place revisions: a member has 0..N memberships and zero grants no organization authority (owner decision of 2026-09-20, migration `0009`); joining makes no commercial check | A5.2-H |
 | [0001](../adr/0001-generic-organization-id-scoping-claim.md) | its existing partial supersession by ADR-0030 is formal (metadata only) | A5.2-H |
-| 0017, 0020, 0022, 0023, 0024 | **Proposed**, unchanged (§11.6); ADR-0023 also remains with OD-A4-8 | open |
+| [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | Accepted after three in-place revisions: the owner rule (active owner, platform in own company, else the collapsed `404`); the two-call pattern uses `GET /auth/admin/organizations/:id`; the post-transition cache-miss contract (owner decision D1(a): local reads of validated reference rows, collapsed `404`, no ensure-on-read, no new Organization dependency, no `503` for a miss). **Recorded on the ADR-0023 branch until its pull request is merged** | A5.2-I |
+| [0011](../adr/0011-operator-time-boxed-login-code.md), [0014](../adr/0014-schedule-anchored-operator-duration.md) | Accepted, **partly** superseded by ADR-0023 (business-day gating; platform-calendar combination); their earlier "Superseded by ADR-0023" status lines overstated it (metadata only) | A5.2-I, same branch |
+| 0017, 0020, 0022, 0024 | **Proposed**, unchanged (§11.6) | open |
 
 **Architecture as now recorded (no runtime change):** registration, onboarding join and invitation acceptance make no commercial
 check; a member has 0..N memberships and zero grants no organization authority; Auth owns identities, memberships, join codes and
@@ -291,6 +294,11 @@ separate mechanism; organization-service's hierarchy authority is **not** activa
   Auth / A3M event-contract review. No contract is changed here.
 - ADR-0029's unresolved questions 1–3 (invitation delivery, a stronger proof for org-admin minting, an organization with no admin
   left) and ADR-0030's residual risks stay open. OD-A5-1 to OD-A5-5 stay open.
+- **Deferred runtime test (ADR-0023, D1(a)).** No end-to-end test covers the post-transition cache miss for an owner (an entity known
+  to Organization Service but not yet in Auth's reference rows answers the collapsed `404`). A test item for later, separately
+  authorized work; reference-cache consistency, freshness and lifecycle stay with A5.3, OD-A5-1 and OD-A5-4.
+- **OD-A4-8** (scope: review ADR-0023 and ADR-0026 for possible acceptance): both decisions are taken. ADR-0026 is Accepted on `main`
+  (PR #256); ADR-0023 is Accepted on its branch. OD-A4-8 is **resolved once the ADR-0023 pull request is merged**, not before.
 
 ## 12. Validation per sub-stage
 
