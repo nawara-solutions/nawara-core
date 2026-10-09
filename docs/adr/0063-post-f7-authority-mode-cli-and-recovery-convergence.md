@@ -1,8 +1,46 @@
 # 0063. Post-F7 authority-mode, CLI and recovery convergence
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.3 OD-A5-5 and OD-A5-4(e) owner authorization) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
 - **Date:** 2026-10-09
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.3 OD-A5-5 and OD-A5-4(e)).** The architecture owner accepted this ADR. The Proposed-era notes and
+> body below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is replaced by this note,
+> while "**nothing in it is implemented**, and it authorizes no runtime change, CLI change, CLI execution, restore, migration or
+> production operation" remains true. Acceptance:
+> 1. **Authority and the one-way transition (§3).** Organization Service remains the hierarchy authority after the certified F6/F7
+>    transition; Auth remains responsible for identities, grants and Owner associations, and its hierarchy references are not a second
+>    authority. ADR-0040's precise one-way-door rules (A2.6) and the historical AD-5 wording of A1.4 are preserved; no new emergency
+>    rollback mechanism is created or authorized.
+> 2. **CLI retention and retirement (§6, §8).** Auth `hierarchy-status` and `hierarchy-verify` (read-only cache diagnostics) and
+>    Organization `ownership status` and genuinely read-only verification diagnostics are retained; the ADR-0061 restricted reference
+>    diagnostic is planned as an Auth CLI capability. Auth `hierarchy-retire` is retained for its certified F6 mirror and Organization
+>    `ownership retire` for the certified F7 step. Authority-changing commands keep refusing once their valid phase has passed. Obsolete
+>    transition commands are retired only when the capability-based criteria of §8 are all met (relevant environments have certified F7,
+>    operational recovery and G6 needs are satisfied, development and CI alternatives exist, security tests pass, and a separate removal
+>    approval is given); development, CI and recovery tooling stays until a verified replacement exists. No calendar date applies.
+> 3. **Readiness consistency (§4).** In steady-state operation a source/marker mismatch, in either direction and including a restored old
+>    `local` marker, makes Auth not ready and raises an operational alert. The narrowly scoped F6 transitional state is defined explicitly
+>    in the future runbook and certified in the G6 rehearsal; no uncontrolled startup dependency is introduced; database-level authority
+>    enforcement is preserved; there is no fallback to local authority.
+> 4. **Dependencies (§5).** The narrowly defined Auth → Organization Service administrative dependency and Organization Service → Auth
+>    `/auth/grants` and step-up verification are kept. Authentication, registration, join, refresh, sessions, `/auth/me`, `/auth/grants`
+>    and ADR-0023's local authorization reads never synchronously depend on Organization Service; a static test guarding that boundary is
+>    required.
+> 5. **Recovery and backups (§9).** A pre-F6 Auth backup is never restored as an ordinary post-F6 recovery; the equivalent restriction on
+>    incompatible Organization backups is preserved; an invalid authority-marker restoration is detected as a critical disagreement.
+>    Exceptional recovery stays separately controlled and does not authorize restoring Auth's former authority. No universal
+>    administrator or database-repair bypass is permitted.
+> 6. **CLI configuration and diagnostics (§6, §7).** Both CLIs complete their `EnvReader` convergence in a separately authorized post-F7
+>    stage (Auth is partly converged; Organization is the main gap), preserving credential and secret-handling boundaries. The ADR-0061
+>    diagnostic outputs only approved identifiers, reference presence, immutable-parent agreement and reason codes, with no reference
+>    placement, authority change or sensitive output.
+> 7. **Not authorized by this acceptance (future implementation or documentation steps, each separately authorized):** changing Auth's
+>    readiness implementation; implementing or removing CLI commands; changing `EnvReader` behavior; adding the diagnostic or the static
+>    test; editing the recovery runbooks; running G6, G7, F6 or F7; restoring databases or changing production configuration; activating
+>    any runtime feature.
+> 8. **Relationships.** The "proposed relationships" paragraph below now takes effect in substance. No other ADR is changed here: the
+>    dated notes on ADR-0040, ADR-0042 (decision 8) and ADR-0061 (§6) each require a separate authorization and commit.
 
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-5 and OD-A5-4(e) (2026-10-09), recorded
 > below. This ADR is **Proposed**: it is not accepted, **nothing in it is implemented**, and it authorizes no runtime change, CLI change,
