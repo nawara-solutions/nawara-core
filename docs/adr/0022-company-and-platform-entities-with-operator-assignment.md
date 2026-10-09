@@ -1,8 +1,23 @@
 # 0022. Company and Platform entities, with many-to-many operator↔platform assignment
 
-- **Status:** Proposed
+- **Status:** Proposed (partially superseded by [ADR-0040](./0040-organization-ownership-migration-decisions.md), 2026-10-09, A5.3 closure owner disposition; surviving decisions deferred to A6; not Accepted)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Disposition (2026-10-09, A5.3 closure, architecture-owner authorization).** This ADR stays **Proposed**; it is **partially superseded by ADR-0040** and is
+> **not** Accepted, in whole or in part. Its text below is kept unchanged as history.
+> - **Superseded by later Accepted architecture:** Auth's ownership of the Company and Platform hierarchy (ADR-0040 decisions 1–2 and
+>   A1.2, with ADR-0031 and ADR-0039); the Platform creation and administration routes in Auth (never built; Platform administration is
+>   Organization Service's, [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) A.2); and the bootstrap inserting
+>   the Company into Auth as hierarchy authority (ADR-0040 A1.2 / AD-4;
+>   [ADR-0062](./0062-initial-hierarchy-provisioning-and-first-platform-sequencing.md)).
+> - **Surviving decisions, implemented and still Proposed:** append-only, many-to-many operator–Platform assignments
+>   (`PlatformAssignment`); company-wide Owner scope; the token model without a `platformId` claim; and the removal of
+>   `User.platformId`. The owner and operator management rules adopted from this ADR by ADR-0042 decision 7 are unchanged.
+> - **Deferred to A6 (authorization):** acceptance of the surviving decisions and the remaining open questions (multi-company, as also
+>   left open by ADR-0062; the assignment-revocation window, now read with Accepted
+>   [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md); the database-level uniqueness that
+>   [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) proposes).
 
 > **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): The "at most one active row per `(operatorId, platformId)`, service layer only" position is reversed (partial unique index + append-only trigger), `assignedBy` must be an `Owner`, `revokedBy`/`companyId` are added, and the owner→company relationship is explicit — see ADR-0024.
 
