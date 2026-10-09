@@ -1,10 +1,14 @@
 # 0029. Organization admin invitations: privileged provisioning, and where administration authority lives
 
-- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-G owner authorization)
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-G owner authorization; partly superseded by [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md), 2026-10-09, A5.2-H owner authorization)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
 > **Forward note (2026-09-19):** acceptance now stores `invitationType` as the membership's `audience`; the user's `role` is the neutral `member`. See [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md).
+> *(2026-10-09: now that ADR-0030 is Accepted, this ADR is **partly superseded** by it on the earlier role and invitation
+> assumptions only: the new member's `role` being the invitation's `invitationType` label (the type is the membership's
+> `audience`; the role is `member`) and the `pending | active | rejected` membership state set. Invitation security,
+> provisioning authority, step-up, rate limits and audit are unchanged. This ADR's body is unchanged and kept as history.)*
 >
 > **Acceptance note (2026-10-09, A5.2-G; no decision of this ADR is changed).** Read as follows:
 > 1. **No commercial check.** The decision that acceptance asks no license stands, and is now general: registration, join and
