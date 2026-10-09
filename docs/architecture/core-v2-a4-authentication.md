@@ -5,9 +5,9 @@
   `e039ed6`); their sections keep the text they were approved with. **A4.6** (§10 design,
   [ADR-0058](../adr/0058-access-token-signing-key-ring.md)) is merged (PR #248, `8d62b3f`), and ADR-0058 is **Accepted** (2026-10-08,
   PR #249). **A4.7** (§10 implementation, §10.11) is merged (PR #250, `f95956b`); **A4.8** (§11, §11.1) is merged (PR #251,
-  `d3dd2fd`). **A4.9** (§18, local certification) is prepared on `feature/core-v2-a4-9-local-certification`: A4 is **locally certified
-  on repository and CI evidence** once its pull request passes Core CI (including the real-image check of §18.5) and the owner merges
-  it. **Nothing in A4 is deployed**: production Auth still runs the pre-A4 image, no JWT key ring is configured anywhere, and every
+  `d3dd2fd`). **A4.9** (§18, local certification) is merged (PR #252,
+  `f90787a`; 24 of 24 required checks, including `core-ci-passed` and the real-image check of §18.5): **A4 is CLOSED and locally
+  certified on repository and CI evidence.** **Nothing in A4 is deployed**: production Auth still runs the pre-A4 image, no JWT key ring is configured anywhere, and every
   production step stays a separate, owner-authorized checkpoint (§17).
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET]**: approved by an owner decision, implemented by the named stage.
   **[PENDING DESIGN]**: approved in direction only; the named stage must design it and the owner must review it before code.
@@ -463,7 +463,7 @@ Reused, not repeated: the A1, A2, A15 and A3M evidence. Not part of A4: G6, prod
 | A re-provisioning reintroduces a generated `JWT_SECRET` after retirement | mitigated in the repository by A4.8 (D6, six-variable guard, duplicate and malformed JWT lines refused; PR #251); effective in production only once an A4.8 (or later) image is deployed |
 | An image older than A4.8 is redeployed after a ring is configured (its script regenerates `JWT_SECRET`, runs no check; before A4.7 it cannot verify ring tokens) | owner at dispatch (rotation runbook §4.11). A workflow-side minimum-image gate needs **separate authorization** and is a prerequisite before any production ring activation (§18.7, D5) |
 | Retained `-previous-*` containers and `.env` backups keep old JWT keys | rotation runbook §4.6, §4.10; owner at retirement and after an emergency |
-| The real Auth image's `dist/cli/check-config.js` (A4.8 review F5) | the A4.9 core-image smoke (§18.5); proven only by that CI run |
+| The real Auth image's `dist/cli/check-config.js` (A4.8 review F5) | resolved: the A4.9 core-image smoke (§18.5) passed in PR #252's CI (run 37851334577) and runs on every Auth image build in Core CI |
 | ADR-0058 acceptance | resolved: Accepted by the owner on 2026-10-08 |
 | F1 (forged Auth events to Notification) | P-A1 / A14; `AUTH_EVENTS` stays off (A3M.8) |
 | Peppers cannot be rotated (A2 accepted limitation) | recorded; A4 does not change it |
@@ -487,7 +487,7 @@ key, cleaning a server `.env`, and enabling `AUTH_EVENTS` are each a separate, o
 [Auth deployment runbook](../runbooks/auth-service-deploy.md) and the protected `production` environment. G6 stays deferred; Final Core
 Validation stays the absolute last validation.
 
-## 18. A4.9: local certification (2026-10-08; prepared, closes when its pull request merges)
+## 18. A4.9: local certification (2026-10-08; closed on `main`, PR #252, merge `f90787a`)
 
 - **Owner decisions:** D1 = the real Auth image's configuration check joins the existing core-image smoke (§18.5); D2 = one defensive
   test of the check's non-`ConfigError` path; D3 = ADR-0056 is **not** edited (its §12 `[TARGET: A4]` is shown met here, §18.4);
@@ -513,7 +513,7 @@ Every A4 pull request merged with 24 of 24 checks passing, `core-ci-passed` incl
 | (ADR-0058) | acceptance, by explicit owner authorization | #249, `5964697b29a4b895d0cb4fb41445f809b865daf6` | 37841230733 | ✅ Accepted |
 | A4.7 | §10.9 tests, kit behaviour unchanged, legacy `JWT_SECRET` unchanged, no key generated | #250, `f95956b90927d9ea46bab046580d3919efd811e1` | 37844836922 | ✅ merged |
 | A4.8 | value-free check CLI, deploy runbook review, D6, rotation runbook | #251, `d3dd2fdb7c1c869e2efb47336043e707f1891a47` | 37849083293 | ✅ merged |
-| A4.9 | §16 met (§18.2) | this pull request | pending | prepared |
+| A4.9 | §16 met (§18.2) | #252, `f90787aa52760d50dbe510354293f1a203ce8644` | 37851334577 | ✅ merged; A4 certified |
 
 Across A4 (`16476f9`..`d3dd2fd`) only `apps/auth-service/**`, three kit files (`bootstrap.ts`, `config/key-material.ts`, `index.ts`),
 documentation, `scripts/**` and ADR-0058 (with its index row) changed: no other service, audit contract, workflow or migration.
@@ -528,7 +528,7 @@ documentation, `scripts/**` and ADR-0058 (with its index row) changed: no other 
 | 4 | the key ring works with the legacy `JWT_SECRET`; no production key generated or activated | §18.5; no production run (§18.6) | CI, local | **met** |
 | 5 | no Auth deployment; `AUTH_EVENTS` unchanged; F1 and F2 untouched; ADR statuses unchanged unless authorized | no `auth-service-deploy.yml` run since 2026-09-30 and no production workflow run during A4 (last: core backup 2026-10-04); the deploy script's `AUTH_EVENTS off` line unchanged; no audit, notification or event-contract change (§18.1); only ADR-0058's status changed, by explicit authorization (#249) | GitHub, repository | **met** |
 | 6 | this record lists what was not run and the open risks | §18.6, §18.7 | record | **met** |
-| – | (D1) the real Auth image contains and runs `dist/cli/check-config.js` as the deploy does | §18.5 | CI of **this** pull request | **UNVERIFIED until that run passes** |
+| – | (D1) the real Auth image contains and runs `dist/cli/check-config.js` as the deploy does | §18.5 | CI of PR #252 (run 37851334577, job `core image (auth-service)`) | **met** (verified; recorded UNVERIFIED until that run passed) |
 
 ### 18.3 The §2.1 guarantees and the tests that show them
 
@@ -568,7 +568,7 @@ All files run in Core CI's `auth-service` job (`npm test` and `npm run test:e2e`
 | e2e `tokens.e2e-spec.ts` (unknown and `legacy` kids refused; a ring app with `JWT_SECRET` retired) | CI |
 | unit `config-check.spec.ts` (9, including D2's non-`ConfigError` path); `scripts/deploy-tests/auth-deploy.test.mjs` with the fake Docker CLI (the six-variable guard, duplicate and malformed JWT lines refused before any change, the check's image, network and position before migrations and the stop, no secret printed) | CI (`test:deploy`) |
 | 8 of 8 security mutants caught (A4.7); the six focused Auth e2e suites (76 tests); the built CLI smoke (8 cases); the runbook's `.env` editing procedure run on a throwaway file (A4.8) | local |
-| **real image** (D1): `scripts/smoke-core-image.sh` runs `dist/cli/check-config.js` in the built `auth-service` image as the deploy does (`--rm --network none --entrypoint node`, the image's working directory): the valid production configuration gives `configuration valid; JWT: legacy only (JWT_SECRET signs and verifies)`, a pepper equal to `JWT_SECRET` is refused with exit 1, no configuration value appears | CI of this pull request, **UNVERIFIED until it passes** |
+| **real image** (D1): `scripts/smoke-core-image.sh` runs `dist/cli/check-config.js` in the built `auth-service` image as the deploy does (`--rm --network none --entrypoint node`, the image's working directory): the valid production configuration gives `configuration valid; JWT: legacy only (JWT_SECRET signs and verifies)`, a pepper equal to `JWT_SECRET` is refused with exit 1, no configuration value appears | CI of PR #252 (run 37851334577): **passed** |
 
 ### 18.6 Not run
 

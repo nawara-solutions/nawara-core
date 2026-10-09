@@ -197,7 +197,7 @@ A3 Messaging (A3M; not V2-A.3's A3.6 / A3.7)   🔄 OPEN
   A3M.6  deterministic broker evidence         ✅ closed on main (PR #241)
   A3M.7  local certification                   ✅ closed on main (PR #242)
   A3M.8  production messaging                  not started (each item separately authorized)
-A4 Authentication                              🔄 OPEN until A4.9 merges (record: core-v2-a4-authentication.md; nothing deployed in A4)
+A4 Authentication                              ✅ CLOSED / CERTIFIED (record: core-v2-a4-authentication.md; nothing deployed in A4)
   A4.0  discovery                              ✅ complete (owner-reviewed; OD-A4-1 to OD-A4-8 approved)
   A4.1  architecture record                    ✅ closed on main (PR #243)
   A4.2  configuration convergence              ✅ closed on main (PR #244)
@@ -207,8 +207,15 @@ A4 Authentication                              🔄 OPEN until A4.9 merges (reco
   A4.6  JWT key-ring design                    ✅ closed on main (PR #248; ADR-0058 Accepted, PR #249)
   A4.7  JWT key-ring implementation            ✅ closed on main (PR #250)
   A4.8  deployment-readiness tooling           ✅ closed on main (PR #251)
-  A4.9  local certification                    record prepared (§18); certified once its PR passes CI (real-image check) and merges
+  A4.9  local certification                    ✅ closed on main (PR #252; 24/24 checks, real-image config check passed)
   A4 production checkpoints                    not started (Auth deploy, minimum-image gate, JWT ring activation: each separately authorized)
+A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (record: core-v2-a5-organization.md)
+  A5.0  discovery                              ✅ complete (read-only inventory, recorded in the A5 record)
+  A5.1  architecture and scope record          record prepared; pending CI and owner merge
+  A5.2  ADR reviews (one ADR at a time)        not started (proposed; 🟡)
+  A5.3  post-F7 design                         not started (proposed; 🟡)
+  A5.4  implementation                         ⛔ blocked until F7 (proposed; 🔴)
+  A5.5  certification                          not started (proposed)
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
@@ -279,10 +286,16 @@ retention activation) is separately authorized (A3M.8).
 A4 (authentication; [A4 record](architecture/core-v2-a4-authentication.md)) converges the existing Auth implementation on the kit
 (configuration, CLIs, bootstrap with its exception filter, the genericity exemption) and adds a JWT signing-key ring designed in A4.6
 before it is built in A4.7 (OD-A4-1 to OD-A4-8). It adds no new authentication feature, deploys nothing (each merge only builds an Auth
-image) and leaves `AUTH_EVENTS` to A3M.8. A4.1 to A4.8 are merged (PRs #243 to #251, ADR-0058 Accepted); A4.9 certifies them on
-repository, CI and local evidence (record §18), not on production evidence. Production Auth still runs a pre-V2-A.2 image; its next
+image) and leaves `AUTH_EVENTS` to A3M.8. A4 is closed: A4.1 to A4.9 are merged (PRs #243 to #252, ADR-0058 Accepted) and A4 is
+certified on repository, CI and local evidence (record §18), not on production evidence. Production Auth still runs a pre-V2-A.2 image; its next
 deployment is a separate, owner-authorized checkpoint with its own compatibility review, and a production JWT key ring is not
 activated before a separately authorized minimum-image gate exists (record §15, §18.7).
+
+A5 (organization; [A5 record](architecture/core-v2-a5-organization.md)) is labelled 🔴 (design 🟡). Auth remains the hierarchy authority
+and organization-service is implemented but inactive; after F7 organization-service is the only authority for Company, Platform and
+Organization while Auth keeps identities, memberships, join codes and invitations. A5.0 and A5.1 record the inventory, the authority
+map and proposed sub-stages and owner decisions; design and ADR reviews proceed now, and every runtime or authority change waits for
+G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup.
 
 ### Compatibility and safety rules for V1 work
 
@@ -527,4 +540,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
 | V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene, A15.2 developer path, A15.3 test determinism, A15.4 conventions, the A15 certification) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
 | V2 A4: authentication (A4.0 inventory, preserved guarantees, owner decisions OD-A4-1 to OD-A4-8, convergence and key-ring requirements, the A4.1 to A4.9 stages, validation, deployment exclusion) | [`core-v2-a4-authentication.md`](architecture/core-v2-a4-authentication.md) |
+| V2 A5: organization (A5.0 inventory, authority today and after F7, the Auth ↔ Organization interaction, classification, the production gate, proposed sub-stages A5.1 to A5.5, proposed owner decisions OD-A5-1 to OD-A5-5, ADR review priorities) | [`core-v2-a5-organization.md`](architecture/core-v2-a5-organization.md) |
 | V2 A3M: messaging (A3M.0 inventory and findings G1–G10, owner decisions OD-A3M-0 to OD-A3M-7, the A3M.0 to A3M.8 phases, the G7 proof, A3M.1 records and policy) | [`core-v2-a3m-messaging.md`](architecture/core-v2-a3m-messaging.md) |
