@@ -58,6 +58,12 @@ Rule (OD-A1-1): only an explicit owner approval makes an ADR Accepted. No Propos
 ADR's `Deciders: Anwar (project owner)` line is authorship (it appears on Accepted, Proposed and Superseded ADRs alike), and no
 other record states an approval of these ADRs. **No status is changed by A1.1.**
 
+> **Forward note (2026-10-09, Core V2 A5.2).** This section is the A1.1 review as performed and is kept unchanged; the statuses below
+> are those of that review. Later owner decisions are recorded where they were taken. In A5.2 the owner accepted ADR-0039 (PR #255)
+> and, each separately, ADR-0031, 0026, 0028, 0029 and 0030, with metadata updates to ADR-0001 and ADR-0004
+> ([A5 record](core-v2-a5-organization.md) §11.9; the ADR index is the current status of every ADR). §4's plan to mark ADR-0006
+> partly superseded was reviewed and not applied: ADR-0026 supersedes no decision of ADR-0006.
+
 Classification: **A** keep Proposed; **B** ready for acceptance on an existing explicit owner decision; **C** superseded on
 authoritative evidence; **D** defer the status change (outside A1).
 
@@ -90,6 +96,11 @@ authoritative evidence; **D** defer the status change (outside A1).
 time): 0026, 0032, 0037, 0018 after A3 reconciles its library choice, and the Organization, Auth and financial ADRs when their stages (A3, A4, A5, A10, A11) reach them.
 
 ## 4. ADR-0004, 0006, 0008 and 0026
+
+> **Forward note (2026-10-09, Core V2 A5.2).** Kept as the A1.1 analysis. ADR-0026 is now Accepted with decision 4 revised before
+> acceptance (registration and join make no commercial check; removed in Stage 12.1), so the registration-time check this section
+> says ADR-0026 "leaves" no longer exists. ADR-0004 is Accepted, partly superseded by ADR-0026 and ADR-0028; ADR-0006 and ADR-0008 are
+> unchanged ([A5 record](core-v2-a5-organization.md) §11.9).
 
 - **0026** (Proposed, implemented) says it supersedes **0005 in full**, the **login / refresh usage** of 0004 and 0006's
   `subscription_invalid` contract, and leaves 0004's **registration-time** license check and the license ownership of 0006, 0007 and
