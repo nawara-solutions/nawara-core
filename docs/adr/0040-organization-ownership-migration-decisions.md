@@ -15,6 +15,15 @@
 > A1.2 (Organization Service is the hierarchy and lifecycle authority) and I1/I2(b) (ids never reused; no physical deletion), which
 > ADR-0060 keeps as permanent lifecycle rules.
 
+> **Clarified by [ADR-0061](./0061-auth-hierarchy-reference-repair-and-diagnostics.md)** (Accepted 2026-10-09, A5.3 OD-A5-4; a
+> clarification of decision 2, **not** a new supersession; status and text unchanged; the ADR-0060 partial supersession above stays
+> intact). Decision 2's administrative first touches include **one explicitly authorized, Owner-invoked reference-repair operation**
+> for platforms and organizations. It resolves the entity and its authoritative parent links without writing, authorizes the active
+> Owner's Company, and only then places the reference (resolve → authorize → place): no new reference is placed before that
+> authorization. A repair grants no access and never proves lifecycle `ACTIVE`. Auth's ordinary local authorization reads are unchanged,
+> and no new synchronous Organization Service dependency is introduced for authentication, sessions, registration, join, `/auth/me`,
+> `/auth/grants` or the ADR-0023 D1(a) routes.
+
 > **Adoption record (2026-09-20).** Decisions 1 to 4 were adopted in Amendment 1; decisions 5 and 6 and the added decision 7 were accepted in Amendment 2; the ADR is **Accepted**. The original text below is kept unchanged for the historical record and still says "Proposed" in its own wording; where an amendment differs, **the amendment governs, and Amendment 2 governs over Amendment 1**.
 
 > **Partly supersedes [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md)** (in effect: ADR-0040 is Accepted, 2026-09-20), on the passages listed under "Amendments to ADR-0039" only; the rest of ADR-0039 (phases, stable ids, verification, freeze, single cutover point) stands. Because the ADR README defines no "amended" status, the record on acceptance follows the repository's precedent for partial replacement (ADR-0001, ADR-0010): ADR-0039's status becomes "partly superseded by ADR-0040", the two ADRs link to each other, and a forward note is added to ADR-0039. ADR-0039 is **not edited** by this draft (**update 2026-09-20:** for decisions 1 to 4, adopted on that date, it now carries the forward note and its status reads partly superseded; see Amendment 1). The analysis behind every choice below is in the [Stage 10.0 decision study](../architecture/stage-10/stage-10.0-ownership-migration-decisions.md) and the [Stage 10 study](../architecture/stage-10-organization-ownership-migration-study.md).
