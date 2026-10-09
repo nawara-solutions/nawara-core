@@ -58,7 +58,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
   with ADR-0023's acceptance on 2026-10-09 (A5.2-I). ADR-0059 (accepted 2026-10-09, A5.3) partly supersedes ADR-0050 (Accepted) and
   ADR-0017 (Proposed, marker only) and amends ADR-0024 (Proposed, forward note); merged as PR #258. ADR-0060 (accepted 2026-10-09, A5.3
   OD-A5-1) partly supersedes ADR-0040 (decision 2 only) and ADR-0050 (the decision 12 lifecycle bullet) and clarifies ADR-0042 (decision
-  5); until its pull request is merged, these relationships are recorded on its branch only.
+  5); merged as PR #259 (until then, these relationships were recorded on its branch only).
 - Status changes are made one ADR at a time, never in bulk. The current review of every Proposed ADR is in the
   [A1 record](../architecture/core-v2-a1-architecture.md) §3; the Organization ADRs reviewed in Core V2 A5.2 are in the
   [A5 record](../architecture/core-v2-a5-organization.md) §11.
