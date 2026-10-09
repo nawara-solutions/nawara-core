@@ -1,10 +1,31 @@
 # 0029. Organization admin invitations: privileged provisioning, and where administration authority lives
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-G owner authorization)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
 > **Forward note (2026-09-19):** acceptance now stores `invitationType` as the membership's `audience`; the user's `role` is the neutral `member`. See [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md).
+>
+> **Acceptance note (2026-10-09, A5.2-G; no decision of this ADR is changed).** Read as follows:
+> 1. **No commercial check.** The decision that acceptance asks no license stands, and is now general: registration, join and
+>    invitation acceptance make no commercial check ([ADR-0026](./0026-authentication-is-not-entitlement.md) decision 4,
+>    Accepted). The rationale citing payment-service and [ADR-0007](./0007-out-of-band-cash-payment-confirmation.md), and
+>    "entitlement is still enforced by Payment", are historical: the service providing a paid capability enforces entitlement at
+>    the point of use (ADR-0026 decision 2).
+> 2. **ADR-0030 changes (Proposed, implemented by migrations `0006` and `0007`).** The user's `role` is the neutral `member` and
+>    the invitation type is stored as the membership `audience`; the membership state set gains `revoked`. These are not re-decided
+>    here and are reviewed with ADR-0030.
+> 3. **Events.** With `AUTH_EVENTS=on`, `user.registered` and `membership.admin_provisioned` are written to Auth's transactional
+>    outbox in the acceptance transaction ([ADR-0052](./0052-core-v1-capability-closure.md), Accepted). Production runs
+>    `AUTH_EVENTS=off`, which writes no domain-event row; enabling it is A3M.8, separately authorized. "Nothing delivers them yet"
+>    describes 2026-09-18. Independently of `AUTH_EVENTS`, the acceptance writes the central audit intent
+>    `membership.admin_provisioned` ([ADR-0049](./0049-audit-trail-architecture.md)).
+> 4. **Implementation is stricter on one point.** An Owner's revocation of an invitation also requires a factor-only step-up.
+> 5. **Unresolved questions.** 1 (delivery), 2 (a stronger proof for org-admin minting) and 3 (an organization with no admin
+>    left) remain open; 4 is moot for Auth under ADR-0026 and stays a platform and Billing decision. Organization-admin
+>    invitations stay in Auth after the ownership transition
+>    ([ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), ADR-0040; creation is an administrative
+>    first touch, ADR-0040 decision 2). This acceptance authorizes no production or runtime change.
 
 
 > **Extends** [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md) (join codes,

@@ -89,7 +89,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Accepted (2026-10-09, A5.2-E owner authorization; decisions 2 and 4 revised before acceptance) |
 | [0027](./0027-service-layer-security-model.md) | Service-layer security model: cool-down recovery, enrollment rules, live authorization, shared security state, key management | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
 | [0028](./0028-organization-join-codes-membership-and-organization-admin.md) | Organization join codes, membership and organization-admin authority | Accepted (2026-10-09, A5.2-F owner authorization; registration license sentences revised before acceptance) |
-| [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Proposed |
+| [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Accepted (2026-10-09, A5.2-G owner authorization) |
 | [0030](./0030-multi-organization-membership-and-revoked-state.md) | Multi-organization membership: one identity, many memberships, and the REVOKED state | Proposed |
 | [0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service is the intended future owner of Company, Platform and Organization (mechanism deferred) | Accepted (2026-10-09, A5.2-D owner authorization; partly superseded by ADR-0039) |
 | [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
