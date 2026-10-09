@@ -6,7 +6,8 @@
   subsequent, individually approved ADR decisions are recorded in **§11.9** (ADR-0039 Accepted on `main`, PR #255; ADR-0031, 0026,
   0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request, merged as PR #256; ADR-0023 accepted on
   2026-10-09 under A5.2-I, merged as PR #257). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remain Proposed. OD-A5-3 is
-  decided by ADR-0059, accepted on 2026-10-09 on its own branch, pending its pull request (§10.1).
+  decided by ADR-0059, accepted on 2026-10-09 and merged as PR #258 (§10.1). The OD-A5-1 policy is decided by ADR-0060, accepted on
+  2026-10-09 on its own branch, pending its pull request (§10.0).
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -134,7 +135,7 @@ excluded. The production track (§7) is separate and owner-driven.
 
 | Id | Decision needed | Notes |
 |---|---|---|
-| OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision existed; organization-service has no status column or delete path. **Policy direction approved 2026-10-09** (§10.0; ADR-0060 Proposed) |
+| OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision existed; organization-service has no status column or delete path. **Policy decided 2026-10-09** (§10.0; ADR-0060 accepted on its branch, pending its pull request) |
 | OD-A5-2 | **OPEN-5**: whether initial Platforms or Organizations must exist before activation in a fresh environment | ADR-0040 A2.8; not blocking Stage 10.1 |
 | OD-A5-3 | **Owner transfer**: in A5 scope or not | ADR-0017 keeps one owner per Company permanently; no transfer decision exists. **Decided 2026-10-09** (§10.1; ADR-0059) |
 | OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]` |
@@ -149,14 +150,19 @@ excluded. The production track (§7) is separate and owner-driven.
   E5 (E5 a narrow amendment of ADR-0040 decision 2 for Auth's access-granting administrative writes only); access-reducing actions always
   available; an additive effective-status reference contract never memoized (OD-L5); closed reason codes (OD-L6); normal ADR-0059 transfer
   denied for an archived Company, exceptional recovery unaffected.
-- **Proposed design:** [ADR-0060](../adr/0060-company-platform-organization-lifecycle.md) (**Proposed**, not accepted, nothing
-  implemented). Its relationships to ADR-0040, ADR-0042, ADR-0050, ADR-0023, ADR-0059 and ADR-0026 take effect only on acceptance; no
-  other ADR is changed.
-- **Recorded gaps:** redemption of earlier join codes and invitations (G1), the E5 concurrency window (G2), local Auth reads are not
-  lifecycle signals (G3), E1 consumer certification (G4), the reference-contract change (G5).
-- **Open:** retention and legal erasure; event-driven propagation (E3, after A3M.8); OD-L7 (commercial restrictions, a Billing/Payment
-  decision); an organization-scoped member restriction; the exact reason vocabulary and reference-contract shape.
-- **Blocked:** any lifecycle runtime until F6/F7 (§6, §7). A5.3 is not complete.
+- **Design:** [ADR-0060](../adr/0060-company-platform-organization-lifecycle.md), **Accepted on 2026-10-09 (A5.3 OD-A5-1 owner
+  authorization) on its own branch, pending its pull request and merge**; the OD-A5-1 architecture policy is decided. Nothing is
+  implemented or activated.
+- **Relationships (separately approved, same branch):** ADR-0040 partly superseded (decision 2 only, the E5 administrative-write
+  amendment); ADR-0042 decision 5 clarified (lifecycle status never memoized; status unchanged); ADR-0050 partly superseded also by
+  ADR-0060 (the decision 12 lifecycle bullet only). ADR-0023, ADR-0059 and ADR-0026 are preserved.
+- **Accepted limitations:** G1 (earlier join codes and invitations may still be redeemed during suspension, with no effective product
+  access) and G2 (the E5 time-of-check/time-of-use window), documented, not permission to deploy unprotected paths. Also recorded: G3
+  (local Auth reads are not lifecycle signals), G4 (E1 consumer certification), G5 (the reference-contract change).
+- **Unresolved implementation details:** the exact OD-L5 reference-contract shape and the OD-L6 reason vocabulary.
+- **Open:** retention and legal erasure; event-driven propagation (E3, after A3M.8); OD-L7 (commercial settlement restrictions);
+  an organization-scoped member restriction.
+- **Blocked:** any lifecycle runtime until F6/F7 (§6, §7). No lifecycle functionality is implemented or activated. A5.3 is not complete.
 
 ### 10.1 OD-A5-3 design progress (2026-10-09)
 
@@ -165,7 +171,7 @@ excluded. The production track (§7) is separate and owner-driven.
   (24-hour cool-down; completion requires delivered notification), OD-T4 (operator assignments preserved), OD-R1 (recovery stewards,
   two-person approval, fresh MFA) and OD-R3 (at least 7 days for exceptional recovery).
 - **Design:** [ADR-0059](../adr/0059-company-ownership-transfer-and-exceptional-owner-recovery.md), **Accepted on 2026-10-09 (A5.3
-  owner authorization) on its own branch, pending its pull request**; nothing implemented or activated. It records the `pending → active → retired` lifecycle, the database invariant, the steward token and
+  owner authorization) and merged as PR #258**; nothing implemented or activated. It records the `pending → active → retired` lifecycle, the database invariant, the steward token and
   guard contract, Company-level serialization, the cross-service dependencies (audit contract consumer-first, service-kit validation)
   and two default-off activation gates (`OWNER_TRANSFER`, `OWNER_RECOVERY`).
 - **Open:** OD-S1 (steward provisioning: its own threat model, nothing authorized), OD-S2 (Release and Audit response mapping;
@@ -329,7 +335,7 @@ separate mechanism; organization-service's hierarchy authority is **not** activa
   (`auth.service.ts`, `invitation.service.ts`, `events/event-catalog.ts`), while the user's role is `member`; a follow-up for an
   Auth / A3M event-contract review. No contract is changed here.
 - ADR-0029's unresolved questions 1–3 (invitation delivery, a stronger proof for org-admin minting, an organization with no admin
-  left) and ADR-0030's residual risks stay open. OD-A5-1 to OD-A5-5 stay open.
+  left) and ADR-0030's residual risks stay open. OD-A5-2, OD-A5-4 and OD-A5-5 stay open (OD-A5-1 and OD-A5-3 are decided later: §10.0, §10.1).
 - **Deferred runtime test (ADR-0023, D1(a)).** No end-to-end test covers the post-transition cache miss for an owner (an entity known
   to Organization Service but not yet in Auth's reference rows answers the collapsed `404`). A test item for later, separately
   authorized work; reference-cache consistency, freshness and lifecycle stay with A5.3, OD-A5-1 and OD-A5-4.
