@@ -1,10 +1,10 @@
 # 0014. Schedule-anchored operator login-code and session duration
 
-- **Status:** Superseded by ADR-0023
+- **Status:** Accepted (partly superseded by [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md), platform-calendar combination only; formal since ADR-0023's acceptance on 2026-10-09, A5.2-I owner authorization)
 - **Date:** 2026-09-17
 - **Deciders:** Anwar (project owner)
 
-> **Superseded by [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md).**
+> **Partly superseded by [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md)** (Accepted 2026-10-09; the earlier status line "Superseded by ADR-0023" overstated it, as this note always said). *(Original heading: "Superseded by ADR-0023.")*
 > Only the platform-calendar-combination portion is affected: the guarantee behind
 > `getShiftEndOrFallback`'s "today's `OperatorSchedule` row is guaranteed to exist" invariant no
 > longer depends on `isOperatorAvailable` having first validated a single platform's calendar
