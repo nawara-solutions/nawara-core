@@ -21,6 +21,16 @@
 > future Company onboarding requires its own fully certified architecture. This note authorizes neither multiple Companies nor any future
 > Owner bootstrap functionality, and it changes no provisioning permission or accepted service boundary. Every other decision stands.
 
+> **Clarified by [ADR-0063](./0063-post-f7-authority-mode-cli-and-recovery-convergence.md)** (Accepted 2026-10-09, A5.3 OD-A5-5 and OD-A5-4(e); a clarification of
+> **decision 8**, not a supersession; status unchanged; the original decision text is unchanged and **not narrowed**). ADR-0063 is the
+> required operational enforcement of decision 8's boundary. The **complete** never-call list stays in force, being decision 8's list as
+> extended by ADR-0040 decision 2 (including its ADR-0060 and ADR-0061 clarifications) and by ADR-0063 §5: login and logout; session
+> validation and refresh; registration and join; invitation consumption and onboarding resolution; `/auth/me` and `/auth/grants`; the
+> member-access and platform-access checks; ADR-0023's local reference-read routes (including the admin organization lookup); and
+> ordinary authentication-path operations. A future **static boundary test** must protect this full set, the union of those lists (decision 8's "should" becomes required). The allowed, bounded Auth → Organization Service
+> administrative dependencies are preserved: first-touch `ensure`, ADR-0060 E5 lifecycle reads and ADR-0061 repair. Every other decision
+> stands.
+
 > Related, none modified: [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (header status Proposed; its token mechanism is implemented in service-kit), [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), [ADR-0040](./0040-organization-ownership-migration-decisions.md) (Proposed), [ADR-0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) (Proposed). The analysis, evidence and decision matrix are in the [BD-4 study](../architecture/stage-10/stage-10-bd4-service-authorization-study.md); the owner's answers are in the [owner-decision sheet](../architecture/stage-10/stage-10-bd4-owner-decisions.md). This ADR does **not amend** ADR-0033: it keeps its authentication and adds the authorization layer that ADR-0033 does not define. ADR-0040, ADR-0041, ADR-0020, ADR-0022 and ADR-0024 keep their own header status; this ADR adopts, for hierarchy administration, the rules it names from them and does not change those ADRs.
 
 ## Context

@@ -134,6 +134,13 @@ In every row reached after step 3, the step-up stays consumed; the rows refused 
   It never repairs, never modifies a database and is not a privileged recovery tool. It is a **deployment-level** tool, run only by the
   operator of the Auth deployment with Auth's own read credential, never exposed over HTTP. Its exact CLI conventions follow OD-A5-5.
 
+> **Clarified by [ADR-0063](./0063-post-f7-authority-mode-cli-and-recovery-convergence.md)** (Accepted 2026-10-09, A5.3 OD-A5-5; a clarification of this section's
+> diagnostic CLI conventions; status and decisions unchanged). The reference diagnostic is a **restricted Auth CLI subcommand**. It is
+> **read-only**: it places no reference and makes no hierarchy write. It compares Auth's validated immutable hierarchy anchors with the
+> authoritative Organization records, and outputs only approved identifiers, presence, parent-link agreement and reason codes: no names,
+> user data, credentials, tokens or unrelated hierarchy data. It refuses to operate when Auth's authority or configuration state is
+> inconsistent (ADR-0063 §4). The deployment-level, operator-run, never-HTTP rules above are unchanged. The exact credential and database-role requirements remain subject to separate implementation verification.
+
 ## 7. Decision: lifecycle
 
 - Repair of a validated, immutable reference is **permitted while the entity or an ancestor is SUSPENDED or ARCHIVED**: it places existence

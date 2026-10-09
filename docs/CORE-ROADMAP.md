@@ -213,7 +213,7 @@ A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (re
   A5.0  discovery                              ✅ complete (read-only inventory, recorded in the A5 record)
   A5.1  architecture and scope record          ✅ closed on main (PR #253; 24/24 checks, core-ci-passed)
   A5.2  ADR reviews (one ADR at a time)        🔄 0039 (PR #255), 0026, 0028, 0029, 0030, 0031 (PR #256) and 0023 (PR #257) Accepted on main; 0017, 0020, 0022, 0024 open
-  A5.3  post-F7 design                         🔄 in progress: OD-A5-3 (ADR-0059, #258) and OD-A5-1 (ADR-0060, #259) decided; OD-A5-4(a)–(d) decided (ADR-0061, #260); OD-A5-2 decided (ADR-0062 accepted 2026-10-09 on its branch, pending its PR); OD-A5-4(e) open (🟡)
+  A5.3  post-F7 design                         🔄 in progress: OD-A5-3 (ADR-0059, #258) and OD-A5-1 (ADR-0060, #259) decided; OD-A5-4(a)–(d) decided (ADR-0061, #260); OD-A5-2 decided (ADR-0062, #261); OD-A5-4(e) and OD-A5-5 decided (ADR-0063 accepted 2026-10-09 on its branch, pending its PR); 0017, 0020, 0022, 0024 to reconcile (🟡)
   A5.4  implementation                         ⛔ blocked until F7 (proposed; 🔴)
   A5.5  certification                          not started (proposed)
 
@@ -300,9 +300,11 @@ and ADR-0004 metadata, merged as the grouped A5.2 documentation pull request (#2
 2026-10-09 (A5.2-I) and merged (#257), which resolves OD-A4-8; OD-A5-3 is decided by ADR-0059 (merged, #258); the OD-A5-1
 lifecycle policy is decided by ADR-0060 (merged, #259; no lifecycle runtime exists); OD-A5-4(a)–(d), the Auth hierarchy-reference repair
 and diagnostics, are decided by ADR-0061 (merged, #260; no repair functionality exists);
-the OD-A5-2 initial-hierarchy policy is decided by ADR-0062, accepted on 2026-10-09 on its own branch, pending its pull request (no
+the OD-A5-2 initial-hierarchy policy is decided by ADR-0062 (merged, #261; no
 Platform or Organization exists in production; provisioning-credential retirement and `allowedPlatforms` scope tooling are future
-prerequisites); ADR-0017, 0020, 0022 and 0024 remain Proposed, and OD-A5-4(e) and OD-A5-5 remain open; design and ADR reviews proceed now, and every runtime or authority change waits for
+prerequisites); the OD-A5-5 and OD-A5-4(e) policies are decided by ADR-0063, accepted on 2026-10-09 on its own branch, pending its pull request (the
+readiness check, static boundary test, `EnvReader` convergence, diagnostic CLI and command retirement are not implemented; no production
+transition has occurred); ADR-0017, 0020, 0022 and 0024 remain Proposed and are to be reconciled; design and ADR reviews proceed now, and every runtime or authority change waits for
 G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup.
 
 ### Compatibility and safety rules for V1 work
@@ -548,5 +550,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
 | V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene, A15.2 developer path, A15.3 test determinism, A15.4 conventions, the A15 certification) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
 | V2 A4: authentication (A4.0 inventory, preserved guarantees, owner decisions OD-A4-1 to OD-A4-8, convergence and key-ring requirements, the A4.1 to A4.9 stages, validation, deployment exclusion) | [`core-v2-a4-authentication.md`](architecture/core-v2-a4-authentication.md) |
-| V2 A5: organization (A5.0 inventory, authority today and after F7, the Auth ↔ Organization interaction, classification, the production gate, proposed sub-stages A5.1 to A5.5, owner decisions OD-A5-1 to OD-A5-5 (OD-A5-3 decided through ADR-0059; OD-A5-1 decided through ADR-0060; OD-A5-4(a)–(d) decided through ADR-0061; OD-A5-2 decided through ADR-0062, pending its pull request; OD-A5-4(e) and OD-A5-5 open), ADR review priorities, the A5.2 review record of the ten Organization ADRs) | [`core-v2-a5-organization.md`](architecture/core-v2-a5-organization.md) |
+| V2 A5: organization (A5.0 inventory, authority today and after F7, the Auth ↔ Organization interaction, classification, the production gate, proposed sub-stages A5.1 to A5.5, owner decisions OD-A5-1 to OD-A5-5 (OD-A5-3 decided through ADR-0059; OD-A5-1 decided through ADR-0060; OD-A5-4(a)–(d) decided through ADR-0061; OD-A5-2 decided through ADR-0062; OD-A5-4(e) and OD-A5-5 decided through ADR-0063, pending its pull request), ADR review priorities, the A5.2 review record of the ten Organization ADRs) | [`core-v2-a5-organization.md`](architecture/core-v2-a5-organization.md) |
 | V2 A3M: messaging (A3M.0 inventory and findings G1–G10, owner decisions OD-A3M-0 to OD-A3M-7, the A3M.0 to A3M.8 phases, the G7 proof, A3M.1 records and policy) | [`core-v2-a3m-messaging.md`](architecture/core-v2-a3m-messaging.md) |

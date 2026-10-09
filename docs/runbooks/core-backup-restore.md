@@ -261,6 +261,23 @@ what can be reconstructed. Restoring a backup is necessary for Audit recovery, n
   post-F6 restore: do not resume traffic; run the agreement check; on a mismatch **stop, investigate, no automatic repair**.
   Hierarchy writes made after the restored backup are lost, and ADR-0040 designs no reconciliation for lost writes after
   activation: that gap stands and is escalated to the owner, not filled here.
+- **After F6, a pre-F6 Auth backup is forbidden as an ordinary restore** ([ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md)
+  §9). An Auth backup taken before F6 holds the `local` (or, in an existing environment, `frozen`) hierarchy authority marker, and one taken
+  inside the attended F6 step may still hold `local` while Organization is `ACTIVE`; restoring it would reintroduce Auth's former
+  hierarchy authority, and a restore is not an `UPDATE`, so the marker's trigger cannot stop it. The pre-F6 Organization rule above is
+  unchanged. This rule is **procedural**: no tool enforces it today, and it has **not** been rehearsed.
+  - **Marker compatibility:** after F6, a restorable Auth backup is one whose recorded authority state (the encrypted restore facts,
+    §3) is `org_authoritative`; a restorable Organization backup is one whose recorded phase is `ACTIVE` or `RETIRED`. Auth and
+    Organization backups restored together must be on the same side of F6.
+  - **Before the restore:** read the backup's recorded authority state from its restore facts, decrypted with the recovery key in
+    the isolated drill environment (§5), never in production; an incompatible backup is not restored.
+  - **After the restore, before traffic:** read Auth's marker (`hierarchy-status`) and Organization's phase (`ownership status`), both
+    read-only, and run the agreement check (§6.2 of the Organization runbook); a `local` marker after F6 is a critical disagreement.
+  - **Refusal and escalation:** on an incompatible backup or any disagreement, stop, do not resume traffic, never edit either side to
+    make them agree, and escalate to the owner.
+  - **Exceptional recovery** stays separately governed (ADR-0040 A1.4, A2.6): it is attended and owner-decided, requires a
+    reconciliation design that does not exist, and never authorizes restoring Auth's former authority. No universal administrator or
+    database-repair bypass applies.
 - **Backup timing around the cutover:** the policy is the daily backup. ADR-0040 does not mandate a backup immediately before or after
   F6; an additional cutover backup can be approved in the G6 rehearsal plan.
 

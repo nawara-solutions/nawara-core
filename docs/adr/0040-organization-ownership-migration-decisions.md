@@ -32,6 +32,14 @@
 > and A2.5 is a **role and capability**, not a credential that must stay continuously active. The certified F2 to F5 sequence is
 > **not** modified, and the ADR-0060 partial supersession and the ADR-0061 clarification above are unchanged.
 
+> **Clarified by [ADR-0063](./0063-post-f7-authority-mode-cli-and-recovery-convergence.md)** (Accepted 2026-10-09, A5.3 OD-A5-5 and OD-A5-4(e); a clarification, **not** a new
+> supersession; status, decisions, dates and text unchanged). ADR-0063 defines the **post-F7 operational CLI convergence**. After F6,
+> Auth's hierarchy authority cannot ordinarily revert, and Organization Service remains authoritative. Auth `hierarchy-retire` remains
+> required for its certified F6 mirror step and Organization `ownership retire` for F7; authority-changing commands stay guarded and
+> refuse once their valid transition phase has passed. Fleet-wide removal of the transition code happens only after the transition,
+> recovery, CI and development prerequisites are certified. No new emergency authority, automated rollback or database-repair bypass is
+> authorized. A1.4's AD-5 emergency-mechanism wording and A2.6's one-way-door semantics are preserved unchanged.
+
 > **Adoption record (2026-09-20).** Decisions 1 to 4 were adopted in Amendment 1; decisions 5 and 6 and the added decision 7 were accepted in Amendment 2; the ADR is **Accepted**. The original text below is kept unchanged for the historical record and still says "Proposed" in its own wording; where an amendment differs, **the amendment governs, and Amendment 2 governs over Amendment 1**.
 
 > **Partly supersedes [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md)** (in effect: ADR-0040 is Accepted, 2026-09-20), on the passages listed under "Amendments to ADR-0039" only; the rest of ADR-0039 (phases, stable ids, verification, freeze, single cutover point) stands. Because the ADR README defines no "amended" status, the record on acceptance follows the repository's precedent for partial replacement (ADR-0001, ADR-0010): ADR-0039's status becomes "partly superseded by ADR-0040", the two ADRs link to each other, and a forward note is added to ADR-0039. ADR-0039 is **not edited** by this draft (**update 2026-09-20:** for decisions 1 to 4, adopted on that date, it now carries the forward note and its status reads partly superseded; see Amendment 1). The analysis behind every choice below is in the [Stage 10.0 decision study](../architecture/stage-10/stage-10.0-ownership-migration-decisions.md) and the [Stage 10 study](../architecture/stage-10-organization-ownership-migration-study.md).
