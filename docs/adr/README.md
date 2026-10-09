@@ -85,7 +85,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Proposed |
 | [0021](./0021-payment-service-platform-scoped-authorization.md) | Synchronous, fail-closed platform-scope check for payment-service's organization-scoped admin actions | Proposed |
 | [0022](./0022-company-and-platform-entities-with-operator-assignment.md) | Company and Platform entities, with many-to-many operator↔platform assignment | Proposed |
-| [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Proposed |
+| [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Accepted (2026-10-09, A5.2-I owner authorization; three passages revised before acceptance) |
 | [0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) | Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness) | Proposed |
 | [0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) | Owner login with password + second factor; secret key as step-up and recovery credential | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
 | [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Accepted (2026-10-09, A5.2-E owner authorization; decisions 2 and 4 revised before acceptance) |

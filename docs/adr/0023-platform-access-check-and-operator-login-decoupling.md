@@ -1,8 +1,25 @@
 # 0023. Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-I owner authorization; three passages revised before acceptance)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.2-I).** Before acceptance the owner approved three normative revisions, made in place while
+> Proposed, with the originals kept as history: **V1** the owner rule of `GET /auth/platform-access/:platformId` (active owner, platform
+> in the owner's company, else the collapsed `404`); **V2** the two-call pattern uses the implemented `GET /auth/admin/organizations/:id`;
+> **V3** the post-transition cache-miss contract (owner decision D1(a), section "After the ownership transition"). No other decision
+> changes. Read as follows:
+> 1. **Calendar endpoints.** The `POST`/`GET`/`DELETE /auth/admin/platform/calendar` endpoints this ADR says "keep working" were never
+>    built; the `platform_non_working_day` table exists as unused reference data.
+> 2. **Guard.** "`RolesGuard` (`role: admin`)" is implemented as Auth's guard with `@Actors('owner', 'operator')`: the kind is read live
+>    from the database, a member is refused with `403`, and a missing, invalid or revoked session is `401`
+>    ([ADR-0027](./0027-service-layer-security-model.md)).
+> 3. **References to `GET /auth/organizations/:id` and ADR-0021** in Context and in the route-placement rationale are historical;
+>    ADR-0021 is Proposed and that route does not exist.
+> 4. **Living documents.** "`docs/adr/README.md`, ADD and SDD are not updated by this ADR" describes 2026-09-18.
+> 5. **No operational authorization.** No runtime change and no production change; no entitlement check is involved
+>    ([ADR-0026](./0026-authentication-is-not-entitlement.md)). Open questions stay open; an end-to-end test of the post-transition
+>    cache miss for an owner does not exist yet (an implementation follow-up, not authorized here).
 
 > **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): the platform-access check no longer returns `200` unconditionally for an owner — it requires the platform to exist in the owner's own company and the account to be active — see ADR-0024.
 
@@ -184,9 +201,12 @@ callers here, with different outcomes, exactly the same gating choice ADR-0020/A
 made for `GET /auth/organizations/:id` and the organization-CRUD endpoints (equal rights,
 distinguished by branching inside the handler, not by which tier is allowed to call it at all).
 
-- **`adminTier: 'owner'`** → always `200`. An owner's access is global across their entire
-  company (per ADR-0022), so no `PlatformAssignment` lookup is needed beyond trusting the
-  `adminTier` claim itself — there is nothing an owner is ever excluded from, by construction.
+- **`adminTier: 'owner'`** (revised 2026-10-09, before acceptance, A5.2-I) → `200` only when the owner's account is active and
+  the platform exists in Auth's hierarchy rows (its validated reference rows after the ownership transition, see "After the
+  ownership transition" below) and belongs to the owner's own company (`Owner.companyId = Platform.companyId`); otherwise the
+  same collapsed `404` as below. No `PlatformAssignment` lookup is involved for an owner. *(Original: "→ always `200`. An owner's
+  access is global across their entire company (per ADR-0022), so no `PlatformAssignment` lookup is needed beyond trusting the
+  `adminTier` claim itself — there is nothing an owner is ever excluded from, by construction.")*
 - **`adminTier: 'operator'`** → a live query: does an **active** `PlatformAssignment` row exist
   for `(operatorId: caller's own JWT `sub`, platformId: the path parameter)`? `200` if yes,
   `404` if no. **Never `403`** — this repo's established collapsed-existence convention for
@@ -212,9 +232,10 @@ service, **not** in `auth-service`.
 
 1. The downstream service looks up which `Organization` Student #123 belongs to — its own
    concern, using its own data.
-2. It calls this repo's existing `GET /auth/organizations/:id` (ADR-0021) with that
+2. It calls this repo's existing `GET /auth/admin/organizations/:id` (revised 2026-10-09, before acceptance: the implemented
+   route; owner or operator only, the platform derived from the organization row, the collapsed `404` otherwise) with that
    `organizationId`, forwarding the calling operator's own JWT, to resolve `{id, platformId}` —
-   which `Platform` that `Organization` belongs to.
+   which `Platform` that `Organization` belongs to. *(Original: "`GET /auth/organizations/:id` (ADR-0021)".)*
 3. It calls this ADR's new `GET /auth/platform-access/:platformId`, again forwarding the same
    JWT, to confirm the calling operator currently has live access to that platform.
 4. If, and only if, both calls succeed, the downstream service applies its **own**
@@ -236,14 +257,14 @@ sequenceDiagram
 
     Op->>Downstream: PATCH /students/123<br/>Authorization: Bearer <JWT>
     Downstream->>Downstream: Look up Student #123's own organizationId<br/>(downstream service's own data)
-    Downstream->>Auth: GET /auth/organizations/:organizationId<br/>Authorization: Bearer <JWT> (forwarded)
+    Downstream->>Auth: GET /auth/admin/organizations/:organizationId<br/>Authorization: Bearer <JWT> (forwarded)
     alt organization not found / not resolvable
         Auth-->>Downstream: 404
         Downstream-->>Op: 404 / 503 (fail closed)
     else organization resolved
         Auth-->>Downstream: 200 {id, platformId}
         Downstream->>Auth: GET /auth/platform-access/:platformId<br/>Authorization: Bearer <JWT> (forwarded)
-        Auth->>Auth: adminTier === 'owner'? 200 : live PlatformAssignment<br/>lookup (operatorId, platformId, active)
+        Auth->>Auth: owner: active account and platform in own company? 200 : 404<br/>operator: live PlatformAssignment lookup (operatorId, platformId, active)
         alt no active assignment
             Auth-->>Downstream: 404
             Downstream-->>Op: 403/404 (downstream's own choice)
@@ -254,6 +275,9 @@ sequenceDiagram
         end
     end
 ```
+
+*(Diagram revised 2026-10-09, before acceptance (V1, V2). Original lines: `Downstream->>Auth: GET /auth/organizations/:organizationId` and
+`Auth->>Auth: adminTier === 'owner'? 200 : live PlatformAssignment lookup (operatorId, platformId, active)`.)*
 
 ### Revocation semantics, contrasted with ADR-0012's block/unblock
 
@@ -273,6 +297,19 @@ logout for a scoped revocation would needlessly interrupt an operator's legitima
 work on every *other* platform they're assigned to, for no gain: the revoked platform is already
 protected on its own next access check, without touching anything else.
 
+### After the ownership transition: cache-miss contract (added 2026-10-09, before acceptance, A5.2-I)
+
+In `organization-service` mode (after F6), Auth's `company`, `platform` and `organization` rows are a validated, non-authoritative
+reference cache ([ADR-0040](./0040-organization-ownership-migration-decisions.md) decision 1). `GET /auth/platform-access/:platformId`
+and `GET /auth/admin/organizations/:id` are **local authorization reads**: they keep reading those validated reference rows and
+**never call Organization Service** (ADR-0040 decision 2 limits Organization Service calls to administrative first touches). An
+entity that is not (yet) in Auth's reference rows answers the **same collapsed `404`**: no ensure-on-read, no new synchronous
+dependency on Organization Service, and no `503` for a cache miss. Authority over the hierarchy itself (creating and administering
+Company, Platform and Organization) is Organization Service's, which evaluates a human administrator from Auth's live facts through
+`GET /auth/grants` ([ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md), [ADR-0050](./0050-platform-administration-and-verified-human-authority.md)),
+not from Auth's reference rows. This contract does **not** decide reference-cache consistency, freshness or organization lifecycle
+(A5.3, OD-A5-1, OD-A5-4).
+
 ## Consequences
 
 - Closes the gap ADR-0022 explicitly deferred: any request, from `auth-service` or from any
@@ -280,7 +317,7 @@ protected on its own next access check, without touching anything else.
   currently live, without trusting a JWT claim.
 - Gives every future downstream, platform-specific service (`nawara-drive` today; `daycare`,
   named in `CLAUDE.md`, potentially later) the same reusable two-call pattern
-  (`GET /auth/organizations/:id` → `GET /auth/platform-access/:platformId`) to enforce the
+  (`GET /auth/admin/organizations/:id` → `GET /auth/platform-access/:platformId`; route revised 2026-10-09) to enforce the
   Platform boundary on its own resources, entirely over HTTP, with zero direct access to
   `auth-service`'s database — consistent with this repo's database-per-service principle.
 - **Supersedes ADR-0011 and ADR-0014**, each only in the specific portion named above; per this
@@ -326,7 +363,7 @@ protected on its own next access check, without touching anything else.
   ADR designs for (a single resource, a single platform), and not added speculatively — left for
   a future ADR if a real batched use case appears.
 - **What is the actual added latency/availability cost, in practice, of the two-call chain
-  (`GET /auth/organizations/:id` + `GET /auth/platform-access/:platformId`) on a downstream
+  (`GET /auth/admin/organizations/:id` + `GET /auth/platform-access/:platformId`) on a downstream
   service's hot paths?** This ADR names the dependency and its fail-closed posture but does not
   measure or bound it — genuinely unknown until a real downstream service adopts this pattern.
 - **Is a stale-access window meaningfully narrowed by this design, or just relocated?** ADR-0022
