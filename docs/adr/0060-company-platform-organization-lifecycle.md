@@ -1,8 +1,26 @@
 # 0060. Company, Platform and Organization lifecycle
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.3 OD-A5-1 owner authorization) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
 - **Date:** 2026-10-09
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.3 OD-A5-1).** The architecture owner accepted the architectural design of this ADR as written
+> (§3 to §12). The Proposed-era notes below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not
+> accepted" is replaced by this note, while "nothing in it is implemented, and it activates nothing" remains true. Acceptance:
+> 1. **Implements and activates nothing.** No lifecycle runtime exists; every stage of §11 is separately authorized and stays blocked,
+>    for runtime effect, until F6/F7.
+> 2. **The E5 amendment of ADR-0040 decision 2** (§7) is accepted through this ADR: only Auth's access-granting administrative writes
+>    make a fresh, fail-closed lifecycle read; authentication, sessions, registration, join, `/auth/me` and the ADR-0023 local reads
+>    never call Organization Service.
+> 3. **Accepted residual risks:** G1 (earlier join codes or invitations may still be redeemed during suspension, with no effective
+>    product access until the scope is active) and G2 (E5's cross-service time-of-check/time-of-use window, requiring point-of-use
+>    enforcement). These are accepted architecture limitations, **not** permission to deploy unprotected access paths.
+> 4. **Deferred** (§12): retention and legal erasure; E3 event-driven propagation after A3M.8; OD-L7; an organization-scoped member
+>    restriction; the exact OD-L6 reason vocabulary; the exact OD-L5 reference-contract shape.
+> 5. **Relationships.** The "proposed relationships" listed in the preserved note below now take effect in substance: the amendment of
+>    ADR-0040 decision 2, the clarification of ADR-0042 decision 5 and the partial supersession of ADR-0050 decision 12's lifecycle
+>    scope bullet are decided by this acceptance; those ADRs' status lines and backlinks are **not**
+>    changed here and require separate, explicit approvals and commits.
 
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-1 (2026-10-09), recorded below.
 > This ADR is **Proposed**: it is not accepted, **nothing in it is implemented**, and it activates nothing. Every implementation stage
