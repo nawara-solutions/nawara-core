@@ -614,6 +614,10 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
     });
 
     it('no transaction is open while a provider call runs (the claim and the attempt are committed first)', async () => {
+      // One provider call at a time: at a concurrency above 1, a SIBLING delivery's own short attempt or outcome transaction is
+      // legitimately open while another delivery's provider call runs, and the probe (any session of this service) cannot tell it
+      // apart from a transaction held across the call. Serially, any open transaction seen during a call belongs to that call's flow.
+      const serial = (await app({ NOTIFICATION_WORKER_CONCURRENCY: '1' })).app.get(DeliveryWorker);
       const seen: { state: string; n: number }[][] = [];
       email.behavior = async (m, ctx) => {
         await sleep(30);
@@ -623,7 +627,7 @@ describeWithEnv('notification delivery engine (real PostgreSQL)', ['TEST_DATABAS
       };
       await alert();
       await alert();
-      await worker.passOnce();
+      await serial.passOnce();
       expect(seen).toHaveLength(2);
       expect(seen.flat()).toEqual([]);
     });
