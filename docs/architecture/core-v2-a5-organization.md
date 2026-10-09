@@ -131,13 +131,51 @@ redeploys unless images are pinned.
 | A5.1 | this record; A4 closure wording | A5.0 | this record, the roadmap, the A4 record | merged; every A5 item labelled; no runtime change | `check:repo`, `git diff --check`, links; Core CI | ✅ merged (PR #253) |
 | A5.2 | ADR reviews, one ADR at a time (§11); each status change separately authorized | A5.1 | review record: this record and the roadmap; then `docs/adr/00xx-*.md` and the ADR index, one ADR per status-change PR | each review recorded (**done**, §11); statuses change only on explicit authorization (**done**: every reviewed ADR has an owner disposition) — **COMPLETED 2026-10-09** | docs checks; Core CI per status-change PR | 10–20 h (review record done; about 12–18 h remained at review time, §11.8; completed 2026-10-09) |
 | A5.3 | post-F7 design: Auth as reference cache in steady state, retiring local mode and the legacy Company insert, the dependency decision, CLI convergence plan, and lifecycle only if decided in scope | A5.1, A5.2, owner decisions (§10) | this record; possibly a new ADR (Proposed) | designs owner-reviewed; implementation items labelled 🔴 (**design complete**; ADR-0059 to ADR-0063) — **CLOSED 2026-10-09, architecture only** (PR #263, §10.5) | docs checks; Core CI | 10–25 h |
-| A5.4 | implementation of the approved A5.3 designs | **F7** and a refreshed baseline | `apps/auth-service/src/hierarchy/*`, `src/cli/owner-tools.ts`, `src/config/app-config.ts`; `apps/organization-service/src/cli/ownership.ts`, `src/admin/*`; their tests | the V2 protocol: focused tests and mutants, service regression, `test:e2e:auth-organization` | full Core CI per pull request | ⚪ about 30–150 h, set by A5.3 (a governance proposal for A5.4, not in force: §9.1) |
+| A5.4 | implementation of the approved A5.3 designs | **F7** and a refreshed baseline | `apps/auth-service/src/hierarchy/*`, `src/cli/owner-tools.ts`, `src/config/app-config.ts`; `apps/organization-service/src/cli/ownership.ts`, `src/admin/*`; their tests | the V2 protocol: focused tests and mutants, service regression, `test:e2e:auth-organization` | full Core CI per pull request | ⚪ about 30–150 h, set by A5.3 (implementation governance A5.4-G1 accepted 2026-10-09, §9.1; RED work stays blocked until F7) |
 | A5.5 | certification | A5.4 | this record, the roadmap | the criteria A5.3 fixes | records-based; merged pull requests' CI | 3–6 h |
 
 Design phase (A5.2–A5.3): about 20–45 h. Assumptions: about 6 productive hours a day, one Core CI run per pull request, owner decision time
 excluded. The production track (§7) is separate and owner-driven.
 
-### 9.1 A5.4 implementation governance (A5.4-G1) [PROPOSED, not approved]
+### 9.1 A5.4 implementation governance (A5.4-G1) [ACCEPTED 2026-10-09]
+
+> **Acceptance note (2026-10-09, architecture-owner authorization; governance documentation only).** The owner accepted A5.4-G1,
+> Controlled Pre-F7 Implementation Governance. The proposal text below is kept unchanged as history; its banner "Not in force" is
+> superseded by this note. **Nothing is implemented, merged, deployed or activated by this acceptance, and every task still needs its
+> own explicit authorization.** Where the preserved proposal text below says proposed, not accepted or not in force, this note governs.
+> 1. **GREEN / YELLOW / RED approved.** GREEN (specifications and design documents, static security-boundary checks, test-only
+>    infrastructure with no shipped runtime change, documentation and draft runbooks) may be developed and merged under each task's
+>    authorization (ADR-0063 §11 items only after point 2's clarification is recorded). YELLOW (additive audit-contract declarations, disabled-by-default independently testable capabilities, inert step-up
+>    purposes, Notification templates without producers) is approved as a category only: each task is separately authorized, and a
+>    merge into `main` additionally needs evidence of no changed behavior in deployed images, an approved image-pinning policy and an
+>    explicit merge authorization; no production rollout follows. RED stays **blocked** until its applicable gate or a separately
+>    approved, specific governance amendment: hierarchy lifecycle runtime and migrations; Owner transfer, steward recovery and Owner
+>    lifecycle migrations; reference-repair runtime; authority modes and CLI modifications; retiring local hierarchy authority;
+>    G6/G7/F6/F7 tooling; hierarchy provisioning and first-Platform operations; `allowedPlatforms` and `register-caller.sh`; Auth →
+>    Organization authority changes; `AUTH_EVENTS` and A3M.8 activation; production schema migrations and feature activation. Every
+>    item of the **RED** row of the Classes table below also stays blocked (among them activating authority, retiring the legacy
+>    Company insert, removing or narrowing the Auth ↔ Organization dependency, `bootstrap-owner` changes and opening callers).
+> 2. **ADR-0063 §11.** A separately recorded, dated clarification on ADR-0063 is approved: the F7 restriction applies to operational
+>    activation and transition-sensitive changes; GREEN work may be developed and merged under its authorization; YELLOW work may be
+>    developed in isolation, with merges under the extra image-safety conditions; RED runtime stays gated except a separately approved,
+>    narrow exception; no authority invariant, F6/F7 gate or certification requirement is weakened. It is supported by ADR-0063's preserved
+>    status block ("every stage is separately authorized and, for runtime effect, blocked until F7"), by §4 (the readiness sequence is
+>    verified in the G6 rehearsal before the check ships) and by its acceptance item 7 (every step separately authorized). The note
+>    itself is the **next, separately scoped documentation action**; it is not in this commit. **Until it is recorded, no ADR-0063 §11
+>    item (including A5.4-T1 and A5.4-A5) is developed or merged.**
+> 3. **Certified digest-set policy approved.** G6 selects and rehearses one exact certified image-digest set (auth-service,
+>    organization-service, audit-service), recording each digest, its approved configuration, the deployment script and release
+>    context, which services redeploy at F6/F7, the G6 rehearsal and certification evidence, and the re-rehearsal required when any
+>    digest or relevant configuration changes. F6/F7 use only that set, including configuration-only redeploys such as the F6 Auth mirror. The control is procedural until enforcement is separately
+>    implemented. No digest is chosen and nothing is deployed now; workflows and credentials are unchanged; each service's first
+>    production digest deployment stays separately authorized.
+> 4. **A5.4-A5 pre-G6 exception to RED approved as a design.** A future, separately authorized implementation may add Auth's `/ready`
+>    configuration/marker consistency check, in Auth only (read-only marker access; tests for permitted, forbidden and unreadable states;
+>    the readiness reason and alert; no new startup database dependency; `/auth/health` verified unchanged and kept database-only,
+>    outside the deploy health path). Its merge also needs the image-pinning approval. Prohibited: marker mutation, trigger, CLI or `ensure` changes, migrations,
+>    deployment-script changes and any local-authority fallback. The exact F6 TRANSITIONAL behavior stays **OPEN** and must be specified
+>    before any transition-dependent behavior is implemented or the check's merge is approved; the check is certified in G6 with the
+>    approved digest and configuration. **No A5.4-A5 implementation is authorized by this acceptance.**
 
 > **Not in force.** This section is a proposal for the architecture owner (2026-10-09). Until it is explicitly approved, §6, §7, §8, the
 > A5.4 row of §9 and the roadmap stay the effective gates: A5.4 stays **blocked until F7 (🔴)**. Nothing here authorizes code, a merge,
