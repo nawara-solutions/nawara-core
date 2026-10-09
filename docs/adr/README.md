@@ -73,7 +73,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0008](./0008-automatic-grace-license-on-license-lapse.md) | Automatic 24-hour grace license on organization license lapse | Accepted |
 | [0009](./0009-platform-scoped-admin-accounts.md) | Platform-scoped Admin accounts (platformId, owner/operator tiers) | Accepted |
 | [0010](./0010-owner-secret-key-login-with-device-alerting.md) | Owner permanent secret-key login with new-device alerting | Partially superseded by ADR-0025 |
-| [0011](./0011-operator-time-boxed-login-code.md) | Time-boxed operator login code with business-day gating | Accepted |
+| [0011](./0011-operator-time-boxed-login-code.md) | Time-boxed operator login code with business-day gating | Accepted (partly superseded by ADR-0023, business-day gating only, 2026-10-09) |
 | [0012](./0012-owner-managed-operator-schedule-and-blocking.md) | Owner-managed operator profile, schedule, and block/unblock | Accepted |
 | [0013](./0013-operator-session-ceiling.md) | Hard 8-hour session ceiling for operator refresh-token rotation | Accepted |
 | [0014](./0014-schedule-anchored-operator-duration.md) | Schedule-anchored operator login-code and session duration | Accepted |
