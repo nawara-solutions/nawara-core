@@ -1,8 +1,21 @@
 # 0059. Company ownership transfer and exceptional owner recovery
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.3 owner authorization) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
 - **Date:** 2026-10-09
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.3).** The architecture owner accepted the architecture of this ADR as written (§3 to §14). The
+> Proposed-era notes below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is replaced
+> by this note, while "nothing in it is implemented, and it activates nothing" remains true. Acceptance:
+> 1. **Implements and activates nothing.** No runtime feature exists; both activation gates (§10) stay off; no ownership transfer or
+>    exceptional recovery may be enabled until its prerequisites are implemented and certified.
+> 2. **OD-S1 is deferred** to a separate threat model and owner approval. **No steward account may be provisioned and no
+>    exceptional-recovery endpoint may be enabled** until OD-S1 is resolved and every required security control is implemented and
+>    certified. OD-S2, OD-P1, OD-R2, OD-R4, multi-company ownership and Organization lifecycle interaction remain open (§12).
+> 3. **Relationships (§14).** The partial supersession of ADR-0017 and ADR-0050 and the amendment of ADR-0024 are decided by this
+>    acceptance; their status lines and backlinks are **not** changed here and require separate, explicit approvals and commits.
+> 4. **Cross-service work** (audit contract and audit-service, service-kit, notification, downstream services) remains separately
+>    gated and authorized (§8, §13).
 
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-3 (2026-10-09): exactly one active
 > Owner per Company, controlled transfer, and exceptional recovery, with the decisions OD-T1 to OD-T4, OD-R1 and OD-R3 recorded below.
