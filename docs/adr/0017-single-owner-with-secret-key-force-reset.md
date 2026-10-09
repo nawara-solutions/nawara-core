@@ -1,8 +1,17 @@
 # 0017. Single owner per Company, permanently, with a CLI secret-key force-reset tool
 
-- **Status:** Proposed
+- **Status:** Proposed (partly superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md), Accepted 2026-10-09: the permanent-owner and no-transfer decisions only)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Partly superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md)** (2026-10-09, A5.3 owner
+> authorization; marker only, this ADR's text is unchanged and it stays **Proposed** for its later focused review). Superseded only: the
+> decision that single ownership is **permanent** ("Single owner per Company — permanent, not an interim state": "There is no in-band
+> way to create, deactivate, or replace an owner, and none is planned"; "no ownership-transfer or second-owner mechanism will be
+> built"), the Consequences entry that ownership transfer "has no designed mechanism", and the same permanence wording elsewhere
+> (the title, Options considered and Consequences). ADR-0059 decides a controlled transfer and an
+> exceptional recovery. **Kept:** exactly one active Owner per Company, and every other part of this ADR as it stands (the force-reset CLI
+> remains withdrawn by ADR-0050). ADR-0059 implements and activates nothing.
 
 > **Amended by [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)** (on the following point only; the rest of this ADR stands): The single-owner rule is now the droppable unique index `owner_single_per_company_v1`, and `secretKeyHash`/`secretKeyIssuedAt` live on the `Owner` table rather than `User` — see ADR-0024.
 
