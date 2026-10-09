@@ -61,7 +61,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 
 | #   | Title | Status |
 | --- | ----- | ------ |
-| [0001](./0001-generic-organization-id-scoping-claim.md) | Generic `organizationId` as the multi-tenancy scoping claim | Accepted (partly superseded by 0030) |
+| [0001](./0001-generic-organization-id-scoping-claim.md) | Generic `organizationId` as the multi-tenancy scoping claim | Accepted (partly superseded by 0030, formal 2026-10-09) |
 | [0002](./0002-jwt-access-token-with-rotating-refresh-token.md) | JWT access token + DB-backed refresh token with rotation & reuse detection | Accepted |
 | [0003](./0003-postgresql-typeorm-persistence.md) | PostgreSQL + TypeORM as auth-service's persistence | Accepted |
 | [0004](./0004-synchronous-fail-closed-license-validation.md) | Synchronous, fail-closed license validation against payment-service for B2B registration | Accepted (partly superseded by ADR-0026 and ADR-0028, 2026-10-09) |
