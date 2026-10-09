@@ -214,7 +214,7 @@ A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (re
   A5.1  architecture and scope record          ✅ closed on main (PR #253; 24/24 checks, core-ci-passed)
   A5.2  ADR reviews (one ADR at a time)        ✅ COMPLETED 2026-10-09: 0039 (#255), 0026, 0028, 0029, 0030, 0031 (#256), 0023 (#257) Accepted; 0017 and 0020 superseded (0059, 0040); 0022 and 0024 Proposed, deferred to A6 (#263)
   A5.3  post-F7 design                         ✅ CLOSED 2026-10-09 (architecture only, #263): OD-A5-1 to OD-A5-5 decided (ADR-0059 to 0063, #258–#262); runtime not implemented, production not activated
-  A5.4  implementation                         ⛔ blocked until F7 (proposed; 🔴)
+  A5.4  implementation                         ⛔ blocked until F7 (proposed; 🔴) for RED work; GREEN / YELLOW / RED governance (A5.4-G1) ACCEPTED 2026-10-09 (A5 record §9.1; ADR-0063 §11 clarification recorded): each task separately authorized; production activation stays blocked
   A5.5  certification                          not started (proposed)
 
 G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒

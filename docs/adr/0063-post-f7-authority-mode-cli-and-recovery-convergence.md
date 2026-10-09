@@ -200,6 +200,23 @@ A future runbook rule (not authorized to be written or applied by this ADR):
 
 ## 11. Implementation and tests (each separately authorized; blocked until F7)
 
+> **Clarification (2026-10-09, A5.4-G1, architecture-owner authorization; a clarification, not a supersession; this ADR's status,
+> this section's original text below, its rationale and its relationships are unchanged).** Implementation timing for the stages
+> below is governed by the Accepted A5.4-G1 governance ([A5 record](../architecture/core-v2-a5-organization.md) §9.1), read with
+> this ADR's own statement that every stage is "separately authorized and, for runtime effect, blocked until F7":
+> - **Developing, merging, deploying and activating are four separate authorization events.**
+> - **GREEN** (behavior-neutral static checks and documentation, such as the static boundary test) may be developed and merged under
+>   individually approved tasks.
+> - **YELLOW** (additive, inert implementation) needs separate development authorization; merging it needs the approved digest-pinning
+>   strategy, demonstrated absence of changed deployed behavior, and a separate approval.
+> - **RED** implementation stays blocked under the effective A5.4 gates, apart from explicitly approved, narrowly scoped exceptions.
+> - The **F7 restriction** of this section continues to govern runtime effects and production activation. All certified G6, G7, F6
+>   and F7 procedures and every authority invariant of this ADR stay in force.
+> - **A5.4-A5** (the readiness check and alert of §4) is a design-approved pre-G6 exception, **not** an implementation authorization.
+>   The exact TRANSITIONAL readiness behavior stays unresolved (§12) and must be specified before any transition-dependent behavior is
+>   implemented.
+> - The **certified image-digest-set policy** is accepted; no individual digest is selected or deployed.
+
 Readiness check and alert; the static boundary test; the read-only `verify` replacement; the ADR-0061 diagnostic; `EnvReader`
 convergence; the runbook restore rule; later, the capability-gated removal. Tests: every authority-changing command refuses after F7
 with a recorded event; read-only commands write nothing; each mismatch and marker failure makes Auth not ready; the F6 transitional
