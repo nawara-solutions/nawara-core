@@ -17,6 +17,12 @@
 > 4. **Cross-service work** (audit contract and audit-service, service-kit, notification, downstream services) remains separately
 >    gated and authorized (§8, §13).
 
+> **Forward note (2026-10-09, A5.3 OD-A5-1).** The "Organization lifecycle interaction" listed as open in §12 and in the acceptance note
+> above is now decided by Accepted [ADR-0060](./0060-company-platform-organization-lifecycle.md) (§9): normal ownership transfer remains
+> permitted while the Company is `SUSPENDED` and is refused for an `ARCHIVED` Company; exceptional recovery remains separately gated under
+> this ADR. No ownership-transfer or recovery functionality is implemented or activated. §12 is kept unchanged as history; this ADR's
+> status and decisions are unchanged.
+
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-3 (2026-10-09): exactly one active
 > Owner per Company, controlled transfer, and exceptional recovery, with the decisions OD-T1 to OD-T4, OD-R1 and OD-R3 recorded below.
 > This ADR is **Proposed**: it is not accepted, **nothing in it is implemented**, and it activates nothing. Every implementation stage

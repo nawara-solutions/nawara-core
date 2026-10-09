@@ -1,8 +1,19 @@
 # 0040. Organization ownership migration: Auth's reference model, cutover mechanism, one-way door and import
 
-- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (**accepted** by the architecture owner on 2026-09-20: decisions 1 to 4 (DEC-4, Amendment 1); decisions 5 and 6, and the added **decision 7**, the production-readiness and cutover gates (OPEN-1 and OPEN-2, Amendment 2). Acceptance is architecture only: **nothing is implemented, no rehearsal has run, and no production gate is met.**)
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (**accepted** by the architecture owner on 2026-09-20: decisions 1 to 4 (DEC-4, Amendment 1); decisions 5 and 6, and the added **decision 7**, the production-readiness and cutover gates (OPEN-1 and OPEN-2, Amendment 2). Acceptance is architecture only: **nothing is implemented, no rehearsal has run, and no production gate is met.**) **Partly superseded by [ADR-0060](./0060-company-platform-organization-lifecycle.md) (decision 2 only; 2026-10-09).**
 - **Date:** 2026-09-20
 - **Deciders:** Anwar (project owner). Decisions 5, 6 and 7 were accepted on 2026-09-20. The interim invariants I1 and I2 are accepted as **migration invariants, not as a lifecycle policy**, so they need no separate lifecycle decision.
+
+> **Partly superseded by [ADR-0060](./0060-company-platform-organization-lifecycle.md)** (Accepted 2026-10-09, A5.3 OD-A5-1; metadata
+> only, this ADR's text is unchanged). **Decision 2 only:** Auth's **administrative access-granting writes** (join-code and invitation
+> creation, membership approval, organization-admin grant, operator platform-assignment grant, ADR-0059 normal ownership-transfer
+> initiation and completion, the latter refused only for an ARCHIVED Company) now
+> make a fresh, fail-closed lifecycle read from Organization Service on every operation, not only on the first touch. The prohibition of
+> synchronous Organization Service calls is **unchanged** for authentication and login, logout, registration and join (and invitation
+> acceptance), onboarding resolution, sessions and refresh, `/auth/me` and `/auth/grants`, the member-access and platform-access reads,
+> and ADR-0023's local reference-read routes (including the admin organization lookup). Every other decision stands, including decision 1 (Auth's validated reference cache, no lifecycle state in Auth),
+> A1.2 (Organization Service is the hierarchy and lifecycle authority) and I1/I2(b) (ids never reused; no physical deletion), which
+> ADR-0060 keeps as permanent lifecycle rules.
 
 > **Adoption record (2026-09-20).** Decisions 1 to 4 were adopted in Amendment 1; decisions 5 and 6 and the added decision 7 were accepted in Amendment 2; the ADR is **Accepted**. The original text below is kept unchanged for the historical record and still says "Proposed" in its own wording; where an amendment differs, **the amendment governs, and Amendment 2 governs over Amendment 1**.
 
