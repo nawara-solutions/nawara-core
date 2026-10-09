@@ -22,6 +22,12 @@
 >    scope bullet are decided by this acceptance; those ADRs' status lines and backlinks are **not**
 >    changed here and require separate, explicit approvals and commits.
 
+> **Clarified by [ADR-0062](./0062-initial-hierarchy-provisioning-and-first-platform-sequencing.md)** (Accepted 2026-10-09, A5.3
+> OD-A5-2; a clarification of the initial lifecycle state, not a supersession; status, decisions and text unchanged). A newly created
+> Company, Platform or Organization starts with local lifecycle state **`ACTIVE`**, and creating a child requires an **effectively
+> `ACTIVE` parent** (E4, §7). The existing certified Company receives a **controlled `ACTIVE`-state backfill** when the separately
+> authorized §11 L2 stage runs. No migration, lifecycle API or schema change is authorized by this note, and no service is activated by it.
+
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-1 (2026-10-09), recorded below.
 > This ADR is **Proposed**: it is not accepted, **nothing in it is implemented**, and it activates nothing. Every implementation stage
 > is separately authorized and blocked, for runtime effect, until the ownership transition F6/F7 (§11).
