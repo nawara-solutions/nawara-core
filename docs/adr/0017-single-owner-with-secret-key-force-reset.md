@@ -1,8 +1,21 @@
 # 0017. Single owner per Company, permanently, with a CLI secret-key force-reset tool
 
-- **Status:** Proposed (partly superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md), Accepted 2026-10-09: the permanent-owner and no-transfer decisions only)
+- **Status:** Superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md) (2026-10-09, A5.3 closure owner disposition; never Accepted; the force-reset CLI was withdrawn by [ADR-0050](./0050-platform-administration-and-verified-human-authority.md))
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Disposition (2026-10-09, A5.3 closure, architecture-owner authorization).** This ADR is **superseded by ADR-0059** as a whole. It was never Accepted; its
+> full text below is kept unchanged as history, as are the notes that follow. ADR-0059's controlled owner transfer and exceptional
+> recovery replace the permanent, non-transferable Owner model. ADR-0050 withdrew the force-reset CLI for the owner's secret key, and
+> that withdrawal stands. The existing owner authentication and recovery behavior is governed by Accepted
+> [ADR-0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) and
+> [ADR-0027](./0027-service-layer-security-model.md). **Exactly one active Owner** per Company remains an accepted invariant under
+> ADR-0059 §3, and the droppable owner-cardinality index is governed by ADR-0024 (as amended by ADR-0059). No unique decision of this
+> ADR is lost. **Scope of the supersession:** ADR-0059's own text partly supersedes this ADR (permanence and no transfer); the
+> supersession of the whole rests on this owner disposition, the remainder being covered by ADR-0050, ADR-0025, ADR-0027 and ADR-0024.
+> A reciprocal note on ADR-0059 recording the whole-ADR disposition needs a separate approval. The earlier note below that this ADR
+> "stays **Proposed** for its later focused review" is superseded by this disposition. The historical backlink from ADR-0024 ("amends
+> ADR-0017") stays as history.
 
 > **Partly superseded by [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md)** (2026-10-09, A5.3 owner
 > authorization; marker only, this ADR's text is unchanged and it stays **Proposed** for its later focused review). Superseded only: the
