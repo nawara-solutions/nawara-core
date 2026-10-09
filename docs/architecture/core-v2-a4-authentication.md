@@ -98,6 +98,11 @@ Accepted ADRs take precedence over this record.
 | OD-A4-7 | No production Auth deployment during A4; a merged stage may build an image, never deploy it |
 | OD-A4-8 | Review ADR-0023 and ADR-0026 for possible acceptance; ADR-0017 stays with A5; no ADR status changes without separate authorization |
 
+> **Forward note (2026-10-09, Core V2 A5.2).** OD-A4-8's scope was to review ADR-0023 and ADR-0026 for possible acceptance; it was
+> carried forward open by A4.9 (D4). Both decisions are now taken: ADR-0026 is Accepted on `main` (PR #256), and ADR-0023 was accepted
+> on 2026-10-09 (A5.2-I) on its own branch ([A5 record](core-v2-a5-organization.md) §11.9). OD-A4-8 is resolved **once the ADR-0023
+> pull request is merged**; this A4 record, certified on 2026-10-08, is otherwise unchanged.
+
 ## 5. Out of scope
 
 | Capability | Where it belongs |

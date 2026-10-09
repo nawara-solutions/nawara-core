@@ -62,7 +62,9 @@ other record states an approval of these ADRs. **No status is changed by A1.1.**
 > are those of that review. Later owner decisions are recorded where they were taken. In A5.2 the owner accepted ADR-0039 (PR #255)
 > and, each separately, ADR-0031, 0026, 0028, 0029 and 0030, with metadata updates to ADR-0001 and ADR-0004
 > ([A5 record](core-v2-a5-organization.md) §11.9; the ADR index is the current status of every ADR). §4's plan to mark ADR-0006
-> partly superseded was reviewed and not applied: ADR-0026 supersedes no decision of ADR-0006.
+> partly superseded was reviewed and not applied: ADR-0026 supersedes no decision of ADR-0006. Later on 2026-10-09 (A5.2-I) the owner
+> accepted ADR-0023, with ADR-0011 and ADR-0014 recorded as **partly** superseded by it (their earlier "Superseded by ADR-0023"
+> status lines overstated it); recorded on the ADR-0023 branch until its pull request is merged.
 
 Classification: **A** keep Proposed; **B** ready for acceptance on an existing explicit owner decision; **C** superseded on
 authoritative evidence; **D** defer the status change (outside A1).

@@ -212,7 +212,7 @@ A4 Authentication                              ✅ CLOSED / CERTIFIED (record: c
 A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (record: core-v2-a5-organization.md)
   A5.0  discovery                              ✅ complete (read-only inventory, recorded in the A5 record)
   A5.1  architecture and scope record          ✅ closed on main (PR #253; 24/24 checks, core-ci-passed)
-  A5.2  ADR reviews (one ADR at a time)        🔄 0039 Accepted on main (PR #255); 0026, 0028, 0029, 0030, 0031 owner-accepted 2026-10-09 in the grouped A5.2 PR (A5 record §11.9); 0017, 0020, 0022, 0023, 0024 open
+  A5.2  ADR reviews (one ADR at a time)        🔄 0039 (PR #255) and 0026, 0028, 0029, 0030, 0031 (PR #256) Accepted on main; 0023 owner-accepted 2026-10-09 (A5.2-I), pending its PR; 0017, 0020, 0022, 0024 open
   A5.3  post-F7 design                         not started (proposed; 🟡)
   A5.4  implementation                         ⛔ blocked until F7 (proposed; 🔴)
   A5.5  certification                          not started (proposed)
@@ -296,7 +296,8 @@ and organization-service is implemented but inactive; after F7 organization-serv
 Organization while Auth keeps identities, memberships, join codes and invitations. A5.0 and A5.1 record the inventory, the authority
 map and proposed sub-stages and owner decisions; the A5.2 review of the ten Organization ADRs is recorded (A5 record §11). ADR-0039 was
 accepted (PR #255); on 2026-10-09 the owner accepted ADR-0031, 0026, 0028, 0029 and 0030, each separately, with the related ADR-0001
-and ADR-0004 metadata, carried by the grouped A5.2 documentation pull request (A5 record §11.9); ADR-0017, 0020, 0022, 0023 and
+and ADR-0004 metadata, merged as the grouped A5.2 documentation pull request (#256; A5 record §11.9); ADR-0023 was accepted on
+2026-10-09 (A5.2-I) on its own branch, pending its pull request, which also resolves OD-A4-8 once merged; ADR-0017, 0020, 0022 and
 0024 remain Proposed, and OD-A5-1 to OD-A5-5 remain open; design and ADR reviews proceed now, and every runtime or authority change waits for
 G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup.
 
