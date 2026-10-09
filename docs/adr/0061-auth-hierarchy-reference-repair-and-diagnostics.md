@@ -1,8 +1,23 @@
 # 0061. Auth hierarchy-reference repair and diagnostics
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.3 OD-A5-4 owner authorization) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
 - **Date:** 2026-10-09
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.3 OD-A5-4).** The architecture owner accepted the architectural design of this ADR as written (§3 to
+> §10). The Proposed-era notes below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is
+> replaced by this note, while "no reference-repair or diagnostic functionality is implemented or active" remains true. Acceptance:
+> 1. **Explicitly accepted:** the step-up consumed in its own committed transaction once per valid attempt, even when the attempt later
+>    returns `404`, `503` or fails in the placement transaction (§4 step 3); and **best-effort** audit of failed repairs after rollback,
+>    with no guarantee of durable central evidence for every failure (§6).
+> 2. **Implements and activates nothing.** Before any implementation or activation: the audit contract and the production Audit Service
+>    must support the repair actions through separately authorized consumer-first changes; `ensure` must be safely split into resolve and
+>    place; security, concurrency, audit and failure-path tests must pass; and the F6/F7 authority prerequisites must be met. This
+>    acceptance authorizes none of those operations.
+> 3. **Deferred:** OD-A5-4(e) (post-F7 dependency convergence and `local`-mode retirement) and the diagnostic CLI conventions, with OD-A5-5.
+> 4. **Relationships.** The "proposed relationships" paragraph below now takes effect in substance: the clarification of ADR-0040
+>    decision 2 is decided by this acceptance; ADR-0023, ADR-0042, ADR-0050 and ADR-0060
+>    are preserved. No other ADR is changed here; any backlink or clarification note requires a separate approval and commit.
 
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-4(a)–(d) (2026-10-09), recorded below;
 > OD-A5-4(e) stays open with OD-A5-5. This ADR is **Proposed**: it is not accepted, **no reference-repair or diagnostic functionality is
