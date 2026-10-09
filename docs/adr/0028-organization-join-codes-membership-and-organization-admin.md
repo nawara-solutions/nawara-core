@@ -1,12 +1,35 @@
 # 0028. Organization join codes, membership and organization-admin authority
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-F owner authorization; the registration license sentences revised before acceptance)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
 > **Forward note (2026-09-19):** the state machine gains `revoked` and the audience label moves from `user.role` to `organization_membership.audience`; existing users can join with `POST /auth/onboarding/join`. See [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md).
 >
 > **Forward note (2026-09-20):** "Operators and org admins have no step-up mechanism" remains true of the membership operations in this ADR. [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) Amendment 1 (DEC-1) extends Auth's step-up mechanism to **operators** for sensitive Organization Service operations (single-use, session-bound, purpose-bound and short-lived). Organization administrators still have no step-up mechanism, and no operation in this ADR changes.
+>
+> **Acceptance note (2026-10-09, A5.2-F).** Before acceptance the owner approved one normative revision, made in place while
+> Proposed: registration and join make **no commercial check**, as [ADR-0026](./0026-authentication-is-not-entitlement.md)
+> decision 4 (Accepted) governs; the original sentences are kept as history below. No other decision changes. Read as follows:
+> 1. **Entitlement.** The statements that payment-service decides entitlement or owns licenses, subscriptions and trials (Context,
+>    state machine) are historical; ADR-0026 governs (Auth makes no commercial check; paid capabilities enforce entitlement at the
+>    point of use). `requiresSubscription` is a non-authoritative hint, stored and returned, never enforced by Auth.
+> 2. **ADR-0030 changes (Proposed, implemented by migrations `0006` and `0007`).** The single-organization rule
+>    (`user_org_iff_member`), the membership's composite foreign key to `"user"(id, organizationId)`, `role` as the audience label,
+>    the `GET /auth/me` `membership` field and "revocation is future scope" describe the state before ADR-0030; they are not
+>    re-decided here and are reviewed with ADR-0030.
+> 3. **Events.** The membership and contact-verification events are written to Auth's transactional outbox in the same
+>    transaction as the state change ([ADR-0052](./0052-core-v1-capability-closure.md), Accepted). Their delivery is not active
+>    in production (`AUTH_EVENTS=off`; production messaging is A3M.8, separately authorized); "nothing delivers" and "not built
+>    now" describe 2026-09-18.
+> 4. **Unresolved questions.** 1, 2 and 4 are moot for Auth under ADR-0026 decision 4; their platform-side answers belong to the
+>    platforms and Billing and are not decided here. 3 (delivery channel) stays open operationally. 5 is addressed for Auth by
+>    ADR-0030 (Proposed). 6 is resolved by ADR-0029.
+> 5. **Authority boundary.** Join codes, memberships and organization-admin authority stay in Auth after the ownership transition
+>    ([ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), ADR-0040); Auth's foreign keys to its hierarchy
+>    rows, including the join code's composite key to `organization(id, platformId)`, are kept on the reference cache (ADR-0040
+>    decision 1). This acceptance authorizes no
+>    production or runtime change.
 
 
 > **Extends** [ADR-0020](./0020-organization-entity-and-platform-scoped-management.md),
@@ -14,8 +37,9 @@
 > [ADR-0026](./0026-authentication-is-not-entitlement.md) and
 > [ADR-0027](./0027-service-layer-security-model.md). **Replaces the client-supplied
 > `organizationId` + `role` registration contract that ADR-0004 assumed** (ADR-0005 is already superseded by
-> ADR-0026); the registration-time license question to payment-service (ADR-0004 as narrowed by ADR-0026) is
-> unchanged. ADR-0004 carries a forward note. Migration `0004`.
+> ADR-0026); (revised 2026-10-09) registration makes no license question: ADR-0026 decision 4 removed it (Stage 12.1).
+> *(Original: "the registration-time license question to payment-service (ADR-0004 as narrowed by ADR-0026) is unchanged.")*
+> ADR-0004 carries a backlink. Migration `0004`.
 
 ## Context
 
@@ -85,8 +109,10 @@ Constraints already in the repository:
 `POST /auth/register` takes `{ joinCode, email|phone, password }`. `organizationId`, `platformId`, `role`,
 `audience` and every other property are rejected by the validation pipe. In one transaction it spends a
 use of the code, creates a `kind=member` user (`role` is the opaque audience label) and creates the
-membership. A bad, expired, revoked or exhausted code and an unlicensed organization give the same
-generic 403. payment-service is asked once whether the organization is licensed (fail closed).
+membership. A bad, expired, revoked or exhausted code gives one generic 403 (revised 2026-10-09: registration makes no
+license or entitlement check, ADR-0026 decision 4). *(Original: "A bad, expired, revoked or exhausted code and an
+unlicensed organization give the same generic 403. payment-service is asked once whether the organization is licensed
+(fail closed).")*
 
 ### Membership
 `organization_membership(userId, organizationId, status)`, `status` in `pending | active | rejected`:
