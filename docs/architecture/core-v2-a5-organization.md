@@ -140,6 +140,21 @@ excluded. The production track (§7) is separate and owner-driven.
 | OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]` |
 | OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7 |
 
+### 10.1 OD-A5-3 design progress (2026-10-09)
+
+- **Policy direction approved by the owner:** exactly one active Owner per Company; controlled transfer; exceptional recovery.
+  Decisions OD-T1 (disable the former Owner's account), OD-T2 (Strategy A: a new `kind = owner` account with a pending owner row), OD-T3
+  (24-hour cool-down; completion requires delivered notification), OD-T4 (operator assignments preserved), OD-R1 (recovery stewards,
+  two-person approval, fresh MFA) and OD-R3 (at least 7 days for exceptional recovery).
+- **Proposed design:** [ADR-0059](../adr/0059-company-ownership-transfer-and-exceptional-owner-recovery.md) (**Proposed**, not
+  accepted, nothing implemented). It records the `pending → active → retired` lifecycle, the database invariant, the steward token and
+  guard contract, Company-level serialization, the cross-service dependencies (audit contract consumer-first, service-kit validation)
+  and two default-off activation gates (`OWNER_TRANSFER`, `OWNER_RECOVERY`).
+- **Open:** OD-S1 (steward provisioning: its own threat model, nothing authorized), OD-S2 (Release and Audit response mapping;
+  deferred, fail closed today), OD-P1 (abandoned recipient-contact reuse details), OD-R2 (evidence standard), OD-R4 (external legal or
+  notarial step), multi-company ownership (A5.3), Organization lifecycle interaction (OD-A5-1).
+- **Not done:** no ADR status change (ADR-0017, ADR-0024 and ADR-0050 unchanged), no runtime change, no activation. A5.3 is not complete.
+
 ## 11. A5.2 ADR review record
 
 **Status: review completed, decisions pending** *(at review time; the owner's later decisions are in §11.9)*. The read-only review ran on `main` at `ffdb604` (2026-10-09). **No ADR status is
