@@ -5,15 +5,15 @@
   (§11; read-only review on `main` at `ffdb604`, 2026-10-09). The review record (PR #254) changed no ADR status; the owner's
   subsequent, individually approved ADR decisions are recorded in **§11.9** (ADR-0039 Accepted on `main`, PR #255; ADR-0031, 0026,
   0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request, merged as PR #256; ADR-0023 accepted on
-  2026-10-09 under A5.2-I, merged as PR #257). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remained Proposed; their owner dispositions are recorded on
-  2026-10-09 (§11.9: 0017 superseded by ADR-0059, 0020 by ADR-0040, 0022 partially superseded by ADR-0040 and 0022 and 0024 deferred
-  to A6), and whether A5.2 is complete is a separate owner decision. OD-A5-3 is
+  2026-10-09 under A5.2-I, merged as PR #257). **A5.2 — COMPLETED (2026-10-09)** (owner decision): ADR-0017, 0020, 0022 and 0024 remained Proposed until their owner
+  dispositions of 2026-10-09 (§11.9: 0017 superseded by ADR-0059, 0020 by ADR-0040, 0022 partially superseded by ADR-0040 and 0022 and
+  0024 kept Proposed, deferred to A6), merged with PR #263. OD-A5-3 is
   decided by ADR-0059, accepted on 2026-10-09 and merged as PR #258 (§10.1). The OD-A5-1 policy is decided by ADR-0060, accepted on
   2026-10-09 and merged as PR #259 (§10.0). OD-A5-4(a)–(d) are decided by ADR-0061, accepted on 2026-10-09 and merged as
   PR #260 (§10.2). The OD-A5-2 architecture policy is decided by ADR-0062, accepted on 2026-10-09 and merged as PR #261
   (§10.3). The OD-A5-5 and OD-A5-4(e) architecture policies are decided by ADR-0063, accepted on 2026-10-09 and merged as
-  PR #262 (§10.4). **A5.3: ARCHITECTURE DESIGN COMPLETE — RUNTIME NOT IMPLEMENTED — PRODUCTION NOT ACTIVATED**; formally closed only
-  after the closure pull request is merged and its merged documentation verified (§10.5).
+  PR #262 (§10.4). **A5.3: ARCHITECTURE DESIGN COMPLETE — RUNTIME NOT IMPLEMENTED — PRODUCTION NOT ACTIVATED**; **A5.3 — CLOSED (2026-10-09,
+  architecture only)**: closure PR #263 merged at `a0fd8a1` and its merged documentation verified (§10.5).
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -129,8 +129,8 @@ redeploys unless images are pinned.
 | Sub-stage | Objective | Depends on | Files | Acceptance | Validation | Effort (Claude-assisted) |
 |---|---|---|---|---|---|---|
 | A5.1 | this record; A4 closure wording | A5.0 | this record, the roadmap, the A4 record | merged; every A5 item labelled; no runtime change | `check:repo`, `git diff --check`, links; Core CI | ✅ merged (PR #253) |
-| A5.2 | ADR reviews, one ADR at a time (§11); each status change separately authorized | A5.1 | review record: this record and the roadmap; then `docs/adr/00xx-*.md` and the ADR index, one ADR per status-change PR | each review recorded (**done**, §11); statuses change only on explicit authorization (**pending**) | docs checks; Core CI per status-change PR | 10–20 h (review record done; about 12–18 h remain, §11.8) |
-| A5.3 | post-F7 design: Auth as reference cache in steady state, retiring local mode and the legacy Company insert, the dependency decision, CLI convergence plan, and lifecycle only if decided in scope | A5.1, A5.2, owner decisions (§10) | this record; possibly a new ADR (Proposed) | designs owner-reviewed; implementation items labelled 🔴 (**design complete**; ADR-0059 to ADR-0063; closure pending its pull request, §10.5) | docs checks; Core CI | 10–25 h |
+| A5.2 | ADR reviews, one ADR at a time (§11); each status change separately authorized | A5.1 | review record: this record and the roadmap; then `docs/adr/00xx-*.md` and the ADR index, one ADR per status-change PR | each review recorded (**done**, §11); statuses change only on explicit authorization (**done**: every reviewed ADR has an owner disposition) — **COMPLETED 2026-10-09** | docs checks; Core CI per status-change PR | 10–20 h (review record done; about 12–18 h remained at review time, §11.8; completed 2026-10-09) |
+| A5.3 | post-F7 design: Auth as reference cache in steady state, retiring local mode and the legacy Company insert, the dependency decision, CLI convergence plan, and lifecycle only if decided in scope | A5.1, A5.2, owner decisions (§10) | this record; possibly a new ADR (Proposed) | designs owner-reviewed; implementation items labelled 🔴 (**design complete**; ADR-0059 to ADR-0063) — **CLOSED 2026-10-09, architecture only** (PR #263, §10.5) | docs checks; Core CI | 10–25 h |
 | A5.4 | implementation of the approved A5.3 designs | **F7** and a refreshed baseline | `apps/auth-service/src/hierarchy/*`, `src/cli/owner-tools.ts`, `src/config/app-config.ts`; `apps/organization-service/src/cli/ownership.ts`, `src/admin/*`; their tests | the V2 protocol: focused tests and mutants, service regression, `test:e2e:auth-organization` | full Core CI per pull request | ⚪ about 30–150 h, set by A5.3 |
 | A5.5 | certification | A5.4 | this record, the roadmap | the criteria A5.3 fixes | records-based; merged pull requests' CI | 3–6 h |
 
@@ -168,7 +168,8 @@ excluded. The production track (§7) is separate and owner-driven.
 - **Unresolved implementation details:** the exact OD-L5 reference-contract shape and the OD-L6 reason vocabulary.
 - **Open:** retention and legal erasure; event-driven propagation (E3, after A3M.8); OD-L7 (commercial settlement restrictions);
   an organization-scoped member restriction.
-- **Blocked:** any lifecycle runtime until F6/F7 (§6, §7). No lifecycle functionality is implemented or activated. A5.3 is not complete.
+- **Blocked:** any lifecycle runtime until F6/F7 (§6, §7). No lifecycle functionality is implemented or activated. A5.3 was not complete then; it is now CLOSED (2026-10-09, architecture
+  only, §10.5), and no lifecycle runtime is implemented.
 
 ### 10.1 OD-A5-3 design progress (2026-10-09)
 
@@ -185,8 +186,8 @@ excluded. The production track (§7) is separate and owner-driven.
   notarial step), multi-company ownership (A5.3), Organization lifecycle interaction (OD-A5-1).
 - **Relationships (separately approved, on the same branch):** ADR-0050 partly superseded (its Stage 19 scope passages only); ADR-0017
   marked partly superseded (permanence and no-transfer only) and still Proposed; ADR-0024 amended by a forward note and still Proposed.
-- **Not done:** no steward provisioning (OD-S1 deferred), no runtime change, no migration, no activation of either gate. A5.3 is not
-  complete.
+- **Not done:** no steward provisioning (OD-S1 deferred), no runtime change, no migration, no activation of either gate. A5.3 was not complete then; it is now CLOSED
+  (2026-10-09, architecture only, §10.5).
 
 
 ### 10.2 OD-A5-4 design progress (2026-10-09)
@@ -228,7 +229,8 @@ excluded. The production track (§7) is separate and owner-driven.
 - **Future implementation prerequisites (separately authorized):** the provisioning-credential retirement procedure; `register-caller.sh` hard-codes Auth's `"allowedPlatforms":[]` and
   rebuilds the policy on every run, and has no deregistration path; ADR-0060 L2 for the initial state and backfill; a consumer-first audit action for any future bootstrap.
 - **Open:** multi-company creation and ownership; future Company onboarding; factor-only step-up for Platform and Organization
-  creation; OD-A5-4(e); OD-A5-5; OD-S1. Nothing is implemented, provisioned or activated; A5.3 is not complete.
+  creation; OD-A5-4(e); OD-A5-5; OD-S1. Nothing is implemented, provisioned or activated; A5.3 was not complete then and is now CLOSED (2026-10-09, architecture only,
+  §10.5).
 
 ### 10.4 OD-A5-5 and OD-A5-4(e) design progress (2026-10-09)
 
@@ -259,8 +261,9 @@ excluded. The production track (§7) is separate and owner-driven.
 
 ### 10.5 A5.3 closure record (2026-10-09)
 
-**ARCHITECTURE DESIGN COMPLETE — RUNTIME NOT IMPLEMENTED — PRODUCTION NOT ACTIVATED.** A5.3 is shown as **pending its closure pull
-request**: it is formally CLOSED only after that pull request is merged and its merged documentation is verified.
+**ARCHITECTURE DESIGN COMPLETE — RUNTIME NOT IMPLEMENTED — PRODUCTION NOT ACTIVATED.** **A5.3 — CLOSED (2026-10-09, architecture only).** The closure pull request
+(#263) merged at `a0fd8a1`, and its merged documentation was independently verified on `main`. No production transition has occurred.
+A5 as a whole stays OPEN: A5.4 and A5.5 remain gated (blocked until F7, after G6).
 
 | Accepted ADR | Settles | Merged |
 |---|---|---|
@@ -275,9 +278,9 @@ request**: it is formally CLOSED only after that pull request is merged and its 
 - **A5.2 dispositions recorded with this closure:** ADR-0017 superseded by ADR-0059 (ADR-0050's withdrawal of the force-reset CLI
   stands); ADR-0020 superseded by ADR-0040 (its rules survive in ADR-0042 decision 7, the Auth-local read in ADR-0023 D1(a)); ADR-0022
   Proposed, partially superseded by ADR-0040, its surviving decisions (append-only operator–Platform assignments, company-wide Owner
-  scope, no `platformId` token claim, no `User.platformId`) deferred to A6; ADR-0024 Proposed, deferred to A6. ADR-0040 does not yet
-  carry backlinks to ADR-0020 and ADR-0022, and ADR-0059 records only its partial supersession of ADR-0017 (the whole rests on the
-  owner's disposition); those reciprocal notes need a separate approval.
+  scope, no `platformId` token claim, no `User.platformId`) deferred to A6; ADR-0024 Proposed, deferred to A6. The reciprocal notes
+  were added on 2026-10-09 with the formal closure: ADR-0040 records its supersession of ADR-0020 and partial supersession of ADR-0022,
+  ADR-0059 records the whole-ADR disposition of ADR-0017, and ADR-0042 records ADR-0020's new status.
 - **Remaining A6 governance:** acceptance of ADR-0022's surviving decisions and of ADR-0024 (with ADR-0030, ADR-0059 and ADR-0060
   taken into account), and their open questions (`Operator.companyId`, Owner `isActive` versus status, per-assignment permissions,
   multi-company).
@@ -285,7 +288,7 @@ request**: it is formally CLOSED only after that pull request is merged and its 
   first-touch `ensure`, Organization Service's admin routes behind its inactive authority, the database-integrity migrations) exist;
   **none** of the features decided by ADR-0059 to ADR-0063 is implemented.
 - **Future A5.4 prerequisites (blocked until F7, after G6):** consumer-first audit-contract changes; Organization Service lifecycle (L2,
-  L3) with the `ACTIVE` backfill and a read-only `verify`; Auth E5, the `ensure` resolve/place split and repair, the diagnostic CLI, the
+  L3) with the `ACTIVE` backfill and a read-only `verify`; Auth E5, the `ensure` resolve/place split and repair, ADR-0059 owner transfer and steward recovery (after OD-S1), the diagnostic CLI, the
   readiness mismatch check, the static boundary test, the owner lifecycle behind default-off gates and `EnvReader` convergence; the
   `register-caller.sh` scope and deregistration tooling and the provisioning-credential retirement design; consumer E1 adoption; later,
   the capability-based removal of legacy modes and E3 after A3M.8.
@@ -411,7 +414,8 @@ The one-ADR-at-a-time rule applies to **status changes**; text corrections of Pr
 ### 11.8 Effort
 
 Remaining A5.2 work (Claude-assisted): 0039 about 1 h; 0031 1–2 h; membership cluster 4–6 h; 0023 2–3 h; 0017 2–3 h after OD-A5-3;
-0024, 0020, 0022 records 2–3 h. About **12–18 h**, plus one Core CI run per pull request and owner decision time.
+0024, 0020, 0022 records 2–3 h. About **12–18 h**, plus one Core CI run per pull request and owner decision time. *(Estimate at
+review time; A5.2 was completed on 2026-10-09, so no A5.2 work remains.)*
 
 ### 11.9 Outcomes of the A5.2 decisions (2026-10-09)
 

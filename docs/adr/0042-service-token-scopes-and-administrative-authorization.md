@@ -31,6 +31,12 @@
 > administrative dependencies are preserved: first-touch `ensure`, ADR-0060 E5 lifecycle reads and ADR-0061 repair. Every other decision
 > stands.
 
+> **Status clarification: [ADR-0020](./0020-organization-entity-and-platform-scoped-management.md)** (2026-10-09, A5 formal closure, architecture-owner authorization; a relationship note; this ADR's status, decisions and earlier notes are unchanged). ADR-0020
+> is now **Superseded by [ADR-0040](./0040-organization-ownership-migration-decisions.md)**; where this ADR describes ADR-0020 as
+> Proposed (the related-ADR line, Context and decision 7), that is accurate for its original date. The management authorization rules
+> decision 7 adopted from ADR-0020, ADR-0022 and ADR-0024 **remain valid**. ADR-0022 and ADR-0024 remain **Proposed**, deferred to A6.
+> No current hierarchy authorization boundary changes.
+
 > Related, none modified: [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (header status Proposed; its token mechanism is implemented in service-kit), [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), [ADR-0040](./0040-organization-ownership-migration-decisions.md) (Proposed), [ADR-0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) (Proposed). The analysis, evidence and decision matrix are in the [BD-4 study](../architecture/stage-10/stage-10-bd4-service-authorization-study.md); the owner's answers are in the [owner-decision sheet](../architecture/stage-10/stage-10-bd4-owner-decisions.md). This ADR does **not amend** ADR-0033: it keeps its authentication and adds the authorization layer that ADR-0033 does not define. ADR-0040, ADR-0041, ADR-0020, ADR-0022 and ADR-0024 keep their own header status; this ADR adopts, for hierarchy administration, the rules it names from them and does not change those ADRs.
 
 ## Context

@@ -40,6 +40,12 @@
 > recovery, CI and development prerequisites are certified. No new emergency authority, automated rollback or database-repair bypass is
 > authorized. A1.4's AD-5 emergency-mechanism wording and A2.6's one-way-door semantics are preserved unchanged.
 
+> **Supersedes [ADR-0020](./0020-organization-entity-and-platform-scoped-management.md) and partly supersedes
+> [ADR-0022](./0022-company-and-platform-entities-with-operator-assignment.md)** (2026-10-09, A5 formal closure, architecture-owner authorization; a relationship note; this ADR's status, decisions and earlier notes are unchanged). Recorded by the owner's
+> A5.3 closure dispositions (2026-10-09). **ADR-0020** is superseded as a whole; it was never Accepted. **ADR-0022** is superseded only
+> on Auth's ownership of the Company and Platform hierarchy, the Platform routes in Auth and the bootstrap's Company insert into Auth;
+> it stays **Proposed** for its surviving, implemented operator–Platform assignment and token decisions, deferred to A6.
+
 > **Adoption record (2026-09-20).** Decisions 1 to 4 were adopted in Amendment 1; decisions 5 and 6 and the added decision 7 were accepted in Amendment 2; the ADR is **Accepted**. The original text below is kept unchanged for the historical record and still says "Proposed" in its own wording; where an amendment differs, **the amendment governs, and Amendment 2 governs over Amendment 1**.
 
 > **Partly supersedes [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md)** (in effect: ADR-0040 is Accepted, 2026-09-20), on the passages listed under "Amendments to ADR-0039" only; the rest of ADR-0039 (phases, stable ids, verification, freeze, single cutover point) stands. Because the ADR README defines no "amended" status, the record on acceptance follows the repository's precedent for partial replacement (ADR-0001, ADR-0010): ADR-0039's status becomes "partly superseded by ADR-0040", the two ADRs link to each other, and a forward note is added to ADR-0039. ADR-0039 is **not edited** by this draft (**update 2026-09-20:** for decisions 1 to 4, adopted on that date, it now carries the forward note and its status reads partly superseded; see Amendment 1). The analysis behind every choice below is in the [Stage 10.0 decision study](../architecture/stage-10/stage-10.0-ownership-migration-decisions.md) and the [Stage 10 study](../architecture/stage-10-organization-ownership-migration-study.md).

@@ -23,6 +23,15 @@
 > this ADR. No ownership-transfer or recovery functionality is implemented or activated. §12 is kept unchanged as history; this ADR's
 > status and decisions are unchanged.
 
+> **Relationship with [ADR-0017](./0017-single-owner-with-secret-key-force-reset.md) after the A5.3 closure** (2026-10-09, A5 formal closure, architecture-owner authorization; a relationship note; this ADR's status, decisions and earlier notes are unchanged).
+> Under the owner's final A5.3 disposition (2026-10-09), ADR-0017 is **superseded as a whole**. This ADR directly supersedes its
+> permanent, non-transferable Owner model; [ADR-0050](./0050-platform-administration-and-verified-human-authority.md) (the withdrawn
+> force-reset CLI), [ADR-0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md),
+> [ADR-0027](./0027-service-layer-security-model.md) and
+> [ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) cover its other historical concerns. The earlier
+> partial-supersession text of this ADR (the acceptance note, the relationships above and §14) remains accurate for its original date.
+> The Owner transfer and recovery decisions are unchanged.
+
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-3 (2026-10-09): exactly one active
 > Owner per Company, controlled transfer, and exceptional recovery, with the decisions OD-T1 to OD-T4, OD-R1 and OD-R3 recorded below.
 > This ADR is **Proposed**: it is not accepted, **nothing in it is implemented**, and it activates nothing. Every implementation stage
