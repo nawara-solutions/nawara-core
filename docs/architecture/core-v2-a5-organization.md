@@ -5,8 +5,8 @@
   (§11; read-only review on `main` at `ffdb604`, 2026-10-09). The review record (PR #254) changed no ADR status; the owner's
   subsequent, individually approved ADR decisions are recorded in **§11.9** (ADR-0039 Accepted on `main`, PR #255; ADR-0031, 0026,
   0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request, merged as PR #256; ADR-0023 accepted on
-  2026-10-09 under A5.2-I on its own branch, pending its pull request). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remain
-  Proposed.
+  2026-10-09 under A5.2-I, merged as PR #257). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remain Proposed. OD-A5-3 is
+  decided by ADR-0059, accepted on 2026-10-09 on its own branch, pending its pull request (§10.1).
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -136,9 +136,27 @@ excluded. The production track (§7) is separate and owner-driven.
 |---|---|---|
 | OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision exists; organization-service has no status column or delete path |
 | OD-A5-2 | **OPEN-5**: whether initial Platforms or Organizations must exist before activation in a fresh environment | ADR-0040 A2.8; not blocking Stage 10.1 |
-| OD-A5-3 | **Owner transfer**: in A5 scope or not | ADR-0017 keeps one owner per Company permanently; no transfer decision exists |
+| OD-A5-3 | **Owner transfer**: in A5 scope or not | ADR-0017 keeps one owner per Company permanently; no transfer decision exists. **Decided 2026-10-09** (§10.1; ADR-0059) |
 | OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]` |
 | OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7 |
+
+### 10.1 OD-A5-3 design progress (2026-10-09)
+
+- **Policy direction approved by the owner:** exactly one active Owner per Company; controlled transfer; exceptional recovery.
+  Decisions OD-T1 (disable the former Owner's account), OD-T2 (Strategy A: a new `kind = owner` account with a pending owner row), OD-T3
+  (24-hour cool-down; completion requires delivered notification), OD-T4 (operator assignments preserved), OD-R1 (recovery stewards,
+  two-person approval, fresh MFA) and OD-R3 (at least 7 days for exceptional recovery).
+- **Design:** [ADR-0059](../adr/0059-company-ownership-transfer-and-exceptional-owner-recovery.md), **Accepted on 2026-10-09 (A5.3
+  owner authorization) on its own branch, pending its pull request**; nothing implemented or activated. It records the `pending → active → retired` lifecycle, the database invariant, the steward token and
+  guard contract, Company-level serialization, the cross-service dependencies (audit contract consumer-first, service-kit validation)
+  and two default-off activation gates (`OWNER_TRANSFER`, `OWNER_RECOVERY`).
+- **Open:** OD-S1 (steward provisioning: its own threat model, nothing authorized), OD-S2 (Release and Audit response mapping;
+  deferred, fail closed today), OD-P1 (abandoned recipient-contact reuse details), OD-R2 (evidence standard), OD-R4 (external legal or
+  notarial step), multi-company ownership (A5.3), Organization lifecycle interaction (OD-A5-1).
+- **Relationships (separately approved, on the same branch):** ADR-0050 partly superseded (its Stage 19 scope passages only); ADR-0017
+  marked partly superseded (permanence and no-transfer only) and still Proposed; ADR-0024 amended by a forward note and still Proposed.
+- **Not done:** no steward provisioning (OD-S1 deferred), no runtime change, no migration, no activation of either gate. A5.3 is not
+  complete.
 
 ## 11. A5.2 ADR review record
 
@@ -264,7 +282,7 @@ Remaining A5.2 work (Claude-assisted): 0039 about 1 h; 0031 1–2 h; membership 
 first was merged on its own (PR #255); the others are carried by **one grouped documentation pull request**, under the owner's grouping
 rule of 2026-10-09: compatible ADR changes may share a pull request only when each ADR is individually reviewed, explicitly approved
 by the owner, changed separately and recorded in its own commit; this is not bulk acceptance and does not bypass the required Core CI.
-**Until that pull request is merged, these decisions are recorded on its branch, not on `main`.**
+That pull request was merged as PR #256; ADR-0023 followed separately (PR #257).
 
 | ADR | Outcome | Approval |
 |---|---|---|
@@ -277,9 +295,9 @@ by the owner, changed separately and recorded in its own commit; this is not bul
 | [0029](../adr/0029-organization-admin-invitations.md) | Accepted with a note (no normative change); unresolved questions 1–3 stay open; partly superseded by ADR-0030 (metadata) | A5.2-G, A5.2-H |
 | [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) | Accepted after two in-place revisions: a member has 0..N memberships and zero grants no organization authority (owner decision of 2026-09-20, migration `0009`); joining makes no commercial check | A5.2-H |
 | [0001](../adr/0001-generic-organization-id-scoping-claim.md) | its existing partial supersession by ADR-0030 is formal (metadata only) | A5.2-H |
-| [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | Accepted after three in-place revisions: the owner rule (active owner, platform in own company, else the collapsed `404`); the two-call pattern uses `GET /auth/admin/organizations/:id`; the post-transition cache-miss contract (owner decision D1(a): local reads of validated reference rows, collapsed `404`, no ensure-on-read, no new Organization dependency, no `503` for a miss). **Recorded on the ADR-0023 branch until its pull request is merged** | A5.2-I |
-| [0011](../adr/0011-operator-time-boxed-login-code.md), [0014](../adr/0014-schedule-anchored-operator-duration.md) | Accepted, **partly** superseded by ADR-0023 (business-day gating; platform-calendar combination); their earlier "Superseded by ADR-0023" status lines overstated it (metadata only) | A5.2-I, same branch |
-| 0017, 0020, 0022, 0024 | **Proposed**, unchanged (§11.6) | open |
+| [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | Accepted after three in-place revisions: the owner rule (active owner, platform in own company, else the collapsed `404`); the two-call pattern uses `GET /auth/admin/organizations/:id`; the post-transition cache-miss contract (owner decision D1(a): local reads of validated reference rows, collapsed `404`, no ensure-on-read, no new Organization dependency, no `503` for a miss). **Merged as PR #257** | A5.2-I |
+| [0011](../adr/0011-operator-time-boxed-login-code.md), [0014](../adr/0014-schedule-anchored-operator-duration.md) | Accepted, **partly** superseded by ADR-0023 (business-day gating; platform-calendar combination); their earlier "Superseded by ADR-0023" status lines overstated it (metadata only) | A5.2-I; merged as PR #257 |
+| 0017, 0020, 0022, 0024 | **Proposed**; 0017 marked partly superseded and 0024 amended by ADR-0059 (§10.1) | open |
 
 **Architecture as now recorded (no runtime change):** registration, onboarding join and invitation acceptance make no commercial
 check; a member has 0..N memberships and zero grants no organization authority; Auth owns identities, memberships, join codes and
@@ -298,7 +316,7 @@ separate mechanism; organization-service's hierarchy authority is **not** activa
   to Organization Service but not yet in Auth's reference rows answers the collapsed `404`). A test item for later, separately
   authorized work; reference-cache consistency, freshness and lifecycle stay with A5.3, OD-A5-1 and OD-A5-4.
 - **OD-A4-8** (scope: review ADR-0023 and ADR-0026 for possible acceptance): both decisions are taken. ADR-0026 is Accepted on `main`
-  (PR #256); ADR-0023 is Accepted on its branch. OD-A4-8 is **resolved once the ADR-0023 pull request is merged**, not before.
+  (PR #256); ADR-0023 is Accepted on `main` (PR #257). OD-A4-8 is therefore **resolved**.
 
 ## 12. Validation per sub-stage
 

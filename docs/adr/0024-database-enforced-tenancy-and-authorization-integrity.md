@@ -4,6 +4,13 @@
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
 
+> **Forward note (2026-10-09, A5.3 owner authorization; an amendment relationship, not a supersession).** Accepted
+> [ADR-0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md) establishes the future Owner lifecycle and
+> cardinality design that extends "Owner cardinality is policy, not architecture" below: owner rows become `pending → active → retired`,
+> `owner_single_per_company_v1` is to be replaced by a partial unique index on **active** owners, and a deferred invariant keeps exactly
+> one active Owner per owned Company. Immutable `kind`, `companyId` and `userId` are kept. This ADR stays **Proposed**; its text is
+> unchanged and its other tenancy and database questions are not settled by ADR-0059. Nothing is implemented.
+
 > **Forward note (2026-09-19):** `user.organizationId`, `user_org_iff_member`, the `(userId, organizationId)` composite key and view `user_platform` are replaced by the membership model and view `member_platform` in [ADR-0030](./0030-multi-organization-membership-and-revoked-state.md). Everything else here stands.
 
 
