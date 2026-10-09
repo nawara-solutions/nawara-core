@@ -1,8 +1,17 @@
 # 0020. Organization entity and platform-scoped organization management
 
-- **Status:** Proposed
+- **Status:** Superseded by [ADR-0040](./0040-organization-ownership-migration-decisions.md) (2026-10-09, A5.3 closure owner disposition; never Accepted)
 - **Date:** 2026-09-18
 - **Deciders:** Anwar (project owner)
+
+> **Disposition (2026-10-09, A5.3 closure, architecture-owner authorization).** This ADR is **superseded by ADR-0040** as a whole. It was never Accepted; its
+> original proposal and historical context below are kept unchanged. Organization Service owns the authoritative Company, Platform and
+> Organization entities (ADR-0040 decisions 1–2 and A1.2, with [ADR-0031](./0031-organization-service-intended-owner-of-the-hierarchy.md)
+> and [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md)); the Auth-owned Organization design here is
+> obsolete, and Auth keeps only validated references. The organization-management authorization rules survive in Accepted
+> [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) decision 7, and the surviving Auth-local read
+> (`GET /auth/admin/organizations/:id`) is governed by Accepted [ADR-0023](./0023-platform-access-check-and-operator-login-decoupling.md)
+> D1(a). The Auth administration routes proposed here are **not** newly authorized by this disposition.
 
 > **Forward note (2026-09-19):** [ADR-0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) records that organization-service is the *intended* future owner of Company, Platform and Organization (reversing this ADR's rejection of a dedicated organization-service for the long term). **Nothing changes today:** auth-service's tables stay as they are, and the cross-service mechanism is a separate decision when organization-service is built.
 

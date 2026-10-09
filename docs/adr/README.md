@@ -86,7 +86,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0017](./0017-single-owner-with-secret-key-force-reset.md) | Single owner per Company, permanently, with a CLI secret-key force-reset tool | Superseded by ADR-0059 (2026-10-09, A5.3 closure owner disposition; never Accepted; force-reset CLI withdrawn by ADR-0050) |
 | [0018](./0018-rabbitmq-as-async-message-broker.md) | RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq` | Proposed |
 | [0019](./0019-twilio-as-sms-gateway-provider.md) | Twilio as the SMS gateway provider | Accepted (2026-09-24, Stage 16.8 acceptance note) |
-| [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Proposed |
+| [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Superseded by ADR-0040 (2026-10-09, A5.3 closure owner disposition; never Accepted; management rules survive in ADR-0042 decision 7, the Auth-local read in ADR-0023 D1(a)) |
 | [0021](./0021-payment-service-platform-scoped-authorization.md) | Synchronous, fail-closed platform-scope check for payment-service's organization-scoped admin actions | Proposed |
 | [0022](./0022-company-and-platform-entities-with-operator-assignment.md) | Company and Platform entities, with many-to-many operator↔platform assignment | Proposed |
 | [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Accepted (2026-10-09, A5.2-I owner authorization; three passages revised before acceptance) |
