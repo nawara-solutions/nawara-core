@@ -1,7 +1,9 @@
 # Core V2 A5: organization
 
 - **Status:** RECORD of the A5.0 discovery (read-only, 2026-10-08, on `main` at `f90787a`, the PR #252 merge that closed A4) and of
-  **A5.1: the A5 architecture and scope record**. **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
+  **A5.1: the A5 architecture and scope record** (merged, PR #253, `ffdb604`, 24/24 checks), and of **A5.2: the ADR review record**
+  (§11; read-only review on `main` at `ffdb604`, 2026-10-09; review completed, owner decisions pending, **no ADR status changed**).
+  **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
 - **Labels.** **[CURRENT]**: true on `main` today. **[TARGET: post-F7]**: the state the Accepted decisions define once F7 is complete.
@@ -115,8 +117,8 @@ redeploys unless images are pinned.
 
 | Sub-stage | Objective | Depends on | Files | Acceptance | Validation | Effort (Claude-assisted) |
 |---|---|---|---|---|---|---|
-| A5.1 | this record; A4 closure wording | A5.0 | this record, the roadmap, the A4 record | merged; every A5 item labelled; no runtime change | `check:repo`, `git diff --check`, links; Core CI | done with this record |
-| A5.2 | ADR reviews, one ADR at a time (§11); each status change separately authorized | A5.1 | `docs/adr/00xx-*.md`, the ADR index | each review recorded; statuses change only on explicit authorization | docs checks; Core CI per status-change PR | 10–20 h |
+| A5.1 | this record; A4 closure wording | A5.0 | this record, the roadmap, the A4 record | merged; every A5 item labelled; no runtime change | `check:repo`, `git diff --check`, links; Core CI | ✅ merged (PR #253) |
+| A5.2 | ADR reviews, one ADR at a time (§11); each status change separately authorized | A5.1 | review record: this record and the roadmap; then `docs/adr/00xx-*.md` and the ADR index, one ADR per status-change PR | each review recorded (**done**, §11); statuses change only on explicit authorization (**pending**) | docs checks; Core CI per status-change PR | 10–20 h (review record done; about 12–18 h remain, §11.8) |
 | A5.3 | post-F7 design: Auth as reference cache in steady state, retiring local mode and the legacy Company insert, the dependency decision, CLI convergence plan, and lifecycle only if decided in scope | A5.1, A5.2, owner decisions (§10) | this record; possibly a new ADR (Proposed) | designs owner-reviewed; implementation items labelled 🔴 | docs checks; Core CI | 10–25 h |
 | A5.4 | implementation of the approved A5.3 designs | **F7** and a refreshed baseline | `apps/auth-service/src/hierarchy/*`, `src/cli/owner-tools.ts`, `src/config/app-config.ts`; `apps/organization-service/src/cli/ownership.ts`, `src/admin/*`; their tests | the V2 protocol: focused tests and mutants, service regression, `test:e2e:auth-organization` | full Core CI per pull request | ⚪ about 30–150 h, set by A5.3 |
 | A5.5 | certification | A5.4 | this record, the roadmap | the criteria A5.3 fixes | records-based; merged pull requests' CI | 3–6 h |
@@ -134,18 +136,122 @@ excluded. The production track (§7) is separate and owner-driven.
 | OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]` |
 | OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7 |
 
-## 11. ADR review priorities
+## 11. A5.2 ADR review record
 
-Reviews are read-only and recorded one ADR at a time; a status change is a separate, explicit owner authorization (ADR index rules).
+**Status: review completed, decisions pending.** The read-only review ran on `main` at `ffdb604` (2026-10-09). **No ADR status is
+changed by A5.2's review record**, and no ADR file is edited by it. Every **"recommend ACCEPT"** below is a recommendation of this
+review, **not an approval and not a completed acceptance**: under the ADR index rules (OD-A1-1) an ADR becomes Accepted only on the
+architecture owner's explicit approval, recorded in its status line, one ADR at a time, each in its own pull request with Core CI.
+Merge, implementation or this record are not approval.
 
-| ADR | Review | Reason |
+Recommendation labels: **ACCEPT** (recommend acceptance as written), **REVISE** (correct the Proposed text in place first, then
+decide), **DEFER** (no status decision before the named prerequisite), **RETAIN** (keep Proposed, no action planned).
+
+### 11.1 The ten ADRs and their current statuses
+
+| ADR | Title (short) | Current status |
 |---|---|---|
-| [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) | now | single owner implemented; the force-reset CLI is not to be built |
-| [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | now | implemented in Auth; carried forward from OD-A4-8 |
-| [0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md), [0029](../adr/0029-organization-admin-invitations.md), [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) | now | membership, join codes and invitations stay in Auth after F7 |
-| [0039](../adr/0039-organization-ownership-and-cross-service-migration-authority.md) | now | text reconciliation with Accepted ADR-0040, which partly supersedes it |
-| [0031](../adr/0031-organization-service-intended-owner-of-the-hierarchy.md) | now for its intent | full acceptance arguably after F7 |
-| [0020](../adr/0020-organization-entity-and-platform-scoped-management.md), [0022](../adr/0022-company-and-platform-entities-with-operator-assignment.md), [0024](../adr/0024-database-enforced-tenancy-and-authorization-integrity.md) | review now; acceptance after F7 | they describe the hierarchy and database-enforced tenancy inside Auth, which becomes a reference cache after F7 |
+| [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) | single owner per Company; CLI force-reset | Proposed (force-reset CLI never built; withdrawn from Core V1 by Accepted ADR-0050) |
+| [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) | Organization entity, platform-scoped management | Proposed |
+| [0022](../adr/0022-company-and-platform-entities-with-operator-assignment.md) | Company, Platform, PlatformAssignment | Proposed |
+| [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | platform-access check; operator login decoupled from calendars | Proposed |
+| [0024](../adr/0024-database-enforced-tenancy-and-authorization-integrity.md) | database-enforced tenancy and authorization integrity | Proposed |
+| [0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md) | join codes, membership, organization-admin authority | Proposed |
+| [0029](../adr/0029-organization-admin-invitations.md) | organization-admin invitations | Proposed |
+| [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) | multi-organization membership, REVOKED | Proposed |
+| [0031](../adr/0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service as intended hierarchy owner | Proposed (amended 2026-09-19: mechanism not designed) |
+| [0039](../adr/0039-organization-ownership-and-cross-service-migration-authority.md) | ownership and cross-service migration authority | Proposed, **partly superseded by [ADR-0040](../adr/0040-organization-ownership-migration-decisions.md)** (Accepted 2026-09-20) on the passages its "Amendments to ADR-0039" lists; the rest stands. A5.2 preserves this supersession |
+
+### 11.2 Decision and dependency matrix
+
+"Evidence" is G6, F6 or F7 evidence. Acceptance approves a decision; it does not implement or certify it, so no status decision below
+requires executing G6, G7, F6 or F7. The column names where the natural decision point lies.
+
+| ADR | Decision | Depends on | Compatible with certified V1 | Decidable now | Evidence | Recommendation |
+|---|---|---|---|---|---|---|
+| 0017 | exactly one owner per Company, permanently; a CLI secret-key force-reset | 0009, 0010, 0016, 0022, 0024, 0025, 0027, 0050 | single owner: yes; the CLI and the "dual loss is unrecoverable" consequence: no (§11.3) | after OD-A5-3 | none | **REVISE** |
+| 0020 | Organization entity owned by Auth; four admin routes; a dedicated organization-service rejected | 0001, 0004, 0006, 0007, 0021, 0022, 0023, 0024 | partly: entity yes, routes mostly not built (§11.3) | no | F7 (natural point) | **DEFER** to A5.3 |
+| 0022 | Company, Platform and append-only PlatformAssignment in Auth; owner company-wide; bootstrap creates the Company | 0009, 0011, 0016, 0017, 0020, 0023, 0024 | partly: entities and assignment routes yes, platform CRUD not built | no | F7 (natural point) | **DEFER** to A5.3 |
+| 0023 | §1 operator login and session never consult a platform calendar; §2 `GET /auth/platform-access/:platformId`, live, collapsed 404 | 0011, 0012, 0014, 0021, 0022, 0024 | yes (both implemented); the two-call example names a route that does not exist | §1 yes; the two-call pattern after OD-A5-4 | none | **REVISE** |
+| 0024 | `User.kind` with Owner/Operator subtypes, mandatory tenancy FKs, DB-unique active assignment, immutable anchors | 0009, 0011, 0016, 0017, 0020, 0022, 0023; partly superseded by 0030 | yes (Auth migrations) | after OD-A5-3 and the A6 alignment | none | **DEFER** |
+| 0028 | join codes, membership state machine, organization-admin authority | 0020, 0024, 0026; amended by 0029, 0030, 0042 | yes, except the license call (§11.3) | yes, after the text correction | none | **REVISE**, then recommend ACCEPT |
+| 0029 | single-use admin invitations; first-admin bootstrap by an Owner with a factor step-up | 0007, 0028, 0030 | yes, except the event-delivery text | yes, after the text correction | none | **REVISE**, then recommend ACCEPT |
+| 0030 | one identity, many memberships; REVOKED; no `organizationId` claim | 0001, 0024, 0028, 0029 | yes, except the license check on join | yes, after the text correction | none | **REVISE**, then recommend ACCEPT |
+| 0031 | organization-service is the intended owner of Company, Platform, Organization; mechanism not designed | 0020, 0024, 0030; 0039 and 0040 build on it | intent: yes; its "today" bullets are overtaken (§11.3) | intent: yes | none | **REVISE** (forward note to 0039 / 0040), then recommend ACCEPT of the intent |
+| 0039 | five phases, stable ids, verification, narrow freeze, single cutover point | 0031, 0032, 0033, 0036; partly superseded by Accepted 0040 | yes: the phase tooling is implemented, CI-tested and is what G6 rehearses | **yes** | none (0040 was accepted before G6) | **recommend ACCEPT**, keeping the partial supersession by 0040 |
+
+### 11.3 Current behavior versus outdated text
+
+| ADR | Outdated text | Current behavior on `main` |
+|---|---|---|
+| 0017 | the owner's login is ADR-0010's secret-key login; a sole owner losing password and secret key is unrecoverable; "exactly one owner row globally" | owner login is password plus a second factor, the secret key a step-up and recovery credential (Accepted ADR-0025); cool-down recovery exists (ADR-0027, named by Accepted ADR-0050 as the extreme path); the limit is the per-Company index `owner_single_per_company_v1` (ADR-0024) |
+| 0020 | `POST`, `GET` (list) and `PATCH /auth/admin/organizations` in Auth | Auth exposes only `GET /auth/admin/organizations/:id`; creating and updating organizations is organization-service's `organization/admin/organizations` (inactive authority) |
+| 0022 | `POST`, `GET`, `PATCH /auth/admin/platforms` in Auth | not built in Auth; platform administration is organization-service's `organization/admin/platforms`. The assignment routes exist |
+| 0023 | downstream services call `GET /auth/organizations/:id` (ADR-0021) | the implemented route is `GET /auth/admin/organizations/:id` |
+| 0028 | registration asks payment-service whether the organization is licensed | Auth makes no license or entitlement call (Stage 11/12 decoupling; ADR-0026, still Proposed) |
+| 0029 | "nothing delivers" the events | Auth publishes through its outbox; delivery stays off in production (`AUTH_EVENTS`, A3M.8 not activated) |
+| 0030 | joining another organization runs a "fail-closed license check" | no license check (as for 0028) |
+| 0031 | "no new Auth route"; organization-service "not on the critical path of any other service"; the only lookup is Auth's | the mechanism is decided by 0039 / 0040; Auth's administrative first-touch flows call `ensure` in `organization-service` mode (0040 decision 2); organization-service has `organization/reference/organizations/:id` |
+| 0039 | Phase C names Auth hierarchy-mutating routes | those routes never existed; already corrected in 0039's own header and in 0040's amendments |
+
+The A5.1 version of this section and the [A1 record](core-v2-a1-architecture.md) §3 describe 0020 and 0022 as "implemented in
+Auth": that is true of the entities and the assignment routes, not of the hierarchy administration routes.
+
+### 11.4 Conflicts with Accepted ADR-0040
+
+| ADR | Conflict | Consequence |
+|---|---|---|
+| 0022 | the bootstrap command creates the Company | 0040 A1.2 (AD-4): Auth never creates a Company in the authoritative mode. Accepting 0022 as written contradicts an Accepted ADR |
+| 0020 | Auth is chosen as the Organization owner; organization-service rejected | 0040 decisions 1 and 2 (with 0031): after activation organization-service is the only authority and Auth holds a reference cache |
+| 0031 | the cross-service mechanism is "not decided" | decided by 0039 and 0040; needs a forward note, not a contradiction of intent |
+| 0039 | the superseded passages (ownership boundaries, Phase D wording, "Auth independence", rollback) | already replaced by 0040 decisions 1 to 4; the remainder stands and is consistent |
+| 0023 | the two-call pattern reads Auth's organization row | after F7 Auth's row exists only once `ensure` has run (0040 decision 1): an organization never touched by Auth answers 404. Not a contradiction today; a consumer contract risk for OD-A5-4 |
+| 0024 | none: 0040 decision 1 keeps the intra-Auth foreign keys and immutable anchors | 0024's integrity design survives F7; its acceptance waits on 0017 and A6, not on F7 (this corrects the A5.1 text "acceptance after F7" for 0024) |
+
+Other conflicts carried forward: **0017 versus 0024** (a "permanent architectural invariant" versus "owner cardinality is policy, not
+architecture", one droppable index); **0028 and 0030 versus ADR-0026** (out-of-date license text while ADR-0026, which removed the
+call, stays Proposed under OD-A4-8); **0024 versus OD-A5-1** (immutable anchors, `ON DELETE RESTRICT` and no reparenting operation, with
+0040's interim invariant I2, bound any lifecycle decision).
+
+### 11.5 Owner decisions and the ADRs they touch
+
+Unchanged from §10 and **not resolved by A5.2**.
+
+| Owner decision | ADRs directly affected |
+|---|---|
+| OD-A5-1 organization lifecycle (BD-5) | 0024 (immutable anchors, RESTRICT, no reparenting), 0020 (deletion and deactivation out of scope), 0039 (lifecycle deferred), 0040 I2, 0031; 0028 and 0030 (effect on memberships, join codes, invitations) |
+| OD-A5-2 initial hierarchy before activation (OPEN-5) | 0022 (bootstrap Company), 0040 A1.2 and A2.8, 0042 (the provisioning identity creates Companies only), 0031, 0039 Phase A |
+| OD-A5-3 owner transfer | 0017, 0024, 0022; the Accepted owner model 0025, 0027, 0050 |
+| OD-A5-4 Auth ↔ Organization dependency after F7 | 0039 ("Auth independence"), 0040 decisions 1 and 2, 0023, 0020 (Auth's organization read route), 0024 (the foreign keys that need the cache), 0031 |
+| OD-A5-5 ownership CLI convergence | 0039 (phase tooling), 0040 decisions 5 and 7, 0022 and 0017 (bootstrap and CLI precedent) |
+
+### 11.6 Decidable now versus deferred
+
+| Now (each still needs explicit owner approval) | After an owner decision | Deferred to A5.3 (post-F7 design) |
+|---|---|---|
+| 0039 (recommend ACCEPT); 0031 intent (after a forward note); 0028, 0029, 0030 (after text corrections); 0023 §1 | 0017 (OD-A5-3); 0023's two-call pattern (OD-A5-4); 0024 (OD-A5-3, OD-A5-1, A6) | 0020 and 0022: the likely outcome is "partially superseded by ADR-0040", not Accepted, which is an owner decision |
+
+No status decision requires G6, G7, F6 or F7 execution; none of these gates is run by A5.2.
+
+### 11.7 Proposed review and acceptance ordering [PROPOSED]
+
+The one-ADR-at-a-time rule applies to **status changes**; text corrections of Proposed ADRs may share a pull request.
+
+1. **This review record** (this record and the roadmap; no status change).
+2. **ADR-0039**: recommend ACCEPT, status "Accepted, partly superseded by ADR-0040". It is the only ADR whose superseded passages are
+   already replaced by an Accepted ADR, which needs no OD-A5 decision and changes no rehearsed code. Accepting a child before its parent
+   0031 has precedent (0040 was accepted while 0031 and 0039 were Proposed); the owner may prefer 0031 first.
+3. **ADR-0031**: forward note to 0039 / 0040, then a decision on the intent.
+4. **ADR-0028, 0029, 0030**: one text-correction pull request, then three status pull requests in base-first order 0028 → 0029 → 0030.
+   Decide first whether the license text is corrected in place or ADR-0026 is reviewed first (OD-A4-8, carried forward).
+5. **ADR-0023**: correct the route name and add the post-F7 caveat; decide §1 now or the whole ADR after OD-A5-4 (overlaps A4 and A6).
+6. **ADR-0017**: after OD-A5-3, rewrite in place, then decide.
+7. **ADR-0024, then 0020 and 0022**: keep Proposed; revisit in A5.3.
+
+### 11.8 Effort
+
+Remaining A5.2 work (Claude-assisted): 0039 about 1 h; 0031 1–2 h; membership cluster 4–6 h; 0023 2–3 h; 0017 2–3 h after OD-A5-3;
+0024, 0020, 0022 records 2–3 h. About **12–18 h**, plus one Core CI run per pull request and owner decision time.
 
 ## 12. Validation per sub-stage
 

@@ -211,8 +211,8 @@ A4 Authentication                              ✅ CLOSED / CERTIFIED (record: c
   A4 production checkpoints                    not started (Auth deploy, minimum-image gate, JWT ring activation: each separately authorized)
 A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (record: core-v2-a5-organization.md)
   A5.0  discovery                              ✅ complete (read-only inventory, recorded in the A5 record)
-  A5.1  architecture and scope record          record prepared; pending CI and owner merge
-  A5.2  ADR reviews (one ADR at a time)        not started (proposed; 🟡)
+  A5.1  architecture and scope record          ✅ closed on main (PR #253; 24/24 checks, core-ci-passed)
+  A5.2  ADR reviews (one ADR at a time)        🔄 review completed, decisions pending (A5 record §11; no ADR status changed)
   A5.3  post-F7 design                         not started (proposed; 🟡)
   A5.4  implementation                         ⛔ blocked until F7 (proposed; 🔴)
   A5.5  certification                          not started (proposed)
@@ -294,7 +294,8 @@ activated before a separately authorized minimum-image gate exists (record §15,
 A5 (organization; [A5 record](architecture/core-v2-a5-organization.md)) is labelled 🔴 (design 🟡). Auth remains the hierarchy authority
 and organization-service is implemented but inactive; after F7 organization-service is the only authority for Company, Platform and
 Organization while Auth keeps identities, memberships, join codes and invitations. A5.0 and A5.1 record the inventory, the authority
-map and proposed sub-stages and owner decisions; design and ADR reviews proceed now, and every runtime or authority change waits for
+map and proposed sub-stages and owner decisions; the A5.2 review of the ten Organization ADRs is recorded (A5 record §11), with
+every recommendation and status change still awaiting the owner; design and ADR reviews proceed now, and every runtime or authority change waits for
 G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup.
 
 ### Compatibility and safety rules for V1 work
@@ -540,5 +541,5 @@ project's concern. Core's localized `message` is for display only. Application b
 | V2 A2: configuration and secrets (findings, owner decisions, A2.1 to A2.5, the A2 certification) | [`core-v2-a2-configuration-and-secrets.md`](architecture/core-v2-a2-configuration-and-secrets.md) |
 | V2 A15: developer and platform experience (A15.0 scope and owner decisions, the phases, A15.1 CLI configuration hygiene, A15.2 developer path, A15.3 test determinism, A15.4 conventions, the A15 certification) | [`core-v2-a15-developer-experience.md`](architecture/core-v2-a15-developer-experience.md) |
 | V2 A4: authentication (A4.0 inventory, preserved guarantees, owner decisions OD-A4-1 to OD-A4-8, convergence and key-ring requirements, the A4.1 to A4.9 stages, validation, deployment exclusion) | [`core-v2-a4-authentication.md`](architecture/core-v2-a4-authentication.md) |
-| V2 A5: organization (A5.0 inventory, authority today and after F7, the Auth ↔ Organization interaction, classification, the production gate, proposed sub-stages A5.1 to A5.5, proposed owner decisions OD-A5-1 to OD-A5-5, ADR review priorities) | [`core-v2-a5-organization.md`](architecture/core-v2-a5-organization.md) |
+| V2 A5: organization (A5.0 inventory, authority today and after F7, the Auth ↔ Organization interaction, classification, the production gate, proposed sub-stages A5.1 to A5.5, proposed owner decisions OD-A5-1 to OD-A5-5, ADR review priorities, the A5.2 review record of the ten Organization ADRs) | [`core-v2-a5-organization.md`](architecture/core-v2-a5-organization.md) |
 | V2 A3M: messaging (A3M.0 inventory and findings G1–G10, owner decisions OD-A3M-0 to OD-A3M-7, the A3M.0 to A3M.8 phases, the G7 proof, A3M.1 records and policy) | [`core-v2-a3m-messaging.md`](architecture/core-v2-a3m-messaging.md) |
