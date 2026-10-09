@@ -1,8 +1,27 @@
 # 0031. organization-service is the intended future owner of Company, Platform and Organization
 
-- **Status:** Proposed (amended 2026-09-19 on the project owner's direction: the mechanism is deliberately **not** designed)
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-D owner authorization; partly superseded by [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md)) (amended 2026-09-19 on the project owner's direction: the mechanism is deliberately **not** designed)
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.2-D; no decision of this ADR is changed).** The intent is accepted: organization-service is the
+> intended owner of Company, Platform and Organization and never owns users, credentials, sessions or membership; the hierarchy
+> invariant stands. Read as follows:
+> 1. **Mechanism decided.** The bullet "Not decided (and not to be invented)" is closed by the separate ADR it called for:
+>    [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md) (Accepted), as amended by
+>    [ADR-0040](./0040-organization-ownership-migration-decisions.md) (Accepted: Auth's validated reference cache, the cutover
+>    sequence, the one-way door).
+> 2. **"Today" statements are historical (2026-09-19).** Inert, expand-only Auth changes such as migration
+>    `0008_hierarchy_authority.sql` are permitted under ADR-0040 decision 7 (G2). No Auth HTTP route creates a platform or an
+>    organization. After the switch to `organization-service` mode, Auth's administrative first-touch flows depend on
+>    organization-service, bounded and fail closed; authentication paths never do (ADR-0040 decision 2).
+> 3. **Interim rule.** Validating a hierarchy relationship without user context is decided: organization-service validates service
+>    requests under [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) (Accepted); other callers open only
+>    after F7.
+> 4. **F23.** Human hierarchy administration is organization-service's (ADR-0042, ADR-0050), effective only after authority
+>    activation; Auth still has no creation route.
+> 5. **No operational authorization.** This acceptance authorizes no production deployment, no authority activation and no execution
+>    of G6, G7, F6 or F7; organization lifecycle (BD-5) stays deferred.
 
 > **Amends [ADR-0020](./0020-organization-entity-and-platform-scoped-management.md)** for the long term only. ADR-0020 chose that
 > auth-service owns the Organization entity and rejected a dedicated `organization-service`; this ADR records that
