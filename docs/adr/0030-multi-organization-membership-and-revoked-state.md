@@ -1,8 +1,27 @@
 # 0030. Multi-organization membership: one identity, many memberships, and the REVOKED state
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-H owner authorization; two sentences revised before acceptance)
 - **Date:** 2026-09-19
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.2-H).** Before acceptance the owner approved two normative revisions, made in place while
+> Proposed: **R1** a member has 0..N memberships (Data model) and **R2** joining makes no commercial check (Joining another
+> organization); the original sentences are kept as history. No other decision changes. Read as follows:
+> 1. **Events.** With `AUTH_EVENTS=on`, the `membership.*` domain events are written to Auth's transactional outbox in the state
+>    change's transaction ([ADR-0052](./0052-core-v1-capability-closure.md), Accepted). With `AUTH_EVENTS=off`, which production
+>    runs, no domain-event row is written; delivery depends on the separately gated messaging and relay infrastructure (A3M.8).
+>    The central audit intents of membership administration are independent of `AUTH_EVENTS`.
+> 2. **Token claims.** The claim list omits `adminTier`, which owner and operator tokens carry
+>    ([ADR-0024](./0024-database-enforced-tenancy-and-authorization-integrity.md)); the JWT signing key ring adds only a `kid`
+>    header. Tokens still carry no organization, platform or business role.
+> 3. **Historical statements.** "Merging triggers `0006`/`0007` automatically" and the note on tokens issued before that deploy
+>    describe 2026-09-19; since V2-A.2 a merge builds an image and never deploys.
+> 4. **Open items.** The residual risks and deferred items under Consequences stay open (no step-up for operator and org-admin
+>    revocation, re-application after rejection or revocation, invitation acceptance by an existing user, duplicate-account
+>    reconciliation, correcting a frozen `audience`).
+> 5. **No operational authorization.** Memberships stay in Auth after the ownership transition
+>    ([ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), ADR-0040). This acceptance authorizes no
+>    production or runtime change.
 
 > **Supersedes in part** the one-organization-per-member rule of
 > [ADR-0001](./0001-generic-organization-id-scoping-claim.md) and
@@ -74,8 +93,11 @@ User(kind = member | owner | operator)      -- no organization, platform or busi
 - `user`: drop `organizationId`, `user_org_iff_member`, `user_id_organization_uk`, `user_organization_idx`, view
   `user_platform`. New CHECK `user_role_is_kind_neutral`: members are `member`; owners and operators are `admin`.
 - View `member_platform` replaces `user_platform`: one row per membership with organization, platform and company.
-- A **deferred constraint trigger** requires every member to have at least one membership at commit (rows are never
-  deleted, so this holds for the life of the account).
+- A member has **0..N** memberships (revised 2026-10-09, before acceptance, consistent with the owner decision of 2026-09-20,
+  [`member-membership-invariant-owner-decision.md`](../architecture/stage-10/member-membership-invariant-owner-decision.md), and
+  migration `0009`): zero memberships grants zero organization authority; the owner and operator subtype requirements are
+  unchanged. *(Original: "A **deferred constraint trigger** requires every member to have at least one membership at commit
+  (rows are never deleted, so this holds for the life of the account).")*
 
 ### State machine (database-enforced by `membership_guard`)
 ```
@@ -89,8 +111,10 @@ the admin flag exists only while `active` and is **cleared in the same statement
 membership is read; a revoked membership never affects the account or the other memberships.
 
 ### Joining another organization
-`POST /auth/onboarding/join {joinCode}` (member session): the same lookup, fail-closed license check, atomic
-single-use redemption and membership creation as registration, in one transaction. A second membership in the same
+`POST /auth/onboarding/join {joinCode}` (member session): the same lookup, atomic single-use redemption and membership
+creation as registration, in one transaction, with **no commercial license or entitlement check** (revised 2026-10-09,
+before acceptance: [ADR-0026](./0026-authentication-is-not-entitlement.md) decision 4). *(Original: "the same lookup,
+fail-closed license check, atomic single-use redemption and membership creation as registration, in one transaction.")* A second membership in the same
 organization is a 409 that rolls the spent use back. Rate limited per user (`membership_join_user`, default 10 per hour, `RATE_MEMBERSHIP_JOIN_USER_*`) and per client
 address, audited. Registering with a contact that already has an account stays a 409: **one contact, one account**.
 
