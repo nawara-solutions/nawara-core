@@ -86,7 +86,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Proposed |
 | [0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) | Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness) | Proposed |
 | [0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) | Owner login with password + second factor; secret key as step-up and recovery credential | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
-| [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Proposed |
+| [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Accepted (2026-10-09, A5.2-E owner authorization; decisions 2 and 4 revised before acceptance) |
 | [0027](./0027-service-layer-security-model.md) | Service-layer security model: cool-down recovery, enrollment rules, live authorization, shared security state, key management | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
 | [0028](./0028-organization-join-codes-membership-and-organization-admin.md) | Organization join codes, membership and organization-admin authority | Proposed |
 | [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Proposed |
