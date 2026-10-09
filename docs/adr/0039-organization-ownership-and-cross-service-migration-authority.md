@@ -1,8 +1,25 @@
 # 0039. Organization ownership and cross-service migration authority
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (**partly superseded by [ADR-0040](./0040-organization-ownership-migration-decisions.md)**, on the passages listed in that ADR's "Amendments to ADR-0039", by its decisions 1 to 4. ADR-0040 is **Accepted** (2026-09-20). The import mechanism this ADR left open is decided by ADR-0040 decision 5, and the interim id invariants by its decision 6. The rest of this ADR stands.)
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.2-C owner authorization) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X --> (**partly superseded by [ADR-0040](./0040-organization-ownership-migration-decisions.md)**, on the passages listed in that ADR's "Amendments to ADR-0039", by its decisions 1 to 4. ADR-0040 is **Accepted** (2026-09-20). The import mechanism this ADR left open is decided by ADR-0040 decision 5, and the interim id invariants by its decision 6. The rest of this ADR stands, as read through the acceptance note below.)
 - **Date:** 2026-09-20
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.2-C; no decision of this ADR is changed).** Accepted as partly superseded by
+> [ADR-0040](./0040-organization-ownership-migration-decisions.md), read as follows:
+> 1. **Environment classes.** "Migration phases" A to E (import, verification, freeze, cutover, post-cutover verification) govern an
+>    **existing** environment: ADR-0040 A1.3 and A2.5, steps E0–E7. A **fresh** environment, the class of Core production
+>    ([cutover record](../architecture/stage-21/stage-21-x-cutover-record.md) §2), follows ADR-0040 A2.5 steps F1–F7, with **no
+>    import and no freeze**; its single cutover point is ACTIVATE AUTHORITY and its one-way door is ADR-0040 A2.6.
+> 2. **Auth schema.** Phase A's "No Auth schema change" describes the import step only. Inert, expand-only Auth changes, such as
+>    migration `0008_hierarchy_authority.sql`, are permitted under ADR-0040 decision 7 (G2).
+> 3. **Service-token scope.** The organization-service service-token scope model this ADR left open (B-029 / O-13 / O-14) is governed
+>    by [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) (Accepted).
+> 4. **Historical passages.** "organization-service itself remains unbuilt", the section "Implementation prerequisites for a future
+>    Stage 9", the O9 follow-up and the mentions of a license record the state of 2026-09-20; they are not current implementation
+>    statements.
+> 5. **No operational authorization.** This acceptance authorizes no production deployment, no authority activation and no execution
+>    of G6, G7, F6 or F7. Activation remains governed by ADR-0040 decision 7 (gates G1–G7) and the Core roadmap's production order;
+>    organization lifecycle (BD-5), B-026 / O-18 and B-036 stay deferred.
 
 > **Builds on [ADR-0031](./0031-organization-service-intended-owner-of-the-hierarchy.md)**, which names
 > organization-service as the *intended* future owner of `Company`, `Platform` and `Organization` but explicitly
