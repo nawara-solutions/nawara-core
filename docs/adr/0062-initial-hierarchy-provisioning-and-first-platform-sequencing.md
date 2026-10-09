@@ -1,8 +1,47 @@
 # 0062. Initial hierarchy provisioning and first-Platform sequencing
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-09, by the architecture owner, A5.3 OD-A5-2 owner authorization) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
 - **Date:** 2026-10-09
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-09, A5.3 OD-A5-2).** The architecture owner accepted this ADR. The Proposed-era notes and body below are
+> kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is replaced by this note, while "it
+> **implements, provisions, migrates and activates nothing**, and it changes no credential" remains true. Acceptance:
+> 1. **Accepted policy.** The fresh pre-activation hierarchy is one provisioned Company and no Platform or Organization; the certified
+>    F2, F3 (no-op), F4 and F5 are preserved. The first Platform is created by the authenticated, active Company Owner through
+>    Organization Service only after F7 and the verified post-F7 backup, under a separate attended authorization (§4). Organizations are
+>    created through Organization Service's authorized human administration route with the existing assignment and step-up restrictions.
+>    New Companies, Platforms and Organizations default to `ACTIVE`, subject to their active-ancestor requirements; the existing Company is
+>    backfilled safely to `ACTIVE` in the separately authorized ADR-0060 lifecycle implementation (§8).
+> 2. **Auth scope.** Each new Platform is added to Auth's `allowedPlatforms` only through a separately approved, least-privilege,
+>    audited change-control procedure, before any Auth first touch or ADR-0061 repair (§5). The `register-caller.sh` behavior that resets
+>    `allowedPlatforms` to `[]` must be **corrected and certified** before any operational scope extension. This acceptance authorizes no
+>    tooling change.
+> 3. **Provisioning credential.** The current production Company-provisioning credential must not remain capable of creating additional
+>    Companies after the authorized initial transition; its retirement timing, method, verification and recovery implications are designed
+>    and approved separately (§7).
+> 4. **Bootstrap evidence.** The certified F4 runbook record remains the historical evidence of the completed Owner bootstrap; no Audit
+>    Service record is backdated or fabricated. Any future bootstrap-capable implementation requires an independently authorized
+>    audit-contract and Audit Service integration decision (§9).
+> 5. **ADR-0040 / ADR-0042 interpretation (§13), decided as a clarification of deployment-credential lifecycle, not a partial
+>    supersession.** The current production provisioning credential is one **instance** of the narrowly scoped provisioning capability.
+>    Retiring it after the authorized initial transition does not retire the architectural possibility of provisioning future Companies.
+>    Any future provisioning credential (of the dedicated provisioning identity, or of a new identity under its own decision) must
+>    be separately created, scoped, authorized and certified for a future multi-company lifecycle; no currently deployed credential is implicitly authorized for later Company provisioning; and the current
+>    single-Owner bootstrap limitations mean multi-company onboarding is not operationally ready. ADR-0042 D1, A.2 and A.5 and ADR-0040
+>    A2.5 are read consistently with this: ADR-0042 D1 itself distinguishes the dedicated provisioning **identity** from its
+>    **credentials** (whose form it leaves open), so A.5's "later Companies use the same provisioning identity" names the dedicated,
+>    non-human provisioning role, not a standing credential; and ADR-0040 A2.5's "later provisioning by the provisioning credential" is
+>    among the operations permitted while a fresh environment is still inactive: a permission, not an obligation to keep a credential
+>    registered, which this ADR does not change. No material
+>    contradiction with the normative text was found.
+> 6. **Unimplemented and unapproved:** multi-company onboarding and future Company ownership, a per-Company ownership bootstrap, any
+>    broader provisioning workflow. **Still open:** the exact provisioning-credential retirement procedure; the `allowedPlatforms`
+>    scope-extension implementation and runbook; factor-only MFA for Platform and Organization creation; OD-A5-4(e); OD-A5-5; OD-S1;
+>    every runtime implementation and activation gate. Nothing is implemented, provisioned or activated, and no G6, G7, F6 or F7 step
+>    runs as part of this acceptance.
+> 7. **Relationships.** The "proposed relationships" paragraph below now takes effect in substance. No other ADR is changed here: the
+>    dated relationship notes on ADR-0040, ADR-0042 and ADR-0060 each require a separate authorization and commit.
 
 > **Status of this document.** The architecture owner approved the **policy direction** of OD-A5-2(a)–(f) (2026-10-09), recorded below,
 > subject to final ADR review. This ADR is **Proposed**: it is not accepted, it **implements, provisions, migrates and activates
