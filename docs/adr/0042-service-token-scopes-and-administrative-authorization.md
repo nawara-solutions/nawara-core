@@ -12,6 +12,15 @@
 > lifecycle decision reads current status from Organization Service through ADR-0060's additive effective-status reference contract.
 > Every other decision of this ADR stands.
 
+> **Clarified by [ADR-0062](./0062-initial-hierarchy-provisioning-and-first-platform-sequencing.md)** (Accepted 2026-10-09, A5.3
+> OD-A5-2; a clarification of **D1, A.2 and A.5**, not a supersession; status unchanged; the original decision text is unchanged). The
+> **provisioning identity** and a **provisioning credential** are distinct: the identity is the dedicated, non-human provisioning role
+> that D1, A.2 and A.5 name; a credential is one deployed instance of it. The current production credential may be retired through a later,
+> separately authorized operation, and it cannot be assumed to retain authority indefinitely. Future Company provisioning may use a
+> separately approved credential associated with the existing provisioning identity, or a new identity if independently authorized;
+> future Company onboarding requires its own fully certified architecture. This note authorizes neither multiple Companies nor any future
+> Owner bootstrap functionality, and it changes no provisioning permission or accepted service boundary. Every other decision stands.
+
 > Related, none modified: [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md) (header status Proposed; its token mechanism is implemented in service-kit), [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md), [ADR-0040](./0040-organization-ownership-migration-decisions.md) (Proposed), [ADR-0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) (Proposed). The analysis, evidence and decision matrix are in the [BD-4 study](../architecture/stage-10/stage-10-bd4-service-authorization-study.md); the owner's answers are in the [owner-decision sheet](../architecture/stage-10/stage-10-bd4-owner-decisions.md). This ADR does **not amend** ADR-0033: it keeps its authentication and adds the authorization layer that ADR-0033 does not define. ADR-0040, ADR-0041, ADR-0020, ADR-0022 and ADR-0024 keep their own header status; this ADR adopts, for hierarchy administration, the rules it names from them and does not change those ADRs.
 
 ## Context
