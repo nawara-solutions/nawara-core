@@ -5,12 +5,15 @@
   (§11; read-only review on `main` at `ffdb604`, 2026-10-09). The review record (PR #254) changed no ADR status; the owner's
   subsequent, individually approved ADR decisions are recorded in **§11.9** (ADR-0039 Accepted on `main`, PR #255; ADR-0031, 0026,
   0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request, merged as PR #256; ADR-0023 accepted on
-  2026-10-09 under A5.2-I, merged as PR #257). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remain Proposed. OD-A5-3 is
+  2026-10-09 under A5.2-I, merged as PR #257). **A5.2 is not complete**: ADR-0017, 0020, 0022 and 0024 remained Proposed; their owner dispositions are recorded on
+  2026-10-09 (§11.9: 0017 superseded by ADR-0059, 0020 by ADR-0040, 0022 partially superseded by ADR-0040 and 0022 and 0024 deferred
+  to A6), and whether A5.2 is complete is a separate owner decision. OD-A5-3 is
   decided by ADR-0059, accepted on 2026-10-09 and merged as PR #258 (§10.1). The OD-A5-1 policy is decided by ADR-0060, accepted on
   2026-10-09 and merged as PR #259 (§10.0). OD-A5-4(a)–(d) are decided by ADR-0061, accepted on 2026-10-09 and merged as
   PR #260 (§10.2). The OD-A5-2 architecture policy is decided by ADR-0062, accepted on 2026-10-09 and merged as PR #261
-  (§10.3). The OD-A5-5 and OD-A5-4(e) architecture policies are decided by ADR-0063, accepted on 2026-10-09 on its own branch,
-  pending its pull request (§10.4). A5.3 stays in progress until ADR-0063 merges and its closure prerequisites are reviewed.
+  (§10.3). The OD-A5-5 and OD-A5-4(e) architecture policies are decided by ADR-0063, accepted on 2026-10-09 and merged as
+  PR #262 (§10.4). **A5.3: ARCHITECTURE DESIGN COMPLETE — RUNTIME NOT IMPLEMENTED — PRODUCTION NOT ACTIVATED**; formally closed only
+  after the closure pull request is merged and its merged documentation verified (§10.5).
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -127,7 +130,7 @@ redeploys unless images are pinned.
 |---|---|---|---|---|---|---|
 | A5.1 | this record; A4 closure wording | A5.0 | this record, the roadmap, the A4 record | merged; every A5 item labelled; no runtime change | `check:repo`, `git diff --check`, links; Core CI | ✅ merged (PR #253) |
 | A5.2 | ADR reviews, one ADR at a time (§11); each status change separately authorized | A5.1 | review record: this record and the roadmap; then `docs/adr/00xx-*.md` and the ADR index, one ADR per status-change PR | each review recorded (**done**, §11); statuses change only on explicit authorization (**pending**) | docs checks; Core CI per status-change PR | 10–20 h (review record done; about 12–18 h remain, §11.8) |
-| A5.3 | post-F7 design: Auth as reference cache in steady state, retiring local mode and the legacy Company insert, the dependency decision, CLI convergence plan, and lifecycle only if decided in scope | A5.1, A5.2, owner decisions (§10) | this record; possibly a new ADR (Proposed) | designs owner-reviewed; implementation items labelled 🔴 | docs checks; Core CI | 10–25 h |
+| A5.3 | post-F7 design: Auth as reference cache in steady state, retiring local mode and the legacy Company insert, the dependency decision, CLI convergence plan, and lifecycle only if decided in scope | A5.1, A5.2, owner decisions (§10) | this record; possibly a new ADR (Proposed) | designs owner-reviewed; implementation items labelled 🔴 (**design complete**; ADR-0059 to ADR-0063; closure pending its pull request, §10.5) | docs checks; Core CI | 10–25 h |
 | A5.4 | implementation of the approved A5.3 designs | **F7** and a refreshed baseline | `apps/auth-service/src/hierarchy/*`, `src/cli/owner-tools.ts`, `src/config/app-config.ts`; `apps/organization-service/src/cli/ownership.ts`, `src/admin/*`; their tests | the V2 protocol: focused tests and mutants, service regression, `test:e2e:auth-organization` | full Core CI per pull request | ⚪ about 30–150 h, set by A5.3 |
 | A5.5 | certification | A5.4 | this record, the roadmap | the criteria A5.3 fixes | records-based; merged pull requests' CI | 3–6 h |
 
@@ -141,8 +144,8 @@ excluded. The production track (§7) is separate and owner-driven.
 | OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision existed; organization-service has no status column or delete path. **Policy decided 2026-10-09** (§10.0; ADR-0060, merged as PR #259) |
 | OD-A5-2 | **OPEN-5**: whether initial Platforms or Organizations must exist before activation in a fresh environment | ADR-0040 A2.8; not blocking Stage 10.1. **Decided 2026-10-09** (§10.3; ADR-0062, merged as PR #261) |
 | OD-A5-3 | **Owner transfer**: in A5 scope or not | ADR-0017 keeps one owner per Company permanently; no transfer decision exists. **Decided 2026-10-09** (§10.1; ADR-0059) |
-| OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]`. **(a)–(d) decided 2026-10-09** (§10.2; ADR-0061, merged as PR #260); the dependency question itself, (e), is **decided 2026-10-09** (§10.4; ADR-0063 accepted on its branch, pending its pull request) |
-| OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7. **Decided 2026-10-09** (§10.4; ADR-0063 accepted on its branch, pending its pull request) |
+| OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]`. **(a)–(d) decided 2026-10-09** (§10.2; ADR-0061, merged as PR #260); the dependency question itself, (e), is **decided 2026-10-09** (§10.4; ADR-0063, merged as PR #262) |
+| OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7. **Decided 2026-10-09** (§10.4; ADR-0063, merged as PR #262) |
 
 ### 10.0 OD-A5-1 design progress (2026-10-09)
 
@@ -240,19 +243,57 @@ excluded. The production track (§7) is separate and owner-driven.
   a static Auth boundary test. A future runbook rule forbids restoring a pre-F6 Auth backup (old `local` marker) after F6, alongside the
   existing Organization rule. Both CLIs move to the kit's `EnvReader` in a separately authorized post-F7 stage.
 - **Design:** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md), drafted as Proposed (2026-10-09) and
-  **Accepted on 2026-10-09 (A5.3 OD-A5-5 and OD-A5-4(e) owner authorization) on its own branch, pending its pull request and merge**;
+  **Accepted on 2026-10-09 (A5.3 OD-A5-5 and OD-A5-4(e) owner authorization) and merged as PR #262**;
   the OD-A5-5 and OD-A5-4(e) architecture policies are decided. ADR-0040 A1.4's AD-5 wording and A2.6 are preserved, with no recovery
   mechanism designed.
-- **Relationships (separately approved, on the same branch):** dated clarification notes, none a supersession, on ADR-0040 (post-F7 CLI
+- **Relationships (separately approved; merged with PR #262):** dated clarification notes, none a supersession, on ADR-0040 (post-F7 CLI
   convergence; both `retire` commands kept for F6 and F7), ADR-0042 decision 8 (the complete never-call list kept, not narrowed; the
   static boundary test required) and ADR-0061 §6 (the diagnostic as a restricted, read-only Auth CLI subcommand); statuses unchanged.
-- **Runbook:** a documentation-only rule in [`core-backup-restore.md`](../runbooks/core-backup-restore.md) §7 forbids restoring a pre-F6
+- **Runbook (merged with PR #262):** a documentation-only rule in [`core-backup-restore.md`](../runbooks/core-backup-restore.md) §7 forbids restoring a pre-F6
   Auth backup after F6 as an ordinary restore; it is procedural, not enforced by any tool, and not rehearsed.
 - **Not implemented:** the readiness check, the static boundary test, the read-only `verify`, the diagnostic CLI, the `EnvReader`
   convergence and any command retirement; no restore, production transition or G6/G7/F6/F7 step has occurred. A5.4 stays blocked until
   F7.
-- **Still to reconcile before A5.3 closes:** Proposed ADR-0017, ADR-0020, ADR-0022 and ADR-0024 (A5.2) and the closure review. A5.3
-  is not complete.
+- **Reconciled for A5.3 closure (2026-10-09, owner dispositions; §10.5, §11.9):** ADR-0017 and ADR-0020 superseded; ADR-0022 partially
+  superseded and, with ADR-0024, deferred to A6.
+
+### 10.5 A5.3 closure record (2026-10-09)
+
+**ARCHITECTURE DESIGN COMPLETE — RUNTIME NOT IMPLEMENTED — PRODUCTION NOT ACTIVATED.** A5.3 is shown as **pending its closure pull
+request**: it is formally CLOSED only after that pull request is merged and its merged documentation is verified.
+
+| Accepted ADR | Settles | Merged |
+|---|---|---|
+| [ADR-0059](../adr/0059-company-ownership-transfer-and-exceptional-owner-recovery.md) | OD-A5-3: exactly one active Owner, controlled transfer, exceptional recovery | PR #258 |
+| [ADR-0060](../adr/0060-company-platform-organization-lifecycle.md) | OD-A5-1: Company, Platform and Organization lifecycle (E4 + E1 + E5) | PR #259 |
+| [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) | OD-A5-4(a)–(d): Owner-authorized reference repair and read-only diagnostics | PR #260 |
+| [ADR-0062](../adr/0062-initial-hierarchy-provisioning-and-first-platform-sequencing.md) | OD-A5-2: initial hierarchy and first-Platform sequencing | PR #261 |
+| [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) | OD-A5-4(e) and OD-A5-5: post-F7 authority modes, dependencies, CLIs and recovery | PR #262 |
+
+- **Relationships and runbook:** the dated notes on ADR-0017, 0024, 0040, 0042, 0050, 0060 and 0061 (§10.0 to §10.4) and the
+  post-F6 Auth backup restore rule (`core-backup-restore.md` §7; procedural, not rehearsed).
+- **A5.2 dispositions recorded with this closure:** ADR-0017 superseded by ADR-0059 (ADR-0050's withdrawal of the force-reset CLI
+  stands); ADR-0020 superseded by ADR-0040 (its rules survive in ADR-0042 decision 7, the Auth-local read in ADR-0023 D1(a)); ADR-0022
+  Proposed, partially superseded by ADR-0040, its surviving decisions (append-only operator–Platform assignments, company-wide Owner
+  scope, no `platformId` token claim, no `User.platformId`) deferred to A6; ADR-0024 Proposed, deferred to A6. ADR-0040 does not yet
+  carry backlinks to ADR-0020 and ADR-0022, and ADR-0059 records only its partial supersession of ADR-0017 (the whole rests on the
+  owner's disposition); those reciprocal notes need a separate approval.
+- **Remaining A6 governance:** acceptance of ADR-0022's surviving decisions and of ADR-0024 (with ADR-0030, ADR-0059 and ADR-0060
+  taken into account), and their open questions (`Operator.companyId`, Owner `isActive` versus status, per-assignment permissions,
+  multi-company).
+- **Implemented today versus future:** the legacy capabilities (Auth's `local` hierarchy, the transition CLIs, `bootstrap-owner`,
+  first-touch `ensure`, Organization Service's admin routes behind its inactive authority, the database-integrity migrations) exist;
+  **none** of the features decided by ADR-0059 to ADR-0063 is implemented.
+- **Future A5.4 prerequisites (blocked until F7, after G6):** consumer-first audit-contract changes; Organization Service lifecycle (L2,
+  L3) with the `ACTIVE` backfill and a read-only `verify`; Auth E5, the `ensure` resolve/place split and repair, the diagnostic CLI, the
+  readiness mismatch check, the static boundary test, the owner lifecycle behind default-off gates and `EnvReader` convergence; the
+  `register-caller.sh` scope and deregistration tooling and the provisioning-credential retirement design; consumer E1 adoption; later,
+  the capability-based removal of legacy modes and E3 after A3M.8.
+- **Still deferred:** multi-company onboarding; OD-S1 steward provisioning; OD-L5, OD-L6 and OD-L7; E3 lifecycle propagation;
+  retention and erasure; factor-only MFA for Platform and Organization creation; provisioning-credential retirement; `allowedPlatforms`
+  extension tooling; the exact F6 transitional readiness behavior.
+- **Production gate (unchanged):** G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup; G6 deferred; G7, F6 and F7 locked; no runtime
+  feature is implemented and no production transition has occurred.
 
 ## 11. A5.2 ADR review record
 
@@ -269,11 +310,11 @@ decide), **DEFER** (no status decision before the named prerequisite), **RETAIN*
 
 | ADR | Title (short) | Current status |
 |---|---|---|
-| [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) | single owner per Company; CLI force-reset | Proposed (force-reset CLI never built; withdrawn from Core V1 by Accepted ADR-0050) |
-| [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) | Organization entity, platform-scoped management | Proposed |
-| [0022](../adr/0022-company-and-platform-entities-with-operator-assignment.md) | Company, Platform, PlatformAssignment | Proposed |
+| [0017](../adr/0017-single-owner-with-secret-key-force-reset.md) | single owner per Company; CLI force-reset | Proposed (force-reset CLI never built; withdrawn from Core V1 by Accepted ADR-0050) (at review time; see §11.9) |
+| [0020](../adr/0020-organization-entity-and-platform-scoped-management.md) | Organization entity, platform-scoped management | Proposed (at review time; see §11.9) |
+| [0022](../adr/0022-company-and-platform-entities-with-operator-assignment.md) | Company, Platform, PlatformAssignment | Proposed (at review time; see §11.9) |
 | [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | platform-access check; operator login decoupled from calendars | Proposed |
-| [0024](../adr/0024-database-enforced-tenancy-and-authorization-integrity.md) | database-enforced tenancy and authorization integrity | Proposed |
+| [0024](../adr/0024-database-enforced-tenancy-and-authorization-integrity.md) | database-enforced tenancy and authorization integrity | Proposed (at review time; see §11.9) |
 | [0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md) | join codes, membership, organization-admin authority | Proposed |
 | [0029](../adr/0029-organization-admin-invitations.md) | organization-admin invitations | Proposed |
 | [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) | multi-organization membership, REVOKED | Proposed |
@@ -394,7 +435,7 @@ That pull request was merged as PR #256; ADR-0023 followed separately (PR #257).
 | [0001](../adr/0001-generic-organization-id-scoping-claim.md) | its existing partial supersession by ADR-0030 is formal (metadata only) | A5.2-H |
 | [0023](../adr/0023-platform-access-check-and-operator-login-decoupling.md) | Accepted after three in-place revisions: the owner rule (active owner, platform in own company, else the collapsed `404`); the two-call pattern uses `GET /auth/admin/organizations/:id`; the post-transition cache-miss contract (owner decision D1(a): local reads of validated reference rows, collapsed `404`, no ensure-on-read, no new Organization dependency, no `503` for a miss). **Merged as PR #257** | A5.2-I |
 | [0011](../adr/0011-operator-time-boxed-login-code.md), [0014](../adr/0014-schedule-anchored-operator-duration.md) | Accepted, **partly** superseded by ADR-0023 (business-day gating; platform-calendar combination); their earlier "Superseded by ADR-0023" status lines overstated it (metadata only) | A5.2-I; merged as PR #257 |
-| 0017, 0020, 0022, 0024 | **Proposed**; 0017 marked partly superseded and 0024 amended by ADR-0059 (§10.1) | open |
+| 0017, 0020, 0022, 0024 | **Proposed** until 2026-10-09; 0017 marked partly superseded and 0024 amended by ADR-0059 (§10.1); then the owner's A5.3 closure dispositions: 0017 **Superseded by ADR-0059**, 0020 **Superseded by ADR-0040**, 0022 **Proposed, partially superseded by ADR-0040, deferred to A6**, 0024 **Proposed, deferred to A6** (§10.5) | A5.3 closure owner dispositions |
 
 **Architecture as now recorded (no runtime change):** registration, onboarding join and invitation acceptance make no commercial
 check; a member has 0..N memberships and zero grants no organization authority; Auth owns identities, memberships, join codes and

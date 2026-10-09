@@ -58,7 +58,11 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
   with ADR-0023's acceptance on 2026-10-09 (A5.2-I). ADR-0059 (accepted 2026-10-09, A5.3) partly supersedes ADR-0050 (Accepted) and
   ADR-0017 (Proposed, marker only) and amends ADR-0024 (Proposed, forward note); merged as PR #258. ADR-0060 (accepted 2026-10-09, A5.3
   OD-A5-1) partly supersedes ADR-0040 (decision 2 only) and ADR-0050 (the decision 12 lifecycle bullet) and clarifies ADR-0042 (decision
-  5); merged as PR #259 (until then, these relationships were recorded on its branch only).
+  5); merged as PR #259 (until then, these relationships were recorded on its branch only). On 2026-10-09 (A5.3 closure) the owner
+  disposed of the remaining Proposed A5.2 ADRs: ADR-0017 is superseded by ADR-0059 (ADR-0059's own text records a partial supersession; the whole rests on the owner's disposition)
+  and ADR-0020 by ADR-0040 (neither was Accepted);
+  ADR-0022 stays Proposed, partially superseded by ADR-0040, and ADR-0024 stays Proposed, both deferred to A6. ADR-0040 does not yet
+  link back to ADR-0020 and ADR-0022, nor ADR-0059 to the whole-ADR disposition of ADR-0017; those notes need a separate approval.
 - Status changes are made one ADR at a time, never in bulk. The current review of every Proposed ADR is in the
   [A1 record](../architecture/core-v2-a1-architecture.md) §3; the Organization ADRs reviewed in Core V2 A5.2 are in the
   [A5 record](../architecture/core-v2-a5-organization.md) §11.
@@ -83,14 +87,14 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0014](./0014-schedule-anchored-operator-duration.md) | Schedule-anchored operator login-code and session duration | Accepted (partly superseded by ADR-0023, platform-calendar combination only, 2026-10-09) |
 | [0015](./0015-two-phase-operator-contact-confirmation.md) | Two-phase operator contact confirmation before first login | Accepted |
 | [0016](./0016-first-owner-bootstrap-command.md) | One-time bootstrap command for a platform's first owner account | Accepted |
-| [0017](./0017-single-owner-with-secret-key-force-reset.md) | Single owner per Company, permanently, with a CLI secret-key force-reset tool | Proposed (force-reset CLI never built; withdrawn from Core V1 by ADR-0050; partly superseded by ADR-0059, 2026-10-09: permanence and no-transfer only) |
+| [0017](./0017-single-owner-with-secret-key-force-reset.md) | Single owner per Company, permanently, with a CLI secret-key force-reset tool | Superseded by ADR-0059 (2026-10-09, A5.3 closure owner disposition; never Accepted; force-reset CLI withdrawn by ADR-0050) |
 | [0018](./0018-rabbitmq-as-async-message-broker.md) | RabbitMQ as the async message broker, via `@golevelup/nestjs-rabbitmq` | Proposed |
 | [0019](./0019-twilio-as-sms-gateway-provider.md) | Twilio as the SMS gateway provider | Accepted (2026-09-24, Stage 16.8 acceptance note) |
-| [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Proposed |
+| [0020](./0020-organization-entity-and-platform-scoped-management.md) | Organization entity and platform-scoped organization management | Superseded by ADR-0040 (2026-10-09, A5.3 closure owner disposition; never Accepted; management rules survive in ADR-0042 decision 7, the Auth-local read in ADR-0023 D1(a)) |
 | [0021](./0021-payment-service-platform-scoped-authorization.md) | Synchronous, fail-closed platform-scope check for payment-service's organization-scoped admin actions | Proposed |
-| [0022](./0022-company-and-platform-entities-with-operator-assignment.md) | Company and Platform entities, with many-to-many operator↔platform assignment | Proposed |
+| [0022](./0022-company-and-platform-entities-with-operator-assignment.md) | Company and Platform entities, with many-to-many operator↔platform assignment | Proposed (partially superseded by ADR-0040, 2026-10-09, A5.3 closure owner disposition; surviving decisions deferred to A6) |
 | [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Accepted (2026-10-09, A5.2-I owner authorization; three passages revised before acceptance) |
-| [0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) | Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness) | Proposed |
+| [0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) | Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness) | Proposed (acceptance deferred to A6, 2026-10-09, A5.3 closure owner disposition) |
 | [0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) | Owner login with password + second factor; secret key as step-up and recovery credential | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
 | [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Accepted (2026-10-09, A5.2-E owner authorization; decisions 2 and 4 revised before acceptance) |
 | [0027](./0027-service-layer-security-model.md) | Service-layer security model: cool-down recovery, enrollment rules, live authorization, shared security state, key management | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
