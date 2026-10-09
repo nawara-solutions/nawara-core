@@ -64,7 +64,7 @@ other record states an approval of these ADRs. **No status is changed by A1.1.**
 > ([A5 record](core-v2-a5-organization.md) §11.9; the ADR index is the current status of every ADR). §4's plan to mark ADR-0006
 > partly superseded was reviewed and not applied: ADR-0026 supersedes no decision of ADR-0006. Later on 2026-10-09 (A5.2-I) the owner
 > accepted ADR-0023, with ADR-0011 and ADR-0014 recorded as **partly** superseded by it (their earlier "Superseded by ADR-0023"
-> status lines overstated it); recorded on the ADR-0023 branch until its pull request is merged.
+> status lines overstated it); ADR-0023 is Accepted and merged through PR #257.
 
 Classification: **A** keep Proposed; **B** ready for acceptance on an existing explicit owner decision; **C** superseded on
 authoritative evidence; **D** defer the status change (outside A1).

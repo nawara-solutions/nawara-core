@@ -100,8 +100,9 @@ Accepted ADRs take precedence over this record.
 
 > **Forward note (2026-10-09, Core V2 A5.2).** OD-A4-8's scope was to review ADR-0023 and ADR-0026 for possible acceptance; it was
 > carried forward open by A4.9 (D4). Both decisions are now taken: ADR-0026 is Accepted on `main` (PR #256), and ADR-0023 was accepted
-> on 2026-10-09 (A5.2-I) on its own branch ([A5 record](core-v2-a5-organization.md) §11.9). OD-A4-8 is resolved **once the ADR-0023
-> pull request is merged**; this A4 record, certified on 2026-10-08, is otherwise unchanged.
+> on 2026-10-09 (A5.2-I) and merged through PR #257 ([A5 record](core-v2-a5-organization.md) §11.9). The condition for closing OD-A4-8
+> is satisfied: **OD-A4-8 is resolved**. This A4 record, certified on 2026-10-08, is otherwise unchanged; its certification-time
+> statements that OD-A4-8 stays open are kept as dated history.
 
 ## 5. Out of scope
 
