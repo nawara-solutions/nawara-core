@@ -24,6 +24,14 @@
 > and no new synchronous Organization Service dependency is introduced for authentication, sessions, registration, join, `/auth/me`,
 > `/auth/grants` or the ADR-0023 D1(a) routes.
 
+> **Clarified by [ADR-0062](./0062-initial-hierarchy-provisioning-and-first-platform-sequencing.md)** (Accepted 2026-10-09, A5.3
+> OD-A5-2; a clarification, **not** another supersession; status, decisions, dates and text unchanged). **OPEN-5 (A2.8) is answered:**
+> the pre-activation hierarchy of a fresh environment contains **the provisioned Company only**; no Platform or Organization is created
+> during F3 or at any time before activation. The **first operational Platform** is created after F7 and a verified post-F7 backup,
+> by the active Company Owner through Organization Service, under a separate authorization. The provisioning identity named in A1.3
+> and A2.5 is a **role and capability**, not a credential that must stay continuously active. The certified F2 to F5 sequence is
+> **not** modified, and the ADR-0060 partial supersession and the ADR-0061 clarification above are unchanged.
+
 > **Adoption record (2026-09-20).** Decisions 1 to 4 were adopted in Amendment 1; decisions 5 and 6 and the added decision 7 were accepted in Amendment 2; the ADR is **Accepted**. The original text below is kept unchanged for the historical record and still says "Proposed" in its own wording; where an amendment differs, **the amendment governs, and Amendment 2 governs over Amendment 1**.
 
 > **Partly supersedes [ADR-0039](./0039-organization-ownership-and-cross-service-migration-authority.md)** (in effect: ADR-0040 is Accepted, 2026-09-20), on the passages listed under "Amendments to ADR-0039" only; the rest of ADR-0039 (phases, stable ids, verification, freeze, single cutover point) stands. Because the ADR README defines no "amended" status, the record on acceptance follows the repository's precedent for partial replacement (ADR-0001, ADR-0010): ADR-0039's status becomes "partly superseded by ADR-0040", the two ADRs link to each other, and a forward note is added to ADR-0039. ADR-0039 is **not edited** by this draft (**update 2026-09-20:** for decisions 1 to 4, adopted on that date, it now carries the forward note and its status reads partly superseded; see Amendment 1). The analysis behind every choice below is in the [Stage 10.0 decision study](../architecture/stage-10/stage-10.0-ownership-migration-decisions.md) and the [Stage 10 study](../architecture/stage-10-organization-ownership-migration-study.md).
