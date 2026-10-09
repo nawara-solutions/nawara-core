@@ -138,11 +138,11 @@ It explicitly does **not** own:
 
 - What a given `role` or `organizationId` value *means* semantically to any consumer —
   those are fully opaque strings to `auth-service` (per ADR-0001).
-- License, billing, or individual-subscription data. That belongs to `payment-service`'s
-  `Product`/`Charge` model (per `CLAUDE.md`); `auth-service` only asks `payment-service`
-  one yes/no question — whether an organization currently holds a valid license — and only at
-  **registration** (per ADR-0004, as narrowed by ADR-0026). It never asks at login or refresh, never
-  stores license/subscription/trial/plan state, and never decides who gets a subscription.
+- License, billing, or individual-subscription data. Entitlement belongs to billing-service (ADR-0038 and ADR-0044, both
+  Proposed); `auth-service` asks **no** commercial service anything: registration and join make no license or entitlement check
+  (ADR-0026 decision 4, Accepted; removed in Stage 12.1). It never stores license/subscription/trial/plan state and never decides
+  who gets a subscription. *(Historical: until Stage 12.1 it asked `payment-service` one registration-time yes/no license question,
+  per ADR-0004.)*
 - Any actual blocking, rate-limiting, or abuse-scoring logic built on top of `Device`
   records. That is future work consuming what this service captures — this design covers
   capture only (see the ADD's "Design rationale: device/network fingerprinting").
@@ -411,8 +411,8 @@ Notes:
   one, and a management identity cannot be given one. The nullable-`organizationId` convention
   ADR-0016 relied on is thus now an explicit, checked consequence of `kind`. It was required
   as input on the public `POST /auth/register` endpoint; **since ADR-0028 the client sends only a join code and the
-  organization is resolved server-side**, still never validated *against
-  `payment-service`* beyond the license check (no cross-service FK is possible or attempted), and
+  organization is resolved server-side**, never validated against any commercial service (no license check since Stage 12.1,
+  ADR-0026 decision 4; no cross-service FK is possible or attempted), and
   `User` still gains no access to `Organization`'s business fields.
 - **`User.platformId` (ADR-0009) is dropped entirely, per ADR-0022, and must never be
   reintroduced (ADR-0024).** No table has a `platformId` column that competes with the canonical
@@ -1758,13 +1758,13 @@ call, rather than assigning the passed value directly. This matters concretely: 
 or `now + 8h` only if unscheduled — is passed on every rotation throughout an operator's
 whole session, not just the final one, so a literal "use this value as `exp`" reading would give
 every operator access token — not just the last — a session-length lifetime, silently
-defeating ADR-0002's short-lived-access-token model for that token class. `OrganizationsModule`
-(`OrganizationsController`/`OrganizationValidationService`/`PaymentServiceClient`) is the
+defeating ADR-0002's short-lived-access-token model for that token class. *Historical (removed in Stage 12.1, ADR-0026 decision 4; Auth makes no commercial call):* `OrganizationsModule`
+(`OrganizationsController`/`OrganizationValidationService`/`PaymentServiceClient`) was the
 only module with an outbound network dependency on another service, implementing the
-license-check contract from ADR-0004. **As of ADR-0026 it is called from registration only**:
+license-check contract from ADR-0004. **As of ADR-0026 it was called from registration only**:
 `AuthService.login`/`AuthService.refresh` no longer call it, and the subscription-check contract
-(ADR-0005/ADR-0006) is no longer a dependency of `auth-service` at all — platform services call
-`payment-service` for entitlement themselves. As of ADR-0021, `OrganizationsController` also gains a small new dependency
+(ADR-0005/ADR-0006) is no longer a dependency of `auth-service` at all — platform services were to call
+`payment-service` for entitlement themselves (today: ADR-0026 decision 2, against the entitlement owner). As of ADR-0021, `OrganizationsController` also gains a small new dependency
 on `OrganizationManagementService` (imported from wherever `AdminOrganizationController`'s
 module exports it) to serve `GET /auth/organizations/:id` — the one narrow lookup
 `payment-service` depends on; this is the only cross-module wiring ADR-0021 adds to
@@ -3399,8 +3399,8 @@ and `active → revoked` only, freezes identity fields, and requires `revokedAt/
 
 **Code.** `MembershipService.revoke` takes a row lock, applies the authority rules (owner, operator, org admin;
 never self; an org admin cannot remove another admin), and runs one conditional `UPDATE ... WHERE status='active'`
-that also clears `isOrganizationAdmin`. `AuthService.join` reuses lookup, fail-closed license check and atomic
-`redeem`; a duplicate pair is a `membership_user_org_uk` violation mapped to 409 inside the transaction (the spent
+that also clears `isOrganizationAdmin`. `AuthService.join` reuses lookup and atomic
+`redeem`, with no commercial check (ADR-0026 decision 4; the fail-closed license check was removed in Stage 12.1); a duplicate pair is a `membership_user_org_uk` violation mapped to 409 inside the transaction (the spent
 use rolls back). `PlatformAccessService` reads the membership of the organization in the URL for both member checks.
 `AuthGuard`, `SessionService` and `TokenService` no longer read or write an organization.
 
@@ -3501,8 +3501,9 @@ Runbook: Stage 19.5 record §4.
 - **ADR-0025/0027 follow-ups.** Recovery hardening beyond the cool-down (out-of-band confirmation); where the TOTP
   encryption key lives and how it is rotated; whether a step-up should bind to target ids rather than
   only to `purpose`; WebAuthn RP/origin configuration per deployment.
-- **ADR-0026 follow-up.** Whether the registration-time license check should also move out of
-  `auth-service`; every platform service must implement its own entitlement check.
+- **ADR-0026 follow-up (resolved 2026-10-09).** The registration-time license check left `auth-service` in Stage 12.1 (ADR-0026
+  decision 4, Accepted). Still open: every service providing a paid capability must implement its own entitlement check
+  (ADR-0026 decision 2); none is verified today.
 - How `installId` collisions or resets (e.g. app reinstall) should be handled —
   currently just looks like a new device, no special handling designed.
 - `Device` data-retention period and whether it needs privacy-policy disclosure

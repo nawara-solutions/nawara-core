@@ -2,7 +2,10 @@
 
 - **Status:** RECORD of the A5.0 discovery (read-only, 2026-10-08, on `main` at `f90787a`, the PR #252 merge that closed A4) and of
   **A5.1: the A5 architecture and scope record** (merged, PR #253, `ffdb604`, 24/24 checks), and of **A5.2: the ADR review record**
-  (§11; read-only review on `main` at `ffdb604`, 2026-10-09; review completed, owner decisions pending, **no ADR status changed**).
+  (§11; read-only review on `main` at `ffdb604`, 2026-10-09). The review record (PR #254) changed no ADR status; the owner's
+  subsequent, individually approved ADR decisions are recorded in **§11.9** (ADR-0039 Accepted on `main`, PR #255; ADR-0031, 0026,
+  0028, 0029 and 0030 accepted on 2026-10-09 in the grouped A5.2 documentation pull request). **A5.2 is not complete**: ADR-0017,
+  0020, 0022, 0023 and 0024 remain Proposed.
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -138,7 +141,7 @@ excluded. The production track (§7) is separate and owner-driven.
 
 ## 11. A5.2 ADR review record
 
-**Status: review completed, decisions pending.** The read-only review ran on `main` at `ffdb604` (2026-10-09). **No ADR status is
+**Status: review completed, decisions pending** *(at review time; the owner's later decisions are in §11.9)*. The read-only review ran on `main` at `ffdb604` (2026-10-09). **No ADR status is
 changed by A5.2's review record**, and no ADR file is edited by it. Every **"recommend ACCEPT"** below is a recommendation of this
 review, **not an approval and not a completed acceptance**: under the ADR index rules (OD-A1-1) an ADR becomes Accepted only on the
 architecture owner's explicit approval, recorded in its status line, one ADR at a time, each in its own pull request with Core CI.
@@ -252,6 +255,42 @@ The one-ADR-at-a-time rule applies to **status changes**; text corrections of Pr
 
 Remaining A5.2 work (Claude-assisted): 0039 about 1 h; 0031 1–2 h; membership cluster 4–6 h; 0023 2–3 h; 0017 2–3 h after OD-A5-3;
 0024, 0020, 0022 records 2–3 h. About **12–18 h**, plus one Core CI run per pull request and owner decision time.
+
+### 11.9 Outcomes of the A5.2 decisions (2026-10-09)
+
+§11.1 to §11.8 are the review as performed on `ffdb604` and are kept unchanged as its record; the statuses there are the statuses
+**at review time**. The owner then took the decisions below, **each explicitly and separately approved**, each in its own commit. The
+first was merged on its own (PR #255); the others are carried by **one grouped documentation pull request**, under the owner's grouping
+rule of 2026-10-09: compatible ADR changes may share a pull request only when each ADR is individually reviewed, explicitly approved
+by the owner, changed separately and recorded in its own commit; this is not bulk acceptance and does not bypass the required Core CI.
+**Until that pull request is merged, these decisions are recorded on its branch, not on `main`.**
+
+| ADR | Outcome | Approval |
+|---|---|---|
+| [0039](../adr/0039-organization-ownership-and-cross-service-migration-authority.md) | Accepted, partly superseded by ADR-0040, with an acceptance note (environment classes, expand-only Auth schema, ADR-0042 scope, historical passages, no operational authorization) | A5.2-C; **merged**, PR #255 |
+| [0031](../adr/0031-organization-service-intended-owner-of-the-hierarchy.md) | Accepted (intent), partly superseded by ADR-0039 | A5.2-D |
+| [0026](../adr/0026-authentication-is-not-entitlement.md) | Accepted after two in-place revisions: registration and join make no commercial check (decision 4); paid capabilities enforce authoritative entitlement at the point of use and deny when it is missing, invalid, expired, unavailable or indeterminate (decision 2) | A5.2-E |
+| [0004](../adr/0004-synchronous-fail-closed-license-validation.md) | Accepted, partly superseded by ADR-0026 and ADR-0028 (metadata only) | A5.2-E, A5.2-F |
+| [0006](../adr/0006-per-user-subscription-reservation-on-license-lapse.md) | **unchanged** (reviewed: ADR-0026 supersedes no decision of it; `subscription_invalid` was ADR-0005's) | owner decision, no change |
+| [0028](../adr/0028-organization-join-codes-membership-and-organization-admin.md) | Accepted after the registration license sentences were revised; acceptance note point 3 corrected later (factual only: `AUTH_EVENTS=off` writes no domain-event row); partly superseded by ADR-0030 (metadata) | A5.2-F, A5.2-H |
+| [0029](../adr/0029-organization-admin-invitations.md) | Accepted with a note (no normative change); unresolved questions 1–3 stay open; partly superseded by ADR-0030 (metadata) | A5.2-G, A5.2-H |
+| [0030](../adr/0030-multi-organization-membership-and-revoked-state.md) | Accepted after two in-place revisions: a member has 0..N memberships and zero grants no organization authority (owner decision of 2026-09-20, migration `0009`); joining makes no commercial check | A5.2-H |
+| [0001](../adr/0001-generic-organization-id-scoping-claim.md) | its existing partial supersession by ADR-0030 is formal (metadata only) | A5.2-H |
+| 0017, 0020, 0022, 0023, 0024 | **Proposed**, unchanged (§11.6); ADR-0023 also remains with OD-A4-8 | open |
+
+**Architecture as now recorded (no runtime change):** registration, onboarding join and invitation acceptance make no commercial
+check; a member has 0..N memberships and zero grants no organization authority; Auth owns identities, memberships, join codes and
+invitations; with `AUTH_EVENTS=off`, which production runs, Auth writes no domain-event row, and the central audit intents are a
+separate mechanism; organization-service's hierarchy authority is **not** activated in production.
+
+**Open items recorded by these decisions (not authorized for implementation):**
+- **Paid-capability enforcement gap.** No Core service consumes billing-service's entitlement contract, billing-service is not in
+  production, and enforcement at the point of use exists only as ADR-0026 decision 2's requirement (a forgotten check fails open).
+- **Event contract review.** `user.registered` carries the membership audience label in a payload field named `role`
+  (`auth.service.ts`, `invitation.service.ts`, `events/event-catalog.ts`), while the user's role is `member`; a follow-up for an
+  Auth / A3M event-contract review. No contract is changed here.
+- ADR-0029's unresolved questions 1–3 (invitation delivery, a stronger proof for org-admin minting, an organization with no admin
+  left) and ADR-0030's residual risks stay open. OD-A5-1 to OD-A5-5 stay open.
 
 ## 12. Validation per sub-stage
 

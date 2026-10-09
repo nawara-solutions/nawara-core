@@ -923,7 +923,8 @@ what a "platform" *means* to any given consumer (that stays opaque, exactly like
 `organizationId`); what changed is that its mere existence and identity are now real, checkable
 facts, not an assumed-valid string. License/billing data, and individual-subscription data (per
 ADR-0006), are owned entirely by `payment-service` — `auth-service` only ever reads their
-*status*, on the same terms as the license check; `Organization`'s own business fields (name,
+*status*, on the same terms as the license check *(historical: since Stage 12.1 `auth-service` reads no commercial status at
+all, ADR-0026 decision 4; entitlement is billing-service's, ADR-0038/0044, Proposed)*; `Organization`'s own business fields (name,
 tax code, address, phone, type) are a separate, `auth-service`-owned identity concern, per
 ADR-0020.
 

@@ -1,14 +1,14 @@
 # 0004. Synchronous, fail-closed license validation against payment-service for B2B registration
 
-- **Status:** Accepted
+- **Status:** Accepted (partly superseded by [ADR-0026](./0026-authentication-is-not-entitlement.md), 2026-10-09, A5.2-E owner authorization, and by [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md), 2026-10-09, A5.2-F owner authorization)
 - **Date:** 2026-09-16
 - **Deciders:** Anwar (project owner)
 
 > **Forward note (2026-09-19):** the license-status contract (`GET /payment/licenses/:organizationId/status`) and the ownership of license data move to billing-service ([ADR-0038](./0038-entitlement-in-billing-service.md)); auth-service's client is repointed in a separate small change.
 
-> **Amended by [ADR-0026](./0026-authentication-is-not-entitlement.md):** only the registration-time license check remains in `auth-service`; the login/refresh usage and the `trialEndsAt` preview are removed.
+> **Partly superseded by [ADR-0026](./0026-authentication-is-not-entitlement.md)** (Accepted 2026-10-09, decision 4): this ADR's license check, its validation step and its registration-time re-check, no longer applies; registration and join make no commercial check (removed in Stage 12.1). This ADR's text is otherwise unchanged and kept as history. *(Earlier note, when ADR-0026 was Proposed: "only the registration-time license check remains in `auth-service`; the login/refresh usage and the `trialEndsAt` preview are removed.")*
 
-> **Also amended by [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md):** registration no longer takes `organizationId` or `role` from the client; the organization is resolved server-side from a join code. The registration-time license check described here is unchanged.
+> **Partly superseded by [ADR-0028](./0028-organization-join-codes-membership-and-organization-admin.md)** (Accepted 2026-10-09): registration no longer takes `organizationId` or `role` from the client; the organization is resolved server-side from a join code. *(Earlier note, before ADR-0026 was Accepted: "The registration-time license check described here is unchanged."; that check is superseded by ADR-0026, see above.)*
 
 ## Context
 

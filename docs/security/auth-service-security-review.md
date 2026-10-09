@@ -1,5 +1,10 @@
 # auth-service — security review and implementation report
 
+> **Forward note (2026-10-09).** This review is dated 2026-09-18 and kept as written. Since Stage 12.1, registration and join make no
+> commercial check, and [ADR-0026](../adr/0026-authentication-is-not-entitlement.md) (Accepted 2026-10-09, decision 4) records it: the
+> Auth → Payment license call and the "org must … be licensed (payment, fail closed)" registration row below are historical. Paid
+> capabilities enforce entitlement at the point of use (ADR-0026 decision 2); no such enforcement is verified today.
+
 - **Date:** 2026-09-18
 - **Canonical references:** the migrations in `apps/auth-service/db/migrations/` (schema of record),
   [ADR-0026](../adr/0026-authentication-is-not-entitlement.md) (data model / entitlement boundary),

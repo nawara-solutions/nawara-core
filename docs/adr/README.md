@@ -52,19 +52,21 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 - **Implementation is not approval.** Code, passing tests or a deployment that follow an ADR do not make it Accepted, and neither
   does another ADR building on it. The `Deciders` field names who decides, not that they have approved.
 - **Supersession takes effect when the superseding ADR is Accepted.** Older ADRs already marked (partially) superseded or amended by
-  an ADR that is still `Proposed` (for example 0005 → 0026; 0009, 0016 → 0022; 0011, 0014 → 0023; 0001 → 0030; the 0004 and 0006
-  amendment banners → 0026) keep that marker as historical record; the supersession becomes formal when the newer ADR is Accepted.
+  an ADR that is still `Proposed` (for example 0009, 0016 → 0022; 0011, 0014 → 0023) keep that marker as historical record; the
+  supersession becomes formal when the newer ADR is Accepted. The markers pointing to ADR-0026 (0005; 0004 and 0006) and to ADR-0030
+  (0001) became formal with those ADRs' acceptance on 2026-10-09 (Core V2 A5.2).
 - Status changes are made one ADR at a time, never in bulk. The current review of every Proposed ADR is in the
-  [A1 record](../architecture/core-v2-a1-architecture.md) §3.
+  [A1 record](../architecture/core-v2-a1-architecture.md) §3; the Organization ADRs reviewed in Core V2 A5.2 are in the
+  [A5 record](../architecture/core-v2-a5-organization.md) §11.
 
 ## Index
 
 | #   | Title | Status |
 | --- | ----- | ------ |
-| [0001](./0001-generic-organization-id-scoping-claim.md) | Generic `organizationId` as the multi-tenancy scoping claim | Accepted (partly superseded by 0030) |
+| [0001](./0001-generic-organization-id-scoping-claim.md) | Generic `organizationId` as the multi-tenancy scoping claim | Accepted (partly superseded by 0030, formal 2026-10-09) |
 | [0002](./0002-jwt-access-token-with-rotating-refresh-token.md) | JWT access token + DB-backed refresh token with rotation & reuse detection | Accepted |
 | [0003](./0003-postgresql-typeorm-persistence.md) | PostgreSQL + TypeORM as auth-service's persistence | Accepted |
-| [0004](./0004-synchronous-fail-closed-license-validation.md) | Synchronous, fail-closed license validation against payment-service for B2B registration | Accepted |
+| [0004](./0004-synchronous-fail-closed-license-validation.md) | Synchronous, fail-closed license validation against payment-service for B2B registration | Accepted (partly superseded by ADR-0026 and ADR-0028, 2026-10-09) |
 | [0005](./0005-bounded-time-license-subscription-revalidation.md) | Bounded-time license and subscription re-validation on login and refresh | Superseded by ADR-0026 |
 | [0006](./0006-per-user-subscription-reservation-on-license-lapse.md) | Per-user subscription reservation on organization license lapse | Accepted |
 | [0007](./0007-out-of-band-cash-payment-confirmation.md) | Out-of-band cash payment confirmation via Admin role | Accepted |
@@ -86,12 +88,12 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0023](./0023-platform-access-check-and-operator-login-decoupling.md) | Generic platform-access check, and decoupling operator login/session gating from any Platform's calendar | Proposed |
 | [0024](./0024-database-enforced-tenancy-and-authorization-integrity.md) | Database-enforced tenancy and authorization integrity (Owner/Operator subtypes, mandatory FKs, DB-level assignment uniqueness) | Proposed |
 | [0025](./0025-owner-mfa-login-with-secret-key-step-up-and-recovery.md) | Owner login with password + second factor; secret key as step-up and recovery credential | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
-| [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Proposed |
+| [0026](./0026-authentication-is-not-entitlement.md) | Authentication is not entitlement: auth-service stops gating login/refresh on licenses and subscriptions | Accepted (2026-10-09, A5.2-E owner authorization; decisions 2 and 4 revised before acceptance) |
 | [0027](./0027-service-layer-security-model.md) | Service-layer security model: cool-down recovery, enrollment rules, live authorization, shared security state, key management | Accepted (2026-09-26, Stage 19.1 D1; amended by 0050) |
-| [0028](./0028-organization-join-codes-membership-and-organization-admin.md) | Organization join codes, membership and organization-admin authority | Proposed |
-| [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Proposed |
-| [0030](./0030-multi-organization-membership-and-revoked-state.md) | Multi-organization membership: one identity, many memberships, and the REVOKED state | Proposed |
-| [0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service is the intended future owner of Company, Platform and Organization (mechanism deferred) | Proposed |
+| [0028](./0028-organization-join-codes-membership-and-organization-admin.md) | Organization join codes, membership and organization-admin authority | Accepted (2026-10-09, A5.2-F owner authorization; registration license sentences revised before acceptance; partly superseded by ADR-0030, 2026-10-09) |
+| [0029](./0029-organization-admin-invitations.md) | Organization admin invitations: privileged provisioning, and where administration authority lives | Accepted (2026-10-09, A5.2-G owner authorization; partly superseded by ADR-0030, 2026-10-09) |
+| [0030](./0030-multi-organization-membership-and-revoked-state.md) | Multi-organization membership: one identity, many memberships, and the REVOKED state | Accepted (2026-10-09, A5.2-H owner authorization; two sentences revised before acceptance) |
+| [0031](./0031-organization-service-intended-owner-of-the-hierarchy.md) | organization-service is the intended future owner of Company, Platform and Organization (mechanism deferred) | Accepted (2026-10-09, A5.2-D owner authorization; partly superseded by ADR-0039) |
 | [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
 | [0033](./0033-service-to-service-authentication-and-user-identity.md) | Service-to-service authentication, and how services identify the end user | Accepted (2026-09-26, Stage 19.1 D1) |
 | [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Superseded by ADR-0056 (2026-10-07) |
