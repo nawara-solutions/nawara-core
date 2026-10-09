@@ -182,6 +182,20 @@ excluded. The production track (§7) is separate and owner-driven.
 - **Not done:** no steward provisioning (OD-S1 deferred), no runtime change, no migration, no activation of either gate. A5.3 is not
   complete.
 
+
+### 10.2 OD-A5-4 design progress (2026-10-09)
+
+- **Policy direction approved by the owner (OD-A5-4(a)–(d)):** keep first-touch `ensure` and add one explicit hierarchy-reference repair
+  operation; active Company Owner only, with a fresh factor-only step-up; resolve authoritative parent links without writing, authorize
+  the Owner's Company, then place through the guarded idempotent reference write; same-transaction audit on success, best-effort failure
+  audit after rollback, alerts for parent-link mismatches; a restricted read-only diagnostic. No background or event-driven reference
+  synchronization. Authorization reads stay local (ADR-0023 D1(a)).
+- **Proposed design:** [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) (**Proposed**, not accepted). **No
+  reference-repair or diagnostic functionality is implemented or active.** Prerequisites: the audit-contract and audit-service change
+  (consumer-first, separately authorized), the resolve/place split of `ensure`, and F6/F7 for any runtime effect.
+- **Open:** OD-A5-4(e) (post-F7 dependency convergence and Auth `local`-mode retirement) with OD-A5-5; OD-A5-2; the diagnostic CLI
+  conventions (OD-A5-5).
+
 ## 11. A5.2 ADR review record
 
 **Status: review completed, decisions pending** *(at review time; the owner's later decisions are in §11.9)*. The read-only review ran on `main` at `ffdb604` (2026-10-09). **No ADR status is
