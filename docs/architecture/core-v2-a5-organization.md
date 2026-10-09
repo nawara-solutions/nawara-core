@@ -177,6 +177,11 @@ excluded. The production track (§7) is separate and owner-driven.
 >    before any transition-dependent behavior is implemented or the check's merge is approved; the check is certified in G6 with the
 >    approved digest and configuration. **No A5.4-A5 implementation is authorized by this acceptance.**
 
+> **Update (2026-10-09, separately authorized).** The ADR-0063 §11 clarification of point 2 is now recorded
+> ([ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §11). ADR-0063 §11 items, including A5.4-T1 and
+> A5.4-A5, may therefore proceed only under their class and their own individual authorization; nothing is implemented, merged,
+> deployed or activated by this update, and production activation stays blocked.
+
 > **Not in force.** This section is a proposal for the architecture owner (2026-10-09). Until it is explicitly approved, §6, §7, §8, the
 > A5.4 row of §9 and the roadmap stay the effective gates: A5.4 stays **blocked until F7 (🔴)**. Nothing here authorizes code, a merge,
 > a deployment or an activation, and no Accepted ADR is amended by it.
