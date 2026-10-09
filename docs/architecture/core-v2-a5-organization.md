@@ -257,7 +257,8 @@ Auth": that is true of the entities and the assignment routes, not of the hierar
 Other conflicts carried forward: **0017 versus 0024** (a "permanent architectural invariant" versus "owner cardinality is policy, not
 architecture", one droppable index); **0028 and 0030 versus ADR-0026** (out-of-date license text while ADR-0026, which removed the
 call, stays Proposed under OD-A4-8); **0024 versus OD-A5-1** (immutable anchors, `ON DELETE RESTRICT` and no reparenting operation, with
-0040's interim invariant I2, bound any lifecycle decision).
+0040's interim invariant I2, bound any lifecycle decision; OD-A5-1 is now decided by [ADR-0060](../adr/0060-company-platform-organization-lifecycle.md),
+which keeps the anchors immutable and I2(b) as a permanent rule, §10.0).
 
 ### 11.5 Owner decisions and the ADRs they touch
 
