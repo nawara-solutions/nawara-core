@@ -9,7 +9,8 @@
   decided by ADR-0059, accepted on 2026-10-09 and merged as PR #258 (§10.1). The OD-A5-1 policy is decided by ADR-0060, accepted on
   2026-10-09 and merged as PR #259 (§10.0). OD-A5-4(a)–(d) are decided by ADR-0061, accepted on 2026-10-09 and merged as
   PR #260 (§10.2). The OD-A5-2 architecture policy is decided by ADR-0062, accepted on 2026-10-09 and merged as PR #261
-  (§10.3). OD-A5-5 and OD-A5-4(e) have an owner-approved policy direction drafted as ADR-0063, **Proposed**, on its own branch (§10.4).
+  (§10.3). The OD-A5-5 and OD-A5-4(e) architecture policies are decided by ADR-0063, accepted on 2026-10-09 on its own branch,
+  pending its pull request (§10.4). A5.3 stays in progress until ADR-0063 merges and its closure prerequisites are reviewed.
   **A5 is OPEN.** Its label is **🔴 (design 🟡)** ([roadmap](../CORE-ROADMAP.md), Core V2
   table; [V2-A record](core-v2-a-baseline-and-change-safety.md) §4): design, analysis and ADR review proceed now; **every runtime or
   authority change waits for the production transition of §7**. Nothing in this record is implemented, approved or activated by it.
@@ -140,8 +141,8 @@ excluded. The production track (§7) is separate and owner-driven.
 | OD-A5-1 | **BD-5 organization lifecycle** (deletion, archive, deactivate, suspend, restoration, reparenting): in A5 scope or not | no decision existed; organization-service has no status column or delete path. **Policy decided 2026-10-09** (§10.0; ADR-0060, merged as PR #259) |
 | OD-A5-2 | **OPEN-5**: whether initial Platforms or Organizations must exist before activation in a fresh environment | ADR-0040 A2.8; not blocking Stage 10.1. **Decided 2026-10-09** (§10.3; ADR-0062, merged as PR #261) |
 | OD-A5-3 | **Owner transfer**: in A5 scope or not | ADR-0017 keeps one owner per Company permanently; no transfer decision exists. **Decided 2026-10-09** (§10.1; ADR-0059) |
-| OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]`. **(a)–(d) decided 2026-10-09** (§10.2; ADR-0061, merged as PR #260); the dependency question itself, (e), stays open with OD-A5-5; **(e) policy direction approved 2026-10-09** (§10.4; ADR-0063 Proposed, not accepted) |
-| OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7. **Policy direction approved 2026-10-09** (§10.4; ADR-0063 Proposed, not accepted) |
+| OD-A5-4 | **Transitional dependencies**: after F7, remove, keep or narrow the two-way Auth ↔ Organization dependency and Auth's `local` mode | ADR-0056 `[COMPAT]` and `[DEFERRED: A5 / F6 / F7]`. **(a)–(d) decided 2026-10-09** (§10.2; ADR-0061, merged as PR #260); the dependency question itself, (e), is **decided 2026-10-09** (§10.4; ADR-0063 accepted on its branch, pending its pull request) |
+| OD-A5-5 | **Ownership CLI convergence**: after F7, move `ownership` and Auth's `hierarchy-*` commands onto the kit's `EnvReader`, retire them, or keep them | excluded from A2 / A15; must not change before F7. **Decided 2026-10-09** (§10.4; ADR-0063 accepted on its branch, pending its pull request) |
 
 ### 10.0 OD-A5-1 design progress (2026-10-09)
 
@@ -196,7 +197,8 @@ excluded. The production track (§7) is separate and owner-driven.
   authorization) and merged as PR #260**, with a separately approved clarification note on ADR-0040
   decision 2 (not a supersession). **No reference-repair or diagnostic functionality is implemented or active.** Prerequisites: the audit-contract and audit-service change
   (consumer-first, separately authorized), the resolve/place split of `ensure`, and F6/F7 for any runtime effect.
-- **Open:** OD-A5-4(e) (post-F7 dependency convergence and Auth `local`-mode retirement) with OD-A5-5 (direction drafted: §10.4); OD-A5-2 (decided: §10.3); the diagnostic CLI conventions (OD-A5-5; §10.4).
+- **Open:** none of OD-A5-4 remains open at the architecture level: (e) and OD-A5-5, including the diagnostic CLI conventions, are
+  decided (§10.4); OD-A5-2 is decided (§10.3).
 
 ### 10.3 OD-A5-2 design progress (2026-10-09)
 
@@ -237,11 +239,20 @@ excluded. The production track (§7) is separate and owner-driven.
   readiness and alerts, with the attended F6 transitional state defined explicitly. The narrowed two-way dependency is kept, enforced by
   a static Auth boundary test. A future runbook rule forbids restoring a pre-F6 Auth backup (old `local` marker) after F6, alongside the
   existing Organization rule. Both CLIs move to the kit's `EnvReader` in a separately authorized post-F7 stage.
-- **Design:** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md), **Proposed** (2026-10-09), not accepted;
-  proposed clarifications of ADR-0040 (transition and F7 retirement), ADR-0042 decision 8 (the boundary test) and ADR-0061 §6 (diagnostic
-  CLI conventions); ADR-0040 A1.4's AD-5 wording is preserved, with no recovery mechanism designed.
-- **Not implemented or authorized:** the readiness check, the boundary test, the read-only `verify`, the diagnostic, the `EnvReader`
-  move, the runbook rule, any removal, restore or production operation. A5.4 stays blocked until F7; A5.3 is not complete.
+- **Design:** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md), drafted as Proposed (2026-10-09) and
+  **Accepted on 2026-10-09 (A5.3 OD-A5-5 and OD-A5-4(e) owner authorization) on its own branch, pending its pull request and merge**;
+  the OD-A5-5 and OD-A5-4(e) architecture policies are decided. ADR-0040 A1.4's AD-5 wording and A2.6 are preserved, with no recovery
+  mechanism designed.
+- **Relationships (separately approved, on the same branch):** dated clarification notes, none a supersession, on ADR-0040 (post-F7 CLI
+  convergence; both `retire` commands kept for F6 and F7), ADR-0042 decision 8 (the complete never-call list kept, not narrowed; the
+  static boundary test required) and ADR-0061 §6 (the diagnostic as a restricted, read-only Auth CLI subcommand); statuses unchanged.
+- **Runbook:** a documentation-only rule in [`core-backup-restore.md`](../runbooks/core-backup-restore.md) §7 forbids restoring a pre-F6
+  Auth backup after F6 as an ordinary restore; it is procedural, not enforced by any tool, and not rehearsed.
+- **Not implemented:** the readiness check, the static boundary test, the read-only `verify`, the diagnostic CLI, the `EnvReader`
+  convergence and any command retirement; no restore, production transition or G6/G7/F6/F7 step has occurred. A5.4 stays blocked until
+  F7.
+- **Still to reconcile before A5.3 closes:** Proposed ADR-0017, ADR-0020, ADR-0022 and ADR-0024 (A5.2) and the closure review. A5.3
+  is not complete.
 
 ## 11. A5.2 ADR review record
 
