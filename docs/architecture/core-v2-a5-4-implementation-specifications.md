@@ -416,7 +416,9 @@ today. The provisioning **identity** remains an architectural role; a future cre
   database dependency.
 - Design constraints (A5.4-G1): Auth only; one check in the kit's readiness registry (`/ready`); `/auth/health` stays database-only
   and outside the deploy health path; no marker, trigger, CLI, `ensure`, migration or deploy-script change.
-- **OPEN DECISION:** the F6 **TRANSITIONAL** behavior. The check reads the marker and the source, not organization-service's phase, so
+- **Ruled in principle on 2026-10-10** (ADR-0063 §4 clarification; [decision record](core-v2-a5-4-f6-transitional-readiness.md)):
+  not ready with direction-specific reasons, source-first mirroring. No implementation is authorized. *Original text:*
+  *open decision:* the F6 TRANSITIONAL behavior. The check reads the marker and the source, not organization-service's phase, so
   it cannot by itself tell the attended F6 window from a mismatch. It must be specified before any transition-dependent behavior is
   implemented or the merge is approved, and certified in G6. The runbook statements that `/ready` never checks authority and that an
   Auth not-ready is critical (`docs/runbooks/organization-production.md` §6.1, §6.3) are updated when the check ships.

@@ -106,6 +106,56 @@
 
 ## 4. Decision: configuration and marker consistency
 
+> **Clarification (2026-10-10, F6 readiness and mirror order; architecture-owner rulings in principle; a clarification, not a
+> supersession; this ADR's status, this section's original text below, its rationale and its relationships are unchanged).** This
+> section leaves "the exact sequencing" to the G6 rehearsal, and §12 lists "the exact TRANSITIONAL implementation" as unresolved. The
+> owner rules as follows; the record is the
+> [F6 readiness decision record](../architecture/core-v2-a5-4-f6-transitional-readiness.md).
+> 1. **Readiness.** Every source/marker disagreement makes Auth **not ready, including inside the attended F6 window**, with a
+>    direction-specific diagnostic reason (source ahead of the marker, or marker ahead of the source). The TRANSITIONAL state is
+>    explicit because it is defined, named by its reason and expected only inside the authorized attended F6 step; it is **not** an
+>    exemption from not ready. The words "other than the explicit TRANSITIONAL state" below are read with §10 ("TRANSITIONAL handled
+>    explicitly"): handled explicitly, never reported ready. A known mismatch is never treated as automatically safe. This resolves
+>    the TRANSITIONAL implementation that §11 and §12 leave unresolved, in the stricter direction: it reads "other than" as
+>    identifying a named state, not as an exemption from not ready. On its plain wording the sentence can also be read as an
+>    exemption; adopting that reading instead would need a new decision, not this note. A ready answer between `ownership activate`
+>    and the new-source redeploy is expected and verifies nothing about the mirror.
+> 2. **Mirror order: source first.** After `ownership activate`, Auth is first redeployed with
+>    `AUTH_HIERARCHY_SOURCE=organization-service` and that deployment is verified; only then is the irreversible marker change
+>    (`hierarchy-retire --fresh`) performed. No Accepted ADR fixes the order: ADR-0040 A2.5 defines the mirror as the source and
+>    the marker together; its F6 row names only the source, and its existing-environment E6 row lists the source, then the marker.
+>    The parenthetical below and the G6 plan §9.1 list the marker first, without an order rule. **This ruling changes that listed
+>    order**: the G6 plan and the runbook's §6.2 prose must be updated and certified before F6 can run so, and the G6 rehearsal still
+>    verifies the sequencing, as this section requires.
+> 3. **`frozen`.** On the fresh F6 transition a `frozen` marker is not ready. The freeze semantics of an existing environment
+>    (ADR-0040 E2) and every documented recovery or freeze rule are not changed by this note; whether readiness also reports not
+>    ready during an existing environment's freeze is not decided.
+> 4. **`/ready` stays a monitoring signal.** It is read by the attended operator, including for post-transition verification, and
+>    is not used to route traffic. `/auth/health` stays database-only, and the container healthcheck and the deploy wait are
+>    unchanged. No routing enforcement is introduced.
+> 5. **The attended windows.** The decision record defines two: a **transition window** from `ownership activate` to the
+>    authority agreement MATCH, to which a hard procedural limit applies, and the narrower **disagreement window** between the new
+>    Auth container and the marker change, with the one reason expected inside it, the stop conditions and the escalation. Being
+>    inside a window makes a mismatch expected, not safe. While the marker is still `local` the database write guard is open, so
+>    the disagreement window relies on Auth's code and on the attended rule that no administrative first touch and no other
+>    hierarchy command runs; that is a trade-off of the source-first order, stated in the record. In neither order does the flag-based guard
+>    stop a credentialed or privileged direct SQL session.
+> 6. **Restores.** This readiness check is **not sufficient** to detect a restore from the wrong side of F6. Restore provenance,
+>    an independent authority agreement and generation or anchor consistency need separately governed designs and controls; they
+>    are **open and not implemented**.
+> 7. **Source-first safeguards (2026-10-10, after the source-first safety review).** The owner retains Option B and source first,
+>    adopts the record's required design safeguards (a transition window from `ownership activate` to MATCH with a hard procedural
+>    limit measured in G6; in-window restrictions; equal hierarchy-content evidence before the redeploy and before the marker
+>    change; at most one pre-authorized retry), and introduces **no new technical write guard**. F6 is activation, the source mirror,
+>    the marker retirement and agreement verification; F7 is Organization's `ownership retire` and the certified post-F7
+>    procedures. Each safeguard still needs its own runbook text, rehearsal and production approval.
+>
+> **Not changed and not authorized.** No authority invariant, one-way-door rule (§3, §9; ADR-0040 A2.6), gate or certification
+> requirement is weakened. The certified G6 plan and the active F6/F7 runbooks are unchanged and **cannot be executed in the
+> source-first order until they are separately updated and certified**. Deployment health, traffic routing, the authority commands
+> and every production configuration are unchanged. A5.4-A5 stays a design-approved exception: nothing is implemented, merged,
+> deployed or activated by this note.
+
 Once Auth's marker is `org_authoritative`:
 
 - `AUTH_HIERARCHY_SOURCE` other than `organization-service` makes Auth **not ready** (`/ready` fails, naming the check, in the A12
