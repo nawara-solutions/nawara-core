@@ -1,14 +1,107 @@
-# Core V2 A5.4-D2: Auth readiness during the F6 transition (decision record, OPEN)
+# Core V2 A5.4-D2: Auth readiness during the F6 transition (decision record)
 
-- **Status:** OPEN decision record (2026-10-10), on `main` at `9ca1c8f` (the PR #268 merge). Documentation only: part of the **GREEN**
-  task A5.4-D2 ([A5 record](core-v2-a5-organization.md) §9.1). It **selects no approach**, it is **not an ADR**, and it authorizes
-  nothing: **A5.4-A5 stays a design-approved exception with no implementation authorized.**
+- **Status:** **DECIDED IN PRINCIPLE (2026-10-10)** by the architecture owner: see **Decision** below, recorded as a dated
+  clarification on ADR-0063 §4. Sections 1 to 7 are the comparison as it was written while the question was open (on `main` at
+  `9ca1c8f`); they are kept unchanged as the record of the alternatives, and where they say open, not selected or not decided for a
+  ruled item, the Decision governs. Documentation only; **not an ADR**; it authorizes nothing: **A5.4-A5 stays a design-approved
+  exception with no implementation authorized.**
 - **The question.** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4 makes any disagreement between
   Auth's configured hierarchy source and its authority marker **not ready**, "other than the explicit TRANSITIONAL state", and leaves
   the exact TRANSITIONAL implementation unresolved (§12). A5.4-G1 requires it to be specified before any transition-dependent behavior
   is implemented or the check's merge is approved, and certified in the G6 rehearsal.
 - **Authority.** Where this record and an Accepted ADR or the A5.4-G1 governance differ, they govern.
 - **Companion:** [A5.4-D2 operational runbook drafts](core-v2-a5-4-operational-runbooks.md).
+
+## Decision (2026-10-10, architecture-owner rulings in principle)
+
+These are design rulings. **They authorize no implementation, merge, deployment or activation.** The certified
+[G6 plan](stage-21/stage-21-x-g6-rehearsal-plan.md) and the active [F6/F7 runbook](../runbooks/organization-production.md) are
+**unchanged, and F6 cannot be executed in the source-first order until both are separately updated and certified**. Deployment
+health, traffic routing, the authority commands and every production configuration are unchanged.
+
+| # | Ruling |
+|---|---|
+| 1 | **Option B** (§4): a source/marker disagreement is **not ready**, with a direction-specific diagnostic reason. This holds inside the attended F6 window too |
+| 2 | **Source first:** after `ownership activate`, the Auth deployment with `AUTH_HIERARCHY_SOURCE=organization-service` is verified **before** the irreversible marker change (`hierarchy-retire --fresh`) |
+| 3 | On the fresh F6 transition a **`frozen` marker is not ready**. The freeze semantics of an existing environment and the documented recovery rules are not changed |
+| 4 | **`/ready` stays monitoring-only**, usable for attended post-transition verification. `/auth/health` stays database-only; the container healthcheck and the deploy wait are unchanged; **no routing enforcement** |
+| 5 | A mismatch inside an authorized F6 window is **expected operationally and still not ready**. It is never treated as automatically safe |
+| 6 | The readiness check is **not sufficient** to detect a wrong-side restore. Restore provenance, an independent authority agreement and generation or anchor consistency need separately governed designs and controls: **OPEN, not implemented** |
+
+### The window under source first (state S2c of §3)
+
+- **Opens** when the redeployed Auth container starts with the new source: marker `local`, source `organization-service`,
+  organization-service `ACTIVE`.
+- **Closes** when `hierarchy-retire --fresh` has committed, `/ready` answers ready and the authority agreement
+  (runbook §6.2) is MATCH. This assumes the marker command stays inside F6, as the runbook and the plan have it; that placement
+  is listed as open below.
+- **Before it** (after `ownership activate`, before the redeploy: S2a) Auth answers **ready**. That answer is expected and
+  verifies nothing about the mirror.
+- **Inside it** Auth reports not ready with the reason "source ahead of the marker". It keeps serving, because `/ready` routes
+  nothing. The readiness signal protects nothing by itself.
+- **The trade-off of source first.** While the marker is `local`, **the database write guard permits hierarchy writes**
+  (migration `0008`). Marker first would close that guard at once; source first leaves it open until the marker command. Inside
+  the window the only barriers are the code and the attended rule: with the source `organization-service` the owner tool refuses
+  a local Company insert, no HTTP path writes hierarchy rows, and `ensure` places validated references only
+  (`apps/auth-service/src/cli/owner-tools.ts`, `src/hierarchy/hierarchy-reference.ts`). In exchange, a failed redeploy leaves no
+  standing mismatch under an irreversible marker. **The window is expected, not safe.**
+- **The same two values are the signature of a restored pre-F6 Auth database (S5a).** Inside the window the operator separates the
+  two by the attended step log and the agreement check, never by the reason alone.
+
+### Reasons (semantics decided; identifiers illustrative, fixed in the A5.4-A5 design document)
+
+| Reason | Marker | Source | Inside the attended window | At any other time |
+|---|---|---|---|---|
+| source ahead of the marker (*illustrative:* `source_ahead_of_marker`) | `local` | `organization-service` | the **only** expected reason | critical |
+| marker ahead of the source (*illustrative:* `marker_ahead_of_source`) | `org_authoritative` | `local` | **never expected** on this order | critical |
+| marker frozen (*illustrative:* `marker_frozen`) | `frozen` | any | never expected on the fresh path | critical on the fresh path |
+| marker missing, invalid or unreadable | – | any | never expected | critical; never treated as `local` |
+
+### Attended monitoring, stop conditions and escalation (design only; not an approved or executable procedure)
+
+The runbook text is a later, separately authorized edit, certified in G6. The items below are proposed checks.
+
+- **Monitoring.** The named operator of the F6 step watches, at each sub-step: both services' `/ready`, the reason reported, the
+  authority agreement, the event rows and the Auth log signals (runbook §6.1 to §6.3).
+- **Inside the window** no Auth CLI or operator command that writes hierarchy rows is run, other than the marker command itself.
+- **Proposed checks before the marker change, at least:** the new Auth container is running and healthy on the certified digest; its start-up line
+  shows the source `organization-service` with a configured credential; `/ready` fails on this check only, with the source-ahead
+  reason; the agreement shows `ACTIVE`, `local`, `organization-service`. If any of these is missing, the marker change is not run.
+- **Stop conditions:**
+  - any reason other than "source ahead" inside the window;
+  - "source ahead" before `ownership activate`, or after the window has closed;
+  - a failed Auth redeploy. The deploy restores the previous container, so no mismatch is shown and Auth looks consistent while
+    organization-service is `ACTIVE`: **the step is incomplete and the marker change is not run**. A retry of the redeploy is
+    the one continuation the owner may allow, and only if the authorization of the F6 step expressly covers it; otherwise stop
+    and escalate;
+  - any other readiness check failing, an anchor mismatch, or a rejected or failed authority event;
+  - a window that stays open beyond the bound the runbook sets. **The bound is not decided here.**
+- **Escalation.** Stop; run no further ownership or mirror command; keep the evidence; never edit either side to make them agree;
+  escalate to the owner. After `ownership activate` there is no rollback (ADR-0040 A2.6): the step is completed forward or
+  escalated.
+
+### Consequences for the comparison below
+
+- §4 and §5 were written for the marker-first order. Under source first the window is S2c, a failed mirror redeploy leaves no
+  standing disagreement, and Option B's "source ahead" is the expected reason inside the window.
+- Options A, C1, C2, D and E and the phase-reading alternative are **not selected**.
+- The G6 plan's monitoring demonstrations (§8.1: an induced source mismatch and an induced freeze) would also change Auth's `/ready`
+  once the check is in the rehearsed image. The plan is unchanged; this is input to its refresh.
+
+### Still open after this decision
+
+- The check's name and the reason identifiers (the A5.4-A5 design document); the bound on the window; whether the F6
+  authorization covers a redeploy retry.
+- A note for the A5.4-A5 design: Auth's start-up warning says first touches "fail closed until configuration and marker agree"
+  (`hierarchy-reference.ts`), which is not what happens with a `local` marker and the new source, where `ensure` works. No code
+  is changed here.
+- The check's behavior during the freeze of an **existing** environment. Auth does not know its environment class, so one rule in
+  code would also report not ready there; whether that is wanted is not decided. Production is a fresh environment.
+- Wrong-side restore detection: restore provenance, the independent agreement control and generation or anchor consistency.
+- What carries an alert in production while no alerting stack is deployed; today the signal is the attended operator.
+- The updates to the G6 plan and the active runbooks, and their certification; whether the marker command stays inside F6 as the
+  runbook and the plan have it (ADR-0040 A2.5 words F7 as "Retire").
+- Any later routing use of readiness: a separately governed infrastructure task.
 
 ## 1. What is fixed (not reopened here)
 
@@ -195,5 +288,6 @@ governance amendment, not only this decision.
 
 ## 7. Not decided here
 
-Which option; the mirror order; the `frozen` behavior; the interval of Option C; whether Auth's readiness should later gate traffic; whether a check
+*Superseded in part by the Decision above (2026-10-10): the option, the mirror order, the `frozen` behavior on the fresh path and
+the monitoring-only use of `/ready` are ruled. Original text:* Which option; the mirror order; the `frozen` behavior; the interval of Option C; whether Auth's readiness should later gate traffic; whether a check
 of organization-service's phase is wanted. No implementation, merge, deployment or activation is authorized by this record.

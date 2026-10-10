@@ -182,6 +182,14 @@ excluded. The production track (§7) is separate and owner-driven.
 > A5.4-A5, may therefore proceed only under their class and their own individual authorization; nothing is implemented, merged,
 > deployed or activated by this update, and production activation stays blocked.
 
+> **Update (2026-10-10, F6 readiness rulings; separately authorized).** The F6 TRANSITIONAL behavior that point 4 above left open is
+> ruled in principle by the owner and recorded as a dated clarification on
+> [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4: every source/marker disagreement is not ready
+> with a direction-specific reason, including inside the attended F6 window; the mirror is source first; a `frozen` marker is not
+> ready on the fresh path; `/ready` stays monitoring-only and `/auth/health`, the container healthcheck and the deploy wait are
+> unchanged. Point 4's other conditions stand. **No A5.4-A5 implementation is authorized by this update**; the certified G6 plan
+> and the active runbooks are unchanged, and wrong-side restore detection stays open.
+
 > **Not in force.** This section is a proposal for the architecture owner (2026-10-09). Until it is explicitly approved, §6, §7, §8, the
 > A5.4 row of §9 and the roadmap stay the effective gates: A5.4 stays **blocked until F7 (🔴)**. Nothing here authorizes code, a merge,
 > a deployment or an activation, and no Accepted ADR is amended by it.
@@ -270,7 +278,8 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 | A5.4-G1 implementation governance | – | Accepted 2026-10-09; merged as PR #266 (§9.1) |
 | A5.4-T1 static Auth boundary check | GREEN | merged as PR #267 (2026-10-10): `checkAuthOrganizationBoundary` in `scripts/lib/checks.mjs`, run by `npm run check:repo`; a syntax-level check with documented limits |
 | A5.4-D1 implementation specifications | GREEN | merged as PR #268 (2026-10-10): [`core-v2-a5-4-implementation-specifications.md`](core-v2-a5-4-implementation-specifications.md); documentation only, decides nothing |
-| A5.4-D2 operational runbook drafts and readiness specifications | GREEN | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-operational-runbooks.md`](core-v2-a5-4-operational-runbooks.md) and the OPEN decision record [`core-v2-a5-4-f6-transitional-readiness.md`](core-v2-a5-4-f6-transitional-readiness.md); documentation only; no active runbook, plan or tool is edited, no approach or digest is selected |
+| A5.4-D2 operational runbook drafts and readiness specifications | GREEN | merged as PR #269 (2026-10-10): [`core-v2-a5-4-operational-runbooks.md`](core-v2-a5-4-operational-runbooks.md) and the OPEN decision record [`core-v2-a5-4-f6-transitional-readiness.md`](core-v2-a5-4-f6-transitional-readiness.md); documentation only; no active runbook, plan or tool is edited, no approach or digest is selected |
+| F6 readiness and mirror-order rulings | GREEN (documentation) | owner rulings in principle recorded 2026-10-10 on its own branch: a dated clarification on [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4 and the Decision of [`core-v2-a5-4-f6-transitional-readiness.md`](core-v2-a5-4-f6-transitional-readiness.md). Not ready with direction-specific reasons; source-first mirroring; `/ready` monitoring-only. The G6 plan and the active runbooks are unchanged; A5.4-A5 is not authorized |
 
 **Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
 of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed

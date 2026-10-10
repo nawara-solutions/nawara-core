@@ -202,6 +202,10 @@ requirements and the risks of a false ready and a false not ready.
 
 - **OPEN.** No approach is selected.
 - **Not authorized.** A5.4-A5 stays a design-approved exception; this document authorizes no implementation of it.
+- **Update (2026-10-10).** The owner has since ruled in principle (the companion record's Decision; ADR-0063 §4 clarification):
+  Option B, source-first mirroring, `frozen` not ready on the fresh path, and `/ready` monitoring-only. Where this document says
+  the approach, the mirror order or the `frozen` detail is open, that Decision governs. Nothing is implemented, and the certified
+  plan and the active runbooks are unchanged.
 - **Five findings the owner should weigh**, all from the code as it is:
   1. Auth's `/ready` does not control traffic today. The container healthcheck and the deploy wait use `/auth/health`, so a not-ready
      Auth keeps serving; the outcome is a signal for the operator, the restore drill and the gauges.
@@ -581,7 +585,7 @@ The dependency model is D1 §8, unchanged. In particular, and to avoid reintrodu
 
 | Open item | Blocks |
 |---|---|
-| the F6 TRANSITIONAL approach, the order of the two mirror steps, and the `frozen` detail | A5.4-A5; the amended alert rule; the G6 monitoring demonstrations |
+| ~~the F6 TRANSITIONAL approach, the order of the two mirror steps, and the `frozen` detail~~ ruled in principle on 2026-10-10 (§3 update); still open: the reason identifiers, the window bound and the existing-environment freeze | A5.4-A5; the amended alert rule; the G6 monitoring demonstrations |
 | which ADR-required behaviors enter the certified set before G6-C (§2.8) | the content of the certified set and of the rehearsal |
 | whether elapsed time alone requires a new rehearsal; confirmation of the derived conditions of §2.6 | the validity of a certified G6 |
 | what "verified" means for the post-F7 backup; backup-generation tagging | the post-F7 backup checkpoint; the restore procedure |
