@@ -13,6 +13,9 @@
   assigns to it ("the check's name and the reason identifiers (the A5.4-A5 design document)"), with three implementation
   diagnostics: the error class, the Auth reason log line, and the three-way split of the fail-closed reason (§3, §5, §7). **The
   owner confirmed these identifiers on 2026-10-10 (R4).**
+- **Implementation status (2026-10-10): COMPLETE LOCALLY, committed as `da0fd957` on `feature/core-v2-a5-4-a5-readiness-check`;
+  NOT MERGED, NOT DEPLOYED, NOT ACTIVATED (§14).** Developed under the RED-exception development authorization of A5.4-G1 item 4. The
+  test evidence of §14 is local and CI-independent; it is **not** a deployment certification.
 - **Owner rulings (2026-10-10, R1 to R4; recorded on ADR-0063 §4 and in the decision record's "Later rulings"):** R1, a `frozen`
   marker is not ready with `marker_frozen` in fresh and existing environments, with either source (§4, §11); R2, a backup taken
   under a freeze stays a valid backup state, and the restore-drill compatibility change is separately authorized (§9, §10); R3, a
@@ -371,3 +374,87 @@ deployment is `97f78cb` (2026-10-02, `sha256:26164d42…5eaf`), not `9e29c76`; t
 It implements nothing, writes no test, changes no ADR, runbook, plan, schema, workflow, script or library, selects no digest,
 deploys nothing and authorizes no task. Its identifiers (the check name, the six reason codes, the reason log line) take effect only
 through a separately authorized implementation.
+
+## 14. Implementation status (2026-10-10): committed locally, not merged
+
+*Recorded after the implementation commit; it changes no ruling or design statement above and approves nothing retrospectively.*
+
+**What exists.** One local commit, `da0fd9571a8a522d680d59eac6488a4ed591251e` (`feat(auth): add hierarchy authority readiness check`), on
+`feature/core-v2-a5-4-a5-readiness-check`, parent `9bc8176` (`main` after PR #290), made under the RED-exception development and
+commit authorizations of A5.4-G1 item 4. It is **not pushed, not in a pull request, not merged, not deployed and not activated**.
+
+**Scope: exactly six Auth files** (520 lines added, 4 removed).
+
+| File | Change |
+|---|---|
+| `apps/auth-service/src/hierarchy/authority-readiness.ts` | new: the strict marker reader, the §4 decision, `HierarchyAuthorityNotReady`, the reason line, the registration |
+| `apps/auth-service/src/hierarchy/authority-readiness.spec.ts` | new: the matrix, the reader and the provider with controlled doubles (T10, T11's two-row case, part of T12) |
+| `apps/auth-service/test/hierarchy-authority-readiness.e2e-spec.ts` | new: T1 to T9 and T12 to T19 against real PostgreSQL |
+| `apps/auth-service/src/app.module.ts` | one provider, its import and a comment |
+| `apps/auth-service/test/health-readiness.e2e-spec.ts` | the §8.4 change: `failed` gains `hierarchy_authority`; the stale title renamed |
+| `apps/auth-service/test/migrations.e2e-spec.ts` | the §8.4 change: `failed` becomes `['hierarchy_authority', 'migrations']` |
+
+No library, migration, trigger, deploy script, Dockerfile, workflow, runbook, ADR or production configuration changes. `/auth/health`,
+`ensure()` (A2), the A3 repair route and `hierarchy-authority.ts` are unchanged.
+
+**Outcomes of the nine rows of §4, each tested:**
+
+| # | Source | Marker | Result | Reason | Evidence |
+|---|---|---|---|---|---|
+| 1 | `local` | `local` | ready | – | T1 |
+| 2 | `local` | `frozen` | not ready | `marker_frozen` | T2 |
+| 3 | `local` | `org_authoritative` | not ready | `marker_ahead_of_source` | T3 |
+| 4 | `organization-service` | `local` | not ready | `source_ahead_of_marker` | T4, T13 |
+| 5 | `organization-service` | `frozen` | not ready | `marker_frozen` | T5 |
+| 6 | `organization-service` | `org_authoritative` | ready | – | T6 |
+| 7 | any | missing | not ready | `marker_missing` | T7 (both sources) |
+| 8 | any | invalid, or more than one row | not ready | `marker_invalid` | unit doubles (T10, T11) |
+| 9 | any | unreadable, or no answer within the timeout | not ready | `marker_unreadable` (a timeout shows as the kit's `ReadinessCheckTimeout`) | T8a, T8b, T8c, T9 |
+
+**Local test evidence (not a deployment certification):**
+
+- **T1 to T19 passed.** The new e2e file holds 19 tests against real PostgreSQL; T10 and T11's two-row case are unit doubles.
+  **T20:** its static part holds (no deploy-path file changed); its `npm run test:deploy` part was **NOT RUN**. T8b and T8c assert the full registry line
+  `readiness_check_failed check=hierarchy_authority error=HierarchyAuthorityNotReady code=marker_unreadable`; T8a asserts its
+  `error=HierarchyAuthorityNotReady code=marker_unreadable` part.
+- **M1 to M14 passed:** all 17 original mutation variants (M2 and M12 have sub-variants) were killed by named tests and restored
+  byte-identically. A targeted rerun showed M9a (an `UPDATE` of the marker) killed by T17, M9b (the design's
+  `SET LOCAL nawara.reference_write` variant) killed by T17 and by the `check:repo` reference-write rule, and M10 (a configuration value
+  leaked through the check name into the `/ready` body, which is kit-owned) killed by T18. M7 was exercised as a temporary middleware in
+  `app.module.ts` gating `/auth/health`. No mutant was committed.
+- **Auth unit: 323 passed** (16 files) and the **typecheck passed**, in one run whose log records the hashes of the provider, the unit
+  spec, `app.module.ts` and the two changed existing tests, which equal the committed files; the e2e file's hash in that log is the
+  version before the final T8b and T8c assertions (unit runs do not include e2e specs). A typecheck run after that final change printed no
+  diagnostic (its saved log records no exit code).
+- **Auth e2e: 577 passed** (50 files), a run that **preceded** the final, assertion-only change to T8b and T8c; **the new e2e file then
+  passed all 19 tests** in a run whose log records the committed file's hash.
+- **Repository:** `check:repo` passed (including the Auth → Organization boundary check and the reference-repair producer-scope check);
+  `test:repo` **133 passed**. Cross-service: `test:e2e:auth-organization` 9 passed, `test:e2e:audit-producers` 26 passed.
+- **A2 golden fixture** unchanged: `ea7ab0749d8f4f8b462b49b6b7f2b074a459a46d0b0f230fa164dcde2ed5b394`.
+- Independent reviews: PASS WITH FINDINGS, no material finding remaining. Not run: GitHub CI, `npm run test:deploy` (no deploy
+  file changed), Final Core Validation.
+
+**Compatibility (prepared for the pull request; it must be recorded there BEFORE any merge approval).**
+
+- **Baseline:** the last **documented** Auth deployment, revision `97f78cb` (2026-10-02, `sha256:26164d42…5eaf`; A3 design §11.9),
+  recorded as source `local` and marker `local`. The live production image, source and marker are **NOT VERIFIED**.
+- Under `local`/`local` Auth stays ready (T1; the full suites; the cross-service suite's Auth `/ready`). `/auth/health` is unchanged
+  (T14; its controller is not in the diff). Requests keep being served (T15). No start-up database dependency is introduced (T16).
+- No change reaches organization-service or audit-service images: their image workflows build only on their own application paths,
+  the two libraries, the package files and their own build files, none of which changed.
+- **Not covered:** the full Auth deployment delta from `97f78cb` to the candidate (A3 design §11.9) still requires its own review before
+  any deployment. This evidence does not certify it.
+
+**Before the implementation pull request may merge (each separately authorized):** a push and one pull request; the compatibility
+evidence above **and the image-pinning condition of A5.4-G1 item 4** ([A5 record](core-v2-a5-organization.md) §9.1 item 4: "Its merge
+also needs the image-pinning approval"; §10 item 4) recorded in the pull request **before** the merge approval; an **explicit, recorded RED-exception merge approval** in that
+pull request; and the merge **before** the G6 baseline refresh selects the certified digest set (§10).
+
+**Production stays gated by:** the restore-drill compatibility change (R2, OPEN-8); the operational alert mechanism, designed, implemented
+and demonstrated before the first production deployment of an Auth image containing the check, and for every later such deployment,
+including F6-related redeployments (R3, OPEN-3); the G6 plan and runbook
+updates (OPEN-6); the certified digest selection and the G6 rehearsal; verification of the live state; and a separate deployment
+authorization covering the check's runtime effect (§10 item 11). Nothing here authorizes a merge, a deployment or an activation.
+
+**A3 findings, unchanged:** PR #287's RED-exception merge approval (item 5) remains **NOT VERIFIED**, and A3's O1 pre-merge timing remains
+**unmet** (§12; A3 design §11.8, §11.9).
