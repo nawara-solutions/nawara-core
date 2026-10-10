@@ -372,7 +372,8 @@ before any RED-exception merge**; the ruling does not presume it (§14 item 11).
 
 **O2 — producer-scope enforcement (alternative (b)).** The current producer-less assertions are to be relocated into an equivalent,
 phase-aware repository check, as a **separate prerequisite task**, before A3. That task needs its own development, review, CI and
-merge authorization; **none is granted here**. Its requirements:
+merge authorization; **none is granted here**. **The governance class of that task is not ruled**: the word "YELLOW" in the
+alternative recorded in the table above is not adopted. Its requirements:
 
 - the exact application paths are fixed first, through O10 (O10 remains open; for this purpose it also has to fix the file paths);
 - there is never an interval without producer-scope enforcement;
@@ -394,9 +395,10 @@ transaction; a determinable placed or no-op result; detectable integrity mismatc
 unchanged. Resolution and placement are never exposed as a public HTTP API.
 
 **O5 — cached-ancestor integrity (alternative (a), the literal reading).** For an Organization with a cached Platform ancestor, the
-repair fetches that Platform from Organization Service and compares its Company link with the cached relationship. An unavailable,
-missing or inconsistent authoritative parent is handled by the accepted failure and integrity rules (§7). How a cached Platform
-that the authority does not show is classified among those rules is not ruled here; it is settled in the A3 implementation design. The cached relationship is never silently trusted. `ensure` keeps its lookup
+repair fetches that Platform from Organization Service and compares its Company link with the cached relationship. An unavailable
+or inconsistent authoritative parent is handled by the accepted failure and integrity rules (§7). A cached Platform that the
+authority does not show is not covered by that sentence: its classification is **not ruled here** and stays OPEN for the A3
+implementation design. The cached relationship is never silently trusted. `ensure` keeps its lookup
 sequence: the comparison belongs to the repair path only.
 
 **O11 — where Owner authorization lives (alternative (a)).** The HTTP route may admit authenticated users. The repair service itself
