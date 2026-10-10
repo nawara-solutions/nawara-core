@@ -49,6 +49,10 @@ export const STEP_UP_METHODS = {
   // Verified and consumed by release-service through POST /auth/step-up/verify.
   'release.withdraw': ['totp', 'webauthn'],
   'compatibility_policy.change': ['totp', 'webauthn'],
+  // Hierarchy reference repair (ADR-0061 §3, §4; A5.4-A1): a fresh, factor-only step-up, never the bare key. Declared only: no Auth
+  // route consumes it yet (the repair runtime is A5.4-A3), so a proof for it authorizes nothing in Auth. The generic
+  // POST /auth/step-up/verify can still consume (burn) it, as it can any listed purpose.
+  'hierarchy.reference.repair': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
