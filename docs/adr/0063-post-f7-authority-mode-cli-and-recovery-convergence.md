@@ -156,6 +156,29 @@
 > and every production configuration are unchanged. A5.4-A5 stays a design-approved exception: nothing is implemented, merged,
 > deployed or activated by this note.
 
+> **Clarification (2026-10-10, A5.4-A5 readiness: frozen marker, backups under a freeze, operational alert; architecture-owner
+> rulings R1 to R3; a clarification, not a supersession; this ADR's status, this section's original text below and the clarification
+> above, rulings 1 to 7 included, are unchanged).** The record is the
+> [F6 readiness decision record](../architecture/core-v2-a5-4-f6-transitional-readiness.md) ("Later rulings") and the
+> [A5.4-A5 design](../architecture/core-v2-a5-4-a5-readiness-design.md).
+> 8. **`frozen`, every environment (R1).** Ruling 3 left undecided whether readiness reports not ready during an existing
+>    environment's freeze. It does: a `frozen` marker is **not ready**, with the reason `marker_frozen`, with either hierarchy source,
+>    in fresh and in existing environments. The check stays monitoring-only (ruling 4): it alters neither `/auth/health`, Auth's
+>    serving or routing, the container healthchecks, the deploy waits, the freeze, unfreeze or restoration procedures, nor the marker.
+> 9. **Backups under a freeze (R2).** A backup taken while the marker is `frozen` remains a valid backup state, and an expected
+>    `marker_frozen` readiness result is not treated as backup corruption. Any restore-drill compatibility change needs its own
+>    authorization, testing and review before an affected rehearsal; no restore script or runbook is changed by this note.
+> 10. **Operational alert (R3).** Before the **first** production deployment of any Auth image containing the A5.4-A5 readiness check,
+>     an explicitly reviewed operational alert mechanism is implemented and demonstrated; the requirement also applies to later Auth
+>     deployments, including F6-related redeployments. A separately certified equivalent mechanism may satisfy it without completing
+>     the whole A12.10 stage. The alert implementation, delivery channel, polling strategy and demonstration environment are the
+>     subject of a separate reviewed design. Logs and an attended operator give diagnostic visibility for local testing; they do not
+>     by themselves satisfy the production alert requirement.
+>
+> **Not changed and not authorized.** No authority invariant, one-way-door rule, gate, certification requirement or F6 sequencing is
+> changed. No alert implementation, restore-drill change, runbook or G6-plan edit, implementation of A5.4-A5, merge, deployment or
+> activation is authorized by this note.
+
 Once Auth's marker is `org_authoritative`:
 
 - `AUTH_HIERARCHY_SOURCE` other than `organization-service` makes Auth **not ready** (`/ready` fails, naming the check, in the A12
