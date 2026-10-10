@@ -4,9 +4,9 @@
   seven separate authorizations of the accepted A2/A3 exception ([A5 record](core-v2-a5-organization.md) §9.3, A.2 item 1). **It
   authorizes no code, test, commit of code, pull request, merge, deployment, audit emission or activation.** Local A3 development is a
   separate authorization (A.2 item 3) and must not start while a blocking decision of §11 is open.
-- **Implementation status (2026-10-10): IMPLEMENTED LOCALLY, NOT MERGED (§11.7).** Slices A to D exist as four local commits on the
-  branch `feature/core-v2-a5-4-a3-reference-repair`, under authorizations 3 and 4 of §9.3 A.2. They are not pushed, not in a pull
-  request, not merged, not deployed and not activated; A3 is not certified by CI and the RED-exception merge conditions are not met.
+- **Implementation status (2026-10-10, post-merge): MERGED, NOT DEPLOYED, NOT ACTIVATED (§11.7, §11.8).** Slices A to E were merged
+  into `main` as PR #287 (merge commit `fcf5806`), with the pull request's CI green (24 of 24). **The RED-exception merge approval
+  (§9.3 A.2 item 5) is NOT VERIFIED**, and deployed-image compatibility (§11.1, O1) was **not demonstrated before the merge** (§11.8).
 - **Owner rulings (2026-10-10):** the seven blocking decisions O1, O2, O3, O4, O5, O11 and O12 are **ruled** (§11.1). The rulings
   are documentation: they implement nothing and authorize no development. **A3 stays blocked** until the O2 prerequisite task is
   merged, the remaining prerequisites of §11.2 are met and local A3 development is separately authorized.
@@ -762,7 +762,9 @@ unchanged; the earlier wording of TA8 expected `403` for the Owner, which contra
 **None of C1, C4 and C5 is a source or test change made now.** They are permissions and a documentation correction; the files are
 touched only by a separately authorized slice C change.
 
-### 11.7 Implementation status (2026-10-10): local, RED-governed, not merged
+### 11.7 Implementation status (2026-10-10): local, RED-governed, before the merge
+
+*This section records the state before PR #287 was merged; the state after the merge is §11.8.*
 
 **What exists.** Four local commits on `feature/core-v2-a5-4-a3-reference-repair`, each separately authorized under §9.3 A.2 items 3 and
 4, plus one authorized merge of `main` (bringing in PR #286's rulings). They are **not pushed, not in a pull request, not merged, not
@@ -811,7 +813,7 @@ conforming. This is local evidence only; it is not CI certification.
   cases are tested with controlled test doubles.
 - The O7 failure metric is not implemented; it remains an activation condition (§11.5, O7).
 
-**Not yet complete.**
+**Not yet complete** (as at the commit of slice E; superseded by §11.8 for the pull request, its CI and the merge).
 
 - The commit of this documentation (slice E).
 - Push and the pull request.
@@ -822,6 +824,41 @@ conforming. This is local evidence only; it is not CI certification.
 - Image selection, production deployment (A.2 item 6).
 - The audit-service deployment declaring the four actions; F6 and F7 with Auth's source `organization-service`; the O7 monitoring
   condition; activation (A.2 item 7).
+
+### 11.8 Status after the merge (2026-10-10): merged, not deployed, not activated
+
+Recorded from a read-only post-merge governance audit. It changes no decision and approves nothing retrospectively.
+
+- **Merge.** Slices A to E (commits `eedfa1e`, `89a21af`, `04fe865`, `fa32acd`, `7fbe340`, with the integration merge `30ec85b`) were
+  merged into `main` as PR #287, merge commit `fcf5806`, on 2026-10-10 at 20:10:58Z, by the repository owner account, with no recorded
+  item 5 approval. The pull request's CI was green before the merge:
+  24 of 24 checks, including `core-ci-passed`. No auto-merge was involved. The pull request carried a "merge not authorized" notice
+  listing the conditions below.
+- **Not deployed, not activated.** The merge triggered only the build-only `auth-service Docker build` workflow (a revision-labelled
+  image; nothing deployed). No Auth deployment has run since 2026-09-30; production Auth runs with source `local` (§2; not re-verified in
+  production by this audit), where the repair route is inert. No audit emission and no authority change has occurred.
+
+| Condition | Status |
+|---|---|
+| Local development and commits (§9.3 A.2 items 3, 4); push and one pull request | satisfied |
+| CI green on the pull request (§14 item 9) | satisfied (24 of 24) |
+| §14 items 1 to 8 (scope, inertness, outcome rows, A2, T1, mutation checks, decisions, review) | satisfied per the pull request's evidence table (local runs and reviews, §11.7) and its CI |
+| The G6 timing statement in the pull request (§14 item 10) | present in the pull request; it left the question whether the refresh had happened to the owner's confirmation at merge time |
+| **RED-exception merge approval (§9.3 A.2 item 5)** | **NOT VERIFIED**: no approval is recorded in the pull request or in this record |
+| **Deployed-image compatibility (§11.1, O1)** | **NOT DEMONSTRATED BEFORE THE MERGE** |
+| G6 rule: merged before the baseline refresh (§9.3 A.3; §15) | per this repository's record, the baseline refresh has not happened: G6 is deferred and no certified digest set is recorded as selected |
+| Image selection, deployment (A.2 item 6) | not done; separately gated |
+| Audit-service deployment declaring the four actions; F6 and F7; the O7 monitoring condition; activation (A.2 item 7) | outstanding; separately gated |
+
+- **Compatibility analysis after the merge (read-only; it does not satisfy O1's timing).** The last Auth deployment (2026-09-30,
+  revision `9e29c76`) predates the repair purpose: that image refuses to issue a proof for it, so no deployed caller can hold one, and
+  S1's changed answer of the generic verification affects no deployed caller. An image built from `fcf5806` would run with source
+  `local`, where the route is inert. This indicates no affected deployed caller; **it does not retroactively satisfy the requirement
+  that O1 be demonstrated before a RED-exception merge.**
+- **G6.** The next G6 baseline refresh must select a certified auth-service revision that includes the merged A3 code (`fcf5806` or a
+  later certified revision), and G6 rehearses that set. If any owner record outside this repository had already selected a certified
+  digest set before 2026-10-10 20:10:58Z, the merge changed that set and a separately authorized re-rehearsal is required (§15).
+- **Nothing here authorizes** image selection, deployment, audit emission, F6/F7 or activation.
 
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
@@ -918,9 +955,9 @@ The **seven separate authorizations** of §9.3 A.2:
 |---|---|---|
 | 1 | design documents and test plans | this document |
 | 2 | local A2 development | done (A2) |
-| 3 | local A3 development | **granted per slice and done** for slices A to D (§11.7); slice E documentation in progress |
-| 4 | each commit and each pull request | **granted for the four local slice commits only**; no push and no pull request yet |
-| 5 | a RED-exception merge approval per pull request | not granted |
+| 3 | local A3 development | **granted per slice and done** for slices A to E (§11.7) |
+| 4 | each commit and each pull request | **granted** by the owner's instructions for the slice commits, the push and one pull request (PR #287) |
+| 5 | a RED-exception merge approval per pull request | **NOT VERIFIED**: PR #287 was merged (`fcf5806`) without a recorded approval (§11.8) |
 | 6 | each deployment of an image containing the code | not granted |
 | 7 | audit emission and activation, after their prerequisites | not granted |
 
