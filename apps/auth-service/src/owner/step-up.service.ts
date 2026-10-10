@@ -58,6 +58,34 @@ export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The purpose of the hierarchy reference repair (ADR-0061 §3). The literal stays in this file (A5.4-A3 O10). */
+const REFERENCE_REPAIR_PURPOSE = 'hierarchy.reference.repair' satisfies StepUpPurpose;
+
+/**
+ * What `consumeForReferenceRepair` knows after its one statement (ADR-0065 §5; A5.4-A3 O8):
+ * - `consumed`: the statement completed and consumed the proof. It is spent for good.
+ * - `rejected`: the statement completed and matched nothing (unknown, expired, already used, or not this owner, session, purpose or an
+ *   allowed method), or no well-formed proof was presented. Nothing was consumed.
+ * - `not_consumed`: the DATABASE reported that the statement failed and its implicit transaction was rolled back. Nothing was consumed.
+ * - `uncertain`: anything else. The proof may or may not have been consumed; the caller must fail closed, must not retry the
+ *   consumption, and must never report the proof as unused.
+ */
+export type RepairProofConsumption = 'consumed' | 'rejected' | 'not_consumed' | 'uncertain';
+
+/**
+ * Whether a failure of the single autocommit consume statement PROVES that nothing was committed. Deliberately narrow: only an error
+ * report sent by PostgreSQL itself, at severity ERROR (the statement's implicit transaction is aborted and the session lives on), whose
+ * status code does not say that completion is unknown. A status code alone is never enough: a FATAL or PANIC report carries one too and
+ * can follow a commit. A connection failure, a client-side deadline, a lost answer or any other error proves nothing.
+ */
+function provesNothingCommitted(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const { severity, code } = e as { severity?: unknown; code?: unknown };
+  if (severity !== 'ERROR') return false; // FATAL, PANIC, a localized severity, or not a database report at all
+  if (typeof code !== 'string' || !/^[0-9A-Z]{5}$/.test(code)) return false;
+  return !code.startsWith('08') && code !== '40003'; // connection exceptions; statement_completion_unknown
+}
+
 export interface StepUpRequest {
   ownerId: string;
   sid: string;
@@ -157,5 +185,27 @@ export class StepUpService {
       [a.token, a.ownerId, a.sid, a.purpose, this.clock.now()],
     );
     if (!rows[0] || !this.allowed(a.purpose, rows[0].method)) throw await denied();
+  }
+
+  /**
+   * Consumes a reference-repair proof on its own (ADR-0061 §4 step 3; ADR-0065 §5, S2; A5.4-A3 O8). Unlike `consume`, this is ONE
+   * statement sent in autocommit, outside any transaction of the caller: once it has completed, no later rollback restores the proof.
+   * The whole security context is checked by that statement, the allowed method included, so a proof that fails any condition is not
+   * consumed. It records nothing and throws nothing: the caller decides the answer and the evidence from the outcome it returns.
+   */
+  async consumeForReferenceRepair(a: { ownerId: string; sid: string; token: string | undefined }): Promise<RepairProofConsumption> {
+    if (!a.token || !UUID_RE.test(a.token)) return 'rejected'; // no statement is sent for an absent or malformed proof
+    try {
+      const { rows } = await this.db.query(
+        `UPDATE owner_step_up SET "consumedAt"=$5
+          WHERE id=$1 AND "ownerId"=$2 AND "sessionFamilyId"=$3 AND purpose=$4 AND method::text = ANY($6::text[])
+            AND "consumedAt" IS NULL AND "expiresAt" > $5
+          RETURNING id`,
+        [a.token, a.ownerId, a.sid, REFERENCE_REPAIR_PURPOSE, this.clock.now(), STEP_UP_METHODS[REFERENCE_REPAIR_PURPOSE]],
+      );
+      return rows.length === 1 ? 'consumed' : 'rejected';
+    } catch (e) {
+      return provesNothingCommitted(e) ? 'not_consumed' : 'uncertain';
+    }
   }
 }
