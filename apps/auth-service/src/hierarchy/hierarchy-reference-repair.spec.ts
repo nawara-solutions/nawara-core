@@ -389,7 +389,7 @@ describe('A5.4-A3 slice B: repairReference, guards and boundaries', () => {
 
   it('nothing calls it yet: `repairReference` is named in hierarchy-reference.ts only (no route, no service, no caller)', () => {
     const named = sources(src).filter((path) => readFileSync(path, 'utf8').includes('repairReference'));
-    expect(named.map((path) => path.slice(src.length + 1))).toEqual(['hierarchy/hierarchy-reference.ts']);
+    expect(named.map((path) => path.slice(src.length + 1))).toEqual(['hierarchy/hierarchy-reference.ts', 'hierarchy/reference-repair.service.ts']);
   });
 
   it('the module writes no audit record of its own: no central writer, no local audit, no outbox', () => {

@@ -2155,6 +2155,9 @@ export const AUTH_ORGANIZATION_OPERATIONS = [
     callers: [`${AUTH_SRC}platform/platform.controller.ts#PlatformController.grant`] },
   { operation: 'owner bootstrap (command line)', holder: `${AUTH_SRC}cli/owner-tools.ts`, owner: null, member: 'bootstrapOwner',
     callers: [`${AUTH_SRC}cli/main.ts#<module>`] },
+  // A5.4-A3 (ADR-0061; §9.3 A.1): the Owner's hierarchy reference repair, the one entry this exception adds.
+  { operation: 'hierarchy reference repair', holder: `${AUTH_SRC}hierarchy/reference-repair.service.ts`, owner: 'ReferenceRepairService', member: 'repair',
+    callers: [`${AUTH_SRC}hierarchy/reference-repair.controller.ts#ReferenceRepairController.repair`] },
 ];
 /** A call site that hands the client itself to an operation (the command line resolves it from the application context). */
 export const AUTH_ORGANIZATION_CLIENT_PASSERS = { [`${AUTH_SRC}cli/main.ts`]: ['<module>'] };

@@ -52,7 +52,9 @@ export type RateBucket =
   | 'invitation_resolve_ip'
   | 'invitation_resolve_global'
   | 'invitation_accept_ip'
-  | 'invitation_manage_actor';
+  | 'invitation_manage_actor'
+  | 'reference_repair_owner'
+  | 'reference_repair_ip';
 
 export interface AppConfig {
   env: 'development' | 'test' | 'production';
@@ -380,6 +382,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
       invitation_resolve_global: rule(reader, 'INVITATION_RESOLVE_GLOBAL', 500, 60),
       invitation_accept_ip: rule(reader, 'INVITATION_ACCEPT_IP', 10, 900),
       invitation_manage_actor: rule(reader, 'INVITATION_MANAGE_ACTOR', 20, 3600),
+      // Hierarchy reference repair (ADR-0061 §4 step 2; A5.4-A3 O9): per Owner and per address, counted only once the repair is eligible.
+      reference_repair_owner: rule(reader, 'REFERENCE_REPAIR_OWNER', 5, 300),
+      reference_repair_ip: rule(reader, 'REFERENCE_REPAIR_IP', 20, 300),
     },
     onboarding: {
       // V2 A2.3: exactly `true` or `false` (default false); an ambiguous value is refused instead of silently turning verification off.

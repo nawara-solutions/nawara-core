@@ -378,7 +378,7 @@ describe('A5.4-A3 slice A: reference-repair proof consumption (real PostgreSQL)'
 
     it('nothing calls it: the method is named in step-up.service.ts only (no route, no repair service, no caller)', () => {
       const named = sources(src).filter((path) => readFileSync(path, 'utf8').includes('consumeForReferenceRepair'));
-      expect(named.map((path) => path.slice(src.length + 1))).toEqual(['owner/step-up.service.ts']);
+      expect(named.map((path) => path.slice(src.length + 1))).toEqual(['hierarchy/reference-repair.service.ts', 'owner/step-up.service.ts']);
     });
 
     it('the generic `consume` is unchanged for this purpose: POST /auth/step-up/verify still consumes a repair proof exactly once (S1 is a later slice)', async () => {
