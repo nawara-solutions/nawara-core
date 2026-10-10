@@ -5,6 +5,9 @@
   `9ca1c8f`); they are kept unchanged as the record of the alternatives, and where they say open, not selected or not decided for a
   ruled item, the Decision governs. Documentation only; **not an ADR**; it authorizes nothing: **A5.4-A5 stays a design-approved
   exception with no implementation authorized.**
+- **Later rulings (2026-10-10):** the owner ruled R1 to R4 for the A5.4-A5 readiness check ("Later rulings" below; ADR-0063 §4,
+  clarification items 8 to 10). They rule two items of "Still open after this decision" and the policy part of a third (the alert
+  mechanism's design stays open), and authorize nothing.
 - **The question.** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4 makes any disagreement between
   Auth's configured hierarchy source and its authority marker **not ready**, "other than the explicit TRANSITIONAL state", and leaves
   the exact TRANSITIONAL implementation unresolved (§12). A5.4-G1 requires it to be specified before any transition-dependent behavior
@@ -182,6 +185,28 @@ The refreshed G6 plan must rehearse, at least (seven cases):
 Cases 1 and 4, and the readiness part of 3, need the A5.4-A5 check in the rehearsed image. **G6 is not ready and not certified**;
 these requirements change neither the certified plan nor its acceptance criteria until the plan is separately refreshed.
 
+### Later rulings (2026-10-10): the A5.4-A5 readiness check (R1 to R4)
+
+Architecture-owner rulings, recorded as items 8 to 10 of the ADR-0063 §4 clarification (R1 to R3) and here (R4). **They authorize no
+implementation, merge, alert implementation, restore-drill change, runbook or G6-plan edit, deployment or activation.** The Decision
+above, its six rulings and the source-first sequencing are unchanged.
+
+| # | Ruling |
+|---|---|
+| R1 | **Frozen marker.** In fresh and in existing environments, with either `AUTH_HIERARCHY_SOURCE` value, a `frozen` marker is **not ready** with the reason `marker_frozen`. The check is monitoring-only: it alters neither `/auth/health`, Auth's serving or routing, the container healthchecks, the deploy waits, the freeze, unfreeze or restoration procedures, nor the marker. This rules the existing-environment question that ruling 3 left undecided |
+| R2 | **Frozen backup validity.** A backup taken while the marker is `frozen` remains a valid backup state. An expected `marker_frozen` readiness result must not be treated as backup corruption. Any restore-drill compatibility change needs separate authorization, testing and review before an affected rehearsal; no restore script or runbook is changed here |
+| R3 | **Operational alerting.** Before the **first** production deployment of any Auth image containing the A5.4-A5 check, an explicitly reviewed operational alert mechanism must be implemented and demonstrated; this also applies to later Auth deployments, including F6-related redeployments. A separately certified equivalent mechanism may satisfy it without completing the whole A12.10 stage. The alert implementation, delivery channel, polling strategy and demonstration environment remain subjects of a separate reviewed design. Logs and an attended operator give diagnostic visibility for local testing but do not by themselves satisfy the production alert requirement |
+| R4 | **Diagnostics.** Check name `hierarchy_authority`; error class `HierarchyAuthorityNotReady`; warning `hierarchy_authority_not_ready` with the fields `reason`, `source` and `marker`; fail-closed reason codes `marker_missing`, `marker_invalid` and `marker_unreadable`. The `/ready` response stays names-only, and the warning must not leak credentials or sensitive values |
+
+With R1 and R4, `marker_frozen` and the three fail-closed codes of the "Reasons" table's last row ("marker missing, invalid or
+unreadable") are confirmed. `source_ahead_of_marker` and `marker_ahead_of_source` are fixed, unchanged, by the
+[A5.4-A5 design](core-v2-a5-4-a5-readiness-design.md), as this record assigns; its §4 is the complete matrix.
+
+**Consequences recorded, none acted on:** the restore drill requires a ready answer and accepts `frozen` as a recorded backup state
+(`infra/backup/restore-drill.sh`), so a drill of a backup taken under a freeze would fail its ready step once the check is in the
+drilled image, until the separately authorized compatibility change of R2; the G6 plan's induced freeze (§8.1) would show
+`marker_frozen` on Auth's `/ready`, which is input to the plan's refresh.
+
 ### Still open after this decision
 
 - The check's name and the reason identifiers (the A5.4-A5 design document); the value of the hard limit (from G6).
@@ -195,6 +220,14 @@ these requirements change neither the certified plan nor its acceptance criteria
 - The updates to the G6 plan and the active runbooks, and their certification.
 - Post-one-way-door reconciliation: not designed.
 - Any later routing use of readiness: a separately governed infrastructure task.
+
+*Update (2026-10-10, later rulings; the list above is kept as written).* Three of its items are ruled: the check's name and the
+fail-closed reason codes (R4), the other reason identifiers being fixed by the A5.4-A5 design; the check's behavior during an existing environment's freeze (R1); and, as policy, what carries an alert in
+production (R3: a reviewed mechanism, implemented and demonstrated before the first production deployment of any Auth image
+containing the check, and for later Auth deployments, including F6-related redeployments). **Still open:** the
+alert mechanism's design (implementation, delivery channel, polling strategy, demonstration environment); the restore-drill
+compatibility change (R2); the hard limit; the start-up warning's wording; wrong-side restore detection; the G6 plan and runbook
+updates; reconciliation; any routing use of readiness.
 
 ## 1. What is fixed (not reopened here)
 
