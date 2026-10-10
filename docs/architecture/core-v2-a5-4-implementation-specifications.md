@@ -346,7 +346,9 @@ In every row reached after step 3 the step-up stays consumed; the rows refused b
   and a reason code only, never the authoritative hierarchy.
 - **OPEN (implementation), not decided here:** the audit contract's outcomes are `succeeded` and `denied` only
   (`libs/audit-contract/src/contract.ts`). How an upstream failure or an anchor mismatch is recorded (an action of its own with one of
-  those outcomes, or a contract change) is decided with A5.4-AC1.
+  those outcomes, or a contract change) is decided with A5.4-AC1. *Update (2026-10-10):* the first AC1 batch is decided
+  ([decision record](core-v2-a5-4-ac1-repair-audit-contract.md)): success and authorization refusal only; the collapsed `404`,
+  operational failures and anchor mismatch stay open and block the repair runtime.
 
 ### 5.5 Diagnostic CLI — ACCEPTED DESIGN — NOT IMPLEMENTED
 
@@ -469,7 +471,8 @@ today. The provisioning **identity** remains an architectural role; a future cre
   like any other declaration, or it travels with AS1 (alone, it would be accepted by validation and rejected by the database CHECK).
 - **AS1's scope** also covers audit-service's own types: its query API enumerates the user kinds
   (`apps/audit-service/src/query/query.dto.ts`), as ADR-0059 §8 says ("audit-service's type and its … CHECK").
-- **OPEN:** action names and target types; the reason-code vocabulary (OD-L6); the outcome question of §5.4.
+- **OPEN:** action names and target types; the reason-code vocabulary (OD-L6); the outcome question of §5.4. *Update (2026-10-10):*
+  the two repair actions are named in the [AC1 decision record](core-v2-a5-4-ac1-repair-audit-contract.md); the rest stays open.
 
 ### 7.2 service-kit (A5.4-K1) — ACCEPTED DESIGN — NOT IMPLEMENTED
 
