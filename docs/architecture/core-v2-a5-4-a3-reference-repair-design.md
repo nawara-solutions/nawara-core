@@ -4,6 +4,9 @@
   seven separate authorizations of the accepted A2/A3 exception ([A5 record](core-v2-a5-organization.md) §9.3, A.2 item 1). **It
   authorizes no code, test, commit of code, pull request, merge, deployment, audit emission or activation.** Local A3 development is a
   separate authorization (A.2 item 3) and must not start while a blocking decision of §11 is open.
+- **Owner rulings (2026-10-10):** the seven blocking decisions O1, O2, O3, O4, O5, O11 and O12 are **ruled** (§11.1). The rulings
+  are documentation: they implement nothing and authorize no development. **A3 stays blocked** until the O2 prerequisite task is
+  merged, the remaining prerequisites of §11.2 are met and local A3 development is separately authorized.
 - **Class.** A5.4-A3 is **RED**, permitted only inside §9.3's narrow exception.
 - **Authority.** [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) as partly superseded by
   [ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md) and
@@ -51,12 +54,12 @@ A3 is developed, committed and merged separately from A2 (already merged) and fr
   service can burn a repair proof today.
 - **Existing tests that state today's behavior.** `test/reference-repair-step-up.e2e-spec.ts` asserts that the generic endpoint
   consumes a repair proof exactly once, and uses that endpoint for its binding tests; `src/owner/step-up-purposes.spec.ts` asserts that
-  no application source outside an allow-list names the purpose. Both necessarily change with A3 (§11, O1).
+  no application source outside an allow-list names the purpose. Both necessarily change with A3 (ruled: §11.1, O1).
 - **Where the "producer-less" tests live.** `libs/audit-contract/test/reference-repair-catalog.spec.ts` and
   `reference-repair-batch2.spec.ts` each assert that no source file under `apps/` names the repair actions (the batch 2 test also covers `libs/` outside the contract
   library). They are test files of
   the shared library: excluded from the images (`.dockerignore`), but under `libs/audit-contract/**`, a path that triggers the image
-  builds of all three services. Any producer in Auth makes them fail (§11, O2).
+  builds of all three services. Any producer in Auth makes them fail (ruled: §11.1, O2).
 - **Audit.** The four repair actions are declared and producer-less (catalog of 58 actions, contract version 1). Auth writes central
   intents through `CentralAudit.write(q, …)` inside a transaction, and local records through `AuditService.record` / `tryRecord`
   (`auth_audit_event`; the type must match `^[a-z_]+(\.[a-z_]+)+$`, so a new local type needs no migration).
@@ -98,9 +101,9 @@ it adds no second owner, no shared admin database (decision 8) and no privileged
 | 3 | consume the proof (S2, §6) | `403 step_up_required`, or `503` | ADR-0061 §4 step 3; ADR-0065 §5 |
 | 4 to 8 | resolve, authorize, place, audit, respond (§4) | `404`, `503` | ADR-0061 §4 |
 
-**The order is DECIDED; the mechanism that achieves it is OPEN (§11, O11).** Steps 1b and 1c come before validation, and a refused
+**The order is DECIDED; the mechanism that achieves it is RULED (§11.1, O11): the repair service performs the checks.** Steps 1b and 1c come before validation, and a refused
 non-Owner needs a central record in the Organization-authoritative mode (ADR-0064 §4). Nest runs guards, then pipes, then the handler,
-so a plain `@Actors('owner')` guard with a `ParseUUIDPipe` gives neither the record nor the order. Whatever mechanism is chosen, with
+so a plain `@Actors('owner')` guard with a `ParseUUIDPipe` gives neither the record nor the order. With
 source `local` an Owner gets the collapsed `404` even for a malformed id or a missing proof, and nothing is validated, counted or
 consumed.
 
@@ -110,7 +113,7 @@ must not reuse `AssignmentService.ownerCompany`'s `404` for that case. ADR-0059'
 check follows it.
 
 **A refusal the central record cannot describe** (a non-Owner, or a missing proof, with a malformed id or an unknown `kind`): the
-denial action needs a resource type and a UUID. What is recorded then is OPEN (§11, O3).
+denial action needs a resource type and a UUID. What is recorded then is RULED (§11.1, O3): the local denial record only.
 
 The Owner's Company is read from the `owner` row of the authenticated user.
 
@@ -130,11 +133,11 @@ The Owner's Company is read from the `owner` row of the authenticated user.
   reference statement).
 - **Resolve for an uncached target:** fetch the target and each uncached parent with the existing hardened client and its response
   validation; place nothing. A target unknown to Organization Service, or outside Auth's scope there, gives the collapsed `404`.
-- **Cached-ancestor comparison (DECIDED as a requirement; its exact reading is OPEN, §11 O5):** "for any ancestor already cached,
+- **Cached-ancestor comparison (DECIDED as a requirement; its reading is RULED as the literal one, §11.1 O5):** "for any ancestor already cached,
   compare the local parent link with the authority's". This is new behavior, in the repair path only. `ensure` keeps stopping at the
   first cached ancestor.
 - **Nothing is placed before step 5 succeeds.** The repair never calls `ensure`, `firstTouchPlatform` or `firstTouchOrganization`.
-- **How the repair reaches the two steps is OPEN (§11, O4).** Whatever is chosen, the reference statements, the gate and the anchor
+- **How the repair reaches the two steps is RULED (§11.1, O4): one repair entry method; both steps stay private.** The reference statements, the gate and the anchor
   re-read stay those of `HierarchyReference.place`, and `ensure` keeps the trace recorded in
   `test/fixtures/hierarchy-ensure-trace.main.json`.
 - **Source `organization-service` with a marker that is not Organization-authoritative:** the database refuses the reference write, as
@@ -154,7 +157,7 @@ The Owner's Company is read from the `owner` row of the authenticated user.
 - **Documentation follow-up, part of the A3 change:** the endpoint's API description and the comment on the purpose in
   `step-up.service.ts`. The dated note on ADR-0042 already exists (added with ADR-0065's acceptance).
 - **S1 is not mode-conditional in ADR-0065.** It therefore changes one answer of a deployed image while Auth's source is `local`, and
-  it changes existing tests. That meets the wording of two automatic stop conditions; see §11, O1, which blocks A3 development.
+  it changes existing tests. That meets the wording of two automatic stop conditions; see §11, O1, ruled in §11.1.
 
 ## 6. S2: dedicated atomic consumption — DECIDED (ADR-0065 §5), mechanism PROPOSED
 
@@ -209,8 +212,8 @@ A3 are marked *baseline*.
 - **Collapsed `404` (DECIDED):** the three cases return the same status and body and write the same record, with the requested kind
   and id, `organizationId` `null`, and no field that distinguishes them. The accepted timing difference of ADR-0061 §8 is unchanged.
   The body equals Auth's existing `notFound()` answer, which is also what the route returns with source `local`.
-- **Residual risk, OPEN (§11, O12).** ADR-0061 orders resolve (step 4) before authorize (step 5). A failure during resolve
-  (an authority failure, a missing parent, or, if O5 is ruled as (a), a cached-ancestor mismatch) therefore answers `503` before the Company is known, including
+- **Residual risk, ACCEPTED by the owner (§11.1, O12).** ADR-0061 orders resolve (step 4) before authorize (step 5). A failure during resolve
+  (an authority failure, a missing parent, or a cached-ancestor mismatch) therefore answers `503` before the Company is known, including
   when the id belongs to another Company. For such ids "identical `404`" holds only when resolve completes, and a `503` caused by a
   missing parent or a link disagreement reveals that the id exists. ADR-0061 §8 names a timing difference only.
 - **Record fields (catalog rules):** the success record's `organizationId` is the target id for an Organization and `null` for a
@@ -264,8 +267,8 @@ today only a log line states: §11, O6.
 
 ### 8.3 Anchor mismatch — DECIDED (ADR-0064 D3), for the repair path only
 
-Detected at the anchor re-read after a conflicting insert (existing) and, if the O5 ruling is its alternative (a), at the new
-cached-ancestor comparison at resolve.
+Detected at the anchor re-read after a conflicting insert (existing) and at the new cached-ancestor comparison at
+resolve (§11.1, O5).
 Both answer `503`, change nothing, keep the existing error log (and so the existing alert), and write the incident record with the
 system actor `hierarchy_anchor_detection` and `operation: reference_repair`. The record is written by the repair service, never by
 `HierarchyReference.place`, so first-touch recording stays unchanged (§9.3 A.1). The three other operation codes stay unused.
@@ -276,7 +279,7 @@ system actor `hierarchy_anchor_detection` and `operation: reference_repair`. The
   outcomes and the actor kinds do not change; `libs/audit-contract` is not edited.
 - **Producer-less until authorized.** Until A3 is merged, no file under `apps/` names the four actions (the existing AC1 tests
   assert it). Adding the producers makes those two assertions false; they are tests of the shared library, so how they are
-  changed is an owner decision (§11, O2).
+  changed is ruled in §11.1, O2: a separate prerequisite task, before A3.
 - **Consumer first.** No production emission before an audit-service image declaring all four actions is deployed, separately
   authorized (§9.3 A.3). Production audit-service predates them: the AC1 batch 1 record (§4, citing ADR-0049 A50) describes an action reaching it as
   refused and kept in its dead-letter queue: a safety net, not a plan.
@@ -300,7 +303,7 @@ system actor `hierarchy_anchor_detection` and `operation: reference_repair`. The
 local audit record, no marker or authority change, and **zero** Organization Service calls. Reads done by the guard are the existing
 ones. The inertness is decided by the configured source, read at step 1c on every request; there is no second switch.
 
-S1 is the one A3 behavior that is **not** confined to the repair route and is not mode-conditional (§5; §11, O1).
+S1 is the one A3 behavior that is **not** confined to the repair route and is not mode-conditional (§5; ruled in §11.1, O1).
 
 ### 10.2 Automatic stop conditions (§9.3 A.5, unchanged)
 
@@ -316,7 +319,9 @@ Whether A3 adds stop conditions of its own is the owner's choice (§11, O14); th
 
 ## 11. Open decisions for the architecture owner
 
-None is resolved here. **O1 to O5, O11 and O12 block local A3 development**; the others can be settled at the start of it.
+The table records the questions, the alternatives considered and this document's recommendations. **O1, O2, O3, O4, O5, O11 and
+O12 were ruled by the architecture owner on 2026-10-10 (§11.1)**; their rows are kept as the record of what was considered. **O6 to
+O10 and O13 to O15 remain OPEN** (§11.2).
 
 | # | Question | Alternatives | Recommendation |
 |---|---|---|---|
@@ -335,6 +340,87 @@ None is resolved here. **O1 to O5, O11 and O12 block local A3 development**; the
 | **O13** | **Meaning of `placed`** in the response and in the success record (§3.1). | (a) The target's row was inserted by this request. (b) Any row (target or parent) was inserted by this request. | **(a)**: it answers the question the Owner asked and is unambiguous under concurrency. |
 | **O14** | **A3-specific stop conditions**, in addition to §9.3 A.5. | (a) Add: stop if producing a reason code or the mismatch record would require changing what `ensure` logs, returns or throws, or the golden fixture; stop if a new error code or rate-limit bucket would need a migration. (b) Rely on A.5 as accepted. | **(a)**, recorded by the owner; both are already implied by A.5's first and third conditions. |
 | **O15** | **Source `organization-service` with a marker that is not Organization-authoritative**: the proof is consumed, then the write is refused (`503`). | (a) No special case (ADR-0061 §5 keeps the proof consumed on every `503`). (b) A read-only pre-check before step 3 that answers `503` without consuming. | **(a)**; (b) adds a new early exit to the accepted sequence. |
+
+### 11.1 Owner rulings of 2026-10-10 on the seven blocking decisions
+
+Recorded from the architecture owner's rulings. Each is subject to exact conformance with the Accepted ADRs, **supersedes no
+Accepted ADR**, implements nothing and authorizes no development, test change, merge, deployment, emission or activation.
+
+**O1 — S1, the Auth-local restriction of the generic verification (alternative (a)).** The narrow S1 behavior of ADR-0065 §4 is
+approved. For the purpose `hierarchy.reference.repair` only, the generic endpoint `POST /auth/step-up/verify`:
+
+- answers `403 step_up_required`;
+- does not consume the proof;
+- keeps the existing local denial-audit mechanism (the `owner.step_up.consume` `denied` record its refusals already write);
+- emits no new central audit event, and adds no outbox row and no hierarchy write.
+
+This endpoint is **not** the repair route. The repair route stays fully inert while `AUTH_HIERARCHY_SOURCE` is `local` (§10.1), and
+§9.3 A.4's "no local audit record" concerns that route. **No other local-mode stop condition is weakened.** Only these existing A1
+test changes are permitted, as far as S1 requires:
+
+| File | Test (exact name) | Permitted change |
+|---|---|---|
+| `apps/auth-service/test/reference-repair-step-up.e2e-spec.ts` | `documented, unchanged generic behavior: POST /auth/step-up/verify consumes the proof exactly once` | replaced by the S1 assertion (`403`, proof not consumed) |
+| same | `a proof is bound to its owner: another owner cannot consume it` | re-pointed at the repair route and S2 (its second half expects `204` from the generic endpoint) |
+| same | `a proof is bound to its session: another session of the same owner cannot consume it` | re-pointed: it would still pass after S1, but vacuously, on S1's `403` instead of the binding |
+| same | `a proof is bound to its purpose, in both directions` | re-pointed, likewise |
+| same | `a proof expires with the existing step-up lifetime` | re-pointed, likewise |
+| `apps/auth-service/src/owner/step-up-purposes.spec.ts` | `no application source outside the allow-list names the purpose: no route, consumer or producer exists for it` | its allow-list gains exactly the application files that implement S1 (and, once A3 is separately authorized, the repair files that must name the purpose) |
+
+The remaining tests of those two files are not to change. **Compatibility with the images actually deployed must be demonstrated
+before any RED-exception merge**; the ruling does not presume it (§14 item 11).
+
+**O2 — producer-scope enforcement (alternative (b)).** The current producer-less assertions are to be relocated into an equivalent,
+phase-aware repository check, as a **separate prerequisite task**, before A3. That task needs its own development, review, CI and
+merge authorization; **none is granted here**. **The governance class of that task is not ruled**: the word "YELLOW" in the
+alternative recorded in the table above is not adopted. Its requirements:
+
+- the exact application paths are fixed first, through O10 (O10 remains open; for this purpose it also has to fix the file paths);
+- there is never an interval without producer-scope enforcement;
+- the existing audit actions and the consumer-first safeguards are kept;
+- any producer outside an explicit allow-list is detected, and tests that deliberately violate the allow-list prove the rejection;
+- the check is effective before and after A3;
+- no audit-contract semantics, catalog entry or deployed producer changes;
+- the task proves whether its test and script changes alter any runtime image contents, and it preserves the G6 timing requirements.
+
+**O3 — a refusal the central record cannot describe (alternative (a)).** An authenticated caller refused during authorization keeps the
+existing `403`. When a malformed id or an unknown kind cannot satisfy the central denial contract: no UUID or kind is fabricated;
+nothing about another Company's resources is revealed; ADR-0064's local denial-audit fallback applies; the accepted audit ordering and
+failure handling are kept; no invalid central record is emitted. With source `local` the route stays inert.
+
+**O4 — the internal repair entry (alternative (a)).** One narrowly scoped repair entry method on `HierarchyReference`, introduced only
+during separately authorized A3 implementation. `resolve` and `placeChain` stay private. The method must guarantee: no hierarchy
+placement before authorization; read-only resolution before the authorized placement; the success audit intent in the placement
+transaction; a determinable placed or no-op result; detectable integrity mismatches; and `ensure`'s behavior and the A2 golden traces
+unchanged. Resolution and placement are never exposed as a public HTTP API.
+
+**O5 — cached-ancestor integrity (alternative (a), the literal reading).** For an Organization with a cached Platform ancestor, the
+repair fetches that Platform from Organization Service and compares its Company link with the cached relationship. An unavailable,
+missing or inconsistent authoritative parent is handled by the accepted failure and integrity rules (§7). The one point left unruled
+is a cached Platform that the authority does not show: how it is classified among those rules (for example the `parent_missing`
+failure, or an integrity incident) is **not ruled here** and stays OPEN for the A3 implementation design. The cached relationship is never silently trusted. `ensure` keeps its lookup
+sequence: the comparison belongs to the repair path only.
+
+**O11 — where Owner authorization lives (alternative (a)).** The HTTP route may admit authenticated users. The repair service itself
+checks the hierarchy source and the Owner authority in the accepted order (§3.3), refuses non-Owners, applies the approved
+denial-audit behavior, keeps the collapsed response semantics, and prevents any unauthorized lookup or placement. A route-level Owner
+decorator that would prevent the required denial recording is not relied on alone. Tests cover a Member, an Operator, the Owner and
+unauthenticated callers (§12.1, §12.2).
+
+**O12 — residual privacy risk (alternative (a)).** The `503` for an integrity anomaly found before the Company can be established is
+accepted, as the Accepted ADR-0061 resolution sequence dictates. **Recorded residual risk:** for an uncached id that belongs to another
+Company, a `503` caused by a parent missing at the authority or by a parent-link disagreement tells the calling Owner that the id
+exists. Preserved: Owner-only authorization, one-time step-up consumption, rate limiting, the existing logging and audit
+restrictions, and no additional resource detail in any response. **This ruling is not a general acceptance of cross-company
+disclosure**: it covers this case only, and no Accepted ADR is superseded by it.
+
+### 11.2 What still blocks A3
+
+- **The O2 prerequisite task**, separately authorized, developed, reviewed and merged (§11.1, O2). It needs **O10** (the exact paths
+  and names) settled first.
+- **The open decisions:** O6, O7, O8, O9, O10, O13, O14 and O15. None is ruled here.
+- **The separate authorization for local A3 development** (§13, authorization 3), and every later authorization.
+- Every automatic stop condition of §9.3 A.5 (§10.2), unchanged apart from the bounded O1 test list above.
 
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
@@ -367,7 +453,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | TA5 | a proof for another purpose stays usable for that purpose after being refused here | no cross-purpose burn |
 | TA6 | a secret-key-only step-up cannot be issued for the purpose (existing A1 test, unchanged) | factor-only |
 | TA7 | malformed id or `kind`: `400`; rate limit: `429`; neither consumes the proof | step 2 |
-| TA8 | a non-Owner, and an Owner without a proof, with a malformed id or an unknown `kind`: `403`, and the record ruled under O3 | O3 |
+| TA8 | a non-Owner, and an Owner without a proof, with a malformed id or an unknown `kind`: `403`, the local denial record only, no central record (§11.1, O3) | O3 |
 
 ### 12.3 S1 and S2
 
@@ -387,7 +473,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 |---|---|---|
 | TP1 | placement: rows parents first, one transaction, the success intent in the same transaction, `placed: true`; response has exactly `kind`, `id`, `placed` | steps 6 to 8 |
 | TP2 | no-op: cached and authorized target gives `200`, `placed: false`, zero Organization calls, one success intent, no reference statement | cached target |
-| TP3 | **collapsed `404`** (resolve completes; under O12 alternative (a) the failures before authorization answer `503` and are TF1 and TF3; under (b) they join this test as `404`)**:** unknown id, id outside Auth's scope, another Company's uncached id, another Company's cached id: byte-identical responses; nothing placed (including parents); proof consumed; one `reference_repair_unresolved` each, identical apart from the requested kind and id, `organizationId` `null` | privacy |
+| TP3 | **collapsed `404`** (resolve completes; the failures before authorization answer `503` and are TF1 and TF3, as ruled in §11.1, O12)**:** unknown id, id outside Auth's scope, another Company's uncached id, another Company's cached id: byte-identical responses; nothing placed (including parents); proof consumed; one `reference_repair_unresolved` each, identical apart from the requested kind and id, `organizationId` `null` | privacy |
 | TP4 | another Company's Owner cannot learn or place anything, and an Organization-scoped audit read of the probed Company shows nothing | concealment |
 | TP5 | concurrent repairs of one id by two proofs (barrier): each `200`, one row, exactly one `placed: true`; a variant where one request inserts only the missing parent states the value ruled under O13 | idempotence |
 | TP6 | repair under a suspended or archived ancestor succeeds and grants nothing; a later grant still runs its own checks | lifecycle |
@@ -399,7 +485,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 |---|---|---|
 | TF1 | one test per reason of §8.2 except the two step-up reasons, which are TS5 and TS6 (authority down, timeout, redirect, oversized, malformed, `401`/`403` from the authority, no credential, parent missing, frozen hierarchy, success intent unwritable): `503`, nothing placed, proof consumed, one local `failure` record and one log line with the listed reason, **no** central record | D2 |
 | TF2 | no record or log contains a token, URL, upstream body, name or parent id (asserted on the stored rows and captured logs) | hygiene |
-| TF3 | mismatch at the anchor re-read, and (if O5 is ruled as (a)) at the cached-ancestor comparison: `503`, cached row unchanged, existing error log present, one `reference_anchor_mismatch_detected` with the system actor and `operation: reference_repair`, written after the rollback; neither batch 1 action written | D3 |
+| TF3 | mismatch at the anchor re-read, and at the cached-ancestor comparison: `503`, cached row unchanged, existing error log present, one `reference_anchor_mismatch_detected` with the system actor and `operation: reference_repair`, written after the rollback; neither batch 1 action written | D3 |
 | TF4 | **denial-audit failure:** with the outbox write failing, each refusal (`403`, `404`, mismatch `503`) is unchanged and leaves the local record; with both failing, a log line; never a success | D4 |
 | TF5 | success-intent failure rolls the placement back and answers `503` | ADR-0050 decision 9 |
 | TF6 | a first-touch mismatch still writes **no** central record (unchanged) | scope of A3 |
@@ -409,9 +495,9 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | # | Test | Proves |
 |---|---|---|
 | TC1 | the A2 golden-trace spec passes with the fixture **byte-identical** (same checksum as on `main`), together with its mutation tests | `ensure` unchanged |
-| TC2 | every existing Auth unit and integration suite and `test:e2e:auth-organization` pass; the only edited assertions are those ruled under O1 and O2, each listed in the pull request; the A1 binding tests are re-pointed at the repair route so they still test the binding | existing behavior |
+| TC2 | every existing Auth unit and integration suite and `test:e2e:auth-organization` pass; the only edited assertions are the six named under O1 (§11.1), each listed in the pull request; the A1 binding tests are re-pointed at the repair route so they still test the binding | existing behavior |
 | TC3 | `npm run check:repo`: exactly one new T1 entry, the repair operation; the never-call list unchanged | boundary |
-| TC4 | **producer-less before authorization:** on `main` the two library tests prove no file under `apps/` names the four actions, and they stay as they are until A3 is authorized. After the O2 ruling the property becomes "named only by Auth's repair service" (an Auth-side test), and a test asserts the anchor-mismatch action is written only with `operation: reference_repair` | producer scope |
+| TC4 | **producer scope:** on `main` the two library tests prove no file under `apps/` names the four actions. The O2 prerequisite task (§11.1) relocates that property into a phase-aware repository check before A3, with tests that deliberately violate its allow-list; A3 must pass that check unchanged, and a test asserts the anchor-mismatch action is written only with `operation: reference_repair` | producer scope |
 | TC5 | every event the repair writes validates against the declared catalog entry (the contract's validator), for each kind and outcome, including `organizationId` for an Organization and a mismatch whose resource is an ancestor | contract fit |
 | TC6 | mutation checks: removing the step 1c test, moving the placement before step 5, consuming inside the placement transaction, or adding a distinguishing field to the `404` record is caught by a test | the tests have teeth |
 | TC7 | audit-service's suites that iterate over every action pass unchanged | consumer compatibility |
@@ -427,7 +513,7 @@ The **seven separate authorizations** of §9.3 A.2:
 |---|---|---|
 | 1 | design documents and test plans | this document |
 | 2 | local A2 development | done (A2) |
-| 3 | local A3 development | **not granted**; needs O1 to O5, O11 and O12 decided |
+| 3 | local A3 development | **not granted**; the seven blockers are ruled (§11.1), and it still needs the prerequisites of §11.2 and its own authorization |
 | 4 | each commit and each pull request | not granted |
 | 5 | a RED-exception merge approval per pull request | not granted |
 | 6 | each deployment of an image containing the code | not granted |
@@ -446,25 +532,26 @@ The **seven separate authorizations** of §9.3 A.2:
 1. The diff touches only: the repair route and service, `hierarchy-reference.ts`, `step-up.service.ts`, the verify endpoint, Auth's
    wiring and configuration, the one T1 entry in `scripts/lib/checks.mjs`, Auth tests, and documentation (API description, status
    rows). No migration, no organization-service or catalog change, no workflow change, and no `libs/` change other than what the
-   O2 ruling allows (none, under its recommended alternative).
+   O2 ruling allows: none (§11.1, O2: the relocation is a separate, earlier task).
 2. The `local`-mode proof of §12.1 passing.
 3. Every row of §7 reproduced by a test (§12.2 to §12.5), including S2 concurrency, replay and the uncertain outcome.
-4. The A2 golden fixture byte-identical and its spec passing (TC1); every existing suite passing with only the edits ruled
-   under O1 and O2 (TC2).
+4. The A2 golden fixture byte-identical and its spec passing (TC1); every existing suite passing with only the six
+   test changes named under O1 (TC2).
 5. `check:repo` passing with exactly one new T1 entry (TC3).
 6. The mutation checks of TC6.
-7. Recorded owner decisions for O1 to O15.
+7. Recorded owner decisions for O1 to O15 (the seven of §11.1 are recorded; eight remain), and the O2 prerequisite task merged.
 8. An independent design-conformance review against ADR-0061, ADR-0064, ADR-0065 and §9.3, with no required finding open.
 9. Full Core CI green on the pull request.
 10. The G6 timing statement of §15 in the pull request.
-11. The merge conditions of §9.3 A.2 item 5 (S1's effect on "no changed behavior in deployed images" is the owner's O1 ruling and is not presumed here), the
+11. The merge conditions of §9.3 A.2 item 5, **with evidence of compatibility with the images actually deployed** (§11.1, O1: the
+    ruling does not presume it; it must be demonstrated before any RED-exception merge), the
     certified digest-set policy as framework, and the owner's separate **RED-exception merge approval**.
 
 ## 15. G6 timing and the certified digest set
 
 - A3's own code changes the auth-service image only: no audit-service, organization-service or library source changes. The O2
-  ruling may still put a change under `libs/audit-contract/**` (alternatives (a) and (b)), which rebuilds all three images; under
-  (b) that happens before A3 and has its own timing against the refresh.
+  prerequisite task may touch tests under `libs/audit-contract/**` and repository scripts; it must prove whether any runtime image
+  contents change and preserve the G6 timing requirements (§11.1, O2).
 - **Merged before the G6 baseline refresh**, A3 is in the auth-service digest that G6 selects and rehearses: inert with source
   `local` (the §12.1 evidence), then exercised after the rehearsed activation.
 - **Merged after the refresh**, it changes the certified set, and a separately authorized re-rehearsal is required (§9.1 item 3).
