@@ -2095,3 +2095,555 @@ export function checkOutboxRetentionEligibility(kit, serviceSources) {
   }
   return problems;
 }
+
+// ─────────────────────────────────────────────────────────────── V2 A5.4-T1: the Auth → Organization Service dependency boundary
+
+/**
+ * V2 A5.4-T1 (ADR-0042 decision 8 with ADR-0040 decision 2; ADR-0063 §5): auth-service reaches Organization Service synchronously
+ * from a short, reviewed list of ADMINISTRATIVE operations only. Everything else in Auth (login and logout, session validation and
+ * refresh, registration and join, invitation consumption and onboarding resolution, `/auth/me` and `/auth/grants`, the member-access
+ * and platform-access reads, ADR-0023's local reference reads, ordinary authentication paths) never does.
+ *
+ * The rule is an allowlist, so a new path is refused until it is reviewed here:
+ *   - one module holds the client (`AUTH_ORGANIZATION_CLIENT`); only the wiring module and the operations below may import it;
+ *   - in each holder, only the operation's own method may touch the client (a holder also serves never-call paths: `OnboardingService`
+ *     resolves and redeems join codes for registration, and creates them for administrators);
+ *   - each operation is called from its approved call sites only, which closes the indirect paths one hop at a time;
+ *   - no class or interface extends a holder or an approved controller, directly or through other auth-service classes (an import
+ *     alias, a namespace import, a re-export and a mixin expression that names the class are followed), so an operation cannot be
+ *     inherited and called as `super.create()` or `this.create()`; the inheritance is refused even when the subclass calls nothing yet;
+ *   - no other Auth module opens an outbound HTTP client or reads Auth's Organization Service credential.
+ * ADR-0060's E5 lifecycle reads and ADR-0061's reference repair are approved dependencies that do not exist yet: each adds its entry
+ * here when it is implemented.
+ *
+ * What counts as "an instance of a holder or of an approved controller" (the SUPPORTED forms; a call through any of them is held to
+ * the approved callers):
+ *   - a parameter, a parameter property, a class property or a variable whose DECLARATION names the class: by its type, by
+ *     `@Inject(Name)`, by `x.get(Name)` / `x.resolve(Name)`, by `new Name()`, or by a cast in its initializer;
+ *   - the name may be the class, a subclass, an import alias (`import { X as Y }`), `namespace.Name`, a type alias of any of these in
+ *     the same file or imported (through re-exports and alias chains), `typeof Name` / `InstanceType<typeof Name>`, a generic
+ *     constraint (`<T extends Name>`), and it may sit inside a union, an intersection or a type argument (`Pick<Name, 'm'>`);
+ *   - a receiver cast on the spot: `(x as Name).create()`, `(x as unknown as Name)`, `(<Name>x)`;
+ *   - `this.member` and `super.member` inside a subclass, and `this.handler` inside the approved controller itself.
+ *
+ * Limits (the check reads syntax; it runs no type checker and no service, and it does not follow where a value flows):
+ *   - an instance that reaches the call without such a declaration is not seen: an untyped or `any` variable, the result of a getter,
+ *     a method or a function (even one with a declared return type), a property of another object (`deps.service`), a destructured
+ *     parameter or receiver, an indexed access type (`Deps['service']`), and a class kept in a variable (`const C = OnboardingService`);
+ *   - computed member access (`service[name]`), a method detached from its receiver, a container lookup by string token,
+ *     `Name.prototype.method.call(…)` and other reflection are not seen;
+ *   - a variable or parameter holding a service is matched by its name within one file, not by its scope;
+ *   - inheritance is followed through static `extends` clauses only: a base class chosen by a computed expression that does not name it,
+ *     a prototype assigned at run time (`Object.setPrototypeOf`, `Object.create`) and composition that copies methods are not seen;
+ *   - an approved handler is recognized by its class and method, not by its route decorator;
+ *   - an outbound client is recognized as a direct `fetch` call or an import of a listed module; one opened inside a dependency, or
+ *     through an alias of `fetch`, is not;
+ *   - test sources (`*.spec.ts`, `apps/auth-service/test/`) are out of scope.
+ * The check narrows what a reviewer must look for; it does not prove that no runtime path to Organization Service exists.
+ */
+const AUTH_SRC = 'apps/auth-service/src/';
+export const AUTH_ORGANIZATION_CLIENT = `${AUTH_SRC}hierarchy/hierarchy-reference.ts`;
+/** Dependency-injection wiring: it provides the client and calls nothing. */
+export const AUTH_ORGANIZATION_WIRING = `${AUTH_SRC}app.module.ts`;
+/** `owner: null` is an exported function; otherwise `owner.member` is a class method. `callers`: `file#Class.method` or `file#<module>`. */
+export const AUTH_ORGANIZATION_OPERATIONS = [
+  { operation: 'join-code creation', holder: `${AUTH_SRC}onboarding/onboarding.service.ts`, owner: 'OnboardingService', member: 'create',
+    callers: [`${AUTH_SRC}membership/organization.controller.ts#OrganizationController.createJoinCode`] },
+  { operation: 'organization-admin invitation creation', holder: `${AUTH_SRC}onboarding/invitation.service.ts`, owner: 'InvitationService', member: 'create',
+    callers: [`${AUTH_SRC}membership/organization.controller.ts#OrganizationController.createInvitation`] },
+  { operation: 'operator platform-assignment grant', holder: `${AUTH_SRC}platform/assignment.service.ts`, owner: 'AssignmentService', member: 'grant',
+    callers: [`${AUTH_SRC}platform/platform.controller.ts#PlatformController.grant`] },
+  { operation: 'owner bootstrap (command line)', holder: `${AUTH_SRC}cli/owner-tools.ts`, owner: null, member: 'bootstrapOwner',
+    callers: [`${AUTH_SRC}cli/main.ts#<module>`] },
+];
+/** A call site that hands the client itself to an operation (the command line resolves it from the application context). */
+export const AUTH_ORGANIZATION_CLIENT_PASSERS = { [`${AUTH_SRC}cli/main.ts`]: ['<module>'] };
+/**
+ * The never-call paths, named so that no future edit can list one of them as an approved caller. `modules` are never-call as a whole;
+ * `contexts` are the never-call methods of a module that also holds an approved operation.
+ */
+export const AUTH_NEVER_CALL = {
+  modules: ['auth/auth.controller.ts', 'auth/auth.service.ts', 'auth/auth.guard.ts', 'auth/session.service.ts', 'auth/grants.service.ts',
+    'tokens/refresh-token.service.ts', 'tokens/token.service.ts', 'onboarding/onboarding.controller.ts', 'platform/platform-access.service.ts',
+    'owner/owner-auth.service.ts', 'operator/operator-code.service.ts'].map((rel) => AUTH_SRC + rel),
+  contexts: [
+    ...['guardGuessing', 'lookup', 'resolve', 'redeem'].map((m) => `${AUTH_SRC}onboarding/onboarding.service.ts#OnboardingService.${m}`),
+    ...['lookup', 'resolve', 'accept'].map((m) => `${AUTH_SRC}onboarding/invitation.service.ts#InvitationService.${m}`),
+    ...['platformAccess', 'organization'].map((m) => `${AUTH_SRC}platform/platform.controller.ts#PlatformController.${m}`),
+  ],
+};
+/** Modules through which Node code opens an outbound HTTP or socket client. */
+const OUTBOUND_CLIENT_MODULES = new Set(['http', 'https', 'http2', 'net', 'tls', 'dgram', 'undici', 'axios', 'got', 'node-fetch', 'superagent', 'needle']);
+const AUTH_ORGANIZATION_CREDENTIAL_READERS = new Set([AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_WIRING, `${AUTH_SRC}config/app-config.ts`]);
+const ORGANIZATION_CREDENTIAL_NAME = /^ORGANIZATION_SERVICE_(?:URL|TOKEN)$/;
+const BOUNDARY_RULE = 'ADR-0042 decision 8, ADR-0063 §5';
+const DECLARATION = '<declaration>';
+const MODULE_SCOPE = '<module>';
+
+const strip = (node) => {
+  let n = node;
+  while (n && (ts.isParenthesizedExpression(n) || ts.isNonNullExpression(n) || ts.isAsExpression(n) || ts.isTypeAssertionExpression?.(n) || ts.isSatisfiesExpression?.(n))) n = n.expression;
+  return n;
+};
+/** A relative specifier of a TypeScript source (`./x.js`) as the repository path of that source. */
+function resolveSourceSpecifier(fromPath, spec) {
+  if (typeof spec !== 'string' || !spec.startsWith('.')) return undefined;
+  const parts = fromPath.split('/').slice(0, -1);
+  for (const seg of spec.split('/')) {
+    if (seg === '.' || seg === '') continue;
+    if (seg === '..') parts.pop();
+    else parts.push(seg);
+  }
+  const joined = parts.join('/');
+  return /\.[cm]?js$/.test(joined) ? joined.replace(/\.([cm]?)js$/, '.$1ts') : /\.[cm]?ts$/.test(joined) ? joined : `${joined}.ts`;
+}
+const className = (node) => (node.name ? node.name.text : '<anonymous class>');
+const memberName = (node) => (node.name && (ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name) || ts.isPrivateIdentifier(node.name)) ? node.name.text : '<computed>');
+/** The outermost named scope a node sits in: `Class.member`, a top-level function or variable, `<module>`, or `<declaration>`. */
+function boundaryContext(node) {
+  let scope = MODULE_SCOPE;
+  for (let n = node.parent, child = node; n; child = n, n = n.parent) {
+    if (ts.isParameter(n) && n.parent && ts.isConstructorDeclaration(n.parent)) return DECLARATION; // a constructor parameter declares, it does not call
+    if (ts.isPropertyDeclaration(n) && n.type === child) return DECLARATION; // the declared type of a member
+    if (ts.isClassLike(n.parent ?? n) && (ts.isMethodDeclaration(n) || ts.isGetAccessorDeclaration(n) || ts.isSetAccessorDeclaration(n) || ts.isPropertyDeclaration(n))) scope = `${className(n.parent)}.${memberName(n)}`;
+    else if (ts.isConstructorDeclaration(n)) scope = `${className(n.parent)}.constructor`;
+    else if (ts.isFunctionDeclaration(n) && n.name) scope = n.name.text;
+    else if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))) scope = n.name.text;
+  }
+  return scope;
+}
+/** Every context a source file declares: `Class.member` and top-level function names. */
+function declaredContexts(sf) {
+  const out = new Set([MODULE_SCOPE]);
+  const visit = (node) => {
+    if (ts.isClassLike(node)) for (const m of node.members) if (!ts.isConstructorDeclaration(m)) out.add(`${className(node)}.${memberName(m)}`);
+    if (ts.isFunctionDeclaration(node) && node.name) out.add(node.name.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return out;
+}
+/** Local names a file imports from `target` (a repository path), as local name -> imported name (`*` for a namespace import). */
+function importedFrom(relPath, sf, target) {
+  const names = new Map();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || resolveSourceSpecifier(relPath, staticSpecifier(st.moduleSpecifier)) !== target || !st.importClause) continue;
+    if (st.importClause.name) names.set(st.importClause.name.text, 'default');
+    const bindings = st.importClause.namedBindings;
+    if (bindings && ts.isNamespaceImport(bindings)) names.set(bindings.name.text, '*');
+    if (bindings && ts.isNamedImports(bindings)) for (const el of bindings.elements) names.set(el.name.text, (el.propertyName ?? el.name).text);
+  }
+  return names;
+}
+const isNamePosition = (node) => {
+  const p = node.parent;
+  return !p || (ts.isPropertyAccessExpression(p) && p.name === node) || (ts.isQualifiedName(p) && p.right === node)
+    || ((ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p) || ts.isPropertySignature(p) || ts.isMethodSignature(p) || ts.isBindingElement(p)) && (p.name === node || p.propertyName === node))
+    || ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p);
+};
+/** `Name` or `namespace.Name`, as written in a type (`QualifiedName`) or in an expression (`PropertyAccessExpression`). */
+const dottedName = (node) => {
+  if (!node) return undefined;
+  if (ts.isIdentifier(node)) return node.text;
+  const left = ts.isQualifiedName(node) ? node.left : ts.isPropertyAccessExpression(node) ? node.expression : undefined;
+  const right = ts.isQualifiedName(node) ? node.right : ts.isPropertyAccessExpression(node) ? node.name : undefined;
+  const base = left && dottedName(left);
+  return base && right && ts.isIdentifier(right) ? `${base}.${right.text}` : undefined;
+};
+/** A dotted name and its first segment: `ns.Name` also answers for `ns` (a namespace import of the module that declares the class). */
+const nameForms = (text) => (text === undefined ? [] : text.includes('.') ? [text, text.slice(0, text.indexOf('.'))] : [text]);
+/**
+ * The names a type stands for: its type references and `typeof` queries, through unions, intersections and type arguments
+ * (`Pick<X, 'm'>`, `InstanceType<typeof X>`, `Promise<X>`). The members of an object type, the parameters of a function type and the
+ * elements of an array are not what the value itself is, so they are not read.
+ */
+const typeNames = (type) => {
+  const out = [];
+  const visit = (n) => {
+    if (ts.isTypeLiteralNode(n) || ts.isFunctionTypeNode(n) || ts.isConstructorTypeNode(n) || ts.isMappedTypeNode(n) || ts.isArrayTypeNode(n) || ts.isTupleTypeNode(n)) return;
+    if (ts.isTypeReferenceNode(n)) out.push(...nameForms(dottedName(n.typeName)));
+    if (ts.isTypeQueryNode(n)) out.push(...nameForms(dottedName(n.exprName)));
+    ts.forEachChild(n, visit);
+  };
+  if (type) visit(type);
+  return out;
+};
+const namesExpression = (expr, names) => nameForms(dottedName(strip(expr))).some((n) => names.has(n));
+/** Is the expression asserted to be one of `names`: `x as Name`, `<Name>x`, `x as unknown as Name`? */
+function castsTo(expr, names) {
+  for (let n = expr; n; n = n.expression) {
+    if ((ts.isAsExpression(n) || ts.isTypeAssertionExpression?.(n)) && typeNames(n.type).some((t) => names.has(t))) return true;
+    if (!(ts.isParenthesizedExpression(n) || ts.isNonNullExpression(n) || ts.isAsExpression(n) || ts.isTypeAssertionExpression?.(n) || ts.isSatisfiesExpression?.(n))) return false;
+  }
+  return false;
+}
+/** Does a declaration (parameter, property, variable) hold one of `names`: by its type, by `@Inject(Name)`, or by `x.get(Name)` / `new Name()`? */
+function declaresInstanceOf(decl, names) {
+  const declared = typeNames(decl.type);
+  if (declared.some((n) => names.has(n))) return true;
+  // A type parameter stands for its constraint: `<T extends OnboardingService>(service: T)`.
+  for (let scope = decl.parent; scope && declared.length > 0; scope = scope.parent) {
+    for (const parameter of scope.typeParameters ?? []) {
+      if (declared.includes(parameter.name.text) && typeNames(parameter.constraint).some((n) => names.has(n))) return true;
+    }
+  }
+  for (const d of (ts.canHaveDecorators?.(decl) ? ts.getDecorators(decl) : undefined) ?? []) {
+    const call = d.expression;
+    if (ts.isCallExpression(call) && call.arguments.some((a) => namesExpression(a, names))) return true;
+  }
+  return decl.initializer ? yieldsInstanceOf(decl.initializer, names) : false;
+}
+function yieldsInstanceOf(expr, names) {
+  if (castsTo(expr, names)) return true;
+  let e = strip(expr);
+  if (e && ts.isAwaitExpression(e)) {
+    if (castsTo(e.expression, names)) return true;
+    e = strip(e.expression);
+  }
+  if (!e) return false;
+  if (ts.isNewExpression(e)) return namesExpression(e.expression, names);
+  return ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && ['get', 'resolve', 'create'].includes(e.expression.name.text)
+    && e.arguments.some((a) => namesExpression(a, names));
+}
+/** Members of the file's classes, and variables and parameters, that hold an instance of one of `names`. */
+function instanceHolders(sf, names) {
+  const members = new Set();
+  const locals = new Set();
+  if (names.size === 0) return { members, locals };
+  const visit = (node) => {
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && declaresInstanceOf(node, names)) {
+      const property = ts.isConstructorDeclaration(node.parent) && (ts.getModifiers(node) ?? []).length > 0;
+      (property ? members : locals).add(node.name.text);
+      if (property) locals.add(node.name.text); // a parameter property is also a local of the constructor
+    } else if (ts.isPropertyDeclaration(node) && declaresInstanceOf(node, names)) members.add(memberName(node));
+    else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && declaresInstanceOf(node, names)) locals.add(node.name.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return { members, locals };
+}
+/** Is `expr` an instance of one of `names` in this file: `this.member`, a holding local, `x.get(Name)`, or anything cast to `Name`? */
+function isInstanceExpression(expr, names, holders) {
+  if (castsTo(expr, names)) return true;
+  const e = strip(expr);
+  if (!e) return false;
+  if (ts.isPropertyAccessExpression(e) && e.expression.kind === ts.SyntaxKind.ThisKeyword) return holders.members.has(e.name.text);
+  if (ts.isIdentifier(e)) return holders.locals.has(e.text);
+  return yieldsInstanceOf(e, names);
+}
+const enclosingClass = (node) => {
+  for (let n = node.parent; n; n = n.parent) if (ts.isClassLike(n)) return n;
+  return undefined;
+};
+/** A class's name: its own, or the variable a class expression is assigned to. */
+const declaredClassName = (node) => node.name?.text ?? (node.parent && ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name) ? node.parent.name.text : undefined);
+/** Every local name a file imports from another source: local name -> { target, imported } (`*` for a namespace import). */
+function sourceImports(relPath, sf) {
+  const out = new Map();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !st.importClause) continue;
+    const target = resolveSourceSpecifier(relPath, staticSpecifier(st.moduleSpecifier));
+    if (!target) continue;
+    if (st.importClause.name) out.set(st.importClause.name.text, { target, imported: 'default' });
+    const bindings = st.importClause.namedBindings;
+    if (bindings && ts.isNamespaceImport(bindings)) out.set(bindings.name.text, { target, imported: '*' });
+    if (bindings && ts.isNamedImports(bindings)) for (const el of bindings.elements) out.set(el.name.text, { target, imported: (el.propertyName ?? el.name).text });
+  }
+  return out;
+}
+/**
+ * The classes of a set of sources (`file#Class`) with what each `extends`, resolved statically: a class of the same file, an imported
+ * class (through an alias, a namespace import or a re-export), and every class named inside a mixin expression (`extends Mixin(Base)`).
+ */
+function classGraph(parsed) {
+  const classes = new Map();
+  const aliases = new Map(); // `file#Alias` -> the names its type stands for (`type A = OnboardingService`, `InstanceType<typeof X>`)
+  const imports = new Map();
+  for (const [rel, sf] of parsed) {
+    imports.set(rel, sourceImports(rel, sf));
+    const visit = (node) => {
+      if (ts.isTypeAliasDeclaration(node)) aliases.set(`${rel}#${node.name.text}`, { file: rel, name: node.name.text, refs: typeNames(node.type) });
+      // An interface that extends a class inherits its members as a type, so it is part of the same graph.
+      const name = ts.isClassLike(node) ? declaredClassName(node) : ts.isInterfaceDeclaration(node) ? node.name.text : undefined;
+      if (name) {
+        const bases = (node.heritageClauses ?? []).filter((h) => h.token === ts.SyntaxKind.ExtendsKeyword).flatMap((h) => h.types.map((t) => t.expression));
+        classes.set(`${rel}#${name}`, { file: rel, name, kind: ts.isInterfaceDeclaration(node) ? 'interface' : 'class', bases });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  const declared = (key) => classes.has(key) || aliases.has(key);
+  const resolveLocal = (file, local, seen = new Set()) => {
+    if (declared(`${file}#${local}`)) return `${file}#${local}`;
+    const imp = imports.get(file)?.get(local);
+    return imp && imp.imported !== '*' ? resolveExport(imp.target, imp.imported, seen) : undefined;
+  };
+  /** `Name`, or `namespace.Name` through a namespace import. */
+  const resolveName = (file, text) => {
+    if (!text.includes('.')) return resolveLocal(file, text);
+    const [space, name, ...deeper] = text.split('.');
+    const imp = imports.get(file)?.get(space);
+    return imp?.imported === '*' && deeper.length === 0 ? resolveExport(imp.target, name) : undefined;
+  };
+  const resolveExport = (file, name, seen = new Set()) => {
+    const sf = parsed.get(file);
+    const key = `${file}#${name}`;
+    if (!sf || seen.has(key)) return undefined;
+    seen.add(key);
+    if (name !== 'default' && declared(key)) return key;
+    for (const st of sf.statements) {
+      if (name === 'default') {
+        if (ts.isExportAssignment(st) && ts.isIdentifier(strip(st.expression))) return resolveLocal(file, strip(st.expression).text, seen);
+        if (ts.isClassDeclaration(st) && st.name && (ts.getModifiers(st) ?? []).some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) return `${file}#${st.name.text}`;
+      }
+      if (!ts.isExportDeclaration(st)) continue;
+      const target = st.moduleSpecifier ? resolveSourceSpecifier(file, staticSpecifier(st.moduleSpecifier)) : undefined;
+      if (st.exportClause && ts.isNamedExports(st.exportClause)) {
+        const el = st.exportClause.elements.find((e) => e.name.text === name);
+        if (!el) continue;
+        const original = (el.propertyName ?? el.name).text;
+        const found = st.moduleSpecifier ? target && resolveExport(target, original, seen) : resolveLocal(file, original, seen);
+        if (found) return found;
+      } else if (!st.exportClause && target) { // export * from './x.js'
+        const found = resolveExport(target, name, seen);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  const resolveBases = (file, expression) => {
+    const out = [];
+    const visit = (node) => {
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && imports.get(file)?.get(node.expression.text)?.imported === '*') {
+        const found = resolveExport(imports.get(file).get(node.expression.text).target, node.name.text);
+        if (found) out.push(found);
+        return;
+      }
+      if (ts.isIdentifier(node) && !isNamePosition(node)) {
+        const found = resolveLocal(file, node.text);
+        if (found) out.push(found);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(expression);
+    return out;
+  };
+  return { classes, aliases, imports, resolveLocal, resolveName, resolveExport, resolveBases };
+}
+
+/**
+ * `sources`: every non-test TypeScript source of auth-service (`apps/auth-service/src/**`), repository path -> text.
+ * Syntactic and deterministic; its limits are listed with the policy above.
+ */
+export function checkAuthOrganizationBoundary(sources) {
+  const problems = [];
+  const files = Object.keys(sources ?? {}).filter((rel) => rel.startsWith(AUTH_SRC) && /\.ts$/.test(rel) && !/\.spec\.ts$|\.d\.ts$/.test(rel)).sort();
+  if (files.length === 0) return ['auth-service sources were not found; the Auth → Organization Service boundary cannot be checked'];
+  const parsed = new Map(files.map((rel) => [rel, ts.createSourceFile(rel, sources[rel], ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)]));
+  const short = (rel) => rel.slice(AUTH_SRC.length);
+
+  // 0. The policy still describes the code: a renamed file or method must not silently drop out of the rule.
+  const holderContexts = new Map(); // holder file -> contexts that may touch the client
+  for (const op of AUTH_ORGANIZATION_OPERATIONS) holderContexts.set(op.holder, [...(holderContexts.get(op.holder) ?? []), op.owner ? `${op.owner}.${op.member}` : op.member]);
+  for (const [file, contexts] of Object.entries(AUTH_ORGANIZATION_CLIENT_PASSERS)) holderContexts.set(file, [...(holderContexts.get(file) ?? []), ...contexts]);
+  const approved = [...[...holderContexts].flatMap(([file, contexts]) => contexts.map((c) => `${file}#${c}`)), ...AUTH_ORGANIZATION_OPERATIONS.flatMap((op) => op.callers)];
+  const exists = (key) => {
+    const [file, context] = key.split('#');
+    return parsed.has(file) && (context === undefined || declaredContexts(parsed.get(file)).has(context));
+  };
+  for (const file of [AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_WIRING]) if (!parsed.has(file)) problems.push(`${file}: named by the Auth → Organization Service boundary policy but missing; update AUTH_ORGANIZATION_* in scripts/lib/checks.mjs`);
+  for (const key of new Set([...approved, ...AUTH_NEVER_CALL.modules, ...AUTH_NEVER_CALL.contexts])) {
+    if (!exists(key)) problems.push(`${key}: named by the Auth → Organization Service boundary policy but not found in the source; update AUTH_ORGANIZATION_* / AUTH_NEVER_CALL in scripts/lib/checks.mjs`);
+  }
+  for (const key of new Set(approved)) {
+    if (AUTH_NEVER_CALL.modules.includes(key.split('#')[0]) || AUTH_NEVER_CALL.contexts.includes(key)) {
+      problems.push(`${key}: is a never-call path and cannot be an approved Organization Service caller (${BOUNDARY_RULE})`);
+    }
+  }
+
+  // 0b. No class inherits from a holder or from an approved controller, directly or through other classes: a subclass would inherit the
+  // administrative operation (or the approved route) and call it as `super.create()` or `this.create()` from anywhere.
+  const graph = classGraph(parsed);
+  const protectedClasses = new Map();
+  for (const op of AUTH_ORGANIZATION_OPERATIONS) {
+    if (op.owner) protectedClasses.set(`${op.holder}#${op.owner}`, 'an Organization Service holder');
+    for (const caller of op.callers) if (caller.includes('.')) protectedClasses.set(caller.slice(0, caller.lastIndexOf('.')), 'an approved administrative controller');
+  }
+  const chains = new Map(); // `file#Class` -> [itself, …, the protected class it inherits from]
+  const chainOf = (key, seen = new Set()) => {
+    if (chains.has(key)) return chains.get(key);
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    const cls = graph.classes.get(key);
+    let found;
+    for (const base of (cls?.bases ?? []).flatMap((expression) => graph.resolveBases(cls.file, expression))) {
+      if (base === key) continue;
+      const rest = protectedClasses.has(base) ? [base] : chainOf(base, seen);
+      if (rest) {
+        found = [key, ...rest];
+        break;
+      }
+    }
+    chains.set(key, found);
+    return found;
+  };
+  for (const [key, cls] of graph.classes) {
+    const chain = chainOf(key);
+    if (!chain) continue;
+    const root = chain[chain.length - 1];
+    problems.push(`${cls.file}: ${cls.kind} ${chain.map((k) => k.slice(k.indexOf('#') + 1)).join(' extends ')} inherits from ${protectedClasses.get(root)} (${short(root.slice(0, root.indexOf('#')))}); no class may extend one (${BOUNDARY_RULE})`);
+  }
+  const inheritsFrom = (key, root) => chains.get(key)?.at(-1) === root;
+  // A name stands for a protected class when it is that class, inherits from it, or is a type alias of something that does
+  // (`type A = OnboardingService`, `type B = InstanceType<typeof A>`), through imports and re-exports.
+  const standing = new Map();
+  const standsFor = (key, root, seen = new Set()) => {
+    const memo = `${key}|${root}`;
+    if (standing.has(memo)) return standing.get(memo);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const alias = graph.aliases.get(key);
+    const result = key === root || inheritsFrom(key, root)
+      || (alias !== undefined && alias.refs.some((ref) => {
+        const resolved = graph.resolveName(alias.file, ref);
+        return resolved !== undefined && standsFor(resolved, root, seen);
+      }));
+    standing.set(memo, result);
+    return result;
+  };
+  const declaredNames = [...new Set([...graph.classes.values(), ...graph.aliases.values()].map((d) => d.name))];
+  /** Every name by which `rel` can write the protected class `root`: a local or imported class, subclass or alias, or `namespace.Name`. */
+  const namesFor = (rel, root) => {
+    const names = new Set();
+    const imports = graph.imports.get(rel) ?? new Map();
+    const locals = [...[...imports].filter(([, imp]) => imp.imported !== '*').map(([local]) => local),
+      ...[...graph.classes.values(), ...graph.aliases.values()].filter((d) => d.file === rel).map((d) => d.name)];
+    for (const local of locals) {
+      const resolved = graph.resolveLocal(rel, local);
+      if (resolved && standsFor(resolved, root)) names.add(local);
+    }
+    for (const [space, imp] of imports) {
+      if (imp.imported !== '*') continue;
+      for (const name of declaredNames) {
+        const resolved = graph.resolveExport(imp.target, name);
+        if (resolved && standsFor(resolved, root)) names.add(`${space}.${name}`);
+      }
+    }
+    return names;
+  };
+  // An approved handler is a target too: an instance of its controller, however it is declared, is not called from anywhere.
+  const targets = [
+    ...AUTH_ORGANIZATION_OPERATIONS,
+    ...[...new Set(AUTH_ORGANIZATION_OPERATIONS.flatMap((op) => op.callers).filter((c) => c.includes('.')))].map((caller) => {
+      const [file, context] = caller.split('#');
+      const [owner, member] = context.split('.');
+      return { entry: true, operation: `entry point ${context}`, holder: file, owner, member, callers: [] };
+    }),
+  ];
+
+  for (const rel of files) {
+    if (rel === AUTH_ORGANIZATION_CLIENT) continue;
+    const sf = parsed.get(rel);
+    const clientNames = importedFrom(rel, sf, AUTH_ORGANIZATION_CLIENT);
+    const isWiring = rel === AUTH_ORGANIZATION_WIRING;
+    const allowedHere = holderContexts.get(rel);
+
+    // 1. Who may import the client at all (every static form: import, import type, export from, require, dynamic import).
+    const referencesClient = staticModuleSpecifiers(rel, sources[rel]).some((spec) => resolveSourceSpecifier(rel, spec) === AUTH_ORGANIZATION_CLIENT);
+    if (referencesClient && !isWiring && !allowedHere) {
+      problems.push(`${rel}: imports the Organization Service client (${short(AUTH_ORGANIZATION_CLIENT)}); only the approved administrative operations may (${BOUNDARY_RULE})`);
+    }
+    // 1b. Nobody re-exports the client, so no module can obtain it without importing it.
+    for (const st of sf.statements) {
+      const reexports = ts.isExportDeclaration(st) && (
+        (st.moduleSpecifier && resolveSourceSpecifier(rel, staticSpecifier(st.moduleSpecifier)) === AUTH_ORGANIZATION_CLIENT)
+        || (!st.moduleSpecifier && st.exportClause && ts.isNamedExports(st.exportClause) && st.exportClause.elements.some((el) => clientNames.has((el.propertyName ?? el.name).text))));
+      const exportsDefault = ts.isExportAssignment(st) && ts.isIdentifier(strip(st.expression)) && clientNames.has(strip(st.expression).text);
+      if (reexports || exportsDefault) problems.push(`${rel}: re-exports the Organization Service client; it is imported from ${short(AUTH_ORGANIZATION_CLIENT)} only (${BOUNDARY_RULE})`);
+    }
+
+    // 2. In a holder, only the operation's own method touches the client (the same class also serves never-call paths).
+    const clientHolders = instanceHolders(sf, new Set(clientNames.keys()));
+    const reported = new Set();
+    const touch = (node) => {
+      const context = boundaryContext(node);
+      if (context === DECLARATION || allowedHere.includes(context) || reported.has(context)) return;
+      reported.add(context);
+      problems.push(`${rel}: ${context} → Organization Service client (${short(AUTH_ORGANIZATION_CLIENT)}); in this module only ${allowedHere.join(', ')} may reach it (${BOUNDARY_RULE})`);
+    };
+
+    // 3. Each administrative operation is called from its approved call sites only.
+    const operations = targets.map((op) => {
+      // A class target is known by every name that stands for it here: the class, a subclass (already refused by 0b), a type alias,
+      // `namespace.Name`. A function target is known by its imported name.
+      const root = op.owner ? `${op.holder}#${op.owner}` : undefined;
+      let names;
+      if (root) names = namesFor(rel, root);
+      else {
+        names = new Set([...importedFrom(rel, sf, op.holder)].filter(([, original]) => original === op.member).map(([local]) => local));
+        if (rel === op.holder) names.add(op.member);
+      }
+      return { op, root, names, holders: op.owner ? instanceHolders(sf, names) : undefined, self: rel === op.holder ? (op.owner ? `${op.owner}.${op.member}` : op.member) : undefined };
+    });
+    const seenCalls = new Set();
+    const call = (node, { op, self }) => {
+      const context = boundaryContext(node);
+      const key = `${rel}#${context}`;
+      if (context === self || op.callers.includes(key) || seenCalls.has(`${key}|${op.operation}`)) return;
+      seenCalls.add(`${key}|${op.operation}`);
+      const target = op.owner ? `${op.owner}.${op.member}` : op.member;
+      problems.push(op.entry
+        ? `${rel}: ${context} → ${target} (an approved Organization Service entry point); only its route may run it (${BOUNDARY_RULE})`
+        : `${rel}: ${context} → ${target} → Organization Service (${op.operation}); its only approved callers are ${op.callers.map((c) => c.slice(AUTH_SRC.length)).join(', ')} (${BOUNDARY_RULE})`);
+    };
+    const entryMethods = AUTH_ORGANIZATION_OPERATIONS.flatMap((op) => op.callers).filter((c) => c.startsWith(`${rel}#`) && c.includes('.')).map((c) => c.slice(rel.length + 1));
+
+    const visit = (node) => {
+      if (ts.isImportDeclaration(node)) return;
+      if (allowedHere) { // a module that may not import the client at all is already reported by rule 1
+        if (ts.isIdentifier(node) && clientNames.has(node.text) && !isNamePosition(node)) touch(node);
+        if (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword && clientHolders.members.has(node.name.text)) touch(node);
+      }
+      for (const entry of operations) {
+        const { op, root, names, holders } = entry;
+        if (op.owner) {
+          if (ts.isPropertyAccessExpression(node) && node.name.text === op.member) {
+            const cls = enclosingClass(node);
+            // `this.handler` inside the controller itself is rule 4's; for an operation, another method of the holder calling it is a caller.
+            const own = !op.entry && node.expression.kind === ts.SyntaxKind.ThisKeyword && rel === op.holder && cls?.name?.text === op.owner;
+            const inherited = cls && (node.expression.kind === ts.SyntaxKind.ThisKeyword || node.expression.kind === ts.SyntaxKind.SuperKeyword)
+              && inheritsFrom(`${rel}#${declaredClassName(cls)}`, root);
+            if (own || inherited || isInstanceExpression(node.expression, names, holders)) call(node, entry);
+          }
+        } else if (ts.isIdentifier(node) && names.has(node.text) && !isNamePosition(node) && !(ts.isFunctionDeclaration(node.parent) && node.parent.name === node)) call(node, entry);
+      }
+      // 4. An approved handler is an entry point: nothing else in its class calls it.
+      if (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword) {
+        const target = `${enclosingClass(node)?.name?.text}.${node.name.text}`;
+        const context = boundaryContext(node);
+        if (entryMethods.includes(target) && context !== target) problems.push(`${rel}: ${context} → ${target} (an approved Organization Service entry point) is called from inside its class; only the route itself may run it (${BOUNDARY_RULE})`);
+      }
+      // 5. No second client: no other Auth module opens an outbound client or reads the Organization Service credential.
+      if (ts.isCallExpression(node)) {
+        const callee = strip(node.expression);
+        if ((ts.isIdentifier(callee) && callee.text === 'fetch') || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'fetch' && ts.isIdentifier(strip(callee.expression)) && ['globalThis', 'global', 'window', 'self'].includes(strip(callee.expression).text))) {
+          problems.push(`${rel}: ${boundaryContext(node)} calls fetch; the only outbound HTTP client in auth-service is ${short(AUTH_ORGANIZATION_CLIENT)} (${BOUNDARY_RULE})`);
+        }
+      }
+      if (!AUTH_ORGANIZATION_CREDENTIAL_READERS.has(rel)) {
+        const credential = (ts.isPropertyAccessExpression(node) && node.name.text === 'client' && ts.isPropertyAccessExpression(strip(node.expression)) && strip(node.expression).name.text === 'hierarchy')
+          || (ts.isStringLiteralLike(node) && ORGANIZATION_CREDENTIAL_NAME.test(node.text));
+        if (credential) problems.push(`${rel}: ${boundaryContext(node)} reads auth-service's Organization Service credential; only the configuration loader, the wiring and ${short(AUTH_ORGANIZATION_CLIENT)} may (${BOUNDARY_RULE})`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    for (const spec of new Set(staticModuleSpecifiers(rel, sources[rel]))) {
+      if (OUTBOUND_CLIENT_MODULES.has(spec.replace(/^node:/, '').split('/')[0])) {
+        problems.push(`${rel}: imports ${spec}; the only outbound HTTP client in auth-service is ${short(AUTH_ORGANIZATION_CLIENT)} (${BOUNDARY_RULE})`);
+      }
+    }
+  }
+  return problems;
+}

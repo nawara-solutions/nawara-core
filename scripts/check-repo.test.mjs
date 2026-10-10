@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 
@@ -2222,4 +2223,193 @@ test('V2 A3M.5: outbox retention stays limited to reviewed services that let the
   const runner = repoFile('scripts/check-repo.mjs');
   assert.equal(runner.split('checkOutboxRetentionEligibility(').length - 1, 1);
   assert.match(runner, /for \(const service of OUTBOX_RETENTION_APPROVED_SERVICES\)/);
+});
+
+// V2 A5.4-T1: the Auth → Organization Service dependency boundary (ADR-0042 decision 8, ADR-0063 §5).
+test('A5.4-T1: auth-service reaches Organization Service only from its approved administrative operations', () => {
+  const SRC = 'apps/auth-service/src/';
+  const srcDir = new URL('../apps/auth-service/src/', import.meta.url);
+  const real = {};
+  const collect = (dir, prefix) => {
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      if (name.isDirectory()) collect(new URL(`${name.name}/`, dir), `${prefix}${name.name}/`);
+      else if (name.name.endsWith('.ts') && !name.name.endsWith('.spec.ts') && !name.name.endsWith('.d.ts')) real[`${SRC}${prefix}${name.name}`] = readFileSync(new URL(name.name, dir), 'utf8');
+    }
+  };
+  collect(srcDir, '');
+  const run = (changes = {}) => checkAuthOrganizationBoundary({ ...real, ...changes });
+  const edit = (rel, from, to) => {
+    const text = real[SRC + rel];
+    assert.ok(text.includes(from), `${rel} no longer contains: ${from}`);
+    return { [SRC + rel]: text.replace(from, to) };
+  };
+  const add = (rel, extra) => ({ [SRC + rel]: `${real[SRC + rel]}\n${extra}\n` });
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected ${pattern}, got:\n${problems.join('\n') || '(no problem)'}`);
+
+  // 1. the real auth-service passes, with every approved administrative caller in place
+  assert.deepEqual(run(), []);
+  assert.deepEqual(AUTH_ORGANIZATION_OPERATIONS.map((op) => op.operation), ['join-code creation', 'organization-admin invitation creation', 'operator platform-assignment grant', 'owner bootstrap (command line)']);
+  assert.equal(AUTH_ORGANIZATION_CLIENT, `${SRC}hierarchy/hierarchy-reference.ts`);
+
+  // 2. a DIRECT forbidden dependency: a never-call module imports the client (each static form)
+  const importClient = "import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';";
+  fails(run(add('auth/auth.service.ts', importClient)), /auth\/auth\.service\.ts: imports the Organization Service client/);
+  fails(run(add('auth/grants.service.ts', "import type { HierarchyReference } from '../hierarchy/hierarchy-reference.js';\nexport type T = HierarchyReference;")), /auth\/grants\.service\.ts: imports the Organization Service client/);
+  fails(run(add('auth/session.service.ts', "const h = await import('../hierarchy/hierarchy-reference.js');")), /auth\/session\.service\.ts: imports the Organization Service client/);
+  fails(run(add('platform/platform-access.service.ts', "export { HierarchyReference } from '../hierarchy/hierarchy-reference.js';")), /platform-access\.service\.ts: (imports|re-exports) the Organization Service client/);
+  fails(run({ [`${SRC}auth/new-flow.service.ts`]: `${importClient}\nexport const x = HierarchyReference;` }), /auth\/new-flow\.service\.ts: imports the Organization Service client/);
+  // a holder may not re-export the client either (that would let any module obtain it without importing it)
+  fails(run(add('onboarding/onboarding.service.ts', 'export { HierarchyReference };')), /onboarding\.service\.ts: re-exports the Organization Service client/);
+
+  // 3. in a holder, a never-call METHOD may not touch the client (the class serves registration and join too)
+  const firstTouch = 'if (!(await this.hierarchy.firstTouchOrganization(organizationId))) throw notFound();';
+  fails(run(edit('onboarding/onboarding.service.ts', '  async resolve(rawCode: string, client: ClientInfo) {', '  async resolve(rawCode: string, client: ClientInfo) {\n    await this.hierarchy.firstTouchOrganization(rawCode);')),
+    /onboarding\.service\.ts: OnboardingService\.resolve → Organization Service client .*only OnboardingService\.create may reach it/);
+  fails(run(edit('onboarding/invitation.service.ts', '  async accept(', '  async touch() { return this.hierarchy.ensure(\'organization\', \'x\'); }\n  async accept(')),
+    /invitation\.service\.ts: InvitationService\.touch → Organization Service client/);
+  fails(run(edit('platform/assignment.service.ts', '  async revoke(', '  async leak() { return this.hierarchy; }\n  async revoke(')), /assignment\.service\.ts: AssignmentService\.leak → Organization Service client/);
+  assert.ok(real[`${SRC}onboarding/onboarding.service.ts`].includes(firstTouch)); // the approved first touch itself is still there
+
+  // 4. an INDIRECT forbidden dependency: a never-call path calls an administrative operation
+  fails(run(edit('auth/auth.service.ts', 'await this.onboarding.guardGuessing(client);', 'await this.onboarding.guardGuessing(client);\n    await this.onboarding.create({} as never, \'o\', {} as never, undefined, \'ip\');')),
+    /auth\/auth\.service\.ts: AuthService\.\w+ → OnboardingService\.create → Organization Service \(join-code creation\); its only approved callers are membership\/organization\.controller\.ts#OrganizationController\.createJoinCode/);
+  // through a new intermediate service, the chain breaks at the first unapproved hop
+  fails(run({ [`${SRC}auth/helper.service.ts`]: "import { AssignmentService } from '../platform/assignment.service.js';\nexport class Helper {\n  constructor(private readonly assignments: AssignmentService) {}\n  go() { return this.assignments.grant({} as never, 'a', 'b', undefined, 'ip'); }\n}" }),
+    /auth\/helper\.service\.ts: Helper\.go → AssignmentService\.grant → Organization Service \(operator platform-assignment grant\)/);
+  // obtained from the container instead of injected, and from another method of the holder itself
+  fails(run(add('auth/session.service.ts', "import { InvitationService } from '../onboarding/invitation.service.js';\nexport const sneak = (moduleRef: { get(t: unknown): InvitationService }) => moduleRef.get(InvitationService).create({} as never, 'o', {} as never, undefined, 'ip');")),
+    /auth\/session\.service\.ts: sneak → InvitationService\.create → Organization Service/);
+  fails(run(edit('onboarding/onboarding.service.ts', '  async resolve(rawCode: string, client: ClientInfo) {', '  async resolve(rawCode: string, client: ClientInfo) {\n    await this.create({} as never, rawCode, {} as never, undefined, client.ip);')),
+    /onboarding\.service\.ts: OnboardingService\.resolve → OnboardingService\.create → Organization Service/);
+  // another handler of the same controller, and a second caller of the command-line bootstrap
+  fails(run(edit('membership/organization.controller.ts', 'return this.invitations.create(this.actor(req), org, dto, su, this.ip(req));', 'return this.onboarding.create(this.actor(req), org, dto as never, su, this.ip(req));')),
+    /organization\.controller\.ts: OrganizationController\.createInvitation → OnboardingService\.create/);
+  fails(run(add('cli/check-config.ts', "import { bootstrapOwner } from './owner-tools.js';\nexport const again = () => bootstrapOwner(undefined as never, undefined as never, undefined as never, { companyName: 'c', email: 'e', password: 'p' });")),
+    /cli\/check-config\.ts: again → bootstrapOwner → Organization Service \(owner bootstrap \(command line\)\)/);
+  // an approved handler is an entry point: its own class does not call it
+  fails(run(edit('platform/platform.controller.ts', '  @Post(\'admin/operators/:id/platform-assignments\')', '  viaHandler() { return this.grant(\'a\', {} as never, {} as never); }\n\n  @Post(\'admin/operators/:id/platform-assignments\')')),
+    /platform\.controller\.ts: PlatformController\.viaHandler → PlatformController\.grant \(an approved Organization Service entry point\)/);
+
+  // 5. no second client: outbound HTTP and the Organization Service credential stay in their modules
+  fails(run(add('auth/auth.service.ts', "export const ping = () => fetch('http://organization-service/organization/companies/x');")), /auth\/auth\.service\.ts: ping calls fetch/);
+  fails(run(add('auth/grants.service.ts', "import { request } from 'node:https';\nexport const r = request;")), /auth\/grants\.service\.ts: imports node:https/);
+  fails(run(add('tokens/token.service.ts', "import { request } from 'undici';\nexport const r = request;")), /tokens\/token\.service\.ts: imports undici/);
+  fails(run(add('auth/session.service.ts', 'export const url = (c: { hierarchy: { client?: { baseUrl: string } } }) => c.hierarchy.client?.baseUrl;')), /auth\/session\.service\.ts: url reads auth-service's Organization Service credential/);
+  fails(run(add('members/member-security.service.ts', "export const name = 'ORGANIZATION_SERVICE_TOKEN';")), /member-security\.service\.ts: .* reads auth-service's Organization Service credential/);
+
+  // 6. the permitted administrative dependencies still pass when their own code changes shape
+  assert.deepEqual(run(edit('onboarding/onboarding.service.ts', firstTouch, `const known = await this.hierarchy.firstTouchOrganization(organizationId);\n    if (!known) throw notFound();`)), []);
+  assert.deepEqual(run(edit('platform/platform.controller.ts', 'return this.assignments.grant({ userId: req.actor.userId, sid: req.actor.sid }, id, dto.platformId, su, this.ip(req));', 'const granted = await this.assignments.grant({ userId: req.actor.userId, sid: req.actor.sid }, id, dto.platformId, su, this.ip(req));\n    return granted;')), []);
+  // a never-call path keeps using the same holder for its own, never-call, methods
+  assert.match(real[`${SRC}auth/auth.service.ts`], /this\.onboarding\.redeem\(/);
+
+  // 7. the policy cannot drift: a renamed method or file is reported, and a never-call path can never be listed as approved
+  fails(run(edit('onboarding/onboarding.service.ts', '  async create(', '  async createCode(')), /onboarding\.service\.ts#OnboardingService\.create: named by the Auth → Organization Service boundary policy but not found/);
+  const without = { ...real };
+  delete without[`${SRC}auth/grants.service.ts`];
+  fails(checkAuthOrganizationBoundary(without), /auth\/grants\.service\.ts: named by the Auth → Organization Service boundary policy but not found/);
+  assert.deepEqual(checkAuthOrganizationBoundary({}), ['auth-service sources were not found; the Auth → Organization Service boundary cannot be checked']);
+  const approved = AUTH_ORGANIZATION_OPERATIONS.flatMap((op) => [`${op.holder}#${op.owner ? `${op.owner}.${op.member}` : op.member}`, ...op.callers]);
+  for (const key of approved) {
+    assert.ok(!AUTH_NEVER_CALL.modules.includes(key.split('#')[0]), `${key} is in a never-call module`);
+    assert.ok(!AUTH_NEVER_CALL.contexts.includes(key), `${key} is a never-call context`);
+  }
+  // decision 8's list is named: login and logout, sessions, registration and join, onboarding resolution, /auth/me and /auth/grants, access reads
+  for (const rel of ['auth/auth.service.ts', 'auth/auth.controller.ts', 'auth/session.service.ts', 'auth/grants.service.ts', 'platform/platform-access.service.ts', 'onboarding/onboarding.controller.ts']) {
+    assert.ok(AUTH_NEVER_CALL.modules.includes(SRC + rel), `${rel} must stay a never-call module`);
+  }
+  for (const ctx of ['onboarding/onboarding.service.ts#OnboardingService.redeem', 'onboarding/invitation.service.ts#InvitationService.accept', 'platform/platform.controller.ts#PlatformController.platformAccess', 'platform/platform.controller.ts#PlatformController.organization']) {
+    assert.ok(AUTH_NEVER_CALL.contexts.includes(SRC + ctx), `${ctx} must stay a never-call context`);
+  }
+
+  // 8. inheritance: no class extends a holder or an approved controller, so an operation cannot be inherited and called from anywhere
+  const onb = "import { OnboardingService } from '../onboarding/onboarding.service.js';";
+  const file = (rel, text) => ({ [SRC + rel]: text });
+  // direct subclassing fails on the relationship itself, even when the subclass calls nothing
+  fails(run(file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {}`)),
+    /auth\/sub\.service\.ts: class Sub extends OnboardingService inherits from an Organization Service holder \(onboarding\/onboarding\.service\.ts\); no class may extend one/);
+  // indirect subclassing through an intermediate class, in another file, reports the whole chain; the intermediate is reported too
+  const indirect = run({ ...file('auth/mid.service.ts', `${onb}\nexport class Mid extends OnboardingService {}`), ...file('auth/leaf.service.ts', "import { Mid } from './mid.service.js';\nexport class Leaf extends Mid {}") });
+  fails(indirect, /auth\/leaf\.service\.ts: class Leaf extends Mid extends OnboardingService inherits from an Organization Service holder/);
+  fails(indirect, /auth\/mid\.service\.ts: class Mid extends OnboardingService inherits from an Organization Service holder/);
+  // the other holders, an alias, a namespace import, a re-export, a default export, a class expression and a mixin are followed
+  fails(run(file('auth/a.ts', "import { InvitationService as Base } from '../onboarding/invitation.service.js';\nexport class A extends Base {}")), /auth\/a\.ts: class A extends InvitationService inherits from an Organization Service holder/);
+  fails(run(file('auth/b.ts', "import * as p from '../platform/assignment.service.js';\nexport class B extends p.AssignmentService {}")), /auth\/b\.ts: class B extends AssignmentService inherits from an Organization Service holder/);
+  fails(run({ ...file('auth/barrel.ts', "export { OnboardingService as Onb } from '../onboarding/onboarding.service.js';"), ...file('auth/c.ts', "import { Onb } from './barrel.js';\nexport class C extends Onb {}") }), /auth\/c\.ts: class C extends OnboardingService inherits/);
+  fails(run({ ...file('auth/star.ts', "export * from '../onboarding/onboarding.service.js';"), ...file('auth/d.ts', "import { OnboardingService } from './star.js';\nexport class D extends OnboardingService {}") }), /auth\/d\.ts: class D extends OnboardingService inherits/);
+  fails(run({ ...file('auth/def.ts', `${onb}\nexport default class Def extends OnboardingService {}`), ...file('auth/e.ts', "import Def from './def.js';\nexport class E extends Def {}") }), /auth\/e\.ts: class E extends Def extends OnboardingService inherits/);
+  fails(run(file('auth/f.ts', `${onb}\nexport const F = class extends OnboardingService {};`)), /auth\/f\.ts: class F extends OnboardingService inherits/);
+  fails(run(file('auth/g.ts', `${onb}\nconst Mixin = <T>(base: T) => base;\nexport class G extends Mixin(OnboardingService) {}`)), /auth\/g\.ts: class G extends OnboardingService inherits/);
+  // an interface that extends a holder is the same relationship as a type, and a service typed with it is followed
+  fails(run(file('auth/i.ts', `${onb}\nexport interface Like extends OnboardingService {}`)), /auth\/i\.ts: interface Like extends OnboardingService inherits from an Organization Service holder/);
+  fails(run(file('auth/i.ts', `${onb}\ninterface Like extends OnboardingService {}\nexport class Uses {\n  constructor(private readonly o: Like) {}\n  go() { return this.o.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}`)),
+    /auth\/i\.ts: Uses\.go → OnboardingService\.create → Organization Service/);
+  // an approved administrative controller cannot be subclassed either
+  fails(run(file('membership/sub.controller.ts', "import { OrganizationController } from './organization.controller.js';\nexport class SubController extends OrganizationController {}")),
+    /membership\/sub\.controller\.ts: class SubController extends OrganizationController inherits from an approved administrative controller \(membership\/organization\.controller\.ts\)/);
+  fails(run(file('platform/sub.controller.ts', "import { PlatformController } from './platform.controller.js';\nexport class P2 extends PlatformController {}")), /platform\/sub\.controller\.ts: class P2 extends PlatformController inherits from an approved administrative controller/);
+  // an inherited operation cannot bypass the caller restrictions: `super.create`, `this.create` and an instance of the subclass are all refused
+  const viaSuper = run(file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {\n  go() { return super.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}`));
+  fails(viaSuper, /auth\/sub\.service\.ts: class Sub extends OnboardingService inherits/);
+  fails(viaSuper, /auth\/sub\.service\.ts: Sub\.go → OnboardingService\.create → Organization Service \(join-code creation\); its only approved callers are/);
+  fails(run(file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {\n  go() { return this.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}`)), /auth\/sub\.service\.ts: Sub\.go → OnboardingService\.create → Organization Service/);
+  fails(run({ ...file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {}`), ...file('auth/user.service.ts', "import { Sub } from './sub.service.js';\nexport class User {\n  constructor(private readonly sub: Sub) {}\n  go() { return this.sub.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}") }),
+    /auth\/user\.service\.ts: User\.go → OnboardingService\.create → Organization Service/);
+  // unrelated inheritance stays permitted: an external base, a never-call service, a local base class, and a cycle does not hang
+  assert.deepEqual(run({
+    ...file('auth/errors2.ts', 'export class Refused extends Error {}'),
+    ...file('auth/base.service.ts', 'export class Base {}\nexport class Derived extends Base {}'),
+    ...file('auth/grants2.service.ts', "import { GrantsService } from './grants.service.js';\nexport class Grants2 extends GrantsService {}"),
+    ...file('auth/cycle.ts', "import { Two } from './cycle2.js';\nexport class One extends Two {}"),
+    ...file('auth/cycle2.ts', "import { One } from './cycle.js';\nexport class Two extends One {}"),
+  }), []);
+  // the real services and controllers still pass (case 1), and the real code has no subclass of a holder
+  assert.ok(!Object.values(real).some((text) => /extends\s+(OnboardingService|InvitationService|AssignmentService|OrganizationController|PlatformController)\b/.test(text)));
+
+  // 9. declared-type indirection: an operation called through a name that only STANDS FOR the holder is still that operation
+  const args = "({} as never, 'o', {} as never, undefined, 'ip')";
+  const joinCode = /→ OnboardingService\.create → Organization Service \(join-code creation\); its only approved callers are membership\/organization\.controller\.ts#OrganizationController\.createJoinCode/;
+  const uses = (declaration, type) => `${declaration}\nexport class Uses {\n  constructor(private readonly o: ${type}) {}\n  go() { return this.o.create${args}; }\n}`;
+  // a same-file type alias, and an alias of an alias
+  fails(run(file('auth/t.ts', uses(`${onb}\ntype Onb = OnboardingService;`, 'Onb'))), /auth\/t\.ts: Uses\.go → OnboardingService\.create/);
+  fails(run(file('auth/t.ts', uses(`${onb}\ntype Onb = OnboardingService;\ntype Again = Onb | undefined;`, 'Again'))), joinCode);
+  // an imported type alias, through `import type`, a re-export and a second alias in another file
+  const aliasFile = file('auth/alias.ts', `${onb}\nexport type Onb = OnboardingService;`);
+  fails(run({ ...aliasFile, ...file('auth/t.ts', uses("import type { Onb } from './alias.js';", 'Onb')) }), /auth\/t\.ts: Uses\.go → OnboardingService\.create/);
+  fails(run({ ...aliasFile, ...file('auth/barrel.ts', "export type { Onb as Svc } from './alias.js';"), ...file('auth/t.ts', uses("import type { Svc } from './barrel.js';\ntype Mine = Svc;", 'Mine')) }), joinCode);
+  // typeof and InstanceType<typeof …>, directly and behind an alias
+  fails(run(file('auth/t.ts', uses(onb, 'InstanceType<typeof OnboardingService>'))), joinCode);
+  fails(run(file('auth/t.ts', uses(`${onb}\ntype Ctor = typeof OnboardingService;\ntype Inst = InstanceType<Ctor>;`, 'Inst'))), joinCode);
+  // a cast that names the class or one of its aliases: on the receiver, doubled, in angle brackets, and kept in a variable
+  const cast = (expression, declaration = onb) => file('auth/t.ts', `${declaration}\nexport class Uses {\n  constructor(private readonly x: unknown) {}\n  go() { ${expression} }\n}`);
+  fails(run(cast(`return (this.x as OnboardingService).create${args};`)), joinCode);
+  fails(run(cast(`return (this.x as unknown as OnboardingService).create${args};`)), joinCode);
+  fails(run(cast(`return (<OnboardingService>this.x).create${args};`)), joinCode);
+  fails(run(cast(`const o = this.x as OnboardingService;\n    return o.create${args};`)), joinCode);
+  fails(run(cast(`return (this.x as Onb).create${args};`, `${onb}\ntype Onb = OnboardingService;`)), joinCode);
+  // import aliases in these declarations: a renamed import, a namespace import, and a generic constraint
+  fails(run(file('auth/t.ts', uses("import { OnboardingService as O } from '../onboarding/onboarding.service.js';\ntype A = O;", 'A'))), joinCode);
+  fails(run(file('auth/t.ts', uses("import * as onbs from '../onboarding/onboarding.service.js';", 'onbs.OnboardingService'))), joinCode);
+  fails(run(file('auth/t.ts', uses("import * as onbs from '../onboarding/onboarding.service.js';\ntype A = onbs.OnboardingService;", 'A'))), joinCode);
+  fails(run(file('auth/t.ts', `${onb}\nexport const go = <T extends OnboardingService>(o: T) => o.create${args};`)), /auth\/t\.ts: go → OnboardingService\.create/);
+  // the other holders, and an approved controller handler reached through a typed, aliased or cast instance
+  fails(run(file('auth/t.ts', "import { AssignmentService } from '../platform/assignment.service.js';\ntype A = AssignmentService;\nexport const go = (a: A) => a.grant({} as never, 'a', 'b', undefined, 'ip');")), /auth\/t\.ts: go → AssignmentService\.grant → Organization Service \(operator platform-assignment grant\)/);
+  const ctl = "import { OrganizationController } from '../membership/organization.controller.js';";
+  fails(run(file('auth/t.ts', `${ctl}\nexport const go = (c: OrganizationController) => c.createJoinCode('o', {} as never, {} as never);`)),
+    /auth\/t\.ts: go → OrganizationController\.createJoinCode \(an approved Organization Service entry point\); only its route may run it/);
+  fails(run(file('auth/t.ts', `${ctl}\ntype C = OrganizationController;\nexport const go = (c: unknown) => (c as C).createInvitation('o', {} as never, {} as never);`)), /auth\/t\.ts: go → OrganizationController\.createInvitation \(an approved/);
+  // ordinary unrelated aliases and casts do not fail, nor does a holder alias that calls only never-call or unrelated methods
+  assert.deepEqual(run({
+    ...file('auth/ok1.ts', "import { GrantsService } from './grants.service.js';\ntype G = GrantsService;\nexport const a = (g: G) => g.forUser('u');\nexport const b = (x: unknown) => (x as GrantsService).forUser('u');"),
+    ...file('auth/ok2.ts', "type Maker = { create(): void };\nexport const c = (m: Maker) => m.create();\nexport const d = (x: unknown) => (x as Maker).create();\nexport const e = <T extends Maker>(m: T) => m.create();"),
+    ...file('auth/ok3.ts', `${onb}\ntype Onb = OnboardingService;\nexport const f = (o: Onb) => o.list({} as never, 'o');\nexport const g = (x: unknown) => (x as OnboardingService).resolve('c', {} as never);`),
+    ...file('auth/ok4.ts', `${onb}\nexport type Shape = { service: OnboardingService; many: OnboardingService[] };\nexport const h = (s: { create(): void }, _shape?: Shape) => s.create();`),
+  }), []);
+  // the earlier protections are unchanged by this rule (cases 2 to 8 above ran against the same check)
+  assert.deepEqual(run(), []);
+
+  // the runner calls the check once, with auth-service's non-test sources
+  const runner = readFileSync(new URL('./check-repo.mjs', import.meta.url), 'utf8');
+  assert.equal(runner.split('checkAuthOrganizationBoundary(').length - 1, 1);
+  assert.match(runner, /apps\/auth-service\/src/);
 });
