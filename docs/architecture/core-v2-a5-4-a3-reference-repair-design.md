@@ -11,9 +11,10 @@
   classified **GREEN with two additional merge conditions** (§11.3). Documentation only: neither O2 nor A3 is implemented or
   authorized by it.
 - **Owner rulings (2026-10-10), third set:** the remaining decisions are recorded in §11.5: O6, O9, O13, O14 and O15, the
-  cached-Platform classification and the local diagnostics. For O7 a deferral of the metric is recorded for local implementation, merge and deployment, and the owner's confirmation is
-  still required for activation; **O8 is conditional**
-  on evidence the implementation must produce. §11.5 also corrects this document's earlier statement about the authority marker.
+  cached-Platform classification and the local diagnostics. For O7 the metric is deferred for local implementation, merge and the
+  deployment of inert code, and it is **not waived for activation**; O8 is ruled with the conservative fallback and must be shown
+  by tests; an unreadable marker answers `503 hierarchy_unavailable`. §11.5 also corrects this document's earlier statement about
+  the authority marker.
   Documentation only: A3 development is not authorized.
 - **Class.** A5.4-A3 is **RED**, permitted only inside §9.3's narrow exception.
 - **Authority.** [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) as partly superseded by
@@ -106,7 +107,7 @@ it adds no second owner, no shared admin database (decision 8) and no privileged
 |---|---|---|---|
 | 1a | valid bearer, active user, active session | `401` | ADR-0061 §4 step 1; `AuthGuard` |
 | 1b | the user is the Owner | `403 forbidden` | ADR-0061 §5; §9.3 A.4 ("a non-Owner `403`, before anything else") |
-| 1c | Auth's source is `organization-service` **and** the authority marker is `org_authoritative` (§11.5, O15) | collapsed `404`, the route does nothing more (an unreadable marker fails closed: §11.5) | ADR-0061 §4 step 1 and its last paragraph, as clarified 2026-10-10 |
+| 1c | Auth's source is `organization-service` **and** the authority marker is `org_authoritative` (§11.5, O15) | collapsed `404`, the route does nothing more (a missing or unreadable marker: `503 hierarchy_unavailable`, §11.5) | ADR-0061 §4 step 1 and its last paragraph, as clarified 2026-10-10 |
 | 2a | `kind` and `id` are well formed | `400` | ADR-0061 §4 step 2 |
 | 2b | per-actor and per-address rate limits | `429` | ADR-0061 §4 step 2 |
 | 3 | consume the proof (S2, §6) | `403 step_up_required`, or `503` | ADR-0061 §4 step 3; ADR-0065 §5 |
@@ -189,12 +190,12 @@ Used only by the repair route. `consume()` is untouched.
 |---|---|---|---|---|
 | **consumed** (confirmed committed) | the autocommit statement **completed** and returned one row | continue to step 4 | yes | – |
 | **confirmed rejection** | the statement completed and returned no row (missing, invalid, expired, used, wrong Owner, session, purpose or method) | `403 step_up_required` | none | `hierarchy.reference_repair_denied`, reason `step_up_required`, best effort (§8) |
-| **confirmed failed** | the database reported an error for the statement and the connection stayed usable, so nothing was committed | `503 hierarchy_unavailable` | none | local failure record, reason `step_up_consume_failed`; no central record |
+| **confirmed failed** | the database reported an error for the statement and the conditions of §11.5, O8 hold | `503 hierarchy_unavailable` | none | local failure record, reason `step_up_consume_failed`; no central record |
 | **uncertain** | anything else: connection lost, timeout, no reply, a row seen but the statement not completed, an error that does not prove a rollback | `503 hierarchy_unavailable`, fail closed | none | local failure record, reason `step_up_consume_uncertain`; no central record |
 
 - **Uncertain is the default.** Only an explicit short list of database error classes counts as "confirmed failed"; everything not on
   it is "uncertain". Both answer `503` and both stop before any lookup, so a misclassification changes a reason code and nothing else.
-  The list is fixed in the A3 implementation review (§11, O8).
+  The classification is ruled in §11.5, O8, which governs; the table above is a summary.
 - **Never:** proceeding on an uncertain outcome; retrying the consumption with the same proof; restoring a consumed proof after a
   later `404`, `503` or rollback. A client that re-presents the proof gets the verdict of that new request's statement.
 - **Concurrency:** two requests with the same proof race on one row; the database lets exactly one statement match.
@@ -305,7 +306,7 @@ system actor `hierarchy_anchor_detection` and `operation: reference_repair`. The
 
 ## 10. Local-mode inertness and automatic stop conditions
 
-### 10.1 With `AUTH_HIERARCHY_SOURCE=local` — DECIDED (ADR-0061 §4; ADR-0065 clarification 3; §9.3 A.4)
+### 10.1 Inert modes: source `local`, and source `organization-service` with marker `local` — DECIDED (ADR-0061 §4; ADR-0065 clarification 3; §9.3 A.4)
 
 | Caller | Answer | The route writes |
 |---|---|---|
@@ -317,7 +318,8 @@ system actor `hierarchy_anchor_detection` and `operation: reference_repair`. The
 "Nothing" means: no proof consumption (`consumedAt` stays NULL), no throttle row, no reference row, no outbox row, no central or
 local audit record, no marker or authority change, and **zero** Organization Service calls. Reads done by the guard are the existing
 ones. The inertness is decided at step 1c on every request, by the configured source and, when the source is
-`organization-service`, by the authority marker (one additional read; §11.5, O15).
+`organization-service`, by the authority marker (one additional read; §11.5, O15, which also covers the `frozen` and unreadable
+markers).
 
 S1 is the one A3 behavior that is **not** confined to the repair route and is not mode-conditional (§5; ruled in §11.1, O1).
 
@@ -337,8 +339,8 @@ Whether A3 adds stop conditions of its own is the owner's choice (§11, O14); th
 
 The table records the questions, the alternatives considered and this document's recommendations. **O1, O2, O3, O4, O5, O11 and
 O12 were ruled by the architecture owner on 2026-10-10 (§11.1)**, and **O10, for its names and paths, on the same day (§11.3)**; their rows are kept as the
-record of what was considered. **O6, O7, O9, O13, O14 and O15 were ruled on the same day (§11.5); O8 is ruled as a contract and
-stays conditional on evidence (§11.5).**
+record of what was considered. **O6, O7, O8, O9, O13, O14 and O15 were ruled on the same day (§11.5).** O8's classification must
+still be demonstrated by tests, and O7's metric is required before activation.
 
 | # | Question | Alternatives | Recommendation |
 |---|---|---|---|
@@ -437,10 +439,9 @@ disclosure**: it covers this case only, and no Accepted ADR is superseded by it.
 - **The O2 prerequisite task**, separately authorized, developed, reviewed and merged (§11.1, O2), under its class and merge
   conditions (§11.3). The names it needs are ruled (§11.3, O10). It is implemented and merged (PR #283, §11.4), so this
   prerequisite is met.
-- **What §11.5 leaves conditional or unconfirmed:** O8 (evidence the implementation must produce; its fallback is proposed and
-  awaits the owner's confirmation); the
-  response code of the unreadable-marker case (O15); the owner's confirmation of the O7 boundary for activation. The other
-  decisions, the cached-Platform classification and the local diagnostics are recorded in §11.5.
+- **What the rulings of §11.5 still require, later:** for O8, focused tests demonstrating the classification before the A3
+  implementation is accepted; for O7, the metric or an owner-approved equivalent monitoring capability **before activation**. No
+  architecture-owner decision recorded in §11 remains open.
 - **The separate authorization for local A3 development** (§13, authorization 3), and every later authorization.
 - Every automatic stop condition of §9.3 A.5 (§10.2), unchanged apart from the bounded O1 test list above.
 
@@ -541,8 +542,8 @@ No deployment or activation is authorized. O2 stays a separate prerequisite task
 ### 11.5 Owner rulings of 2026-10-10 on the remaining decisions
 
 Recorded from the architecture owner's rulings. Documentation only: they implement nothing, widen nothing in §9.3 A.1, and authorize
-no A3 development, merge, deployment, emission or activation. Where a ruling is **conditional**, the condition is stated and the
-decision is not treated as closed beyond it.
+no A3 development, merge, deployment, emission or activation. O7 and O8 carry later requirements: monitoring before activation,
+and certainty tests before the implementation is accepted.
 
 **O6 — typed failure causes (closed).** The repair path learns why a lookup or a placement failed through **module-private, typed
 failure causes** inside `hierarchy-reference.ts`, readable only by the repair path. `ensure()` keeps its exception status, its code,
@@ -569,7 +570,7 @@ database reports to each request.
 behavior or the golden traces; a new migration for a rate-limit bucket or a failure code; a shared-library change that is not
 approved; relaxing the `local`-mode inertness or the audit producer scope.
 
-**O15 — authority-marker safety (closed, with one response code left proposed).** The repair is eligible only when
+**O15 — authority-marker safety (closed).** The repair is eligible only when
 **`AUTH_HIERARCHY_SOURCE` is `organization-service` AND the authority marker is `org_authoritative`**.
 
 - **Source `organization-service`, marker `local`:** the agreed collapsed `404`. The proof is neither validated nor consumed; no
@@ -577,11 +578,19 @@ approved; relaxing the `local`-mode inertness or the audit producer scope.
   behavior as source `local` (§10.1).
 - **Marker `frozen`:** unchanged. The request proceeds as ADR-0061 §5 describes and the database refuses the placement: `503`, with
   the proof consumed.
-- **Marker unavailable, invalid or unreadable:** the request **fails closed** and the marker is **never** treated as
-  `org_authoritative`: no proof consumption, no lookup, no placement, no repair record. *Response code, PROPOSED and not ruled:*
-  `503 hierarchy_unavailable`, the only hierarchy-state error in Auth's error contract. ADR-0061 §5 has no row for this case, so the
-  exact code is confirmed with the A3 development authorization. (A marker read fails when Auth's own database fails; the
-  authentication guard reads the same database first, so this case is narrow.)
+- **Marker missing, malformed, unreadable or otherwise indeterminate (ruled):** the request **fails closed** with
+  **`503`, code `hierarchy_unavailable`**, and the marker is **never** treated as `org_authoritative`. The marker check comes
+  before any repair-specific proof validation, proof consumption, rate-limit count and hierarchy write, so none of them happens.
+  The marker is read only when the source is `organization-service`: with the source `local` the route is inert without reading it.
+  ADR-0061 §5 has no row for this case, and none of its rows is changed by it.
+- **The four marker cases, kept distinct:**
+
+  | Marker (source `organization-service`) | Outcome |
+  |---|---|
+  | `local` | the collapsed `404`; nothing validated, consumed, counted or written |
+  | `frozen` | the existing behavior and order of ADR-0061: the request proceeds, the database refuses the placement, `503` with the proof consumed |
+  | `org_authoritative` | eligible, subject to every other check |
+  | missing, malformed, unreadable or indeterminate | `503 hierarchy_unavailable`; nothing validated, consumed, counted or written |
 - **Correction of this document.** §4 previously said that, with a marker that is not Organization-authoritative, "the database
   refuses the reference write". That is true for `frozen` only. With marker `local` the database guard of migration
   `0008_hierarchy_authority.sql` accepts every hierarchy insert, so a placement would be written as an ordinary local row. §4 and
@@ -618,30 +627,29 @@ Verified on `main` at `564a30f`:
 - **Privacy.** Records and the log line carry ids, the kind and a closed code only. **No bearer, step-up proof, credential or
   upstream response content appears in a record or a log line**, and no name, URL or parent id. The requested id may belong to another
   Company; it stays in Auth's own log and local audit, which only the deployment's operators read.
-- **Still to confirm in implementation:** that every producing call site uses only these keys (a test reads the stored rows), and
-  the response code of the unreadable-marker case above. The schema is final in its names and not yet proven by a test.
+- **Still to confirm in implementation:** that every producing call site uses only these keys (a test reads the stored rows). The
+  schema is final in its names and not yet proven by a test.
 
-**O7 — the failure metric (deferral recorded for local implementation, merge and deployment; owner confirmation required for
-activation).**
+**O7 — the failure metric (ruled: deferred for implementation, merge and inert deployment; NOT waived for activation).**
 
 - **Fact.** `installMetrics` in `libs/service-kit` creates the metrics registry internally and exports no accessor; no Core service
   defines an application counter. Adding the counter of ADR-0064 §3 needs a `libs/service-kit` change, which §9.3 A.5 makes a stop
-  condition for A3. `libs/service-kit` is not modified.
-- **No Accepted safety gate depends on the metric.** No stop condition, merge condition or activation condition of §9.3, and no gate
-  of ADR-0040, ADR-0061 or ADR-0065, names it. The accepted alert for an anchor mismatch is log-based. The
-  [AC1 batch 2 record](core-v2-a5-4-ac1-batch2-decisions.md) §3 already notes that metrics are off in production until a
-  separately authorized rollout (A12) and that the log is the operational signal until then.
-- **Boundary of the deferral.** The counter is not required for A3's local implementation, merge or deployment. Whether
-  activation may also proceed without it is the owner decision below. Throughout, the local failure record and the warning line above are retained as the evidence and the operational signal. The
-  counter is added by the **V2 A12 observability workstream** (roadmap stages A12.7 to A12.10; A12.10 is production observability,
-  not started, and A12.7 to A12.9 have no defined scope yet), when the service-kit exposes
-  application counters through a separately authorized shared-library change. Nothing else in ADR-0064 is deferred.
-- ADR-0064 carries a dated clarification of that timing; its decision text is unchanged. Every deployment and activation stop
-  condition is preserved.
-- **Owner decision still required:** to confirm, at the latest with the activation authorization, that activation may proceed with
-  the log line and the local record as the only operational signal for infrastructure failures, or to require the counter first.
+  condition for A3. `libs/service-kit` is not modified, and no metric is implemented by A3.
+- **Deferred for:** A3's local implementation; A3's merge; the deployment of repair code that is otherwise inert or not activated.
+- **Not waived for production activation.** Before the repair capability is activated, one of these is required:
+  - **A.** the intended metric, with appropriate operational monitoring; or
+  - **B.** a separately reviewed, equivalent monitoring capability, with the owner's explicit approval.
+- **Always mandatory:** the local failure record and the warning line above, from the first implementation.
+- **Expected path:** the V2 A12 observability workstream (roadmap stages A12.7 to A12.10; A12.10 is production observability, not
+  started, and A12.7 to A12.9 have no defined scope yet), when the service-kit exposes application counters through a separately
+  authorized shared-library change.
+- **Compatibility.** ADR-0064 §3 requires the local audit record, the structured log and a bounded metric. Nothing is removed from
+  that requirement: the first two exist from the first implementation, and the third must exist, or have an approved equivalent,
+  before any activation, which is when infrastructure failures of the repair can first occur in production. The existing activation
+  gates (§9.3 A.2 item 7, A.3 and A.5) are unchanged; this adds a condition to activation and removes none. ADR-0064 carries a dated
+  clarification; its decision text is unchanged. This ruling authorizes no activation.
 
-**O8 — classifying the proof consumption (ruled as a contract; CONDITIONAL on evidence, not closed).**
+**O8 — classifying the proof consumption (ruled, with the conservative fallback; its tests are required before A3 is accepted).**
 
 S2 runs **one statement in autocommit**, outside any explicit transaction (§6). This differs on purpose from
 `StepUpService.consume`, which runs inside the caller's transaction and is undone by its rollback (ADR-0061 §4 step 3).
@@ -659,15 +667,19 @@ S2 runs **one statement in autocommit**, outside any explicit transaction (§6).
   misclassification changes a reason code and nothing else.
 - **Consistency.** ADR-0061 §4 step 3 (consumed in its own committed transaction, before any lookup) and ADR-0065 §5 and its
   acceptance clarification 1 are followed as written.
-- **Why this stays conditional.** The fields exist: the database client reports a severity and a status code on a database error, and
+- **What is not yet demonstrated.** The fields exist: the database client reports a severity and a status code on a database error, and
   `DbService.query` passes that error through unchanged. That the client behaves as the table assumes in each case has **not been
   demonstrated by a test**; this task changed no code and ran none.
 - **Smallest missing implementation contract.** A3 must demonstrate, with tests against a real PostgreSQL, each row of the table:
   a server-reported `ERROR` (for example a statement cancelled by the server's own timeout) leaves the proof unconsumed and is
   classified "confirmed no consumption"; a client-side deadline, a dropped connection and a terminated session are classified
-  "uncertain", whether or not the database applied the statement. **Proposed fallback, not ruled:** if any of this cannot be
-  demonstrated, the "confirmed no consumption" row is not used and every consume error is "uncertain". The owner confirms that
-  fallback with the A3 development authorization.
+  "uncertain", whether or not the database applied the statement. **Conservative fallback (ruled):** whenever there is not
+  enough evidence that the consume operation definitely did not commit, the result is classified **uncertain**. If the
+  "confirmed no consumption" row cannot be demonstrated, it is not used and every consume error is "uncertain".
+- **Never report a proof as unused after an ambiguous result.** Neither a response, a record nor a log line may say or imply that
+  the proof remains available when the outcome is uncertain.
+- **Required before A3 implementation acceptance:** focused tests that demonstrate the classification, row by row. This document
+  implements no consumption logic.
 
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
@@ -686,7 +698,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | TL1 | unauthenticated `401` (no bearer, an invalid bearer, a service token); Operator, Member and Organization administrator `403` | steps 1a, 1b |
 | TL2 | Owner: byte-identical `404` (status, body, headers that are not per-request) for a valid proof, an invalid proof, no proof, a malformed id, an unknown `kind`, an existing id, another Company's id | step 1c precedes everything |
 | TL2b | the same requests with source `organization-service` and marker `local` (§11.5, O15): the same byte-identical `404`; the TL3 checks hold (nothing consumed, counted or written; zero Organization Service calls). With marker `frozen`: `503`, proof consumed (TF1) | the marker is part of the inertness gate |
-| TL2c | the marker cannot be read, or holds no usable value, with source `organization-service` (§11.5, O15): the request fails closed; nothing is consumed, counted, looked up or placed, and no repair record is written. The asserted response code is the one confirmed with the A3 development authorization (proposed: `503 hierarchy_unavailable`) | an unreadable marker is never treated as Organization-authoritative |
+| TL2c | the marker is missing, malformed or cannot be read, with source `organization-service` (§11.5, O15): `503 hierarchy_unavailable`; nothing is validated, consumed, counted, looked up or placed, and no repair record is written. With source `local` and the same broken marker, the route still answers its inert `404` without reading the marker | an indeterminate marker is never treated as Organization-authoritative |
 | TL3 | after TL1 and TL2: the proof's `consumedAt` is NULL; `auth_throttle`, `outbox`, `auth_audit_event`, `company`, `platform`, `organization`, `hierarchy_authority` and its event table are unchanged (counts and the hierarchy content digest); the stand-in records zero calls | no new write, no emission, no proof consumption |
 | TL4 | after TL2, the generic `POST /auth/step-up/verify` refuses that proof (`403`) and its `consumedAt` is still NULL | the proof is not burned by either endpoint |
 | TL5 | the three first-touch operations and `bootstrap-owner` behave as on `main` (the A2 integration spec, unchanged) | existing behavior with `local` |
@@ -788,8 +800,9 @@ The **seven separate authorizations** of §9.3 A.2:
    test changes named under O1 (TC2).
 5. `check:repo` passing with exactly one new T1 entry (TC3).
 6. The mutation checks of TC6.
-7. Recorded owner decisions for O1 to O15 (§11.1, §11.3, §11.5), with the O8 evidence produced or the owner-confirmed fallback applied,
-   the unreadable-marker response code confirmed, and the O2 prerequisite task merged.
+7. Recorded owner decisions for O1 to O15 (§11.1, §11.3, §11.5); the O8 classification demonstrated by focused tests, with the
+   conservative fallback applied wherever non-commit is not proven; and the O2 prerequisite task merged (done: PR #283). The O7
+   metric is not a merge condition; it is an activation condition (§11.5).
 8. An independent design-conformance review against ADR-0061, ADR-0064, ADR-0065 and §9.3, with no required finding open.
 9. Full Core CI green on the pull request.
 10. The G6 timing statement of §15 in the pull request.

@@ -23,8 +23,9 @@
 > `organization-service` **and** that Auth's authority marker is `org_authoritative`. With the source `organization-service` and the
 > marker `local`, the route answers the collapsed `404` and does nothing, exactly as with the source `local`: Auth's database accepts
 > ordinary hierarchy writes while the marker is `local`, so a placement there would not be a guarded reference write. The marker
-> `frozen` keeps the `503` of §5 ("placement refused by the database"). A marker that cannot be read is never treated as
-> `org_authoritative`. Detail: the [A3 design](../architecture/core-v2-a5-4-a3-reference-repair-design.md) §11.5.
+> `frozen` keeps the `503` of §5 ("placement refused by the database") and its order. A marker that is missing, malformed or cannot
+> be read is never treated as `org_authoritative`: the route fails closed with `503 hierarchy_unavailable`, before any proof
+> validation, consumption, rate-limit count or hierarchy write. Detail: the [A3 design](../architecture/core-v2-a5-4-a3-reference-repair-design.md) §11.5.
 
 > **Acceptance note (2026-10-09, A5.3 OD-A5-4).** The architecture owner accepted the architectural design of this ADR as written (§3 to
 > §10). The Proposed-era notes below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is
