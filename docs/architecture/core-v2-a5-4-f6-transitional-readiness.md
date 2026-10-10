@@ -30,7 +30,7 @@
 - **The F6 mirror.** `ownership activate` in organization-service comes first; the mirror is Auth's marker
   (`hierarchy-retire --fresh`) and `AUTH_HIERARCHY_SOURCE=organization-service` with an Auth redeploy. **The certified documents do
   not fix the order of those two.** ADR-0063 §4 and the [G6 plan](stage-21/stage-21-x-g6-rehearsal-plan.md) §9.1 list the marker
-  first; the [runbook](../runbooks/organization-production.md) §3 F6 row lists the source first, and its §6.2 TRANSITIONAL row accepts
+  first; the [runbook](../runbooks/organization-production.md) §3 F6 row lists the source first, its §6.2 prose lists the marker first, and its §6.2 TRANSITIONAL row accepts
   either marker with either source while the phase is `ACTIVE`. This record calls the two orders **marker first** and **source
   first**. The Auth deploy never writes the source; the operator sets it on the server
   (`apps/auth-service/deploy/provision-and-deploy.sh`).
@@ -181,7 +181,7 @@ governance amendment, not only this decision.
 | new parameter or switch | none | none | an interval | an interval | a declaration | none |
 | change to the F6 mirror steps | none | none | none | none | one added start | Auth stopped and started |
 | runbook rule needed for the window | yes | yes | a note for the warning | yes | yes (set and remove) | no |
-| needs the mirror order fixed | no | yes | yes | yes | if direction-limited | yes (it defines one) |
+| needs the mirror order fixed | no (its runbook window follows whichever order is fixed) | yes | yes | yes | if direction-limited | yes (it defines one) |
 
 ## 6. What every option needs before A5.4-A5 can be authorized
 

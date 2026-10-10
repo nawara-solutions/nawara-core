@@ -34,7 +34,16 @@ Every future action carries one class. A class describes what an action needs; i
 | **DEPLOY** | separately authorized deployment of an exact digest, with the `production` approval |
 | **ACTIVATE** | separately authorized activation: a gate, a flag, a configuration value or a production step turns behavior on |
 | **OPEN** | blocked by an open architecture-owner decision; nothing proceeds until it is decided |
-| **OPS** | a separately authorized operational checkpoint that is none of the above: a read-only production check, a backup, a restore drill or a rehearsal step. Added here because such steps deploy and activate nothing |
+| **OPS** | a descriptive label only, for a separately authorized operational action that is none of the above: a read-only production check, a backup, a backup inspection, a restore drill, a restoration or a rehearsal step |
+
+**OPS is not a governance class.** It does not redefine or extend GREEN, YELLOW and RED, and it is not an accepted
+implementation-risk class; it only names actions that the other five labels do not describe.
+
+- Read-only production verification still requires its own appropriate authorization.
+- Backup inspection, rehearsal, restoration and recovery each require their own appropriate, separate authorization.
+- OPS authorizes no production access and no execution.
+- A high-risk operation labelled OPS keeps every applicable RED restriction and every certified gate restriction (G6, G7, F6, F7,
+  the `production` environment approval, the runbooks' own rules).
 
 The production order is unchanged (V2-A record §2; G6 plan §12): G6 baseline refresh → G6 → pre-G7 backup, verified, then the
 backup schedule → G7 → F6 → F7 → post-F7 backup, verified → other callers opened. G6 is deferred; G7, F6
@@ -160,8 +169,8 @@ alone requires a new rehearsal is **not decided**.
   a secret appears in output; anything touches production. On STOP: record the deviation, fix it **in the rehearsal only**, repeat
   the affected step. G7 cannot proceed while G6 is not certified.
 - **Rollback inside the rehearsal:** the plan rehearses `ownership rollback` from `VERIFIED` to `PREPARED` and verifies again, then
-  shows that the same command is refused after activation (plan §9.1). After the rehearsal's F6 there is no rollback; a failed
-  rehearsal is repeated on a fresh VM state.
+  shows that the same command is refused after activation (plan §9.1). After the rehearsal's F6 there is no rollback; the plan
+  repeats the affected step after a STOP, and whether a failure after F6 needs a fresh VM state is not decided.
 - **Production:** the rehearsal changes nothing in production, so there is nothing to roll back. The production steps after G6 are
   separate checkpoints (plan §12).
 - **Retention:** the VM is kept stopped through G7 + 14 days; raw logs until F7 certification + 90 days (plan §11).
@@ -177,7 +186,7 @@ alone requires a new rehearsal is **not decided**.
 | 5 | §8.1 induces `hierarchy_source_mismatch` and a freeze as monitoring demonstrations | with the readiness check in the rehearsed image, both would also change Auth's `/ready` | **DOC**, with item 4 |
 | 6 | §7 restores at the rehearsed phase | ADR-0063 §11: a restore drill detects a `local` marker after F6; the wrong-side restore rule is not rehearsed | **DOC** to add |
 | 7 | `ownership verify` is the F5 and post-activation verification | ADR-0063 §6: a read-only replacement for post-transition use is planned; today `verify` appends an event | **IMPL, RED** (A5.4-O5) if wanted in the rehearsed set; otherwise the existing `verify` stays |
-| 8 | the plan lists the mirror as marker, then source and redeploy (§9.1) | the active runbook's §3 F6 row lists the source first, its F7 row repeats "retire Auth's hierarchy writes", and its §6.2 accepts either order | the mirror order is **OPEN** with the readiness decision; then **DOC** on both documents |
+| 8 | the plan lists the mirror as marker, then source and redeploy (§9.1) | the active runbook's §3 F6 row lists the source first (its §6.2 prose lists the marker first), its F7 row repeats "retire Auth's hierarchy writes", and its §6.2 accepts either order | the mirror order is **OPEN** with the readiness decision; then **DOC** on both documents |
 
 **Sequencing question for the owner (OPEN, not decided here).** Items 3, 4 and 7 name behavior that the ADRs want certified in G6,
 while the code that provides it is RED or unauthorized today. Each such item either enters the certified set before G6-C, under its
@@ -535,11 +544,11 @@ The dependency model is D1 §8, unchanged. In particular, and to avoid reintrodu
 | select the certified digest set | **OPEN** until the owner records it at the refresh |
 | first digest deployment of each service; every later deployment | **DEPLOY** |
 | G6 (G6-B to G6-F); never production | **OPS** |
-| pre-G7 and post-F7 backups; any restore drill | **OPS** |
+| pre-G7 and post-F7 backups; any restore drill | **OPS** (each backup is a production dispatch needing its own authorization and the `production` approval; each drill its own authorization) |
 | G7, F6, F7 | locked; each **ACTIVATE**, a separately authorized production checkpoint; F6 has no rollback; the redeploys inside them are **DEPLOY** |
 | opening other callers | **ACTIVATE** (the last part of F7) |
 | select the F6 TRANSITIONAL approach | **OPEN** |
-| Auth readiness check (A5.4-A5) | **IMPL** (RED, design-approved exception) after the selection; then **DEPLOY** inside the certified set |
+| Auth readiness check (A5.4-A5) | not authorized by this document; separately authorized **IMPL** (RED, design-approved exception) after the selection; then **DEPLOY** inside the certified set |
 | the meaning of "verified" for the post-F7 backup; backup-generation tagging | **OPEN** |
 | reconciliation after the door; any exceptional recovery mechanism | **OPEN**; nothing is designed |
 | `register-caller.sh` scope extension and deregistration (A5.4-O6) | **OPEN** (mechanism) then **IMPL** (RED) |
@@ -576,8 +585,10 @@ The dependency model is D1 §8, unchanged. In particular, and to avoid reintrodu
 | which ADR-required behaviors enter the certified set before G6-C (§2.8) | the content of the certified set and of the rehearsal |
 | whether elapsed time alone requires a new rehearsal; confirmation of the derived conditions of §2.6 | the validity of a certified G6 |
 | what "verified" means for the post-F7 backup; backup-generation tagging | the post-F7 backup checkpoint; the restore procedure |
+| how a restore from the wrong side of F6 is detected (procedural today; the drill does not detect it, §3) | the restore procedure after F6; the G6 restore rehearsal |
+| every architecture-owner decision still open in [D1](core-v2-a5-4-implementation-specifications.md) §9 | as listed there; none is answered here |
 | reconciliation after the door | any exceptional recovery |
-| the `allowedPlatforms` mechanism | the scope extension, and so Auth's first touch or repair on a new Platform and the first Organization that Auth must reach; **not** the creation of the first Platform (ADR-0062 §4, §11) |
+| the `allowedPlatforms` mechanism | the scope extension, and so Auth's first touch or repair on a new Platform and the first Organization that Auth must reach; **not** the creation of the first Platform (ADR-0062 §4 and §11 order the extension after it; D1 §9 words this row as "the first Platform") |
 | the provisioning-credential retirement design and timing | the retirement step; whether it precedes ordinary administration is part of that design |
 | the diagnostic's database role, token use and output format | the diagnostic and its runbook block |
 | OD-L5, OD-L6, OD-L7; lifecycle step-up purposes and methods; the Operator step-up mechanism | the lifecycle procedure |
@@ -587,6 +598,8 @@ The dependency model is D1 §8, unchanged. In particular, and to avoid reintrodu
 | OD-R2, OD-R4 | the verification steps of recovery |
 | audit action names; how failures are recorded | every verify step |
 | the rehearsal host and the read-only GHCR credential | G6-B |
+
+Every item above stays **OPEN**. Nothing in this document or its companion answers one.
 
 ## 9. What this document does not do
 
