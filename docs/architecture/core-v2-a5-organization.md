@@ -269,7 +269,8 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 |---|---|---|
 | A5.4-G1 implementation governance | – | Accepted 2026-10-09; merged as PR #266 (§9.1) |
 | A5.4-T1 static Auth boundary check | GREEN | merged as PR #267 (2026-10-10): `checkAuthOrganizationBoundary` in `scripts/lib/checks.mjs`, run by `npm run check:repo`; a syntax-level check with documented limits |
-| A5.4-D1 implementation specifications | GREEN | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-implementation-specifications.md`](core-v2-a5-4-implementation-specifications.md); documentation only, decides nothing |
+| A5.4-D1 implementation specifications | GREEN | merged as PR #268 (2026-10-10): [`core-v2-a5-4-implementation-specifications.md`](core-v2-a5-4-implementation-specifications.md); documentation only, decides nothing |
+| A5.4-D2 operational runbook drafts and readiness specifications | GREEN | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-operational-runbooks.md`](core-v2-a5-4-operational-runbooks.md) and the OPEN decision record [`core-v2-a5-4-f6-transitional-readiness.md`](core-v2-a5-4-f6-transitional-readiness.md); documentation only; no active runbook, plan or tool is edited, no approach or digest is selected |
 
 **Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
 of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed
