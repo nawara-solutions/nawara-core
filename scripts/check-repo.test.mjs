@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 
@@ -2222,4 +2223,107 @@ test('V2 A3M.5: outbox retention stays limited to reviewed services that let the
   const runner = repoFile('scripts/check-repo.mjs');
   assert.equal(runner.split('checkOutboxRetentionEligibility(').length - 1, 1);
   assert.match(runner, /for \(const service of OUTBOX_RETENTION_APPROVED_SERVICES\)/);
+});
+
+// V2 A5.4-T1: the Auth → Organization Service dependency boundary (ADR-0042 decision 8, ADR-0063 §5).
+test('A5.4-T1: auth-service reaches Organization Service only from its approved administrative operations', () => {
+  const SRC = 'apps/auth-service/src/';
+  const srcDir = new URL('../apps/auth-service/src/', import.meta.url);
+  const real = {};
+  const collect = (dir, prefix) => {
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      if (name.isDirectory()) collect(new URL(`${name.name}/`, dir), `${prefix}${name.name}/`);
+      else if (name.name.endsWith('.ts') && !name.name.endsWith('.spec.ts') && !name.name.endsWith('.d.ts')) real[`${SRC}${prefix}${name.name}`] = readFileSync(new URL(name.name, dir), 'utf8');
+    }
+  };
+  collect(srcDir, '');
+  const run = (changes = {}) => checkAuthOrganizationBoundary({ ...real, ...changes });
+  const edit = (rel, from, to) => {
+    const text = real[SRC + rel];
+    assert.ok(text.includes(from), `${rel} no longer contains: ${from}`);
+    return { [SRC + rel]: text.replace(from, to) };
+  };
+  const add = (rel, extra) => ({ [SRC + rel]: `${real[SRC + rel]}\n${extra}\n` });
+  const fails = (problems, pattern) => assert.ok(problems.some((p) => pattern.test(p)), `expected ${pattern}, got:\n${problems.join('\n') || '(no problem)'}`);
+
+  // 1. the real auth-service passes, with every approved administrative caller in place
+  assert.deepEqual(run(), []);
+  assert.deepEqual(AUTH_ORGANIZATION_OPERATIONS.map((op) => op.operation), ['join-code creation', 'organization-admin invitation creation', 'operator platform-assignment grant', 'owner bootstrap (command line)']);
+  assert.equal(AUTH_ORGANIZATION_CLIENT, `${SRC}hierarchy/hierarchy-reference.ts`);
+
+  // 2. a DIRECT forbidden dependency: a never-call module imports the client (each static form)
+  const importClient = "import { HierarchyReference } from '../hierarchy/hierarchy-reference.js';";
+  fails(run(add('auth/auth.service.ts', importClient)), /auth\/auth\.service\.ts: imports the Organization Service client/);
+  fails(run(add('auth/grants.service.ts', "import type { HierarchyReference } from '../hierarchy/hierarchy-reference.js';\nexport type T = HierarchyReference;")), /auth\/grants\.service\.ts: imports the Organization Service client/);
+  fails(run(add('auth/session.service.ts', "const h = await import('../hierarchy/hierarchy-reference.js');")), /auth\/session\.service\.ts: imports the Organization Service client/);
+  fails(run(add('platform/platform-access.service.ts', "export { HierarchyReference } from '../hierarchy/hierarchy-reference.js';")), /platform-access\.service\.ts: (imports|re-exports) the Organization Service client/);
+  fails(run({ [`${SRC}auth/new-flow.service.ts`]: `${importClient}\nexport const x = HierarchyReference;` }), /auth\/new-flow\.service\.ts: imports the Organization Service client/);
+  // a holder may not re-export the client either (that would let any module obtain it without importing it)
+  fails(run(add('onboarding/onboarding.service.ts', 'export { HierarchyReference };')), /onboarding\.service\.ts: re-exports the Organization Service client/);
+
+  // 3. in a holder, a never-call METHOD may not touch the client (the class serves registration and join too)
+  const firstTouch = 'if (!(await this.hierarchy.firstTouchOrganization(organizationId))) throw notFound();';
+  fails(run(edit('onboarding/onboarding.service.ts', '  async resolve(rawCode: string, client: ClientInfo) {', '  async resolve(rawCode: string, client: ClientInfo) {\n    await this.hierarchy.firstTouchOrganization(rawCode);')),
+    /onboarding\.service\.ts: OnboardingService\.resolve → Organization Service client .*only OnboardingService\.create may reach it/);
+  fails(run(edit('onboarding/invitation.service.ts', '  async accept(', '  async touch() { return this.hierarchy.ensure(\'organization\', \'x\'); }\n  async accept(')),
+    /invitation\.service\.ts: InvitationService\.touch → Organization Service client/);
+  fails(run(edit('platform/assignment.service.ts', '  async revoke(', '  async leak() { return this.hierarchy; }\n  async revoke(')), /assignment\.service\.ts: AssignmentService\.leak → Organization Service client/);
+  assert.ok(real[`${SRC}onboarding/onboarding.service.ts`].includes(firstTouch)); // the approved first touch itself is still there
+
+  // 4. an INDIRECT forbidden dependency: a never-call path calls an administrative operation
+  fails(run(edit('auth/auth.service.ts', 'await this.onboarding.guardGuessing(client);', 'await this.onboarding.guardGuessing(client);\n    await this.onboarding.create({} as never, \'o\', {} as never, undefined, \'ip\');')),
+    /auth\/auth\.service\.ts: AuthService\.\w+ → OnboardingService\.create → Organization Service \(join-code creation\); its only approved callers are membership\/organization\.controller\.ts#OrganizationController\.createJoinCode/);
+  // through a new intermediate service, the chain breaks at the first unapproved hop
+  fails(run({ [`${SRC}auth/helper.service.ts`]: "import { AssignmentService } from '../platform/assignment.service.js';\nexport class Helper {\n  constructor(private readonly assignments: AssignmentService) {}\n  go() { return this.assignments.grant({} as never, 'a', 'b', undefined, 'ip'); }\n}" }),
+    /auth\/helper\.service\.ts: Helper\.go → AssignmentService\.grant → Organization Service \(operator platform-assignment grant\)/);
+  // obtained from the container instead of injected, and from another method of the holder itself
+  fails(run(add('auth/session.service.ts', "import { InvitationService } from '../onboarding/invitation.service.js';\nexport const sneak = (moduleRef: { get(t: unknown): InvitationService }) => moduleRef.get(InvitationService).create({} as never, 'o', {} as never, undefined, 'ip');")),
+    /auth\/session\.service\.ts: sneak → InvitationService\.create → Organization Service/);
+  fails(run(edit('onboarding/onboarding.service.ts', '  async resolve(rawCode: string, client: ClientInfo) {', '  async resolve(rawCode: string, client: ClientInfo) {\n    await this.create({} as never, rawCode, {} as never, undefined, client.ip);')),
+    /onboarding\.service\.ts: OnboardingService\.resolve → OnboardingService\.create → Organization Service/);
+  // another handler of the same controller, and a second caller of the command-line bootstrap
+  fails(run(edit('membership/organization.controller.ts', 'return this.invitations.create(this.actor(req), org, dto, su, this.ip(req));', 'return this.onboarding.create(this.actor(req), org, dto as never, su, this.ip(req));')),
+    /organization\.controller\.ts: OrganizationController\.createInvitation → OnboardingService\.create/);
+  fails(run(add('cli/check-config.ts', "import { bootstrapOwner } from './owner-tools.js';\nexport const again = () => bootstrapOwner(undefined as never, undefined as never, undefined as never, { companyName: 'c', email: 'e', password: 'p' });")),
+    /cli\/check-config\.ts: again → bootstrapOwner → Organization Service \(owner bootstrap \(command line\)\)/);
+  // an approved handler is an entry point: its own class does not call it
+  fails(run(edit('platform/platform.controller.ts', '  @Post(\'admin/operators/:id/platform-assignments\')', '  viaHandler() { return this.grant(\'a\', {} as never, {} as never); }\n\n  @Post(\'admin/operators/:id/platform-assignments\')')),
+    /platform\.controller\.ts: PlatformController\.viaHandler → PlatformController\.grant \(an approved Organization Service entry point\)/);
+
+  // 5. no second client: outbound HTTP and the Organization Service credential stay in their modules
+  fails(run(add('auth/auth.service.ts', "export const ping = () => fetch('http://organization-service/organization/companies/x');")), /auth\/auth\.service\.ts: ping calls fetch/);
+  fails(run(add('auth/grants.service.ts', "import { request } from 'node:https';\nexport const r = request;")), /auth\/grants\.service\.ts: imports node:https/);
+  fails(run(add('tokens/token.service.ts', "import { request } from 'undici';\nexport const r = request;")), /tokens\/token\.service\.ts: imports undici/);
+  fails(run(add('auth/session.service.ts', 'export const url = (c: { hierarchy: { client?: { baseUrl: string } } }) => c.hierarchy.client?.baseUrl;')), /auth\/session\.service\.ts: url reads auth-service's Organization Service credential/);
+  fails(run(add('members/member-security.service.ts', "export const name = 'ORGANIZATION_SERVICE_TOKEN';")), /member-security\.service\.ts: .* reads auth-service's Organization Service credential/);
+
+  // 6. the permitted administrative dependencies still pass when their own code changes shape
+  assert.deepEqual(run(edit('onboarding/onboarding.service.ts', firstTouch, `const known = await this.hierarchy.firstTouchOrganization(organizationId);\n    if (!known) throw notFound();`)), []);
+  assert.deepEqual(run(edit('platform/platform.controller.ts', 'return this.assignments.grant({ userId: req.actor.userId, sid: req.actor.sid }, id, dto.platformId, su, this.ip(req));', 'const granted = await this.assignments.grant({ userId: req.actor.userId, sid: req.actor.sid }, id, dto.platformId, su, this.ip(req));\n    return granted;')), []);
+  // a never-call path keeps using the same holder for its own, never-call, methods
+  assert.match(real[`${SRC}auth/auth.service.ts`], /this\.onboarding\.redeem\(/);
+
+  // 7. the policy cannot drift: a renamed method or file is reported, and a never-call path can never be listed as approved
+  fails(run(edit('onboarding/onboarding.service.ts', '  async create(', '  async createCode(')), /onboarding\.service\.ts#OnboardingService\.create: named by the Auth → Organization Service boundary policy but not found/);
+  const without = { ...real };
+  delete without[`${SRC}auth/grants.service.ts`];
+  fails(checkAuthOrganizationBoundary(without), /auth\/grants\.service\.ts: named by the Auth → Organization Service boundary policy but not found/);
+  assert.deepEqual(checkAuthOrganizationBoundary({}), ['auth-service sources were not found; the Auth → Organization Service boundary cannot be checked']);
+  const approved = AUTH_ORGANIZATION_OPERATIONS.flatMap((op) => [`${op.holder}#${op.owner ? `${op.owner}.${op.member}` : op.member}`, ...op.callers]);
+  for (const key of approved) {
+    assert.ok(!AUTH_NEVER_CALL.modules.includes(key.split('#')[0]), `${key} is in a never-call module`);
+    assert.ok(!AUTH_NEVER_CALL.contexts.includes(key), `${key} is a never-call context`);
+  }
+  // decision 8's list is named: login and logout, sessions, registration and join, onboarding resolution, /auth/me and /auth/grants, access reads
+  for (const rel of ['auth/auth.service.ts', 'auth/auth.controller.ts', 'auth/session.service.ts', 'auth/grants.service.ts', 'platform/platform-access.service.ts', 'onboarding/onboarding.controller.ts']) {
+    assert.ok(AUTH_NEVER_CALL.modules.includes(SRC + rel), `${rel} must stay a never-call module`);
+  }
+  for (const ctx of ['onboarding/onboarding.service.ts#OnboardingService.redeem', 'onboarding/invitation.service.ts#InvitationService.accept', 'platform/platform.controller.ts#PlatformController.platformAccess', 'platform/platform.controller.ts#PlatformController.organization']) {
+    assert.ok(AUTH_NEVER_CALL.contexts.includes(SRC + ctx), `${ctx} must stay a never-call context`);
+  }
+
+  // the runner calls the check once, with auth-service's non-test sources
+  const runner = readFileSync(new URL('./check-repo.mjs', import.meta.url), 'utf8');
+  assert.equal(runner.split('checkAuthOrganizationBoundary(').length - 1, 1);
+  assert.match(runner, /apps\/auth-service\/src/);
 });
