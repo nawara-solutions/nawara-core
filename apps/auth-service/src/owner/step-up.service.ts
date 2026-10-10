@@ -49,9 +49,9 @@ export const STEP_UP_METHODS = {
   // Verified and consumed by release-service through POST /auth/step-up/verify.
   'release.withdraw': ['totp', 'webauthn'],
   'compatibility_policy.change': ['totp', 'webauthn'],
-  // Hierarchy reference repair (ADR-0061 §3, §4; A5.4-A1): a fresh, factor-only step-up, never the bare key. Declared only: no Auth
-  // route consumes it yet (the repair runtime is A5.4-A3), so a proof for it authorizes nothing in Auth. The generic
-  // POST /auth/step-up/verify can still consume (burn) it, as it can any listed purpose.
+  // Hierarchy reference repair (ADR-0061 §3, §4; A5.4-A1): a fresh, factor-only step-up, never the bare key. Consumed only by the
+  // repair route, through consumeForReferenceRepair (A5.4-A3). The generic POST /auth/step-up/verify refuses it without consuming it
+  // (ADR-0065 §4, S1: verifyForService), so a calling service can never burn a repair proof.
   'hierarchy.reference.repair': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
@@ -185,6 +185,20 @@ export class StepUpService {
       [a.token, a.ownerId, a.sid, a.purpose, this.clock.now()],
     );
     if (!rows[0] || !this.allowed(a.purpose, rows[0].method)) throw await denied();
+  }
+
+  /**
+   * The generic, service-facing verification (POST /auth/step-up/verify; ADR-0042 Amendment 1 A.1, as clarified by ADR-0065 §4, S1).
+   * A reference-repair proof is Auth-local: it is refused here BEFORE any consuming statement, with the endpoint's existing answer
+   * (`403 step_up_required`) and the same local denial record `consume` writes for its own refusals, so it stays usable by the repair
+   * route. Every other purpose goes through `consume`, unchanged.
+   */
+  async verifyForService(q: Queryable, a: { ownerId: string; sid: string; purpose: string; token: string | undefined }): Promise<void> {
+    if (a.purpose === REFERENCE_REPAIR_PURPOSE) {
+      await this.audit.tryRecord({ type: 'owner.step_up.consume', outcome: 'denied', actorId: a.ownerId, sessionFamilyId: a.sid, metadata: { purpose: a.purpose } });
+      throw authError(403, 'step_up_required', AUTH_MESSAGES.stepUpRequired);
+    }
+    await this.consume(q, { ownerId: a.ownerId, sid: a.sid, purpose: a.purpose as StepUpPurpose, token: a.token });
   }
 
   /**

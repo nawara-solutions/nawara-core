@@ -381,12 +381,14 @@ describe('A5.4-A3 slice A: reference-repair proof consumption (real PostgreSQL)'
       expect(named.map((path) => path.slice(src.length + 1))).toEqual(['hierarchy/reference-repair.service.ts', 'owner/step-up.service.ts']);
     });
 
-    it('the generic `consume` is unchanged for this purpose: POST /auth/step-up/verify still consumes a repair proof exactly once (S1 is a later slice)', async () => {
+    it('S1: POST /auth/step-up/verify refuses a repair proof (403 step_up_required) without consuming it; the dedicated consumption then consumes it, once', async () => {
       const o = await owner();
       const proof = await proofFor(o);
-      await t.http.post('/auth/step-up/verify').set(bearer(o.tokens)).send({ purpose: PURPOSE, stepUpToken: proof }).expect(204);
-      await t.http.post('/auth/step-up/verify').set(bearer(o.tokens)).send({ purpose: PURPOSE, stepUpToken: proof }).expect(403);
-      expect(await stepUp.consumeForReferenceRepair({ ...who(o.tokens), token: proof })).toBe('rejected'); // one proof, one consumption, whoever consumes it
+      const r = await t.http.post('/auth/step-up/verify').set(bearer(o.tokens)).send({ purpose: PURPOSE, stepUpToken: proof });
+      expect([r.status, r.body.code]).toEqual([403, 'step_up_required']);
+      expect(await consumedAt(proof)).toBeNull();
+      expect(await stepUp.consumeForReferenceRepair({ ...who(o.tokens), token: proof })).toBe('consumed');
+      expect(await stepUp.consumeForReferenceRepair({ ...who(o.tokens), token: proof })).toBe('rejected');
     });
   });
 });
