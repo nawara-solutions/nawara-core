@@ -27,6 +27,15 @@ digest the cutover record certified. The digest it does run has **not** been ver
 fingerprints of G6-A still describe the schema. Organization and audit-service are deployed manually and were not redeployed; `main`
 contains localization changes to both that production does not run.
 
+*Correction (2026-10-10).* The count above is **eight**, not seven: the list omits `7bf3ee3` (merge of PR #157), whose run
+36786449805 completed `build-production` and `deploy-production` successfully on 2026-09-30 (deployment 22:36:29Z–22:37:47Z, `:production`
+reported healthy), after the cutover record's F4-M3 deployment of `9e29c763` (run 36699283208, 09:56Z) and after the record itself
+was written. No record gives a reason for excluding it. The eight successful `deploy-production` runs of `auth-service-docker-build.yml`
+after `9e29c763`, from GitHub Actions history: `7bf3ee3` (36786449805), `093e3ee` (36789040627), `b20bbab` (36791945101), `08475a5`
+(36794905227), `52160a2` (36853646153), `fe5d106` (36858882083), `fd8c743` (36865550727), `97f78cb` (36979422758, the last,
+2026-10-02T07:38Z). The conclusions above are unchanged. The cutover record's later-status note (§10) repeats the seven-item list, and
+[production readiness](production-readiness.md) (the Docker build row) also states seven; neither is edited here.
+
 ## 2. G6 is a dependency gate
 
 G6 is **deferred**: not cancelled, not waived, not passed. It is a **dependency gate**, not a calendar phase of V2: no V2 phase is
