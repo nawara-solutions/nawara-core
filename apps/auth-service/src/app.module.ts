@@ -19,6 +19,7 @@ import { CodeEventPurge } from './events/code-event-purge.js';
 import { HierarchyReference, ORGANIZATION_DIRECTORY, OrganizationDirectoryClient } from './hierarchy/hierarchy-reference.js';
 import { ReferenceRepairController } from './hierarchy/reference-repair.controller.js';
 import { ReferenceRepairService } from './hierarchy/reference-repair.service.js';
+import { HierarchyAuthorityReadiness } from './hierarchy/authority-readiness.js';
 import { OutboxDomainEvents } from './events/domain-events.js';
 import { HealthController } from './health/health.controller.js';
 import { MemberSecurityController } from './members/member-security.controller.js';
@@ -69,6 +70,8 @@ import { UsersService } from './users/users.service.js';
     HierarchyReference,
     // A5.4-A3: the hierarchy reference repair (inert unless Organization Service is the authority).
     ReferenceRepairService,
+    // A5.4-A5: the hierarchy-authority readiness check on `/ready` (monitoring only; `/auth/health` is unchanged).
+    HierarchyAuthorityReadiness,
     { provide: PasswordService, useFactory: (c: AppConfig) => new PasswordService(c.bcryptCost), inject: [APP_CONFIG] },
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,

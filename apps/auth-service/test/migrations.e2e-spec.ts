@@ -92,7 +92,7 @@ describe('auth-service migrations: runner, production upgrade and readiness (rea
     try {
       const before = await t.http.get('/ready');
       expect(before.status).toBe(503);
-      expect(before.body).toEqual({ status: 'unavailable', failed: ['migrations'] });
+      expect(before.body).toEqual({ status: 'unavailable', failed: ['hierarchy_authority', 'migrations'] }); // A5.4-A5: 0008 pending, no marker table
       await t.http.get('/health').expect(200, { status: 'ok' });
       expect((await history(url)).length).toBe(7); // readiness observed; it never migrated
       await runMigrations(url, [AUTH_MIGRATIONS_DIR], AUTH_MIGRATION_OPTIONS);
