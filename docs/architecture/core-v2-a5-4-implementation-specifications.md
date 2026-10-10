@@ -29,9 +29,15 @@
 of no changed behavior in deployed images, the approved image-pinning policy and an explicit merge approval. **RED** stays blocked
 until its gate or a specific governance amendment.
 
-**The mapping below is derived, not decided.** A5.4-G1 defines the three classes by category; the work-item ids and the class given to
-each come from the A5.4 readiness audit (which is not a repository record) and from this document. The owner confirms or corrects the
-class of each item when it is authorized; two items are flagged for a ruling.
+**The mapping below is derived, not decided,** except where an owner ruling is recorded. A5.4-G1 defines the three classes by
+category; the work-item ids and the class given to each come from the A5.4 readiness audit (which is not a repository record) and from
+this document. The owner confirms or corrects the class of each item when it is authorized.
+
+**Owner rulings (2026-10-10, classification only).** A5.4-AS1 is **RED** (a production schema change and Audit Service acceptance
+behavior). A5.4-K1 is **RED** (shared fail-closed runtime behavior). A5.4-AC1, additive audit-contract declarations with no
+producer, stays **YELLOW**. A5.4-D1 and A5.4-D2, documentation, stay **GREEN**; behavior-neutral tests stay GREEN where individually
+authorized. A classification authorizes nothing: every implementation, merge, deployment and activation still needs its own
+authorization and its gates.
 
 | Id | Work item | Class | Section |
 |---|---|---|---|
@@ -39,8 +45,8 @@ class of each item when it is authorized; two items are flagged for a ruling.
 | A5.4-D1 | this specification | GREEN | – |
 | A5.4-D2 | runbook drafts (F6 transitional state, `allowedPlatforms` change control, credential retirement, first Platform) | GREEN (editing an active runbook needs its own authorization) | §6 |
 | A5.4-AC1 | audit-contract declarations | YELLOW | §7.1 |
-| A5.4-AS1 | audit-service acceptance of them (in production; a digest deployment is separately authorized) | **owner ruling needed:** accepting new actions is additive, but accepting the `steward` user kind extends a database CHECK, a schema migration of a production service, which A5.4-G1 lists as RED | §7.1 |
-| A5.4-K1 | service-kit `adminTier` validation | **owner ruling needed:** it is not in the A5.4-G1 YELLOW list and it is a fail-closed behavior change in every image, not an inert declaration | §7.2 |
+| A5.4-AS1 | audit-service acceptance of the `steward` user kind, including its database CHECK change (in production; a digest deployment is separately authorized) | **RED** (owner ruling, 2026-10-10) | §7.1 |
+| A5.4-K1 | service-kit runtime `adminTier` fail-closed validation | **RED** (owner ruling, 2026-10-10) | §7.2 |
 | A5.4-A1 | inert step-up purpose declarations in Auth | YELLOW | §7.3 |
 | A5.4-N1 | Notification templates without a producer | YELLOW | §7.4 |
 | A5.4-A5 | Auth `/ready` source/marker check | RED, with a design-approved pre-G6 exception (no implementation authorized) | §6.5 |
@@ -138,7 +144,7 @@ Tests: every ancestor combination; child creation refused under a `SUSPENDED` or
   whether the answer names the ancestor that makes the scope inactive; how a Company read is scoped (a Company has no Platform, so
   Platform scope does not apply to it); and which capability Auth's E5 read uses. Auth holds `hierarchy.read` and uses the full-read
   routes for `ensure`; it is not admitted for `hierarchy.reference.read` today.
-- Compatibility: the reference read has no production reader today (ADR-0042 A.3 admits `payment-service` and `billing-service`, and
+- Compatibility: the reference read has no production reader today (ADR-0042 A.3 lists `payment-service` and `billing-service` as derived entries awaiting owner confirmation, Billing's Platform set is empty, and
   the service refuses reads until it is authoritative), so an additive field breaks nobody. It remains a contract change (**G5**).
 
 ### 3.8 E5 in Auth (stage L4) — ACCEPTED DESIGN — NOT IMPLEMENTED
@@ -173,8 +179,9 @@ scope. One exception: ADR-0059 normal transfer is allowed while the Company is `
 
 Every affected organization-scoped operation checks effective lifecycle with organization-service at the point of use and fails closed
 when the scope is inactive or cannot be confirmed. Auth's `platform-access` and admin organization lookup are **not** lifecycle checks.
-Prerequisites: the L3 contract; each consumer's admission and Platform scope at organization-service (ADR-0042 A.3 admits
-`payment-service` and `billing-service` for the reference read; other consumers are not admitted); consumer certification (**G4**: a
+Prerequisites: the L3 contract; each consumer's admission and Platform scope at organization-service (ADR-0042 A.3 lists
+`payment-service` and `billing-service` for the reference read as derived entries awaiting owner confirmation; other consumers are
+not admitted); consumer certification (**G4**: a
 forgotten check fails open). Opening callers is the last part of F7.
 
 ### 3.10 E3 event-driven propagation (stage L6) — GATED
@@ -349,9 +356,10 @@ only approved identifiers, presence, parent-link agreement and reason codes; it 
 authority state is inconsistent (§6.5). **OPEN (implementation):** the database role, the use of Auth's service token, the output
 format. It is one more approved caller of the client in the A5.4-T1 policy.
 
-### 5.6 Gate
+### 5.6 Gate, lifecycle interaction and residual risks
 
-RED. The route is disabled in `local` mode, so it has no effect before F6/F7. Prerequisites: A5.4-AC1 and AS1, A5.4-A2.
+RED. The route is disabled in `local` mode, so it has no effect before F6/F7. Prerequisites: A5.4-AC1, an authorized audit-service
+deployment that carries the repair actions (§7.1), the `hierarchy.reference.repair` purpose (A5.4-A1, or with the route) and A5.4-A2.
 
 **Lifecycle (ADR-0061 §7).** A repair is **permitted while the entity or an ancestor is `SUSPENDED` or `ARCHIVED`**: it places
 existence and parent links only and grants nothing, so the rule that inactive scopes allow only lifecycle operations and reads (§3.6,
@@ -447,16 +455,26 @@ today. The provisioning **identity** remains an architectural role; a future cre
   bootstrap-capable implementation (ADR-0062).
 - **Order:** the contract declares; audit-service accepts (and is deployed, separately authorized, since it is in production); only
   then does a producer emit. A declaration without a producer is inert.
-- **Class (owner ruling needed, §2):** accepting the `steward` user kind means extending audit-service's database CHECK, which is a
-  schema migration of a production service; A5.4-G1 lists production schema migrations as RED and only "additive audit-contract
-  declarations" as YELLOW.
+- **Two kinds of acceptance.** New *actions* reach audit-service through the contract library built into its image, so accepting them
+  is an audit-service deployment of a build that contains A5.4-AC1 (the deploy boundary, separately authorized). The `steward` *user
+  kind* also needs the database CHECK change: that is A5.4-AS1.
+- **Class (owner ruling, 2026-10-10, §2):** A5.4-AS1 is **RED**: accepting the `steward` user kind means extending audit-service's
+  database CHECK, a schema change of a production service, and changes what the service accepts. A5.4-AC1, producer-less
+  declarations, stays **YELLOW**. The ruling is a classification; it authorizes no migration, deployment or activation.
+- **Evidence AC1 must provide (YELLOW merge condition):** the contract's validation and screening code, which runs inside
+  audit-service and the producers, reads `USER_KINDS` (`libs/audit-contract/src/validate.ts`, `screen.ts`). A declaration is mergeable
+  as YELLOW only with evidence that it changes no deployed image's behavior; a `steward` value in `USER_KINDS` needs that evidence
+  like any other declaration, or it travels with AS1 (alone, it would be accepted by validation and rejected by the database CHECK).
+- **AS1's scope** also covers audit-service's own types: its query API enumerates the user kinds
+  (`apps/audit-service/src/query/query.dto.ts`), as ADR-0059 §8 says ("audit-service's type and its … CHECK").
 - **OPEN:** action names and target types; the reason-code vocabulary (OD-L6); the outcome question of §5.4.
 
 ### 7.2 service-kit (A5.4-K1) — ACCEPTED DESIGN — NOT IMPLEMENTED
 
 `HttpAuthClient.getIdentity` returns `adminTier` unvalidated today (`libs/service-kit/src/service-auth/auth-client.ts`). Decided: it
-validates `adminTier ∈ {owner, operator, null}` and fails closed otherwise. It changes the kit, which every image contains, and it
-is a behavior change (a previously accepted value is refused), so its class needs an owner ruling (§2).
+validates `adminTier ∈ {owner, operator, null}` and fails closed otherwise (ADR-0059 §8; part of its stage T5, the steward work,
+after OD-S1). It changes the kit, which every image contains, and it is a behavior change (a previously accepted value is refused).
+**Class (owner ruling, 2026-10-10, §2): RED.** It is not a prerequisite of the lifecycle or repair work.
 
 ### 7.3 Inert step-up purposes (A5.4-A1) — ACCEPTED DIRECTION; names OPEN
 
@@ -488,25 +506,43 @@ administrative operation. E5, repair and the diagnostic each add their entry whe
 value returned by a getter or a function, stored in another object, destructured or untyped, nor reflection; its comment lists the
 limits. It narrows what a reviewer must look for and does not prove the absence of a runtime path.
 
-## 8. Dependency order
+## 8. Dependencies
+
+These are the dependencies the ADR stages state (ADR-0059 §13, ADR-0060 §11, ADR-0061 §10). **This is not a delivery schedule**, and
+the three tracks are independent of each other except where a line says so.
 
 ```text
-audit-contract declarations (AC1) → audit-service acceptance and its deployment (AS1)
-        │
-        ├─ Auth: inert step-up purposes (A1) ─┐
-        ├─ service-kit adminTier check (K1)   │
-        ▼                                     ▼
-organization-service: L2 schema + backfill → lifecycle API + E4 → L3 effective status      [needs A1 for its step-ups]
-        ▼
-Auth: E5 (A6)                 Auth: ensure split (A2) → repair (A3) → diagnostic (A4)
-Auth: owner lifecycle (A7) → transfer (A8, needs N1 and E5) → stewards and recovery (A9, after OD-S1)
-        ▼
-consumers: E1 → later E3 (after A3M.8) → capability-based removal (R1)
+Shared first step, for every track that audits:
+  audit-contract declarations (AC1) → an authorized audit-service deployment that carries them
+
+Lifecycle (ADR-0060 stages L2 to L6):
+  organization-service: L2 schema + backfill, lifecycle API, E4 → L3 effective status
+    the lifecycle API's step-ups need their purposes declared in Auth first (A1); a code fact, not an ADR stage:
+    organization-service verifies a step-up through Auth, and Auth refuses a purpose it does not list
+  L3 → Auth: E5 (A6, stage L4)
+  L3 → consumers: E1 (stage L5, with consumer certification)
+  later: E3 (stage L6, after A3M.8)
+
+Reference repair (ADR-0061 stages R2 to R4; no lifecycle prerequisite):
+  AC1 and its audit-service deployment → Auth: the ensure split, the repair purpose and the route (A1, A2, A3)
+  diagnostic (A4): after the OD-A5-5 policy (decided by ADR-0063) and its open implementation details;
+    the ADR states no dependency on repair
+
+Ownership (ADR-0059 stages T2 to T7):
+  Auth: owner lifecycle and active-only authority (A7; T2, T3) → transfer API behind OWNER_TRANSFER (A8; T4)
+  notification integration (N1; T6) needs notification-service and A3M.8 in production; a transfer completes only
+    after a delivered notification, so the gate cannot be enabled before T6
+  after OD-S1, the steward work together (T5): the steward kind and audit-service's CHECK (AS1),
+    the service-kit adminTier validation (K1), steward MFA and the recovery API (A9)
+  E5 is extended to the transfer path once both exist (ADR-0060 stage L4)
+
+Last: capability-based removal of legacy modes and commands (R1)
 ```
 
-The Auth ↔ organization-service cycle is administrative only (organization-service reads grants and verifies step-ups in Auth; Auth
-reads references and status in organization-service) and is ordered by deployment: Auth's inert purposes, then organization-service's
-lifecycle and status contract, then Auth's E5 and repair.
+A5.4-AS1 and A5.4-K1 belong to the steward work only; neither is a prerequisite of the lifecycle or repair tracks. The Auth ↔
+organization-service cycle is administrative only (organization-service reads grants and verifies step-ups in Auth; Auth reads
+references and status in organization-service); for the lifecycle track it is ordered by deployment: Auth's inert purposes, then
+organization-service's lifecycle and status contract, then Auth's E5.
 
 ## 9. Open decisions, consolidated
 
@@ -524,7 +560,6 @@ lifecycle and status contract, then Auth's E5 and repair.
 | diagnostic database role, token use and output format | A4 |
 | the exact `allowedPlatforms` mechanism (its constraints are decided, §6.2); provisioning-credential retirement design | the first Platform |
 | the E5 answer for an unknown or out-of-scope entity; E5 placement relative to ownership transactions; the capability of the E5 read | E5 |
-| the class of A5.4-AS1 (the `steward` CHECK migration) and of A5.4-K1 (§2) | their authorization |
 | retention and legal erasure; an organization-scoped member restriction (ADR-0060 §12) | later lifecycle work |
 | backup-generation tagging; the replacement of `local` in dev and CI fixtures (ADR-0063 §12) | the restore procedure; removal (R1) |
 | reconciliation after the one-way door (not designed; ADR-0040, ADR-0063 §9) | any post-activation ownership recovery |

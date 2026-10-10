@@ -271,6 +271,11 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 | A5.4-T1 static Auth boundary check | GREEN | merged as PR #267 (2026-10-10): `checkAuthOrganizationBoundary` in `scripts/lib/checks.mjs`, run by `npm run check:repo`; a syntax-level check with documented limits |
 | A5.4-D1 implementation specifications | GREEN | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-implementation-specifications.md`](core-v2-a5-4-implementation-specifications.md); documentation only, decides nothing |
 
+**Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
+of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed
+validation) is **RED**; A5.4-AC1 (additive, producer-less audit-contract declarations) stays **YELLOW**; A5.4-D1 and A5.4-D2
+(documentation) stay **GREEN**.
+
 No YELLOW or RED task is authorized or started. Nothing is implemented in a service, deployed or activated.
 
 ## 10. Owner decisions [PROPOSED, not approved]
