@@ -4,6 +4,9 @@
   seven separate authorizations of the accepted A2/A3 exception ([A5 record](core-v2-a5-organization.md) §9.3, A.2 item 1). **It
   authorizes no code, test, commit of code, pull request, merge, deployment, audit emission or activation.** Local A3 development is a
   separate authorization (A.2 item 3) and must not start while a blocking decision of §11 is open.
+- **Implementation status (2026-10-10): IMPLEMENTED LOCALLY, NOT MERGED (§11.7).** Slices A to D exist as four local commits on the
+  branch `feature/core-v2-a5-4-a3-reference-repair`, under authorizations 3 and 4 of §9.3 A.2. They are not pushed, not in a pull
+  request, not merged, not deployed and not activated; A3 is not certified by CI and the RED-exception merge conditions are not met.
 - **Owner rulings (2026-10-10):** the seven blocking decisions O1, O2, O3, O4, O5, O11 and O12 are **ruled** (§11.1). The rulings
   are documentation: they implement nothing and authorize no development. **A3 stays blocked** until the O2 prerequisite task is
   merged, the remaining prerequisites of §11.2 are met and local A3 development is separately authorized.
@@ -759,6 +762,67 @@ unchanged; the earlier wording of TA8 expected `403` for the Owner, which contra
 **None of C1, C4 and C5 is a source or test change made now.** They are permissions and a documentation correction; the files are
 touched only by a separately authorized slice C change.
 
+### 11.7 Implementation status (2026-10-10): local, RED-governed, not merged
+
+**What exists.** Four local commits on `feature/core-v2-a5-4-a3-reference-repair`, each separately authorized under §9.3 A.2 items 3 and
+4, plus one authorized merge of `main` (bringing in PR #286's rulings). They are **not pushed, not in a pull request, not merged, not
+deployed and not activated.** Production Auth runs with source `local` (§2), so even a deployed image containing this code would be
+inert (§10.1).
+
+| Slice | Commit | What it adds |
+|---|---|---|
+| A | `eedfa1e` | `StepUpService.consumeForReferenceRepair` (S2): one autocommit statement checking the proof, the owner, the session, the purpose, an allowed method, unused and unexpired; four outcomes (O8) |
+| B | `89a21af` | `HierarchyReference.repairReference(kind, id, steps)` (O4): read-only resolve, the caller's authorization, placement with the caller's record in one transaction; the cached-ancestor comparison (O5); module-private failure causes (O6); `placed` from the target's insert (O13) |
+| C | `04fe865` | the route, `ReferenceRepairController`, `ReferenceRepairService`, `ReferenceRepairResponseDto`; the two rate-limit buckets (O9); the one A5.4-T1 entry; the C1 and C4 test lines; integration tests |
+| D | `fa32acd` | `StepUpService.verifyForService` (S1): the generic verification refuses the repair purpose without consuming the proof; the five A1 test changes of O1 and the one slice A test |
+
+**Traceability (contract → implementation).**
+
+| Contract | Where it is implemented | Evidence |
+|---|---|---|
+| Route `POST /auth/admin/hierarchy-references/:kind/:id/repair`, kinds `platform` and `organization`; `200` body exactly `{ kind, id, placed }`; existing error codes only; OpenAPI operation, every status, the `x-step-up-token` header, `@ApiProperty` on the response | `hierarchy/reference-repair.controller.ts`, `hierarchy/dto.ts` | integration tests; review |
+| Order of checks (§3.3): authentication; the Owner from the database; source and marker; validation; rate limits; the proof; resolve, authorize, place | `hierarchy/reference-repair.service.ts` | integration tests; mutation checks |
+| Source `local` and marker `local` inert (§10.1; O15); the marker not read with source `local` | `reference-repair.service.ts` | `test/reference-repair-local.e2e-spec.ts` |
+| Marker missing, malformed, multiple or unreadable: `503 hierarchy_unavailable` before anything (§11.5) | `reference-repair.service.ts` | the same spec (test doubles: §11.7 limitations) |
+| Owner and Company from the database; only an explicit `true` authorizes placement | `reference-repair.service.ts`; `hierarchy-reference.ts` | integration and unit tests |
+| S2 and O8: one autocommit statement; `consumed`, `rejected`, `not_consumed` (a server-reported `ERROR` only), `uncertain` otherwise | `owner/step-up.service.ts` | `test/reference-repair-proof.e2e-spec.ts`: real statement timeout, cancel, terminate, stalled and cut connections |
+| S1 (O1): the generic verification refuses the repair purpose, no consumption, the existing local denial record | `owner/step-up.service.ts` (`verifyForService`), `auth/auth.controller.ts` | `test/reference-repair-step-up.e2e-spec.ts` |
+| O9: `reference_repair_owner` 5 per 300 s, `reference_repair_ip` 20 per 300 s, counted after the inertness gate | `config/app-config.ts`; the service | integration tests |
+| Success record in the placement transaction; rollback when it cannot be written (ADR-0050 decision 9) | `hierarchy-reference.ts`; the service | integration test with the record write failing |
+| C2 denials; O3 unrecordable input recorded locally; D1 unresolved; D2 failures with the closed reasons plus `auth_database_unavailable`; D3 anchor-mismatch incident; D4 best effort | the service | integration tests |
+| Frozen evidence policy (§11.6) including the cached-target exception (C3) | the service; `hierarchy-reference.ts` | integration tests under marker `frozen` |
+| O2: the four actions named only in the repair service and the approved tests; T1: one new entry | `scripts/lib/checks.mjs` | `npm run check:repo` |
+| A2: `ensure()` and its golden fixture unchanged | `hierarchy-reference.ts` | the golden spec, unchanged fixture checksum |
+
+**Local evidence.** The Auth unit suite (299 tests) and integration suite (558 tests), the Auth–Organization suite and the repository
+checks passed locally, the integration tests against an isolated local PostgreSQL (run results, not reproduced in the repository). Temporary source mutations of each slice were caught
+by its tests. Independent design-conformance reviews of each slice and of the four commits together found the implementation
+conforming. This is local evidence only; it is not CI certification.
+
+**Known limitations (as implemented; no remediation is committed here).**
+
+- `auth_database_unavailable` labels any error that slice B does not classify after the proof is consumed: in practice a failure of
+  Auth's own database while reading the cache, but also any other unclassified error on that path.
+- A database failure before the proof (at the Owner lookup or the rate-limit write) answers `500`, with the service's generic error log
+  and no repair-specific record; nothing is consumed.
+- A database failure inside the placement transaction keeps the classification `placement_refused`, and any failure of the
+  cached-target transaction (opening it or writing the record) is labelled `audit_intent_unwritable`, as slice B classifies them.
+- A missing marker row, an unexpected marker value and several marker rows cannot exist in the database (migration `0008`); those
+  cases are tested with controlled test doubles.
+- The O7 failure metric is not implemented; it remains an activation condition (§11.5, O7).
+
+**Not yet complete.**
+
+- The commit of this documentation (slice E).
+- Push and the pull request.
+- GitHub CI certification of A3 (`core-ci-passed` on the pull request).
+- Compatibility with the images actually deployed, demonstrated before any RED-exception merge (§11.1, O1).
+- The G6 timing statement and condition (§15).
+- The owner's RED-exception merge approval (§9.3 A.2 item 5) and the image-pinning framework.
+- Image selection, production deployment (A.2 item 6).
+- The audit-service deployment declaring the four actions; F6 and F7 with Auth's source `organization-service`; the O7 monitoring
+  condition; activation (A.2 item 7).
+
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
 
@@ -854,8 +918,8 @@ The **seven separate authorizations** of §9.3 A.2:
 |---|---|---|
 | 1 | design documents and test plans | this document |
 | 2 | local A2 development | done (A2) |
-| 3 | local A3 development | **not granted**; the decisions are recorded (§11.1, §11.3, §11.5), and it still needs the prerequisites of §11.2 and its own authorization |
-| 4 | each commit and each pull request | not granted |
+| 3 | local A3 development | **granted per slice and done** for slices A to D (§11.7); slice E documentation in progress |
+| 4 | each commit and each pull request | **granted for the four local slice commits only**; no push and no pull request yet |
 | 5 | a RED-exception merge approval per pull request | not granted |
 | 6 | each deployment of an image containing the code | not granted |
 | 7 | audit emission and activation, after their prerequisites | not granted |
