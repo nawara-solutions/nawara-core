@@ -37,9 +37,9 @@ describe('A5.4-AC1: additive only', () => {
     for (const [action, entry] of Object.entries(BEFORE)) expect(JSON.parse(JSON.stringify(AUDIT_CATALOG.get(action as never))), action).toEqual(entry);
   });
 
-  it('the catalog grows from 54 to 56 with exactly the two reference-repair actions', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(56);
-    expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE)).sort()).toEqual([DENIED, REPAIRED]);
+  it('batch 1 added exactly the two reference-repair actions to the 54 (batch 2 adds two more: reference-repair-batch2.spec.ts)', () => {
+    const BATCH2 = ['hierarchy.reference_anchor_mismatch_detected', 'hierarchy.reference_repair_unresolved'];
+    expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE) && !BATCH2.includes(a)).sort()).toEqual([DENIED, REPAIRED]);
   });
 
   it('no contract constant changes: version, supported versions, user kinds, outcomes, actor types, categories, producers', () => {

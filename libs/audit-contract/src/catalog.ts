@@ -223,6 +223,24 @@ const SPEC = {
     changes: { reason: { type: 'code', shape: 'value', required: true, values: ['no_authority', 'step_up_required'] } },
     purpose: 'A verified user was refused a hierarchy reference repair (no authority, or no valid fresh step-up).',
   },
+  // A5.4-AC1 batch 2 (ADR-0064; docs/architecture/core-v2-a5-4-ac1-batch2-decisions.md): declared consumer-first, with NO producer yet.
+  // D1: a repair answered with the collapsed 404 after the step-up was consumed. One reason for the nonexistent, out-of-scope and
+  // other-Company cases, and never an organization, so the record cannot tell them apart. D3: a cached parent link (anchor) that
+  // disagrees with the authority, seen by the repair or by a first touch; a Company has no anchor. Additive (A50).
+  'hierarchy.reference_repair_unresolved': {
+    producer: 'auth-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['company', 'platform', 'organization'], subject: NO_SUBJECT, outcomes: DENIED,
+    changes: { reason: { type: 'code', shape: 'value', required: true, values: ['unresolved'] } },
+    purpose: 'The active Company owner\'s hierarchy reference repair did not resolve: the requested id is unknown, outside Auth\'s scope or in another Company, and the record does not say which.',
+  },
+  'hierarchy.reference_anchor_mismatch_detected': {
+    producer: 'auth-service', category: 'security', since: 1, actors: { system: ['hierarchy_anchor_detection'] }, organization: 'none',
+    resource: ['platform', 'organization'], subject: NO_SUBJECT, outcomes: DENIED,
+    changes: {
+      operation: { type: 'code', shape: 'value', required: true, values: ['reference_repair', 'join_code_creation', 'invitation_creation', 'platform_assignment_grant'] },
+    },
+    purpose: 'A cached hierarchy parent link disagreed with the authority (a reused id or tampered data): the operation failed closed and nothing was overwritten.',
+  },
 
   // ----------------------------------------------------------------------------------------------------------------------- organization-service
   'company.created': {

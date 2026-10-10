@@ -117,7 +117,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     expect(logs().some((m) => m.startsWith(`audit_event_persisted eventId=${e.id} action=membership.revoked source=auth-service`))).toBe(true);
   });
 
-  it('events of every catalog producer are admitted when their source is the action\'s owner (all 55 bus actions; release-service since Stages 20.3 / 20.4; the A5.4-AC1 reference-repair actions); audit-service\'s own action never over the bus', async () => {
+  it('events of every catalog producer are admitted when their source is the action\'s owner (all 57 bus actions; release-service since Stages 20.3 / 20.4; the A5.4-AC1 reference-repair actions, batches 1 and 2); audit-service\'s own action never over the bus', async () => {
     await start();
     const events = AUDIT_ACTIONS.filter((a) => a !== 'platform_query.executed').map((a) => auditEnvelope(a));
     const self = auditEnvelope('platform_query.executed'); // source audit-service: written only by audit-service itself (18.6)
@@ -126,7 +126,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     await until(async () => (await sql<{ n: number }>(d.adminUrl, `SELECT count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[])`, [events.map((e) => e.id)]))[0]!.n === events.length, 30_000);
     const bySource = await sql<{ s: string; n: number }>(d.adminUrl, `SELECT "sourceService" AS s, count(*)::int AS n FROM audit_record WHERE "eventId" = ANY($1::uuid[]) GROUP BY 1 ORDER BY 1`, [events.map((e) => e.id)]);
     expect(bySource).toEqual([
-      { s: 'auth-service', n: 26 }, { s: 'billing-service', n: 11 }, { s: 'file-service', n: 2 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 5 },
+      { s: 'auth-service', n: 28 }, { s: 'billing-service', n: 11 }, { s: 'file-service', n: 2 }, { s: 'organization-service', n: 7 }, { s: 'payment-service', n: 5 },
       { s: 'release-service', n: 4 },
     ]);
     const dead = await deadLetters(1);

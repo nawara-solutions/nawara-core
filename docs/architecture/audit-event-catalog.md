@@ -13,7 +13,7 @@ Columns: **actors** allowed (user kinds; `service` = the calling service's name;
 rule, **resource** type, **subject** (at most one), **outcomes**, allowed **changes** (`?` = optional; `code` values are closed
 enumerations). Every resource and subject id is a lowercase UUID. No change carries a name, contact, amount, credential or free text.
 
-## auth-service (26)
+## auth-service (28)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -43,6 +43,8 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `owner.webauthn_clone_suspected` | security | system (`webauthn_clone_detection`) | none (platform) | factor | user (required) | denied | — | A security key reported a signature counter that went backwards: a likely cloned authenticator, revoked. |
 | `hierarchy.reference_repaired` | security | user (owner) | the target when it is an organization, else none | company \| platform \| organization | — | succeeded | `placed`: boolean | The active Company owner repaired a hierarchy reference in Auth: a validated reference row was placed, or it was already present. |
 | `hierarchy.reference_repair_denied` | security | user (member, owner, operator) | none (platform) | company \| platform \| organization | — | denied | `reason`: no_authority \| step_up_required | A verified user was refused a hierarchy reference repair (no authority, or no valid fresh step-up). |
+| `hierarchy.reference_repair_unresolved` | security | user (owner) | none (platform) | company \| platform \| organization | — | denied | `reason`: unresolved | The active Company owner's hierarchy reference repair did not resolve: the requested id is unknown, outside Auth's scope or in another Company, and the record does not say which. |
+| `hierarchy.reference_anchor_mismatch_detected` | security | system (`hierarchy_anchor_detection`) | none (platform) | platform \| organization | — | denied | `operation`: reference_repair \| join_code_creation \| invitation_creation \| platform_assignment_grant | A cached hierarchy parent link disagreed with the authority (a reused id or tampered data): the operation failed closed and nothing was overwritten. |
 
 ## organization-service (7)
 
@@ -109,4 +111,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 56 actions.**
+**Total: 58 actions.**
