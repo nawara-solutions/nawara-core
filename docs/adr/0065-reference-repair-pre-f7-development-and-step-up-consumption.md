@@ -1,8 +1,36 @@
 # 0065. Reference repair: pre-F7 development order and repair step-up consumption
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
+- **Status:** Accepted (2026-10-10, by the architecture owner: formal acceptance of ADR-0065 and A5 §9.3, with the three clarifications recorded in the acceptance note below) <!-- Proposed | Accepted | Rejected | Superseded by ADR-000X -->
 - **Date:** 2026-10-10
 - **Deciders:** Anwar (project owner)
+
+> **Acceptance note (2026-10-10, architecture-owner acceptance).** The owner accepted this ADR. The Proposed-era note below and the
+> body are kept unchanged as history; where they say "Proposed", "if accepted" or "nothing in it is in force", this note governs.
+> **Acceptance implements and authorizes nothing:** no A2 or A3 development, commit, pull request, merge, deployment, audit emission or
+> activation; each stays separately authorized (§1; [A5 record](../architecture/core-v2-a5-organization.md) §9.3). The owner confirmed
+> three clarifications:
+> 1. **Uncertain consumption outcome (§5).** If the outcome of the consume transaction is unknown, including a connection lost at or
+>    after commit, Auth answers `503`, performs no hierarchy lookup and no reference placement, does not assume the proof remains
+>    available, and does not automatically retry the consume with the same proof. The database-enforced single-use semantics are
+>    preserved: a proof is consumed at most once, by the atomic statement. A confirmed invalid, expired, consumed, wrong-Owner,
+>    wrong-session, wrong-purpose or wrong-method proof keeps the documented `403`. A repair that fails after an acknowledged consumption never restores
+>    the consumed proof.
+> 2. **S1 clarifies ADR-0042 Amendment 1 A.1 (§4); it does not partly supersede it.** The Auth-local reference-repair purpose is
+>    excluded from the generic service-facing verification path and keeps every A.1 property: single use, session binding, purpose
+>    binding, short lifetime, server-generated proof. No existing step-up contract for any other purpose changes. (§4's offer of a
+>    partial-supersession alternative is closed by this choice.)
+> 3. **No central repair audit while Auth's source is `local`.** While `AUTH_HIERARCHY_SOURCE` is `local`, the reference-repair route
+>    emits no new central repair-audit action: no success record and no denial record, **including for a non-Owner request refused with
+>    `403`**. This holds when the implementation is merged but not activated. Existing, unrelated audit producers are unchanged, and the
+>    rule does not permit omitting separately required local diagnostics or existing security records.
+>
+> **Relationships now in effect.** This ADR partly supersedes [ADR-0061](./0061-auth-hierarchy-reference-repair-and-diagnostics.md) (the
+> scope of §3 only) and clarifies [ADR-0042](./0042-service-token-scopes-and-administrative-authorization.md) Amendment 1 A.1; both carry
+> a dated reciprocal note. It extends the infrastructure-failure cases of
+> [ADR-0064](./0064-reference-repair-failure-and-incident-audit.md) (§5) and supersedes nothing there. Clarification 3 is a
+> mode-conditional restriction: while `AUTH_HIERARCHY_SOURCE` is `local`, ADR-0064 §4's refusal row
+> (`hierarchy.reference_repair_denied`, best effort) is not emitted, consistent with that table's `local`-mode `404` entry; the row is
+> unchanged and applies in the Organization-authoritative mode.
 
 > **Proposed; nothing in it is in force.** The architecture owner agreed in principle (2026-10-10) with the directions recorded below
 > (C1-a, S1, S2, and `503` for a failed consumption). That agreement authorized this documentation only: it does not accept this ADR,

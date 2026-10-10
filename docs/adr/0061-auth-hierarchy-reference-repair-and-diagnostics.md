@@ -4,6 +4,19 @@
 - **Date:** 2026-10-09
 - **Deciders:** Anwar (project owner)
 
+> **Partly superseded by [ADR-0064](./0064-reference-repair-failure-and-incident-audit.md)** (Accepted 2026-10-10, A5.4-AC1 batch 2;
+> metadata only, this ADR's text is unchanged). **§6 only:** the central-outbox-first step of the failure chain no longer applies to
+> **infrastructure failures** (the `503` cases of §5 other than the parent-link mismatch), which are recorded through Auth's local audit,
+> a structured log and a bounded metric. Everything else in §6 stands. ADR-0064 also adds, as new policy, the records for the collapsed
+> `404` and the parent-link mismatch and the best-effort write mode for refusals.
+>
+> **Partly superseded by [ADR-0065](./0065-reference-repair-pre-f7-development-and-step-up-consumption.md)** (Accepted 2026-10-10;
+> metadata only, this ADR's text is unchanged). **Acceptance note item 2 only:** the "before any implementation" timing of two
+> conditions (the production Audit Service deployment and the F6/F7 prerequisites) no longer applies to **local implementation and
+> merge** of the dormant repair runtime under the accepted A5.4-G1 exception (A5 record §9.3). Every condition of item 2 still applies to
+> production deployment, production audit emission and activation, and "runtime effect … blocked until F6/F7" is unchanged. ADR-0065
+> also fixes how the repair consumes its step-up proof (§4 step 3) and its failure outcomes.
+
 > **Acceptance note (2026-10-09, A5.3 OD-A5-4).** The architecture owner accepted the architectural design of this ADR as written (§3 to
 > §10). The Proposed-era notes below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is
 > replaced by this note, while "no reference-repair or diagnostic functionality is implemented or active" remains true. Acceptance:
