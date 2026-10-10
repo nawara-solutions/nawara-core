@@ -287,7 +287,8 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 | A5.4-AC1 batch 2 decisions, ADR-0064 | YELLOW (documentation) | merged as PR #273 (2026-10-10) |
 | A5.4-AC1 batch 2 declarations | YELLOW | merged as PR #274 (2026-10-10): `hierarchy.reference_repair_unresolved`, `hierarchy.reference_anchor_mismatch_detected`; producer-less; not deployed |
 | A5.4-A1 `hierarchy.reference.repair` step-up purpose | YELLOW | merged as PR #275 (2026-10-10): factor-only; consumed by no Auth route (the generic verify can still burn a proof: §9.3 S1); not deployed |
-| A5.4-A2 and A5.4-A3 narrow RED exception | RED (exception accepted) | **accepted 2026-10-10** with [ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md) (proposed in PR #276): §9.3. In force; no A2 or A3 work is authorized or started |
+| A5.4-A2 and A5.4-A3 narrow RED exception | RED (exception accepted) | **accepted 2026-10-10** with [ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md) (proposed in PR #276): §9.3. In force; no A2 or A3 development is authorized or started (only A2 design and test planning, authorization 1) |
+| A5.4-A2 design and test plan | RED exception, authorization 1 of 7 (documentation) | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-a2-ensure-split-design.md`](core-v2-a5-4-a2-ensure-split-design.md); no code; local A2 development not authorized |
 
 **Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
 of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed
