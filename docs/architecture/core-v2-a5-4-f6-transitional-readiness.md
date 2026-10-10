@@ -89,10 +89,14 @@ needs its runbook text, its G6 rehearsal and its production approval, separately
 - Only the specifically approved mirror commands (the Auth redeploy with the new source, `hierarchy-retire --fresh`) and read-only
   verification run.
 - No other Auth hierarchy CLI operation (`hierarchy-freeze`, `-unfreeze`, `-export`, `bootstrap-owner`).
-- No administrative operation that first-touches an Organization or a Platform (join-code creation, invitation creation, the
-  platform-assignment grant). In the certified state no Platform or Organization exists before F7 (ADR-0062 §3, §4) and the
-  Company reference is cached since F4, so no reference row is expected; a reference row that appears anyway is a stop-and-escalate
-  event, not an expected difference.
+- **Administrative first touches (two safeguards, both approved by the owner on 2026-10-10):**
+  1. no administrative first-touch operation runs inside the transition window: join-code creation, invitation creation and the
+     platform-assignment grant;
+  2. any unexpected Auth hierarchy-reference row change inside the window is a **mandatory stop-and-escalate condition**; it is
+     never accepted as an expected difference.
+
+  In the certified state no Platform or Organization exists before F7 (ADR-0062 §3, §4) and the Company reference is cached since
+  F4, so no reference row is expected. Both are policy for a future attended runbook: no code enforces either today.
 - No mutating direct SQL on either database; read-only agreement queries only.
 - No backup is created inside the transition window.
 - No automatic recovery, rollback or restoration.
@@ -126,6 +130,8 @@ the irreversible marker change**, and must be equal:
 - **Proposed checks before the marker change, at least:** the new Auth container is running and healthy on the certified digest; its start-up line
   shows the source `organization-service` with a configured credential; `/ready` fails on this check only, with the source-ahead
   reason; the agreement shows `ACTIVE`, `local`, `organization-service`. If any of these is missing, the marker change is not run.
+  The agreement query reads the source from the server's `.env`, not from the running container, so after a failed redeploy it can
+  show the new source while the restored container runs the old one: only the start-up line confirms the running source.
 - **Stop conditions:**
   - any reason other than "source ahead" inside the disagreement window;
   - "source ahead" before the redeploy, or after the disagreement window has closed;
@@ -134,7 +140,7 @@ the irreversible marker change**, and must be equal:
     policy above; otherwise stop and escalate;
   - any other readiness check failing, an anchor mismatch, or a rejected or failed authority event;
   - the transition window exceeding its hard limit;
-  - any difference in the verification evidence.
+  - any difference in the verification evidence, including any Auth hierarchy-reference row change.
 - **Escalation.** Stop; run no further ownership or mirror command; keep the evidence; never edit either side to make them agree;
   escalate to the owner. After `ownership activate` there is no rollback (ADR-0040 A2.6): the step is completed forward or
   escalated. The only continuation after a stop is an authorized retry under the retry policy.

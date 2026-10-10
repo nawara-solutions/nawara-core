@@ -137,8 +137,8 @@
 >    authority agreement MATCH, to which a hard procedural limit applies, and the narrower **disagreement window** between the new
 >    Auth container and the marker change, with the one reason expected inside it, the stop conditions and the escalation. Being
 >    inside a window makes a mismatch expected, not safe. While the marker is still `local` the database write guard is open, so
->    the disagreement window relies on Auth's code and on the attended rule that no administrative first touch and no hierarchy
->    command runs; that is a trade-off of the source-first order, stated in the record. In neither order does the flag-based guard
+>    the disagreement window relies on Auth's code and on the attended rule that no administrative first touch and no other
+>    hierarchy command runs; that is a trade-off of the source-first order, stated in the record. In neither order does the flag-based guard
 >    stop a credentialed or privileged direct SQL session.
 > 6. **Restores.** This readiness check is **not sufficient** to detect a restore from the wrong side of F6. Restore provenance,
 >    an independent authority agreement and generation or anchor consistency need separately governed designs and controls; they
