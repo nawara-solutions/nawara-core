@@ -68,6 +68,8 @@ grant; and `bootstrap-owner`, which ensures a Company.
   TypeScript's `private`, a compile-time rule; the A5.4-T1 check does not inspect the methods of the client module itself. How A3's repair
   reaches them (visibility, or a dedicated method) is an A3 design decision under its own authorization; it would also need its A5.4-T1
   entry.
+- **The client.** The Organization Service client is optional on the class. `ensure` keeps its existing no-credential check (step 3)
+  before calling `resolve`, which receives or reads the already-checked client; no new null path and no wider access is introduced.
 - **Inputs and outputs.** `resolve` takes the already-validated kind and lowercase id and returns `Array<{ kind, row }>` in placement
   order, or `null`. `placeChain` takes that array. No new type leaves the module.
 - **Failure semantics** are those of §2, statement for statement: the same return values, the same `503 hierarchy_unavailable`, the
@@ -106,10 +108,10 @@ required for A3.
 |---|---|
 | no reference placement on any HTTP path | run join-code creation, invitation creation and a platform-assignment grant on the real application: the row counts and the content digest of `company`, `platform` and `organization` are unchanged, and the Organization Service stub records **zero** calls |
 | no new central audit event | the audit intents written by those three operations, read from Auth's outbox table, equal the committed expected list (action names and counts) |
-| no new outbox row | the outbox rows written by those operations equal the committed expected list, by event name and count |
+| no new outbox row | the outbox rows written by those operations equal the committed expected list, by event name and count (rows are counted whether or not the relay has already published them) |
 | no proof consumption beyond today's | each operation consumes exactly one step-up, for its existing purpose (`join_code.create`, `admin_invitation.create`, `platform_assignment.grant`); no `hierarchy.reference.repair` proof is required or consumed |
 | no authority or marker change | `hierarchy_authority` (mode and timestamps) and the count of `hierarchy_authority_event` rows are unchanged |
-| the command-line path is unchanged | `bootstrap-owner` with a Company id and source `local`: the same statements and the same single Company reference row as on `main` (the trace of §5.1), and nothing else written |
+| the command-line path is unchanged | `bootstrap-owner` with a Company id and source `local`: the same single Company reference row and the same outcome as on `main`, and nothing else written; the statements themselves are compared by the unit trace of the Company scenario (§5.1) |
 
 Requirements for these tests to mean anything:
 - the application is started with `AUTH_HIERARCHY_SOURCE=local` **and** a configured `ORGANIZATION_SERVICE_URL` and
@@ -141,6 +143,12 @@ A fake database and a fake client that **record every statement and every call i
 4. **Composition.** `ensure` calls `resolve` once and `placeChain` at most once, and never `placeChain` when `resolve` returns `null`
    or throws. Tests 2 to 4 reach the private steps through a test spy on the instance; no production visibility is widened for them.
 
+How the unit harness works, with no production change: `HierarchyReference` is constructed directly with a fake database, the
+configuration and a fake client (its constructor takes exactly those). The fake database implements the two methods `ensure` uses,
+`query` and `tx`; its `tx` runs the callback and records the transaction's open, commit, or rollback and rethrow itself, so the trace
+proves ordering and statements, while real transaction semantics stay proven by the integration suites. Log calls are captured with
+Nest's `Logger.overrideLogger` and a recorder that keeps `log`, `warn` and `error` apart, restored after each test.
+
 Log **levels** (warning or error) are provable only here: the integration harness's capturing logger does not separate them.
 
 ### 5.2 Integration tests (real PostgreSQL; the existing Organization Service stub)
@@ -148,7 +156,9 @@ Log **levels** (warning or error) are provable only here: the integration harnes
 The existing suites must pass **unchanged, with no edit to their assertions**:
 `hierarchy-reference.e2e-spec.ts` (first touches, the unknown Organization, every unavailable case, the missing parent, the anchor
 mismatch, the authentication paths never calling, the frozen hierarchy, the fresh-environment bootstrap), `hierarchy-authority.e2e-spec.ts`,
-`bootstrap.e2e-spec.ts`, `onboarding.e2e-spec.ts`, `admin-invitation.e2e-spec.ts`, `platform-authz.e2e-spec.ts`, and the cross-service
+the suites that exercise the owner bootstrap (`owner-tools.e2e-spec.ts`, `cli.e2e-spec.ts`, `concurrency.e2e-spec.ts`,
+`runtime-role.e2e-spec.ts`), `onboarding.e2e-spec.ts`, `admin-invitation.e2e-spec.ts`, `platform-authz.e2e-spec.ts`,
+`bootstrap.e2e-spec.ts` (the HTTP process start: general regression only, not owner-bootstrap evidence), and the cross-service
 `test:e2e:auth-organization`.
 
 New integration tests: the source-`local` table of §4; scenario 12 (concurrent first touches) and scenario 13 (a second bootstrap
@@ -168,7 +178,7 @@ run), which no existing suite covers. Scenario 3 (no credential) has no existing
 | 8 | parent missing at the authority | `503`; warn `parent_missing`; nothing placed |
 | 9 | each client failure: `409`, `5xx`, timeout, redirect, oversized, malformed, `401`/`403` | `503`; nothing placed |
 | 10 | anchor mismatch (a concurrent row with another parent) | `503`; error log `hierarchy_anchor_mismatch`; the cached row unchanged; the transaction rolled back (the existing test asserts the first three; the rollback and the log level are asserted by the unit trace) |
-| 11 | frozen hierarchy | `503`; warn `reference_write_refused`; nothing placed (the existing test covers a Company and the `503`; the warning is asserted by the unit trace) |
+| 11 | frozen hierarchy, on a single-row chain (a Company) **and on a multi-row chain** (an Organization target with its Platform and Company uncached, refused at the first insert) | `503`; warn `reference_write_refused kind=<the target's kind>` (`organization` for the multi-row case, never the first row's kind); nothing placed (the existing test covers a Company and the `503`; the warning and the multi-row case are asserted by the unit trace) |
 | 12 | concurrent first touches of the same id (integration only) | both succeed; one row |
 | 13 | bootstrap with a Company id | the Company reference placed once; a second run returns `created: false` (an owner exists) and places nothing, the row being cached |
 
@@ -193,18 +203,20 @@ test:repo`; `git diff --check`; commitlint; an independent security and design-c
 
 ## 6. Evidence required before a RED-exception merge
 
-1. The diff touches only `hierarchy-reference.ts` and Auth test files; no migration, no organization-service, shared-library, catalog,
+1. The source diff touches only `hierarchy-reference.ts`; the rest is Auth test files (the unit spec, the golden-trace fixture, the new
+   integration tests) and the status rows of the A5 record and the roadmap; no migration, no organization-service, shared-library, catalog,
    workflow or check-script change.
 2. The golden-trace fixture recorded from `main`, and the trace-equivalence test passing.
 3. Every existing suite of §5.2 passing with **no assertion edited**, and each automatic stop condition of §9.3 A.5 checked and not
    triggered.
 4. The source-`local` table of §4 passing.
 5. `check:repo` passing with the A5.4-T1 policy unchanged.
-6. A mutation check: at least one deliberate deviation (for example comparing a cached ancestor, or placing before the fetch completes)
-   is caught by the tests.
+6. A mutation check: at least one deliberate deviation (for example comparing a cached ancestor, placing before the fetch completes, or
+   logging the first row's kind instead of the target's in the refused-write warning) is caught by the tests.
 7. The independent review, with no required finding open.
 8. Full Core CI green on the pull request.
-9. The G6 timing condition of §7 stated in the pull request.
+9. The G6 timing condition of §7 stated in the pull request, with a confirmation that no G6 baseline refresh has yet selected the
+   certified digest set, or that a re-rehearsal is authorized.
 10. The merge conditions of §9.3 A.2 item 5: evidence that **no observable behavior of a deployed image changes** (items 2 to 4, with
     source `local` and with source `organization-service`); the image-pinning condition, which is the accepted certified digest-set
     policy of §9.1 item 3 (a framework, not a merge or deployment approval); and the owner's separate **RED-exception merge approval**.
