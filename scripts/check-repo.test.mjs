@@ -2452,11 +2452,39 @@ test('A5.4-A3 O2: the reference-repair audit actions are named only inside their
   const catalog = readFileSync(new URL('../libs/audit-contract/src/catalog.ts', import.meta.url), 'utf8');
   for (const action of REPAIR_AUDIT_ACTIONS) assert.ok(catalog.includes(`'${action}': {`), `${action} is not declared in the audit catalog`);
 
-  // 1. the real repository passes, and it does so because nothing names the actions yet (the pre-A3 state: no producer at all)
+  // 1. the real repository passes, WHATEVER its phase: before A5.4-A3 (the four approved files do not exist and nothing names the
+  //    actions) and after it (they exist and name them). What is asserted is the behavior, not a snapshot of either phase.
+  const approved = [REPAIR_AUDIT_PRODUCER, ...REPAIR_AUDIT_TESTS];
+  const fragments = ['reference_repaired', 'reference_repair_denied', 'reference_repair_unresolved', 'reference_anchor_mismatch'];
+  const names = (text) => fragments.some((fragment) => text.includes(fragment));
   assert.ok(Object.keys(real).length > 500, 'the scan found too few files to be the real repository');
   assert.deepEqual(run(), []);
-  for (const path of [REPAIR_AUDIT_PRODUCER, ...REPAIR_AUDIT_TESTS]) assert.equal(real[path], undefined, `${path} exists: this test describes the state before A5.4-A3`);
-  assert.deepEqual(Object.keys(real).filter((path) => legacy(path, real[path])), []);
+  // in the real tree, every file that names a protected action is one of the four approved paths (none today; at most those four later)
+  assert.deepEqual(Object.keys(real).filter((path) => names(real[path]) && !approved.includes(path)), []);
+  // ...and whatever the two replaced assertions would have reported in the real tree is one of those four paths too
+  assert.deepEqual(Object.keys(real).filter((path) => legacy(path, real[path]) && !approved.includes(path)), []);
+  // both phases, built from the real tree so that this test holds in either: `before` has none of the four files, `after` has all of them
+  const all4 = REPAIR_AUDIT_ACTIONS.map(use).join('');
+  const before = Object.fromEntries(Object.entries(real).filter(([path]) => !approved.includes(path)));
+  const after = { ...before, ...Object.fromEntries(approved.map((path) => [path, all4])) };
+  for (const path of approved) assert.equal(before[path], undefined);
+  assert.equal(Object.keys(before).some((path) => names(before[path])), false); // the producer-less state, as a fixture
+  assert.deepEqual(Object.keys(after).filter((path) => names(after[path])).sort(), [...approved].sort()); // the four files, nothing else
+  for (const [phase, tree] of [['before A3', before], ['after A3', after]]) {
+    assert.deepEqual(checkRepairAuditProducerScope(tree), [], phase);
+    // in either phase, each protected action in an unauthorized location is refused: an Auth source file, another service, a shared
+    // library, an unlisted Auth test, and paths that only look approved
+    for (const action of REPAIR_AUDIT_ACTIONS) {
+      for (const path of ['apps/auth-service/src/auth/auth.service.ts', 'apps/auth-service/src/hierarchy/hierarchy-reference.ts', 'apps/organization-service/src/main.ts',
+        'apps/audit-service/src/main.ts', 'libs/service-kit/src/index.ts', 'apps/auth-service/test/onboarding.e2e-spec.ts',
+        'apps/audit-service/src/hierarchy/reference-repair.service.ts', 'apps/auth-service/src/hierarchy/reference-repair.service.ts.bak.ts',
+        'apps/auth-service/src/hierarchy/reference-repair.controller.ts', 'apps/auth-service/test/reference-repair-extra.e2e-spec.ts']) {
+        const problems = checkRepairAuditProducerScope({ ...tree, [path]: `${tree[path] ?? ''}\n${use(action)}` });
+        assert.equal(problems.length, 1, `${phase}: ${path} naming ${action} must be the one problem, got:\n${problems.join('\n') || '(no problem)'}`);
+        assert.ok(problems[0].startsWith(`${path}: names the reference-repair audit action`) && problems[0].includes(action), `${phase}: ${problems[0]}`);
+      }
+    }
+  }
 
   // 2. each protected action, named in an Auth source file outside the scope, is refused; the message names the file and the action
   for (const action of REPAIR_AUDIT_ACTIONS) {
