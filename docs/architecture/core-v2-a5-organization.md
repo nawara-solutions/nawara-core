@@ -287,7 +287,7 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 | A5.4-AC1 batch 2 decisions, ADR-0064 | YELLOW (documentation) | merged as PR #273 (2026-10-10) |
 | A5.4-AC1 batch 2 declarations | YELLOW | merged as PR #274 (2026-10-10): `hierarchy.reference_repair_unresolved`, `hierarchy.reference_anchor_mismatch_detected`; producer-less; not deployed |
 | A5.4-A1 `hierarchy.reference.repair` step-up purpose | YELLOW | merged as PR #275 (2026-10-10): factor-only; consumed by no Auth route (the generic verify can still burn a proof: §9.3 S1); not deployed |
-| A5.4-A2 and A5.4-A3 narrow RED exception | RED (proposal) | **proposed, not in force** (2026-10-10): §9.3 |
+| A5.4-A2 and A5.4-A3 narrow RED exception | RED (exception accepted) | **accepted 2026-10-10** with [ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md) (proposed in PR #276): §9.3. In force; no A2 or A3 work is authorized or started |
 
 **Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
 of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed
@@ -297,7 +297,33 @@ validation) is **RED**; A5.4-AC1 (additive, producer-less audit-contract declara
 No RED task is authorized or started. The YELLOW items above are merged as producer-less or consumer-less declarations; nothing is
 implemented as runtime behavior in a service, deployed or activated.
 
-### 9.3 Proposed narrow RED exception for A5.4-A2 and A5.4-A3 [PROPOSED — NOT IN FORCE]
+### 9.3 Narrow RED exception for A5.4-A2 and A5.4-A3 [ACCEPTED 2026-10-10]
+
+> **Acceptance note (2026-10-10, architecture-owner acceptance; governance documentation only).** The owner accepted this section
+> together with [ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md), which is now Accepted. The
+> proposal text below is kept unchanged as history; its banner "Not in force" and its words "proposed", "if accepted" and "not accepted"
+> are superseded by this note. **The exception is in force, and acceptance alone authorizes no implementation.**
+> 1. **Scope.** The exception applies only to A5.4-A2 (the `ensure` resolve/place split) and A5.4-A3 (the repair route, with S1 and S2
+>    as decided in ADR-0065), within A.1. Every other RED item stays governed by §9.1, unchanged; first-touch mismatch recording stays
+>    excluded.
+> 2. **Seven separate authorizations stay required** (A.2): design documents and test plans; local A2 development; local A3
+>    development; each commit and each pull request; each RED-exception merge; each deployment; audit emission and activation after
+>    their prerequisites. None has been requested or granted. No authorization advances the next.
+> 3. **Unchanged restrictions.** The automatic stop conditions (A.5); the certified digest-set and G6 timing rule (A.3); the rule that
+>    deployment and runtime effect stay blocked by the Audit consumer deployment, F6/F7 and the production prerequisites; the common
+>    prohibitions of A.1.
+> 4. **Clarifications confirmed with ADR-0065's acceptance:** the fail-closed `503` covers an **uncertain** consume outcome (no lookup,
+>    no placement, no automatic retry with the same proof); S1 **clarifies** ADR-0042 Amendment 1 A.1 and supersedes nothing; and
+>    **while Auth's source is `local` the repair route emits no new central repair-audit action, including for a non-Owner request
+>    refused with `403`** (this completes A.4; existing unrelated producers and separately required local diagnostics or security
+>    records are unaffected).
+> 5. **C1** is closed by ADR-0065: local implementation and merge may precede the production Audit Service deployment and F7 under this
+>    exception; production deployment, production audit emission and activation may not.
+> 6. **Reading the preserved text.** "(if accepted)", "(**Proposed**)", "Until ADR-0065 is Accepted", "only after ADR-0065 … Accepted" and
+>    "Neither S1 nor S2 nor C1 is accepted" below describe the state before acceptance. In A.5, the stop condition for a route that "writes anything"
+>    with source `local` is not narrowed: it still means any write at all, including a reference placement or any other hierarchy or
+>    cache write, any new repair audit (local or central), outbox row or central record, and any proof consumption. Only the unchanged
+>    emission of existing, unrelated producers and existing security logging is outside it.
 
 > **Not in force.** This is a proposal for the architecture owner (2026-10-10). Until the owner explicitly accepts it, A5.4-A2 and
 > A5.4-A3 stay **RED and blocked** under §9.1, and this section authorizes no work beyond this documentation: no design work, code,

@@ -5,6 +5,12 @@
 - **Deciders:** Anwar (project owner); decisions D1 to D4 were made by the architecture owner.
 - **Amended:** **Amendment 1 (2026-09-20)** at the end of this ADR records the architecture owner's DEC-1 to DEC-5 direction; **Amendment 2** records the consequences of ADR-0040 being Accepted; **Amendment 3 (2026-09-26)** withdraws `auth-service`'s admission to Payment (Stage 21.C.1, Q1). The ADR **stays Accepted**. The original text below is kept for the historical record; where the amendment differs, the amendment governs.
 
+> **Clarified by [ADR-0065](./0065-reference-repair-pre-f7-development-and-step-up-consumption.md)** (Accepted 2026-10-10; a clarification, not a
+> supersession; status unchanged; the original decision text is unchanged). **Amendment 1 A.1, the step-up verification path:** the
+> Auth-local purpose `hierarchy.reference.repair` is consumed only by Auth's own repair route and is **not** verifiable through the
+> generic service-facing verification endpoint. That proof keeps every A.1 property (single use, session binding, purpose binding, short
+> lifetime, server-generated). No step-up contract for any other purpose changes. Nothing is implemented by this note.
+
 > **Clarified by [ADR-0060](./0060-company-platform-organization-lifecycle.md)** (Accepted 2026-10-09, A5.3 OD-A5-1; a clarification, not a
 > supersession; status unchanged; the original decision text is unchanged). **Decision 5's memoization** of a validated hierarchy reference applies
 > to **existence and immutable parent anchors only**, which stay valid because ADR-0060 keeps I1 (ids never reused) and I2(b) (no physical
