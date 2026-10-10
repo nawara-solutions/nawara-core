@@ -39,6 +39,54 @@ interface Fetched {
 /** Rows fetched from Organization Service for one `ensure`, in placement order: parents first, the target last. */
 type ReferenceChain = Array<{ kind: HierarchyKind; row: Fetched[HierarchyKind] }>;
 
+/** What a repair may target (ADR-0061 §3): a Company is placed only as the parent of a repaired Platform. */
+export type RepairableKind = 'platform' | 'organization';
+/** Why a repair could not be completed (A5.4-A3 design §8.2). An infrastructure failure: nothing was placed. */
+export type ReferenceRepairFailure =
+  | 'authority_unavailable' | 'authority_timeout' | 'authority_redirect' | 'authority_response_invalid'
+  | 'credential_missing' | 'credential_refused' | 'parent_missing' | 'placement_refused' | 'audit_intent_unwritable';
+/**
+ * The two decisions `repairReference` leaves to its caller (A5.4-A3 O4). `authorize` is called once the Company of the target is known
+ * and BEFORE anything is placed; `false` places nothing. `record` runs INSIDE the placement transaction, after the rows are placed (or
+ * in a transaction of its own when nothing needs placing): the caller writes its success record there, and if it throws, everything
+ * rolls back. This module writes no audit record of its own.
+ */
+export interface ReferenceRepairSteps {
+  authorize(companyId: string): boolean | Promise<boolean>;
+  record(q: Queryable, result: { placed: boolean }): Promise<void>;
+}
+/**
+ * `repaired`: the target is (now) a validated reference row; `placed` says whether THIS call inserted the target's row.
+ * `unresolved`: Organization Service does not show the target (or it is outside Auth's scope there), or the caller did not authorize
+ * its Company: one answer, so the caller cannot tell them apart by accident. Nothing was placed.
+ * `failed`: an infrastructure failure, nothing placed. `anchor_mismatch`: a cached parent link disagrees with the authority, nothing
+ * placed and nothing overwritten; `at` is the entity whose cached link disagreed.
+ */
+export type ReferenceRepairResult =
+  | { outcome: 'repaired'; placed: boolean }
+  | { outcome: 'unresolved' }
+  | { outcome: 'failed'; reason: ReferenceRepairFailure }
+  | { outcome: 'anchor_mismatch'; at: { kind: RepairableKind; id: string } };
+
+/**
+ * Why a `503 hierarchy_unavailable` was raised, kept beside the exception and never on it: the exception, its status, its code and the
+ * log lines of `ensure` are exactly what they were. Readable only inside this module, by the repair path (A5.4-A3 O6).
+ */
+type UnavailableCause = { reason: ReferenceRepairFailure } | { mismatch: { kind: RepairableKind; id: string } };
+const CAUSES = new WeakMap<object, UnavailableCause>();
+function because<E extends object>(error: E, cause: UnavailableCause): E {
+  CAUSES.set(error, cause);
+  return error;
+}
+/** The client's own failure words (they stay in its log line) as repair failure reasons. */
+function clientFailure(reason: string): ReferenceRepairFailure {
+  if (reason === 'timeout') return 'authority_timeout';
+  if (reason === 'redirect_refused') return 'authority_redirect';
+  if (reason === 'oversized' || reason === 'malformed') return 'authority_response_invalid';
+  if (reason === 'status_401' || reason === 'status_403') return 'credential_refused';
+  return 'authority_unavailable'; // network, not_authoritative, any other status
+}
+
 /** The hardened client (the Stage 19.4 / 21.C.2 rules): a deadline, no redirect followed, a capped body read under the deadline, unread bodies released. */
 export class OrganizationDirectoryClient {
   private readonly log = new Logger('OrganizationDirectory');
@@ -46,7 +94,7 @@ export class OrganizationDirectoryClient {
 
   private unavailable(reason: string) {
     this.log.warn(`hierarchy_reference_unavailable reason=${reason}`);
-    return hierarchyUnavailable();
+    return because(hierarchyUnavailable(), { reason: clientFailure(reason) });
   }
 
   /** The entity, or null when Organization Service says it does not exist or is outside Auth's Platform scope (one collapsed 404). */
@@ -182,7 +230,7 @@ export class HierarchyReference implements OnApplicationBootstrap {
       if (!row) {
         if (next.kind === kind) return null;
         this.log.warn(`hierarchy_reference_unavailable reason=parent_missing kind=${next.kind}`);
-        throw hierarchyUnavailable(); // a child whose parent the authority does not show: not an answer to trust
+        throw because(hierarchyUnavailable(), { reason: 'parent_missing' }); // a child whose parent the authority does not show: not an answer to trust
       }
       chain.unshift({ kind: next.kind, row });
       next = next.kind === 'organization' ? { kind: 'platform', id: (row as Fetched['organization']).platformId }
@@ -214,23 +262,119 @@ export class HierarchyReference implements OnApplicationBootstrap {
     return (rowCount ?? 0) > 0;
   }
 
-  /** Inserts one validated reference row, or verifies an existing one's anchor (a concurrent first touch placed it). Never updates. */
-  private async place(q: Queryable, kind: HierarchyKind, row: Fetched[HierarchyKind]): Promise<void> {
+  /**
+   * Inserts one validated reference row, or verifies an existing one's anchor (a concurrent first touch placed it). Never updates.
+   * Returns whether THIS statement inserted the row (the database's own answer), which only the repair path reads.
+   */
+  private async place(q: Queryable, kind: HierarchyKind, row: Fetched[HierarchyKind]): Promise<boolean> {
     if (kind === 'company') {
-      await q.query(`INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [row.id, row.name]);
-      return;
+      const inserted = await q.query(`INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [row.id, row.name]);
+      return (inserted.rowCount ?? 0) > 0;
     }
     const [anchorColumn, anchor] = kind === 'platform' ? ['companyId', (row as Fetched['platform']).companyId] : ['platformId', (row as Fetched['organization']).platformId];
-    if (kind === 'platform') {
-      await q.query(`INSERT INTO platform (id, "companyId", name, key) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`, [row.id, anchor, row.name, (row as Fetched['platform']).key]);
-    } else {
-      await q.query(`INSERT INTO organization (id, "platformId", name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [row.id, anchor, row.name]);
-    }
+    const inserted = kind === 'platform'
+      ? await q.query(`INSERT INTO platform (id, "companyId", name, key) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`, [row.id, anchor, row.name, (row as Fetched['platform']).key])
+      : await q.query(`INSERT INTO organization (id, "platformId", name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [row.id, anchor, row.name]);
     const { rows } = await q.query(`SELECT "${anchorColumn}" AS anchor FROM ${kind} WHERE id = $1`, [row.id]);
     if (rows[0]?.anchor !== anchor) {
       // ADR-0040 decision 1: an anchor that disagrees with the authority means a reused id or tampered data. Fail closed, and alert.
       this.log.error(`hierarchy_anchor_mismatch kind=${kind} id=${row.id} — the cached anchor disagrees with Organization Service; nothing was changed`);
-      throw hierarchyUnavailable();
+      throw because(hierarchyUnavailable(), { mismatch: { kind, id: row.id } });
     }
+    return (inserted.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * The repair entry (ADR-0061 §4 steps 4 to 7; A5.4-A3 O4, O5, O13): resolve without writing, let the caller authorize the Company,
+   * and only then place, with the caller's success record in the SAME transaction. `resolve` and `placeChain` stay private, and this
+   * method never calls `ensure`: nothing is placed before `steps.authorize` has said yes.
+   *
+   * It decides no HTTP answer, writes no audit record and raises no `503`: it returns what happened and the caller (the repair
+   * service, A5.4-A3 slice C) maps it. Whether a repair may run at all (the configured source AND the authority marker, O15), the
+   * Owner, the step-up proof and the rate limits are the caller's, BEFORE this method. As a last guard it does nothing when the
+   * configured source is not Organization Service.
+   *
+   * A target already cached is read through its own immutable links, with no Organization Service call. For an uncached Organization
+   * whose Platform is cached, that Platform is fetched too and its Company link compared with the cached one (new with the repair;
+   * `ensure` keeps stopping at the first cached ancestor).
+   */
+  async repairReference(kind: RepairableKind, id: string, steps: ReferenceRepairSteps): Promise<ReferenceRepairResult> {
+    const lower = id.toLowerCase();
+    if (!this.fromOrganizationService || !UUID.test(lower)) return { outcome: 'unresolved' };
+
+    // A cached target: its Company through its own validated links. No lookup, and nothing to place.
+    const local = await this.db.query<{ company: string }>(
+      kind === 'platform'
+        ? `SELECT "companyId" AS company FROM platform WHERE id = $1`
+        : `SELECT p."companyId" AS company FROM organization o JOIN platform p ON p.id = o."platformId" WHERE o.id = $1`,
+      [lower],
+    );
+    if (local.rows[0]) {
+      if ((await steps.authorize(local.rows[0].company)) !== true) return { outcome: 'unresolved' }; // only an explicit yes authorizes
+      try {
+        await this.db.tx((q) => steps.record(q, { placed: false }));
+      } catch {
+        return { outcome: 'failed', reason: 'audit_intent_unwritable' };
+      }
+      return { outcome: 'repaired', placed: false };
+    }
+
+    if (!this.client) return { outcome: 'failed', reason: 'credential_missing' };
+    let chain: ReferenceChain | null;
+    let companyId: string;
+    try {
+      chain = await this.resolve(this.client, kind, lower);
+      if (!chain) return { outcome: 'unresolved' };
+      const first = chain[0]!;
+      if (first.kind === 'organization') {
+        // Its Platform is cached (resolve stopped there): the cached Company link must be the authority's (ADR-0061 §4 step 4).
+        const platformId = (first.row as Fetched['organization']).platformId;
+        const authoritative = await this.client.get('platform', platformId);
+        if (!authoritative) return { outcome: 'failed', reason: 'parent_missing' }; // a cached Platform the authority does not show
+        const cached = await this.db.query<{ company: string }>(`SELECT "companyId" AS company FROM platform WHERE id = $1`, [platformId]);
+        if (cached.rows[0]?.company !== authoritative.companyId) {
+          this.log.error(`hierarchy_anchor_mismatch kind=platform id=${platformId} — the cached anchor disagrees with Organization Service; nothing was changed`);
+          return { outcome: 'anchor_mismatch', at: { kind: 'platform', id: platformId } };
+        }
+        companyId = authoritative.companyId;
+      } else {
+        companyId = first.kind === 'company' ? first.row.id : (first.row as Fetched['platform']).companyId;
+      }
+    } catch (e) {
+      return this.repairFailure(e);
+    }
+
+    if ((await steps.authorize(companyId)) !== true) return { outcome: 'unresolved' }; // only an explicit yes; nothing has been placed
+
+    const rows = chain;
+    const RECORD = Symbol('record');
+    try {
+      const placed = await this.db.tx(async (q) => {
+        await withReferenceWrite(q);
+        let target = false;
+        for (const { kind: k, row } of rows) target = await this.place(q, k, row); // parents first: the last row is the target
+        try {
+          await steps.record(q, { placed: target });
+        } catch (e) {
+          throw Object.assign(new Error('the repair record could not be written'), { [RECORD]: true, cause: e });
+        }
+        return target;
+      });
+      return { outcome: 'repaired', placed };
+    } catch (e) {
+      if (e instanceof Error && RECORD in e) return { outcome: 'failed', reason: 'audit_intent_unwritable' };
+      const known = typeof e === 'object' && e !== null ? CAUSES.get(e) : undefined;
+      if (known && 'mismatch' in known) return { outcome: 'anchor_mismatch', at: known.mismatch };
+      return { outcome: 'failed', reason: 'placement_refused' }; // the database refused the reference write (for example, frozen)
+    }
+  }
+
+  /** A failure raised while resolving, as the repair reports it: the cause this module recorded, or the authority being unavailable. */
+  private repairFailure(e: unknown): ReferenceRepairResult {
+    const known = typeof e === 'object' && e !== null ? CAUSES.get(e) : undefined;
+    if (known && 'mismatch' in known) return { outcome: 'anchor_mismatch', at: known.mismatch };
+    if (known) return { outcome: 'failed', reason: known.reason };
+    if (e instanceof Error && 'getStatus' in e) return { outcome: 'failed', reason: 'authority_unavailable' }; // a 503 with no recorded cause
+    throw e; // not a hierarchy failure (for example Auth's own database): not this method's to classify
   }
 }
