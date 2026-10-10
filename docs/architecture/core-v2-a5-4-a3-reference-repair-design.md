@@ -57,7 +57,8 @@ A3 is developed, committed and merged separately from A2 (already merged) and fr
   service can burn a repair proof today.
 - **Existing tests that state today's behavior.** `test/reference-repair-step-up.e2e-spec.ts` asserts that the generic endpoint
   consumes a repair proof exactly once, and uses that endpoint for its binding tests; `src/owner/step-up-purposes.spec.ts` asserts that
-  no application source outside an allow-list names the purpose. Both necessarily change with A3 (ruled: §11.1, O1).
+  no application source outside an allow-list names the purpose. The first necessarily changes with A3 (ruled: §11.1, O1); the second is expected to stay
+  unchanged, because the purpose literal is kept inside `step-up.service.ts` (§11.3).
 - **Where the "producer-less" tests live.** `libs/audit-contract/test/reference-repair-catalog.spec.ts` and
   `reference-repair-batch2.spec.ts` each assert that no source file under `apps/` names the repair actions (the batch 2 test also covers `libs/` outside the contract
   library). They are test files of
@@ -74,7 +75,7 @@ A3 is developed, committed and merged separately from A2 (already merged) and fr
 
 ### 3.1 Route — path and names RULED (§11.3, O10); the semantics are DECIDED
 
-`POST /auth/admin/hierarchy-references/{kind}/{id}/repair`, with the Owner's bearer and the header `x-step-up-token`.
+`POST /auth/admin/hierarchy-references/{kind}/{id}/repair` (the OpenAPI form of `:kind/:id`, §11.3), with the Owner's bearer and the header `x-step-up-token`.
 
 - `kind` is `platform` or `organization` only (ADR-0061 §3: "for platforms and organizations"). A Company is placed only as the parent
   of a repaired Platform. The catalog's `company` resource type stays unused by A3.
@@ -368,7 +369,7 @@ test changes are permitted, as far as S1 requires:
 | same | `a proof is bound to its session: another session of the same owner cannot consume it` | re-pointed: it would still pass after S1, but vacuously, on S1's `403` instead of the binding |
 | same | `a proof is bound to its purpose, in both directions` | re-pointed, likewise |
 | same | `a proof expires with the existing step-up lifetime` | re-pointed, likewise |
-| `apps/auth-service/src/owner/step-up-purposes.spec.ts` | `no application source outside the allow-list names the purpose: no route, consumer or producer exists for it` | its allow-list gains exactly the application files that implement S1 (and, once A3 is separately authorized, the repair files that must name the purpose) |
+| `apps/auth-service/src/owner/step-up-purposes.spec.ts` | `no application source outside the allow-list names the purpose: no route, consumer or producer exists for it` | its allow-list gains exactly the application files that implement S1 (and, once A3 is separately authorized, the repair files that must name the purpose). Under the later O10 ruling the literal is kept inside `step-up.service.ts`, so no change to this test is expected; any addition would be a deliberate, reviewed change listed in the pull request (§11.3) |
 
 The remaining tests of those two files are not to change. **Compatibility with the images actually deployed must be demonstrated
 before any RED-exception merge**; the ruling does not presume it (§14 item 11).
@@ -384,7 +385,8 @@ the alternative recorded in the table above is not adopted. (The class was ruled
 - any producer outside an explicit allow-list is detected, and tests that deliberately violate the allow-list prove the rejection;
 - the check is effective before and after A3;
 - no audit-contract semantics, catalog entry or deployed producer changes;
-- the task proves whether its test and script changes alter any runtime image contents, and it preserves the G6 timing requirements.
+- the task proves whether its test and script changes alter any runtime image contents, and it preserves the G6 timing requirements (since made a mandatory merge condition, with verifiable evidence that
+  no shipped runtime image contents change: §11.3, condition 2).
 
 **O3 — a refusal the central record cannot describe (alternative (a)).** An authenticated caller refused during authorization keeps the
 existing `403`. When a malformed id or an unknown kind cannot satisfy the central denial contract: no UUID or kind is fabricated;
@@ -423,6 +425,8 @@ disclosure**: it covers this case only, and no Accepted ADR is superseded by it.
   conditions (§11.3). The names it needs are ruled (§11.3, O10). It is not authorized.
 - **The open decisions:** O6, O7, O8, O9, O13, O14 and O15, and the classification of a cached Platform that the authority does not
   show (§11.1, O5). None is ruled here.
+- **The local record types (§8.1, §8.2) and the log line (§8.2):** PROPOSED, not ruled; settled in the separately authorized A3
+  implementation design (§11.3).
 - **The separate authorization for local A3 development** (§13, authorization 3), and every later authorization.
 - Every automatic stop condition of §9.3 A.5 (§10.2), unchanged apart from the bounded O1 test list above.
 
