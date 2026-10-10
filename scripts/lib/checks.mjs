@@ -2109,14 +2109,22 @@ export function checkOutboxRetentionEligibility(kit, serviceSources) {
  *   - in each holder, only the operation's own method may touch the client (a holder also serves never-call paths: `OnboardingService`
  *     resolves and redeems join codes for registration, and creates them for administrators);
  *   - each operation is called from its approved call sites only, which closes the indirect paths one hop at a time;
+ *   - no class or interface extends a holder or an approved controller, directly or through other auth-service classes (an import
+ *     alias, a namespace import, a re-export and a mixin expression that names the class are followed), so an operation cannot be
+ *     inherited and called as `super.create()` or `this.create()`; the inheritance is refused even when the subclass calls nothing yet;
  *   - no other Auth module opens an outbound HTTP client or reads Auth's Organization Service credential.
  * ADR-0060's E5 lifecycle reads and ADR-0061's reference repair are approved dependencies that do not exist yet: each adds its entry
  * here when it is implemented.
  *
  * Limits (the check reads syntax; it runs no type checker and no service):
- *   - an instance kept in an untyped or `any` variable, or handed to another module without a declared type, is not followed;
+ *   - a service instance is recognized by the CLASS NAME in its declaration (a declared type, `@Inject(Name)`, `x.get(Name)`,
+ *     `new Name()`). It is not followed when it is kept in an untyped or `any` variable, handed to another module without a declared
+ *     type, declared through a type alias (`type A = OnboardingService`), `typeof` / `InstanceType<typeof …>`, named only in a cast
+ *     (`(x as OnboardingService).create()`), or returned by another member (a getter, a method); those calls are not seen;
  *   - computed member access (`this[name]`), a destructured method, a container lookup by string token and other reflection are not seen;
  *   - a variable or parameter holding a service is matched by its name within one file, not by its scope;
+ *   - inheritance is followed through static `extends` clauses only: a base class chosen by a computed expression that does not name it,
+ *     a prototype assigned at run time (`Object.setPrototypeOf`, `Object.create`) and composition that copies methods are not seen;
  *   - an approved handler is recognized by its class and method, not by its route decorator, and a call to it from outside its own
  *     class is not seen (auth-service injects no controller anywhere);
  *   - an outbound client is recognized as a direct `fetch` call or an import of a listed module; one opened inside a dependency is not;
@@ -2277,6 +2285,92 @@ const enclosingClass = (node) => {
   for (let n = node.parent; n; n = n.parent) if (ts.isClassLike(n)) return n;
   return undefined;
 };
+/** A class's name: its own, or the variable a class expression is assigned to. */
+const declaredClassName = (node) => node.name?.text ?? (node.parent && ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name) ? node.parent.name.text : undefined);
+/** Every local name a file imports from another source: local name -> { target, imported } (`*` for a namespace import). */
+function sourceImports(relPath, sf) {
+  const out = new Map();
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !st.importClause) continue;
+    const target = resolveSourceSpecifier(relPath, staticSpecifier(st.moduleSpecifier));
+    if (!target) continue;
+    if (st.importClause.name) out.set(st.importClause.name.text, { target, imported: 'default' });
+    const bindings = st.importClause.namedBindings;
+    if (bindings && ts.isNamespaceImport(bindings)) out.set(bindings.name.text, { target, imported: '*' });
+    if (bindings && ts.isNamedImports(bindings)) for (const el of bindings.elements) out.set(el.name.text, { target, imported: (el.propertyName ?? el.name).text });
+  }
+  return out;
+}
+/**
+ * The classes of a set of sources (`file#Class`) with what each `extends`, resolved statically: a class of the same file, an imported
+ * class (through an alias, a namespace import or a re-export), and every class named inside a mixin expression (`extends Mixin(Base)`).
+ */
+function classGraph(parsed) {
+  const classes = new Map();
+  const imports = new Map();
+  for (const [rel, sf] of parsed) {
+    imports.set(rel, sourceImports(rel, sf));
+    const visit = (node) => {
+      // An interface that extends a class inherits its members as a type, so it is part of the same graph.
+      const name = ts.isClassLike(node) ? declaredClassName(node) : ts.isInterfaceDeclaration(node) ? node.name.text : undefined;
+      if (name) {
+        const bases = (node.heritageClauses ?? []).filter((h) => h.token === ts.SyntaxKind.ExtendsKeyword).flatMap((h) => h.types.map((t) => t.expression));
+        classes.set(`${rel}#${name}`, { file: rel, name, kind: ts.isInterfaceDeclaration(node) ? 'interface' : 'class', bases });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  const resolveLocal = (file, local, seen = new Set()) => {
+    if (classes.has(`${file}#${local}`)) return `${file}#${local}`;
+    const imp = imports.get(file)?.get(local);
+    return imp && imp.imported !== '*' ? resolveExport(imp.target, imp.imported, seen) : undefined;
+  };
+  const resolveExport = (file, name, seen = new Set()) => {
+    const sf = parsed.get(file);
+    const key = `${file}#${name}`;
+    if (!sf || seen.has(key)) return undefined;
+    seen.add(key);
+    if (name !== 'default' && classes.has(key)) return key;
+    for (const st of sf.statements) {
+      if (name === 'default') {
+        if (ts.isExportAssignment(st) && ts.isIdentifier(strip(st.expression))) return resolveLocal(file, strip(st.expression).text, seen);
+        if (ts.isClassDeclaration(st) && st.name && (ts.getModifiers(st) ?? []).some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) return `${file}#${st.name.text}`;
+      }
+      if (!ts.isExportDeclaration(st)) continue;
+      const target = st.moduleSpecifier ? resolveSourceSpecifier(file, staticSpecifier(st.moduleSpecifier)) : undefined;
+      if (st.exportClause && ts.isNamedExports(st.exportClause)) {
+        const el = st.exportClause.elements.find((e) => e.name.text === name);
+        if (!el) continue;
+        const original = (el.propertyName ?? el.name).text;
+        const found = st.moduleSpecifier ? target && resolveExport(target, original, seen) : resolveLocal(file, original, seen);
+        if (found) return found;
+      } else if (!st.exportClause && target) { // export * from './x.js'
+        const found = resolveExport(target, name, seen);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  const resolveBases = (file, expression) => {
+    const out = [];
+    const visit = (node) => {
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && imports.get(file)?.get(node.expression.text)?.imported === '*') {
+        const found = resolveExport(imports.get(file).get(node.expression.text).target, node.name.text);
+        if (found) out.push(found);
+        return;
+      }
+      if (ts.isIdentifier(node) && !isNamePosition(node)) {
+        const found = resolveLocal(file, node.text);
+        if (found) out.push(found);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(expression);
+    return out;
+  };
+  return { classes, resolveLocal, resolveBases };
+}
 
 /**
  * `sources`: every non-test TypeScript source of auth-service (`apps/auth-service/src/**`), repository path -> text.
@@ -2307,6 +2401,40 @@ export function checkAuthOrganizationBoundary(sources) {
       problems.push(`${key}: is a never-call path and cannot be an approved Organization Service caller (${BOUNDARY_RULE})`);
     }
   }
+
+  // 0b. No class inherits from a holder or from an approved controller, directly or through other classes: a subclass would inherit the
+  // administrative operation (or the approved route) and call it as `super.create()` or `this.create()` from anywhere.
+  const graph = classGraph(parsed);
+  const protectedClasses = new Map();
+  for (const op of AUTH_ORGANIZATION_OPERATIONS) {
+    if (op.owner) protectedClasses.set(`${op.holder}#${op.owner}`, 'an Organization Service holder');
+    for (const caller of op.callers) if (caller.includes('.')) protectedClasses.set(caller.slice(0, caller.lastIndexOf('.')), 'an approved administrative controller');
+  }
+  const chains = new Map(); // `file#Class` -> [itself, …, the protected class it inherits from]
+  const chainOf = (key, seen = new Set()) => {
+    if (chains.has(key)) return chains.get(key);
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    const cls = graph.classes.get(key);
+    let found;
+    for (const base of (cls?.bases ?? []).flatMap((expression) => graph.resolveBases(cls.file, expression))) {
+      if (base === key) continue;
+      const rest = protectedClasses.has(base) ? [base] : chainOf(base, seen);
+      if (rest) {
+        found = [key, ...rest];
+        break;
+      }
+    }
+    chains.set(key, found);
+    return found;
+  };
+  for (const [key, cls] of graph.classes) {
+    const chain = chainOf(key);
+    if (!chain) continue;
+    const root = chain[chain.length - 1];
+    problems.push(`${cls.file}: ${cls.kind} ${chain.map((k) => k.slice(k.indexOf('#') + 1)).join(' extends ')} inherits from ${protectedClasses.get(root)} (${short(root.slice(0, root.indexOf('#')))}); no class may extend one (${BOUNDARY_RULE})`);
+  }
+  const inheritsFrom = (key, root) => chains.get(key)?.at(-1) === root;
 
   for (const rel of files) {
     if (rel === AUTH_ORGANIZATION_CLIENT) continue;
@@ -2344,7 +2472,15 @@ export function checkAuthOrganizationBoundary(sources) {
       const imported = importedFrom(rel, sf, op.holder);
       const names = new Set([...imported].filter(([, original]) => original === (op.owner ?? op.member)).map(([local]) => local));
       if (rel === op.holder) names.add(op.owner ?? op.member);
-      return { op, names, holders: op.owner ? instanceHolders(sf, names) : undefined, self: rel === op.holder ? (op.owner ? `${op.owner}.${op.member}` : op.member) : undefined };
+      // A subclass of the holder (already refused by 0b) is the holder for this rule too: its instances and its own `super` / `this` calls.
+      const root = op.owner ? `${op.holder}#${op.owner}` : undefined;
+      if (root) {
+        for (const local of [...sourceImports(rel, sf).keys(), ...[...graph.classes.values()].filter((c) => c.file === rel).map((c) => c.name)]) {
+          const resolved = graph.resolveLocal(rel, local);
+          if (resolved && inheritsFrom(resolved, root)) names.add(local);
+        }
+      }
+      return { op, root, names, holders: op.owner ? instanceHolders(sf, names) : undefined, self: rel === op.holder ? (op.owner ? `${op.owner}.${op.member}` : op.member) : undefined };
     });
     const seenCalls = new Set();
     const call = (node, { op, self }) => {
@@ -2364,11 +2500,14 @@ export function checkAuthOrganizationBoundary(sources) {
         if (ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword && clientHolders.members.has(node.name.text)) touch(node);
       }
       for (const entry of operations) {
-        const { op, names, holders } = entry;
+        const { op, root, names, holders } = entry;
         if (op.owner) {
           if (ts.isPropertyAccessExpression(node) && node.name.text === op.member) {
-            const own = node.expression.kind === ts.SyntaxKind.ThisKeyword && rel === op.holder && enclosingClass(node)?.name?.text === op.owner;
-            if (own || isInstanceExpression(node.expression, names, holders)) call(node, entry);
+            const cls = enclosingClass(node);
+            const own = node.expression.kind === ts.SyntaxKind.ThisKeyword && rel === op.holder && cls?.name?.text === op.owner;
+            const inherited = cls && (node.expression.kind === ts.SyntaxKind.ThisKeyword || node.expression.kind === ts.SyntaxKind.SuperKeyword)
+              && inheritsFrom(`${rel}#${declaredClassName(cls)}`, root);
+            if (own || inherited || isInstanceExpression(node.expression, names, holders)) call(node, entry);
           }
         } else if (ts.isIdentifier(node) && names.has(node.text) && !isNamePosition(node) && !(ts.isFunctionDeclaration(node.parent) && node.parent.name === node)) call(node, entry);
       }

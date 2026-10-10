@@ -2322,6 +2322,50 @@ test('A5.4-T1: auth-service reaches Organization Service only from its approved 
     assert.ok(AUTH_NEVER_CALL.contexts.includes(SRC + ctx), `${ctx} must stay a never-call context`);
   }
 
+  // 8. inheritance: no class extends a holder or an approved controller, so an operation cannot be inherited and called from anywhere
+  const onb = "import { OnboardingService } from '../onboarding/onboarding.service.js';";
+  const file = (rel, text) => ({ [SRC + rel]: text });
+  // direct subclassing fails on the relationship itself, even when the subclass calls nothing
+  fails(run(file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {}`)),
+    /auth\/sub\.service\.ts: class Sub extends OnboardingService inherits from an Organization Service holder \(onboarding\/onboarding\.service\.ts\); no class may extend one/);
+  // indirect subclassing through an intermediate class, in another file, reports the whole chain; the intermediate is reported too
+  const indirect = run({ ...file('auth/mid.service.ts', `${onb}\nexport class Mid extends OnboardingService {}`), ...file('auth/leaf.service.ts', "import { Mid } from './mid.service.js';\nexport class Leaf extends Mid {}") });
+  fails(indirect, /auth\/leaf\.service\.ts: class Leaf extends Mid extends OnboardingService inherits from an Organization Service holder/);
+  fails(indirect, /auth\/mid\.service\.ts: class Mid extends OnboardingService inherits from an Organization Service holder/);
+  // the other holders, an alias, a namespace import, a re-export, a default export, a class expression and a mixin are followed
+  fails(run(file('auth/a.ts', "import { InvitationService as Base } from '../onboarding/invitation.service.js';\nexport class A extends Base {}")), /auth\/a\.ts: class A extends InvitationService inherits from an Organization Service holder/);
+  fails(run(file('auth/b.ts', "import * as p from '../platform/assignment.service.js';\nexport class B extends p.AssignmentService {}")), /auth\/b\.ts: class B extends AssignmentService inherits from an Organization Service holder/);
+  fails(run({ ...file('auth/barrel.ts', "export { OnboardingService as Onb } from '../onboarding/onboarding.service.js';"), ...file('auth/c.ts', "import { Onb } from './barrel.js';\nexport class C extends Onb {}") }), /auth\/c\.ts: class C extends OnboardingService inherits/);
+  fails(run({ ...file('auth/star.ts', "export * from '../onboarding/onboarding.service.js';"), ...file('auth/d.ts', "import { OnboardingService } from './star.js';\nexport class D extends OnboardingService {}") }), /auth\/d\.ts: class D extends OnboardingService inherits/);
+  fails(run({ ...file('auth/def.ts', `${onb}\nexport default class Def extends OnboardingService {}`), ...file('auth/e.ts', "import Def from './def.js';\nexport class E extends Def {}") }), /auth\/e\.ts: class E extends Def extends OnboardingService inherits/);
+  fails(run(file('auth/f.ts', `${onb}\nexport const F = class extends OnboardingService {};`)), /auth\/f\.ts: class F extends OnboardingService inherits/);
+  fails(run(file('auth/g.ts', `${onb}\nconst Mixin = <T>(base: T) => base;\nexport class G extends Mixin(OnboardingService) {}`)), /auth\/g\.ts: class G extends OnboardingService inherits/);
+  // an interface that extends a holder is the same relationship as a type, and a service typed with it is followed
+  fails(run(file('auth/i.ts', `${onb}\nexport interface Like extends OnboardingService {}`)), /auth\/i\.ts: interface Like extends OnboardingService inherits from an Organization Service holder/);
+  fails(run(file('auth/i.ts', `${onb}\ninterface Like extends OnboardingService {}\nexport class Uses {\n  constructor(private readonly o: Like) {}\n  go() { return this.o.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}`)),
+    /auth\/i\.ts: Uses\.go → OnboardingService\.create → Organization Service/);
+  // an approved administrative controller cannot be subclassed either
+  fails(run(file('membership/sub.controller.ts', "import { OrganizationController } from './organization.controller.js';\nexport class SubController extends OrganizationController {}")),
+    /membership\/sub\.controller\.ts: class SubController extends OrganizationController inherits from an approved administrative controller \(membership\/organization\.controller\.ts\)/);
+  fails(run(file('platform/sub.controller.ts', "import { PlatformController } from './platform.controller.js';\nexport class P2 extends PlatformController {}")), /platform\/sub\.controller\.ts: class P2 extends PlatformController inherits from an approved administrative controller/);
+  // an inherited operation cannot bypass the caller restrictions: `super.create`, `this.create` and an instance of the subclass are all refused
+  const viaSuper = run(file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {\n  go() { return super.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}`));
+  fails(viaSuper, /auth\/sub\.service\.ts: class Sub extends OnboardingService inherits/);
+  fails(viaSuper, /auth\/sub\.service\.ts: Sub\.go → OnboardingService\.create → Organization Service \(join-code creation\); its only approved callers are/);
+  fails(run(file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {\n  go() { return this.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}`)), /auth\/sub\.service\.ts: Sub\.go → OnboardingService\.create → Organization Service/);
+  fails(run({ ...file('auth/sub.service.ts', `${onb}\nexport class Sub extends OnboardingService {}`), ...file('auth/user.service.ts', "import { Sub } from './sub.service.js';\nexport class User {\n  constructor(private readonly sub: Sub) {}\n  go() { return this.sub.create({} as never, 'o', {} as never, undefined, 'ip'); }\n}") }),
+    /auth\/user\.service\.ts: User\.go → OnboardingService\.create → Organization Service/);
+  // unrelated inheritance stays permitted: an external base, a never-call service, a local base class, and a cycle does not hang
+  assert.deepEqual(run({
+    ...file('auth/errors2.ts', 'export class Refused extends Error {}'),
+    ...file('auth/base.service.ts', 'export class Base {}\nexport class Derived extends Base {}'),
+    ...file('auth/grants2.service.ts', "import { GrantsService } from './grants.service.js';\nexport class Grants2 extends GrantsService {}"),
+    ...file('auth/cycle.ts', "import { Two } from './cycle2.js';\nexport class One extends Two {}"),
+    ...file('auth/cycle2.ts', "import { One } from './cycle.js';\nexport class Two extends One {}"),
+  }), []);
+  // the real services and controllers still pass (case 1), and the real code has no subclass of a holder
+  assert.ok(!Object.values(real).some((text) => /extends\s+(OnboardingService|InvitationService|AssignmentService|OrganizationController|PlatformController)\b/.test(text)));
+
   // the runner calls the check once, with auth-service's non-test sources
   const runner = readFileSync(new URL('./check-repo.mjs', import.meta.url), 'utf8');
   assert.equal(runner.split('checkAuthOrganizationBoundary(').length - 1, 1);
