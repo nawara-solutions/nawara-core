@@ -139,7 +139,8 @@ separately approved governance amendment.
 
 **Declarations (AC1 batch 2):** the 56 existing entries unchanged; the catalog grows to 58 with exactly the two proposed names;
 constants unchanged; each shape validates and the invalid combinations are refused (actor, outcome, organization, reasons and
-operation codes outside their lists, subject, extra keys, `steward`); producer-less; catalog document regenerated; audit-service's
+operation codes outside their lists, subject, extra keys, `steward`); producer-less (*update 2026-10-10, A5.4-A3 O2:* now enforced by
+the repository check `checkRepairAuditProducerScope` (`scripts/lib/checks.mjs`, run by `npm run check:repo`), which replaced the library assertion); catalog document regenerated; audit-service's
 every-action suites pass.
 
 **D1:** the three `404` cases give byte-identical responses and identical records; `organizationId` `null`; step-up consumed; no

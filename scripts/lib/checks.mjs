@@ -2647,3 +2647,68 @@ export function checkAuthOrganizationBoundary(sources) {
   }
   return problems;
 }
+
+/**
+ * V2 A5.4-A3 O2 (ADR-0061 §6, ADR-0064; A3 design §11.3): the producer scope of the four reference-repair audit actions.
+ *
+ * The actions are declared consumer-first in `libs/audit-contract` and have NO producer. Until the repair runtime (A5.4-A3) is
+ * separately authorized, nothing in an application or a shared library may name them; once it exists, only its one service file may
+ * produce them and only its three test files may name them. This check replaces, with equal or wider coverage, the two "producer-less"
+ * assertions that lived in `libs/audit-contract/test/reference-repair-catalog.spec.ts` and `reference-repair-batch2.spec.ts`.
+ *
+ * The allow-listed paths are ENFORCEMENT BOUNDARIES. They authorize nothing: a file listed here that does not exist yet is simply
+ * absent, and creating it is part of A5.4-A3, which has its own authorization.
+ *
+ * What is scanned: every file under `apps/` and `libs/` with a listed source extension, except the contract library itself
+ * (`libs/audit-contract/`, which declares the actions). What is matched: the action names without their `hierarchy.` prefix, so a
+ * name split from its prefix is still seen. Limit, by construction: the text is read, not executed; a name assembled at run time is
+ * not seen (the typed central-audit writer and the repair's own tests cover that).
+ */
+export const REPAIR_AUDIT_ACTIONS = [
+  'hierarchy.reference_repaired',
+  'hierarchy.reference_repair_denied',
+  'hierarchy.reference_repair_unresolved',
+  'hierarchy.reference_anchor_mismatch_detected',
+];
+/** The ONE file that may produce the actions (the A5.4-A3 repair service). An exact path, never a directory or a pattern. */
+export const REPAIR_AUDIT_PRODUCER = 'apps/auth-service/src/hierarchy/reference-repair.service.ts';
+/** The THREE test files that may name the actions. Exact paths; test files are never built into an image. */
+export const REPAIR_AUDIT_TESTS = [
+  'apps/auth-service/test/reference-repair.e2e-spec.ts',
+  'apps/auth-service/test/reference-repair-local.e2e-spec.ts',
+  'apps/auth-service/test/reference-repair-proof.e2e-spec.ts',
+];
+export const REPAIR_AUDIT_SCAN = {
+  roots: ['apps/', 'libs/'],
+  /** The contract library declares the actions (catalog, tests, fixtures): the one existing exception. */
+  excluded: 'libs/audit-contract/',
+  extensions: ['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json'],
+};
+/** What is searched for, per action: its name without the `hierarchy.` prefix (the last one also without `_detected`, as before). */
+const REPAIR_AUDIT_FRAGMENTS = [
+  ['hierarchy.reference_repaired', 'reference_repaired'],
+  ['hierarchy.reference_repair_denied', 'reference_repair_denied'],
+  ['hierarchy.reference_repair_unresolved', 'reference_repair_unresolved'],
+  ['hierarchy.reference_anchor_mismatch_detected', 'reference_anchor_mismatch'],
+];
+
+/** Whether a repository-relative path (forward slashes) is in the scope of the producer-scope check. */
+export function repairAuditScanned(relPath) {
+  const { roots, excluded, extensions } = REPAIR_AUDIT_SCAN;
+  return roots.some((r) => relPath.startsWith(r)) && !relPath.startsWith(excluded) && extensions.some((e) => relPath.endsWith(e));
+}
+
+/** `sources`: repository-relative path (forward slashes) → file text. Paths outside the scanned scope are ignored. */
+export function checkRepairAuditProducerScope(sources) {
+  const problems = [];
+  const allowed = new Set([REPAIR_AUDIT_PRODUCER, ...REPAIR_AUDIT_TESTS]);
+  for (const relPath of Object.keys(sources).sort()) {
+    if (!repairAuditScanned(relPath) || allowed.has(relPath)) continue; // an exact path match only: no prefix, suffix or directory rule
+    const text = sources[relPath];
+    const named = REPAIR_AUDIT_FRAGMENTS.filter(([, fragment]) => text.includes(fragment)).map(([action]) => action);
+    if (named.length > 0) {
+      problems.push(`${relPath}: names the reference-repair audit action${named.length > 1 ? 's' : ''} ${named.join(', ')} outside the approved producer scope (A5.4-A3 O2: only ${REPAIR_AUDIT_PRODUCER} may produce them, and only ${REPAIR_AUDIT_TESTS.join(', ')} may name them)`);
+    }
+  }
+  return problems;
+}

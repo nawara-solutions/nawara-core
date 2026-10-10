@@ -64,6 +64,8 @@ A3 is developed, committed and merged separately from A2 (already merged) and fr
   library). They are test files of
   the shared library: excluded from the images (`.dockerignore`), but under `libs/audit-contract/**`, a path that triggers the image
   builds of all three services. Any producer in Auth makes them fail (ruled: §11.1, O2).
+  *Update (2026-10-10, the O2 task):* the two assertions are relocated, in one change, into the repository check `checkRepairAuditProducerScope` (`scripts/lib/checks.mjs`, run by `npm run check:repo`);
+  see §11.4. The description above is the state this document was written on.
 - **Audit.** The four repair actions are declared and producer-less (catalog of 58 actions, contract version 1). Auth writes central
   intents through `CentralAudit.write(q, …)` inside a transaction, and local records through `AuditService.record` / `tryRecord`
   (`auth_audit_event`; the type must match `^[a-z_]+(\.[a-z_]+)+$`, so a new local type needs no migration).
@@ -283,7 +285,7 @@ system actor `hierarchy_anchor_detection` and `operation: reference_repair`. The
   outcomes and the actor kinds do not change; `libs/audit-contract` is not edited.
 - **Producer-less until authorized.** Until A3 is merged, no file under `apps/` names the four actions (the existing AC1 tests
   assert it). Adding the producers makes those two assertions false; they are tests of the shared library, so how they are
-  changed is ruled in §11.1, O2: a separate prerequisite task, before A3.
+  changed is ruled in §11.1, O2: a separate prerequisite task, before A3 (implemented as the repository check of §11.4).
 - **Consumer first.** No production emission before an audit-service image declaring all four actions is deployed, separately
   authorized (§9.3 A.3). Production audit-service predates them: the AC1 batch 1 record (§4, citing ADR-0049 A50) describes an action reaching it as
   refused and kept in its dead-letter queue: a safety net, not a plan.
@@ -422,7 +424,8 @@ disclosure**: it covers this case only, and no Accepted ADR is superseded by it.
 ### 11.2 What still blocks A3
 
 - **The O2 prerequisite task**, separately authorized, developed, reviewed and merged (§11.1, O2), under its class and merge
-  conditions (§11.3). The names it needs are ruled (§11.3, O10). It is not authorized.
+  conditions (§11.3). The names it needs are ruled (§11.3, O10). Its local development was authorized and done (§11.4); its
+  push, pull request and merge are not, and the merge needs both conditions of §11.3.
 - **The open decisions:** O6, O7, O8, O9, O13, O14 and O15, and the classification of a cached Platform that the authority does not
   show (§11.1, O5). None is ruled here.
 - **The local record types (§8.1, §8.2) and the log line (§8.2):** PROPOSED, not ruled; settled in the separately authorized A3
@@ -496,6 +499,33 @@ No deployment or activation is authorized. O2 stays a separate prerequisite task
 - No certified digest-set selection is authorized.
 - O2 itself does not require a G6 execution.
 - A3's implementation and merge timing stay subject to the G6 baseline refresh rules (§15).
+
+### 11.4 The O2 task as implemented (2026-10-10; GREEN; not merged)
+
+**A check relocation, not an audit producer activation.** Nothing produces the four actions, and nothing in an application changes.
+
+- **What moved.** The two producer-less assertions were removed from `libs/audit-contract/test/reference-repair-catalog.spec.ts` and
+  `reference-repair-batch2.spec.ts`, and replaced, in the same change, by the repository check `checkRepairAuditProducerScope` (`scripts/lib/checks.mjs`, run by `npm run check:repo`), with its tests in `scripts/check-repo.test.mjs`. There is no committed state without
+  the protection.
+- **What it enforces.** Every file under `apps/` and `libs/` with a source extension (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`,
+  `.cjs`, `.json`), except the contract library `libs/audit-contract/` that declares the actions, may not name any of the four
+  actions. The only exceptions are the four exact paths of §11.3: one producer and three test files. A path that merely resembles one
+  of them is refused. The allow-list is asserted as a literal by the test.
+- **Equal or wider than before.** The first replaced assertion read `apps/` and four extensions for two actions; the second read
+  `apps/` and `libs/` and eight extensions for the other two. The check applies the wider reading to all four, and matches each name
+  without its `hierarchy.` prefix. A parity test runs the old logic beside the new one.
+- **Before and after A3.** Today the four paths do not exist and nothing names the actions, so the check enforces exactly the
+  producer-less state. After a separately authorized A3 it still refuses every other file.
+- **The four paths are enforcement boundaries only.** They authorize no file, no producer and no emission. **A3 remains blocked**
+  (§11.2).
+- **Class and merge conditions (§11.3).** GREEN. Its merge still needs the owner's separate explicit approval and the evidence that
+  no shipped runtime image contents change. That evidence is produced with the change and stated in its pull request: for each of
+  the three Dockerfiles, the files it copies from the real build context compared between the base and the change, and local builds
+  of the three images at both. Two facts it must not gloss over: `scripts/` and nested `docs/` files **are** in the build context
+  (`.dockerignore` does not exclude them), and no Dockerfile copies them; and the images built by CI carry a revision label, so
+  their digests differ from their predecessors' whatever their contents.
+- **Unchanged:** the catalog, the contract version, the validator, audit-service, every deployed producer, every deployment and
+  activation permission, and the G6 timing rules (§15).
 
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
@@ -572,7 +602,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | TC1 | the A2 golden-trace spec passes with the fixture **byte-identical** (same checksum as on `main`), together with its mutation tests | `ensure` unchanged |
 | TC2 | every existing Auth unit and integration suite and `test:e2e:auth-organization` pass; the only edited assertions are the six named under O1 (§11.1), each listed in the pull request; the A1 binding tests are re-pointed at the repair route so they still test the binding | existing behavior |
 | TC3 | `npm run check:repo`: exactly one new T1 entry, the repair operation; the never-call list unchanged | boundary |
-| TC4 | **producer scope:** on `main` the two library tests prove no file under `apps/` names the four actions. The O2 prerequisite task (§11.1, §11.3) relocates that property into a phase-aware repository check before A3, with tests that deliberately violate its allow-list; A3 must pass that check unchanged, and a test asserts the anchor-mismatch action is written only with `operation: reference_repair` | producer scope |
+| TC4 | **producer scope:** the repository check of §11.4 (which replaced the two library assertions) refuses any mention of the four actions outside the four approved paths, with tests that deliberately violate its allow-list. A3 must pass that check unchanged, and a test asserts the anchor-mismatch action is written only with `operation: reference_repair` | producer scope |
 | TC5 | every event the repair writes validates against the declared catalog entry (the contract's validator), for each kind and outcome, including `organizationId` for an Organization and a mismatch whose resource is an ancestor | contract fit |
 | TC6 | mutation checks: removing the step 1c test, moving the placement before step 5, consuming inside the placement transaction, or adding a distinguishing field to the `404` record is caught by a test | the tests have teeth |
 | TC7 | audit-service's suites that iterate over every action pass unchanged | consumer compatibility |

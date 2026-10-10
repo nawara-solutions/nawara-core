@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
+import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 
@@ -2412,4 +2413,138 @@ test('A5.4-T1: auth-service reaches Organization Service only from its approved 
   const runner = readFileSync(new URL('./check-repo.mjs', import.meta.url), 'utf8');
   assert.equal(runner.split('checkAuthOrganizationBoundary(').length - 1, 1);
   assert.match(runner, /apps\/auth-service\/src/);
+});
+
+// V2 A5.4-A3 O2: the producer scope of the four reference-repair audit actions (ADR-0061 §6, ADR-0064; A3 design §11.3).
+// This check replaced the two "producer-less" assertions of libs/audit-contract/test (reference-repair-catalog.spec.ts and
+// reference-repair-batch2.spec.ts); `legacy` below is their logic, kept here to prove the replacement covers at least what they did.
+test('A5.4-A3 O2: the reference-repair audit actions are named only inside their approved producer scope', () => {
+  const real = {};
+  const collect = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (['node_modules', 'dist', '.git'].includes(entry.name)) continue;
+      if (entry.isDirectory()) collect(new URL(`${entry.name}/`, dir), `${prefix}${entry.name}/`);
+      else if (repairAuditScanned(`${prefix}${entry.name}`)) real[`${prefix}${entry.name}`] = readFileSync(new URL(entry.name, dir), 'utf8');
+    }
+  };
+  for (const top of ['apps', 'libs']) collect(new URL(`../${top}/`, import.meta.url), `${top}/`);
+  const run = (changes = {}) => checkRepairAuditProducerScope({ ...real, ...changes });
+  const fails = (problems, path) => assert.ok(problems.some((p) => p.startsWith(`${path}: names the reference-repair audit action`)), `expected a problem for ${path}, got:\n${problems.join('\n') || '(no problem)'}`);
+  const use = (action) => `await central.write(q, { action: '${action}' });\n`;
+  /** The two replaced assertions, as they were: a path they would have reported. */
+  const legacy = (path, text) => {
+    const noDotOrBuild = !path.split('/').some((seg) => seg === 'node_modules' || seg === 'dist' || seg.startsWith('.'));
+    const batch1 = path.startsWith('apps/') && /\.(ts|js|mjs|json)$/.test(path) && /hierarchy\.reference_repair(ed|_denied)/.test(text);
+    const batch2 = (path.startsWith('apps/') || path.startsWith('libs/')) && !path.startsWith('libs/audit-contract/')
+      && /\.(ts|tsx|mts|cts|js|mjs|cjs|json)$/.test(path) && /reference_repair_unresolved|reference_anchor_mismatch/.test(text);
+    return noDotOrBuild && (batch1 || batch2);
+  };
+
+  // 0. the approved scope, as a literal: widening it is a deliberate, reviewed edit of this test
+  assert.deepEqual(REPAIR_AUDIT_ACTIONS, ['hierarchy.reference_repaired', 'hierarchy.reference_repair_denied', 'hierarchy.reference_repair_unresolved', 'hierarchy.reference_anchor_mismatch_detected']);
+  assert.equal(REPAIR_AUDIT_PRODUCER, 'apps/auth-service/src/hierarchy/reference-repair.service.ts');
+  assert.deepEqual(REPAIR_AUDIT_TESTS, ['apps/auth-service/test/reference-repair.e2e-spec.ts', 'apps/auth-service/test/reference-repair-local.e2e-spec.ts', 'apps/auth-service/test/reference-repair-proof.e2e-spec.ts']);
+  assert.deepEqual(REPAIR_AUDIT_SCAN, { roots: ['apps/', 'libs/'], excluded: 'libs/audit-contract/', extensions: ['.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json'] });
+  // the producer is application source, the three others are test files that no image contains; the two lists never overlap
+  assert.ok(REPAIR_AUDIT_PRODUCER.startsWith('apps/auth-service/src/') && !REPAIR_AUDIT_PRODUCER.endsWith('.spec.ts'));
+  for (const t of REPAIR_AUDIT_TESTS) assert.ok(t.startsWith('apps/auth-service/test/') && t !== REPAIR_AUDIT_PRODUCER, t);
+  // the four names are the catalog's own (the contract library is the one place that declares them)
+  const catalog = readFileSync(new URL('../libs/audit-contract/src/catalog.ts', import.meta.url), 'utf8');
+  for (const action of REPAIR_AUDIT_ACTIONS) assert.ok(catalog.includes(`'${action}': {`), `${action} is not declared in the audit catalog`);
+
+  // 1. the real repository passes, and it does so because nothing names the actions yet (the pre-A3 state: no producer at all)
+  assert.ok(Object.keys(real).length > 500, 'the scan found too few files to be the real repository');
+  assert.deepEqual(run(), []);
+  for (const path of [REPAIR_AUDIT_PRODUCER, ...REPAIR_AUDIT_TESTS]) assert.equal(real[path], undefined, `${path} exists: this test describes the state before A5.4-A3`);
+  assert.deepEqual(Object.keys(real).filter((path) => legacy(path, real[path])), []);
+
+  // 2. each protected action, named in an Auth source file outside the scope, is refused; the message names the file and the action
+  for (const action of REPAIR_AUDIT_ACTIONS) {
+    const problems = run({ 'apps/auth-service/src/auth/auth.service.ts': `${real['apps/auth-service/src/auth/auth.service.ts']}\n${use(action)}` });
+    fails(problems, 'apps/auth-service/src/auth/auth.service.ts');
+    assert.equal(problems.length, 1);
+    assert.ok(problems[0].includes(action) && problems[0].includes(REPAIR_AUDIT_PRODUCER));
+  }
+  // the hierarchy module itself is not the producer: only the one service file is
+  fails(run({ 'apps/auth-service/src/hierarchy/hierarchy-reference.ts': use('hierarchy.reference_anchor_mismatch_detected') }), 'apps/auth-service/src/hierarchy/hierarchy-reference.ts');
+  fails(run({ 'apps/auth-service/src/hierarchy/reference-repair.controller.ts': use('hierarchy.reference_repaired') }), 'apps/auth-service/src/hierarchy/reference-repair.controller.ts');
+
+  // 3. another service, and a shared library, may not name them either
+  for (const path of ['apps/organization-service/src/admin/admin.controller.ts', 'apps/audit-service/src/ingestion/ingestion.service.ts', 'libs/service-kit/src/events/outbox.service.ts', 'apps/billing-service/src/new.ts']) {
+    fails(run({ [path]: use('hierarchy.reference_repair_unresolved') }), path);
+  }
+
+  // 4. a test file outside the three approved ones (an Auth test, a unit spec beside the source, another service's test)
+  for (const path of ['apps/auth-service/test/onboarding.e2e-spec.ts', 'apps/auth-service/test/audit-actions.e2e-spec.ts', 'apps/auth-service/src/hierarchy/reference-repair.service.spec.ts', 'apps/audit-service/test/query.e2e-spec.ts']) {
+    fails(run({ [path]: `expect(rows[0].name).toBe('audit.hierarchy.reference_repair_denied');` }), path);
+  }
+
+  // 5. every scanned extension, including data and plain JavaScript modules
+  for (const ext of REPAIR_AUDIT_SCAN.extensions) {
+    const path = `apps/auth-service/src/fixtures/actions${ext}`;
+    fails(run({ [path]: '{ "action": "hierarchy.reference_repaired" }' }), path);
+  }
+  fails(run({ 'apps/auth-service/scripts/emit.mjs': use('hierarchy.reference_repair_denied') }), 'apps/auth-service/scripts/emit.mjs');
+  fails(run({ 'libs/service-kit/fixtures/events.json': '["hierarchy.reference_anchor_mismatch_detected"]' }), 'libs/service-kit/fixtures/events.json');
+
+  // 6. a path that only LOOKS approved: another service or library, a prefix, a suffix, a sibling, a different case
+  for (const path of [
+    'apps/audit-service/src/hierarchy/reference-repair.service.ts', 'libs/service-kit/src/hierarchy/reference-repair.service.ts',
+    'apps/auth-service/src/hierarchy/reference-repair.service.ts.bak.ts', 'apps/auth-service/src/hierarchy/reference-repair.service.tsx',
+    'apps/auth-service/src/hierarchy/reference-repair.service.js', 'apps/auth-service/src/hierarchy/x-reference-repair.service.ts',
+    'apps/auth-service/src/hierarchy/reference-repair.service/index.ts', 'apps/auth-service/src/hierarchy/Reference-Repair.service.ts',
+    'apps/auth-service/src/legacy/apps/auth-service/src/hierarchy/reference-repair.service.ts',
+    'apps/auth-service/test/reference-repair.e2e-spec.ts.json', 'apps/auth-service/test/helpers/reference-repair.e2e-spec.ts',
+    'apps/auth-service/test/reference-repair-extra.e2e-spec.ts', 'apps/organization-service/test/reference-repair.e2e-spec.ts',
+  ]) {
+    fails(run({ [path]: use('hierarchy.reference_repaired') }), path);
+  }
+
+  // 7. a name separated from its `hierarchy.` prefix, or built by concatenation of the prefix, is still seen
+  fails(run({ 'apps/auth-service/src/owner/owner.controller.ts': "const action = `hierarchy.${'reference_repair_denied'}`;" }), 'apps/auth-service/src/owner/owner.controller.ts');
+  fails(run({ 'apps/auth-service/src/owner/owner.controller.ts': "const a = 'reference_anchor_mismatch';" }), 'apps/auth-service/src/owner/owner.controller.ts');
+
+  // 8. the approved scope: the one producer and the three tests may name all four actions (the post-A3 state); nothing else changes
+  const all = REPAIR_AUDIT_ACTIONS.map(use).join('');
+  assert.deepEqual(run({ [REPAIR_AUDIT_PRODUCER]: all }), []);
+  for (const t of REPAIR_AUDIT_TESTS) assert.deepEqual(run({ [t]: all }), []);
+  assert.deepEqual(run(Object.fromEntries([REPAIR_AUDIT_PRODUCER, ...REPAIR_AUDIT_TESTS].map((path) => [path, all]))), []);
+  // ...and with the producer in place, a second producer is still refused (the check stays effective after A3)
+  const afterA3 = Object.fromEntries([REPAIR_AUDIT_PRODUCER, ...REPAIR_AUDIT_TESTS].map((path) => [path, all]));
+  fails(run({ ...afterA3, 'apps/auth-service/src/platform/assignment.service.ts': use('hierarchy.reference_anchor_mismatch_detected') }), 'apps/auth-service/src/platform/assignment.service.ts');
+  assert.equal(run({ ...afterA3, 'apps/auth-service/src/platform/assignment.service.ts': use('hierarchy.reference_anchor_mismatch_detected') }).length, 1);
+
+  // 9. what stays outside the scan, as before: the contract library (it declares the actions), documentation, other roots
+  assert.deepEqual(run({ 'libs/audit-contract/src/extra.ts': all, 'libs/audit-contract/test/extra.spec.ts': all }), []);
+  assert.deepEqual(run({ 'docs/architecture/x.md': all, 'apps/auth-service/README.md': all, 'scripts/x.mjs': all }), []);
+  assert.equal(repairAuditScanned('libs/audit-contract-extra/src/a.ts'), true); // only the contract library itself is excluded, not a look-alike
+  fails(run({ 'libs/audit-contract-extra/src/a.ts': all }), 'libs/audit-contract-extra/src/a.ts');
+
+  // 10. PARITY with the two replaced assertions: whatever they reported, this check reports (it is equal or wider)
+  const cases = [];
+  const paths = ['apps/auth-service/src/auth/auth.service.ts', 'apps/auth-service/test/tokens.e2e-spec.ts', 'apps/audit-service/src/a.ts', 'apps/organization-service/src/a.js', 'apps/auth-service/a.mjs', 'apps/auth-service/a.json',
+    'apps/auth-service/src/a.tsx', 'apps/auth-service/src/a.mts', 'apps/auth-service/src/a.cts', 'apps/auth-service/src/a.cjs', 'libs/service-kit/src/a.ts', 'libs/service-kit/test/a.json', 'libs/audit-contract/src/a.ts', 'apps/auth-service/src/a.md'];
+  for (const path of paths) for (const action of REPAIR_AUDIT_ACTIONS) cases.push([path, use(action)]);
+  let legacyHits = 0;
+  for (const [path, text] of cases) {
+    if (!legacy(path, text)) continue;
+    legacyHits += 1;
+    fails(run({ [path]: text }), path);
+  }
+  assert.ok(legacyHits >= 30, `the parity battery exercised only ${legacyHits} legacy hits`);
+  // ...and it is wider where they were not: the first two actions under libs/ and in every extension (the first assertion read apps/ and four extensions only)
+  assert.equal(legacy('libs/service-kit/src/a.ts', use('hierarchy.reference_repaired')), false);
+  fails(run({ 'libs/service-kit/src/a.ts': use('hierarchy.reference_repaired') }), 'libs/service-kit/src/a.ts');
+  assert.equal(legacy('apps/auth-service/src/a.tsx', use('hierarchy.reference_repair_denied')), false);
+  fails(run({ 'apps/auth-service/src/a.tsx': use('hierarchy.reference_repair_denied') }), 'apps/auth-service/src/a.tsx');
+
+  // the runner calls the check once, over apps/ and libs/, and the two replaced assertions are gone from the library tests
+  const runner = readFileSync(new URL('./check-repo.mjs', import.meta.url), 'utf8');
+  assert.equal(runner.split('checkRepairAuditProducerScope(').length - 1, 1);
+  assert.match(runner, /for \(const top of \['apps', 'libs'\]\) read\(join\(root, top\)\)/);
+  assert.match(runner, /if \(\['node_modules', 'dist', '\.git'\]\.includes\(name\)\) continue;/); // nothing else is skipped (dot-directories are read)
+  for (const spec of ['reference-repair-catalog.spec.ts', 'reference-repair-batch2.spec.ts']) {
+    const text = readFileSync(new URL(`../libs/audit-contract/test/${spec}`, import.meta.url), 'utf8');
+    assert.ok(!/is producer-less/.test(text) && /check:repo/.test(text), `${spec} must point to the repository check that replaced its producer-less assertion`);
+  }
 });

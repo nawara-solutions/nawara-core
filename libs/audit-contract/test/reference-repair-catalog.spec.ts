@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ACTOR_TYPES, AUDIT_ACTIONS, AUDIT_CATALOG, AUDIT_CATEGORIES, AUDIT_CONTRACT_VERSION, AUDIT_OUTCOMES, CORE_PRODUCERS,
@@ -11,7 +11,8 @@ import { SAMPLE_IDS } from '../src/testing.js';
 /**
  * A5.4-AC1, first batch (docs/architecture/core-v2-a5-4-ac1-repair-audit-contract.md): two producer-less ADR-0061 reference-repair
  * actions, added consumer-first. These tests pin that the change is additive only: the 54 earlier entries and every contract constant
- * are exactly as before, the two new entries accept precisely the decided shapes, and no application emits them yet.
+ * are exactly as before, and the two new entries accept precisely the decided shapes. That no application names them outside the
+ * approved producer scope is enforced by the repository check `checkRepairAuditProducerScope` (`npm run check:repo`, A5.4-A3 O2).
  */
 type P = Record<string, any>;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -131,20 +132,5 @@ describe('consumer side and producers', () => {
       expect(() => validateAuditEvent(envelope(p, 'organization-service'))).toThrow('producer_not_admitted');
       expect(mayRetainRefusedAuditBody(envelope(p))).toBe(true);
     }
-  });
-
-  it('is producer-less: no file under apps/ names either action', () => {
-    const apps = resolve(here, '../../../apps');
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        if (name === 'node_modules' || name === 'dist' || name.startsWith('.')) continue;
-        const path = join(dir, name);
-        if (statSync(path).isDirectory()) walk(path);
-        else if (/\.(ts|js|mjs|json)$/.test(name) && /hierarchy\.reference_repair(ed|_denied)/.test(readFileSync(path, 'utf8'))) hits.push(path);
-      }
-    };
-    walk(apps);
-    expect(hits).toEqual([]);
   });
 });
