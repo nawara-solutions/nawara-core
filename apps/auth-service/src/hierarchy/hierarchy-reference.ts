@@ -36,6 +36,9 @@ interface Fetched {
   organization: { id: string; platformId: string; name: string };
 }
 
+/** Rows fetched from Organization Service for one `ensure`, in placement order: parents first, the target last. */
+type ReferenceChain = Array<{ kind: HierarchyKind; row: Fetched[HierarchyKind] }>;
+
 /** The hardened client (the Stage 19.4 / 21.C.2 rules): a deadline, no redirect followed, a capped body read under the deadline, unread bodies released. */
 export class OrganizationDirectoryClient {
   private readonly log = new Logger('OrganizationDirectory');
@@ -158,14 +161,26 @@ export class HierarchyReference implements OnApplicationBootstrap {
       this.log.warn(`hierarchy_reference_unavailable reason=no_credential kind=${kind}`);
       throw hierarchyUnavailable();
     }
+    const chain = await this.resolve(this.client, kind, lower);
+    if (!chain) return false;
+    await this.placeChain(chain);
+    return true;
+  }
+
+  /**
+   * The resolve step (A5.4-A2; ADR-0061 §4): fetches the target and each parent Auth does not hold from Organization Service, OUTSIDE any
+   * transaction, stopping at the first ancestor already cached. Reads only: it writes nothing. Returns the rows parents first (the target
+   * last, so the chain is never empty), or null when Organization Service does not know the target.
+   */
+  private async resolve(client: OrganizationDirectoryClient, kind: HierarchyKind, id: string): Promise<ReferenceChain | null> {
     // Parents first, fetched OUTSIDE any transaction; each is placed before its child so the foreign keys hold.
-    const chain: Array<{ kind: HierarchyKind; row: Fetched[HierarchyKind] }> = [];
-    let next: { kind: HierarchyKind; id: string } | null = { kind, id: lower };
+    const chain: ReferenceChain = [];
+    let next: { kind: HierarchyKind; id: string } | null = { kind, id };
     while (next) {
       if (next.kind !== kind && (await this.cached(this.db, next.kind, next.id))) break;
-      const row: Fetched[HierarchyKind] | null = await this.client.get(next.kind, next.id);
+      const row: Fetched[HierarchyKind] | null = await client.get(next.kind, next.id);
       if (!row) {
-        if (next.kind === kind) return false;
+        if (next.kind === kind) return null;
         this.log.warn(`hierarchy_reference_unavailable reason=parent_missing kind=${next.kind}`);
         throw hierarchyUnavailable(); // a child whose parent the authority does not show: not an answer to trust
       }
@@ -173,6 +188,15 @@ export class HierarchyReference implements OnApplicationBootstrap {
       next = next.kind === 'organization' ? { kind: 'platform', id: (row as Fetched['organization']).platformId }
         : next.kind === 'platform' ? { kind: 'company', id: (row as Fetched['platform']).companyId } : null;
     }
+    return chain;
+  }
+
+  /**
+   * The place step (A5.4-A2; ADR-0061 §4): the resolved rows, parents first, in ONE transaction through the reference-write gate.
+   * The chain's last row is the target `ensure` was asked for: its kind names a refused write, whatever row the database refused.
+   */
+  private async placeChain(chain: ReferenceChain): Promise<void> {
+    const target = chain[chain.length - 1]!.kind;
     try {
       await this.db.tx(async (q) => {
         await withReferenceWrite(q);
@@ -180,10 +204,9 @@ export class HierarchyReference implements OnApplicationBootstrap {
       });
     } catch (e) {
       if (e instanceof Error && 'getStatus' in e) throw e;
-      this.log.warn(`hierarchy_reference_unavailable reason=reference_write_refused kind=${kind}`); // e.g. frozen for the transition
+      this.log.warn(`hierarchy_reference_unavailable reason=reference_write_refused kind=${target}`); // e.g. frozen for the transition
       throw hierarchyUnavailable();
     }
-    return true;
   }
 
   private async cached(q: Queryable, kind: HierarchyKind, id: string): Promise<boolean> {
