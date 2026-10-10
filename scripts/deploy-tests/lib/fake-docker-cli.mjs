@@ -199,8 +199,9 @@ export const AUDIT_KNOWN = 'known|auth-service|0b8b7c39-0000-4000-8000-000000000
 const AUDIT_FACTS = ['trigger|audit_record|audit_record_stamp|O', 'trigger|outbox|outbox_immutable|O', 'funcacl|audit_grant_retention|audit_migrator|audit_migrator=X/audit_migrator',
   'defacl|audit_migrator|r|audit_app=arwd/audit_migrator', 'nspacl|public|audit_migrator|audit_migrator=UC/audit_migrator audit_app=U/audit_migrator',
   'audit_digest|1|0123456789abcdef0123456789abcdef', AUDIT_KNOWN].join('\n');
-const factsFor = (name) => (name.includes('audit') ? `${FACTS_BASE}${AUDIT_FACTS}\n`
-  : `${FACTS_BASE}${name.includes('auth') ? 'authority|local' : 'authority|PREPARED|fresh|false'}\n`);
+/** `authority` (R2 tests): Auth's recorded marker line, e.g. 'authority|frozen'; set on both sides (backup and drill) to agree. */
+const factsFor = (name, authority) => (name.includes('audit') ? `${FACTS_BASE}${AUDIT_FACTS}\n`
+  : `${FACTS_BASE}${name.includes('auth') ? (authority ?? 'authority|local') : 'authority|PREPARED|fresh|false'}\n`);
 
 function execIn(args) {
   let i = 0;
@@ -240,6 +241,18 @@ function execIn(args) {
     if (D.statusFail) exit(1);
     out(`${JSON.stringify({ mode: D.appMode ?? 'local', frozen_at: null, frozen_by: 'Synthetic Operator Name', activation_evidence: null, retired_at: null, retired_by: null, contentDigest: 'c'.repeat(64) }, null, 2)}\n`);
     exit(0);
+  }
+  // R2 (the frozen-backup drill): the image's own readiness capability (D1) and the body-reading /ready probe. `drill.capability` is what
+  // the image's packaged module answers ('capable', 'absent', or anything else); `drill.readyProbe` is "<status> <body>" (a string, or an
+  // array consumed one probe at a time, its last entry repeating). Both are recorded so a test can prove they ran (or did not).
+  if (prog === 'node' && progArgs[0] === '-e' && progArgs[1].includes('dist/hierarchy/authority-readiness.js')) {
+    state.capabilityProbes = [...(state.capabilityProbes ?? []), { container: name }];
+    out(`${D.capability ?? 'capable'}\n`); exit(0);
+  }
+  if (prog === 'node' && progArgs[0] === '-e' && progArgs[1].includes('http://127.0.0.1:3000/ready')) {
+    const n = (state.readyProbes = (state.readyProbes ?? 0) + 1);
+    const answers = Array.isArray(D.readyProbe) ? D.readyProbe : [D.readyProbe ?? '200 {"status":"ready"}'];
+    out(`${answers[Math.min(n, answers.length) - 1]}\n`); exit(0);
   }
   if (prog === 'node' && progArgs[0] === '-e' && progArgs[1].includes('/audit/platform/records')) { // the Audit drill's known-record read
     state.auditReads = [...(state.auditReads ?? []), { container: name, args: progArgs.slice(2) }];
@@ -287,7 +300,7 @@ function execIn(args) {
     }
     if (text.includes('-- nawara-backup-facts')) { // infra/backup facts: at backup time from state.backup, after a drill restore from state.drill
       if (B.factsFail) exit(3);
-      out(name.startsWith('nawara-drill-') ? (D.facts ?? B.facts ?? factsFor(name)) : (B.facts ?? factsFor(name))); exit(0);
+      out(name.startsWith('nawara-drill-') ? (D.facts ?? B.facts ?? factsFor(name, D.authority)) : (B.facts ?? factsFor(name, B.authority))); exit(0);
     }
     for (const m of text.matchAll(/ALTER ROLE (\w+) WITH[^;]*PASSWORD '([^']*)'/g)) {
       if (state.pg) { state.pg.roles[m[1]] ??= { super: false }; state.pg.roles[m[1]].password = m[2]; }
@@ -346,6 +359,12 @@ switch (cmd) {
     if (withVolumes) for (const [v, x] of Object.entries(state.volumes ?? {})) if (names.includes(x.anonymousOf)) delete state.volumes[v];
     exit(0); break;
   }
-  case 'logs': case 'ps': exit(0); break;
+  case 'logs': { // R2: the drill service's own log lines (drill.appLogs), for the frozen-backup diagnostics; nothing for other containers
+    const n = rest[rest.length - 1];
+    state.logReads = [...(state.logReads ?? []), rest];
+    if (n.startsWith('nawara-drill-') && n.endsWith('-app') && state.drill?.appLogs) out(state.drill.appLogs);
+    exit(0); break;
+  }
+  case 'ps': exit(0); break;
   default: process.stderr.write(`fake docker: unsupported command ${cmd}\n`); exit(2);
 }

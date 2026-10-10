@@ -498,6 +498,139 @@ for (const [label, drill, reason] of [
   });
 }
 
+// ---------------------------------------------------------------- R2: a backup taken under a freeze (ADR-0063 §4 item 9; A5.4-A5 design §9)
+const FROZEN_BODY = '503 {"status":"unavailable","failed":["hierarchy_authority"]}';
+const jsonLine = (msg, extra = {}) => `${JSON.stringify({ ts: '2026-10-10T00:00:00.000Z', level: 'warn', service: 'auth-service', msg, ...extra })}\n`;
+const REASON = (reason, marker = 'frozen', source = 'local') => jsonLine(`hierarchy_authority_not_ready reason=${reason} source=${source} marker=${marker}`, { context: 'HierarchyAuthorityReadiness' });
+const REGISTRY = (code) => jsonLine(`readiness_check_failed check=hierarchy_authority error=HierarchyAuthorityNotReady code=${code} — /ready answers 503 until it recovers`, { context: 'Readiness' });
+const LOG_SECRET = 'Synthetic Restored Log Value';
+const FROZEN_LOGS = `${jsonLine(`auth_hierarchy_source source=local marker=frozen ${LOG_SECRET}`)}${REASON('marker_frozen')}${REGISTRY('marker_frozen')}`;
+/** A frozen Auth backup (its recorded marker `frozen`, equal in the restored database), drilled with a check-capable image by default. */
+const frozenDrill = (drill = {}, env = {}) => {
+  const w = recoveryWorld(backedUp('auth-service', { authority: 'authority|frozen' }), {
+    drill: { authority: 'authority|frozen', appMode: 'frozen', capability: 'capable', readyProbe: FROZEN_BODY, appLogs: FROZEN_LOGS, ...drill },
+  });
+  return { w, r: w.run(env) };
+};
+
+test('R2: a frozen backup with a check-capable image passes only on the expected answer, confirmed by the reason, the registry and the CLI', () => {
+  const { w, r } = frozenDrill();
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /PASS  7 restore facts equal the backup's/, 'the marker fact is compared with the restored database first');
+  assert.match(r.out, /PASS  GET \/ready -> 503, only hierarchy_authority failing, reason marker_frozen: the expected answer for a backup taken under a freeze \(R2\)/);
+  assert.match(r.out, /PASS  application read: the service reads its hierarchy authority marker \(frozen\), equal to the backup source/);
+  assert.match(r.out, /passed: 10 checks/);
+  const s = w.state();
+  assert.equal(s.capabilityProbes.length, 1, 'the image capability is read once, from the drill service itself');
+  assert.ok(!s.calls.some((a) => a[0] === 'exec' && a.includes('wget')), 'the frozen path reads the status and the body; it does not use the body-blind probe');
+  assert.doesNotMatch(r.out, new RegExp(`${LOG_SECRET}|Synthetic Operator Name|hierarchy_authority_not_ready`), 'no log line or restored value is printed');
+  noLeak(w, r.out);
+  assertDrillGone(w);
+});
+
+test('R2 / D1: a frozen backup with an image that predates the check answers ready, and that is accepted (detected from the image)', () => {
+  const { w, r } = frozenDrill({ capability: 'absent', readyProbe: '503 should-not-be-used', appLogs: '' });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /PASS  GET \/ready -> \{"status":"ready"\} \(the service against the restored database, no broker\)/);
+  assert.match(r.out, /NOTE  the image predates the hierarchy authority readiness check \(A5\.4-A5\): a frozen backup answers ready \(D1\)/);
+  assert.match(r.out, /marker \(frozen\), equal to the backup source/);
+  assert.equal(w.state().readyProbes ?? 0, 0, 'the old image is held to the exact ready gate');
+  assertDrillGone(w);
+});
+
+for (const [mode, label] of [['local', 'a local backup'], ['org_authoritative', 'an org_authoritative backup']]) {
+  test(`R2: ${label} keeps the unchanged exact ready gate; no capability probe, no body probe`, () => {
+    const w = recoveryWorld(backedUp('auth-service', { authority: `authority|${mode}` }), { drill: { authority: `authority|${mode}`, appMode: mode } });
+    const r = w.run();
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /PASS  GET \/ready -> \{"status":"ready"\} \(the service against the restored database, no broker\)/);
+    assert.match(r.out, new RegExp(`marker \\(${mode}\\), equal to the backup source`));
+    assert.equal((w.state().capabilityProbes ?? []).length, 0);
+    assert.equal(w.state().readyProbes ?? 0, 0);
+    assertDrillGone(w);
+  });
+}
+
+const FROZEN_GATE_FAIL = /GET \/ready did not give the expected answer for a frozen backup \(only hierarchy_authority failing, reason marker_frozen\)/;
+for (const [label, drill, reason] of [
+  ['another check also fails (database, migrations)', { readyProbe: '503 {"status":"unavailable","failed":["database","hierarchy_authority","migrations"]}' }, FROZEN_GATE_FAIL],
+  ['another check fails instead (migrations)', { readyProbe: '503 {"status":"unavailable","failed":["migrations"]}' }, FROZEN_GATE_FAIL],
+  ['the reason is a direction (source_ahead_of_marker)', { appLogs: `${REASON('source_ahead_of_marker', 'local', 'organization-service')}${REGISTRY('source_ahead_of_marker')}` }, FROZEN_GATE_FAIL],
+  ['the reason is a direction (marker_ahead_of_source)', { appLogs: `${REASON('marker_ahead_of_source', 'org_authoritative')}${REGISTRY('marker_ahead_of_source')}` }, FROZEN_GATE_FAIL],
+  ['the reason is marker_missing', { appLogs: `${REASON('marker_missing', 'missing')}${REGISTRY('marker_missing')}` }, FROZEN_GATE_FAIL],
+  ['the reason is marker_invalid', { appLogs: `${REASON('marker_invalid', 'invalid')}${REGISTRY('marker_invalid')}` }, FROZEN_GATE_FAIL],
+  ['the reason is marker_unreadable', { appLogs: `${REASON('marker_unreadable', 'unreadable')}${REGISTRY('marker_unreadable')}` }, FROZEN_GATE_FAIL],
+  ['the latest reason is not marker_frozen (an older frozen line does not count)', { appLogs: `${FROZEN_LOGS}${REASON('marker_unreadable', 'unreadable')}` }, FROZEN_GATE_FAIL],
+  ['no diagnostic line at all', { appLogs: '' }, FROZEN_GATE_FAIL],
+  ['only the reason line (no registry line)', { appLogs: REASON('marker_frozen') }, FROZEN_GATE_FAIL],
+  ['only the registry line (no reason line)', { appLogs: REGISTRY('marker_frozen') }, FROZEN_GATE_FAIL],
+  ['the registry names another error class', { appLogs: `${REASON('marker_frozen')}${jsonLine('readiness_check_failed check=hierarchy_authority error=ReadinessCheckTimeout code=marker_frozen — x')}` }, FROZEN_GATE_FAIL],
+  ['spoofed: the diagnostic text inside another field', { appLogs: jsonLine('innocent', { note: '"msg":"hierarchy_authority_not_ready reason=marker_frozen source=local marker=frozen"', other: '"msg":"readiness_check_failed check=hierarchy_authority error=HierarchyAuthorityNotReady code=marker_frozen ' }) }, FROZEN_GATE_FAIL],
+  ['spoofed: plain text, not a JSON msg', { appLogs: 'hierarchy_authority_not_ready reason=marker_frozen source=local marker=frozen\nreadiness_check_failed check=hierarchy_authority error=HierarchyAuthorityNotReady code=marker_frozen x\n' }, FROZEN_GATE_FAIL],
+  ['spoofed: a reason line with trailing extra text', { appLogs: `${jsonLine('hierarchy_authority_not_ready reason=marker_frozen source=local marker=frozen extra')}${REGISTRY('marker_frozen')}` }, FROZEN_GATE_FAIL],
+  ['the readiness probe never answers (timeout)', { readyProbe: 'unreachable' }, FROZEN_GATE_FAIL],
+  ['the 503 body is a look-alike (extra field)', { readyProbe: '503 {"status":"unavailable","failed":["hierarchy_authority"],"reason":"marker_frozen"}' }, FROZEN_GATE_FAIL],
+  ['the status is not 503', { readyProbe: '500 {"status":"unavailable","failed":["hierarchy_authority"]}' }, FROZEN_GATE_FAIL],
+  ['a check-capable image answers ready while frozen', { readyProbe: '200 {"status":"ready"}' }, /answered ready for a frozen backup although the image has the hierarchy authority readiness check/],
+  ['the image capability is unknown (its module exports something else, or fails)', { capability: 'unknown' }, /readiness capability could not be determined; refusing/],
+  ['the image capability probe prints nothing', { capability: '' }, /readiness capability could not be determined; refusing/],
+  ['the service reads a different marker through its CLI (local)', { appMode: 'local' }, /the hierarchy authority state the service reads differs from the backup source/],
+]) {
+  test(`R2: a frozen backup fails closed when ${label}; the drill and its volume are removed`, () => {
+    const { w, r } = frozenDrill(drill);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, reason);
+    assert.doesNotMatch(r.out, new RegExp(`${LOG_SECRET}|Synthetic Operator Name`), 'no log line or restored value is printed');
+    noLeak(w, r.out);
+    assertDrillGone(w);
+  });
+}
+
+test('R2: the frozen gate keeps polling through startup answers and passes when the expected answer arrives within the budget', () => {
+  const { w, r } = frozenDrill({ readyProbe: ['unreachable', '503 {"status":"unavailable","failed":["database","hierarchy_authority","migrations"]}', FROZEN_BODY] });
+  assert.equal(r.code, 0, r.out);
+  assert.equal(w.state().readyProbes, 3);
+  assertDrillGone(w);
+});
+
+test('R2: a malformed authority fact never enables the exception (authority|frozen|x): the exact ready gate, then the fact is refused', () => {
+  const w = recoveryWorld(backedUp('auth-service', { authority: 'authority|frozen|x' }), {
+    drill: { authority: 'authority|frozen|x', appMode: 'frozen', capability: 'capable', readyProbe: FROZEN_BODY, appLogs: FROZEN_LOGS },
+  });
+  const r = w.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /the backup recorded no hierarchy authority state/);
+  assert.equal((w.state().capabilityProbes ?? []).length, 0, 'no exception path was entered');
+  assertDrillGone(w);
+});
+
+test('R2: a caller cannot enable the exception: FROZEN_BACKUP / READY_GATE in the environment are ignored for a local backup', () => {
+  const w = recoveryWorld(backedUp(), { drill: { notReady: true, capability: 'capable', readyProbe: FROZEN_BODY, appLogs: FROZEN_LOGS } });
+  const r = w.run({ FROZEN_BACKUP: 'yes', READY_GATE: 'frozen', EXPECT_FROZEN: 'yes' });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /GET \/ready did not answer ready against the restored database/);
+  assert.equal((w.state().capabilityProbes ?? []).length, 0);
+  assert.equal(w.state().readyProbes ?? 0, 0);
+  assertDrillGone(w);
+});
+
+test('R2: a local backup whose service answers the frozen-shaped 503 still fails (the allowance never applies outside a verified frozen fact)', () => {
+  const w = recoveryWorld(backedUp(), { drill: { notReady: true, appLogs: FROZEN_LOGS } });
+  const r = w.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /GET \/ready did not answer ready against the restored database/);
+  assertDrillGone(w);
+});
+
+test('R2: a frozen backup fact that the restored database does not hold fails before the service starts', () => {
+  const w = recoveryWorld(backedUp('auth-service', { authority: 'authority|frozen' }), { drill: { authority: 'authority|local', capability: 'capable', readyProbe: FROZEN_BODY, appLogs: FROZEN_LOGS } });
+  const r = w.run();
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /a restored fact differs from the backup \(authority\|/);
+  assert.ok(!w.state().runs.some((x) => x.name.endsWith('-app')), 'the service was never started');
+  assertDrillGone(w);
+});
+
 test('restore drill: KEEP_DRILL=yes (local debugging only) keeps the containers and their volume, and says how to remove them', () => {
   const w = recoveryWorld(backedUp());
   const r = w.run({ KEEP_DRILL: 'yes' });
