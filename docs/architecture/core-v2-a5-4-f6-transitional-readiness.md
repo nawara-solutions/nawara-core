@@ -28,24 +28,39 @@ health, traffic routing, the authority commands and every production configurati
 | 5 | A mismatch inside an authorized F6 window is **expected operationally and still not ready**. It is never treated as automatically safe |
 | 6 | The readiness check is **not sufficient** to detect a wrong-side restore. Restore provenance, an independent authority agreement and generation or anchor consistency need separately governed designs and controls: **OPEN, not implemented** |
 
-### The window under source first (state S2c of §3)
+### The two windows under source first
 
-- **Opens** when the redeployed Auth container starts with the new source: marker `local`, source `organization-service`,
-  organization-service `ACTIVE`.
-- **Closes** when `hierarchy-retire --fresh` has committed, `/ready` answers ready and the authority agreement
-  (runbook §6.2) is MATCH. This assumes the marker command stays inside F6, as the runbook and the plan have it; that placement
-  is listed as open below.
-- **Before it** (after `ownership activate`, before the redeploy: S2a) Auth answers **ready**. That answer is expected and
-  verifies nothing about the mirror.
-- **Inside it** Auth reports not ready with the reason "source ahead of the marker". It keeps serving, because `/ready` routes
-  nothing. The readiness signal protects nothing by itself.
-- **The trade-off of source first.** While the marker is `local`, **the database write guard permits hierarchy writes**
-  (migration `0008`). Marker first would close that guard at once; source first leaves it open until the marker command. Inside
-  the window the only barriers are the code and the attended rule: with the source `organization-service` the owner tool refuses
-  a local Company insert, no HTTP path writes hierarchy rows, and `ensure` places validated references only
-  (`apps/auth-service/src/cli/owner-tools.ts`, `src/hierarchy/hierarchy-reference.ts`). In exchange, a failed redeploy leaves no
-  standing mismatch under an irreversible marker. **The window is expected, not safe.**
-- **The same two values are the signature of a restored pre-F6 Auth database (S5a).** Inside the window the operator separates the
+- **The transition window** (the broader one) **starts at `ownership activate`** in organization-service and **ends only when the
+  independent authority agreement (runbook §6.2) returns MATCH** after the marker change. It covers S2a, S2c and a failed redeploy.
+- **The disagreement window** (the narrower one, state S2c of §3) runs from the start of the redeployed Auth container with the new
+  source (marker `local`, source `organization-service`, organization-service `ACTIVE`) to the commit of `hierarchy-retire --fresh`.
+- **Between activate and the redeploy (S2a)** Auth answers **ready**. That answer is expected and verifies nothing about the mirror.
+- **Inside the disagreement window** Auth reports not ready with the reason "source ahead of the marker". It keeps serving, because
+  `/ready` routes nothing. The readiness signal protects nothing by itself.
+- **The abandoned-transition blind spot.** A failed redeploy, or a transition stopped before the redeploy, leaves Auth on the old
+  source with a `local` marker while organization-service is `ACTIVE` (S2a). Readiness reports that as **ready**. Only the
+  authority agreement check sees it: inside the transition window it is TRANSITIONAL, outside it a MISMATCH. This is why the
+  transition window starts at activate and ends only at MATCH.
+- **What the database guard does and does not do** (migration `0008`; the source-first safety review of 2026-10-10):
+  - While the marker is `local`, the hierarchy write guard **permits** every hierarchy write. Marker first would enable the
+    flag-based guard sooner: under `org_authoritative` a hierarchy write is refused unless the session has set
+    `nawara.reference_write`.
+  - That guard stops **unflagged** writes only. Setting the flag needs no privilege, so a session holding a database credential
+    with DML on the tables (the runtime role) can set it and write. **Privileged database access**, such as the superuser bootstrap
+    owner, can bypass trigger-based protection entirely. **Neither order protects against privileged or credentialed direct SQL.**
+  - **No reachable unapproved hierarchy-writing application path was found** in the current code: no HTTP route and no background
+    worker creates or alters authoritative hierarchy content. With the source `organization-service`, `ensure` **does place
+    validated reference rows** on an administrative first touch (join-code creation, invitation creation, the platform-assignment
+    grant), fetched from organization-service. The `bootstrap-owner` legacy Company insert returns early when any owner exists, as
+    in production; without a Company id it is also refused when the source is `organization-service`
+    (`apps/auth-service/src/cli/owner-tools.ts`, `src/hierarchy/hierarchy-reference.ts`).
+  - **What source first still exposes until the marker change** is the Auth CLI: `hierarchy-freeze` and a preparation
+    `hierarchy-export` still run while the marker is `local`, and refuse once it is `org_authoritative`; `hierarchy-unfreeze` runs
+    only from `frozen`. `hierarchy-retire --fresh` is also accepted from `frozen`, so an accidental freeze would not by itself block
+    the marker command (`src/hierarchy/hierarchy-authority.ts`).
+  - In exchange, source first puts the irreversible step last, after the redeploy is proven, and a failed redeploy leaves no
+    standing mismatch under an irreversible marker. **The windows are expected, not safe.**
+- **The same two values are the signature of a restored pre-F6 Auth database (S5a).** Inside the disagreement window the operator separates the
   two by the attended step log and the agreement check, never by the reason alone.
 
 ### Reasons (semantics decided; identifiers illustrative, fixed in the A5.4-A5 design document)
@@ -57,41 +72,113 @@ health, traffic routing, the authority commands and every production configurati
 | marker frozen (*illustrative:* `marker_frozen`) | `frozen` | any | never expected on the fresh path | critical on the fresh path |
 | marker missing, invalid or unreadable | – | any | never expected | critical; never treated as `local` |
 
-### Attended monitoring, stop conditions and escalation (design only; not an approved or executable procedure)
+### Required design safeguards (owner decision of 2026-10-10; not executable procedures)
 
-The runbook text is a later, separately authorized edit, certified in G6. The items below are proposed checks.
+The owner adopted these as **design requirements** for source-first F6. They are not an approved or executable procedure: each
+needs its runbook text, its G6 rehearsal and its production approval, separately. No new technical write guard is introduced.
 
+**Transition window.**
+- Starts at `ownership activate`; ends only when the independent authority agreement returns MATCH (above).
+- A **hard procedural duration limit** applies to the transition window. Its value is set from measurements in the isolated G6
+  rehearsal (approval latency, deploy duration, verification time) and recorded with the certified procedure. **No duration is set
+  here.**
+- **On expiry:** stop every authority-changing action, preserve the evidence, escalate to the owner. There is no automatic
+  recovery, rollback or restoration.
+
+**In-window restrictions.**
+- Only the specifically approved mirror commands (the Auth redeploy with the new source, `hierarchy-retire --fresh`) and read-only
+  verification run.
+- No other Auth hierarchy CLI operation (`hierarchy-freeze`, `-unfreeze`, `-export`, `bootstrap-owner`).
+- No administrative operation that first-touches an Organization or a Platform (join-code creation, invitation creation, the
+  platform-assignment grant). In the certified state no Platform or Organization exists before F7 (ADR-0062 §3, §4) and the
+  Company reference is cached since F4, so no reference row is expected; a reference row that appears anyway is a stop-and-escalate
+  event, not an expected difference.
+- No mutating direct SQL on either database; read-only agreement queries only.
+- No backup is created inside the transition window.
+- No automatic recovery, rollback or restoration.
+
+**Verification evidence.** Comparable hierarchy-content evidence is taken **before the Auth source redeploy** and again **before
+the irreversible marker change**, and must be equal:
+- **Compared, each with itself across time** (Auth before against Auth after, Organization before against Organization after; the
+  two services' digests are not compared with each other, because Auth holds a cached subset): Auth's hierarchy content digest
+  (the `company`, `platform` and `organization` rows, printed read-only by `hierarchy-verify`); organization-service's phase, its
+  verified digest and its live content digest (printed read-only by `ownership status`); and the count of Auth
+  `hierarchy_authority_event` rows, counted with a read-only query like the runbook's §6.3 event query, not by a CLI command.
+- **Excluded:** the `hierarchy_authority` marker row itself (not part of the content digest); container, deployment and log
+  metadata; the Auth redeploy.
+- **Expected:** no difference. Between the two points no `hierarchy_authority_event` row and no hierarchy or reference row is
+  expected; the marker command's own event comes after the second point.
+- **Before a retry** the pre-redeploy evidence is taken again, because the failed deploy restored the previous container.
+- Any difference is a stop condition. Organization `ownership verify` is not used for this evidence, because it appends an event.
+- No verification command is run by this decision.
+
+**Retry policy.**
+- At most **one** redeploy retry, and only if the F6 authorization pre-authorizes it.
+- The retry uses the **identical** certified digest and configuration.
+- Each production dispatch, the retry included, needs its own `production` approval.
+- A second failure, an unexplained failure, or any change of digest or configuration needs a **fresh architecture-owner review and
+  authorization**.
+- No automatic retry is authorized.
+
+**Attended monitoring** (proposed checks).
 - **Monitoring.** The named operator of the F6 step watches, at each sub-step: both services' `/ready`, the reason reported, the
   authority agreement, the event rows and the Auth log signals (runbook §6.1 to §6.3).
-- **Inside the window** no Auth CLI or operator command that writes hierarchy rows is run, other than the marker command itself.
 - **Proposed checks before the marker change, at least:** the new Auth container is running and healthy on the certified digest; its start-up line
   shows the source `organization-service` with a configured credential; `/ready` fails on this check only, with the source-ahead
   reason; the agreement shows `ACTIVE`, `local`, `organization-service`. If any of these is missing, the marker change is not run.
 - **Stop conditions:**
-  - any reason other than "source ahead" inside the window;
-  - "source ahead" before `ownership activate`, or after the window has closed;
+  - any reason other than "source ahead" inside the disagreement window;
+  - "source ahead" before the redeploy, or after the disagreement window has closed;
   - a failed Auth redeploy. The deploy restores the previous container, so no mismatch is shown and Auth looks consistent while
-    organization-service is `ACTIVE`: **the step is incomplete and the marker change is not run**. A retry of the redeploy is
-    the one continuation the owner may allow, and only if the authorization of the F6 step expressly covers it; otherwise stop
-    and escalate;
+    organization-service is `ACTIVE`: **the step is incomplete and the marker change is not run**. Continue only under the retry
+    policy above; otherwise stop and escalate;
   - any other readiness check failing, an anchor mismatch, or a rejected or failed authority event;
-  - a window that stays open beyond the bound the runbook sets. **The bound is not decided here.**
+  - the transition window exceeding its hard limit;
+  - any difference in the verification evidence.
 - **Escalation.** Stop; run no further ownership or mirror command; keep the evidence; never edit either side to make them agree;
   escalate to the owner. After `ownership activate` there is no rollback (ADR-0040 A2.6): the step is completed forward or
-  escalated.
+  escalated. The only continuation after a stop is an authorized retry under the retry policy.
 
 ### Consequences for the comparison below
 
-- §4 and §5 were written for the marker-first order. Under source first the window is S2c, a failed mirror redeploy leaves no
-  standing disagreement, and Option B's "source ahead" is the expected reason inside the window.
+- §4 and §5 were written for the marker-first order. Under source first the disagreement window is S2c, a failed mirror redeploy
+  leaves no standing disagreement, and Option B's "source ahead" is the expected reason inside the disagreement window.
 - Options A, C1, C2, D and E and the phase-reading alternative are **not selected**.
 - The G6 plan's monitoring demonstrations (§8.1: an induced source mismatch and an induced freeze) would also change Auth's `/ready`
   once the check is in the rehearsed image. The plan is unchanged; this is input to its refresh.
 
+### F6 and F7 terminology
+
+- **F6:** organization-service `ownership activate`; the Auth source mirror (the redeploy with
+  `AUTH_HIERARCHY_SOURCE=organization-service`); the Auth hierarchy marker retirement (`hierarchy-retire --fresh`); and the
+  authority agreement verification (MATCH).
+- **F7:** organization-service `ownership retire`, with its own required evidence that Auth has retired its hierarchy writes
+  (`apps/organization-service/src/ownership/ownership-admin.ts`), followed by the certified post-F7 procedures (post-activation
+  verification, the post-F7 backup, then opening other callers).
+- This restates the Accepted sequencing; it amends nothing. ADR-0040 A2.5 defines the mirror as the marker and the source and
+  places the mirror in F6; its F7 row reads "Retire (Auth's hierarchy write paths stay off …)". The authority that settles the
+  placement is ADR-0063, as ADR-0040's "Clarified by ADR-0063" note records it: `hierarchy-retire` "remains required for its
+  certified F6 mirror step and Organization `ownership retire` for F7". The word
+  "retire" names both Auth's marker command and Organization's F7 step; the active runbook's §3 F7 row ("retire Auth's hierarchy
+  writes") is read this way, and its wording is aligned at its next authorized edit.
+
+### G6 certification dependencies (minimum; the plan is unchanged)
+
+The refreshed G6 plan must rehearse, at least (seven cases):
+1. the successful source-first sequence through F7, with MATCH at its end;
+2. no unintended hierarchy-content change across the disagreement window (the verification evidence above);
+3. a failed Auth redeploy and one controlled retry under the retry policy;
+4. an interrupted transition and an Auth restart inside the disagreement window;
+5. detection of an abandoned transition by the agreement check while `/ready` reports ready;
+6. the measured durations that set the hard limit;
+7. a second redeploy failure leading to the stop and escalation path, with no further retry.
+
+Cases 1 and 4, and the readiness part of 3, need the A5.4-A5 check in the rehearsed image. **G6 is not ready and not certified**;
+these requirements change neither the certified plan nor its acceptance criteria until the plan is separately refreshed.
+
 ### Still open after this decision
 
-- The check's name and the reason identifiers (the A5.4-A5 design document); the bound on the window; whether the F6
-  authorization covers a redeploy retry.
+- The check's name and the reason identifiers (the A5.4-A5 design document); the value of the hard limit (from G6).
 - A note for the A5.4-A5 design: Auth's start-up warning says first touches "fail closed until configuration and marker agree"
   (`hierarchy-reference.ts`), which is not what happens with a `local` marker and the new source, where `ensure` works. No code
   is changed here.
@@ -99,8 +186,8 @@ The runbook text is a later, separately authorized edit, certified in G6. The it
   code would also report not ready there; whether that is wanted is not decided. Production is a fresh environment.
 - Wrong-side restore detection: restore provenance, the independent agreement control and generation or anchor consistency.
 - What carries an alert in production while no alerting stack is deployed; today the signal is the attended operator.
-- The updates to the G6 plan and the active runbooks, and their certification; whether the marker command stays inside F6 as the
-  runbook and the plan have it (ADR-0040 A2.5 words F7 as "Retire").
+- The updates to the G6 plan and the active runbooks, and their certification.
+- Post-one-way-door reconciliation: not designed.
 - Any later routing use of readiness: a separately governed infrastructure task.
 
 ## 1. What is fixed (not reopened here)

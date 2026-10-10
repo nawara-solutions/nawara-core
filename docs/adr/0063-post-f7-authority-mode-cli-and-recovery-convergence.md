@@ -133,13 +133,22 @@
 > 4. **`/ready` stays a monitoring signal.** It is read by the attended operator, including for post-transition verification, and
 >    is not used to route traffic. `/auth/health` stays database-only, and the container healthcheck and the deploy wait are
 >    unchanged. No routing enforcement is introduced.
-> 5. **The attended window.** The decision record defines the window, the one reason expected inside it, the stop conditions and
->    the escalation. Being inside the window makes a mismatch expected, not safe. While the marker is still `local` the database
->    write guard is open, so the window relies on Auth's code and on the attended rule that nothing writes hierarchy rows; that is a
->    trade-off of the source-first order, stated in the record.
+> 5. **The attended windows.** The decision record defines two: a **transition window** from `ownership activate` to the
+>    authority agreement MATCH, to which a hard procedural limit applies, and the narrower **disagreement window** between the new
+>    Auth container and the marker change, with the one reason expected inside it, the stop conditions and the escalation. Being
+>    inside a window makes a mismatch expected, not safe. While the marker is still `local` the database write guard is open, so
+>    the disagreement window relies on Auth's code and on the attended rule that no administrative first touch and no hierarchy
+>    command runs; that is a trade-off of the source-first order, stated in the record. In neither order does the flag-based guard
+>    stop a credentialed or privileged direct SQL session.
 > 6. **Restores.** This readiness check is **not sufficient** to detect a restore from the wrong side of F6. Restore provenance,
 >    an independent authority agreement and generation or anchor consistency need separately governed designs and controls; they
 >    are **open and not implemented**.
+> 7. **Source-first safeguards (2026-10-10, after the source-first safety review).** The owner retains Option B and source first,
+>    adopts the record's required design safeguards (a transition window from `ownership activate` to MATCH with a hard procedural
+>    limit measured in G6; in-window restrictions; equal hierarchy-content evidence before the redeploy and before the marker
+>    change; at most one pre-authorized retry), and introduces **no new technical write guard**. F6 is activation, the source mirror,
+>    the marker retirement and agreement verification; F7 is Organization's `ownership retire` and the certified post-F7
+>    procedures. Each safeguard still needs its own runbook text, rehearsal and production approval.
 >
 > **Not changed and not authorized.** No authority invariant, one-way-door rule (§3, §9; ADR-0040 A2.6), gate or certification
 > requirement is weakened. The certified G6 plan and the active F6/F7 runbooks are unchanged and **cannot be executed in the

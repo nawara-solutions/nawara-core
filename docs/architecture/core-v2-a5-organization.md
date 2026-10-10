@@ -188,7 +188,8 @@ excluded. The production track (§7) is separate and owner-driven.
 > with a direction-specific reason, including inside the attended F6 window; the mirror is source first; a `frozen` marker is not
 > ready on the fresh path; `/ready` stays monitoring-only and `/auth/health`, the container healthcheck and the deploy wait are
 > unchanged. Point 4's other conditions stand. **No A5.4-A5 implementation is authorized by this update**; the certified G6 plan
-> and the active runbooks are unchanged, and wrong-side restore detection stays open.
+> and the active runbooks are unchanged, and wrong-side restore detection stays open. The owner later confirmed source first with the
+> record's required design safeguards and no new technical write guard (2026-10-10).
 
 > **Not in force.** This section is a proposal for the architecture owner (2026-10-09). Until it is explicitly approved, §6, §7, §8, the
 > A5.4 row of §9 and the roadmap stay the effective gates: A5.4 stays **blocked until F7 (🔴)**. Nothing here authorizes code, a merge,
