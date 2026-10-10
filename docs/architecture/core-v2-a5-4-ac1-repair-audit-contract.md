@@ -54,6 +54,7 @@ category or producer is added, and **none of the 54 existing actions is edited, 
   failure mode are not decided here:** ADR-0061 §6 specifies none for refusals, and the existing precedent,
   `hierarchy.admin_operation_denied` in organization-service, writes the record with the `403` and fails the request if it cannot
   (`apps/organization-service/src/admin/admin.controller.ts`). Best effort or fail closed is decided with A5.4-A3 (§8).
+  *Update (2026-10-10):* decided in principle as best effort ([batch 2 record](core-v2-a5-4-ac1-batch2-decisions.md) §5).
 
 ## 4. Consumer-first ordering
 
@@ -87,6 +88,10 @@ including in first-touch `ensure`, are not implemented or activated until the th
 owner decision**. A log alone, or Auth's local audit alone, does not satisfy the
 central-audit design of ADR-0061 §6.
 
+*Update (2026-10-10):* the three open cases are decided in principle in the [batch 2 record](core-v2-a5-4-ac1-batch2-decisions.md):
+the collapsed `404` and the anchor mismatch get their own proposed actions; operational failures are recorded locally ([ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md),
+which partly supersedes the ADR-0061 §6 failure chain). The gate above stands until those actions are declared and the producers are separately authorized.
+
 ## 6. Tests required of the AC1 implementation
 
 | # | Test | Proves |
@@ -115,6 +120,9 @@ authorized deployment of §4.
 - An explicit merge approval.
 
 ## 8. Open decisions
+
+*Update (2026-10-10):* the first two items below are decided in principle by the [batch 2 record](core-v2-a5-4-ac1-batch2-decisions.md)
+and ADR-0064; their declarations and producers are not authorized.
 
 - The central audit contract for the collapsed `404`, for operational failures and for anchor mismatch (§5); they block A5.4-A3 and any
   ADR-0061 failure or mismatch recording, not AC1.
