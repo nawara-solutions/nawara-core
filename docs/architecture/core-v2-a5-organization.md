@@ -263,6 +263,16 @@ ADR-0063 §11 is read as blocking runtime effect and deployment, not repository 
 **(ii)** add a separately approved clarifying note to ADR-0063 §11. Until then, this proposal does not claim that no ADR change is
 needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label, which are not ADRs.
 
+### 9.2 A5.4 task progress
+
+| Task | Class | State |
+|---|---|---|
+| A5.4-G1 implementation governance | – | Accepted 2026-10-09; merged as PR #266 (§9.1) |
+| A5.4-T1 static Auth boundary check | GREEN | merged as PR #267 (2026-10-10): `checkAuthOrganizationBoundary` in `scripts/lib/checks.mjs`, run by `npm run check:repo`; a syntax-level check with documented limits |
+| A5.4-D1 implementation specifications | GREEN | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-implementation-specifications.md`](core-v2-a5-4-implementation-specifications.md); documentation only, decides nothing |
+
+No YELLOW or RED task is authorized or started. Nothing is implemented in a service, deployed or activated.
+
 ## 10. Owner decisions [PROPOSED, not approved]
 
 | Id | Decision needed | Notes |
