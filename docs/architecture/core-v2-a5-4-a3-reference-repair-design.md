@@ -860,6 +860,89 @@ Recorded from a read-only post-merge governance audit. It changes no decision an
   digest set before 2026-10-10 20:10:58Z, the merge changed that set and a separately authorized re-rehearsal is required (§15).
 - **Nothing here authorizes** image selection, deployment, audit emission, F6/F7 or activation.
 
+*Correction (2026-10-10, after PR #288).* The deployment statements above, merged in PR #288, are **incorrect** and are kept as
+written. "No Auth deployment has run since 2026-09-30" and "the last Auth deployment (2026-09-30, revision `9e29c76`)" considered
+only `auth-service-deploy.yml` and overlooked the automatic `deploy-production` job of `auth-service-docker-build.yml`, which
+deployed production Auth on merges to `main` until V2-A.2. The last documented Auth deployment is that job's run 36979422758 at
+revision `97f78cb` (2026-10-02, image `sha256:26164d42…5eaf`); no Auth deployment is recorded after it. Nothing has been deployed
+since PR #287, so "not deployed, not activated" stands, and the compatibility conclusion holds against `97f78cb` (§11.9). No other
+statement of this section changes.
+
+### 11.9 O1 compatibility evidence after the merge (2026-10-10)
+
+**Status of this evidence.** It was assembled by a read-only investigation **after PR #287 was merged** (`fcf5806`, 2026-10-10
+20:10:58Z). **It does not satisfy O1's requirement (§11.1; §14 item 11) that compatibility be demonstrated before a RED-exception
+merge, and it does not retroactively make that requirement satisfied.** The RED-exception merge approval (§9.3 A.2 item 5) remains
+**NOT VERIFIED** (§11.8); PR #288, which recorded the post-merge status, granted no retrospective approval. Per this repository's
+record, G6 is deferred and no certified digest set is selected. No image selection, deployment or activation is authorized here.
+
+**Images.** The baseline is the **last documented** Auth deployment, accepted by the owner on 2026-10-10 from the workflow and container
+evidence below; it **does not certify the image running in production now**.
+
+| | Revision | Image | Digest | Evidence |
+|---|---|---|---|---|
+| **Last documented Auth deployment** (2026-10-02, 07:38Z) | `97f78cb218e2f44e50466d2cd1ddb33fe3864982` | `ghcr.io/nawara-solutions/nawara-core-auth-service:production` (legacy, no revision label) | `sha256:26164d42b5d225b756a450e976e0e23c1142f49be6eb68ff9fad177cb1e05eaf` | `auth-service-docker-build.yml` run 36979422758: `build-production` exported this manifest list, `deploy-production` pulled `:production`, applied no migration (11 already applied) and reported the container healthy at 07:38:19Z. The owner's read-only server observation on 2026-10-02 found the container started at 07:38:13Z with this image ([V2-A.2 certification](core-v2-a-2-certification.md) §6; [V2-A record](core-v2-a-baseline-and-change-safety.md) §10) |
+| Earlier deployment, the G6-A certified image (historical) | `9e29c763179dc954e668d6287a07098c0450decf` | `…:sha-9e29c763179dc954e668d6287a07098c0450decf` | `sha256:e6279588ffc4742d356d812858964fdc81903c762c3daa9a71bd00c179c9a7ee` | `auth-service-deploy.yml` run 36699283208 (2026-09-30, F4-M3); the certified running image of the [cutover record](stage-21/stage-21-x-cutover-record.md) §2 and §5. Production no longer runs it: eight automatic deployments followed ([V2-A record](core-v2-a-baseline-and-change-safety.md) §1 and its correction of the count) |
+| A3 revision, built, **not deployed** | `fcf58068e716fda8dd2438621936676b91c62ff9` | `…:sha-fcf58068e716fda8dd2438621936676b91c62ff9` | `sha256:f6e1d165fe1a33f9420f2e4a4626d9a2da482a82c422e879e799a9e19c5d3a54` | the build-only `auth-service-docker-build.yml` run 38082733317 |
+
+No `deploy-production` job of `auth-service-docker-build.yml` succeeded after run 36979422758, and no `auth-service-deploy.yml` run is
+recorded after 2026-09-30 (GitHub Actions history, read 2026-10-10).
+
+**Verified workflow and code evidence** (against `97f78cb`; `9e29c76`, an ancestor, gives the same answers for items 1 to 3).
+
+1. **The last documented deployed revision cannot issue a repair-purpose proof.** At `97f78cb`, the purpose
+   `hierarchy.reference.repair` appears nowhere in the application or library sources. Both ways of issuing a step-up proof (the
+   WebAuthn options and the verification of a factor) first check the purpose table `STEP_UP_METHODS`, and refuse an unlisted purpose
+   with `400 step_up_unsupported`. The purpose was introduced by A1 (`8e14b52`, 2026-10-10), which is not in `97f78cb`.
+2. **S1 is absent from that revision and changes nothing observable through it.** At `97f78cb` there is no `verifyForService`, no
+   S2 consumption and no repair route; the generic `POST /auth/step-up/verify` calls `consume` directly. In `fcf5806` that endpoint
+   calls `verifyForService`, which differs only for the purpose `hierarchy.reference.repair` (`403 step_up_required`, the proof not
+   consumed, the existing local denial record) and otherwise calls `consume`, which is identical in `97f78cb` and `fcf5806`. Because
+   no deployed revision could issue a proof for that purpose (item 1), no deployed caller can hold one and no caller can depend on
+   the earlier answer.
+3. **The A3 route is inert with source `local`** (§3.3; the tests of §12.1, in `reference-repair-local.e2e-spec.ts`). With source `local`,
+   the repair service decides "inert" from the configuration alone and never reads the authority marker. An unauthenticated request is
+   refused by the guard (`401`). A non-Owner gets `403` and, because the repair is not eligible, no record (§11.6, C2). The Owner gets
+   the collapsed `404` at step 1c. In every case there is no validation, rate-limit hit, proof consumption, hierarchy lookup or write,
+   audit record or outbox row; beyond the guard's own authentication checks, the only database access is the read of the caller's
+   Owner row (step 1b), made only for a caller of kind owner.
+4. **No Auth schema change.** Between `97f78cb` and `fcf5806` (and between `9e29c76` and `fcf5806`) no file under
+   `apps/auth-service/db/migrations` changed, and the A3 change (`0782383`..`fcf5806`) adds no migration. An image built from `fcf5806`
+   needs no migration on the schema the last deployment reported (11 migrations applied), and returning to the `97f78cb` image would
+   need no schema reversal.
+5. **The deployment delta is larger than A3** (recorded as evidence, not as proof of deployment readiness). `97f78cb`..`fcf5806` spans
+   103 first-parent commits on `main`; 38 commits touch `apps/auth-service`, `libs/service-kit` or `libs/audit-contract`, and those
+   paths change in 138 files (15,760 lines added, 508 removed). The delta includes, among others, A1, A2 (`d5a8cbb`), changes to both
+   libraries, and changes to the Auth deployment workflows and `provision-and-deploy.sh` (the digest-deployment model of V2-A.2).
+   **This evidence covers A3's compatibility only; the compatibility of that whole delta has not been reviewed.**
+
+**Inferred runtime state (UNVERIFIED; nothing was inspected).** Production Auth's hierarchy source is taken to be `local`: the code
+defaults to `local` when `AUTH_HIERARCHY_SOURCE` is unset; `provision-and-deploy.sh`, at `97f78cb` and at `fcf5806`, states that it
+never writes that variable; this repository records production as `local` (§2); and the variable names listed by the last documented
+deployment's log (2026-10-02) do not include `AUTH_HIERARCHY_SOURCE`. That list is the state at that time, not now. **Neither the
+running production container, the digest it runs today, its environment, nor the authority marker was inspected for this record**;
+that production still runs the 2026-10-02 image, with source `local`, is inferred from the absence of later deployment runs and from
+these records. The current Auth runtime source and marker remain **UNVERIFIED**.
+
+**Conclusion.** No compatibility issue between the last documented deployed Auth and A3 was found: A3 adds no behavior observable by
+a caller of that revision, and with source `local` an image containing A3 leaves the repair route inert and changes the generic
+verification only for a purpose no deployed revision could issue. This is post-merge evidence; **O1's pre-merge timing remains
+unmet.**
+
+**Evidence still required before deploying a new Auth image** (none of it performed or authorized here):
+
+1. the exact candidate image digest, verified (its revision label and attestation);
+2. the auth-service digest actually running in production, confirmed;
+3. `AUTH_HIERARCHY_SOURCE` and the authority marker, verified through a separately authorized read-only inspection;
+4. a review of the whole deployment delta from the running revision to the candidate, not only A3 (item 5 above);
+5. the candidate digest included in the certified G6 digest set and in the applicable rehearsal (§15; [A5 record](core-v2-a5-organization.md)
+   §9.1 item 3, §9.3 A.3);
+6. the owner's outstanding decision on PR #287's RED-exception merge approval (§11.8);
+7. a separate deployment authorization (§9.3 A.2 item 6).
+
+Activation additionally requires the audit-service deployment declaring the four actions, F6 and F7, and the O7 monitoring condition
+(§9.3 A.2 item 7; §11.5).
+
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
 
