@@ -1,4 +1,5 @@
 import { HttpException } from '@nestjs/common';
+import { AUDIT_ACTIONS } from '@nawara/audit-contract';
 import { decodeCursor, encodeCursor, parseOrganizationPath, parseQuery, queryFingerprint } from './query-params.js';
 
 const ORG = '3c1d9b0e-2a4f-4b8e-8f6a-5d7e9c0b1a22';
@@ -22,6 +23,10 @@ describe('parseQuery (strict, closed grammars; nothing coerced, clamped or ignor
     expect(q.filters).toEqual({ action: 'membership.revoked', category: 'business', actor: { type: 'user', id: ORG }, resource: { type: 'membership', id: ORG },
       subject: { type: 'user', id: ORG }, sourceService: 'auth-service', outcome: 'succeeded', correlationId: 'corr-0001-abcd' });
     expect(parseQuery(W, 'organization').limit).toBe(50);
+  });
+
+  it('accepts every cataloged action as an action filter (A5.4-AC1: a newly cataloged action is accepted with no other change)', () => {
+    for (const action of AUDIT_ACTIONS) expect(parseQuery({ ...W, action }, 'platform').filters.action, action).toBe(action);
   });
 
   it('time windows: exactly 92 days (organization) and 31 days (platform) pass; one millisecond more is window_too_large', () => {

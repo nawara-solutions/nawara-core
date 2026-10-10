@@ -13,7 +13,7 @@ Columns: **actors** allowed (user kinds; `service` = the calling service's name;
 rule, **resource** type, **subject** (at most one), **outcomes**, allowed **changes** (`?` = optional; `code` values are closed
 enumerations). Every resource and subject id is a lowercase UUID. No change carries a name, contact, amount, credential or free text.
 
-## auth-service (24)
+## auth-service (26)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -41,6 +41,8 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `owner.recovery_cancelled` | security | user (owner) | none (platform) | user | — | succeeded | — | A pending owner recovery is cancelled from a working session. |
 | `session.refresh_reuse_detected` | security | system (`refresh_reuse_detection`) | none (platform) | user | — | denied | — | A rotated refresh token was replayed: a likely stolen session; the whole session family is revoked. |
 | `owner.webauthn_clone_suspected` | security | system (`webauthn_clone_detection`) | none (platform) | factor | user (required) | denied | — | A security key reported a signature counter that went backwards: a likely cloned authenticator, revoked. |
+| `hierarchy.reference_repaired` | security | user (owner) | the target when it is an organization, else none | company \| platform \| organization | — | succeeded | `placed`: boolean | The active Company owner repaired a hierarchy reference in Auth: a validated reference row was placed, or it was already present. |
+| `hierarchy.reference_repair_denied` | security | user (member, owner, operator) | none (platform) | company \| platform \| organization | — | denied | `reason`: no_authority \| step_up_required | A verified user was refused a hierarchy reference repair (no authority, or no valid fresh step-up). |
 
 ## organization-service (7)
 
@@ -107,4 +109,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 54 actions.**
+**Total: 56 actions.**
