@@ -1,0 +1,700 @@
+{
+  "01 malformed id": [
+    {
+      "t": "outcome",
+      "returned": false
+    }
+  ],
+  "02 target cached": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    }
+  ],
+  "03 no credential": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "log",
+      "level": "warn",
+      "message": "hierarchy_reference_unavailable reason=no_credential kind=organization"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "04 organization, nothing cached": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "platform",
+      "id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "company",
+      "id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "11111111-1111-4111-8111-111111111111",
+        "Company A"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO platform (id, \"companyId\", name, key) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "22222222-2222-4222-8222-222222222222",
+        "11111111-1111-4111-8111-111111111111",
+        "Platform A",
+        "platform-a"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT \"companyId\" AS anchor FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO organization (id, \"platformId\", name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "33333333-3333-4333-8333-333333333333",
+        "22222222-2222-4222-8222-222222222222",
+        "Organization A"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT \"platformId\" AS anchor FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "commit"
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    }
+  ],
+  "05 organization, platform cached": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO organization (id, \"platformId\", name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "33333333-3333-4333-8333-333333333333",
+        "22222222-2222-4222-8222-222222222222",
+        "Organization A"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT \"platformId\" AS anchor FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "commit"
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    }
+  ],
+  "06 platform, company cached": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "platform",
+      "id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO platform (id, \"companyId\", name, key) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "22222222-2222-4222-8222-222222222222",
+        "11111111-1111-4111-8111-111111111111",
+        "Platform A",
+        "platform-a"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT \"companyId\" AS anchor FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "commit"
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    }
+  ],
+  "07 target unknown to the authority": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "outcome",
+      "returned": false
+    }
+  ],
+  "08 parent missing at the authority": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "platform",
+      "id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "t": "log",
+      "level": "warn",
+      "message": "hierarchy_reference_unavailable reason=parent_missing kind=platform"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "09a client fails on the target": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "09b client fails on a parent": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "platform",
+      "id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "company",
+      "id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "10 anchor mismatch": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "platform",
+      "id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO platform (id, \"companyId\", name, key) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "22222222-2222-4222-8222-222222222222",
+        "11111111-1111-4111-8111-111111111111",
+        "Platform A",
+        "platform-a"
+      ]
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT \"companyId\" AS anchor FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "log",
+      "level": "error",
+      "message": "hierarchy_anchor_mismatch kind=platform id=22222222-2222-4222-8222-222222222222 — the cached anchor disagrees with Organization Service; nothing was changed"
+    },
+    {
+      "t": "tx",
+      "event": "rollback"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "11a frozen, single row (company)": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "company",
+      "id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "11111111-1111-4111-8111-111111111111",
+        "Company A"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "rollback"
+    },
+    {
+      "t": "log",
+      "level": "warn",
+      "message": "hierarchy_reference_unavailable reason=reference_write_refused kind=company"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "11b frozen, multi-row chain (organization target)": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM organization WHERE id = $1",
+      "params": [
+        "33333333-3333-4333-8333-333333333333"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "organization",
+      "id": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM platform WHERE id = $1",
+      "params": [
+        "22222222-2222-4222-8222-222222222222"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "platform",
+      "id": "22222222-2222-4222-8222-222222222222"
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "company",
+      "id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "11111111-1111-4111-8111-111111111111",
+        "Company A"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "rollback"
+    },
+    {
+      "t": "log",
+      "level": "warn",
+      "message": "hierarchy_reference_unavailable reason=reference_write_refused kind=organization"
+    },
+    {
+      "t": "outcome",
+      "thrown": {
+        "status": 503,
+        "code": "hierarchy_unavailable"
+      }
+    }
+  ],
+  "13 company placed once, then cached": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "company",
+      "id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "11111111-1111-4111-8111-111111111111",
+        "Company A"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "commit"
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    },
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    }
+  ],
+  "14 uppercase id is lowercased": [
+    {
+      "t": "sql",
+      "where": "db",
+      "sql": "SELECT 1 FROM company WHERE id = $1",
+      "params": [
+        "11111111-1111-4111-8111-111111111111"
+      ]
+    },
+    {
+      "t": "call",
+      "kind": "company",
+      "id": "11111111-1111-4111-8111-111111111111"
+    },
+    {
+      "t": "tx",
+      "event": "begin"
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "SELECT set_config('nawara.reference_write', 'on', true)",
+      "params": []
+    },
+    {
+      "t": "sql",
+      "where": "tx",
+      "sql": "INSERT INTO company (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+      "params": [
+        "11111111-1111-4111-8111-111111111111",
+        "Company A"
+      ]
+    },
+    {
+      "t": "tx",
+      "event": "commit"
+    },
+    {
+      "t": "outcome",
+      "returned": true
+    }
+  ]
+}
