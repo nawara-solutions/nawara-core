@@ -395,10 +395,10 @@ transaction; a determinable placed or no-op result; detectable integrity mismatc
 unchanged. Resolution and placement are never exposed as a public HTTP API.
 
 **O5 — cached-ancestor integrity (alternative (a), the literal reading).** For an Organization with a cached Platform ancestor, the
-repair fetches that Platform from Organization Service and compares its Company link with the cached relationship. An unavailable
-or inconsistent authoritative parent is handled by the accepted failure and integrity rules (§7). A cached Platform that the
-authority does not show is not covered by that sentence: its classification is **not ruled here** and stays OPEN for the A3
-implementation design. The cached relationship is never silently trusted. `ensure` keeps its lookup
+repair fetches that Platform from Organization Service and compares its Company link with the cached relationship. An unavailable,
+missing or inconsistent authoritative parent is handled by the accepted failure and integrity rules (§7). The one point left unruled
+is a cached Platform that the authority does not show: how it is classified among those rules (for example the `parent_missing`
+failure, or an integrity incident) is **not ruled here** and stays OPEN for the A3 implementation design. The cached relationship is never silently trusted. `ensure` keeps its lookup
 sequence: the comparison belongs to the repair path only.
 
 **O11 — where Owner authorization lives (alternative (a)).** The HTTP route may admit authenticated users. The repair service itself
