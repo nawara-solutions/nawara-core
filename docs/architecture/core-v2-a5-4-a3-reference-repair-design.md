@@ -18,7 +18,7 @@
   Documentation only: A3 development is not authorized.
 - **Owner rulings (2026-10-10), fourth set:** the contract points of the repair service (slice C of the implementation) are
   recorded in §11.6: records for a refused non-Owner in each source and marker state (C2), a cached and authorized target under marker
-  `frozen` (C3), three narrow test-file permissions for the slice C change (C1, C4), and the correction of test TA8 (C5).
+  `frozen` (C3), the final evidence policy for every outcome under `frozen`, three narrow test-file permissions for the slice C change (C1, C4), and the correction of test TA8 (C5).
   Documentation only: slice C development is not authorized by it.
 - **Class.** A5.4-A3 is **RED**, permitted only inside §9.3's narrow exception.
 - **Authority.** [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) as partly superseded by
@@ -422,7 +422,7 @@ unchanged. Resolution and placement are never exposed as a public HTTP API.
 repair fetches that Platform from Organization Service and compares its Company link with the cached relationship. An unavailable,
 missing or inconsistent authoritative parent is handled by the accepted failure and integrity rules (§7). The one point left unruled
 is a cached Platform that the authority does not show: how it is classified among those rules (for example the `parent_missing`
-failure, or an integrity incident) is **not ruled here** and stays OPEN for the A3 implementation design. The cached relationship is never silently trusted. `ensure` keeps its lookup
+failure, or an integrity incident) is **not ruled here** and stays OPEN for the A3 implementation design (since ruled as `parent_missing`: §11.5). The cached relationship is never silently trusted. `ensure` keeps its lookup
 sequence: the comparison belongs to the repair path only.
 
 **O11 — where Owner authorization lives (alternative (a)).** The HTTP route may admit authenticated users. The repair service itself
@@ -713,11 +713,33 @@ needs placing. For an uncached target whose placement the frozen guard refuses, 
 unchanged. Frozen-mode write permissions are not broadened: the database guard of migration `0008` covers the hierarchy tables, and
 no hierarchy write statement is issued on the cached path (it only reads the target's links).
 
-**How C2 and C3 fit together under `frozen`.** A refused non-Owner leaves no repair record; an Owner's request proceeds as the
-accepted sequence describes (§11.5, O15), with the records that sequence produces. The two rulings cover different requests and do not
-overlap. **Not ruled here:** the records of the other Owner outcomes under `frozen` (a rejected proof, an unresolved target, an
-infrastructure failure). In particular, whether a denial record is written for an Owner's rejected proof under `frozen` is not
-decided by C2 or C3; it is to be settled with the slice C development authorization.
+**The frozen marker: final evidence policy (ruled 2026-10-10; closes the Owner-path question left open above C2 and C3).** With the
+source `organization-service` and the marker `frozen`, every mandatory repair record and diagnostic of ADR-0064 is **kept**, except
+the two denial records, which ADR-0065 ties to the Organization-authoritative mode, read with ADR-0061's definition of that mode
+(source `organization-service` and marker `org_authoritative`). Responses, the order of checks and the proof
+semantics are unchanged throughout.
+
+| Outcome under `frozen` | Response and proof | Repair evidence | Basis |
+|---|---|---|---|
+| non-Owner | `403`; proof untouched | **no** repair-specific denial record | C2; ADR-0065 acceptance note (the refusal row "applies in the Organization-authoritative mode"); ADR-0061 clarification of that mode |
+| Owner, proof rejected | `403 step_up_required`; proof not consumed | **no** repair-specific denial record | the same texts |
+| cached and authorized target | `200`, `placed: false`; proof consumed | the success record, in the same transaction as the authorized no-op; no hierarchy insert or update | C3; ADR-0061 §4 step 7 and §5; ADR-0050 decision 9 |
+| unresolved target | the collapsed `404`; proof consumed | the central unresolved action, **best effort**, with the existing local fallback if the central write fails | ADR-0064 D1 and §4 |
+| placement refused by the database | `503`; proof consumed | the Auth-local failure record and the structured warning; nothing is changed or overwritten after the refusal | ADR-0061 §5 (the frozen example); ADR-0064 D2 and §3 |
+| infrastructure failure | the applicable fail-closed answer (`503`); proof consumed when the failure follows step 3 (a failure of the consumption itself: §11.5, O8) | the Auth-local failure record and the structured warning | ADR-0064 D2 and §3 |
+| anchor (parent-link) mismatch | `503`; proof consumed; nothing placed or overwritten | the security-incident action, best effort, after the rollback; the existing alert log line stays | ADR-0064 D3 and §4; ADR-0061 §6; for the repair path only (§9.3 A.1) |
+
+- **The frozen marker does not make the repair inert.** Only the source `local` and the marker `local` do (§10.1). ADR-0061's order
+  under `frozen` is unchanged: the proof is consumed before the lookup, and a refused placement comes after it.
+- **A mismatch stays a security incident.** It is never reclassified as an ordinary infrastructure failure, and it is never emitted
+  for first-touch `ensure()` (§9.3 A.1).
+- **The metric stays deferred (§11.5, O7)**, and its condition stays mandatory: before any production activation, the metric with
+  operational monitoring or an owner-approved equivalent.
+- **No audit action is added or removed**, no ADR-0064 requirement is weakened, and no frozen-mode hierarchy write is permitted: the
+  database guard is unchanged and the cached path issues no hierarchy write statement.
+- **Existing generic authentication and security evidence is not suppressed** by any row above.
+- **This is not permission to activate the repair**, to implement the repair service, or to emit anything: each stays separately
+  authorized (§13).
 
 **C1 — the T1 test literal (permission for the slice C change, when it is separately authorized).** In
 `scripts/check-repo.test.mjs`, the assertion that lists the approved operations may gain exactly the fifth one, the hierarchy
@@ -754,7 +776,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | TL1 | unauthenticated `401` (no bearer, an invalid bearer, a service token); Operator, Member and Organization administrator `403` | steps 1a, 1b |
 | TL2 | Owner: byte-identical `404` (status, body, headers that are not per-request) for a valid proof, an invalid proof, no proof, a malformed id, an unknown `kind`, an existing id, another Company's id | step 1c precedes everything |
 | TL2b | the same requests with source `organization-service` and marker `local` (§11.5, O15): the same byte-identical `404`; the TL3 checks hold (nothing consumed, counted or written; zero Organization Service calls). With marker `frozen` and an uncached target: `503`, proof consumed (TF1); a cached and authorized target is TL2d | the marker is part of the inertness gate |
-| TL2d | marker `frozen` (§11.6, C2 and C3): a **cached and authorized** target answers `200` with `placed: false`, the proof consumed, the success record written and **no** hierarchy write statement; an **uncached** target answers `503` with the proof consumed and no row; a **non-Owner** answers `403` with no repair record | frozen keeps the accepted behavior and writes nothing to the hierarchy |
+| TL2d | marker `frozen`, every outcome (§11.6, the frozen evidence policy): a **cached and authorized** target answers `200` with `placed: false`, the proof consumed, the success record written and **no** hierarchy write statement; an **uncached** target whose placement is refused answers `503` with the proof consumed, no row, one local failure record (`placement_refused`) and the warning line; an **unresolved** target answers the collapsed `404` with the proof consumed and one unresolved record (local fallback if the central write fails); an **infrastructure failure** answers `503` with one local failure record and the warning line; an **anchor mismatch** answers `503` with the proof consumed, nothing placed or overwritten, the incident record and the alert log line; a **rejected proof** answers `403` with the proof not consumed and **no** repair denial record; a **non-Owner** answers `403` with no repair record | under `frozen` ADR-0064's evidence is kept, except the two denial records |
 | TL2e | a refused **non-Owner** in each state (§11.6, C2): `403` every time; a repair record only with marker `org_authoritative`; with the marker unreadable the answer is still `403` and nothing is written | denial records follow eligibility; the order of checks is unchanged |
 | TL2c | the marker is missing, malformed or cannot be read, with source `organization-service` (§11.5, O15), for an Owner: `503 hierarchy_unavailable` (a non-Owner still gets `403`, TL2e); nothing is validated, consumed, counted, looked up or placed, and no repair record is written. With source `local` and the same broken marker, the route still answers its inert `404` without reading the marker | an indeterminate marker is never treated as Organization-authoritative |
 | TL3 | after TL1 and TL2: the proof's `consumedAt` is NULL; `auth_throttle`, `outbox`, `auth_audit_event`, `company`, `platform`, `organization`, `hierarchy_authority` and its event table are unchanged (counts and the hierarchy content digest); the stand-in records zero calls | no new write, no emission, no proof consumption |
@@ -768,7 +790,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | TA1 | Owner with a valid proof repairs an uncached Platform, and an uncached Organization (Company cached; nothing cached) | success |
 | TA2 | Operator, Member, Organization administrator, and a user of kind `owner` without an `owner` row: `403`, nothing placed, proof untouched, one `reference_repair_denied` (`no_authority`) with marker `org_authoritative`; no repair record in any other state (TL2e; §11.6, C2) | non-Owner refusal |
 | TA3 | inactive user or session, no bearer: `401`, no record | unauthenticated |
-| TA4 | proof absent; malformed; expired; already used; issued to another Owner; to another session of the same Owner; for another purpose; a repair proof row whose method is not allowed (inserted directly, as a fixture): each `403 step_up_required`, **not consumed**, no Organization call, one denied record (`step_up_required`) | S2 rejections |
+| TA4 | proof absent; malformed; expired; already used; issued to another Owner; to another session of the same Owner; for another purpose; a repair proof row whose method is not allowed (inserted directly, as a fixture): each `403 step_up_required`, **not consumed**, no Organization call, one `reference_repair_denied` (`step_up_required`) with marker `org_authoritative`; no repair denial record under `frozen` (TL2d) | S2 rejections |
 | TA5 | a proof for another purpose stays usable for that purpose after being refused here | no cross-purpose burn |
 | TA6 | a secret-key-only step-up cannot be issued for the purpose (existing A1 test, unchanged) | factor-only |
 | TA7 | malformed id or `kind`: `400`; rate limit: `429`; neither consumes the proof | step 2 |
@@ -804,8 +826,8 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 |---|---|---|
 | TF1 | one test per reason of §8.2 except the two step-up reasons, which are TS5 and TS6 (authority down, timeout, redirect, oversized, malformed, `401`/`403` from the authority, no credential, parent missing, frozen hierarchy, success intent unwritable): `503`, nothing placed, proof consumed, one local `failure` record and one log line with the listed reason, **no** central record | D2 |
 | TF2 | no record or log contains a token, URL, upstream body, name or parent id (asserted on the stored rows and captured logs) | hygiene |
-| TF3 | mismatch at the anchor re-read, and at the cached-ancestor comparison: `503`, cached row unchanged, existing error log present, one `reference_anchor_mismatch_detected` with the system actor and `operation: reference_repair`, written after the rollback; neither batch 1 action written | D3 |
-| TF4 | **denial-audit failure:** with the outbox write failing, each refusal (`403`, `404`, mismatch `503`) is unchanged and leaves the local record; with both failing, a log line; never a success | D4 |
+| TF3 | mismatch at the anchor re-read, and at the cached-ancestor comparison: `503`, cached row unchanged, existing error log present, one `reference_anchor_mismatch_detected` with the system actor and `operation: reference_repair`, written after the rollback; neither batch 1 action written; the same under marker `frozen` (TL2d) | D3 |
+| TF4 | **denial-audit failure:** with the outbox write failing, each refusal (`403`, `404`, mismatch `503`) is unchanged and leaves the local record (for the `403` refusals, only with marker `org_authoritative`: under `frozen` they write no repair record at all); with both failing, a log line; never a success | D4 |
 | TF5 | success-intent failure rolls the placement back and answers `503` | ADR-0050 decision 9 |
 | TF6 | a first-touch mismatch still writes **no** central record (unchanged) | scope of A3 |
 
