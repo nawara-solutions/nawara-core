@@ -7,6 +7,9 @@
 - **Owner rulings (2026-10-10):** the seven blocking decisions O1, O2, O3, O4, O5, O11 and O12 are **ruled** (§11.1). The rulings
   are documentation: they implement nothing and authorize no development. **A3 stays blocked** until the O2 prerequisite task is
   merged, the remaining prerequisites of §11.2 are met and local A3 development is separately authorized.
+- **Owner rulings (2026-10-10), second set:** the names and file boundaries of **O10** are ruled, and the O2 prerequisite task is
+  classified **GREEN with two additional merge conditions** (§11.3). Documentation only: neither O2 nor A3 is implemented or
+  authorized by it.
 - **Class.** A5.4-A3 is **RED**, permitted only inside §9.3's narrow exception.
 - **Authority.** [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) as partly superseded by
   [ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md) and
@@ -54,7 +57,8 @@ A3 is developed, committed and merged separately from A2 (already merged) and fr
   service can burn a repair proof today.
 - **Existing tests that state today's behavior.** `test/reference-repair-step-up.e2e-spec.ts` asserts that the generic endpoint
   consumes a repair proof exactly once, and uses that endpoint for its binding tests; `src/owner/step-up-purposes.spec.ts` asserts that
-  no application source outside an allow-list names the purpose. Both necessarily change with A3 (ruled: §11.1, O1).
+  no application source outside an allow-list names the purpose. The first necessarily changes with A3 (ruled: §11.1, O1); the second is expected to stay
+  unchanged, because the purpose literal is kept inside `step-up.service.ts` (§11.3).
 - **Where the "producer-less" tests live.** `libs/audit-contract/test/reference-repair-catalog.spec.ts` and
   `reference-repair-batch2.spec.ts` each assert that no source file under `apps/` names the repair actions (the batch 2 test also covers `libs/` outside the contract
   library). They are test files of
@@ -69,9 +73,9 @@ A3 is developed, committed and merged separately from A2 (already merged) and fr
 
 ## 3. API contract and authorization
 
-### 3.1 Route — PROPOSED (path and names; the semantics are DECIDED)
+### 3.1 Route — path and names RULED (§11.3, O10); the semantics are DECIDED
 
-`POST /auth/admin/hierarchy-references/{kind}/{id}/repair`, with the Owner's bearer and the header `x-step-up-token`.
+`POST /auth/admin/hierarchy-references/{kind}/{id}/repair` (the OpenAPI form of `:kind/:id`, §11.3), with the Owner's bearer and the header `x-step-up-token`.
 
 - `kind` is `platform` or `organization` only (ADR-0061 §3: "for platforms and organizations"). A Company is placed only as the parent
   of a repaired Platform. The catalog's `company` resource type stays unused by A3.
@@ -320,8 +324,8 @@ Whether A3 adds stop conditions of its own is the owner's choice (§11, O14); th
 ## 11. Open decisions for the architecture owner
 
 The table records the questions, the alternatives considered and this document's recommendations. **O1, O2, O3, O4, O5, O11 and
-O12 were ruled by the architecture owner on 2026-10-10 (§11.1)**; their rows are kept as the record of what was considered. **O6 to
-O10 and O13 to O15 remain OPEN** (§11.2).
+O12 were ruled by the architecture owner on 2026-10-10 (§11.1)**, and **O10, for its names and paths, on the same day (§11.3)**; their rows are kept as the
+record of what was considered. **O6 to O9 and O13 to O15 remain OPEN** (§11.2).
 
 | # | Question | Alternatives | Recommendation |
 |---|---|---|---|
@@ -334,7 +338,7 @@ O10 and O13 to O15 remain OPEN** (§11.2).
 | **O7** | **The failure metric** (ADR-0064 D2 names "a bounded metric"). | (a) Add a counter labelled `kind` in A3, if it needs no `libs/service-kit` change. (b) Defer the metric to the metrics rollout; log and local record only. | **(b)** unless (a) is confirmed kit-free; ADR-0064 then needs the owner's word that the metric may follow later. |
 | **O8** | **"Confirmed failed" classification list** for S2 (§6). | (a) A short allow-list of database error classes, reviewed in the implementation. (b) No such class: every consume error is "uncertain". | **(a)**, with uncertain as the default. |
 | **O9** | **Rate limits.** | (a) Two new buckets, per Owner and per address, in Auth's configuration. (b) Reuse `step_up_owner` and `step_up_ip`. | **(a)**, limits set by the owner; (b) would let repairs exhaust the step-up budget. |
-| **O10** | **Names:** the route path (§3.1), the local record types (§8), the log line. | as proposed, or the owner's choice | as proposed |
+| **O10** | **Names:** the route path (§3.1), the local record types (§8), the log line; and, for the O2 task, the file paths. | as proposed, or the owner's choice | ruled 2026-10-10 for the names and paths only: see §11.3 (the local record types and the log line stay PROPOSED) |
 | **O11** | **Mechanism for the order of checks** (§3.3): security-relevant, because it decides where the Owner check and the denial record live. | (a) The route admits any authenticated actor (`@Actors()`); the repair service performs 1b, 1c and 2a in order, with no `ParseUUIDPipe`. (b) Dedicated guards for the Owner check and the source check, the denial written by a guard, interceptor or filter, and validation kept in pipes behind them. | **(a)**: one place holds the whole order and it is easy to test; (b) spreads the sequence over framework hooks whose order is implicit. Either way test TL2 and TA2 fix the observable order. |
 | **O12** | **`503` before authorization for another Company's id** (§7). | (a) Accept and record it as a residual risk next to ADR-0061 §8's timing difference (a dated note or the A3 pull request, as the owner prefers). (b) Require the collapsed `404` whenever resolve fails before the Company is known to be the Owner's: hides the signal, but turns real outages into `404` for the Owner's own entities and changes ADR-0061 §5. | **(a)**: it follows the accepted sequence; the caller is an authenticated Owner who spent a factor and is rate limited. It is still more than a timing difference: an outage gives `503` for any id, but a missing parent or a link disagreement gives `503` only for an id that exists, so such a `503` tells the caller that the id exists with an anomalous reference state, and it leaves an incident record. This goes beyond ADR-0061 §8's timing-only residual risk and needs the owner's explicit acceptance. |
 | **O13** | **Meaning of `placed`** in the response and in the success record (§3.1). | (a) The target's row was inserted by this request. (b) Any row (target or parent) was inserted by this request. | **(a)**: it answers the question the Owner asked and is unambiguous under concurrency. |
@@ -365,23 +369,24 @@ test changes are permitted, as far as S1 requires:
 | same | `a proof is bound to its session: another session of the same owner cannot consume it` | re-pointed: it would still pass after S1, but vacuously, on S1's `403` instead of the binding |
 | same | `a proof is bound to its purpose, in both directions` | re-pointed, likewise |
 | same | `a proof expires with the existing step-up lifetime` | re-pointed, likewise |
-| `apps/auth-service/src/owner/step-up-purposes.spec.ts` | `no application source outside the allow-list names the purpose: no route, consumer or producer exists for it` | its allow-list gains exactly the application files that implement S1 (and, once A3 is separately authorized, the repair files that must name the purpose) |
+| `apps/auth-service/src/owner/step-up-purposes.spec.ts` | `no application source outside the allow-list names the purpose: no route, consumer or producer exists for it` | its allow-list gains exactly the application files that implement S1 (and, once A3 is separately authorized, the repair files that must name the purpose). Under the later O10 ruling the literal is kept inside `step-up.service.ts`, so no change to this test is expected; any addition would be a deliberate, reviewed change listed in the pull request (§11.3) |
 
 The remaining tests of those two files are not to change. **Compatibility with the images actually deployed must be demonstrated
 before any RED-exception merge**; the ruling does not presume it (§14 item 11).
 
 **O2 — producer-scope enforcement (alternative (b)).** The current producer-less assertions are to be relocated into an equivalent,
 phase-aware repository check, as a **separate prerequisite task**, before A3. That task needs its own development, review, CI and
-merge authorization; **none is granted here**. **The governance class of that task is not ruled**: the word "YELLOW" in the
-alternative recorded in the table above is not adopted. Its requirements:
+merge authorization; **none is granted here**. **The governance class of that task was not ruled with this ruling**: the word "YELLOW" in
+the alternative recorded in the table above is not adopted. (The class was ruled afterwards: GREEN with two merge conditions, §11.3.) Its requirements:
 
-- the exact application paths are fixed first, through O10 (O10 remains open; for this purpose it also has to fix the file paths);
+- the exact application paths are fixed first, through O10 (since ruled: §11.3);
 - there is never an interval without producer-scope enforcement;
 - the existing audit actions and the consumer-first safeguards are kept;
 - any producer outside an explicit allow-list is detected, and tests that deliberately violate the allow-list prove the rejection;
 - the check is effective before and after A3;
 - no audit-contract semantics, catalog entry or deployed producer changes;
-- the task proves whether its test and script changes alter any runtime image contents, and it preserves the G6 timing requirements.
+- the task proves whether its test and script changes alter any runtime image contents, and it preserves the G6 timing requirements (since made a mandatory merge condition, with verifiable evidence that
+  no shipped runtime image contents change: §11.3, condition 2).
 
 **O3 — a refusal the central record cannot describe (alternative (a)).** An authenticated caller refused during authorization keeps the
 existing `403`. When a malformed id or an unknown kind cannot satisfy the central denial contract: no UUID or kind is fabricated;
@@ -416,11 +421,81 @@ disclosure**: it covers this case only, and no Accepted ADR is superseded by it.
 
 ### 11.2 What still blocks A3
 
-- **The O2 prerequisite task**, separately authorized, developed, reviewed and merged (§11.1, O2). It needs **O10** (the exact paths
-  and names) settled first.
-- **The open decisions:** O6, O7, O8, O9, O10, O13, O14 and O15. None is ruled here.
+- **The O2 prerequisite task**, separately authorized, developed, reviewed and merged (§11.1, O2), under its class and merge
+  conditions (§11.3). The names it needs are ruled (§11.3, O10). It is not authorized.
+- **The open decisions:** O6, O7, O8, O9, O13, O14 and O15, and the classification of a cached Platform that the authority does not
+  show (§11.1, O5). None is ruled here.
+- **The local record types (§8.1, §8.2) and the log line (§8.2):** PROPOSED, not ruled; settled in the separately authorized A3
+  implementation design (§11.3).
 - **The separate authorization for local A3 development** (§13, authorization 3), and every later authorization.
 - Every automatic stop condition of §9.3 A.5 (§10.2), unchanged apart from the bounded O1 test list above.
+
+### 11.3 Owner rulings of 2026-10-10 on O10 and on the O2 task
+
+Recorded from the architecture owner's rulings. Documentation only: they supersede no Accepted ADR, widen nothing in §9.3 A.1, and
+authorize no O2 or A3 development, merge, deployment, emission or activation. **No name below exists in the code today.**
+
+**O10 — names and file boundaries.**
+
+| Item | Ruled name |
+|---|---|
+| HTTP route | `POST /auth/admin/hierarchy-references/:kind/:id/repair` |
+| Route resource kinds | `platform` and `organization` only |
+| Controller | `ReferenceRepairController`, in `apps/auth-service/src/hierarchy/reference-repair.controller.ts` |
+| Service | `ReferenceRepairService`, in `apps/auth-service/src/hierarchy/reference-repair.service.ts` |
+| Internal entry (O4) | `HierarchyReference.repairReference(kind, id, steps)` |
+| Response | `ReferenceRepairResponseDto`, in `apps/auth-service/src/hierarchy/dto.ts` |
+| S2 | `StepUpService.consumeForReferenceRepair(...)` |
+| S1 | `StepUpService.verifyForService(...)` |
+| New tests | `apps/auth-service/test/reference-repair.e2e-spec.ts`, `apps/auth-service/test/reference-repair-local.e2e-spec.ts`, `apps/auth-service/test/reference-repair-proof.e2e-spec.ts` |
+| Existing S1-related tests | keep their locations (the two files named under O1 in §11.1; the paths are not separately ruled here) |
+
+- **The repair-purpose literal is kept inside `step-up.service.ts`.** O1's permission for the sixth named test (§11.1) is unchanged;
+  with the literal kept there, that test's allow-list is expected to need no change.
+- **`resolve` and `placeChain` are not exported** and stay private (§11.1, O4).
+- These names introduce no A3 behavior. Method names, the T1 entry text and the wiring are implementation detail of the separately
+  authorized A3 change. **The local record types and the log line were not ruled**: they remain PROPOSED in §8 and are settled in the
+  A3 implementation design, which is separately authorized.
+
+**The O2 task — class.** O2 is **GREEN** under A5.4-G1 (A5 record §9.1): it consists only of static repository checks, tests and
+documentation, with no runtime change. Two additional merge conditions are mandatory:
+
+1. a **separate, explicit architecture-owner approval** before O2 is merged;
+2. **verifiable evidence that the O2 diff does not modify shipped application or runtime image contents**, checked against the actual
+   build inputs or the produced images, not asserted from file extensions or `.dockerignore` alone. Rebuilt images are not claimed to
+   have identical digests unless that is independently demonstrated.
+
+No deployment or activation is authorized. O2 stays a separate prerequisite task before A3, with its own development authorization.
+
+**The O2 task — the replacement check.** It must:
+
+- scan the agreed source extensions under `apps/` and `libs/`;
+- exclude the audit-contract declaration directory, according to the existing catalog rules;
+- detect the four protected repair audit action names (`hierarchy.reference_repaired`, `hierarchy.reference_repair_denied`,
+  `hierarchy.reference_repair_unresolved`, `hierarchy.reference_anchor_mismatch_detected`);
+- use exact literal allow-list paths, never broad directories or globs;
+- keep the one producer path separate from the three test paths;
+- reject a mention anywhere outside those paths;
+- assert that the allow-list is unchanged unless deliberately reviewed;
+- include negative mutation tests;
+- demonstrate parity with both existing producer-less assertions;
+- be introduced in the same change that removes the superseded assertions;
+- remain effective before and after A3.
+
+| Allow-list | Approved future path |
+|---|---|
+| producer (one) | `apps/auth-service/src/hierarchy/reference-repair.service.ts` |
+| tests (three) | `apps/auth-service/test/reference-repair.e2e-spec.ts`, `apps/auth-service/test/reference-repair-local.e2e-spec.ts`, `apps/auth-service/test/reference-repair-proof.e2e-spec.ts` |
+
+**These paths are enforcement boundaries, not an authorization to produce the events.** Producing them is A3, which stays blocked.
+
+**G6 and deployment boundaries for O2.**
+
+- O2 may trigger the three image-build workflows; it must not deploy any image.
+- Image content compatibility must be proven (condition 2).
+- No certified digest-set selection is authorized.
+- O2 itself does not require a G6 execution.
+- A3's implementation and merge timing stay subject to the G6 baseline refresh rules (§15).
 
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
@@ -497,7 +572,7 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | TC1 | the A2 golden-trace spec passes with the fixture **byte-identical** (same checksum as on `main`), together with its mutation tests | `ensure` unchanged |
 | TC2 | every existing Auth unit and integration suite and `test:e2e:auth-organization` pass; the only edited assertions are the six named under O1 (§11.1), each listed in the pull request; the A1 binding tests are re-pointed at the repair route so they still test the binding | existing behavior |
 | TC3 | `npm run check:repo`: exactly one new T1 entry, the repair operation; the never-call list unchanged | boundary |
-| TC4 | **producer scope:** on `main` the two library tests prove no file under `apps/` names the four actions. The O2 prerequisite task (§11.1) relocates that property into a phase-aware repository check before A3, with tests that deliberately violate its allow-list; A3 must pass that check unchanged, and a test asserts the anchor-mismatch action is written only with `operation: reference_repair` | producer scope |
+| TC4 | **producer scope:** on `main` the two library tests prove no file under `apps/` names the four actions. The O2 prerequisite task (§11.1, §11.3) relocates that property into a phase-aware repository check before A3, with tests that deliberately violate its allow-list; A3 must pass that check unchanged, and a test asserts the anchor-mismatch action is written only with `operation: reference_repair` | producer scope |
 | TC5 | every event the repair writes validates against the declared catalog entry (the contract's validator), for each kind and outcome, including `organizationId` for an Organization and a mismatch whose resource is an ancestor | contract fit |
 | TC6 | mutation checks: removing the step 1c test, moving the placement before step 5, consuming inside the placement transaction, or adding a distinguishing field to the `404` record is caught by a test | the tests have teeth |
 | TC7 | audit-service's suites that iterate over every action pass unchanged | consumer compatibility |
@@ -513,7 +588,7 @@ The **seven separate authorizations** of §9.3 A.2:
 |---|---|---|
 | 1 | design documents and test plans | this document |
 | 2 | local A2 development | done (A2) |
-| 3 | local A3 development | **not granted**; the seven blockers are ruled (§11.1), and it still needs the prerequisites of §11.2 and its own authorization |
+| 3 | local A3 development | **not granted**; the seven blockers and O10 are ruled (§11.1, §11.3), and it still needs the prerequisites of §11.2 and its own authorization |
 | 4 | each commit and each pull request | not granted |
 | 5 | a RED-exception merge approval per pull request | not granted |
 | 6 | each deployment of an image containing the code | not granted |
@@ -539,7 +614,8 @@ The **seven separate authorizations** of §9.3 A.2:
    test changes named under O1 (TC2).
 5. `check:repo` passing with exactly one new T1 entry (TC3).
 6. The mutation checks of TC6.
-7. Recorded owner decisions for O1 to O15 (the seven of §11.1 are recorded; eight remain), and the O2 prerequisite task merged.
+7. Recorded owner decisions for O1 to O15 (eight are recorded, §11.1 and §11.3, O10 for its names and paths only; seven remain), and
+   the O2 prerequisite task merged.
 8. An independent design-conformance review against ADR-0061, ADR-0064, ADR-0065 and §9.3, with no required finding open.
 9. Full Core CI green on the pull request.
 10. The G6 timing statement of §15 in the pull request.
@@ -550,8 +626,8 @@ The **seven separate authorizations** of §9.3 A.2:
 ## 15. G6 timing and the certified digest set
 
 - A3's own code changes the auth-service image only: no audit-service, organization-service or library source changes. The O2
-  prerequisite task may touch tests under `libs/audit-contract/**` and repository scripts; it must prove whether any runtime image
-  contents change and preserve the G6 timing requirements (§11.1, O2).
+  prerequisite task may touch tests under `libs/audit-contract/**` and repository scripts; it must provide verifiable evidence that no shipped
+  runtime image contents change (condition 2 of §11.3) and preserve the G6 timing requirements (§11.1, O2).
 - **Merged before the G6 baseline refresh**, A3 is in the auth-service digest that G6 selects and rehearses: inert with source
   `local` (the §12.1 evidence), then exercised after the rehearsed activation.
 - **Merged after the refresh**, it changes the certified set, and a separately authorized re-rehearsal is required (§9.1 item 3).
