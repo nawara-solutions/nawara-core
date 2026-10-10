@@ -16,6 +16,10 @@
   by tests; an unreadable marker answers `503 hierarchy_unavailable`. §11.5 also corrects this document's earlier statement about
   the authority marker.
   Documentation only: A3 development is not authorized.
+- **Owner rulings (2026-10-10), fourth set:** the contract points of the repair service (slice C of the implementation) are
+  recorded in §11.6: records for a refused non-Owner in each source and marker state (C2), a cached and authorized target under marker
+  `frozen` (C3), three narrow test-file permissions for the slice C change (C1, C4), and the correction of test TA8 (C5).
+  Documentation only: slice C development is not authorized by it.
 - **Class.** A5.4-A3 is **RED**, permitted only inside §9.3's narrow exception.
 - **Authority.** [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) as partly superseded by
   [ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md) and
@@ -577,7 +581,7 @@ approved; relaxing the `local`-mode inertness or the audit producer scope.
   repair audit record is written; no hierarchy reference is written; no repair rate-limit attempt is counted. This is the same inert
   behavior as source `local` (§10.1).
 - **Marker `frozen`:** unchanged. The request proceeds as ADR-0061 §5 describes and the database refuses the placement: `503`, with
-  the proof consumed.
+  the proof consumed. (A target that is already cached and authorized needs no placement and keeps its `200`: §11.6, C3.)
 - **Marker missing, malformed, unreadable or otherwise indeterminate (ruled):** the request **fails closed** with
   **`503`, code `hierarchy_unavailable`**, and the marker is **never** treated as `org_authoritative`. The marker check comes
   before any repair-specific proof validation, proof consumption, rate-limit count and hierarchy write, so none of them happens.
@@ -588,9 +592,9 @@ approved; relaxing the `local`-mode inertness or the audit producer scope.
   | Marker (source `organization-service`) | Outcome |
   |---|---|
   | `local` | the collapsed `404`; nothing validated, consumed, counted or written |
-  | `frozen` | the existing behavior and order of ADR-0061: the request proceeds, the database refuses the placement, `503` with the proof consumed |
+  | `frozen` | the existing behavior and order of ADR-0061: the request proceeds, the database refuses the placement, `503` with the proof consumed (a cached and authorized target, which needs no placement, keeps its `200`: §11.6, C3) |
   | `org_authoritative` | eligible, subject to every other check |
-  | missing, malformed, unreadable or indeterminate | `503 hierarchy_unavailable`; nothing validated, consumed, counted or written |
+  | missing, malformed, unreadable or indeterminate | for an Owner, `503 hierarchy_unavailable`; nothing validated, consumed, counted or written (a non-Owner is refused `403` first: §11.6, C2) |
 - **Correction of this document.** §4 previously said that, with a marker that is not Organization-authoritative, "the database
   refuses the reference write". That is true for `frozen` only. With marker `local` the database guard of migration
   `0008_hierarchy_authority.sql` accepts every hierarchy insert, so a placement would be written as an ordinary local row. §4 and
@@ -681,6 +685,58 @@ S2 runs **one statement in autocommit**, outside any explicit transaction (§6).
 - **Required before A3 implementation acceptance:** focused tests that demonstrate the classification, row by row. This document
   implements no consumption logic.
 
+### 11.6 Owner rulings of 2026-10-10 on the repair service's contract points
+
+Recorded from the architecture owner's rulings, after the read-only contract investigation that followed implementation slices A
+(`StepUpService.consumeForReferenceRepair`) and B (`HierarchyReference.repairReference`), which exist as local, unmerged commits. Documentation only: they supersede no
+Accepted ADR, widen nothing in §9.3 A.1 beyond the three test lines named below, and authorize no slice C development.
+
+**C2 — an authenticated non-Owner.** The answer is `403` in every state; the order of the authorization checks (§3.3) is unchanged.
+What differs is the repair-specific audit record:
+
+| State | Response | Repair audit record |
+|---|---|---|
+| source `local` | `403` | none |
+| source `organization-service`, marker `local` | `403` | none |
+| source `organization-service`, marker `frozen` | `403` | none |
+| source `organization-service`, marker `org_authoritative` | `403` | the central denial, best effort, with the local fallback (§8.1) |
+| source `organization-service`, marker unreadable | `403` | none |
+
+- With the source `organization-service`, the marker may be read to decide whether a record is written. A failure to read it does not
+  change the `403` and results in no repair write.
+- This concerns **repair-specific** audit records only. It suppresses no existing, unrelated authentication or security evidence.
+
+**C3 — a cached and authorized target while the marker is `frozen`.** The existing ADR-0061 behavior applies (§5, "already cached and
+authorized"): `200` with `placed: false`; the valid proof is consumed; the accepted success record is written in its transaction; no
+hierarchy reference is inserted or updated. This holds **only** when the target is already cached and authorized, so that nothing
+needs placing. For an uncached target whose placement the frozen guard refuses, the existing `503` with the proof consumed is
+unchanged. Frozen-mode write permissions are not broadened: the database guard of migration `0008` covers the hierarchy tables, and
+no hierarchy write statement is issued on the cached path (it only reads the target's links).
+
+**How C2 and C3 fit together under `frozen`.** A refused non-Owner leaves no repair record; an Owner's request proceeds as the
+accepted sequence describes (§11.5, O15), with the records that sequence produces. The two rulings cover different requests and do not
+overlap. **Not ruled here:** the records of the other Owner outcomes under `frozen` (a rejected proof, an unresolved target, an
+infrastructure failure). In particular, whether a denial record is written for an Owner's rejected proof under `frozen` is not
+decided by C2 or C3; it is to be settled with the slice C development authorization.
+
+**C1 — the T1 test literal (permission for the slice C change, when it is separately authorized).** In
+`scripts/check-repo.test.mjs`, the assertion that lists the approved operations may gain exactly the fifth one, the hierarchy
+reference repair. The other four entries are not altered and no enforcement is weakened. The implementation side stays the one
+accepted T1 entry in `scripts/lib/checks.mjs`.
+
+**C4 — the two caller-list assertions (same condition).** One narrow update in each of
+`apps/auth-service/src/hierarchy/hierarchy-reference-repair.spec.ts` and `apps/auth-service/test/reference-repair-proof.e2e-spec.ts`:
+each exact list of files allowed to name the method may add `apps/auth-service/src/hierarchy/reference-repair.service.ts` (written
+relative to `src/` in the assertions). No other
+caller is allowed, and neither list becomes a directory pattern.
+
+**C5 — test TA8 corrected (§12.2).** With a malformed id and no proof: an eligible, authenticated Owner gets `400`; an authenticated
+non-Owner gets `403`; an Owner in an inert state gets the collapsed `404`. The accepted order of validation and authorization is
+unchanged; the earlier wording of TA8 expected `403` for the Owner, which contradicted that order.
+
+**None of C1, C4 and C5 is a source or test change made now.** They are permissions and a documentation correction; the files are
+touched only by a separately authorized slice C change.
+
 Carried forward, not A3 decisions: mismatch recording from first-touch `ensure` (separate RED); the `parent_missing` investigation;
 the timing of the audit-service deployment against the G6 refresh; the diagnostic CLI (A5.4-A4).
 
@@ -697,8 +753,10 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 |---|---|---|
 | TL1 | unauthenticated `401` (no bearer, an invalid bearer, a service token); Operator, Member and Organization administrator `403` | steps 1a, 1b |
 | TL2 | Owner: byte-identical `404` (status, body, headers that are not per-request) for a valid proof, an invalid proof, no proof, a malformed id, an unknown `kind`, an existing id, another Company's id | step 1c precedes everything |
-| TL2b | the same requests with source `organization-service` and marker `local` (§11.5, O15): the same byte-identical `404`; the TL3 checks hold (nothing consumed, counted or written; zero Organization Service calls). With marker `frozen`: `503`, proof consumed (TF1) | the marker is part of the inertness gate |
-| TL2c | the marker is missing, malformed or cannot be read, with source `organization-service` (§11.5, O15): `503 hierarchy_unavailable`; nothing is validated, consumed, counted, looked up or placed, and no repair record is written. With source `local` and the same broken marker, the route still answers its inert `404` without reading the marker | an indeterminate marker is never treated as Organization-authoritative |
+| TL2b | the same requests with source `organization-service` and marker `local` (§11.5, O15): the same byte-identical `404`; the TL3 checks hold (nothing consumed, counted or written; zero Organization Service calls). With marker `frozen` and an uncached target: `503`, proof consumed (TF1); a cached and authorized target is TL2d | the marker is part of the inertness gate |
+| TL2d | marker `frozen` (§11.6, C2 and C3): a **cached and authorized** target answers `200` with `placed: false`, the proof consumed, the success record written and **no** hierarchy write statement; an **uncached** target answers `503` with the proof consumed and no row; a **non-Owner** answers `403` with no repair record | frozen keeps the accepted behavior and writes nothing to the hierarchy |
+| TL2e | a refused **non-Owner** in each state (§11.6, C2): `403` every time; a repair record only with marker `org_authoritative`; with the marker unreadable the answer is still `403` and nothing is written | denial records follow eligibility; the order of checks is unchanged |
+| TL2c | the marker is missing, malformed or cannot be read, with source `organization-service` (§11.5, O15), for an Owner: `503 hierarchy_unavailable` (a non-Owner still gets `403`, TL2e); nothing is validated, consumed, counted, looked up or placed, and no repair record is written. With source `local` and the same broken marker, the route still answers its inert `404` without reading the marker | an indeterminate marker is never treated as Organization-authoritative |
 | TL3 | after TL1 and TL2: the proof's `consumedAt` is NULL; `auth_throttle`, `outbox`, `auth_audit_event`, `company`, `platform`, `organization`, `hierarchy_authority` and its event table are unchanged (counts and the hierarchy content digest); the stand-in records zero calls | no new write, no emission, no proof consumption |
 | TL4 | after TL2, the generic `POST /auth/step-up/verify` refuses that proof (`403`) and its `consumedAt` is still NULL | the proof is not burned by either endpoint |
 | TL5 | the three first-touch operations and `bootstrap-owner` behave as on `main` (the A2 integration spec, unchanged) | existing behavior with `local` |
@@ -708,13 +766,13 @@ as A2 did; anything beyond them is a repair-related write and must be exactly wh
 | # | Test | Proves |
 |---|---|---|
 | TA1 | Owner with a valid proof repairs an uncached Platform, and an uncached Organization (Company cached; nothing cached) | success |
-| TA2 | Operator, Member, Organization administrator, and a user of kind `owner` without an `owner` row: `403`, nothing placed, proof untouched, one `reference_repair_denied` (`no_authority`) | non-Owner refusal |
+| TA2 | Operator, Member, Organization administrator, and a user of kind `owner` without an `owner` row: `403`, nothing placed, proof untouched, one `reference_repair_denied` (`no_authority`) with marker `org_authoritative`; no repair record in any other state (TL2e; §11.6, C2) | non-Owner refusal |
 | TA3 | inactive user or session, no bearer: `401`, no record | unauthenticated |
 | TA4 | proof absent; malformed; expired; already used; issued to another Owner; to another session of the same Owner; for another purpose; a repair proof row whose method is not allowed (inserted directly, as a fixture): each `403 step_up_required`, **not consumed**, no Organization call, one denied record (`step_up_required`) | S2 rejections |
 | TA5 | a proof for another purpose stays usable for that purpose after being refused here | no cross-purpose burn |
 | TA6 | a secret-key-only step-up cannot be issued for the purpose (existing A1 test, unchanged) | factor-only |
 | TA7 | malformed id or `kind`: `400`; rate limit: `429`; neither consumes the proof | step 2 |
-| TA8 | a non-Owner, and an Owner without a proof, with a malformed id or an unknown `kind`: `403`, the local denial record only, no central record (§11.1, O3) | O3 |
+| TA8 | a malformed id or an unknown `kind`, with no proof (corrected 2026-10-10, §11.6 C5): an **Owner** in the eligible state gets `400` (validation, step 2a, precedes the proof check); an authenticated **non-Owner** gets `403` (step 1b precedes validation), with the local denial record only and no central record when the marker is `org_authoritative` (§11.1, O3), and no repair record in any other state (§11.6, C2); an Owner in an inert state gets the collapsed `404` | the order of checks; O3 |
 
 ### 12.3 S1 and S2
 
