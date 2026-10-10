@@ -2366,6 +2366,48 @@ test('A5.4-T1: auth-service reaches Organization Service only from its approved 
   // the real services and controllers still pass (case 1), and the real code has no subclass of a holder
   assert.ok(!Object.values(real).some((text) => /extends\s+(OnboardingService|InvitationService|AssignmentService|OrganizationController|PlatformController)\b/.test(text)));
 
+  // 9. declared-type indirection: an operation called through a name that only STANDS FOR the holder is still that operation
+  const args = "({} as never, 'o', {} as never, undefined, 'ip')";
+  const joinCode = /→ OnboardingService\.create → Organization Service \(join-code creation\); its only approved callers are membership\/organization\.controller\.ts#OrganizationController\.createJoinCode/;
+  const uses = (declaration, type) => `${declaration}\nexport class Uses {\n  constructor(private readonly o: ${type}) {}\n  go() { return this.o.create${args}; }\n}`;
+  // a same-file type alias, and an alias of an alias
+  fails(run(file('auth/t.ts', uses(`${onb}\ntype Onb = OnboardingService;`, 'Onb'))), /auth\/t\.ts: Uses\.go → OnboardingService\.create/);
+  fails(run(file('auth/t.ts', uses(`${onb}\ntype Onb = OnboardingService;\ntype Again = Onb | undefined;`, 'Again'))), joinCode);
+  // an imported type alias, through `import type`, a re-export and a second alias in another file
+  const aliasFile = file('auth/alias.ts', `${onb}\nexport type Onb = OnboardingService;`);
+  fails(run({ ...aliasFile, ...file('auth/t.ts', uses("import type { Onb } from './alias.js';", 'Onb')) }), /auth\/t\.ts: Uses\.go → OnboardingService\.create/);
+  fails(run({ ...aliasFile, ...file('auth/barrel.ts', "export type { Onb as Svc } from './alias.js';"), ...file('auth/t.ts', uses("import type { Svc } from './barrel.js';\ntype Mine = Svc;", 'Mine')) }), joinCode);
+  // typeof and InstanceType<typeof …>, directly and behind an alias
+  fails(run(file('auth/t.ts', uses(onb, 'InstanceType<typeof OnboardingService>'))), joinCode);
+  fails(run(file('auth/t.ts', uses(`${onb}\ntype Ctor = typeof OnboardingService;\ntype Inst = InstanceType<Ctor>;`, 'Inst'))), joinCode);
+  // a cast that names the class or one of its aliases: on the receiver, doubled, in angle brackets, and kept in a variable
+  const cast = (expression, declaration = onb) => file('auth/t.ts', `${declaration}\nexport class Uses {\n  constructor(private readonly x: unknown) {}\n  go() { ${expression} }\n}`);
+  fails(run(cast(`return (this.x as OnboardingService).create${args};`)), joinCode);
+  fails(run(cast(`return (this.x as unknown as OnboardingService).create${args};`)), joinCode);
+  fails(run(cast(`return (<OnboardingService>this.x).create${args};`)), joinCode);
+  fails(run(cast(`const o = this.x as OnboardingService;\n    return o.create${args};`)), joinCode);
+  fails(run(cast(`return (this.x as Onb).create${args};`, `${onb}\ntype Onb = OnboardingService;`)), joinCode);
+  // import aliases in these declarations: a renamed import, a namespace import, and a generic constraint
+  fails(run(file('auth/t.ts', uses("import { OnboardingService as O } from '../onboarding/onboarding.service.js';\ntype A = O;", 'A'))), joinCode);
+  fails(run(file('auth/t.ts', uses("import * as onbs from '../onboarding/onboarding.service.js';", 'onbs.OnboardingService'))), joinCode);
+  fails(run(file('auth/t.ts', uses("import * as onbs from '../onboarding/onboarding.service.js';\ntype A = onbs.OnboardingService;", 'A'))), joinCode);
+  fails(run(file('auth/t.ts', `${onb}\nexport const go = <T extends OnboardingService>(o: T) => o.create${args};`)), /auth\/t\.ts: go → OnboardingService\.create/);
+  // the other holders, and an approved controller handler reached through a typed, aliased or cast instance
+  fails(run(file('auth/t.ts', "import { AssignmentService } from '../platform/assignment.service.js';\ntype A = AssignmentService;\nexport const go = (a: A) => a.grant({} as never, 'a', 'b', undefined, 'ip');")), /auth\/t\.ts: go → AssignmentService\.grant → Organization Service \(operator platform-assignment grant\)/);
+  const ctl = "import { OrganizationController } from '../membership/organization.controller.js';";
+  fails(run(file('auth/t.ts', `${ctl}\nexport const go = (c: OrganizationController) => c.createJoinCode('o', {} as never, {} as never);`)),
+    /auth\/t\.ts: go → OrganizationController\.createJoinCode \(an approved Organization Service entry point\); only its route may run it/);
+  fails(run(file('auth/t.ts', `${ctl}\ntype C = OrganizationController;\nexport const go = (c: unknown) => (c as C).createInvitation('o', {} as never, {} as never);`)), /auth\/t\.ts: go → OrganizationController\.createInvitation \(an approved/);
+  // ordinary unrelated aliases and casts do not fail, nor does a holder alias that calls only never-call or unrelated methods
+  assert.deepEqual(run({
+    ...file('auth/ok1.ts', "import { GrantsService } from './grants.service.js';\ntype G = GrantsService;\nexport const a = (g: G) => g.forUser('u');\nexport const b = (x: unknown) => (x as GrantsService).forUser('u');"),
+    ...file('auth/ok2.ts', "type Maker = { create(): void };\nexport const c = (m: Maker) => m.create();\nexport const d = (x: unknown) => (x as Maker).create();\nexport const e = <T extends Maker>(m: T) => m.create();"),
+    ...file('auth/ok3.ts', `${onb}\ntype Onb = OnboardingService;\nexport const f = (o: Onb) => o.list({} as never, 'o');\nexport const g = (x: unknown) => (x as OnboardingService).resolve('c', {} as never);`),
+    ...file('auth/ok4.ts', `${onb}\nexport type Shape = { service: OnboardingService; many: OnboardingService[] };\nexport const h = (s: { create(): void }, _shape?: Shape) => s.create();`),
+  }), []);
+  // the earlier protections are unchanged by this rule (cases 2 to 8 above ran against the same check)
+  assert.deepEqual(run(), []);
+
   // the runner calls the check once, with auth-service's non-test sources
   const runner = readFileSync(new URL('./check-repo.mjs', import.meta.url), 'utf8');
   assert.equal(runner.split('checkAuthOrganizationBoundary(').length - 1, 1);
