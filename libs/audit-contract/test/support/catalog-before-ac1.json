@@ -1,0 +1,1584 @@
+{
+  "membership.approved": {
+    "producer": "auth-service",
+    "category": "business",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "membership"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "operator",
+          "org_admin"
+        ]
+      }
+    },
+    "purpose": "A person is admitted into an organization: access is granted by an identified administrator."
+  },
+  "membership.rejected": {
+    "producer": "auth-service",
+    "category": "business",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "membership"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "operator",
+          "org_admin"
+        ]
+      }
+    },
+    "purpose": "A request to join an organization is refused by an identified administrator."
+  },
+  "membership.revoked": {
+    "producer": "auth-service",
+    "category": "business",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "membership"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "operator",
+          "org_admin"
+        ]
+      },
+      "was_admin": {
+        "type": "boolean",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "A member loses access to an organization (and any administrator capability with it)."
+  },
+  "membership.admin_granted": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "membership"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "An owner makes a member an organization administrator (a privilege grant, with step-up)."
+  },
+  "membership.admin_revoked": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "membership"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "An owner removes the administrator capability of a member."
+  },
+  "membership.admin_provisioned": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "membership"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "invitation_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "An administrator invitation is consumed: a new organization administrator exists."
+  },
+  "join_code.created": {
+    "producer": "auth-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "join_code"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "operator",
+          "org_admin"
+        ]
+      }
+    },
+    "purpose": "A new way to enter an organization is opened."
+  },
+  "join_code.revoked": {
+    "producer": "auth-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "join_code"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "operator",
+          "org_admin"
+        ]
+      }
+    },
+    "purpose": "A way to enter an organization is closed."
+  },
+  "admin_invitation.created": {
+    "producer": "auth-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "admin_invitation"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "org_admin"
+        ]
+      }
+    },
+    "purpose": "An invitation that will mint an organization administrator is issued."
+  },
+  "admin_invitation.revoked": {
+    "producer": "auth-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "admin_invitation"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "authority": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "owner",
+          "org_admin"
+        ]
+      }
+    },
+    "purpose": "A pending administrator invitation is withdrawn."
+  },
+  "operator.created": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "An owner creates a platform operator account (privileged, cross-organization staff)."
+  },
+  "account.disabled": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "reason": {
+        "type": "code",
+        "shape": "value",
+        "required": false,
+        "values": [
+          "compromised_account",
+          "security_incident",
+          "policy_violation"
+        ]
+      }
+    },
+    "purpose": "An owner blocks an operator account, or suspends a member account of the owner's Company (every session revoked)."
+  },
+  "account.enabled": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "An owner unblocks an operator account, or restores a suspended member account of the owner's Company."
+  },
+  "platform_assignment.granted": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "platform_assignment"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "platform_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "An operator gains authority over a platform and its organizations."
+  },
+  "platform_assignment.revoked": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "platform_assignment"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "platform_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "An operator loses authority over a platform."
+  },
+  "owner.password_changed": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "The most privileged credential changes."
+  },
+  "owner.secret_key_rotated": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "The owner recovery secret is replaced."
+  },
+  "owner.factor_enrolled": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "factor"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "method": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "totp",
+          "webauthn"
+        ]
+      }
+    },
+    "purpose": "A second factor is added to an owner account."
+  },
+  "owner.factor_removed": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "factor"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A second factor is removed from an owner account."
+  },
+  "owner.recovery_started": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "Account recovery (factor reset) begins for an owner: the start of a takeover window."
+  },
+  "owner.recovery_completed": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "Owner recovery completes: every factor and session is revoked and re-enrollment starts."
+  },
+  "owner.recovery_cancelled": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A pending owner recovery is cancelled from a working session."
+  },
+  "session.refresh_reuse_detected": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "system": [
+        "refresh_reuse_detection"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "user"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "denied"
+    ],
+    "changes": {},
+    "purpose": "A rotated refresh token was replayed: a likely stolen session; the whole session family is revoked."
+  },
+  "owner.webauthn_clone_suspected": {
+    "producer": "auth-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "system": [
+        "webauthn_clone_detection"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "factor"
+    ],
+    "subject": {
+      "rule": "required",
+      "type": "user"
+    },
+    "outcomes": [
+      "denied"
+    ],
+    "changes": {},
+    "purpose": "A security key reported a signature counter that went backwards: a likely cloned authenticator, revoked."
+  },
+  "company.created": {
+    "producer": "organization-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "none",
+    "resource": [
+      "company"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A top-level tenant hierarchy root is created."
+  },
+  "company.updated": {
+    "producer": "organization-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "none",
+    "resource": [
+      "company"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A company record is changed."
+  },
+  "platform.created": {
+    "producer": "organization-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "none",
+    "resource": [
+      "platform"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A platform is created in the hierarchy."
+  },
+  "platform.updated": {
+    "producer": "organization-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "none",
+    "resource": [
+      "platform"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A platform record is changed."
+  },
+  "organization.created": {
+    "producer": "organization-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "self",
+    "resource": [
+      "organization"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A tenant organization comes into existence."
+  },
+  "organization.updated": {
+    "producer": "organization-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "self",
+    "resource": [
+      "organization"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A tenant organization record is changed."
+  },
+  "hierarchy.admin_operation_denied": {
+    "producer": "organization-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ]
+    },
+    "organization": "resource",
+    "resource": [
+      "company",
+      "platform",
+      "organization"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "denied"
+    ],
+    "changes": {
+      "operation": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "platform.create",
+          "platform.update",
+          "organization.create",
+          "organization.update"
+        ]
+      },
+      "reason": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "no_authority",
+          "step_up_required"
+        ]
+      }
+    },
+    "purpose": "A human was refused a hierarchy administration operation (no authority, or no fresh step-up)."
+  },
+  "subscription.activated": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "system": [
+        "payment_event_consumer",
+        "payment_reconciler"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "subscription"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "price_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "An organization first gains a paid entitlement (its subscription becomes active after a settled payment)."
+  },
+  "subscription.renewed": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "system": [
+        "payment_event_consumer",
+        "payment_reconciler"
+      ]
+    },
+    "organization": "required",
+    "resource": [
+      "subscription"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "period_end": {
+        "type": "timestamp",
+        "shape": "transition",
+        "required": true
+      }
+    },
+    "purpose": "A paid entitlement is extended by a settled payment."
+  },
+  "invoice.issued": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "invoice"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "An invoice becomes a legal claim (numbered, immutable)."
+  },
+  "invoice.discarded": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "invoice"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A draft invoice is abandoned before issue."
+  },
+  "invoice.paid": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "system": [
+        "payment_event_consumer",
+        "payment_reconciler"
+      ]
+    },
+    "organization": "optional",
+    "resource": [
+      "invoice"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "An issued invoice is settled."
+  },
+  "payment_request.created": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "payment_request"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "invoice_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "Collection of an invoice is requested."
+  },
+  "payment_request.cancelled": {
+    "producer": "billing-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true,
+      "system": [
+        "payment_event_consumer",
+        "payment_reconciler"
+      ]
+    },
+    "organization": "optional",
+    "resource": [
+      "payment_request"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "invoice_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "A pending collection is withdrawn."
+  },
+  "product.created": {
+    "producer": "billing-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "product"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A sellable product enters the platform catalog."
+  },
+  "product.archived": {
+    "producer": "billing-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "product"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A product stops being sellable."
+  },
+  "price.created": {
+    "producer": "billing-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "price"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "A price (what an organization will be charged) is published."
+  },
+  "price.retired": {
+    "producer": "billing-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "price"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      }
+    },
+    "purpose": "A price stops being offered."
+  },
+  "payment.created": {
+    "producer": "payment-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "payment"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A service asks for money to be collected."
+  },
+  "payment.cancelled": {
+    "producer": "payment-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "payment"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A pending collection is cancelled by its requester."
+  },
+  "payment.succeeded": {
+    "producer": "payment-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true,
+      "system": [
+        "payment_webhook",
+        "payment_attempt_resolver"
+      ]
+    },
+    "organization": "optional",
+    "resource": [
+      "payment"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "settled_method": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "gateway"
+        ]
+      }
+    },
+    "purpose": "Money is accepted as settled."
+  },
+  "payment.failed": {
+    "producer": "payment-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "user": [
+        "member",
+        "owner",
+        "operator"
+      ],
+      "service": true,
+      "system": [
+        "payment_webhook",
+        "payment_attempt_resolver"
+      ]
+    },
+    "organization": "optional",
+    "resource": [
+      "payment"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A collection definitively failed."
+  },
+  "payment.expired": {
+    "producer": "payment-service",
+    "category": "commercial",
+    "since": 1,
+    "actors": {
+      "system": [
+        "payment_expiry_sweep"
+      ]
+    },
+    "organization": "optional",
+    "resource": [
+      "payment"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A collection lapsed unpaid."
+  },
+  "file.deleted": {
+    "producer": "file-service",
+    "category": "business",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "optional",
+    "resource": [
+      "file"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {},
+    "purpose": "A stored document is deleted at its owner service's request (irreversible loss of content)."
+  },
+  "file.integrity_incident": {
+    "producer": "file-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "system": [
+        "file_download_integrity_check",
+        "file_reconciliation"
+      ]
+    },
+    "organization": "optional",
+    "resource": [
+      "file"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "reason": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "digest_mismatch",
+          "size_mismatch",
+          "object_missing"
+        ]
+      }
+    },
+    "purpose": "Stored content no longer matches its record (altered, truncated or missing): possible tampering or loss."
+  },
+  "release.registered": {
+    "producer": "release-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "none",
+    "resource": [
+      "release"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "component_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "kind": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "backend",
+          "web",
+          "desktop",
+          "mobile_ios",
+          "mobile_android"
+        ]
+      }
+    },
+    "purpose": "Automation declares that a build of a product component exists (a new, immutable release; not yet offered to clients)."
+  },
+  "release.published": {
+    "producer": "release-service",
+    "category": "administrative",
+    "since": 1,
+    "actors": {
+      "service": true
+    },
+    "organization": "none",
+    "resource": [
+      "release"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "component_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "kind": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "backend",
+          "web",
+          "desktop",
+          "mobile_ios",
+          "mobile_android"
+        ]
+      }
+    },
+    "purpose": "Automation publishes a registered release: it may become the latest version that clients are offered or required to use."
+  },
+  "release.withdrawn": {
+    "producer": "release-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "release"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "component_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "kind": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "backend",
+          "web",
+          "desktop",
+          "mobile_ios",
+          "mobile_android"
+        ]
+      }
+    },
+    "purpose": "A published release is withdrawn: it stops being offered, and clients running it are required to update."
+  },
+  "compatibility_policy.changed": {
+    "producer": "release-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "component"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "product_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "kind": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "web",
+          "desktop",
+          "mobile_ios",
+          "mobile_android"
+        ]
+      },
+      "policy_version": {
+        "type": "integer",
+        "shape": "transition",
+        "required": true,
+        "min": 0,
+        "max": 2147483647
+      },
+      "minimum_release_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": true
+      },
+      "previous_minimum_release_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": false
+      }
+    },
+    "purpose": "A client component's minimum supported version changes: clients below it are required to update."
+  },
+  "platform_query.executed": {
+    "producer": "audit-service",
+    "category": "security",
+    "since": 1,
+    "actors": {
+      "service": true,
+      "user": [
+        "owner"
+      ]
+    },
+    "organization": "none",
+    "resource": [
+      "platform_query"
+    ],
+    "subject": {
+      "rule": "forbidden"
+    },
+    "outcomes": [
+      "succeeded"
+    ],
+    "changes": {
+      "target": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "all",
+          "organization",
+          "platform"
+        ]
+      },
+      "window_days": {
+        "type": "integer",
+        "shape": "value",
+        "required": true,
+        "min": 1,
+        "max": 31
+      },
+      "result_count": {
+        "type": "integer",
+        "shape": "value",
+        "required": true,
+        "min": 0,
+        "max": 100
+      },
+      "page": {
+        "type": "code",
+        "shape": "value",
+        "required": true,
+        "values": [
+          "first",
+          "next"
+        ]
+      },
+      "filtered": {
+        "type": "boolean",
+        "shape": "value",
+        "required": true
+      },
+      "organization_id": {
+        "type": "uuid",
+        "shape": "value",
+        "required": false
+      }
+    },
+    "purpose": "Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), or by a Company owner (one organization of their Company). Who, when, which organization, how broadly."
+  }
+}

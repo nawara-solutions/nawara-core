@@ -208,6 +208,21 @@ const SPEC = {
     resource: ['factor'], subject: SUBJECT_USER, outcomes: DENIED, changes: NONE,
     purpose: 'A security key reported a signature counter that went backwards: a likely cloned authenticator, revoked.',
   },
+  // A5.4-AC1 (ADR-0061 §4, §6; docs/architecture/core-v2-a5-4-ac1-repair-audit-contract.md): declared consumer-first, with NO producer
+  // yet. The repair success covers a placement and an already-present reference (`placed` false), in the repair's own transaction. The
+  // denial never names an organization: the requested id may be unknown or belong to another Company (ADR-0061 §5, §8). Additive (A50).
+  'hierarchy.reference_repaired': {
+    producer: 'auth-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'resource',
+    resource: ['company', 'platform', 'organization'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { placed: { type: 'boolean', shape: 'value', required: true } },
+    purpose: 'The active Company owner repaired a hierarchy reference in Auth: a validated reference row was placed, or it was already present.',
+  },
+  'hierarchy.reference_repair_denied': {
+    producer: 'auth-service', category: 'security', since: 1, actors: { user: USERS_ALL }, organization: 'none',
+    resource: ['company', 'platform', 'organization'], subject: NO_SUBJECT, outcomes: DENIED,
+    changes: { reason: { type: 'code', shape: 'value', required: true, values: ['no_authority', 'step_up_required'] } },
+    purpose: 'A verified user was refused a hierarchy reference repair (no authority, or no valid fresh step-up).',
+  },
 
   // ----------------------------------------------------------------------------------------------------------------------- organization-service
   'company.created': {

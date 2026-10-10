@@ -104,8 +104,8 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 });
 
 describe('nothing else was broadened', () => {
-  it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3 and the two of Stage 20.4, and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(54);
+  it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the two of A5.4-AC1, and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
+    expect(AUDIT_ACTIONS).toHaveLength(56);
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
@@ -116,12 +116,12 @@ describe('nothing else was broadened', () => {
     expect(withUser.sort()).toEqual(['payment.failed', 'payment.succeeded']);
   });
 
-  it('exactly these actions accept a member: the 13 of Stage 18.4, plus G1 (payment.succeeded / failed) and G5 (organization.updated)', () => {
+  it('exactly these actions accept a member: the 13 of Stage 18.4, plus G1 (payment.succeeded / failed), G5 (organization.updated) and the A5.4-AC1 repair denial', () => {
     const member = AUDIT_ACTIONS.filter((a) => (AUDIT_CATALOG.get(a)!.actors.user ?? []).includes('member' as never));
     const stage184 = ['membership.approved', 'membership.rejected', 'membership.revoked', 'membership.admin_provisioned', 'join_code.created', 'join_code.revoked',
       'admin_invitation.created', 'admin_invitation.revoked', 'hierarchy.admin_operation_denied', 'invoice.issued', 'invoice.discarded', 'payment_request.created',
       'payment_request.cancelled'];
-    expect(member.sort()).toEqual([...stage184, 'payment.succeeded', 'payment.failed', 'organization.updated'].sort());
+    expect(member.sort()).toEqual([...stage184, 'payment.succeeded', 'payment.failed', 'organization.updated', 'hierarchy.reference_repair_denied'].sort());
     // Every other action refuses a member outright.
     for (const a of AUDIT_ACTIONS.filter((x) => !member.includes(x))) expect(ok(a, { actor: USER }), a).toThrow('invalid_actor');
   });
