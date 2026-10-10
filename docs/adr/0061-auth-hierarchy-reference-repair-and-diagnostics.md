@@ -16,6 +16,16 @@
 > merge** of the dormant repair runtime under the accepted A5.4-G1 exception (A5 record §9.3). Every condition of item 2 still applies to
 > production deployment, production audit emission and activation, and "runtime effect … blocked until F6/F7" is unchanged. ADR-0065
 > also fixes how the repair consumes its step-up proof (§4 step 3) and its failure outcomes.
+>
+> **Clarified (2026-10-10, architecture-owner ruling on A5.4-A3, O15; a clarification, not a supersession; status and decision text
+> unchanged).** §4 says the route "is disabled outside the Organization-authoritative mode (when Auth's hierarchy source is `local`
+> …)". For the repair route, "Organization-authoritative mode" means **both** that Auth's configured hierarchy source is
+> `organization-service` **and** that Auth's authority marker is `org_authoritative`. With the source `organization-service` and the
+> marker `local`, the route answers the collapsed `404` and does nothing, exactly as with the source `local`: Auth's database accepts
+> ordinary hierarchy writes while the marker is `local`, so a placement there would not be a guarded reference write. The marker
+> `frozen` keeps the `503` of §5 ("placement refused by the database") and its order. A marker that is missing, malformed or cannot
+> be read is never treated as `org_authoritative`: the route fails closed with `503 hierarchy_unavailable`, before any proof
+> validation, consumption, rate-limit count or hierarchy write. Detail: the [A3 design](../architecture/core-v2-a5-4-a3-reference-repair-design.md) §11.5.
 
 > **Acceptance note (2026-10-09, A5.3 OD-A5-4).** The architecture owner accepted the architectural design of this ADR as written (§3 to
 > §10). The Proposed-era notes below are kept unchanged as history; their statement "This ADR is **Proposed**: it is not accepted" is

@@ -15,6 +15,16 @@
 > **Implements and activates nothing.** No catalog action is declared by this ADR; the two action names below are proposals fixed by a
 > separately authorized YELLOW declaration task. Every producer (the repair runtime A5.4-A3, the resolve/place split A5.4-A2, any change
 > to first-touch `ensure`) stays RED under A5.4-G1.
+>
+> **Clarified (2026-10-10, architecture-owner ruling on A5.4-A3, O7; a clarification of timing only; status and decision text
+> unchanged).** §3 replaces the central step, for infrastructure failures, with "Auth's local audit (outcome `failure`), a structured
+> log and a bounded metric". The local audit record and the structured log are required from the first implementation. The **bounded
+> metric** needs the service-kit to expose application counters, a shared-library change outside A5.4-A3; it is deferred for the
+> repair's local implementation, its merge and the deployment of inert or non-activated code, with the V2 A12 observability workstream
+> as its expected path. **It is not waived for production activation:** before the repair capability is activated, either the metric
+> with appropriate operational monitoring, or a separately reviewed equivalent monitoring capability with the owner's explicit
+> approval, is required. No other requirement of this ADR is deferred, and nothing here authorizes an activation. Detail: the
+> [A3 design](../architecture/core-v2-a5-4-a3-reference-repair-design.md) §11.5.
 
 ## Context
 
