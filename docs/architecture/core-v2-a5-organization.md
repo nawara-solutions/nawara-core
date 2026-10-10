@@ -320,8 +320,10 @@ implemented as runtime behavior in a service, deployed or activated.
 > 5. **C1** is closed by ADR-0065: local implementation and merge may precede the production Audit Service deployment and F7 under this
 >    exception; production deployment, production audit emission and activation may not.
 > 6. **Reading the preserved text.** "(if accepted)", "(**Proposed**)", "Until ADR-0065 is Accepted", "only after ADR-0065 … Accepted" and
->    "Neither S1 nor S2 nor C1 is accepted" below describe the state before acceptance. In A.5, a route that "writes anything" with
->    source `local` means any new repair audit, outbox or central record, not existing security logging.
+>    "Neither S1 nor S2 nor C1 is accepted" below describe the state before acceptance. In A.5, the stop condition for a route that "writes anything"
+>    with source `local` is not narrowed: it still means any write at all, including a reference placement or any other hierarchy or
+>    cache write, any new repair audit (local or central), outbox row or central record, and any proof consumption. Only the unchanged
+>    emission of existing, unrelated producers and existing security logging is outside it.
 
 > **Not in force.** This is a proposal for the architecture owner (2026-10-10). Until the owner explicitly accepts it, A5.4-A2 and
 > A5.4-A3 stay **RED and blocked** under §9.1, and this section authorizes no work beyond this documentation: no design work, code,
