@@ -290,7 +290,8 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 | A5.4-A2 and A5.4-A3 narrow RED exception | RED (exception accepted) | **accepted 2026-10-10** with [ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md) (proposed in PR #276): §9.3. In force. A2 is designed, implemented and merged (rows below); A3 has a design and test plan only (authorization 1, documentation); no A3 development is authorized or started |
 | A5.4-A2 design and test plan | RED exception, authorization 1 of 7 (documentation) | merged as PR #278 (2026-10-10): [`core-v2-a5-4-a2-ensure-split-design.md`](core-v2-a5-4-a2-ensure-split-design.md) |
 | A5.4-A2 implementation: the `ensure` resolve/place split | RED exception, authorizations 2, 4 and 5 of 7 | **merged as PR #279 (2026-10-10, merge commit `d5a8cbb`) and validated**: `HierarchyReference.ensure` now runs a private read-only resolve step and a private place step; behavior unchanged (15 golden-trace scenarios identical to `main` at `bb36ea3`, mutation tests, source-`local` proofs, full Core CI green). **Not deployed and not activated**: no image containing it is selected or deployed (authorization 6), and it has no emission or activation of its own. **G6 timing still applies** (§9.3 A.3): whether this merge precedes the G6 baseline refresh is not recorded and remains OPEN; the owner decides at certified-digest-set selection, and a selection made before `d5a8cbb` would need a separately authorized re-rehearsal |
-| A5.4-A3 design and test plan | RED exception, authorization 1 of 7 (documentation) | drafted (2026-10-10) on its own branch: [`core-v2-a5-4-a3-reference-repair-design.md`](core-v2-a5-4-a3-reference-repair-design.md); no code; owner decisions open (its §11); local A3 development not authorized |
+| A5.4-A3 design and test plan | RED exception, authorization 1 of 7 (documentation) | merged as PR #280 (2026-10-10): [`core-v2-a5-4-a3-reference-repair-design.md`](core-v2-a5-4-a3-reference-repair-design.md); no code; local A3 development not authorized |
+| A5.4-A3 owner rulings on the seven blocking decisions | RED exception (documentation of rulings; no code) | recorded 2026-10-10 on its own branch: O1, O2, O3, O4, O5, O11 and O12 ruled (the design's §11.1; note below §9.3's acceptance note). O6 to O10 and O13 to O15 stay open. **A3 stays blocked**: the O2 producer-scope prerequisite task is not authorized or started, and local A3 development is not authorized |
 
 **Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
 of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed
@@ -327,6 +328,23 @@ implemented as runtime behavior in a service, deployed or activated.
 >    with source `local` is not narrowed: it still means any write at all, including a reference placement or any other hierarchy or
 >    cache write, any new repair audit (local or central), outbox row or central record, and any proof consumption. Only the unchanged
 >    emission of existing, unrelated producers and existing security logging is outside it.
+
+> **Owner rulings on the A3 blocking decisions (2026-10-10; documentation only).** Recorded in full in the
+> [A3 design](core-v2-a5-4-a3-reference-repair-design.md) §11.1. They supersede no Accepted ADR, widen nothing in A.1 and authorize no
+> development, merge, deployment, emission or activation. Three of them touch this section:
+> 1. **A.5, bounded exception for S1 (O1).** S1 is implemented as ADR-0065 §4 defines it: for the repair purpose only, the generic
+>    `POST /auth/step-up/verify` answers `403 step_up_required`, consumes nothing, keeps its existing local denial record, and adds no
+>    central audit event, outbox row or hierarchy write. The stop condition "any existing … step-up or verify test changes behavior"
+>    admits only the six A1 tests named in the design's §11.1. Every other stop condition stands unchanged; the repair route stays
+>    fully inert with source `local` (A.4); and compatibility with the images actually deployed must be demonstrated before any
+>    RED-exception merge.
+> 2. **A.5, `libs/audit-contract` (O2).** A3 itself makes no change under `libs/`. The producer-less assertions are relocated into an
+>    equivalent phase-aware repository check by a **separate prerequisite task** with its own development, review, CI and merge
+>    authorization, never leaving an interval without enforcement. That task is not authorized here.
+> 3. **Residual risk (O12).** A `503` for an integrity anomaly found before the Company is established is accepted as ADR-0061's
+>    sequence dictates; for another Company's uncached id it can reveal that the id exists. This is accepted for that case only.
+>
+> The other rulings (O3, O4, O5, O11) concern the repair's internal design and change nothing here.
 
 > **Not in force.** This is a proposal for the architecture owner (2026-10-10). Until the owner explicitly accepts it, A5.4-A2 and
 > A5.4-A3 stay **RED and blocked** under §9.1, and this section authorizes no work beyond this documentation: no design work, code,
