@@ -5,7 +5,7 @@ import { clientInfo } from '../common/client-info.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
 import { DbService } from '../db/db.service.js';
 import { notFound } from '../errors.js';
-import { StepUpService, type StepUpPurpose } from '../owner/step-up.service.js';
+import { StepUpService } from '../owner/step-up.service.js';
 import { PlatformAccessService } from '../platform/platform-access.service.js';
 import { Actors, type AuthedRequest } from './auth.guard.js';
 import { AuthService } from './auth.service.js';
@@ -110,10 +110,10 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Verify and consume a step-up proof for the named purpose, for the authenticated caller (ADR-0042 Amendment 1 A.1). Single-use, session-bound, purpose-bound, short-lived.' })
   @ApiResponse({ status: 204, description: 'Verified and consumed.' })
-  @ApiResponse({ status: 403, description: 'Missing, expired, reused, wrong-purpose or wrong-session step-up.' })
+  @ApiResponse({ status: 403, description: "Missing, expired, reused, wrong-purpose or wrong-session step-up, or a purpose that is Auth's own and never verified for a service (the hierarchy reference repair; the proof is not consumed)." })
   async verifyStepUp(@Body() dto: VerifyStepUpDto, @Req() req: AuthedRequest) {
     await this.db.tx((q) =>
-      this.stepUp.consume(q, { ownerId: req.actor.userId, sid: req.actor.sid, purpose: dto.purpose as StepUpPurpose, token: dto.stepUpToken }),
+      this.stepUp.verifyForService(q, { ownerId: req.actor.userId, sid: req.actor.sid, purpose: dto.purpose, token: dto.stepUpToken }),
     );
   }
 

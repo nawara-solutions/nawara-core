@@ -450,7 +450,7 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
       .toMatchObject({ jwt: { issuer: 'iss', audience: 'aud', accessTtlSec: 600 }, refreshTtlSec: 3600 });
   });
 
-  it('every default, including all 29 rate buckets', () => {
+  it('every default, including all 31 rate buckets', () => {
     const c = loadConfig(good());
     expect({ ...c, jwt: undefined, secrets: undefined, databaseUrl: undefined, metrics: undefined }).toEqual({
       env: 'test', logLevel: 'info', port: 3000, databaseUrl: undefined,
@@ -479,11 +479,12 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
         contact_verify_user: { limit: 10, windowSec: 900 }, contact_verify_ip: { limit: 40, windowSec: 900 },
         invitation_resolve_ip: { limit: 15, windowSec: 900 }, invitation_resolve_global: { limit: 500, windowSec: 60 },
         invitation_accept_ip: { limit: 10, windowSec: 900 }, invitation_manage_actor: { limit: 20, windowSec: 3600 },
+        reference_repair_owner: { limit: 5, windowSec: 300 }, reference_repair_ip: { limit: 20, windowSec: 300 },
       },
       onboarding: { requireContactVerification: false, contactCodeTtlSec: 900, invitation: { minMinutes: 15, defaultMinutes: 1440, maxMinutes: 10_080 } },
       docs: { username: 'docs', password: undefined },
     });
-    expect(Object.keys(c.rate)).toHaveLength(29);
+    expect(Object.keys(c.rate)).toHaveLength(31);
     expect(c.secrets.totpActiveKeyId).toBe('k1');
   });
 

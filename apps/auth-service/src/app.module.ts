@@ -17,6 +17,8 @@ import { PasswordService } from './crypto/password.js';
 import { TotpSecretCipher } from './crypto/totp-cipher.js';
 import { CodeEventPurge } from './events/code-event-purge.js';
 import { HierarchyReference, ORGANIZATION_DIRECTORY, OrganizationDirectoryClient } from './hierarchy/hierarchy-reference.js';
+import { ReferenceRepairController } from './hierarchy/reference-repair.controller.js';
+import { ReferenceRepairService } from './hierarchy/reference-repair.service.js';
 import { OutboxDomainEvents } from './events/domain-events.js';
 import { HealthController } from './health/health.controller.js';
 import { MemberSecurityController } from './members/member-security.controller.js';
@@ -55,7 +57,7 @@ import { UsersService } from './users/users.service.js';
  * suites all go through `AppModule.register(cfg)`, so no module reads `process.env` on its own.
  */
 @Module({
-  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController, MemberSecurityController],
+  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController, MemberSecurityController, ReferenceRepairController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -65,6 +67,8 @@ import { UsersService } from './users/users.service.js';
     // Stage 21.C.2 (ADR-0040 decision 1): the reference-cache protocol and Auth's own Organization Service client (absent: no credential).
     { provide: ORGANIZATION_DIRECTORY, useFactory: (c: AppConfig) => (c.hierarchy.client ? new OrganizationDirectoryClient(c.hierarchy.client) : null), inject: [APP_CONFIG] },
     HierarchyReference,
+    // A5.4-A3: the hierarchy reference repair (inert unless Organization Service is the authority).
+    ReferenceRepairService,
     { provide: PasswordService, useFactory: (c: AppConfig) => new PasswordService(c.bcryptCost), inject: [APP_CONFIG] },
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,

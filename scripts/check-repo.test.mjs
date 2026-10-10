@@ -2249,7 +2249,7 @@ test('A5.4-T1: auth-service reaches Organization Service only from its approved 
 
   // 1. the real auth-service passes, with every approved administrative caller in place
   assert.deepEqual(run(), []);
-  assert.deepEqual(AUTH_ORGANIZATION_OPERATIONS.map((op) => op.operation), ['join-code creation', 'organization-admin invitation creation', 'operator platform-assignment grant', 'owner bootstrap (command line)']);
+  assert.deepEqual(AUTH_ORGANIZATION_OPERATIONS.map((op) => op.operation), ['join-code creation', 'organization-admin invitation creation', 'operator platform-assignment grant', 'owner bootstrap (command line)', 'hierarchy reference repair']);
   assert.equal(AUTH_ORGANIZATION_CLIENT, `${SRC}hierarchy/hierarchy-reference.ts`);
 
   // 2. a DIRECT forbidden dependency: a never-call module imports the client (each static form)
