@@ -20,14 +20,14 @@ describe('health, readiness and graceful shutdown', () => {
     expect(r.body).toEqual({ status: 'ok' });
   });
 
-  it('GET /ready is 200 {status: ready} when the database is reachable, and the only registered check is "database"', async () => {
+  it('GET /ready is 200 {status: ready} when the database is reachable', async () => {
     t = await createTestApp();
     const r = await t.http.get('/ready');
     expect(r.status).toBe(200);
     expect(r.body).toEqual({ status: 'ready' });
   });
 
-  it('GET /ready fails closed with 503 naming exactly "database" and "migrations" (which cannot be confirmed either; Stage 14.5) when the database is unreachable, while /health stays 200 and RabbitMQ is never a dependency', async () => {
+  it('GET /ready fails closed with 503 naming exactly "database", "hierarchy_authority" (A5.4-A5) and "migrations" (which cannot be confirmed either; Stage 14.5) when the database is unreachable, while /health stays 200 and RabbitMQ is never a dependency', async () => {
     t = await createTestApp({ AUTH_EVENTS: 'off', DATABASE_URL: 'postgres://nobody:nothing@127.0.0.1:1/none' });
     const health = await t.http.get('/health');
     expect(health.status).toBe(200);
@@ -35,7 +35,7 @@ describe('health, readiness and graceful shutdown', () => {
 
     const ready = await t.http.get('/ready');
     expect(ready.status).toBe(503);
-    expect(ready.body).toEqual({ status: 'unavailable', failed: ['database', 'migrations'] });
+    expect(ready.body).toEqual({ status: 'unavailable', failed: ['database', 'hierarchy_authority', 'migrations'] });
   });
 
   it('GET /ready leaks no host, credential or SQL text when the database is unreachable', async () => {
