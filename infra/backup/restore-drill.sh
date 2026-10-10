@@ -488,6 +488,46 @@ docker run -d --name "$DAPP" --network "container:$DDB" --env-file "$WORK/app.en
 if [ "$SERVICE" = audit-service ]; then
   case "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$DAPP")" in "container:$DDB" | "container:$DDB_ID") ;; *) die "the drill service is not confined to the drill namespace; refusing" ;; esac
 fi
+# R2 (ADR-0063 §4 item 9; the A5.4-A5 design §9): an Auth backup taken under a freeze stays a valid backup. Its restored marker is
+# `frozen`, which an image with the A5.4-A5 readiness check reports as not ready (`marker_frozen`, R1). The exception below applies ONLY
+# when the backup's own authority fact, already proven equal to the restored database by compare_facts, is exactly `authority|frozen`;
+# it is derived here and never read from the caller's environment. Every other backup keeps the exact ready gate below.
+FROZEN_BACKUP=no
+if [ "$SERVICE" = auth-service ] && [ "$AUTHORITY_FACT" = 'authority|frozen' ]; then FROZEN_BACKUP=yes; fi
+READY_GATE=ready
+if [ "$FROZEN_BACKUP" = yes ]; then
+  # D1: the image's own capability, read from its packaged build (WORKDIR /app/apps/auth-service): `absent` (an image built before
+  # A5.4-A5, which answers ready while frozen), `capable` (the module exports the check's name), anything else fails the drill.
+  capability=$(docker exec "$DAPP" node -e 'const f = "dist/hierarchy/authority-readiness.js"; if (!require("fs").existsSync(f)) { console.log("absent"); } else { import(require("url").pathToFileURL(require("path").resolve(f)).href).then((m) => console.log(m.HIERARCHY_AUTHORITY_CHECK === "hierarchy_authority" ? "capable" : "unknown")).catch(() => console.log("unknown")); }' 2>/dev/null || true)
+  case "$capability" in
+    absent) READY_GATE=ready ;;
+    capable) READY_GATE=frozen ;;
+    *) die "the image's hierarchy authority readiness capability could not be determined; refusing" ;;
+  esac
+fi
+if [ "$READY_GATE" = frozen ]; then
+  # The expected answer, and nothing else: 503 naming ONLY hierarchy_authority, AND the service's own diagnostics naming marker_frozen
+  # (its reason line and the registry's line, matched as JSON `msg` values; never printed). The marker itself is confirmed again below
+  # through the service's CLI. A check-capable image answering ready while frozen is a broken check: the drill fails.
+  frozen_ok=""
+  for _ in $(seq 1 60); do
+    probe=$(docker exec "$DAPP" node -e 'fetch("http://127.0.0.1:3000/ready").then(async (r) => console.log(r.status + " " + (await r.text()))).catch(() => console.log("unreachable"))' 2>/dev/null || true)
+    [ "$probe" = '200 {"status":"ready"}' ] && die "GET /ready answered ready for a frozen backup although the image has the hierarchy authority readiness check; refusing"
+    if [ "$probe" = '503 {"status":"unavailable","failed":["hierarchy_authority"]}' ]; then
+      logs=$(docker logs "$DAPP" 2>&1 || true)
+      reason=$(grep -oE '(^|[{,])"msg":"hierarchy_authority_not_ready reason=[a-z_]+ source=(local|organization-service) marker=[a-z_]+"' <<<"$logs" | tail -n 1 || true)
+      registry=$(grep -oE '(^|[{,])"msg":"readiness_check_failed check=hierarchy_authority error=[A-Za-z]+ code=[a-z_]+ ' <<<"$logs" | tail -n 1 || true)
+      unset logs
+      if [[ $reason =~ \"msg\":\"hierarchy_authority_not_ready\ reason=marker_frozen\ source=(local|organization-service)\ marker=frozen\"$ ]] \
+        && [[ $registry =~ \"msg\":\"readiness_check_failed\ check=hierarchy_authority\ error=HierarchyAuthorityNotReady\ code=marker_frozen\ $ ]]; then
+        frozen_ok=yes; break
+      fi
+    fi
+    sleep 1
+  done
+  [ -n "$frozen_ok" ] || die "GET /ready did not give the expected answer for a frozen backup (only hierarchy_authority failing, reason marker_frozen)"
+  ok "GET /ready -> 503, only hierarchy_authority failing, reason marker_frozen: the expected answer for a backup taken under a freeze (R2)"
+else
 ready=""
 for _ in $(seq 1 60); do
   ready=$(docker exec "$DAPP" wget -qO- http://127.0.0.1:3000/ready 2>/dev/null || true)
@@ -495,7 +535,11 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [ "$ready" = '{"status":"ready"}' ] || { docker logs --tail 20 "$DAPP" 2>&1 | grep -oE '"msg":"[a-z_]+' | sort | uniq -c >&2 || true; die "GET /ready did not answer ready against the restored database"; }
-if [ "$SERVICE" = audit-service ]; then
+[ "$FROZEN_BACKUP" = no ] || log "  NOTE  the image predates the hierarchy authority readiness check (A5.4-A5): a frozen backup answers ready (D1)"
+fi
+if [ "$READY_GATE" = frozen ]; then
+  :
+elif [ "$SERVICE" = audit-service ]; then
   ok "GET /ready -> {\"status\":\"ready\"} (the real contract: the restored database, its migrations, the drill broker and the ingestion consumer)"
   # The consumer Audit attached is on the DISPOSABLE broker: the only broker its namespace can reach.
   consumers=$(docker exec -u rabbitmq "$DMQ" rabbitmqctl -q list_consumers -p "$MQ_VHOST" queue_name --no-table-headers 2>/dev/null || true)

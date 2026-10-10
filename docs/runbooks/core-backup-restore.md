@@ -161,7 +161,13 @@ It passes only when all of these hold:
 6. **every** fact recorded at backup time is equal: row counts, structure, migration digest, outbox (total, pending, attempts),
    owners, ACLs, authority state (`ownership_state` / `hierarchy_authority`);
 7. the service boots against the restored database with a drill-only configuration (production endpoints and credentials replaced;
-   **never a production broker URL**, since the relay re-publishes restored pending outbox rows) and `GET /ready` answers ready;
+   **never a production broker URL**, since the relay re-publishes restored pending outbox rows) and `GET /ready` answers ready.
+   **One exception (R2, ADR-0063 §4 item 9):** an auth-service backup whose recorded authority fact is exactly `frozen`, already proven
+   equal to the restored database in step 6, is a valid backup, and an image with the hierarchy authority readiness check (A5.4-A5)
+   correctly reports it **not ready**. The drill then accepts only `503` naming `hierarchy_authority` alone, together with the service's
+   own `marker_frozen` diagnostics (its reason line and the readiness registry's line), and step 8 must still read `frozen`; anything
+   else fails. An image that predates the check, detected from the image itself, answers ready and is held to the normal gate. The
+   exception is never enabled by an operator setting, applies to the drill only, and does not make a frozen Auth ready for traffic;
 8. the application-level read: organization-service returns the known Company through its API; auth-service reads its hierarchy
    authority marker through its own CLI (`hierarchy-status`; only the mode is used, nothing else is printed), and it must equal the
    value recorded at the backup source.
