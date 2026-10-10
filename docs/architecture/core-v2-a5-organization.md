@@ -283,14 +283,137 @@ needed. It also narrows this record's §6 🔴 row and the roadmap's A5.4 label,
 | F6 readiness and mirror-order rulings | GREEN (documentation) | owner rulings in principle recorded 2026-10-10 on its own branch: a dated clarification on [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4 and the Decision of [`core-v2-a5-4-f6-transitional-readiness.md`](core-v2-a5-4-f6-transitional-readiness.md). Not ready with direction-specific reasons; source-first mirroring; `/ready` monitoring-only. The G6 plan and the active runbooks are unchanged; A5.4-A5 is not authorized |
 | A5.4-AC1 reference-repair audit contract (decision) | YELLOW (decision recorded; no code) | owner decisions of 2026-10-10 recorded on its own branch: [`core-v2-a5-4-ac1-repair-audit-contract.md`](core-v2-a5-4-ac1-repair-audit-contract.md). Two producer-less actions, `hierarchy.reference_repaired` and `hierarchy.reference_repair_denied`; the collapsed `404`, operational failures and anchor mismatch stay open and block A5.4-A3 (decided in principle by batch 2, below). No library change; implementation needs its own authorization |
 | A5.4-AC1 batch 1 declarations | YELLOW | merged as PR #272 (2026-10-10): `hierarchy.reference_repaired`, `hierarchy.reference_repair_denied`; producer-less; not deployed |
-| A5.4-AC1 batch 2 decisions | YELLOW (decision recorded; no code) | owner decisions D1 to D4 of 2026-10-10 recorded on its own branch: [`core-v2-a5-4-ac1-batch2-decisions.md`](core-v2-a5-4-ac1-batch2-decisions.md) and [ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md) (Accepted; partly supersedes the ADR-0061 §6 failure chain for infrastructure failures; records D1, D3, D4 as new policy). Two proposed actions; declarations and producers not authorized |
+| A5.4-AC1 batch 2 decisions | YELLOW (decision recorded; no code) | owner decisions D1 to D4 of 2026-10-10 recorded on its own branch: [`core-v2-a5-4-ac1-batch2-decisions.md`](core-v2-a5-4-ac1-batch2-decisions.md) and [ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md) (Accepted; partly supersedes the ADR-0061 §6 failure chain for infrastructure failures; records D1, D3, D4 as new policy). Two proposed actions; producers not authorized (declarations since merged, PR #274) |
+| A5.4-AC1 batch 2 decisions, ADR-0064 | YELLOW (documentation) | merged as PR #273 (2026-10-10) |
+| A5.4-AC1 batch 2 declarations | YELLOW | merged as PR #274 (2026-10-10): `hierarchy.reference_repair_unresolved`, `hierarchy.reference_anchor_mismatch_detected`; producer-less; not deployed |
+| A5.4-A1 `hierarchy.reference.repair` step-up purpose | YELLOW | merged as PR #275 (2026-10-10): factor-only; consumed by no Auth route (the generic verify can still burn a proof: §9.3 S1); not deployed |
+| A5.4-A2 and A5.4-A3 narrow RED exception | RED (proposal) | **proposed, not in force** (2026-10-10): §9.3 |
 
 **Owner classification rulings (2026-10-10; classification only, no implementation authorized):** A5.4-AS1 (audit-service acceptance
 of the `steward` user kind, including its database CHECK change) is **RED**; A5.4-K1 (service-kit runtime `adminTier` fail-closed
 validation) is **RED**; A5.4-AC1 (additive, producer-less audit-contract declarations) stays **YELLOW**; A5.4-D1 and A5.4-D2
 (documentation) stay **GREEN**.
 
-No YELLOW or RED task is authorized or started. Nothing is implemented in a service, deployed or activated.
+No RED task is authorized or started. The YELLOW items above are merged as producer-less or consumer-less declarations; nothing is
+implemented as runtime behavior in a service, deployed or activated.
+
+### 9.3 Proposed narrow RED exception for A5.4-A2 and A5.4-A3 [PROPOSED — NOT IN FORCE]
+
+> **Not in force.** This is a proposal for the architecture owner (2026-10-10). Until the owner explicitly accepts it, A5.4-A2 and
+> A5.4-A3 stay **RED and blocked** under §9.1, and this section authorizes no work beyond this documentation: no design work, code,
+> commit, pull request, merge, deployment or activation. Acceptance would be recorded as a dated acceptance note in this section, as in
+> §9.1; this banner stays until that note exists. Accepting it would itself authorize nothing either: every step in A.2 needs its own
+> authorization.
+
+**Basis.** §9.1 item 1 keeps RED work blocked "until its applicable gate or a separately approved, specific governance amendment", and
+[ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §11 (clarification of 2026-10-09) keeps RED implementation
+blocked "apart from explicitly approved, narrowly scoped exceptions" (§9.1 item 2 words it "a separately approved, narrow exception"). §9.1 item 4 (A5.4-A5) is the precedent. This proposal narrows the RED row for two
+items only; it changes no Accepted ADR, no other RED item, no F6/F7 gate and no certification requirement. The repair semantics stay those
+of [ADR-0061](../adr/0061-auth-hierarchy-reference-repair-and-diagnostics.md) as partly superseded by
+[ADR-0064](../adr/0064-reference-repair-failure-and-incident-audit.md); in particular the route is disabled while Auth's hierarchy source
+is `local` (ADR-0061 §4).
+
+#### A.1 Scope (if accepted)
+
+| Item | Permitted, each under its own authorization | Prohibited |
+|---|---|---|
+| **A5.4-A2**: the `ensure` resolve/place split | refactor `HierarchyReference.ensure` (`apps/auth-service/src/hierarchy/hierarchy-reference.ts`) into a read-only resolve step and the existing guarded place step; `ensure` keeps its exact external behavior (fetch order, early returns, the single placement transaction, `ON CONFLICT DO NOTHING`, the anchor re-read, the `hierarchy_anchor_mismatch` log and `503`, the `false` for a missing target); focused equivalence and regression tests | any new authority, caller or capability; the repair-only cached-ancestor comparison of ADR-0061 §4 step 4 inside `ensure`; any change to the first-touch callers or the owner bootstrap |
+| **A5.4-A3**: the repair route, **only after ADR-0065 (C1, S1, S2) and this section are Accepted** | the Auth repair route and service implementing ADR-0061 §4 and §5 as amended by ADR-0064 §4; the dedicated committed proof consumption (S2); the generic-verification restriction (S1, as decided in ADR-0065); the producers of `hierarchy.reference_repaired`, `hierarchy.reference_repair_denied`, `hierarchy.reference_repair_unresolved` and `hierarchy.reference_anchor_mismatch_detected` **for the repair path only** (the mismatch record only with `operation` `reference_repair`), placed in the repair service and never in the shared `HierarchyReference.place`, so first-touch behavior and recording stay unchanged; the A5.4-T1 allow-list entry for the repair operation only (`scripts/lib/checks.mjs`); focused security and integration tests | recording an anchor mismatch from first-touch `ensure` (a separate RED decision); any other T1 entry; any route reachable with source `local` |
+
+**Common prohibitions (both items):** changing a production hierarchy source or marker; enabling repair while the source is `local`; any
+migration or schema change; any organization-service change; any audit-catalog change; any change to unrelated Auth behavior or to existing
+first-touch recording; deploying an image outside the certified-digest-set treatment (A.3); any production audit emission before the
+consumer is ready (A.3); bypassing G6, G7, F6 or F7; combining A2 and A3 in one change.
+
+#### A.2 Separate authorizations
+
+1. Preparing design documents and test plans (no code).
+2. Local A2 development.
+3. Local A3 development, only after ADR-0065 and this section are Accepted.
+4. Each commit and each pull request.
+5. A RED-exception merge approval for each pull request, in addition to the YELLOW conditions of §9.1 (no changed behavior in deployed
+   images, the approved image-pinning policy) and the timing rule of A.3.
+6. Each deployment of an image containing the code.
+7. Activation: only after F6 and F7, with Auth's source `organization-service` and the audit-service deployment of A.3 done.
+
+Accepting this proposal grants none of these; each is requested and approved on its own.
+
+#### A.3 G6 and deployment sequencing
+
+- **Certified digest set.** Code merged under this exception is in the next auth-service image. It must be merged **before the G6
+  baseline refresh** that selects the certified digest set, so G6 rehearses it; if it is merged after that selection, the set changes
+  and a separately authorized re-rehearsal is required (§9.1 item 3).
+- **Consumer first.** No production emission of the four repair actions before an audit-service image that declares them is deployed
+  (separately authorized). Production audit-service runs an image that predates them. The audit-service digest in the certified set
+  must declare all four actions (PRs #272 and #274).
+- **C1: the implementation-order condition of ADR-0061.** ADR-0061's acceptance item 2 requires, "before any implementation or
+  activation", that the production Audit Service supports the repair actions and that the F6/F7 prerequisites are met. Read
+  literally, it forbids writing A3 before that deployment and before F7. Because Accepted ADRs are immutable, this exception does **not**
+  reinterpret it: it depends on [ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md) (**Proposed**),
+  which would partly supersede that condition for **local implementation and merge only** (the owner's direction C1-a, in principle,
+  2026-10-10). Production deployment, production audit emission and F6/F7 activation stay gated exactly as before. Until ADR-0065 is
+  Accepted, A3 is not developed (A2 does not depend on it).
+- **Merge is not deployment.** A merge approval never implies a deployment; each production deployment is separately authorized.
+- The G6 rehearsal runs the route inert (source `local`) as part of the A.4 evidence, before activation is rehearsed.
+
+#### A.4 Proof of inaccessibility before activation (required evidence for A3)
+
+With Auth's source `local` (an e2e test on the real application):
+- an unauthenticated caller gets `401` and a non-Owner `403`, before anything else (ADR-0061 §4 step 1);
+- for an active Owner the route answers the collapsed `404`, **identical** for a valid proof, an invalid proof and another Company's id;
+- the supplied proof's `consumedAt` stays NULL; no reference row is placed; no outbox row and no central or local audit record is
+  written; the Organization Service client records **zero** calls.
+
+With the source `organization-service` in tests: every row of ADR-0061 §5 as amended by ADR-0064 §4 is reproduced (including `400`,
+`429`, the already-cached `200` and concurrent repairs), and S2's concurrency and failure cases.
+
+#### A.5 Automatic stop conditions
+
+Work stops, and is reported, if:
+- any existing hierarchy, first-touch, bootstrap, step-up or verify test changes behavior, or the A2 equivalence tests fail;
+- the T1 check needs any entry other than the repair operation;
+- a migration, a schema change or an organization-service change becomes necessary;
+- a change in `libs/service-kit` or `libs/audit-contract` becomes necessary (it changes all three service digests);
+- an audit-catalog change becomes necessary;
+- the generic `consume()` semantics would have to change;
+- S1 or S2 needs more than described;
+- the route is reachable, consumes a proof or writes anything with source `local`, or any observable behavior of a deployed image
+  changes with source `local`;
+- a merge would change the certified digest set without an authorized re-rehearsal;
+- at activation, the deployed audit-service image does not declare the four actions;
+- the scope of A.1 would have to grow.
+
+#### A.6 Rollback
+
+Before merge: nothing to undo. After merge, before deployment: revert the pull request. After deployment, before F6: the route is
+inert with source `local`; redeploy the previous attested digest, if one exists, through the digest-deployment procedure. After F6:
+ownership rollback follows ADR-0040 A2.6 (no automatic rollback after the one-way door), and image changes use only the certified
+digest set. No rollback undoes reference rows already placed (never deleted), proofs already consumed or audit records already emitted
+(append-only).
+
+#### A.7 A3 security decisions for the owner [PROPOSED]
+
+The owner's directions in principle (2026-10-10) are S1, S2, and `503` for a failed consumption. Their exact wording is decided in
+[ADR-0065](../adr/0065-reference-repair-pre-f7-development-and-step-up-consumption.md) (**Proposed**) §4 and §5; summary:
+
+**S1. Generic verification refuses the repair purpose.** `POST /auth/step-up/verify` refuses `hierarchy.reference.repair` before any
+consuming statement, so a calling service cannot burn a repair proof and the proof stays usable by the repair route. The answer is the
+endpoint's existing `403 step_up_required`, which it already gives for an unknown purpose, a wrong purpose or an invalid proof, so it
+reveals nothing new. Every other purpose, the endpoint's authentication and service authentication are unchanged. ADR-0065 records it as
+a clarification of ADR-0042 Amendment 1 A.1 (which names no purpose list): it narrows the endpoint for a purpose that did not exist when
+A.1 was written, and a documentation follow-up is required (the endpoint's API description, a dated ADR-0042 note, the
+`step-up.service.ts` comment).
+
+**S2. Dedicated committed proof consumption.** Used only by the repair route; the existing `consume()` is unchanged for every other
+purpose. One atomic statement consumes the proof only if Owner, session, purpose, unused, unexpired **and the allowed method** all hold;
+it runs in its own transaction, committed before any hierarchy lookup; of two concurrent requests with the same proof, exactly one
+consumes it. Outcomes: an invalid, expired, used or mismatched proof → `403 step_up_required` (ADR-0064's refusal row); a consumption
+confirmed committed → continue; a consume transaction confirmed failed → `503 hierarchy_unavailable` with local evidence only; an
+**uncertain** outcome → `503`, fail closed, with bounded local evidence. An uncertain outcome is not proof of consumption: Auth never
+proceeds on it and never retries it; if the client re-presents the proof, that request's atomic statement decides, or the client
+obtains a fresh proof.
+
+Neither S1 nor S2 nor C1 is accepted by this proposal; they take effect only if ADR-0065 and this section are Accepted.
 
 ## 10. Owner decisions [PROPOSED, not approved]
 
