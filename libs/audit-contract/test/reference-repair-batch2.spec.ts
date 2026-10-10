@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ACTOR_TYPES, AUDIT_ACTIONS, AUDIT_CATALOG, AUDIT_CATEGORIES, AUDIT_CONTRACT_VERSION, AUDIT_OUTCOMES, CORE_PRODUCERS,
@@ -11,8 +11,9 @@ import { SAMPLE_IDS } from '../src/testing.js';
 /**
  * A5.4-AC1 batch 2 (ADR-0064; docs/architecture/core-v2-a5-4-ac1-batch2-decisions.md): two more producer-less reference-repair
  * actions, added consumer-first. Pinned here: the change is additive only (the 56 earlier entries and every contract constant are as
- * before), each new entry accepts precisely the decided shape, the collapsed-404 record cannot distinguish its three cases, and no
- * application emits either action yet.
+ * before), each new entry accepts precisely the decided shape, and the collapsed-404 record cannot distinguish its three cases. That no
+ * application names either action outside the approved producer scope is enforced by the repository check
+ * `checkRepairAuditProducerScope` (`npm run check:repo`, A5.4-A3 O2).
  */
 type P = Record<string, any>;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -143,22 +144,5 @@ describe('consumer side and producers', () => {
       expect(() => validateAuditEvent(envelope(p, 'organization-service'))).toThrow('producer_not_admitted');
       expect(mayRetainRefusedAuditBody(envelope(p))).toBe(true);
     }
-  });
-
-  it('is producer-less: no source file under apps/ or libs/ (outside the contract library) names either action', () => {
-    const roots = [resolve(here, '../../../apps'), resolve(here, '../..')];
-    const own = resolve(here, '..');
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        if (name === 'node_modules' || name === 'dist' || name.startsWith('.')) continue;
-        const path = join(dir, name);
-        if (path === own) continue;
-        if (statSync(path).isDirectory()) walk(path);
-        else if (/\.(ts|tsx|mts|cts|js|mjs|cjs|json)$/.test(name) && /reference_repair_unresolved|reference_anchor_mismatch/.test(readFileSync(path, 'utf8'))) hits.push(path);
-      }
-    };
-    for (const root of roots) walk(root);
-    expect(hits).toEqual([]);
   });
 });
