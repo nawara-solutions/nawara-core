@@ -1,0 +1,60 @@
+# R3 operational alert carrier for auth-service readiness: ONE cycle (docs/architecture/core-v2-a5-r3-alert-carrier.md;
+# docs/runbooks/auth-readiness-alerting.md). Started by auth-readiness-alert.timer; never installed or enabled by repository tooling:
+# installing it on a production host is a separately authorized production action.
+#
+# Trust boundary: the carrier needs the Docker socket (`docker inspect`, `docker logs`, one `docker exec` reading /ready), and access
+# to that socket is root-equivalent on the host. It therefore runs as root, without any capability, with a read-only file system except
+# its own state directory, and with its two credential files passed by systemd (LoadCredential=), never through the environment.
+[Unit]
+Description=Nawara Core: auth-service readiness alert carrier (R3), one cycle
+Documentation=file:///opt/nawara-core/docs/runbooks/auth-readiness-alerting.md
+# Ordering only: the carrier must NEVER start Docker (a Requires= or Wants= on docker.service would restart a deliberately stopped
+# daemon, and with it Auth and its database, within one timer period). A stopped daemon is reported as probe_failed:container.
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The script, as installed (the runbook's installation step copies it here, root-owned, mode 0755).
+ExecStart=/usr/local/libexec/nawara/auth-readiness-alert.sh
+# Non-secret settings only. The host label is set at installation (the runbook); the credentials are files, below.
+Environment=AUTH_CONTAINER=nawara-core-auth-service
+Environment=REMINDER_SECONDS=3600
+EnvironmentFile=-/etc/nawara-auth-readiness-alert/carrier.env
+# The receiver's and the heartbeat's curl config files (URL and credential), root-only on the host, exposed to this unit only.
+LoadCredential=receiver.curl:/etc/nawara-auth-readiness-alert/receiver.curl
+LoadCredential=heartbeat.curl:/etc/nawara-auth-readiness-alert/heartbeat.curl
+Environment=RECEIVER_CONFIG=%d/receiver.curl
+Environment=HEARTBEAT_CONFIG=%d/heartbeat.curl
+# Durable state, the delivery queue and the lock: /var/lib/nawara-auth-readiness-alert (mode 0700), kept across restarts and reboots.
+StateDirectory=nawara-auth-readiness-alert
+StateDirectoryMode=0700
+UMask=0077
+# Bounded: the script's own budgets keep a cycle under about 52 s (docker calls at most 30 s in total, no new delivery after 35 s, each
+# delivery at most 10 s, the check-in at most 7 s); systemd kills a cycle that still runs at 55 s. A killed cycle loses nothing: the queue
+# is on disk and is retried (delivery is at-least-once).
+TimeoutStartSec=55
+# Hardening (the Docker socket stays the one privileged path).
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The journal receives states, message kinds and counts only (the script prints nothing else).
+StandardOutput=journal
+StandardError=journal

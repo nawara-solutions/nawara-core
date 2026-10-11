@@ -1,8 +1,13 @@
 # Core V2 A5.4-A5 R3: the operational alert carrier (design record)
 
-- **Status:** design record, **documentation only**, written 2026-10-10 under the owner's documentation authorization for R3. **It
-  implements nothing, selects no provider, creates no account, installs nothing and authorizes no deployment.** Every owner decision in
-  §9 is **OPEN** unless marked otherwise; the proposed defaults there are recommendations, **not approvals**.
+- **Status:** design record, written 2026-10-10 as **documentation only** under the owner's documentation authorization for R3. **The
+  record itself selects no provider, creates no account, installs nothing and authorizes no deployment.** §9 lists the owner decisions
+  as they stood when the design was written (all OPEN, the defaults being recommendations, **not approvals**); the owner's later
+  approvals **for provider-neutral code only** are recorded in §9's update note and in §15.
+- **Implementation status (2026-10-11):** implemented locally on `feature/core-v2-a5-r3-readiness-alert` under the owner's
+  development authorization (§15): `infra/alerting/` (script, service and timer units), its tests and the runbook
+  [`auth-readiness-alerting.md`](../runbooks/auth-readiness-alerting.md). **No provider is selected, nothing is installed, no
+  demonstration has run, and R3 is not satisfied.**
 - **Governs:** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4, clarification item 10 (R3), and the
   [F6 readiness decision record](core-v2-a5-4-f6-transitional-readiness.md) ("Later rulings", R3). Where this record and either differs,
   they govern. Related: the [A5.4-A5 design](core-v2-a5-4-a5-readiness-design.md) (§7, §10 item 10, §11 OPEN-3), the
@@ -59,8 +64,11 @@ delivers a certified path (§12).
 ## 4. Carrier behavior (PROPOSED)
 
 **Probe (every cycle; default interval 60 s, O-R3-5).** On the host:
-1. `docker inspect` of the Auth container (`nawara-core-auth-service`, the deploy script's `APP`): running state, image digest, the
-   revision label if present (else `unlabelled`). A missing or stopped container is the state `probe_failed:container`.
+1. `docker inspect` of the Auth container (`nawara-core-auth-service`, the deploy script's `APP`): its container id, running state, its
+   **image ID** (`.Image`, the local configuration digest) and the revision label if present (else `unlabelled`); then
+   `docker image inspect` of that image for its **registry index digest** (`RepoDigests`, the identity deploy records use; `none` if
+   absent). The image ID and the index digest are distinct fields and are never confused (L-1). A missing or stopped container is the
+   state `probe_failed:container`.
 2. `/ready` read **inside the container** with a body-reading probe (`node -e fetch(…)`, as the R2 restore drill does; BusyBox `wget`
    does not return a 503 body), bounded by a timeout (proposed 10 s). No answer is `probe_failed:unreachable`.
 3. On a not-ready answer, the Auth diagnostic lines since the **start of the previous cycle's probe** (persisted, so a line written by
@@ -94,8 +102,11 @@ expected and **not suppressed**.
 | RECOVERED | not ready / probe failed → `ready` | the payload with the duration of the incident |
 | DEPLOYMENT | the container's image changes (any state) | the old and new image identity and revision; also shows the carrier saw the redeploy |
 
-**Durable state.** One state file (root-owned, `0600`, written atomically by rename): the last state, its first-seen time, the last
-message time and kind, the last digest, and an undelivered-message queue. A restart re-reads it, so a restart never re-sends an ALERT for
+**Durable state.** One state file (root-owned, `0600`, written atomically by rename) holding everything the next cycle needs (L-2): the
+last state, its failing checks and probe-failure class; the carried-forward reason, source, marker and registry code, with the container id
+they belong to; the reason last reported (so a later `unknown` is never a change); the container id, image ID, index digest and revision;
+the failure's first-seen time and the last message time; the log cursor (the previous cycle's probe start, for `--since`); the boot id;
+and the queue sequence. The undelivered messages are separate files in a queue directory, never in the state file. A restart re-reads it, so a restart never re-sends an ALERT for
 an unchanged failure and never loses a RECOVERED. A missing or unreadable state file is treated as "unknown": the next observation is
 sent as ALERT or as an initial `ready` notice (never silently assumed ready).
 
@@ -134,6 +145,9 @@ any database, and never reads a database.
 | `hierarchy_authority_not_ready reason=… source=… marker=…` | reason, source, marker | reason: `source_ahead_of_marker`, `marker_ahead_of_source`, `marker_frozen`, `marker_missing`, `marker_invalid`, `marker_unreadable`; source: `local`, `organization-service`; marker: `local`, `frozen`, `org_authoritative`, `missing`, `invalid`, `unreadable` |
 | `readiness_check_failed check=… error=…[ code=…][ kind=…] — /ready answers 503 until it recovers` | check, error class, optional code, optional kind | check: `[a-z][a-z0-9_-]{0,40}` (the kit's check-name rule); error class: `[A-Za-z][A-Za-z0-9_]{0,63}`; code: `[A-Za-z0-9_.-]{1,64}` (the kit's token rule); kind: one of the kit's `FailureKind` values (`logging/failure.ts`) |
 
+The implementation recognizes the registry line of the `hierarchy_authority` check only (its `code` is what `registry_code` reports); the
+failing set of every other check comes from the `/ready` body, which needs no log line.
+
 - A value outside its enumeration or pattern becomes `unrecognized`, never echoed. Nothing else from the log (message text, stack,
   request ids, fields) is read into the payload.
 - The `/ready` body is parsed as JSON and accepted only in the kit's two shapes (`{"status":"ready"}`, `{"status":"unavailable","failed":[names]}`
@@ -156,14 +170,16 @@ Plain key/value text (or JSON for a webhook receiver), **only** these fields:
 | `reason`, `source`, `marker` | the §5 tokens when `hierarchy_authority` fails; else absent |
 | `registry_code` | the §5 code of the latest registry line for a failing check |
 | `probe_failure` | `container`, `unreachable`, `timeout`, `unparseable` |
-| `since`, `duration_s`, `sent_at` | UTC times |
-| `previous` | the previous state (CHANGED, RECOVERED) |
+| `since`, `duration_s`, `created_at` | UTC times (`created_at`: when the message was queued; a delayed delivery keeps it) |
+| `previous` | the previous state (ALERT, CHANGED, RECOVERED) |
+| `previous_image`, `previous_revision` | DEPLOYMENT only: the image ID and revision seen before |
 | `runbook` | a fixed pointer to the runbook section |
 
 **Never** in the payload, the carrier's own logs or its argv: the receiver or heartbeat credentials, any environment value, database
 URL, token, user, hierarchy content, log text beyond the §5 tokens. The credentials (including a heartbeat's secret check-in URL, which
-is itself a credential) are read from root-only `0600` files and passed via `curl --config -` on stdin or `-H @<root-only file>`: neither a
-header value nor a secret URL ever appears in argv, in the environment of child processes, or in the journal. The heartbeat check-in
+is itself a credential) are read from root-only `0600` files and handed to curl as `--config <that file>` (the implementation's form; the
+file's path is not a secret, its content is never read by the carrier itself): neither a header value nor a secret URL ever appears in
+argv, in the environment of child processes, or in the journal. The heartbeat check-in
 carries **no payload**.
 
 **Reason guidance (static text in the runbook, keyed by the payload):** `marker_frozen` is critical on the fresh path (production);
@@ -179,7 +195,7 @@ which case applies: the operator does, with the authority agreement check (organ
 | carrier script failing or crashing | no check-in → the heartbeat service alerts; systemd records the failed unit |
 | timer stopped, host down or rebooted without the timer | no check-in → the heartbeat service alerts |
 | heartbeat service down | **not** detectable by the carrier itself: the heartbeat provider's own reliability is a provider requirement (§9, O-R3-3) |
-| carrier restarted | `CARRIER_STARTED` (info) on the first cycle after a start, so a restart is visible |
+| carrier (re)installed, its state lost, or the host rebooted | `CARRIER_STARTED` (info) on the first cycle afterwards. A timer stopped and started again **without** a reboot is not announced by the carrier: the heartbeat silence reports the gap |
 
 ## 8. Provider contracts (BLOCKED: no provider is selected)
 
@@ -188,8 +204,10 @@ authenticated mail submission) with a credential usable from a root-only file; r
 small text payload; and keep its credential revocable. It must not require the credential in a URL that could be logged.
 
 **Heartbeat (O-R3-3)** must: be **independent of the production host and of the receiver**; accept a check-in by an authenticated or
-unguessable HTTPS endpoint; alert the owner on its own after a configurable silence (proposed: three missed cycles); and alert through a
-channel that still works if the receiver is down.
+unguessable HTTPS endpoint; alert the owner on its own after a configurable silence (proposed: three missed cycles); alert through a
+channel that still works if the receiver is down; and be **reliable enough to be the backstop** (L-3, §7): its availability, its own
+alert delivery and its silence detection are the provider's documented service, reviewed by the owner when the provider is selected,
+because the carrier cannot detect the heartbeat service's own failure.
 
 No account is created and no credential exists. Choosing them is the owner's (§9).
 
@@ -204,7 +222,13 @@ No account is created and no credential exists. Choosing them is the owner's (§
 | O-R3-5 | intervals; scope of failures; code location | 60 s probe, hourly reminder, every `/ready` failure (the latter is an owner instruction, recorded as such), code under `infra/alerting/` | OPEN (except "every failure") |
 | O-R3-6 | the record type | this short design record, subject to architectural governance review; an ADR only if the review asks for one | OPEN |
 
-## 10. Tests and demonstration (PROPOSED; nothing run)
+**Update (2026-10-11, owner development authorization; provider-neutral code only).** Approved for the implementation of §15:
+O-R3-1 (the host-local carrier); provider-neutral receiver and heartbeat **interfaces** under O-R3-2 and O-R3-3; O-R3-4 (no suppression
+and no authorized-window bypass); O-R3-5 (60 s probes, 60 min reminders, every `/ready` failure, code under `infra/alerting/`); O-R3-6
+(this record as the implementation reference, no additional ADR). **Still OPEN and BLOCKED:** the receiver provider, the heartbeat
+provider, their accounts and credentials, and the demonstration environment. The table above is kept as written.
+
+## 10. Tests and demonstration (as written 2026-10-10: PROPOSED; the tests are since implemented, §15; the demonstration has not run)
 
 **Focused tests** (local, with the existing fake-Docker deploy-test harness and a fake receiver and heartbeat; `npm run test:deploy`):
 
@@ -237,10 +261,10 @@ a real Auth image containing A5.4-A5 (a labelled, attested `main` image), a disp
 5. break the receiver: messages queued, heartbeat silence alert from the provider; restore: queued messages delivered in order;
 6. stop the timer: heartbeat silence alert;
 7. inspect every delivered payload against §6 for secrets.
-The demonstration is recorded (dates, image digest, payload samples with nothing secret) and independently reviewed. The G6 rehearsal VM is
+The demonstration is recorded (dates, the image ID and index digest, payload samples with nothing secret) and independently reviewed. The G6 rehearsal VM is
 a candidate host if it exists in time; the first Auth digest deployment may precede G6, and R3 must be met before it.
 
-## 11. Implementation scope (PROPOSED; a later, separate authorization)
+## 11. Implementation scope (as written 2026-10-10: PROPOSED; implemented locally since, §15)
 
 - `infra/alerting/auth-readiness-alert.sh` (bash, no new dependency), `infra/alerting/auth-readiness-alert.service` and `.timer`.
 - `scripts/deploy-tests/auth-readiness-alert.test.mjs` with the existing harness; a fake receiver and heartbeat (in the test or a small
@@ -260,7 +284,8 @@ Nothing here pre-empts A12.10's decisions D2 or D6a.
 
 ## 13. Production prerequisites (BLOCKED until each is done)
 
-1. Owner rulings O-R3-1 to O-R3-6 (§9), including the receiver and heartbeat providers and their accounts, created by the owner.
+1. The owner rulings still open (§9's update note): the receiver and heartbeat providers, their accounts, created by the owner, and the
+   demonstration environment.
 2. The implementation (§11) under its own authorization, with the tests of §10 passing and an independent review.
 3. The demonstration (§10) on a non-production host, recorded and independently reviewed, followed by an explicit **certification** of
    the carrier as R3's "separately certified equivalent": an owner or architecture-governance act, distinct from the independent review.
@@ -270,6 +295,43 @@ Nothing here pre-empts A12.10's decisions D2 or D6a.
 
 ## 14. What this record does not do
 
-It implements, installs and configures nothing; it selects no provider and holds no credential; it changes no ADR, runbook, workflow,
+*As written 2026-10-10 (superseded for the local implementation by §15).* It implements, installs and configures nothing; it selects no provider and holds no credential; it changes no ADR, runbook, workflow,
 image or alert rule; it authorizes no demonstration, installation, deployment or activation. The A3 findings (PR #287 item 5 NOT VERIFIED;
 O1 timing unmet) and the R2 evidence limitations (the capability probe not yet validated inside a real image) are unchanged.
+
+## 15. Implementation (2026-10-11): local, provider-neutral, not installed
+
+*Recorded with the implementation; the sections above are the design it implements. The owner's development authorization (2026-10-11)
+approved, for provider-neutral code only: O-R3-1 the host-local carrier; O-R3-2 and O-R3-3 provider-neutral receiver and heartbeat
+interfaces (the providers, accounts, credentials and the demonstration environment stay OPEN); O-R3-4 no suppression and no
+authorized-window bypass; O-R3-5 60 s probes, 60 min reminders, every `/ready` failure, code under `infra/alerting/`; O-R3-6 this record as
+the implementation reference (no additional ADR).*
+
+- **Code:** `infra/alerting/auth-readiness-alert.sh` (bash; `docker`, `curl`, `flock`, `timeout`, coreutils; no new dependency),
+  `auth-readiness-alert.service` (oneshot, root without capabilities, read-only file system except `StateDirectory=`, credentials by
+  `LoadCredential=`, `TimeoutStartSec=55`, hardened) and `auth-readiness-alert.timer` (every 60 s, `OnBootSec=60`).
+- **Provider-neutral interfaces:** each of the receiver and the heartbeat is one curl config file (URL and credential) owned by the owner;
+  the receiver gets the §6 JSON by `POST` (`--data-binary` from the queued file), the heartbeat a bare check-in with no payload; both
+  HTTPS only (`--proto =https`, no redirects), `-q` (no `~/.curlrc`), bounded time. Credential files must be regular, owned by the
+  carrier's user, mode `0600`/`0400`; their paths are un-exported, so no child process inherits them.
+- **Resolved design findings:** L-1 (image ID versus index digest, §4 step 1, §6), L-2 (the complete durable state, the persisted log
+  cursor, §4), L-3 (the heartbeat's reliability in its contract, §8).
+- **Tests:** `scripts/deploy-tests/auth-readiness-alert.test.mjs` with the test-only stand-ins `scripts/deploy-tests/lib/fake-alert-tools.mjs`
+  (`docker`, `curl`, `date`), part of `npm run test:deploy`; they prove the carrier's logic only, not a delivery to a real provider.
+- **Guarantees and limits of the implementation:** the carrier never starts Docker (the unit orders itself after `docker.service` without
+  requiring it, so a deliberately stopped daemon stays stopped and is reported `probe_failed:container`); delivery is **at-least-once**
+  (a cycle killed after the receiver accepted a message but before its file is removed sends it again); a cycle is bounded by its own
+  budgets (Docker calls at most 30 s in total, no new delivery after 35 s, 10 s per delivery, 7 s for the check-in) under the unit's 55 s
+  limit; the log cursor advances only when the logs were read; nothing is carried forward once Auth is ready again; a reason is compared
+  only with a registry line that follows it. `CARRIER_STARTED` announces an installation, a lost state or a reboot, not a timer restarted
+  without a reboot.
+- **Mutation checks (local):** alert on every probe; missing recovery; dropped pending delivery; a secret in the journal; a secret in the
+  payload; the heartbeat not withheld; ready treated as a failure; carried diagnostics dropped, or kept across containers; the cursor not
+  persisted; a reason accepted against a later registry line. Also: the carried reason kept after a ready result; the cursor advanced over an unread
+  log window; stray queue files parsed; the unit requiring Docker; the config paths exported. Each of these is killed by a named test and
+  restored byte-identically. **Not covered by a test or a mutant, correct by inspection only:** the ordering "state persisted before
+  delivery" (a kill in the middle of a delivery is not simulated) and the delivery deadline and time budgets (never reached with the
+  test stand-ins).
+- **Not done (each separately authorized):** the provider selection and accounts; the demonstration of §10 on a non-production host; the
+  owner's certification; the production installation. Until then R3 is **not** satisfied and the first and later Auth deployments
+  containing the A5.4-A5 check stay gated.
