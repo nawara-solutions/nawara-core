@@ -1,0 +1,15 @@
+# R3 alert carrier: one cycle every 60 s (O-R3-5). A oneshot service is never started again while a cycle is still running, and the
+# script also holds a lock, so cycles never overlap. Monotonic timers start after boot without any catch-up burst.
+# Never installed or enabled by repository tooling (docs/runbooks/auth-readiness-alerting.md).
+[Unit]
+Description=Nawara Core: auth-service readiness alert carrier (R3), every 60 s
+Documentation=file:///opt/nawara-core/docs/runbooks/auth-readiness-alerting.md
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+Unit=auth-readiness-alert.service
+
+[Install]
+WantedBy=timers.target
