@@ -115,26 +115,82 @@ with a read-only file system except its state directory, and runs only `docker i
 stopped daemon is reported as `probe_failed:container`. If `docker.socket` is enabled on the host, however, **any** Docker client call
 socket-activates the daemon, the carrier's included. Before maintenance that needs Docker to stay stopped, stop the timer first
 (`systemctl stop auth-readiness-alert.timer`; the heartbeat provider will report the silence, which is expected) and start it again
-afterwards. After installation, also confirm with `stat` that the three files systemd places in the unit's credentials directory are
-owned by root with mode `0400` or `0600`; the script refuses anything else on every cycle.
+afterwards.
+
+**Credential permissions (metadata only; never print a credential, never `cat` a credential file or echo a URL).** systemd does not
+hand the unit the files in `/etc/nawara-auth-readiness-alert/`: on every start it places **copies** in the unit's own credentials
+directory (`/run/credentials/auth-readiness-alert.service/`, which exists only while a cycle runs), and the script's per-cycle check
+(a regular file owned by its user, mode `0600`/`0400`) sees only those copies. **A passing check on the copies says nothing about the
+originals**: a world-readable original would still be copied into a correctly protected copy. Check both, separately:
+
+1. the originals, after installation and after any credential change:
+   `find /etc/nawara-auth-readiness-alert -maxdepth 1 -printf '%u:%g %m %y %p\n'` (names and metadata only, hidden files included)
+   must show the directory as `root:root 700 d` and each of `pushover.token`, `pushover.user`, `healthchecks.url` and `carrier.env` as
+   `root:root 600 f` (or `400`); no symbolic link, no other file, no group or other access. Also confirm that no other
+   copy of these values exists on the host (an editor's backup or swap file in that directory, a file in a home directory);
+2. the copies supplied to the unit: every cycle's journal line shows that the script accepted them (a refusal names the credential and
+   the problem, never its value, and exits 1); to inspect them directly, run `stat -c '%U:%G %a %F %n' /run/credentials/auth-readiness-alert.service/*` as
+   root **while a cycle is running** (`systemctl start auth-readiness-alert.service` in another terminal): `root:root`, mode `400` or
+   `600` (systemd's choice), regular files, only the three credential names. A cycle usually lasts a few seconds, so the command may
+   need repeating; "No such file or directory" only means that no cycle was running;
+3. the boundary: only root reads the originals (the unit runs as root; no other user or group is granted access), the copies are
+   visible to the unit only for the length of a cycle, and nothing in the unit's `Environment=` holds a value (only the `%d/…` paths).
 
 **Removal** (separately authorized): `systemctl disable --now auth-readiness-alert.timer`, then remove the units, the script, the
 configuration directory and `/var/lib/nawara-auth-readiness-alert`. R3 is then no longer met for later Auth deployments.
 
 ## 6. Demonstration (required before any production deployment; separately authorized)
 
-On a **non-production** host, with a real labelled `main` Auth image containing A5.4-A5, a disposable database, the real receiver and the
-real heartbeat (the design's §10):
+**Prerequisites** (nothing here authorizes them; each is part of the demonstration's own authorization):
 
-1. healthy start: `CARRIER_STARTED` on the Pushover client, the Healthchecks.io check up (its identity confirmed as in §5 step 5);
-2. `hierarchy-freeze` on the disposable database: `ALERT` (`marker_frozen`); a reminder (shortened interval); unfreeze: `RECOVERED`;
-3. redeploy with the other source (needs a reachable Organization Service and a service token): `DEPLOYMENT`, `ALERT`
-   (`source_ahead_of_marker`); revert: `DEPLOYMENT`, `RECOVERED`;
-4. stop the database: `ALERT` with `database`, `migrations`, `hierarchy_authority`; restart: `RECOVERED`;
-5. break the receiver (for example a revoked or wrong token): messages queued, the back-off logged, Healthchecks.io alerts on silence
-   through its own channel; restore: queued messages delivered in order;
-6. stop the timer: the heartbeat provider alerts on silence;
-7. inspect every delivered payload for secrets.
+- a **non-production host isolated from production**: not the production host, no production database, broker, network, credential or
+  configuration reachable or copied onto it. Every failure below is injected **only** into the demonstration's own disposable resources;
+- a **disposable PostgreSQL** for Auth (created for the demonstration, migrated by the image's own migration runner, destroyed afterwards),
+  required: the freeze, the source mismatch and the database stop all act on it;
+- **digest-pinned packaged images only**, pulled by digest from GHCR, never rebuilt, never a mutable tag:
+  - the **A5.4-A5 image** (with the readiness check): `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:5877c6ad5a4a4ac4b7858efce794abf9ba65c5162dc9fc8f569fdef384ec35ed`
+    (`sha-64ad8e3…`, the merge of #291);
+  - the **pre-A5 image** (no readiness check; used only for the `DEPLOYMENT` step): `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:f6e1d165fe1a33f9420f2e4a4626d9a2da482a82c422e879e799a9e19c5d3a54`
+    (`sha-fcf5806…`, the merge of #287, the last Auth build before A5.4-A5; no Auth migration differs between the two, so both run
+    against the same disposable database);
+- **Organization Service optional**: Auth's readiness check never calls it and Auth's start-up does not depend on it, so the
+  source-mismatch step needs only `AUTH_HIERARCHY_SOURCE=organization-service` with `ORGANIZATION_SERVICE_URL` pointing nowhere (for
+  example `http://127.0.0.1:1`, as the restore drill does) and a throwaway generated `ORGANIZATION_SERVICE_TOKEN` (at least 32
+  characters, never a real token). A disposable Organization Service may be added but proves nothing more for R3;
+- the **real Pushover and Healthchecks.io credentials**, created and placed by the owner (§5 step 3, §7) for a demonstration-only
+  application and check, never printed or shared; `carrier.env` with a demonstration host label and a shortened `REMINDER_SECONDS`.
+
+**Not this demonstration:** the R2 image-capability check (the restore drill's probe, run against the packaged image, that it reports
+`capable` or `absent`; [core-backup-restore](core-backup-restore.md) §5 step 7) is a separate verification. Neither one is evidence
+for the other.
+
+**Steps** (the design's §10), with the events the carrier actually emits:
+
+1. healthy start on the A5.4-A5 image: `CARRIER_STARTED` on the Pushover client, the Healthchecks.io check up (its identity confirmed as
+   in §5 step 5); the credential checks of §5 (originals and copies);
+2. `hierarchy-freeze` on the disposable database: `ALERT` (`marker_frozen`); a `REMINDER` after the shortened interval; unfreeze:
+   `RECOVERED`;
+3. recreate the Auth container **from the same A5.4-A5 image** with the other source (above): `ALERT` (`source_ahead_of_marker`), or
+   `CHANGED` to it when a cycle observed the swap (the state was then already failing); recreate
+   it again with `local`: `RECOVERED`. **No `DEPLOYMENT`:** the carrier sends `DEPLOYMENT` only when the container's image ID changes,
+   never for a new container or a changed setting on the same image. The swap itself may add the messages of §2 (`shutting_down`, then
+   `probe_failed:container`, as `ALERT` or `CHANGED` depending on the state before it, followed by `RECOVERED` when it ends ready);
+   these are expected;
+4. the `DEPLOYMENT` step: recreate the container from the **pre-A5 image** (above), with `local`: `DEPLOYMENT` carrying `previous_image` and
+   `previous_revision` (the A5.4-A5 image's ID and its revision `64ad8e3…`; the index digest is a separate field); then back to the
+   A5.4-A5 image: `DEPLOYMENT` again. With the marker `local` both answer ready, so apart from the swap's own messages (as in step 3)
+   no `ALERT` is expected; the pre-A5 image cannot report
+   `hierarchy_authority` at all, so it is never used for steps 2 and 3;
+5. stop the disposable database: `ALERT` with `database`, `migrations`, `hierarchy_authority`; restart: `RECOVERED`;
+6. break the receiver **by blocking the demonstration host's outbound access to `api.pushover.net`** (a connection failure is retried
+   every cycle), **then** inject a failure on the disposable resources (for example `hierarchy-freeze`) so that there is a message to
+   deliver: messages queued, the cycle exits 3, no check-in, Healthchecks.io alerts on the silence through its own channel; restore
+   access: the queued messages delivered in order, then check-ins resume (unfreeze afterwards: `RECOVERED`). Do **not** use a wrong or
+   revoked token: Pushover answers `4xx`, the carrier backs off for an hour (§4), and repeated `4xx` can get the host's IP blocked by
+   Pushover;
+7. stop the timer: Healthchecks.io alerts after the period and grace; start it again: check-ins resume, without `CARRIER_STARTED` (no
+   reboot, the state kept);
+8. inspect every delivered message, the journal and the host's process list for secrets; record the credential `stat` output (§5).
 
 Record the dates, the image digest and payload samples (nothing secret), and have the record independently reviewed. The local tests
 (`scripts/deploy-tests/auth-readiness-alert.test.mjs`) prove the carrier's logic only: they do **not** demonstrate delivery to a real
