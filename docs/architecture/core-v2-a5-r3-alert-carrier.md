@@ -8,6 +8,9 @@
   development authorization (§15): `infra/alerting/` (script, service and timer units), its tests and the runbook
   [`auth-readiness-alerting.md`](../runbooks/auth-readiness-alerting.md). **No provider is selected, nothing is installed, no
   demonstration has run, and R3 is not satisfied.**
+- **Provider integration (2026-10-11, §16):** the owner selected **Pushover** (receiver) and **Healthchecks.io** (heartbeat); both are
+  integrated and tested locally against fake endpoints only. **No account or credential exists, no real message or ping was sent,
+  nothing is installed, no demonstration has run, the carrier is not certified, and R3 is not satisfied.**
 - **Governs:** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4, clarification item 10 (R3), and the
   [F6 readiness decision record](core-v2-a5-4-f6-transitional-readiness.md) ("Later rulings", R3). Where this record and either differs,
   they govern. Related: the [A5.4-A5 design](core-v2-a5-4-a5-readiness-design.md) (§7, §10 item 10, §11 OPEN-3), the
@@ -209,7 +212,8 @@ channel that still works if the receiver is down; and be **reliable enough to be
 alert delivery and its silence detection are the provider's documented service, reviewed by the owner when the provider is selected,
 because the carrier cannot detect the heartbeat service's own failure.
 
-No account is created and no credential exists. Choosing them is the owner's (§9).
+No account is created and no credential exists. Choosing them is the owner's (§9). *Update 2026-10-11: chosen; see §16 for how each
+selected provider meets these contracts.*
 
 ## 9. Owner decisions (all OPEN unless marked)
 
@@ -227,6 +231,10 @@ O-R3-1 (the host-local carrier); provider-neutral receiver and heartbeat **inter
 and no authorized-window bypass); O-R3-5 (60 s probes, 60 min reminders, every `/ready` failure, code under `infra/alerting/`); O-R3-6
 (this record as the implementation reference, no additional ADR). **Still OPEN and BLOCKED:** the receiver provider, the heartbeat
 provider, their accounts and credentials, and the demonstration environment. The table above is kept as written.
+
+**Update (2026-10-11, owner development authorization "Integrate Pushover + Healthchecks.io with R3").** O-R3-2: **Pushover**; O-R3-3:
+**Healthchecks.io** (§16). **Still OPEN:** the accounts and credentials (owner-created), the demonstration environment, the
+certification and the installation. Pushover emergency priority is not authorized.
 
 ## 10. Tests and demonstration (as written 2026-10-10: PROPOSED; the tests are since implemented, §15; the demonstration has not run)
 
@@ -335,3 +343,49 @@ the implementation reference (no additional ADR).*
 - **Not done (each separately authorized):** the provider selection and accounts; the demonstration of §10 on a non-production host; the
   owner's certification; the production installation. Until then R3 is **not** satisfied and the first and later Auth deployments
   containing the A5.4-A5 check stay gated.
+
+## 16. Provider integration (2026-10-11): Pushover and Healthchecks.io, local only
+
+*Recorded with the integration under the owner's development authorization of 2026-10-11. No account, credential, real message or real
+ping was created or sent; nothing is installed. Contracts read on 2026-10-11 from the providers' official documentation:
+<https://pushover.net/api> and <https://healthchecks.io/docs/http_api/> (also its rate-limit and management-API pages).*
+
+- **Selection:** `RECEIVER_KIND=pushover`, `HEARTBEAT_KIND=healthchecks` in the unit. The provider-neutral curl-config interfaces of §15
+  stay as `generic` (the script's default, used by the existing tests).
+- **Credentials:** three root-only files passed by `LoadCredential=` (`pushover.token`, `pushover.user`, `healthchecks.url`), checked like
+  §15's (regular, owned by the carrier's user, `0600`/`0400`) and by shape: the Pushover token and user key are 30 characters
+  `[A-Za-z0-9]`; the ping URL must be `https://hc-ping.com/<uuid>` or `https://hc-ping.com/<22-character ping key>/<slug>`, with no
+  suffix (`/start`, `/fail`, `/log`), query, user-info or other host (slugs: `a-z`, `0-9`, `-`, `_`). A refused value is never printed. The values are read with bash
+  builtins and handed to curl on **stdin** (`--config -`), so they never appear in argv, any process environment, the journal, a payload
+  or the state directory.
+- **Pushover receiver (§8):** the endpoint `https://api.pushover.net/1/messages.json` is a constant. Each queued §6 message becomes an
+  allow-listed `title` and `key=value` `message` (within the 250 and 1024 character limits), `priority` 1 for critical kinds and 0 for
+  info; emergency priority (2) is never sent. **HTTP success is not acceptance:** a message is delivered only on HTTP 200 **and**
+  `"status":1`. Pushover documents that a `4xx` will not succeed if repeated unchanged (and that repeated 4xx can block the client's IP),
+  so `4xx` and `429` (quota) back off one hour; a 200 without `"status":1` or a redirect backs off 15 minutes; `5xx`, timeouts and
+  connection failures retry next cycle (60 s, above Pushover's 5 s minimum). One request at a time (Pushover allows two concurrent).
+  Every undelivered message stays queued in order, the cycle exits 3 and no heartbeat is sent (§4 and §15 unchanged: at-least-once).
+  The provider's answer is written to a state-directory file, inspected, removed, and never logged; only the HTTP code reaches the journal.
+- **Healthchecks.io heartbeat (§8):** a bare `GET` of the ping URL with no body, query or diagnostic content, only after a completed cycle
+  with an empty queue, at most once per cycle (the service rate-limits above 5 pings per minute per check). **HTTP 200 is not proof:**
+  the service answers 200 `OK (not found)` and 200 `OK (rate limited)` without recording the ping, so a check-in counts only on 200 with
+  the body exactly `OK`; anything else exits 4. A stopped timer, a down host or a broken carrier sends nothing and the check's own
+  period and grace raise the alert, through a Healthchecks.io channel independent of Pushover (runbook §7).
+- **Transport (both):** HTTPS only (`--proto =https`), certificate verification on, no redirect followed (`--max-redirs 0`,
+  `--proto-redir =https`), `-q` (no `~/.curlrc`), `--max-time` plus an outer `timeout -k`, within §15's budgets.
+- **Proving the check's identity without exposing the URL:** the owner compares the Healthchecks.io dashboard, or a **read-only** API key
+  (which hides `ping_url`), for `last_ping`/`n_pings`/`status`, with the carrier's `heartbeat=sent` journal lines. The read-only
+  `unique_key` is not used: its derivation is not documented.
+- **Tests (fake endpoints only, `scripts/deploy-tests/auth-readiness-alert.test.mjs`, "providers:"):** acceptance through the official
+  endpoint with the secrets on stdin; all six kinds formatted within the limits and priorities; HTTP 200 with `"status":0`; 4xx; 429; a
+  302; network failure, timeout and 5xx retried next cycle; the uncertain acknowledgement re-sent identically; a restart with pending
+  alerts; Healthchecks.io `OK`, `OK (not found)`, `OK (rate limited)`, HTTP 500, 404 and timeout; the check-in withheld while Pushover fails
+  and resumed after delivery; no check-in from a lock-skipped cycle; spoofed, plain-HTTP, `/fail`, `?create=1` and user-info URLs and
+  malformed credentials refused unprinted; slug URLs (with `-` and `_`) accepted; an over-long stored back-off ignored; no secret in output, argv, environment, state, queue or a kept response.
+- **Limits:** no real provider was contacted, so the providers' live behavior (TLS, answers, delivery to a device, Healthchecks.io's own
+  notifications) is **not demonstrated**; that is the §10 demonstration. The back-off does not end early when a credential is fixed, and a stored back-off longer than one hour is ignored. A 4xx caused by one
+  message's content (not the credentials) would hold that message, and every later one, at the head of the queue indefinitely; the
+  content is allow-listed so this is not expected, and the silent heartbeat reports it.
+  Healthchecks.io self-hosted instances are out of scope (only `hc-ping.com`).
+- **Not done (each separately authorized):** the owner's accounts and credentials; the demonstration; the certification; the production
+  installation. R3 remains **not** satisfied.
