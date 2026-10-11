@@ -4,7 +4,7 @@
 #
 # Trust boundary: the carrier needs the Docker socket (`docker inspect`, `docker logs`, one `docker exec` reading /ready), and access
 # to that socket is root-equivalent on the host. It therefore runs as root, without any capability, with a read-only file system except
-# its own state directory, and with its two credential files passed by systemd (LoadCredential=), never through the environment.
+# its own state directory, and with its credential files passed by systemd (LoadCredential=), never through the environment.
 [Unit]
 Description=Nawara Core: auth-service readiness alert carrier (R3), one cycle
 Documentation=file:///opt/nawara-core/docs/runbooks/auth-readiness-alerting.md
@@ -21,11 +21,17 @@ ExecStart=/usr/local/libexec/nawara/auth-readiness-alert.sh
 Environment=AUTH_CONTAINER=nawara-core-auth-service
 Environment=REMINDER_SECONDS=3600
 EnvironmentFile=-/etc/nawara-auth-readiness-alert/carrier.env
-# The receiver's and the heartbeat's curl config files (URL and credential), root-only on the host, exposed to this unit only.
-LoadCredential=receiver.curl:/etc/nawara-auth-readiness-alert/receiver.curl
-LoadCredential=heartbeat.curl:/etc/nawara-auth-readiness-alert/heartbeat.curl
-Environment=RECEIVER_CONFIG=%d/receiver.curl
-Environment=HEARTBEAT_CONFIG=%d/heartbeat.curl
+# The selected providers (owner decision, 2026-10-11): Pushover receives the alerts, Healthchecks.io is the independent heartbeat.
+# Their secrets are root-only files on the host, exposed to this unit only (LoadCredential=), never through the environment: the
+# Pushover application token, the Pushover user key, and the Healthchecks.io check's ping URL (the URL itself is the credential).
+Environment=RECEIVER_KIND=pushover
+Environment=HEARTBEAT_KIND=healthchecks
+LoadCredential=pushover.token:/etc/nawara-auth-readiness-alert/pushover.token
+LoadCredential=pushover.user:/etc/nawara-auth-readiness-alert/pushover.user
+LoadCredential=healthchecks.url:/etc/nawara-auth-readiness-alert/healthchecks.url
+Environment=PUSHOVER_TOKEN_FILE=%d/pushover.token
+Environment=PUSHOVER_USER_FILE=%d/pushover.user
+Environment=HEALTHCHECKS_PING_URL_FILE=%d/healthchecks.url
 # Durable state, the delivery queue and the lock: /var/lib/nawara-auth-readiness-alert (mode 0700), kept across restarts and reboots.
 StateDirectory=nawara-auth-readiness-alert
 StateDirectoryMode=0700

@@ -10,22 +10,29 @@
 # The carrier is READ-ONLY towards Auth: it runs `docker inspect`, `docker image inspect`, `docker logs` and one `docker exec … node -e`
 # that reads /ready; it never restarts, stops or reconfigures anything and never reads a database or the marker directly.
 #
-# Configuration (environment; NON-secret values only):
-#   RECEIVER_CONFIG   a curl config file (root-owned, mode 0600 or 0400, not a symlink) naming the receiver's URL and its credential
-#   HEARTBEAT_CONFIG  the same for the heartbeat check-in (its secret URL is a credential too)
+# Configuration (environment; NON-secret values only; every credential FILE is root-owned, mode 0600 or 0400, not a symlink):
+#   RECEIVER_KIND     pushover (the selected provider) or generic (default)
+#     pushover:  PUSHOVER_TOKEN_FILE, PUSHOVER_USER_FILE  the application token and the user key (30 characters [A-Za-z0-9] each)
+#     generic:   RECEIVER_CONFIG                          a curl config file naming the receiver's URL and its credential
+#   HEARTBEAT_KIND    healthchecks (the selected provider) or generic (default)
+#     healthchecks: HEALTHCHECKS_PING_URL_FILE            the check's secret ping URL (https://hc-ping.com/<uuid> or /<ping-key>/<slug>)
+#     generic:   HEARTBEAT_CONFIG                         a curl config file for the check-in
 #   STATE_DIRECTORY   durable state, the delivery queue and the lock (systemd StateDirectory=; default /var/lib/nawara-auth-readiness-alert)
 #   ALERT_HOST_LABEL  a non-secret label for this host        AUTH_CONTAINER   default nawara-core-auth-service
 #   REMINDER_SECONDS  default 3600                            BOOT_ID_FILE     default /proc/sys/kernel/random/boot_id
-# Credentials reach curl only through `--config <file>`: they are never in argv, the environment, the journal or a payload.
+# Credentials reach curl only through a config: a protected file (`--config <file>`, generic) or curl's stdin (`--config -`, the
+# providers), built in memory from the protected files. They are never in argv, the environment, the journal or a payload. The provider
+# endpoints are fixed or strictly validated here, HTTPS only, certificate verification on (never disabled), no redirect followed.
 # Output (the journal) names states, message kinds and counts only: never a payload value beyond the allow-listed tokens, never a secret.
 set -euo pipefail
 umask 077
 export LC_ALL=C
 SECONDS=0   # the cycle's own clock (never inherited from the environment)
 
-: "${RECEIVER_CONFIG:?RECEIVER_CONFIG is required (a protected curl config file for the receiver)}"
-: "${HEARTBEAT_CONFIG:?HEARTBEAT_CONFIG is required (a protected curl config file for the heartbeat)}"
-export -n RECEIVER_CONFIG HEARTBEAT_CONFIG   # paths only, but never handed to a child process
+RECEIVER_KIND=${RECEIVER_KIND:-generic}
+HEARTBEAT_KIND=${HEARTBEAT_KIND:-generic}
+# Paths only, but never handed to a child process.
+export -n RECEIVER_KIND HEARTBEAT_KIND RECEIVER_CONFIG HEARTBEAT_CONFIG PUSHOVER_TOKEN_FILE PUSHOVER_USER_FILE HEALTHCHECKS_PING_URL_FILE 2>/dev/null || true
 STATE_DIRECTORY=${STATE_DIRECTORY:-/var/lib/nawara-auth-readiness-alert}
 STATE_DIRECTORY=${STATE_DIRECTORY%%:*}   # systemd may list several directories; the first is ours
 CONTAINER=${AUTH_CONTAINER:-nawara-core-auth-service}
@@ -56,8 +63,35 @@ protected() { # a credential file: present, regular, not a symlink, owned by us,
   [ "$owner" = "$(id -u)" ] || die "a credential file is not owned by the carrier's user ($2)"
   [[ $mode =~ ^[46]00$ ]] || die "a credential file is readable by others (mode $mode; $2): refusing"
 }
-protected "$RECEIVER_CONFIG" receiver
-protected "$HEARTBEAT_CONFIG" heartbeat
+PUSHOVER_URL='https://api.pushover.net/1/messages.json'   # the official Messages API (https://pushover.net/api); never configurable
+PO_TOKEN=''; PO_USER=''; HC_URL=''
+case "$RECEIVER_KIND" in
+  generic)
+    : "${RECEIVER_CONFIG:?RECEIVER_CONFIG is required (a protected curl config file for the receiver)}"
+    protected "$RECEIVER_CONFIG" receiver ;;
+  pushover)
+    : "${PUSHOVER_TOKEN_FILE:?PUSHOVER_TOKEN_FILE is required}"; : "${PUSHOVER_USER_FILE:?PUSHOVER_USER_FILE is required}"
+    protected "$PUSHOVER_TOKEN_FILE" pushover-token; protected "$PUSHOVER_USER_FILE" pushover-user
+    IFS= read -r PO_TOKEN <"$PUSHOVER_TOKEN_FILE" || true
+    IFS= read -r PO_USER <"$PUSHOVER_USER_FILE" || true
+    # Pushover: "30 characters long, case-sensitive, [A-Za-z0-9]". The value is never printed, even when it is refused.
+    [[ $PO_TOKEN =~ ^[A-Za-z0-9]{30}$ ]] || die "the Pushover application token file does not hold a valid token (value not shown)"
+    [[ $PO_USER =~ ^[A-Za-z0-9]{30}$ ]] || die "the Pushover user key file does not hold a valid user or group key (value not shown)" ;;
+  *) die "RECEIVER_KIND must be pushover or generic" ;;
+esac
+case "$HEARTBEAT_KIND" in
+  generic)
+    : "${HEARTBEAT_CONFIG:?HEARTBEAT_CONFIG is required (a protected curl config file for the heartbeat)}"
+    protected "$HEARTBEAT_CONFIG" heartbeat ;;
+  healthchecks)
+    : "${HEALTHCHECKS_PING_URL_FILE:?HEALTHCHECKS_PING_URL_FILE is required}"
+    protected "$HEALTHCHECKS_PING_URL_FILE" healthchecks-url
+    IFS= read -r HC_URL <"$HEALTHCHECKS_PING_URL_FILE" || true
+    # Only the hosted service's success endpoint: a UUID check, or a ping key and slug; no suffix (/start, /fail, /log), no query (?create=1).
+    [[ $HC_URL =~ ^https://hc-ping\.com/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{22}/[a-z0-9_-]{1,100})$ ]] \
+      || die "the Healthchecks.io ping URL file does not hold a https://hc-ping.com success URL (value not shown)" ;;
+  *) die "HEARTBEAT_KIND must be healthchecks or generic" ;;
+esac
 mkdir -p "$STATE_DIRECTORY/queue"
 chmod 700 "$STATE_DIRECTORY" "$STATE_DIRECTORY/queue"
 
@@ -250,23 +284,97 @@ CURSOR=$NOW_ISO
 write_state
 
 # ---------------------------------------------------------------------------------------------------------------- delivery
-DELIVERED=0; PENDING=0
-for f in "$STATE_DIRECTORY"/queue/*.json; do
-  [[ $f =~ $QUEUE_RE ]] || continue
-  [ "$SECONDS" -lt "$DELIVERY_DEADLINE" ] || break   # the cycle's time budget: the rest stays queued (exit 3, no check-in)
+RESP="$STATE_DIRECTORY/response.tmp"   # a provider's answer, read here and removed; never printed
+BACKOFF_FILE="$STATE_DIRECTORY/receiver-backoff"
+RECEIVER_RESULT=none
+
+# One queued message to Pushover. Accepted ONLY on HTTP 200 with `"status":1` (https://pushover.net/api). A 4xx (invalid input or
+# credentials: "repeating your same request will not work") and a 429 (quota exhausted) back off for an hour instead of being retried
+# every cycle; a 200 without status 1 or an unexpected redirect backs off 15 minutes; a 5xx, a timeout or a connection failure is
+# retried on the next cycle (at least 60 s later; Pushover asks for no less than 5 s). Every message stays queued until accepted.
+po_field() { local re="\"$1\":\"([A-Za-z0-9_.:@/-]{0,120})\""; [[ $J =~ $re ]] && printf '%s' "${BASH_REMATCH[1]}" || true; }
+pushover_send() { # file -> sets RECEIVER_RESULT accepted|retry|backoff:<seconds>
+  local f=$1 kind sev state failed title msg pri code rc=0 line k v
+  J=$(head -c 4096 "$f")
+  kind=$(po_field kind); sev=$(po_field severity); state=$(po_field state)
+  [[ $J =~ \"failed\":\[([a-z0-9_,\"-]{0,600})\] ]] && failed=$(tr -d '"' <<<"${BASH_REMATCH[1]}") || failed=''
+  [[ $kind =~ ^(ALERT|CHANGED|REMINDER|RECOVERED|DEPLOYMENT|CARRIER_STARTED)$ ]] || { kind=MALFORMED; sev=critical; }
+  title="Nawara Auth readiness: $kind (${state:-unknown})"
+  msg="host=$(po_field host)\nstate=${state:-unknown}\nfailed=${failed:-none}"
+  for k in reason source marker registry_code probe_failure previous; do
+    v=$(po_field "$k"); [ -z "$v" ] || msg+="\n$k=$v"
+  done
+  for k in image index_digest revision previous_image previous_revision since created_at; do
+    v=$(po_field "$k"); [ -z "$v" ] || msg+="\n$k=$v"
+  done
+  [[ $J =~ \"duration_s\":(-?[0-9]{1,10}) ]] && msg+="\nduration_s=${BASH_REMATCH[1]}"
+  msg+="\nrunbook=$RUNBOOK"
+  [ "$kind" != MALFORMED ] || msg="a queued message could not be read; see the carrier's state directory\nrunbook=$RUNBOOK"
+  msg=${msg:0:1000}; msg=${msg%\\}   # never end on a lone backslash, which would escape the config's closing quote
+  [ "$sev" = critical ] && pri=1 || pri=0   # high or normal; never 2 (emergency needs its own review)
+  rm -f "$RESP"
+  code=$( {
+    printf 'url = "%s"\n' "$PUSHOVER_URL"
+    printf 'data-urlencode = "token=%s"\ndata-urlencode = "user=%s"\n' "$PO_TOKEN" "$PO_USER"
+    printf 'data-urlencode = "title=%s"\ndata-urlencode = "message=%s"\ndata-urlencode = "priority=%s"\n' "${title:0:250}" "$msg" "$pri"
+  } | timeout -k 2 $((CURL_TIMEOUT + 2)) curl -q --config - --silent --max-time "$CURL_TIMEOUT" \
+      --proto '=https' --proto-redir '=https' --max-redirs 0 -o "$RESP" -w '%{http_code}' 2>/dev/null) || rc=$?
+  line=$(head -c 2000 "$RESP" 2>/dev/null || true); rm -f "$RESP"
+  if [ "$rc" = 0 ] && [ "$code" = 200 ] && [[ $line =~ \"status\":1[,}] ]]; then RECEIVER_RESULT=accepted
+  elif [ "$code" = 429 ]; then RECEIVER_RESULT=backoff:3600; log "receiver: Pushover quota exhausted (429): retrying in 3600 s"
+  elif [[ $code =~ ^4[0-9]{2}$ ]]; then RECEIVER_RESULT=backoff:3600; log "receiver: Pushover refused the request (HTTP $code; check the token and user key): retrying in 3600 s"
+  elif [ "$code" = 200 ] || [[ $code =~ ^3[0-9]{2}$ ]]; then RECEIVER_RESULT=backoff:900; log "receiver: Pushover did not accept the message (HTTP $code): retrying in 900 s"
+  else RECEIVER_RESULT=retry; log "receiver: Pushover unreachable or failing (HTTP ${code:-none}, curl $rc): retrying next cycle"; fi
+  unset J line
+}
+generic_send() {
   if timeout -k 2 $((CURL_TIMEOUT + 2)) curl -q --config "$RECEIVER_CONFIG" --fail --silent --show-error --max-time "$CURL_TIMEOUT" \
-      --proto '=https' --proto-redir '=https' --max-redirs 0 -H 'Content-Type: application/json' --data-binary "@$f" -o /dev/null >/dev/null 2>&1; then
-    rm -f "$f"; DELIVERED=$((DELIVERED + 1))
-  else
-    break   # keep the order: nothing after an undelivered message is sent before it
-  fi
-done
+      --proto '=https' --proto-redir '=https' --max-redirs 0 -H 'Content-Type: application/json' --data-binary "@$1" -o /dev/null >/dev/null 2>&1; then
+    RECEIVER_RESULT=accepted
+  else RECEIVER_RESULT=retry; fi
+}
+DELIVERED=0; PENDING=0
+backoff_until=0
+if [ -f "$BACKOFF_FILE" ]; then IFS= read -r backoff_until <"$BACKOFF_FILE" || true; [[ $backoff_until =~ ^[0-9]{1,12}$ ]] || backoff_until=0; fi
+# Never longer than the longest back-off: a clock stepped backwards or a damaged file must not stall delivery.
+[ "$backoff_until" -le $((NOW + 3600)) ] || backoff_until=0
+if [ "$NOW" -lt "$backoff_until" ]; then
+  log "receiver: backing off until $(iso "$backoff_until"); queued messages stay pending"
+else
+  for f in "$STATE_DIRECTORY"/queue/*.json; do
+    [[ $f =~ $QUEUE_RE ]] || continue
+    [ "$SECONDS" -lt "$DELIVERY_DEADLINE" ] || break   # the cycle's time budget: the rest stays queued (exit 3, no check-in)
+    if [ "$RECEIVER_KIND" = pushover ]; then pushover_send "$f"; else generic_send "$f"; fi
+    if [ "$RECEIVER_RESULT" = accepted ]; then
+      rm -f "$f"; DELIVERED=$((DELIVERED + 1))
+    else
+      if [[ $RECEIVER_RESULT =~ ^backoff:([0-9]+)$ ]]; then
+        printf '%s\n' "$((NOW + BASH_REMATCH[1]))" >"$BACKOFF_FILE.tmp"; sync "$BACKOFF_FILE.tmp"; mv "$BACKOFF_FILE.tmp" "$BACKOFF_FILE"
+      fi
+      break   # keep the order: nothing after an undelivered message is sent before it
+    fi
+  done
+  [ "$RECEIVER_RESULT" != accepted ] || rm -f "$BACKOFF_FILE"
+fi
 for f in "$STATE_DIRECTORY"/queue/*.json; do [[ $f =~ $QUEUE_RE ]] && PENDING=$((PENDING + 1)); done
 
 # ---------------------------------------------------------------------------------------------------------------- heartbeat
+# Healthchecks.io answers HTTP 200 even when it did NOT record the ping ("OK (not found)", "OK (rate limited)";
+# https://healthchecks.io/docs/http_api/): a check-in counts only on HTTP 200 with the body exactly "OK". A bare GET: no body, no
+# diagnostic content, at most one per 60 s cycle (the service rate-limits above 5 per minute).
 HB=withheld
 if [ "$PENDING" = 0 ]; then
-  if timeout -k 2 $((HEARTBEAT_TIMEOUT + 2)) curl -q --config "$HEARTBEAT_CONFIG" --fail --silent --show-error --max-time "$HEARTBEAT_TIMEOUT" \
+  if [ "$HEARTBEAT_KIND" = healthchecks ]; then
+    hb_rc=0; rm -f "$RESP"
+    hb_code=$(printf 'url = "%s"\n' "$HC_URL" | timeout -k 2 $((HEARTBEAT_TIMEOUT + 2)) curl -q --config - --silent --max-time "$HEARTBEAT_TIMEOUT" \
+        --proto '=https' --proto-redir '=https' --max-redirs 0 -o "$RESP" -w '%{http_code}' 2>/dev/null) || hb_rc=$?
+    hb_body=$(head -c 200 "$RESP" 2>/dev/null | tr -d '\r\n' || true); rm -f "$RESP"
+    if [ "$hb_rc" = 0 ] && [ "$hb_code" = 200 ] && [ "$hb_body" = OK ]; then HB=sent
+    elif [ "$hb_body" = 'OK (not found)' ] || [ "$hb_code" = 404 ]; then HB=failed; log "heartbeat: Healthchecks.io has no such check (the ping was not recorded)"
+    elif [ "$hb_body" = 'OK (rate limited)' ] || [ "$hb_code" = 429 ]; then HB=failed; log "heartbeat: Healthchecks.io rate-limited the ping (not recorded)"
+    else HB=failed; log "heartbeat: Healthchecks.io ping failed (HTTP ${hb_code:-none}, curl $hb_rc)"; fi
+    unset hb_body
+  elif timeout -k 2 $((HEARTBEAT_TIMEOUT + 2)) curl -q --config "$HEARTBEAT_CONFIG" --fail --silent --show-error --max-time "$HEARTBEAT_TIMEOUT" \
       --proto '=https' --proto-redir '=https' --max-redirs 0 -o /dev/null >/dev/null 2>&1; then HB=sent; else HB=failed; fi
 fi
 log "cycle state=$NEW_STATE failed=${FAILED:-none} probe_failure=${PROBE_FAILURE:-none} reason=${RP_REASON:-none} queued=$QUEUED delivered=$DELIVERED pending=$PENDING heartbeat=$HB logs=$LOGS_READ"

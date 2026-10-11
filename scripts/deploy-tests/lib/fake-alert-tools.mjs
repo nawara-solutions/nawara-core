@@ -41,8 +41,40 @@ function docker() {
   process.stderr.write(`fake docker: unexpected command ${argv.join(' ')}\n`); exit(2);
 }
 
+/** A curl config as curl reads it: `key = "value"` lines, with \\, \", \n and \t escapes inside the quotes. */
+function parseConfig(text) {
+  const out = [];
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*([a-z-]+)\s*=\s*"((?:[^"\\]|\\.)*)"\s*$/);
+    if (m) out.push([m[1], m[2].replace(/\\(.)/g, (_, c) => ({ n: '\n', t: '\t' })[c] ?? c)]);
+    else if (line.trim()) out.push(['__unparsed', line]);
+  }
+  return out;
+}
+
+/** The two selected providers, reached with `curl --config -` (the URL and the secrets on stdin; `-o <file> -w '%{http_code}'`). */
+function provider(config) {
+  const url = config.find(([k]) => k === 'url')?.[1] ?? '';
+  const host = (() => { try { return new URL(url).host; } catch { return ''; } })();
+  const fields = Object.fromEntries(config.filter(([k]) => k === 'data-urlencode').map(([, v]) => [v.slice(0, v.indexOf('=')), v.slice(v.indexOf('=') + 1)]));
+  const which = host === 'api.pushover.net' ? 'pushover' : host === 'hc-ping.com' ? 'healthchecks' : `unexpected:${host}`;
+  const o = argv[argv.indexOf('-o') + 1];
+  (state.providerCalls ??= []).push({ which, url, argv, fields, stdinKeys: config.map(([k]) => k),
+    env: Object.keys(process.env).filter((k) => /CURL|RECEIVER|HEARTBEAT|TOKEN|SECRET|PUSHOVER|HEALTHCHECKS/.test(k)) });
+  const r = which === 'pushover' ? next('pushoverResp', { code: 200, body: '{"status":1,"request":"fake-request-1"}' })
+    : which === 'healthchecks' ? next('hcResp', { code: 200, body: 'OK' }) : { code: 0, body: '', exit: 6 };
+  if (r.accept && which === 'pushover') (state.pushed ??= []).push(fields); // the provider accepted, whatever the client then sees
+  if (o) writeFileSync(o, r.body ?? '');
+  out(String(r.code ?? 0).padStart(3, '0'));
+  if (r.exit) exit(r.exit);
+  if (which === 'pushover' && r.code === 200 && /"status":1[,}]/.test(r.body ?? '')) (state.pushed ??= []).push(fields);
+  if (which === 'healthchecks' && r.code === 200 && r.body === 'OK') state.pings = (state.pings ?? 0) + 1;
+  exit(0);
+}
+
 function curl() {
   const at = argv.indexOf('--config');
+  if (argv[at + 1] === '-') { provider(parseConfig(readFileSync(0, 'utf8'))); return; }
   const config = readFileSync(argv[at + 1], 'utf8');
   const which = config.includes('receiver') ? 'receiver' : 'heartbeat';
   const dataArg = argv.find((a) => a.startsWith('@'));
