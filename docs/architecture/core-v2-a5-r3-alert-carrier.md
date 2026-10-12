@@ -408,7 +408,7 @@ unsigned prepared form, as its hash below shows. The separate approval record is
 
 | Item | Value |
 |---|---|
-| Lab host | `nawara-lab-01`, which the owner confirmed (2026-10-12) is the **nonproduction Server 2 (`192.168.1.18`)**; this reconciles the S1 addendum's reference to "Server 2" with the certification's lab host. Documentation only: no server was accessed for this record |
+| Lab host | `nawara-lab-01`, which the owner confirmed (2026-10-12) is the isolated **nonproduction Server 2** (network address intentionally not recorded); this reconciles the S1 addendum's reference to "Server 2" with the certification's lab host. Documentation only: no server was accessed for this record |
 | Lab repository revision | `92c3b44e352e07b513e286aac64d181d9c809001` (PR #296) |
 | A5.4-A5 Auth image | `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:5877c6ad5a4a4ac4b7858efce794abf9ba65c5162dc9fc8f569fdef384ec35ed` (`64ad8e3`) |
 | Pre-A5 Auth image | `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:f6e1d165fe1a33f9420f2e4a4626d9a2da482a82c422e879e799a9e19c5d3a54` (`fcf5806`) |
