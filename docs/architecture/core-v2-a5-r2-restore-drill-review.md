@@ -14,6 +14,9 @@
 - **Prior review evidence:** PR #292's description reports an "independent security and governance review: PASS WITH FINDINGS, no
   material finding". There is no review or comment on the pull request in GitHub, so that earlier review is **NOT VERIFIED**. This
   record is the evidenced review.
+- **Update (2026-10-12): R2 PACKAGED-IMAGE PROBE: PASSED. R2 FULL RESTORE DRILL: NOT DEMONSTRATED BY THIS PROBE.** LOW 1's
+  packaged-image capability probe passed for both pinned images on the nonproduction lab host (§5; owner-supplied terminal output).
+  R2 as a whole is **not certified**.
 
 ## 1. What the change does (verified in source)
 
@@ -63,6 +66,8 @@
     `capable` for `sha256:5877c6ad…35ed` (`64ad8e3`) and `absent` for `sha256:f6e1d165…3a54` (`fcf5806`).
   - **Timing:** required before an affected rehearsal relies on this path. The R3 demonstration is not evidence for it
     ([runbook](../runbooks/auth-readiness-alerting.md) §6).
+  - **Update (2026-10-12): done.** The probe ran on 2026-10-12, with both expected results (§5). LOW 1 is closed for these two
+    digests only; any other Auth digest relied on by a frozen-backup drill needs the same probe first.
 - **LOW 2 (accepted design limit):** the registry logs only when a check's state flips. If the first failing `/ready` had a
   different reason, no `code=marker_frozen` registry line appears, and a valid frozen drill fails closed. Rerunning the drill is the
   remedy. This is not a safety defect.
@@ -75,7 +80,53 @@
 - **R2 is implemented and merged.**
 - **Tested:** fake harness only.
 - **Source review:** PASS WITH LIMITATIONS (this record).
-- **Not certified:** the packaged-image probe and a real drill are outstanding.
+- **Not certified:** the packaged-image probe and a real drill are outstanding. *(Update 2026-10-12: the packaged-image probe has
+  passed, §5. A real frozen-backup restore drill is still outstanding, so R2 stays not certified.)*
 - **Gate:** required before any rehearsal that drills a backup taken under a freeze.
 
 This record authorizes no drill, rehearsal, deployment or G6/G7/F6/F7 action.
+
+## 5. Packaged-image capability probe (2026-10-12)
+
+**R2 PACKAGED-IMAGE PROBE: PASSED. R2 FULL RESTORE DRILL: NOT DEMONSTRATED BY THIS PROBE.**
+
+- **Evidence kind:** OWNER-SUPPLIED TERMINAL OUTPUT. The owner ran the probe and supplied the output; it was not independently
+  collected by this record's author.
+- **Where and when:** the isolated nonproduction lab host `nawara-lab-01` (Server 2), 2026-10-12 at 10:23:51 UTC. Production was not
+  involved.
+- **Method:**
+  - The identical capability snippet of `infra/backup/restore-drill.sh` (`node -e`; the file check and module import of
+    `dist/hierarchy/authority-readiness.js`) ran in the image's own `WORKDIR` as its own user.
+  - Each image ran in one throwaway container: `docker run --rm --pull=never --network none --read-only --cap-drop ALL
+    --security-opt no-new-privileges`, with no environment, mounts or volumes.
+  - The only difference from the drill is `docker run` in place of `docker exec` into a running drill application. The probe code and
+    the packaged files are the same.
+
+**Results:**
+
+| Image (pinned digest; no tag used) | Built from | Exit | Result | Expected | Outcome |
+|---|---|---|---|---|---|
+| `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:5877c6ad5a4a4ac4b7858efce794abf9ba65c5162dc9fc8f569fdef384ec35ed` | A5.4-A5 merge `64ad8e3` | 0 | `capable` | `capable` | **PASS** |
+| `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:f6e1d165fe1a33f9420f2e4a4626d9a2da482a82c422e879e799a9e19c5d3a54` | `fcf5806` (pre-A5.4-A5) | 0 | `absent` | `absent` | **PASS** |
+
+**Preflight and isolation, as reported by the owner:**
+- the R3 carrier timer was disabled and inactive, and its queue was empty;
+- the lab's container and volume inventory hash was identical before and after
+  (`ca764750448f6f87553564b1a27b630fb2134221ce5769c71b577591b60c5a76`);
+- no temporary container was left;
+- there was no database restore, authority transition or production operation.
+
+The R3 certification and its artifacts are unchanged.
+
+**What this shows:** in the packaged images, the module resolves and the capability detection gives the expected answer. The
+false-failure risk of LOW 1 did not occur for these digests.
+
+**What it does not show:**
+- a real backup and restore of a frozen Auth backup;
+- the frozen ready gate's `503` and its diagnostics against a restored database;
+- the CLI `frozen` read;
+- any other image digest.
+
+**Remaining before R2 can be certified:** one real restore drill of a backup taken under a freeze. Under R2's rule that drill is needed
+only before a rehearsal that relies on this path, and it needs its own authorization. The G6 rehearsal, which uses the same
+`restore-drill.sh`, is expected to be such a rehearsal if its Auth backup records `authority|frozen`.
