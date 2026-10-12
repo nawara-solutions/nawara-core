@@ -1,8 +1,9 @@
-# Core V2 A5.5: acceptance criteria (PROPOSAL FOR OWNER DECISION)
+# Core V2 A5.5: acceptance criteria (ADOPTED 2026-10-12)
 
-- **Status:** **PROPOSED — AWAITING OWNER ADOPTION, not binding.** First draft 2026-10-12 (PR #298). Revised 2026-10-12 into this
-  decision-ready form after a review of the draft against the authoritative sources (§1). Documentation only. **A5.5 stays pending**:
-  nothing here changes A5's state or any gate, certifies anything, or authorizes any implementation or production step.
+- **Status:** **ADOPTED by the owner on 2026-10-12 (§5): C1–C6 are binding A5.5 acceptance criteria; C7 is adopted as a mandatory
+  production safety boundary.** History: first draft 2026-10-12 (PR #298); revised into a decision-ready form on 2026-10-12 after a
+  review against the authoritative sources (§1; PR #299). Documentation only. **A5.5 itself is not started and A5 is not certified**:
+  adoption changes no gate, certifies nothing, and authorizes no implementation or production step. A5.4 RED work stays gated until F7.
 - **Why:** the [A5 record](core-v2-a5-organization.md) §9 defines A5.5's acceptance as "the criteria A5.3 fixes". A5.3's closure
   (§10.5) records the decided architecture and the A5.4 prerequisites, but states no explicit A5.5 criteria. These criteria are derived
   from:
@@ -29,7 +30,7 @@
 
 No criterion is removed or merged; C1–C7 keep their numbers. No established decision, ADR or gate is changed.
 
-## 2. Proposed criteria
+## 2. Criteria (adopted 2026-10-12)
 
 Evidence kinds follow A4.9: **CI** (Core CI of a merged pull request), **local** (runs recorded during the stage, not rerun),
 **repository** (the content of `main`), **record** (a dated governance record), **production record** (a record of a separately authorized
@@ -172,7 +173,8 @@ A5.5 does not repeat R3's demonstration, does not run an A19 or Final Core Valid
 
 ## 4. Optional interim checkpoint (owner choice)
 
-Unchanged from the first draft. The owner may record a **non-certifying "A5 pre-F7 checkpoint"**. It would list:
+Unchanged from the first draft. **Adopted 2026-10-12 as an option, progress-only** (§5): the owner may record a **non-certifying "A5 pre-F7
+checkpoint"**; none is recorded by the adoption itself. It would list:
 - A5.0 to A5.3 complete;
 - the merged pre-F7 exceptions (A5.4-A2, A5.4-A3, A5.4-A5, R2);
 - R3 certified for nonproduction;
@@ -180,21 +182,18 @@ Unchanged from the first draft. The owner may record a **non-certifying "A5 pre-
 
 It grants no A5 certification. Without it, A5 stays OPEN until C1 to C6 are met.
 
-## 5. Owner decision record (to be completed by the owner)
+## 5. Owner decision record
 
 | Field | Entry |
 |---|---|
-| Decision | ☐ Adopt C1–C7 as written in §2 · ☐ Adopt with amendments (listed below) · ☐ Reject |
-| Interim checkpoint (§4) | ☐ Record it · ☐ Not now |
-| Amendments | – |
-| Date and owner | – |
-| Effect on adoption | §2 becomes A5.5's binding acceptance criteria; the A5 record §9 A5.5 row and the roadmap are updated in a separate documentation pull request. Adoption certifies nothing and authorizes no implementation or production step. |
+| Decision | **C1–C6: ADOPTED** as binding A5.5 acceptance criteria, as written in §2. **C7: ADOPTED AS PRODUCTION SAFETY BOUNDARY** (mandatory; not an acceptance test) |
+| Interim checkpoint (§4) | adopted as an option, **progress-only, never A5 certification**; no checkpoint is recorded by this decision |
+| Amendments | none |
+| Date and owner | 2026-10-12, project owner (explicit decision, recorded in this documentation pull request) |
+| Effect | §2 is A5.5's binding acceptance; the A5 record §9 A5.5 row and the roadmap reference it (same pull request). **A5.5 is not started, A5 is not certified**, A5.4 RED work stays gated until F7, and nothing is implemented, deployed or activated. R3 stays CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION), unchanged |
 
-Until this record is completed, the criteria remain **PROPOSED**.
+## 6. What this decision does not do
 
-## 6. What this proposal does not do
-
-- It makes no criterion binding.
 - It closes or certifies nothing.
 - It authorizes no implementation, merge, deployment or production step.
 - It changes no ADR, governance decision or gate.
