@@ -66,6 +66,14 @@ G6 is **one successful rehearsal of the complete ownership-transition procedure 
 environment** ([G6 plan](architecture/stage-21/stage-21-x-g6-rehearsal-plan.md), decision D-1). It is **not certified**: the owner has
 intentionally deferred the rest of the rehearsal.
 
+**Update (2026-10-12):**
+- The read-only **G6 baseline refresh passed** on production (owner-supplied evidence; [cutover record](architecture/stage-21/stage-21-x-cutover-record.md) §14).
+- A certified digest set is **conditionally approved**. Final approval waits on the cryptographic attestation check and the
+  packaged-image configuration checks. The set is not deployable.
+- The plan is refreshed in its §15: the source-first F6 mirror, the seven readiness cases, restore checkpoint X outside any freeze,
+  and §2.8 items 3 and 7 deferred.
+- G6 stays **not certified** and the rehearsal is **not authorized**.
+
 G6 is not tied to any particular hardware. The plan requires an isolated, disposable Ubuntu VM; where it runs is an owner decision,
 for example:
 
