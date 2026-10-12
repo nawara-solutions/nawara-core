@@ -2,7 +2,10 @@
 
 - **Status:** PROPOSED — owner decisions approved 2026-09-30; recorded here before any rehearsal step runs.
 - **Gate:** ADR-0040 decision 7, G6 (and the parts of G4 and G5 that ADR-0040 assigns to the rehearsal plan).
-- **Revision under rehearsal:** `9e29c763179dc954e668d6287a07098c0450decf`.
+- **Revision under rehearsal:** `9e29c763179dc954e668d6287a07098c0450decf`. *Superseded by the 2026-10-12 refresh (§15): the rehearsal
+  uses the conditionally approved certified digest set (§15.2), once its conditions pass.*
+- **Refresh (2026-10-12):** §15 refreshes this plan after the G6 baseline refresh. Where §15 states a change, it governs; the text above
+  is kept as history. **G6 is not authorized by this plan or its refresh.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -233,3 +236,145 @@ environment. Scheduled backups return through a future, separately reviewed `pro
 carried out through that design when the time comes, and stays after G6 as planned. The steps that run through GitHub workflows (the backups of
 steps 10 and 16, and the service redeploys within F6 and F7) now each need a `production` environment approval; commands the operator
 runs on the server are not affected. The G6 refresh must take this into account.
+
+## 15. Refresh (2026-10-12)
+
+Owner-authorized documentation refresh. It prepares G6 for execution and **authorizes nothing**: no rehearsal step, no digest
+deployment, no production change. Every step in §15.8 needs its own explicit owner authorization. Where this section changes §1–§14,
+it governs; the earlier text is kept as history. Sources: the [cutover record](stage-21-x-cutover-record.md) §14; the
+[A5.4 operational draft](../core-v2-a5-4-operational-runbooks.md) §2.4–§2.8; the
+[F6 readiness decision record](../core-v2-a5-4-f6-transitional-readiness.md); the
+[A5.4-A5 design](../core-v2-a5-4-a5-readiness-design.md) §10; the [R2 review](../core-v2-a5-r2-restore-drill-review.md) §5.
+
+### 15.1 Production baseline (G6 baseline refresh, 2026-10-12)
+
+Read-only, run by the owner on 2026-10-12, 11:16:41–11:16:52 UTC. **Evidence kind: OWNER-SUPPLIED TERMINAL EVIDENCE**, not
+independently collected. The result is recorded in the [cutover record](stage-21-x-cutover-record.md) §14: identity PASS (trusted SSH
+host key matched), all guards PASS, readiness PASS, agreement MATCH, and no change made. Production runs older images that are not in
+the candidate set and carry no revision label. The detailed parity values (OS, Docker, PostgreSQL, RabbitMQ, migration fingerprints,
+broker topology, configuration names) are held in the owner's terminal output and are **not transcribed here: PENDING attachment
+before G6-B**. G6-A (§14) stays certified and is not rerun.
+
+### 15.2 Certified digest set: CONDITIONALLY APPROVED (2026-10-12), not deployable
+
+Replaces "the certified image repo digests" of D-1 and §4. Approved conditionally by the owner on 2026-10-12, **for the rehearsal
+identity only**; it authorizes no deployment.
+
+| Service | Index digest (`ghcr.io/nawara-solutions/…`) | Revision | Build run (push to `main`) |
+|---|---|---|---|
+| auth-service | `nawara-core-auth-service@sha256:5877c6ad5a4a4ac4b7858efce794abf9ba65c5162dc9fc8f569fdef384ec35ed` | `64ad8e3` (PR #291) | 38091302948 |
+| organization-service | `nawara-core-organization-service@sha256:61221d5445f46045cfb9fd99ee38b42833568dfb1f577f853699d5f7acb9ca60` | `564a30f` (PR #283) | 38073779269 |
+| audit-service | `nawara-core-audit-service@sha256:785a443169aada802cba82788b4ba1fda6e70676ba2d9e2d45d3bda89eb571ab` | `564a30f` | 38073779294 |
+
+**Verified (read-only, 2026-10-12):**
+- each digest is the index digest reported by its successful build run, and the build labels it with the full revision;
+- each digest has exactly one GitHub attestation, whose subject is that digest, signed by the service's image workflow on
+  `refs/heads/main` from a `push`, at that revision;
+- both revisions are ancestors of `main`; no image input of any of the three services changed after them;
+- coherence: `libs/`, `package.json` and `package-lock.json` are identical at `564a30f` and `64ad8e3`, so all three images carry the
+  same shared libraries;
+- the Auth candidate contains A2 (`d5a8cbb`), A3 (`fcf5806`) and the A5.4-A5 readiness check (R1), and its packaged R2 capability
+  probe passed (R2 review §5).
+
+**Conditions for final approval (PENDING):**
+1. **CRYPTOGRAPHIC ATTESTATION: PENDING.** `gh attestation verify oci://<image>@<digest> --signer-workflow <image workflow>
+   --source-ref refs/heads/main` could not run: the registry requires authentication, and no read-only registry credential was
+   available. Run once per image with a read-only credential (for example D-16's).
+2. **Packaged-image configuration checks: PENDING.** No evidence exists for these exact digests:
+   - Auth: the image's own `dist/cli/check-config.js` against production's configuration (variable names; the deploy runs the same
+     check);
+   - Organization: the runbook's packaged configuration check (`organization-production.md` §2);
+   - Audit: no packaged check exists; a static comparison shows its configuration names unchanged. Its start-up in G6-C is the evidence.
+3. **Final owner approval**, recorded with the results of 1 and 2.
+
+Any change to a digest, or to its relevant configuration, after final approval requires a new selection and a re-rehearsal (A5.4-G1
+item 3).
+
+### 15.3 Parity changes
+
+- **PostgreSQL image: owner decision required before G6-B.** The candidates' deploy scripts pin
+  `postgres:16-alpine@sha256:721873c3…`. G6-A recorded production on `postgres@sha256:cf78e766…` (16.15). Recommended:
+  - rehearse with the pinned image and record the difference as a §5 deviation, with both server versions compared;
+  - a different PostgreSQL major version is a STOP.
+- **Audit migration `0004_changes_validation_search_path.sql`:** new in the Audit candidate. G6-C applies it on the VM. In production
+  it is applied only by an authorized Audit digest deployment, forward-only.
+- **Other parity targets** come from the 2026-10-12 refresh (§15.1). The revision `9e29c76` and the G6-A image digests no longer apply.
+
+### 15.4 Procedure changes
+
+1. **F6 Auth mirror, source first** (replaces the order in the §9.1 F6 row). After `ownership activate`:
+   1. redeploy Auth with `AUTH_HIERARCHY_SOURCE=organization-service`;
+   2. verify that deployment;
+   3. run the irreversible `hierarchy-retire --fresh`;
+   4. confirm MATCH.
+
+   Inside the window, Auth's `/ready` reports `source_ahead_of_marker`. This is expected, attended, and still not ready.
+2. **The seven Auth readiness cases** (F6 readiness decision record). Each is a §9.1 PASS item:
+   1. the source-first sequence through F7, with MATCH at its end;
+   2. no unintended hierarchy-content change across the disagreement window;
+   3. a failed Auth redeploy and one controlled retry;
+   4. an interrupted transition and an Auth restart inside the disagreement window;
+   5. an abandoned transition detected by the agreement check (organization-production §6.2);
+   6. the measured durations, which set the window's hard limit (OPEN-5);
+   7. a second redeploy failure leading to the stop and escalation path, with no further retry.
+3. **§8.1 monitoring demonstrations, now also on Auth's `/ready`:**
+   - the induced freeze also shows `marker_frozen`;
+   - the induced `AUTH_HIERARCHY_SOURCE` mismatch also shows `source_ahead_of_marker`;
+   - both are restored as before.
+4. **§7 restore checkpoint X lies outside any frozen Auth phase.**
+   - X is taken with the Auth marker `local` before F6, or `org_authoritative` after F6. It is never taken during the §8.1 freeze
+     demonstration.
+   - The drill therefore uses the unchanged ready gate, and **no real frozen-backup drill is required for G6** (R2 applies only to a
+     drill of a backup taken under a freeze).
+   - Added to §7, as ADR-0063 requires: a restore drill of a post-F6 backup detects a `local` marker. A wrong-side restore stays
+     procedural (core-backup-restore §7) and is recorded as not rehearsed.
+
+### 15.5 Deferred items (owner decision, 2026-10-12)
+
+The A5.4 operational draft §2.8 items 3 and 7 are **deferred**. Each needs A5.4 RED code that is gated until F7:
+- item 3: the post-F7 first Platform, the `allowedPlatforms` extension and the first Organization (ADR-0062 §11);
+- item 7: the read-only replacement for `ownership verify` (A5.4-O5).
+
+Each is certified later, in a separately authorized rehearsal after its post-F7 implementation. Until then:
+- the existing `ownership verify` stays the F5 and post-activation verification;
+- production first-Platform operations stay blocked.
+
+### 15.6 Rehearsal VM and isolation
+
+- **A new disposable, isolated Ubuntu VM** (D-1), with user `ubuntu` and `/home/ubuntu/nawara-core`, and no public DNS or TLS. The
+  existing nonproduction R3 lab host `nawara-lab-01` is **not** used and not altered.
+- Isolation per §6. Before G6-B:
+  - the read-only GHCR credential (D-16);
+  - MinIO on the VM with a rehearsal-only key pair (D-17);
+  - a host-side egress block if the VM host shares a network with production.
+- **G6-BV is mandatory before any rehearsal mutation.** Deployments use the §15.2 digests by digest, by hand, never through the GitHub
+  production workflows.
+
+### 15.7 Unchanged
+
+R2 (source review PASS WITH LIMITATIONS; packaged-image probe PASSED; not certified) and R3 (CERTIFIED — PASS WITH LIMITATIONS,
+nonproduction) are unchanged and not repeated. Also unchanged:
+- §6 isolation;
+- §7 RPO and RTO;
+- §10 evidence;
+- §11 retention;
+- §13 PASS, FAIL and STOP;
+- decisions D-1 to D-17 other than the image identity.
+
+### 15.8 Authorization boundary
+
+**No production execution, and no rehearsal step, without a new explicit owner authorization.** In order, each separately authorized:
+1. the final digest approval (§15.2 conditions);
+2. the PostgreSQL parity decision (§15.3);
+3. G6-B (VM provisioning);
+4. G6-BV;
+5. G6-C to G6-F;
+6. G6 CERTIFIED.
+
+After G6, these production steps keep their own checkpoints (§12; cutover record §7):
+- the first digest deployment of each service in the set (R3 installed in production before any Auth deployment containing the
+  check);
+- the pre-G7 backup and its verification;
+- the backup schedule design;
+- G7, F6 and F7;
+- the post-F7 backup.

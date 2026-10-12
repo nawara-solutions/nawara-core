@@ -192,6 +192,7 @@ locally — previously executed result requires later evidence attachment.* G6-B
 | G6-P owner decisions (D-1…D-17) | COMPLETE |
 | G6-P1 rehearsal plan | COMPLETE — PR #151 (merge `4ac4d8a`); file SHA-256 `864545d8003be74259f26ae79a7880d5411d4c458e1751703c182395accda671` |
 | **G6-A** | **CERTIFIED** |
+| G6 baseline refresh (2026-10-12) | **EXECUTED / PASSED**, read-only, owner-supplied evidence (§14) |
 | **G6-B** | **DEFERRED** |
 | **G6-BV** | **DEFERRED** |
 | **G6-C** | **DEFERRED** |
@@ -321,3 +322,36 @@ Appended; §1–§12 are unchanged. Source: the [V2 A0 record](../core-v2-a0-imm
 
 Production still runs the organization-service and audit-service images of §2 and §5; they carry no revision label and the new deploy
 workflows refuse them. G6 stays deferred; G7, F6 and F7 locked; Final Core Validation absolute last.
+
+## 14. Later-status note (2026-10-12, G6 baseline refresh)
+
+Appended. §1–§13 are unchanged.
+
+**Evidence kind: OWNER-SUPPLIED TERMINAL EVIDENCE**, not independently collected. The owner ran the read-only refresh block on
+production on 2026-10-12, from 11:16:41 to 11:16:52 UTC.
+
+| Check | Result |
+|---|---|
+| Host identity | **PASS**: the owner-trusted SSH host-key fingerprint matched; the runtime root, the retained containers of §9 and the production Company of §2 were present |
+| Organization | `VERIFIED` / `fresh` / `authoritative=false`; not approved, not activated; production activation flag absent |
+| Auth | marker `local`, zero `hierarchy_authority_event` rows; `AUTH_EVENTS=off` |
+| Readiness | Auth, Organization and Audit `/ready`: PASS |
+| Containers | the seven core containers running and healthy, zero restarts |
+| Authority agreement | MATCH |
+| Running images | Auth `sha256:26164d42…5eaf`, Organization `sha256:76734d81…e49d`, Audit `sha256:a8dade8c…4554`: older images, not in the candidate set, with no revision label (the deploy workflows refuse them) |
+| R3 carrier | not installed in production |
+| Backups | the status needs attention before G7 (the fresh manual pre-G7 backup of §7) |
+| Changes | **none**; nothing was written, restarted, deployed or activated |
+
+The detailed parity values are held in the owner's terminal output: **PENDING attachment before G6-B**.
+
+**Candidate digest set: CONDITIONALLY APPROVED (2026-10-12), not deployable.**
+- The set is Auth `sha256:5877c6ad…35ed` (`64ad8e3`), Organization `sha256:61221d54…ca60` (`564a30f`) and Audit
+  `sha256:785a4431…71ab` (`564a30f`).
+- Final approval needs a cryptographic attestation verification and the packaged-image configuration checks, followed by the
+  owner's final approval.
+- The owner also deferred G6 plan items 3 and 7 (the A5.4 draft §2.8).
+- Details: [G6 plan](stage-21-x-g6-rehearsal-plan.md) §15.
+
+G6 stays **NOT CERTIFIED** and the rehearsal is **not authorized**. G7, F6 and F7 stay locked. Final Core Validation stays the
+absolute last full Core validation.
