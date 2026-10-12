@@ -229,6 +229,12 @@ alert mechanism's design (implementation, delivery channel, polling strategy, de
 compatibility change (R2); the hard limit; the start-up warning's wording; wrong-side restore detection; the G6 plan and runbook
 updates; reconciliation; any routing use of readiness.
 
+*Update (2026-10-12, status reconciliation; the lists above are kept as written).* The A5.4-A5 check is merged (PR #291, not
+deployed). The restore-drill compatibility change (R2) is merged (PR #292). Its source review passed with limitations; the
+packaged-image probe and a real drill are not done ([review](core-v2-a5-r2-restore-drill-review.md)). The alert mechanism (R3) is
+designed, implemented and **certified for its nonproduction demonstration only** ([carrier record](core-v2-a5-r3-alert-carrier.md)
+§17); it is not installed in production. The other items stay open.
+
 ## 1. What is fixed (not reopened here)
 
 | Fixed by | Rule |

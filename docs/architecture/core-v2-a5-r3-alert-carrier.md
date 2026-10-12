@@ -11,6 +11,11 @@
 - **Provider integration (2026-10-11, §16):** the owner selected **Pushover** (receiver) and **Healthchecks.io** (heartbeat); both are
   integrated and tested locally against fake endpoints only. **No account or credential exists, no real message or ping was sent,
   nothing is installed, no demonstration has run, the carrier is not certified, and R3 is not satisfied.**
+- **Demonstration and certification (2026-10-11; recorded 2026-10-12, §17):** demonstrated on the nonproduction lab host
+  `nawara-lab-01` at revision `92c3b44` and **owner-certified CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION)**. Deviations D1–D4
+  are accepted, and S1 is remediated for the lab (owner-attested, not independently security-audited). The two status lines above
+  are kept as written at the time. **The carrier is not installed in production**; its installation and every Auth deployment
+  containing the A5.4-A5 check stay separately authorized.
 - **Governs:** [ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-recovery-convergence.md) §4, clarification item 10 (R3), and the
   [F6 readiness decision record](core-v2-a5-4-f6-transitional-readiness.md) ("Later rulings", R3). Where this record and either differs,
   they govern. Related: the [A5.4-A5 design](core-v2-a5-4-a5-readiness-design.md) (§7, §10 item 10, §11 OPEN-3), the
@@ -389,3 +394,73 @@ ping was created or sent; nothing is installed. Contracts read on 2026-10-11 fro
   Healthchecks.io self-hosted instances are out of scope (only `hc-ping.com`).
 - **Not done (each separately authorized):** the owner's accounts and credentials; the demonstration; the certification; the production
   installation. R3 remains **not** satisfied.
+
+## 17. Demonstration and owner certification (2026-10-11; recorded 2026-10-12)
+
+*Recorded from the owner's local certification records; nothing here re-runs, extends or reopens the demonstration. The evidence and
+certification files stay outside the repository and are referenced by checksum only: no credential, ping URL, key, journal or
+notification export is copied into Git.*
+
+**Decision:** **R3 CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION)**. The owner approved it explicitly on 2026-10-11, and the
+formal approval record documents that approval. It carries no handwritten or cryptographic signature. The independent reviewer
+recommended PASS WITH LIMITATIONS and did not certify on the owner's behalf. The prepared `R3-OWNER-CERTIFICATION.md` stays in its
+unsigned prepared form, as its hash below shows. The separate approval record is the approval document.
+
+| Item | Value |
+|---|---|
+| Lab host | `nawara-lab-01`, which the owner confirmed (2026-10-12) is the **nonproduction Server 2 (`192.168.1.18`)**; this reconciles the S1 addendum's reference to "Server 2" with the certification's lab host. Documentation only: no server was accessed for this record |
+| Lab repository revision | `92c3b44e352e07b513e286aac64d181d9c809001` (PR #296) |
+| A5.4-A5 Auth image | `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:5877c6ad5a4a4ac4b7858efce794abf9ba65c5162dc9fc8f569fdef384ec35ed` (`64ad8e3`) |
+| Pre-A5 Auth image | `ghcr.io/nawara-solutions/nawara-core-auth-service@sha256:f6e1d165fe1a33f9420f2e4a4626d9a2da482a82c422e879e799a9e19c5d3a54` (`fcf5806`) |
+| Evidence archive | `nawara-core-r3-evidence-20261011.tar.gz`, SHA-256 `e2746f35b6859e45b6b590ed0d7a2a4ba188d7be8b6235838f840f1230999e74` |
+| Evidence manifest | `MANIFEST.sha256`, SHA-256 `e9e5dda9290c0808346381cf3a6a9b9b706da3ef88cfae2eaaf48c993bbcffbc` |
+| S1 remediation addendum | SHA-256 `b0af4852eca616446cc5faf44c8bc8b370e3ae6c1ec62df3c4d189093e7efa50` |
+| Prepared certification (unsigned) | `R3-OWNER-CERTIFICATION.md`, SHA-256 `9f23329691a80e75782190025639c639cee0b1c409a94ee1ffa0614dd0ff0c62` |
+| Formal owner approval record | `NAWARA-CORE-V2-R3-OWNER-APPROVAL-20261011.md`, SHA-256 `92740b1937152fa266a2062890639d2e01f85628fbc80d75222add1484005673`; preserved on 2026-10-12 beside the other certification records and added to their checksum inventory, with the archive and manifest unchanged |
+
+**Results (runbook §6 steps 1–8, archive `EVIDENCE-MATRIX.md`):**
+- `CARRIER_STARTED`.
+- `ALERT`, `REMINDER` and `RECOVERED` for `marker_frozen`.
+- `ALERT` and `RECOVERED` for `source_ahead_of_marker`, without `DEPLOYMENT`.
+- Two `DEPLOYMENT` messages carrying the previous image and revision.
+- A database outage and its recovery.
+- A receiver failure: the message was queued, the heartbeat withheld and the cycle exited with status 3, then a retry succeeded.
+- Healthchecks.io DOWN and UP.
+- Credential-permission, journal and process-argument checks.
+
+**Accepted deviations:**
+- **D1:** the receiver failure was induced through a carrier-scoped HTTPS proxy instead of a host-wide egress block. Slow, timeout
+  and DNS failures were not exercised.
+- **D2:** Healthchecks.io DOWN was shown through missed heartbeats, separately from the brief receiver outage.
+- **D3:** the cycles were run manually. The timer was never active, so its 60-second cadence is first exercised at installation.
+- **D4:** queue recovery was shown with a single message. Ordered multi-message delivery is covered by the local tests only.
+
+**Residual limitations (accepted):**
+- Provider-side receipt is owner-confirmed; the host evidence shows only that the providers accepted the messages.
+- The attachments are owner-supplied: a selected journal transcription and process-scan counts. The Healthchecks.io DOWN email is
+  not attached.
+- The secret checks found no matches, but they do not prove that nothing leaked.
+- The reviewer never connected to the lab host.
+
+**Lab versus production differences (still in force):**
+- `NODE_ENV=test`.
+- `AUTH_EVENTS=off`, and there is no production broker.
+- `REMINDER_SECONDS=180` instead of 3600.
+- The container names were overridden.
+- The timer was inactive.
+
+**S1:** **REMEDIATED FOR THE R3 LAB — OWNER-ATTESTED; NOT INDEPENDENTLY SECURITY-AUDITED.** The exposed personal Pushover user key
+was reset, and the lab destination moved to a dedicated Delivery Group. The owner confirmed a successful delivery (HTTP 200) after
+the reset. The addendum's residual documentation items stay open and do not reopen S1 for the lab: the exposed notification email,
+the sending method of the test messages, the carrier's first delivery with the Group Key, and the post-change metadata of the
+remaining files.
+
+**Not authorized by this certification:**
+- Installing or activating the carrier, or its timer, on the production host (runbook §4).
+- Any production Auth deployment.
+- G6, G7, F6 or F7.
+- A claim of production readiness or of Final Core Validation.
+
+R3 remains a prerequisite before the first, and every later, production deployment of an Auth image containing the A5.4-A5 check.
+For production, the demonstration certified here is the "separately certified equivalent" that ADR-0063 §4 item 10 allows. The
+separately authorized installation on the production host must follow it.
