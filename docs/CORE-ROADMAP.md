@@ -74,6 +74,14 @@ intentionally deferred the rest of the rehearsal.
   and §2.8 items 3 and 7 deferred.
 - G6 stays **not certified** and the rehearsal is **not authorized**.
 
+**Update (2026-10-12, owner decisions; G6 plan §16):**
+- The digest set is **finally approved for isolated G6 rehearsal use only**. Attestations passed 3/3, Tier A checks passed 5/5 for
+  Auth and 5/5 for Organization, and the production configuration-name inventory is complete. This is **not** a production deployment
+  authorization: production Tier B and the other G7 checks remain.
+- PostgreSQL: 16.15 on both, images not identical. Accepted as a documented rehearsal limitation; G6-C assesses ICU and collation.
+- G6-B is done: QEMU/KVM guest `g6-rehearsal-01` on `nawara-lab-01`, R3 preserved. G6-BV-I passed with limitations; G6-BV-S has not
+  started. G6-C is **not authorized**.
+
 G6 is not tied to any particular hardware. The plan requires an isolated, disposable Ubuntu VM; where it runs is an owner decision,
 for example:
 
