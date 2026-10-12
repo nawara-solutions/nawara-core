@@ -16,6 +16,10 @@
 - **Implementation status (2026-10-10): COMPLETE LOCALLY, committed as `da0fd957` on `feature/core-v2-a5-4-a5-readiness-check`;
   NOT MERGED, NOT DEPLOYED, NOT ACTIVATED (§14).** Developed under the RED-exception development authorization of A5.4-G1 item 4. The
   test evidence of §14 is local and CI-independent; it is **not** a deployment certification.
+- **Status update (2026-10-12, reconciliation; §15):** **MERGED as PR #291 (merge `64ad8e3`, 2026-10-10), NOT DEPLOYED, NOT
+  ACTIVATED.** The explicit RED-exception merge approval is **NOT VERIFIED — approval evidence unavailable**. R1 is implemented by
+  this check and is certified only in G6. R2's drill change is merged (PR #292). R3's carrier is certified for its nonproduction
+  demonstration only. The production gates of §14 are unchanged.
 - **Owner rulings (2026-10-10, R1 to R4; recorded on ADR-0063 §4 and in the decision record's "Later rulings"):** R1, a `frozen`
   marker is not ready with `marker_frozen` in fresh and existing environments, with either source (§4, §11); R2, a backup taken
   under a freeze stays a valid backup state, and the restore-drill compatibility change is separately authorized (§9, §10); R3, a
@@ -351,12 +355,12 @@ confirmed by a separately authorized read-only inspection before any deployment.
 |---|---|---|---|
 | OPEN-1 | **Readiness during an existing environment's freeze** (marker `frozen`, either source). Auth has no environment class, so one rule applies to every environment | **RULED 2026-10-10 (R1):** not ready, `marker_frozen`, in fresh and existing environments (ADR-0063 §4, item 8) | no longer blocks. Follow-ups, each separately authorized: the restore-drill compatibility change (R2; OPEN-8); an existing-environment runbook naming `marker_frozen` as expected inside its attended freeze; the G6 plan's induced-freeze demonstration (OPEN-6) |
 | OPEN-2 | the start-up warning `hierarchy_source_mismatch` says first touches "fail closed until configuration and marker agree", which overstates the code (decision record "Still open"). Correcting its prose is not in A5.4-G1 item 4's file scope; this design leaves it unchanged | owner decision | nothing in this check |
-| OPEN-3 | what carries an alert in production while no alerting stack is deployed | **policy RULED 2026-10-10 (R3):** a reviewed operational alert mechanism, implemented and demonstrated, before the first production deployment of any Auth image containing the check and for later ones; the attended operator and logs alone do not satisfy it. **Still open:** the mechanism's implementation, delivery channel, polling strategy and demonstration environment (a separate reviewed design). **Design record (2026-10-10, documentation only; its decisions were approved on 2026-10-11 for provider-neutral code only; the receiver and heartbeat providers and the demonstration environment stay OPEN):** [`core-v2-a5-r3-alert-carrier.md`](core-v2-a5-r3-alert-carrier.md); **implemented locally (2026-10-11), provider-neutral, not installed, not demonstrated, not certified** (its §15) | every production deployment of an Auth image containing the check; not the local implementation or its merge |
+| OPEN-3 | what carries an alert in production while no alerting stack is deployed | **policy RULED 2026-10-10 (R3):** a reviewed operational alert mechanism, implemented and demonstrated, before the first production deployment of any Auth image containing the check and for later ones; the attended operator and logs alone do not satisfy it. **Still open:** the mechanism's implementation, delivery channel, polling strategy and demonstration environment (a separate reviewed design). **Design record (2026-10-10, documentation only; its decisions were approved on 2026-10-11 for provider-neutral code only; the receiver and heartbeat providers and the demonstration environment stay OPEN):** [`core-v2-a5-r3-alert-carrier.md`](core-v2-a5-r3-alert-carrier.md); **implemented locally (2026-10-11), provider-neutral, not installed, not demonstrated, not certified** (its §15). **Update (2026-10-12):** providers integrated (PR #295); demonstrated on the nonproduction lab host on 2026-10-11 and **owner-certified CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION)** (its §17); not installed in production (§15) | every production deployment of an Auth image containing the check; not the local implementation or its merge |
 | OPEN-4 | wrong-side restore detection: restore provenance, an independent agreement control, generation or anchor consistency | open (ruling 6) | nothing in this check; any claim of restore detection |
 | OPEN-5 | the transition window's hard duration limit | set from G6 measurements | the refreshed G6 plan and runbook |
 | OPEN-6 | the updates to the G6 plan and the active runbooks, and their certification | separately authorized | F6 in source-first order; shipping the check |
 | OPEN-7 | post-one-way-door reconciliation; any later routing use of readiness | not designed / separately governed | out of scope |
-| OPEN-8 | the restore-drill compatibility change for a backup taken under a freeze (R2): how the drill recognizes an expected `marker_frozen` without weakening its ready check for other states | not designed; separately authorized, tested and reviewed | any rehearsal that drills a frozen backup with the check in the drilled image |
+| OPEN-8 | the restore-drill compatibility change for a backup taken under a freeze (R2): how the drill recognizes an expected `marker_frozen` without weakening its ready check for other states | *as written:* not designed; separately authorized, tested and reviewed. **Update (2026-10-12): implemented and merged as PR #292** (exact `503` naming only `hierarchy_authority`, both `marker_frozen` diagnostics and the CLI `frozen` read; a pre-check image detected from the image itself). Tested against a fake Docker harness; independent source review PASS WITH LIMITATIONS ([review](core-v2-a5-r2-restore-drill-review.md)); the packaged-image capability probe and a real drill are **not done** (§15) | any rehearsal that drills a frozen backup with the check in the drilled image |
 
 **Limitations stated once:** the check sees two values; it reports ready in S2a, S5b, S5c and an abandoned transition; it runs only
 when `/ready` is called; it does not distinguish S2c from S5a; a not-ready Auth keeps serving; a marker read that times out is
@@ -458,3 +462,20 @@ authorization covering the check's runtime effect (§10 item 11). Nothing here a
 
 **A3 findings, unchanged:** PR #287's RED-exception merge approval (item 5) remains **NOT VERIFIED**, and A3's O1 pre-merge timing remains
 **unmet** (§12; A3 design §11.8, §11.9).
+
+## 15. Status reconciliation (2026-10-12)
+
+*Documentation only. It corrects the stale "not merged" statements above (§14 and the status header are kept as history) and approves
+nothing retrospectively. Evidence: Git history on `main` at `92c3b44` and the GitHub pull-request records, read on 2026-10-12.*
+
+| Item | Implementation | Tests | Review | Certification and remaining gate |
+|---|---|---|---|---|
+| A5.4-A5 check (R1 is implemented by it) | **merged**, PR #291, `64ad8e3` (2026-10-10); not deployed, not activated | §14's local evidence (not rerun); PR CI 24/24, `core-ci-passed` | the PR description reports independent reviews with no material finding remaining; there is no review record on GitHub | **not certified**: certified only in G6 with the certified digest set (A5.4-G1 item 4) |
+| PR #291 merge conditions | compatibility evidence and the image-pinning statement are in the PR description; the merge precedes any G6 digest selection (none has been made) | – | – | explicit RED-exception merge approval: **NOT VERIFIED — approval evidence unavailable** (no review or comment on the PR; merged from the owner's account at 22:24 UTC, six minutes after creation) |
+| R2 drill change (OPEN-8) | **merged**, PR #292, `c79020e` / `5edaf34` | fake Docker harness only (`scripts/deploy-tests/backup-restore.test.mjs`); PR CI 24/24 | independent source review (2026-10-12): **PASS WITH LIMITATIONS**, no code change required ([review](core-v2-a5-r2-restore-drill-review.md)) | **not certified**; the packaged-image capability probe (LOW 1) and a real restore drill are not done; required before any rehearsal that drills a frozen backup |
+| R3 alert carrier (OPEN-3) | merged, PRs #293–#296 | local tests; lab demonstration 2026-10-11 | independent review of the demonstration: PASS WITH LIMITATIONS | **CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION)** ([carrier record](core-v2-a5-r3-alert-carrier.md) §17); not installed in production |
+
+**Production stays gated** exactly as §14 states. R2 and R3 no longer block for missing code. However, R2 still needs its
+packaged-image probe before an affected rehearsal relies on it, and R3 still needs its separately authorized production installation.
+The remaining gates are the G6 plan and runbook updates, the certified digest selection and G6, live-state verification and a
+separate deployment authorization. The A3 findings are unchanged.

@@ -10,6 +10,12 @@ A5.4-A5 readiness check ([ADR-0063](../adr/0063-post-f7-authority-mode-cli-and-r
 > non-production host and independently reviewed; the owner explicitly certifies the carrier; and a separately authorized installation on
 > the production host is done. Every step below that touches a host is a
 > **separately authorized production action**; this runbook authorizes none of them.
+>
+> **Status update (2026-10-12).** The owner created the accounts. The §6 demonstration ran on 2026-10-11 on the nonproduction lab
+> host `nawara-lab-01` and was independently reviewed. The owner certified it **CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION)**,
+> with deviations D1–D4 accepted ([design record](../architecture/core-v2-a5-r3-alert-carrier.md) §17). The one remaining R3 step is
+> the **separately authorized installation on the production host** (§4). The carrier is not installed in production, and nothing
+> in this update authorizes installation, timer activation or an Auth deployment. The paragraph above is kept as written.
 
 ## 1. What it does
 
