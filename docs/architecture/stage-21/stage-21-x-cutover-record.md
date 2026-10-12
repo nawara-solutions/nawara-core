@@ -193,9 +193,12 @@ locally — previously executed result requires later evidence attachment.* G6-B
 | G6-P1 rehearsal plan | COMPLETE — PR #151 (merge `4ac4d8a`); file SHA-256 `864545d8003be74259f26ae79a7880d5411d4c458e1751703c182395accda671` |
 | **G6-A** | **CERTIFIED** |
 | G6 baseline refresh (2026-10-12) | **EXECUTED / PASSED**, read-only, owner-supplied evidence (§14) |
-| **G6-B** | **DEFERRED** |
-| **G6-BV** | **DEFERRED** |
-| **G6-C** | **DEFERRED** |
+| G6 digest set (2026-10-12) | **FINALLY APPROVED for isolated G6 rehearsal use only**; not a production deployment authorization (plan §16.1) |
+| PostgreSQL parity (2026-10-12) | 16.15 on both, images not identical: **accepted as a rehearsal limitation** (plan §16.2) |
+| **G6-B** | **DONE** (2026-10-12): QEMU/KVM guest `g6-rehearsal-01` on `nawara-lab-01`; R3 preserved (plan §15.6, §16.3) |
+| **G6-BV-I** (infrastructure) | **PASS WITH LIMITATIONS** (plan §16.4) |
+| **G6-BV-S** (service level) | **NOT STARTED** |
+| **G6-C** | **DEFERRED** — not authorized; not before G6-BV-S passes |
 | **G6-D** | **DEFERRED** |
 | **G6-E** | **DEFERRED** |
 | **G6-F** | **DEFERRED** |
@@ -207,6 +210,8 @@ intentionally deferred the rest of the rehearsal. No rehearsal VM, firewall rule
 
 Dependencies recorded for when G6-B resumes: the Core packages on GHCR are private, so plan D-16's dedicated read-only credential
 must be created first; and if the VM host shares a network with production, a host-side egress block is needed before G6-BV.
+*Superseded 2026-10-12 (plan §15.6, §16.3): the guest uses offline image transfer with no GHCR credential, and QEMU `restrict=on`
+plus a systemd IP filter instead of a host egress block.*
 
 ## 7. Downstream gates
 

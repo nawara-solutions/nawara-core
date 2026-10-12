@@ -6,6 +6,10 @@
   uses the conditionally approved certified digest set (§15.2), once its conditions pass.*
 - **Refresh (2026-10-12):** §15 refreshes this plan after the G6 baseline refresh. Where §15 states a change, it governs; the text above
   is kept as history. **G6 is not authorized by this plan or its refresh.**
+- **Amendment (2026-10-12, §16):** owner decisions recorded: the digest set is **FINALLY APPROVED for isolated G6 rehearsal use
+  only** (not for production deployment); the PostgreSQL image difference is accepted as a documented rehearsal limitation; the
+  rehearsal VM runs on `nawara-lab-01` under QEMU/KVM; G6-BV is split into G6-BV-I (PASS WITH LIMITATIONS) and G6-BV-S (NOT STARTED).
+  **G6-C is not authorized.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -87,6 +91,10 @@ credentials; a production DNS change; production Docker volumes; any call to a p
 on the VM by the deploy scripts; the backup destination and key pair are rehearsal-only (D-17).
 
 ### 6.1 G6-BV — isolation verification (mandatory, read-only on the VM, before any rehearsal mutation)
+
+**Amended 2026-10-12 (§16.4): G6-BV runs in two stages.** **G6-BV-I** (infrastructure isolation of the host and the guest) is recorded
+in §16.4. **G6-BV-S** (service-level isolation) is the list below, **unchanged and in full**. It runs read-only on the guest after the
+rehearsal stack, MinIO and the rehearsal credentials exist there, and before any rehearsal mutation. G6-C needs both stages.
 
 - `docker context show` is the local default and `DOCKER_HOST` is unset;
 - every service's `DATABASE_URL`, `RABBITMQ_URL` and `ORGANIZATION_SERVICE_URL` host is a VM-local container name;
@@ -287,6 +295,8 @@ identity only**; it authorizes no deployment.
    - Audit: no packaged check exists; a static comparison shows its configuration names unchanged. Its start-up in G6-C is the evidence.
 3. **Final owner approval**, recorded with the results of 1 and 2.
 
+**Update (2026-10-12): conditions 1–3 are met; the set is FINALLY APPROVED for isolated G6 rehearsal use only (§16.1).**
+
 Any change to a digest, or to its relevant configuration, after final approval requires a new selection and a re-rehearsal (A5.4-G1
 item 3).
 
@@ -296,6 +306,9 @@ item 3).
   `postgres:16-alpine@sha256:721873c3…`. G6-A recorded production on `postgres@sha256:cf78e766…` (16.15). Recommended:
   - rehearse with the pinned image and record the difference as a §5 deviation, with both server versions compared;
   - a different PostgreSQL major version is a STOP.
+
+  **Decided (2026-10-12, §16.2):** same PostgreSQL version (16.15), different images; the difference is accepted as a documented
+  rehearsal limitation.
 - **Audit migration `0004_changes_validation_search_path.sql`:** new in the Audit candidate. G6-C applies it on the VM. In production
   it is applied only by an authorized Audit digest deployment, forward-only.
 - **Other parity targets** come from the 2026-10-12 refresh (§15.1). The revision `9e29c76` and the G6-A image digests no longer apply.
@@ -341,40 +354,241 @@ Each is certified later, in a separately authorized rehearsal after its post-F7 
 
 ### 15.6 Rehearsal VM and isolation
 
-- **A new disposable, isolated Ubuntu VM** (D-1), with user `ubuntu` and `/home/ubuntu/nawara-core`, and no public DNS or TLS. The
-  existing nonproduction R3 lab host `nawara-lab-01` is **not** used and not altered.
-- Isolation per §6. Before G6-B:
-  - the read-only GHCR credential (D-16);
-  - MinIO on the VM with a rehearsal-only key pair (D-17);
-  - a host-side egress block if the VM host shares a network with production.
-- **G6-BV is mandatory before any rehearsal mutation.** Deployments use the §15.2 digests by digest, by hand, never through the GitHub
-  production workflows.
+**Amended 2026-10-12 (owner-approved; details in §16.3).** The earlier text planned a new VM away from `nawara-lab-01`, a GHCR
+credential on the VM (D-16) and a host-side egress block. It is replaced by:
+
+- **Host and guest.**
+  - The guest `g6-rehearsal-01` (D-1: Ubuntu 24.04, user `ubuntu`, `/home/ubuntu/nawara-core`, no public DNS or TLS) runs under QEMU/KVM **without libvirt** on the
+    nonproduction host `nawara-lab-01` (Server 2).
+  - It has 2 vCPU, 4 GiB RAM and a 40 GiB thin-provisioned disk, and runs as the transient `g6-vm.service`, which does not restart
+    after a host reboot.
+  - The host also runs the R3 Auth and PostgreSQL laboratory. **Preserving R3 is mandatory**: no R3 container, volume, network,
+    timer or queue is changed.
+- **Network.** QEMU user networking with `restrict=on`; guest SSH forwarded only to the host's `127.0.0.1:2222`; the QEMU process
+  confined by systemd `IPAddressDeny=any` with localhost allowed.
+  - There is no NAT, no bridge and no host firewall change.
+  - There is no outbound internet access, and no access to production, the LAN, R3 or the host's Docker networks.
+- **Images (replaces D-16 on the VM).**
+  - The guest never pulls from GHCR and holds no GHCR credential.
+  - The §15.2 digests reach it only through a separately reviewed and authorized **offline transfer** (§16.3).
+- **Unchanged.**
+  - MinIO on the guest with a rehearsal-only key pair (D-17).
+  - G6-BV-I and G6-BV-S before any rehearsal mutation (§6.1).
+  - Deployments by digest, by hand, never through the GitHub production workflows.
 
 ### 15.7 Unchanged
 
 R2 (source review PASS WITH LIMITATIONS; packaged-image probe PASSED; not certified) and R3 (CERTIFIED — PASS WITH LIMITATIONS,
 nonproduction) are unchanged and not repeated. Also unchanged:
-- §6 isolation;
+- §6 isolation requirements (G6-BV staged by the 2026-10-12 amendment, §6.1 and §16.4, without weakening any check);
 - §7 RPO and RTO;
 - §10 evidence;
 - §11 retention;
 - §13 PASS, FAIL and STOP;
-- decisions D-1 to D-17 other than the image identity.
+- decisions D-1 to D-17 other than the image identity and the 2026-10-12 amendment of D-1's host and D-16 (§15.6).
 
 ### 15.8 Authorization boundary
 
-**No production execution, and no rehearsal step, without a new explicit owner authorization.** In order, each separately authorized:
-1. the final digest approval (§15.2 conditions);
-2. the PostgreSQL parity decision (§15.3);
-3. G6-B (VM provisioning);
-4. G6-BV;
-5. G6-C to G6-F;
-6. G6 CERTIFIED.
+**No production execution, and no rehearsal step, without a new explicit owner authorization.** Each step was or is separately
+authorized. **Amended 2026-10-12** to the actual order: G6-B ran before steps 1 and 2 were recorded, by owner authorization (a
+recorded deviation, §16.5).
+
+| # | Step | Status (2026-10-12) |
+|---|---|---|
+| 1 | Final digest approval (§15.2 conditions) | **DONE** — rehearsal use only (§16.1) |
+| 2 | PostgreSQL parity decision (§15.3) | **DONE** — difference accepted as a limitation (§16.2) |
+| 3 | G6-B (VM provisioning) | **DONE** on `nawara-lab-01` (§15.6, §16.3) |
+| 4 | G6-BV-I (infrastructure isolation) | **PASS WITH LIMITATIONS** (§16.4) |
+| 5 | Offline image transfer and rehearsal-stack setup on the guest, MinIO and rehearsal credentials included (§16.3) | NOT AUTHORIZED |
+| 6 | G6-BV-S (service-level isolation, §6.1) | NOT STARTED |
+| 7 | G6-C to G6-F | NOT AUTHORIZED — not before steps 5 and 6 pass |
+| 8 | G6 CERTIFIED | — |
 
 After G6, these production steps keep their own checkpoints (§12; cutover record §7):
 - the first digest deployment of each service in the set (R3 installed in production before any Auth deployment containing the
-  check);
+  check), each preceded by the production Tier B configuration check (§16.1);
 - the pre-G7 backup and its verification;
 - the backup schedule design;
 - G7, F6 and F7;
 - the post-F7 backup.
+
+## 16. Owner decisions and amendment (2026-10-12)
+
+Owner-approved; it records three decisions and the G6-B / G6-BV-I results. It **authorizes no deployment, no rehearsal step and no
+production change**. Evidence kind for every result below: **OWNER-SUPPLIED TERMINAL OUTPUT** (the owner ran the reviewed scripts on
+the owner workstation or on `nawara-lab-01`; the output files were then read by this record's author). The public attestation
+bundles, the scripts and the outputs are retained by the owner outside the repository; no credential, token or configuration value is
+in them or here.
+
+### 16.1 Decision 1 — candidate digests FINALLY APPROVED for isolated G6 rehearsal use only
+
+The three §15.2 digests are approved **as the G6 rehearsal identity**. **This is not an authorization to deploy them to production.**
+
+**Cryptographic attestation (§15.2 condition 1): 3/3 PASS.** `gh attestation verify oci://<image>@<digest>` ran once per image with a
+short-lived `read:packages`-only credential held in a temporary, deleted Docker configuration, pinned to:
+- the image workflow;
+- `refs/heads/main`;
+- the source commit and the signer commit;
+- the SLSA provenance predicate;
+- `--deny-self-hosted-runners`.
+
+The verified results were then re-checked independently against the pins:
+
+| Image | Attested digest | Source commit | Signer workflow | Runner, trigger | Bundle SHA-256 |
+|---|---|---|---|---|---|
+| auth-service | `5877c6ad…35ed` | `64ad8e3` | `auth-service-docker-build.yml@refs/heads/main` | github-hosted, push | `c7f5c434…3a06` |
+| organization-service | `61221d54…ca60` | `564a30f` | `organization-service-image.yml@refs/heads/main` | github-hosted, push | `18082711…80e7` |
+| audit-service | `785a4431…71ab` | `564a30f` | `audit-service-image.yml@refs/heads/main` | github-hosted, push | `f61f07c5…ef20` |
+
+Each image has one attestation, with a transparency-log timestamp.
+
+**Packaged-image configuration checks, Tier A (§15.2 condition 2): Auth 5/5 PASS, Organization 5/5 PASS.**
+- **Images:** pulled by exact digest on the owner workstation; the digest binding was checked.
+- **Configuration:** the CI synthetic production configuration (`scripts/smoke-core-image.sh`), with generated values only.
+- **Containers:** `--rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges`, with no mounts.
+- **Auth:** `dist/cli/check-config.js`.
+  - A1: a valid configuration is accepted, with the exact expected line.
+  - A2: a pepper equal to `JWT_SECRET` is refused.
+  - A3: a superuser runtime role is refused.
+  - A4: `NAME` and `NAME_FILE` both set is refused.
+  - A5: a missing `JWT_SECRET` is refused.
+- **Organization:** the `organization-production.md` §2 check.
+  - O1: a valid configuration is accepted.
+  - O2: a superuser role is refused.
+  - O3: a missing `RABBITMQ_URL` in production is refused.
+  - O4: an extra top-level key in `SERVICE_POLICY` is refused.
+  - O5: `NAME` and `NAME_FILE` both set is refused.
+  - Every negative case had to fail with a `ConfigError`.
+- **Output and cleanup:** no configuration value appeared in any output, and no check container was left.
+- **Limitation:** Tier A proves the images' contracts, not production's values. Audit has no packaged check; its start-up in G6-C is
+  the evidence.
+
+**Production configuration, names only (read-only, 2026-10-12).** A reviewed parser read only the three service `.env` files on
+production and printed names: no value, length, hash, path or comment.
+
+| Service | Names in the file | Required by the candidate's production loader | Result |
+|---|---|---|---|
+| auth-service | 24 | all 13 present: `NODE_ENV`, `DATABASE_URL`, `JWT_SECRET`, `TOTP_ENCRYPTION_KEYS`, `TOTP_ENCRYPTION_ACTIVE_KEY_ID`, `OPERATOR_CODE_PEPPER`, `SECRET_KEY_PEPPER`, `THROTTLE_KEY_PEPPER`, `JOIN_CODE_PEPPER`, `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGINS`, `AUTH_EVENTS`, `RABBITMQ_URL` | PRESENT |
+| organization-service | 6 | all 4 present (`NODE_ENV`, `DATABASE_URL`, `AUTH_SERVICE_URL`, `RABBITMQ_URL`), plus `SERVICE_TOKENS` and `SERVICE_POLICY` | PRESENT |
+| audit-service | 3 | all 3 present (`NODE_ENV`, `DATABASE_URL`, `RABBITMQ_URL`) | PRESENT |
+
+Audit's three absent loader names do not block rehearsal approval (`apps/audit-service/src/config/audit-config.ts`, at `564a30f` and unchanged on `main`):
+
+| Name | Classification | Effect of absence | Evidence |
+|---|---|---|---|
+| `AUTH_SERVICE_URL` | OPTIONAL | the owner read route is not mounted; Audit calls no other service; ingestion unaffected | `audit-config.ts` lines 23, 47–51, 74–76; its spec, lines 57–60 |
+| `SERVICE_TOKENS` | OPTIONAL, deny by default | every service-token read is refused (fail closed); ingestion unaffected | `audit-config.ts` lines 30, 64 |
+| `AUDIT_SERVICE_POLICY` | required only when a service-token caller is registered | none while no caller is registered | `audit-config.ts` line 69; service-kit `caller-policy.ts` lines 156–160; its spec, lines 122–123 |
+
+- **The deploy script omits these names deliberately:** `apps/audit-service/deploy/provision-and-deploy.sh` lines 167–170.
+- **Production's Audit image** (`cf42b9c`) handles the three names the same way.
+
+**Presence of a name proves neither a valid value nor that the running container loads it.** Before G7, and before each production
+digest deployment, the following stay open:
+- **production Tier B:** each candidate's configuration check against production's real configuration, on the server, with no
+  copy. This matters most for Organization, whose deploy does not run the check;
+- **Organization policy contents:** `SERVICE_POLICY` and `SERVICE_TOKENS` under the stricter A1.3 parsing;
+- **the runtime role:** every service's role under the shared `*_admin` rule;
+- **Auth values:**
+  - `SWAGGER_PASSWORD` meets the 16-character rule;
+  - `TRUST_PROXY` means one hop;
+  - the stale `PAYMENT_SERVICE_*` names stay ignored;
+  - the `ORGANIZATION_SERVICE_*` values are ready for F6.
+
+Any change to a digest after this approval requires a new selection and a re-rehearsal (§15.2).
+
+### 16.2 Decision 2 — PostgreSQL: version parity, images not identical (accepted limitation)
+
+- **The two images:**
+  - candidates and R3: `postgres:16-alpine@sha256:721873c3…`;
+  - production (G6-A): `postgres@sha256:cf78e766…`.
+
+  The public image metadata of both reports `PG_MAJOR=16` and `PG_VERSION=16.15`.
+- **Not identical:** the image digests differ and were built a month apart (2026-09-17 and 2026-08-13). The base image and its
+  libraries (musl, OpenSSL, ICU) may differ, so **binary or image equivalence is not established**.
+- **Decision:** the owner accepts the difference as a **documented rehearsal limitation** (§5 deviation).
+- **Required of G6-C:**
+  - record the ICU and collation versions on the guest and in production (read-only);
+  - assess index and restore consequences of any difference, in particular in the §7 restore;
+  - a different major version remains a STOP.
+
+### 16.3 G6-B result and offline image transfer
+
+- **G6-B: DONE (2026-10-12)**, as §15.6.
+- **Preflight** (owner-run):
+  - KVM, VT-x, cgroup v2 and systemd prerequisites passed;
+  - the 23 new packages caused no upgrade or removal and touched no protected package.
+- **Provisioning controls:**
+  - package service starts were denied during the install by a temporary `policy-rc.d`, which was removed afterwards;
+  - `qemu-kvm.service`, which would enable KSM, was masked before the install;
+  - KSM stays off;
+  - the cloud image was verified against Ubuntu's signed `SHA256SUMS`.
+- **Offline image transfer (not yet authorized; separate review):**
+  - export each §16.1 image by digest on a host with registry access;
+  - copy it into the guest only over the loopback SSH forward;
+  - load it there;
+  - verify inside the guest that each image's repo digest equals the approved digest.
+
+  No GHCR credential and no registry access is placed in the guest. The same applies to the PostgreSQL, RabbitMQ and MinIO images the
+  rehearsal stack needs (their digests are recorded at that step).
+
+### 16.4 G6-BV-I: PASS WITH LIMITATIONS; G6-BV-S: NOT STARTED
+
+**G6-BV-I (infrastructure isolation): PASS WITH LIMITATIONS.** Read-only evidence collection on `nawara-lab-01` and the guest
+showed:
+- **Cloud image:** the `SHA256SUMS` signature and the image hash verify.
+- **Guest:** `g6-rehearsal-01`, Ubuntu 24.04, KVM, 2 CPUs, 40 GiB disk. Memory is about 3.9 GiB visible of the 4 GiB assigned.
+  - No Docker yet, no `DOCKER_HOST`, no deployment-SSH or GHCR credential, apt timers disabled.
+- **QEMU runtime:** `restrict=on`; the only QEMU socket is the listener on `127.0.0.1:2222`.
+- **`g6-vm.service`:** transient, `DynamicUser`, `IPAddressDeny=any`, `IPAddressAllow` loopback only, 0 restarts.
+- **Host before/after:**
+  - identical: the firewall rules, nftables tables, UFW, `ip_forward`, interfaces, routes and listeners;
+  - KSM 0; `qemu-kvm.service` masked; no `policy-rc.d`;
+  - `packagekit` is the pre-installed static unit, started on demand by the install and inactive again, so it is not a deviation.
+- **R3:** containers (ID, image, state, start time, 0 restarts), volumes, networks, the timer (disabled, inactive) and the queue are
+  identical before and after.
+
+Limitations:
+- **Missing route, not enforcement.** The guest has **no default route**: QEMU's restricted DHCP offers none. Its blocked probes to the
+  LAN, R3, the Docker bridge, the internet and DNS therefore show a missing route, **not** firewall enforcement. Two checks do show
+  isolation:
+  - the probe of QEMU's on-link host alias (`10.0.2.2`, port 22), blocked by `restrict=on`;
+  - the IP-filter properties of `g6-vm.service`.
+- **IP-filter enforcement not retained:** the separate enforcement test (a transient unit with the same filter must fail to reach an
+  outside address) was reported passing, but its output was not retained. G6-BV-I becomes unconditional only with retained evidence of
+  that test.
+- **Reboot:** the VM does not survive a host reboot (transient by design). The disk and the serial log persist.
+
+**G6-BV-S (service-level isolation): NOT STARTED.** Its acceptance criteria are the §6.1 checks, unchanged:
+1. the guest's Docker context is the local default and `DOCKER_HOST` is unset;
+2. every service's `DATABASE_URL`, `RABBITMQ_URL` and `ORGANIZATION_SERVICE_URL` host is a guest-local container name;
+3. no production hostname, IP address, bucket or prefix appears under `/home/ubuntu/nawara-core` (compared by name only);
+4. no `DEPLOY_SSH_*` or GHCR credential exists on the guest;
+5. the backup destination is the guest's MinIO, and the recipient certificate fingerprint differs from production's;
+6. the G6-A production fingerprint is unchanged afterwards.
+
+Two checks are added, following from §16.3:
+- every running image's repo digest equals its §16.1 approval or its recorded infrastructure digest;
+- the guest still has no default route, and G6-BV-I's host and R3 fingerprints are unchanged.
+
+It runs after the rehearsal stack, MinIO and the rehearsal credentials exist on the guest. **G6-C does not start before G6-BV-S
+passes.**
+
+### 16.5 Deviations added to §5
+
+| Deviation | Why it does not weaken G6 |
+|---|---|
+| The VM host is `nawara-lab-01`, which also hosts R3, not a separate VM host | QEMU/KVM without libvirt; no host network or firewall change; R3 fingerprints proven unchanged, and re-checked at every gate |
+| QEMU's restriction and the systemd IP filter replace a host egress block | No path off the QEMU process except loopback; no host ruleset change to verify or undo |
+| Offline image transfer instead of a GHCR credential on the VM (D-16) | Images are verified by repo digest inside the guest; no registry credential on the guest |
+| PostgreSQL 16.15 on a different image digest from production | Version parity; image differences assessed in G6-C (§16.2) |
+| G6-B ran before the final digest approval and the PostgreSQL decision were recorded | Owner-authorized; both decisions are recorded before any step that uses them (§15.8) |
+| The VM is transient and does not survive a host reboot | The disk and logs persist; a restart is a deliberate, recorded step |
+
+### 16.6 Remaining before service-level readiness
+
+1. Retained evidence of the IP-filter enforcement test (read-only; this upgrades G6-BV-I).
+2. Review and authorization of the offline image transfer and the rehearsal-stack setup on the guest, with MinIO and rehearsal-only
+   credentials (D-17).
+3. G6-BV-S (§16.4).
+4. Only then, a separate authorization for G6-C to G6-F.
