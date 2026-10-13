@@ -1,11 +1,12 @@
-# Nawara Core roadmap: Core V1 (current), Core V2 (planned), Nawara Admin
+# Nawara Core roadmap: Core V1 (current), Core V2 (planned), Core V3 (deferred), Nawara Admin
 
 - **Status:** Authoritative. This is the one roadmap for Nawara Core: the current Core V1 state and checkpoint, the planned Core V2
   roadmap, the boundary between them, and the relationship with Nawara Admin. Other documents are the authority for their own
   subjects (see [Where the detail lives](#where-the-detail-lives)); when a statement about *status* or *direction* here conflicts with
   an older document, this one wins and the older one is the historical record.
-- **Last verified:** 2026-10-07, `main` at `4279203` (V2-A.3 certified by A3.8 with A3.6 / A3.7 deferred; A12 local observability
-  certified).
+- **Last verified:** 2026-10-13, `main` at `4e4a86a` (PR #303: G6-BV-I PASS; owner decisions B1–B3). **Rescoped 2026-10-13:** Core V2
+  is the minimal production-safe Core needed to launch Nawara Drive ([V2 release scope](#core-v2-release-scope-the-nawara-drive-pilot));
+  the deferred work is in the [Core V3 roadmap](CORE-V3-ROADMAP.md).
 - **Maintenance:** update the [current checkpoint](#current-checkpoint) when a checkpoint closes. Keep this document short: no run
   ids, test counts, branch names or session history. Evidence belongs in the stage records, not here.
 
@@ -14,7 +15,9 @@
 Before making changes:
 
 1. Read this document.
-2. Decide whether the task is **Core V1** (current) or **Core V2** (planned). If it is unclear, ask.
+2. Decide whether the task is **Core V1** (current), **Core V2** (planned; [release scope](#core-v2-release-scope-the-nawara-drive-pilot))
+   or **Core V3** (deferred; [V3 roadmap](CORE-V3-ROADMAP.md)). V3 work does not start without its own owner authorization. If it is
+   unclear, ask.
 3. Check the [current checkpoint](#current-checkpoint).
 4. Distinguish **CURRENT** implementation from **PLANNED** architecture. Planned behaviour is not evidence that it exists.
 5. Do not reopen a CLOSED checkpoint without evidence of a regression.
@@ -32,7 +35,10 @@ NAWARA CORE
 │
 ├── CORE V1   CURRENT / REAL       implemented, partly in production; stabilization and refactor active
 │
-└── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19; A0 certified (A3.6 / A3.7 deferred), A13, A14 and A12 local observability certified; most stages NOT STARTED
+├── CORE V2   FUTURE / PLANNED     architecture roadmap A0–A19, RESCOPED 2026-10-13 to the minimal production-safe Core for the Nawara Drive pilot
+│                                  (foundations certified; remaining: production ownership track, Drive provisioning, File Service, pilot gate)
+│
+└── CORE V3   DEFERRED             the stages and substages moved out of V2, with their original IDs (CORE-V3-ROADMAP.md); NOT AUTHORIZED
 ```
 
 ---
@@ -368,6 +374,10 @@ negative controls, risk-based regression and CI (the [V2 validation protocol](ar
 Core V2 is the next platform architecture. It may redesign contracts deliberately, but only through explicit design documents
 (ADR/ADD/SDD/TDD) and a migration plan, never by drift.
 
+> **Rescoped 2026-10-13 (owner direction).** The table below is the original V2 stage list, kept unchanged for traceability. What
+> remains in the V2 release, what is done and what moved to V3 is decided per stage in
+> [Core V2 release scope: the Nawara Drive pilot](#core-v2-release-scope-the-nawara-drive-pilot).
+
 | Stage | Scope (planned) | G6 label |
 |---|---|---|
 | **A0 Baseline** | the certified V1 baseline: service versions, API compatibility, deployment topology, infrastructure assumptions | 🟢 |
@@ -407,6 +417,122 @@ V2, and Final Core Validation follows it, last.
 `search-service` and `analytics-service`. They appear in
 [`core-architecture.md`](architecture/core-architecture.md) as later services; that is not a V2 commitment. AI is not a Core
 service at all: its runtime belongs to the separate future `nawara-ia` repository ([ADR-0055](adr/0055-ai-service-repository-boundary.md)).
+
+### Core V2 release scope: the Nawara Drive pilot
+
+**Owner direction (2026-10-13).** **Core V2** is the minimal, production-safe Core needed to launch Nawara Drive with its first paying
+client. **Core V3** holds the capabilities that are not needed for that first delivery ([Core V3 roadmap](CORE-V3-ROADMAP.md)). The
+rescoping moves work; it weakens nothing:
+
+- Accepted [ADR-0062](adr/0062-initial-hierarchy-provisioning-and-first-platform-sequencing.md) stands. No Platform or Organization
+  exists before F7 and the verified post-F7 backup, and Auth has no route that creates one. A real Drive client organization therefore
+  needs the complete production ownership track: **G6 → pre-G7 backup → G7 → F6 → F7 → post-F7 backup**. Any change to that track
+  needs its own analysis and explicit owner approval.
+- An implemented or certified service is **not** production-ready until its production prerequisites are met and it is deployed under
+  its own authorization.
+- Controls that protect client identity data and client files stay in V2: authorization, tenant isolation, credentials, migrations,
+  rollback, backup and restore.
+- Final Core Validation stays the single, last, platform-wide validation ([Final Core Validation](#final-core-validation)). It is not
+  repeated per service.
+- Every moved stage keeps its original ID. Nothing is renumbered or erased; the original stage table above stays the requirement list.
+
+#### Done and reused (not repeated)
+
+| Work | State | Record |
+|---|---|---|
+| A0 (V2-A.1, V2-A.2, V2-A.3, immutable digests) | certified; A3.6 and A3.7 deferred (remaining work below) | V2-A records |
+| A1, A2, A4, A15 | certified (repository, CI, local) | stage records |
+| A3M.0 to A3M.7 | certified locally; F1 and F2 open | A3M record |
+| A12.2 to A12.6 (local observability) | certified | A12 record |
+| A13 Audit backup tooling; A14 supply chain and provenance | certified (production evidence gated) | A13, A14 records |
+| Cutover G1–G5, F1–F5 | executed in production; never re-run | cutover record |
+| G6-A, the G6 baseline refresh, the digest-set approval (rehearsal only), G6-B, G6-BV-I | certified, done or PASS | G6 plan §15–§17 |
+| A5.1 to A5.3; the merged A5.4 work (T1, D1, D2, AC1, A1, A2, A3, A5, R2); R3 alert carrier | merged or certified as recorded; not deployed, not activated | A5 record §9.2 |
+| File Service V1 lifecycle (Stages 17.2–17.10) | certified; not in production | 17.10 record |
+
+#### Remaining mandatory V2 work
+
+| # | Work (original stage) | Depends on | Security relevance |
+|---|---|---|---|
+| M1 | G6 remainder: S1 (transfer, Docker, images) → S2 → BV-S → C (F1–F7 rehearsal, including the F6 first-touch `ensure()` / marker item, A5 record §9.2) → D → E (restore, RPO and RTO) → F (G6) | G6-BV-I (done) | proves rollback, activation and restore before production |
+| M2 | Fresh pre-G7 Auth + Organization backup, verification, `CORE_BACKUP_SCHEDULE` (cutover record §7) | M1 | recovery point before the one-way door |
+| M3 | G7, then F6 (one-way door) and F7, then the post-F7 backup and its verification (cutover record §7; A4 production checkpoint: the Auth digest deployment, inside the certified digest set) | M2 | authority transition; production Tier B configuration check before each digest deployment (G6 plan §16.1) |
+| M4 | A3.7 organization-secret restriction; A3.6 production access proof (performed with the first digest deployment) | none (A3.7); M3 (A3.6) | production credentials held only by the protected environment |
+| M5 | A5.4 post-F7 prerequisites of ADR-0062: the corrected and certified `register-caller.sh` (`allowedPlatforms` reset), the attended `allowedPlatforms` scope procedure, the retirement of the Company-provisioning credential | M3 (decision gate DG-5 for early development) | least-privilege service scope; no standing provisioning credential |
+| M6 | The Drive Platform and the pilot client's Organization, created by the active Owner with step-up through Organization Service (ADR-0062 §4) | M3, M5 | the tenant boundary of the client |
+| M7 | A5.5 certification (C1–C6), with the A5 scope register recording each item moved to V3 by a dated owner record | M3 | authorization traceability |
+| M8 | A9 File Service production enablement: register P1 (provider, DG-2), P2, P4, P5, P6, P7, P8, P11 (17.10 record §10); image and digest-deploy workflows on the A0 / A14 model (none exists for File Service today); its broker identity for the audit relay (an A3M.8 item) | DG-2; P3 and P10 decisions | client files: private bucket, encryption at rest, least privilege, backup, retention |
+| M9 | A7 / A13: Audit kept running with its production backup (needs the Audit deployment that applies migration 0004); the A3M F2 finding (Audit first-writer residual) reviewed and dispositioned | M3 | accountability for security-relevant actions |
+| M10 | A12.10 minimal: the R3 readiness-alert carrier installed in production (required before the first Auth image containing the readiness check); backup-failure alerting; File Service alert routing (P6) | M3, M8 | detection of an unready authority state or a failed backup |
+| M11 | A16 Drive slice: the Drive ↔ Core API and authorization contract (endpoints, token claims, organization context, the platform-access check, the File Service policy entry, error codes) | none | the contract the tenant-isolation tests verify |
+| M12 | A17 Drive slice: cross-tenant isolation tests (organization A cannot read or act in organization B; a non-Drive Platform is refused; File access stays organization-scoped) | M11 | tenant isolation |
+| M13 | The pilot readiness gate (below), a focused subset of A19 | M1–M12 | single go / no-go for client data |
+
+**V2, nonblocking** (alongside the pilot work): A14's repository settings (secret scanning, push protection, full-SHA requirement);
+A13's production restore drill of the post-F7 backup is part of the pilot gate below.
+
+#### Parallel Nawara Drive development
+
+Drive does not wait for the production track. It builds against a local Core (the [developer guide](DEVELOPMENT.md); A15), through
+Core's APIs only, never its libraries; it owns its business roles (ADR-0029); it uses the existing organization context (join codes and
+memberships, ADR-0028 and ADR-0030; ADR-0043 is Proposed). M11 is written first, so both sides develop against one contract. No real
+client data enters any environment before the pilot readiness gate passes.
+
+#### Pilot readiness gate
+
+**Proposed criteria; their acceptance is owner decision DG-7.** Before real client data:
+
+1. G6 certified, including G6-E restore with RPO and RTO.
+2. The pre-G7 and post-F7 backups verified; one isolated restore drill of the post-F7 backup.
+3. F7 post-activation verification MATCH; Auth ready in production.
+4. M12's tenant-isolation tests pass against the deployed digests.
+5. M4 and M5 done: production credentials only in the protected environment; the provisioning credential retired; `register-caller.sh`
+   corrected and certified; temporary registry tokens revoked.
+6. The production Tier B configuration check passed before each digest deployment; migrations forward-only, roles before migrations.
+7. M10 alerting live; the Auth → Audit relay healthy; M9 Audit backup taken.
+8. M8 File Service prerequisites met, its restore procedure demonstrated, and decisions P3 and P10 recorded.
+9. Every decision gate the pilot depends on (DG-1 to DG-8) is decided and recorded.
+
+#### Owner decision gates (unresolved; nothing here is approved)
+
+| Gate | Question | Blocks |
+|---|---|---|
+| DG-1 | Shared production (after the cutover) or a separate pilot deployment? A separate deployment would need its own complete fresh-path transition. | M6 onward |
+| DG-2 | File storage provider (O2; register P1), together with P3 (malware scanning of user uploads) and P10 (legal retention durations) | M8 |
+| DG-3 | Does the pilot need email or SMS? If yes: the Notification deployment, its provider credentials and the A3M F1 finding (forged events) become V2 work. | Notification's disposition |
+| DG-4 | Manual (contractual) billing for the pilot, or automated entitlement checks (Billing, ADR-0044)? | Billing's disposition |
+| DG-5 | A narrow pre-F7 development exception for the `register-caller.sh` / `allowedPlatforms` correction (RED under A5.4-G1)? Without it, M5 starts after F7. | M5 timing |
+| DG-6 | Any simplification of G6-D (monitoring demonstrations), for example limiting it to the signals production has? Needs its own analysis; until decided, G6 plan §8 and §13 apply unchanged. | M1 scope |
+| DG-7 | Acceptance of the pilot readiness gate's criteria, and whether pilot onboarding requires A19 (Final Core Validation stays last either way) | client onboarding |
+| DG-8 | Deferring Owner transfer and exceptional recovery (ADR-0059) to V3, and the mitigation for a lost single Owner (for example several registered MFA factors) | ADR-0059's disposition |
+
+#### Disposition of every V2 stage
+
+`KEEP V2 — BLOCKING`, `KEEP V2 — NONBLOCKING`, `MOVE V3` or `DECISION REQUIRED`. Moved items keep their IDs in the
+[V3 roadmap](CORE-V3-ROADMAP.md).
+
+| Stage | Disposition | Reason / dependency |
+|---|---|---|
+| A0 | done; A3.7 and A3.6 **KEEP V2 — BLOCKING** (M4) | credential protection |
+| A1, A2, A15 | done | reused |
+| A3 | A3M.0–A3M.7 done; File's broker identity **KEEP V2 — BLOCKING** (M8); F2 review **KEEP V2 — BLOCKING** (M9); F1 **DECISION REQUIRED** (DG-3); the rest of A3M.8 **MOVE V3** | production messaging only as the pilot needs it |
+| A4 | done; the Auth digest deployment **KEEP V2 — BLOCKING** (M3); JWT key-ring activation and its minimum-image gate **MOVE V3** | the existing signing configuration serves the pilot |
+| A5 | the production track and ADR-0062 prerequisites **KEEP V2 — BLOCKING** (M1–M7); ADR-0060 lifecycle runtime, ADR-0061 repair activation, the ADR-0063 remainder, A5.4-AS1, A5.4-K1 **MOVE V3**; ADR-0059 **DECISION REQUIRED** (DG-8) | authority transition is mandatory; advanced lifecycle is not |
+| A6 | **MOVE V3** (full policy evaluation); tenant isolation stays in V2 through M12 | Drive owns its roles; Core enforces membership and platform access |
+| A7 | basic Audit **KEEP V2 — BLOCKING** (M9); retention, querying and cross-service coverage **MOVE V3** | accountability now, extensions later |
+| A8 | **DECISION REQUIRED** (DG-3); **MOVE V3** if not needed | depends on the pilot's channels |
+| A9 | production enablement **KEEP V2 — BLOCKING** (M8); default tuning (P9) and later features **MOVE V3** | client files |
+| A10 | **DECISION REQUIRED** (DG-4); **MOVE V3** if billing is manual | — |
+| A11 | **MOVE V3** | no real gateway exists; the client pays outside Core |
+| A12 | A12.2–A12.6 done; minimal A12.10 **KEEP V2 — BLOCKING** (M10); A12.7–A12.9 and the rest of A12.10 **MOVE V3** | detection of failures that endanger data |
+| A13 | Auth + Organization schedule and backups **KEEP V2 — BLOCKING** (M2, M3); File and Audit backups (M8, M9); restore automation beyond that **MOVE V3** | recovery of client data |
+| A14 | done; repository settings **KEEP V2 — NONBLOCKING** | secret leakage prevention |
+| A16 | Drive slice **KEEP V2 — BLOCKING** (M11); other products **MOVE V3** | — |
+| A17 | Drive slice **KEEP V2 — BLOCKING** (M12, M13); other products **MOVE V3** | — |
+| A18 | **MOVE V3** | pilot scale |
+| A19 | the pilot readiness gate **KEEP V2 — BLOCKING** (M13); the relation of A19 to pilot onboarding **DECISION REQUIRED** (DG-7) | — |
+| Final Core Validation | unchanged: absolute last | — |
+| Release, Payment services | **MOVE V3** (production enablement) | not Drive pilot dependencies |
 
 ---
 
@@ -561,6 +687,7 @@ project's concern. Core's localized `message` is for display only. Application b
 | Subject | Authority |
 |---|---|
 | Status and direction (this roadmap), V1/V2 boundary, Admin relationship | this document |
+| Core V3: the work deferred from V2 by the 2026-10-13 rescoping, with original stage IDs, reasons, dependencies and security notes | [`CORE-V3-ROADMAP.md`](CORE-V3-ROADMAP.md) |
 | Decisions | [`docs/adr/`](adr/) |
 | Service architecture and boundaries | [`core-architecture.md`](architecture/core-architecture.md), [`financial-architecture.md`](architecture/financial-architecture.md) |
 | One service's design | [`docs/sdd/`](sdd/) and the service's README |
