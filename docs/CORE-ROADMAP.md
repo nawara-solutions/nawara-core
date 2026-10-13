@@ -100,6 +100,12 @@ intentionally deferred the rest of the rehearsal.
 **Update (2026-10-13, G6 plan §18):** **G6-S1 passed**, owner-authorized and owner-run: the seven pinned images are loaded in the
 guest by exact digest, Docker was installed offline, and the Server 2 and R3 fingerprints are identical before and after. G6-S2, G6-BV-S and G6-C are **not authorized**.
 
+**Update (2026-10-13, G6 plan §19):** **G6-S2 passed**, owner-authorized and owner-run: eight guest containers run on their pinned
+digests, the MinIO S3 probe passed (B3, for the rehearsal only), and the Server 2 and R3 fingerprints are unchanged. It is supporting
+evidence, not a G1–G3 PASS. **G6-BV-S has not run:** a corrected script is prepared, and it still needs its production-name inputs, a
+verified production recipient fingerprint, its own authorization and separately authorized production fingerprint evidence. G6-C is
+**not authorized**.
+
 G6 is not tied to any particular hardware. The plan requires an isolated, disposable Ubuntu VM; where it runs is an owner decision,
 for example:
 
@@ -449,7 +455,7 @@ rescoping moves work; it weakens nothing:
 | A12.2 to A12.6 (local observability) | certified | A12 record |
 | A13 Audit backup tooling; A14 supply chain and provenance | certified (production evidence gated) | A13, A14 records |
 | Cutover G1–G5, F1–F5 | executed in production; never re-run | cutover record |
-| G6-A, the G6 baseline refresh, the digest-set approval (rehearsal only), G6-B, G6-BV-I, G6-S1 | certified, done or PASS | G6 plan §15–§18 |
+| G6-A, the G6 baseline refresh, the digest-set approval (rehearsal only), G6-B, G6-BV-I, G6-S1, G6-S2 | certified, done or PASS | G6 plan §15–§19 |
 | A5.1 to A5.3; the merged A5.4 work (T1, D1, D2, AC1, A1, A2, A3, A5, R2); R3 alert carrier | merged or certified as recorded; not deployed, not activated | A5 record §9.2 |
 | File Service V1 lifecycle (Stages 17.2–17.10) | certified; not in production | 17.10 record |
 
@@ -457,7 +463,7 @@ rescoping moves work; it weakens nothing:
 
 | # | Work (original stage) | Depends on | Security relevance |
 |---|---|---|---|
-| M1 | G6 remainder: S2 → BV-S → C (F1–F7 rehearsal, including the F6 first-touch `ensure()` / marker item, A5 record §9.2) → D → E (restore, RPO and RTO) → F (G6) | G6-S1 (done) | proves rollback, activation and restore before production |
+| M1 | G6 remainder: BV-S → C (F1–F7 rehearsal, including the F6 first-touch `ensure()` / marker item, A5 record §9.2) → D → E (restore, RPO and RTO) → F (G6) | G6-S2 (done) | proves rollback, activation and restore before production |
 | M2 | Fresh pre-G7 Auth + Organization backup, verification, `CORE_BACKUP_SCHEDULE` (cutover record §7) | M1 | recovery point before the one-way door |
 | M3 | G7, then F6 (one-way door) and F7, then the post-F7 backup and its verification (cutover record §7; A4 production checkpoint: the Auth digest deployment, inside the certified digest set) | M2 | authority transition; production Tier B configuration check before each digest deployment (G6 plan §16.1) |
 | M4 | A3.7 organization-secret restriction; A3.6 production access proof (performed with the first digest deployment) | none (A3.7); M3 (A3.6) | production credentials held only by the protected environment |

@@ -197,10 +197,10 @@ locally — previously executed result requires later evidence attachment.* G6-B
 | PostgreSQL parity (2026-10-12) | 16.15 on both, images not identical: **accepted as a rehearsal limitation** (plan §16.2) |
 | **G6-B** | **DONE** (2026-10-12): QEMU/KVM guest `g6-rehearsal-01` on `nawara-lab-01`; R3 preserved (plan §15.6, §16.3) |
 | **G6-BV-I** (infrastructure) | **PASS** (2026-10-13): kernel IP-filter enforcement proven; guest IPv6 default route removed with QEMU `ipv6=off`; no default route in either family (plan §17.1) |
-| B1 / B2 / B3 (2026-10-13) | order G6-BV-I → G6-S1 → G6-S2 → G6-BV-S → G6-C; MinIO over internal HTTP for the rehearsal only; Chainguard MinIO digest approved for the isolated rehearsal only, S3 compatibility not yet verified (plan §17.2–§17.4) |
+| B1 / B2 / B3 (2026-10-13) | order G6-BV-I → G6-S1 → G6-S2 → G6-BV-S → G6-C; MinIO over internal HTTP for the rehearsal only; Chainguard MinIO digest approved for the isolated rehearsal only, S3 compatibility verified on the guest by the G6-S2 probe (plan §17.2–§17.4, §19.1) |
 | **G6-S1** (offline images, guest Docker) | **PASS** (2026-10-13): seven images loaded in the guest by exact digest; Docker Server 29.1.3 installed offline; Server 2 and R3 fingerprints identical before and after; script hashes recorded (plan §18) |
-| **G6-S2** (initial guest-only deployment) | **NOT AUTHORIZED** (plan §18.5) |
-| **G6-BV-S** (service level) | **NOT STARTED** |
+| **G6-S2** (initial guest-only deployment) | **PASS** (2026-10-13): eight guest containers on their pinned digests; the MinIO five-operation S3 probe passed; guest inspection passed; Server 2 and R3 fingerprints identical to S1-0 and S1-6; no ownership command, backup or restore; supporting evidence, not a G1–G3 PASS (plan §19) |
+| **G6-BV-S** (service level) | **NOT STARTED**: a corrected script is prepared and not executed; the production-name inputs, the verified production recipient fingerprint, the run's authorization and the separately authorized production fingerprint (check 6) are missing (plan §19.4–§19.5) |
 | **G6-C** | **DEFERRED** — not authorized; not before G6-BV-S passes; G1–G3 accepted only here |
 | **G6-D** | **DEFERRED** |
 | **G6-E** | **DEFERRED** |
