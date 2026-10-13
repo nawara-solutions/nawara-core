@@ -196,9 +196,12 @@ locally — previously executed result requires later evidence attachment.* G6-B
 | G6 digest set (2026-10-12) | **FINALLY APPROVED for isolated G6 rehearsal use only**; not a production deployment authorization (plan §16.1) |
 | PostgreSQL parity (2026-10-12) | 16.15 on both, images not identical: **accepted as a rehearsal limitation** (plan §16.2) |
 | **G6-B** | **DONE** (2026-10-12): QEMU/KVM guest `g6-rehearsal-01` on `nawara-lab-01`; R3 preserved (plan §15.6, §16.3) |
-| **G6-BV-I** (infrastructure) | **PASS WITH LIMITATIONS** (plan §16.4) |
+| **G6-BV-I** (infrastructure) | **PASS** (2026-10-13): kernel IP-filter enforcement proven; guest IPv6 default route removed with QEMU `ipv6=off`; no default route in either family (plan §17.1) |
+| B1 / B2 / B3 (2026-10-13) | order G6-BV-I → G6-S1 → G6-S2 → G6-BV-S → G6-C; MinIO over internal HTTP for the rehearsal only; Chainguard MinIO digest approved for the isolated rehearsal only, S3 compatibility not yet verified (plan §17.2–§17.4) |
+| **G6-S1** (offline images, guest Docker) | **NOT AUTHORIZED** (plan §17.7) |
+| **G6-S2** (initial guest-only deployment) | **NOT AUTHORIZED** |
 | **G6-BV-S** (service level) | **NOT STARTED** |
-| **G6-C** | **DEFERRED** — not authorized; not before G6-BV-S passes |
+| **G6-C** | **DEFERRED** — not authorized; not before G6-BV-S passes; G1–G3 accepted only here |
 | **G6-D** | **DEFERRED** |
 | **G6-E** | **DEFERRED** |
 | **G6-F** | **DEFERRED** |
