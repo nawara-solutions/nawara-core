@@ -82,6 +82,15 @@ intentionally deferred the rest of the rehearsal.
 - G6-B is done: QEMU/KVM guest `g6-rehearsal-01` on `nawara-lab-01`, R3 preserved. G6-BV-I passed with limitations; G6-BV-S has not
   started. G6-C is **not authorized**.
 
+**Update (2026-10-13, G6 plan §17):**
+- **G6-BV-I passed.** Kernel enforcement of the IP filter is proven. The guest's IPv6 default route was removed by restarting the VM
+  with QEMU `ipv6=off`, which is now required for every G6 VM.
+- **Order (B1):** G6-BV-I → G6-S1 (offline images, Docker) → G6-S2 (initial guest-only deployment) → G6-BV-S → G6-C. G1–G3 is
+  accepted only within G6-C.
+- **MinIO:** internal HTTP is accepted for the rehearsal only (B2). The Chainguard MinIO digest is approved for the isolated rehearsal
+  only (B3); its S3 compatibility is not yet verified.
+- G6-S1, G6-S2 and G6-C are **not authorized**.
+
 G6 is not tied to any particular hardware. The plan requires an isolated, disposable Ubuntu VM; where it runs is an owner decision,
 for example:
 

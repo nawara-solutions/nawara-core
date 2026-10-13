@@ -10,6 +10,9 @@
   only** (not for production deployment); the PostgreSQL image difference is accepted as a documented rehearsal limitation; the
   rehearsal VM runs on `nawara-lab-01` under QEMU/KVM; G6-BV is split into G6-BV-I (PASS WITH LIMITATIONS) and G6-BV-S (NOT STARTED).
   **G6-C is not authorized.**
+- **Amendment (2026-10-13, §17):** G6-BV-I **PASS** after the guest's IPv6 default route was removed (QEMU `ipv6=off`); the order is
+  G6-BV-I → G6-S1 → G6-S2 → G6-BV-S → G6-C (B1); MinIO over internal HTTP accepted for the rehearsal only (B2); the Chainguard MinIO
+  digest approved for the isolated rehearsal only (B3). **G6-S1, G6-S2 and G6-C are not authorized.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -95,6 +98,9 @@ on the VM by the deploy scripts; the backup destination and key pair are rehears
 **Amended 2026-10-12 (§16.4): G6-BV runs in two stages.** **G6-BV-I** (infrastructure isolation of the host and the guest) is recorded
 in §16.4. **G6-BV-S** (service-level isolation) is the list below, **unchanged and in full**. It runs read-only on the guest after the
 rehearsal stack, MinIO and the rehearsal credentials exist there, and before any rehearsal mutation. G6-C needs both stages.
+**Amended 2026-10-13 (B1, §17.2):** the guest is prepared by **G6-S1** (offline images, Docker) and **G6-S2** (initial guest-only
+deployment into new disposable databases); G6-BV-S runs after G6-S2 and before G6-C. G6-S2 is environment preparation, not a §9.1
+rehearsal step. The added checks of §16.4, with routes checked for both address families (§17.5), apply.
 
 - `docker context show` is the local default and `DOCKER_HOST` is unset;
 - every service's `DATABASE_URL`, `RABBITMQ_URL` and `ORGANIZATION_SERVICE_URL` host is a VM-local container name;
@@ -161,6 +167,10 @@ not overwritten. The record cites the passing CI run at the rehearsed revision.
 | health / readiness | every step | ready |
 | backup / restore | §7 | RPO and RTO PASS |
 | monitoring | §8 | every signal observed |
+
+**Amended 2026-10-13 (B1, §17.2):** row G1–G3 is accepted **only within G6-C**, as an attended deployment and redeployment on the
+stack G6-S2 prepared, with the PASS criteria above unchanged. G6-S2's initial deployment logs are supporting evidence, **not** a
+G1–G3 PASS.
 
 ### 9.2 Not rehearsed: the existing-environment path
 
@@ -368,6 +378,9 @@ credential on the VM (D-16) and a host-side egress block. It is replaced by:
   confined by systemd `IPAddressDeny=any` with localhost allowed.
   - There is no NAT, no bridge and no host firewall change.
   - There is no outbound internet access, and no access to production, the LAN, R3 or the host's Docker networks.
+  - **Amended 2026-10-13 (§17.5):** QEMU user networking must also carry **`ipv6=off`**
+    (`-netdev user,id=n0,ipv6=off,restrict=on,hostfwd=tcp:127.0.0.1:2222-:22`). Without it, QEMU's router advertisements give the
+    guest an IPv6 default route. This is required for every G6 VM creation or restart.
 - **Images (replaces D-16 on the VM).**
   - The guest never pulls from GHCR and holds no GHCR credential.
   - The §15.2 digests reach it only through a separately reviewed and authorized **offline transfer** (§16.3).
@@ -391,18 +404,19 @@ nonproduction) are unchanged and not repeated. Also unchanged:
 
 **No production execution, and no rehearsal step, without a new explicit owner authorization.** Each step was or is separately
 authorized. **Amended 2026-10-12** to the actual order: G6-B ran before steps 1 and 2 were recorded, by owner authorization (a
-recorded deviation, §16.5).
+recorded deviation, §16.5). **Amended 2026-10-13** to the B1 order (§17.2): G6-BV-I → G6-S1 → G6-S2 → G6-BV-S → G6-C.
 
-| # | Step | Status (2026-10-12) |
+| # | Step | Status (2026-10-13) |
 |---|---|---|
 | 1 | Final digest approval (§15.2 conditions) | **DONE** — rehearsal use only (§16.1) |
 | 2 | PostgreSQL parity decision (§15.3) | **DONE** — difference accepted as a limitation (§16.2) |
 | 3 | G6-B (VM provisioning) | **DONE** on `nawara-lab-01` (§15.6, §16.3) |
-| 4 | G6-BV-I (infrastructure isolation) | **PASS WITH LIMITATIONS** (§16.4) |
-| 5 | Offline image transfer and rehearsal-stack setup on the guest, MinIO and rehearsal credentials included (§16.3) | NOT AUTHORIZED |
-| 6 | G6-BV-S (service-level isolation, §6.1) | NOT STARTED |
-| 7 | G6-C to G6-F | NOT AUTHORIZED — not before steps 5 and 6 pass |
-| 8 | G6 CERTIFIED | — |
+| 4 | G6-BV-I (infrastructure isolation) | **PASS** (§17.1), after the `ipv6=off` restart |
+| 5 | G6-S1: offline image transfer, guest Docker and its dependencies, image loading by exact digest (§16.3) | NOT AUTHORIZED |
+| 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | NOT AUTHORIZED — not before step 5 passes |
+| 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | NOT STARTED — not before step 6 passes |
+| 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | NOT AUTHORIZED — not before step 7 passes |
+| 9 | G6 CERTIFIED | — |
 
 After G6, these production steps keep their own checkpoints (§12; cutover record §7):
 - the first digest deployment of each service in the set (R3 installed in production before any Auth deployment containing the
@@ -534,6 +548,9 @@ Any change to a digest after this approval requires a new selection and a re-reh
 
 ### 16.4 G6-BV-I: PASS WITH LIMITATIONS; G6-BV-S: NOT STARTED
 
+*Superseded 2026-10-13 (§17.1): G6-BV-I is **PASS**. Both limitations below about routes and enforcement are resolved there. The
+added route check below applies to both address families (§17.5). The text is kept as history.*
+
 **G6-BV-I (infrastructure isolation): PASS WITH LIMITATIONS.** Read-only evidence collection on `nawara-lab-01` and the guest
 showed:
 - **Cloud image:** the `SHA256SUMS` signature and the image hash verify.
@@ -584,11 +601,188 @@ passes.**
 | PostgreSQL 16.15 on a different image digest from production | Version parity; image differences assessed in G6-C (§16.2) |
 | G6-B ran before the final digest approval and the PostgreSQL decision were recorded | Owner-authorized; both decisions are recorded before any step that uses them (§15.8) |
 | The VM is transient and does not survive a host reboot | The disk and logs persist; a restart is a deliberate, recorded step |
+| B1 (2026-10-13): G6-S2 deploys the stack before G6-BV-S | Forward-only initialization migrations into new disposable guest databases only; its logs are supporting evidence, not a G1–G3 PASS, which is accepted only within G6-C (§9.1, §17.2) |
+| B2 (2026-10-13): Backups travel to the guest's MinIO over HTTP, not HTTPS | Rehearsal only. The network is guest-private, no MinIO port is published, and production and R3 have no path to it. Data is encrypted and verified before upload. **Not approved for production** (§17.3) |
+| B3 (2026-10-13): MinIO is a third-party Chainguard image, not production's backup provider | Pinned by digest; signature and SLSA provenance verified; isolated rehearsal only; S3 compatibility is proven by the G6-S2 probe before use (§17.4) |
 
 ### 16.6 Remaining before service-level readiness
+
+*Superseded 2026-10-13 by §17.7. Item 1 is done (§17.1).*
 
 1. Retained evidence of the IP-filter enforcement test (read-only; this upgrades G6-BV-I).
 2. Review and authorization of the offline image transfer and the rehearsal-stack setup on the guest, with MinIO and rehearsal-only
    credentials (D-17).
 3. G6-BV-S (§16.4).
 4. Only then, a separate authorization for G6-C to G6-F.
+
+## 17. G6-BV-I certification and owner decisions B1–B3 (2026-10-13)
+
+Owner-approved. It records the IPv6 correction, the G6-BV-I result and decisions B1, B2 and B3. It **authorizes no deployment, no
+G6-S1, G6-S2, G6-BV-S or G6-C step and no production change**. The evidence kind is the same as in §16: **OWNER-SUPPLIED TERMINAL
+OUTPUT**. The owner ran the reviewed scripts on `nawara-lab-01`, and this record's author read the complete output. The scripts and
+outputs are retained by the owner outside the repository; neither contains a credential, token or configuration value.
+
+### 17.1 G6-BV-I: PASS
+
+**Run 1, 2026-10-13T07:23:54Z.** The owner ran `g6-ip-filter-evidence-v2.sh --enforce`, which needed and had its own authorization.
+- **Evidence:** the original is on the lab at `~/g6-vm/state/ip-filter-evidence-20261013T072338Z.txt`; the owner's copy has SHA-256 `4364df53…d102`.
+- **Passed:**
+  - A1, the IP filter of `g6-vm.service`: active; `IPAddressDeny` covers all IPv4 and IPv6; `IPAddressAllow` is loopback only.
+  - A2, QEMU: `restrict=on`, the forward on `127.0.0.1:2222` only, and a single loopback socket.
+  - A4: R3 and the host network fingerprint match the baseline.
+- **Kernel enforcement (B):** three transient units, using the same filter as `g6-vm.service`, tested the host's own sshd.
+
+  | Test | Result |
+  |---|---|
+  | B1: no filter, to the host's LAN address | connected |
+  | B2: the filter, to the host's LAN address | **blocked** |
+  | B3: the filter, to `127.0.0.1:2222` | connected |
+
+  The run printed **`ENFORCEMENT PROVEN`**. This resolves the §16.4 limitation "IP-filter enforcement not retained".
+- **Failed:** A3. The guest reported `default_routes=0 v6_default=1`, so the run's result was `FAIL (1)`. A read-only investigation
+  found a **real IPv6 default route**, not a script defect.
+  - QEMU's user network sends IPv6 router advertisements even with `restrict=on`, and the guest accepted them:
+    `default via fe80::2 dev enp0s1 proto ra` and the address `fec0::5054:ff:fe12:3456/64`.
+  - The §16.4 statement "QEMU's restricted DHCP offers none" was true for IPv4 only. The earlier evidence printed only IPv4 routes.
+
+**Run 2, 2026-10-13T07:42:24Z: the correction.** The owner ran `g6-vm-ipv6-off-restart.sh`, which also needed and had its own authorization.
+- **Script:** SHA-256 `64d81f4a222aa009d73681ef8d28ed42723696af3beded01706f0cd0501c186f`, checked on the lab before the run.
+- **Evidence:** the original is on the lab in `~/g6-vm/state/ipv6-off-20261013T074224Z/`; the owner's copy of the output has SHA-256
+  `475c36ab…03ff`.
+- **What it did:** it stopped and restarted only `g6-vm.service`, using a poweroff from inside the guest. One QEMU argument changed:
+  `-netdev user,id=n0,restrict=on,…` became `-netdev user,id=n0,ipv6=off,restrict=on,hostfwd=tcp:127.0.0.1:2222-:22`.
+
+| Check | Result |
+|---|---|
+| Unit | active and transient; exactly one QEMU process on the host, the unit's main process |
+| QEMU arguments | identical to provisioning before the change; afterwards they differ **only** in the `-netdev` value |
+| Unit properties: sandbox, `DynamicUser`, `/dev/kvm` access, IP filter, `MemoryMax`, CPU quota | 23 properties identical before and after |
+| QEMU sockets | loopback only |
+| Disk | 40 GiB qcow2; read-only `qemu-img check` after the stop: no errors |
+| Seed and pinned known-hosts file | unchanged |
+| Guest | `g6-rehearsal-01`, a new boot ID, the same ed25519 host key, cloud-init `done` |
+| Guest routes and addresses | 0 IPv4 default routes, 0 IPv6 default routes, 0 default routes in any table of either family, 0 IPv6 addresses other than loopback and link-local |
+| QEMU host alias `10.0.2.2:22` from the guest | not reachable (`restrict=on`) |
+| Host | identical before and after: iptables, nftables, UFW, `ip_forward`, links, routes, listeners, enabled units, sshd, Docker |
+| R3 | identical before and after: containers, volumes, networks, timer, queue |
+| Earlier evidence in `~/g6-vm/state` | byte-identical, including the run 1 file |
+
+The script prints `RESULT: PASS`, does not certify G6-BV-I itself, and did not repeat the kernel enforcement test.
+
+**Certification: G6-BV-I PASS.**
+- **Basis:** this record's author read both complete outputs, and every G6-BV-I criterion has a passing line in them:
+  - §16.4's infrastructure checks;
+  - kernel enforcement (run 1);
+  - no default route in either address family (run 2).
+
+  The enforcement result applies to the corrected VM because its unit properties, the IP filter included, are identical.
+- **Not reviewed:** the detail files in the run 2 directory on the lab (argument lists, unit properties, state-file hashes, the copy of
+  the earlier serial log) were not read for this record. Their results are in the output that was read.
+- **Remaining limitations:**
+  - the VM is transient and does not survive a host reboot;
+  - the guest's probes other than `10.0.2.2` still show a missing route, while enforcement is proven on the host side.
+
+### 17.2 B1: order of preparation and verification
+
+1. **G6-BV-I:** infrastructure certification (§17.1, done).
+2. **G6-S1:** offline image transfer, the guest's Docker and its dependencies, and image loading. Every reference must resolve to its
+   exact approved digest.
+3. **G6-S2:** the first guest-only deployment of the broker, Auth, Organization, Audit and MinIO into **new disposable databases**,
+   with rehearsal-only credentials. It may run only the forward-only initialization migrations, and only in those guest databases.
+4. **G6-BV-S:** the complete service-level isolation check (§6.1 and §16.4, routes per §17.5).
+5. **G6-C:** the attended G1–G3 deployment and redeployment acceptance (§9.1), then the rehearsal steps, each separately authorized.
+
+G6-S2's logs are **supporting evidence, not G1–G3 certification**. §9.1's G1–G3 criteria are unchanged and are met only within G6-C.
+Each step needs its own owner authorization and the previous step's PASS.
+
+### 17.3 B2: MinIO over internal HTTP (rehearsal only)
+
+The rehearsal's `backup.sh` reaches the guest's MinIO over HTTP, accepted **for the G6 rehearsal only**, under these conditions:
+- the MinIO container is reachable only on a guest-private, internal Docker network;
+- no MinIO port is published;
+- production and R3 have no path to it;
+- `BACKUP_S3_ALLOW_INSECURE_HTTP=local-test` is set (the only value `backup.sh` accepts for HTTP, `infra/backup/backup.sh` line 136);
+- every artifact is encrypted to the recipient certificate and verified before upload, and the plaintext is removed first (lines 240–244);
+- no recipient private key is in the backup data directory (`backup.sh` refuses one, line 128);
+- the credentials and key pair are rehearsal-only (D-17).
+
+**HTTP is not approved for production.** Production backups keep the HTTPS requirement.
+
+### 17.4 B3: MinIO image (Chainguard), approved for the isolated rehearsal only
+
+- **Why a third-party image:** the upstream MinIO images are no longer anonymously available.
+- **Image:** `cgr.dev/chainguard/minio@sha256:dc455cdd4db6e390b1b26514f15ff37681a777bf8dab41aac445a0259f751e56`.
+- **Owner-run verification:** `g6-minio-cosign-verify.sh`, SHA-256 `10078d4a…7fbb`; output copy SHA-256 `1db81891…a63f`.
+  - The keyless signature verified for `https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main`,
+    issuer `https://token.actions.githubusercontent.com`.
+  - `PASS SLSA provenance attestation verified for the same identity`.
+  - `RESULT: B3 cryptographic verification PASS`.
+- **Decision:** the owner approves this provider and digest **for the isolated G6 rehearsal only**.
+- **Runtime S3 compatibility: NOT YET VERIFIED.** G6-S2 must prove it on the guest. The probe runs put-object, head-object (size),
+  list-objects-v2, get-object (byte-identical round trip) and delete-object. **Any failed operation is a STOP.**
+
+### 17.5 Permanent IPv6 requirement and dual-family gates
+
+- **Provisioning:** every G6 VM creation or restart uses `ipv6=off` together with `restrict=on` and the loopback-only forward (§15.6).
+- **Dual-family gates:** every gate that checks the guest's routes checks all four of:
+  1. IPv4 default routes;
+  2. IPv6 default routes;
+  3. default routes in every routing table, both families;
+  4. IPv6 addresses other than loopback and link-local.
+
+  Any nonzero count is a STOP. The gates are at the start and end of G6-S1, G6-S2 and G6-BV-S, and at every VM restart.
+
+Script versions reviewed for this record. They are held by the owner outside the repository; a hash here identifies a version and is
+**not** an approval to run it:
+
+| Script | SHA-256 | Executed | Route checks |
+|---|---|---|---|
+| `g6-vm-ipv6-off-restart.sh` | `64d81f4a…186f` | yes, run 2 (§17.1) | all four |
+| `g6-guest-stack-prepare-v4.sh` (G6-S1 guest modes, G6-S2 `stack`) | `343b0578…e4d5` | no | 1 and 2 only |
+| `g6-offline-image-transfer-v3.sh` (G6-S1 transfer) | `33264924…0843` | no | 1 and 2 only |
+| `g6-bv-s-check-v2.sh` (G6-BV-S) | `d68a11ce…58ea` | no | 1 and 2 only |
+| `g6-vm-provision-qemu.sh` (G6-B) | `95d329a4…37cc` | yes, G6-B (§16.3) | lacks `ipv6=off` |
+
+Outstanding corrective items, all documentation-tracked and none done by this record:
+- **`g6-vm-provision-qemu.sh` still lacks `ipv6=off`.** It must be corrected before any new G6 VM is created.
+- **`g6-guest-stack-prepare-v4.sh`, `g6-offline-image-transfer-v3.sh` and `g6-bv-s-check-v2.sh` check only checks 1 and 2.** Each must
+  gain checks 3 and 4, and be re-reviewed with a new hash recorded, before it is used.
+- **`g6-guest-stack-prepare-v4.sh` wording:**
+  - its header names the decision token `B1,B2,B3-accepted`, while its gate requires `B1-plan-amended,B2,B3-verified`;
+  - its `stack` mode labels its result "§9.1 G1–G3".
+
+  Per B1, that output is G6-S2 supporting evidence only. Both must be aligned before G6-S2.
+
+### 17.6 PostgreSQL limitation (unchanged)
+
+§16.2 stands. G6-S2 and G6-C use the candidates' `postgres:16-alpine@sha256:721873c3…`, while production runs
+`postgres@sha256:cf78e766…`. Both are PostgreSQL 16.15, but the images are not identical. G6-C records the ICU and collation
+versions and assesses their effect on indexes and on the §7 restore. A different major version is a STOP.
+
+### 17.7 Remaining gates
+
+**Before G6-S1:**
+1. Checks 3 and 4 (§17.5) are added to `g6-offline-image-transfer-v3.sh` and to the `check`, `install-docker` and `load-images` modes
+   of `g6-guest-stack-prepare-v4.sh`; the result is re-reviewed and its hash recorded.
+2. Owner review and authorization of G6-S1:
+   - the export on the owner workstation;
+   - the transfer over the loopback forward;
+   - the guest's Docker `.deb` dependency check;
+   - the Docker install;
+   - image loading by exact digest.
+3. At G6-S1's start, the VM still runs with `ipv6=off`, and G6-BV-I's host and R3 fingerprints are unchanged.
+
+**Before G6-S2:**
+1. G6-S1 PASS.
+2. The `stack` mode wording is aligned with B1 (§17.5).
+3. Owner authorization of G6-S2.
+4. During G6-S2, the B2 conditions (§17.3) and the five-operation S3 probe (§17.4) must hold; any failure is a STOP.
+
+**Before G6-C:**
+1. G6-S2 PASS.
+2. `g6-bv-s-check-v2.sh` gains checks 3 and 4, is re-reviewed, and G6-BV-S passes.
+3. A separate owner authorization of G6-C.
+
+**Before any new G6 VM:** `g6-vm-provision-qemu.sh` carries `ipv6=off`.
+
+**Unchanged, for production after G6:** production Tier B and the other §16.1 checks, the pre-G7 backup, G7, F6 and F7 (§15.8).
