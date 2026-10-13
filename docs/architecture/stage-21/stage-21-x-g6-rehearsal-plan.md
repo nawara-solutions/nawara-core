@@ -17,6 +17,9 @@
   **G6-S2, G6-BV-S and G6-C are not authorized.**
 - **Result (2026-10-13, §19):** **G6-S2 PASS**, owner-authorized and owner-run (supporting evidence, not a §9.1 G1–G3 PASS). A
   corrected G6-BV-S script is prepared and **not executed**. **G6-BV-S has not run; G6-C is not authorized.**
+- **Procedure (2026-10-13, §20):** owner decision on how §6.1's check 6 is evidenced: a fresh production capture immediately before
+  G6-BV-S, compared with one immediately after (a recorded deviation from the G6-A reference). **Not executed; no production access
+  is authorized by it.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -114,6 +117,9 @@ rehearsal step. The added checks of §16.4, with routes checked for both address
 - the G6-A production fingerprint is unchanged afterwards.
 
 Any failure: **STOP**; no rehearsal mutation runs.
+
+**Amended 2026-10-13 (§20), for the last check only:** it is evidenced by two captures of the same read-only block, one immediately
+before G6-BV-S and one immediately after, which must be identical; G6-A is not rerun. The other five checks are unchanged.
 
 ## 7. RPO and RTO (G5)
 
@@ -276,6 +282,9 @@ host key matched), all guards PASS, readiness PASS, agreement MATCH, and no chan
 the candidate set and carry no revision label. The detailed parity values (OS, Docker, PostgreSQL, RabbitMQ, migration fingerprints,
 broker topology, configuration names) are held in the owner's terminal output and are **not transcribed here: PENDING attachment
 before G6-B**. G6-A (§14) stays certified and is not rerun.
+
+**Status (2026-10-13, §20.1):** that detailed output was never attached and is not among the owner's retained evidence. Only the
+summary in the cutover record §14 exists.
 
 ### 15.2 Certified digest set: CONDITIONALLY APPROVED (2026-10-12), not deployable
 
@@ -1007,3 +1016,117 @@ Nothing in this subsection is a G6-BV-S result. **G6-BV-S has not run.**
 
 **Unchanged:** G6-C is **NOT AUTHORIZED** and does not start before G6-BV-S passes; `g6-vm-provision-qemu.sh` still lacks `ipv6=off`
 (§17.5); B1, B2 and B3 (§17.2–§17.4); for production after G6, §15.8.
+
+**Status (2026-10-13, §20):** how check 6 is evidenced, and how the recipient fingerprint is verified, is set out in §20. Nothing in
+it has been executed.
+
+## 20. Check 6 procedure: a fresh pre-BV-S production baseline (2026-10-13)
+
+Owner decision of 2026-10-13, recorded for review. It settles how §6.1's check 6 is evidenced and how the production recipient
+fingerprint is verified. It changes no other gate, and it **authorizes no production access, no G6-BV-S or G6-C step and no
+production change**. **Nothing in this section has been executed:** no capture exists, and production has not been contacted for it.
+
+### 20.1 The deviation
+
+§6.1's check 6 reads "the G6-A production fingerprint is unchanged afterwards". Neither existing record can serve as that reference:
+- **G6-A (2026-09-30)** is certified and is not rerun (cutover record §5). Production's running Auth image already differs between
+  G6-A and the 2026-10-12 refresh (cutover record §5 and §14), so G6-A no longer describes production.
+- **The 2026-10-12 refresh** is recorded only as a summary (cutover record §14). Its detailed output, "PENDING attachment before G6-B"
+  in §15.1, was never attached and is not among the owner's retained evidence. This is recorded as a gap. The summary stays as
+  historical, owner-supplied evidence; it is not claimed to be a recovered capture.
+
+**Decision:** check 6 is evidenced by two captures of the same read-only block, taken immediately before and immediately after
+G6-BV-S, which must be identical under §20.3. The first is a new baseline. It is also checked against the 2026-10-12 summary; a
+difference there is a finding to explain before G6-BV-S, not a comparison result.
+
+This also means two production reads where §6.1 implies one, plus one read for the recipient certificate (§20.2).
+
+### 20.2 The three production reads
+
+Each needs its own explicit owner authorization. **None has been performed.**
+
+| Read | What it does | Passes when |
+|---|---|---|
+| `pre` | runs the refresh block; the output is saved on the owner workstation | the capture is complete and well-formed (§20.3) |
+| `recipient` | reads only the public certificate `~/nawara-core/backup/recipient.pem`: fingerprint, mode, owner, and a count of private-key lines | the SHA-256 fingerprint equals the replacement certificate's of 2026-09-29, and no private-key line is present |
+| `post` | runs the same block again after G6-BV-S | the capture is complete, and identical to `pre` under §20.3 |
+
+- **The block** is the 2026-10-12 refresh block, unmodified: 125 lines, SHA-256
+  `281567ce3f4561feb125e5da99cac01f3b5104f79ec8ad313e971fdb86faf866`.
+  - It reads host identity; the ownership and Auth guards; each of the seven containers' image, state, health, restart count and
+    start time; readiness and authority agreement; platform versions, networks and migration fingerprints; broker topology by name;
+    backup status and schedules.
+  - It uses no `sudo` and writes no file. It does run read-only SQL sessions, `/ready` requests and broker listings inside the
+    production containers, so it is read-only, not zero-contact.
+  - At run time only its line 3 changes, to the owner's trusted host-key fingerprint; the executed text is hashed and recorded.
+- **The recipient reference:** the owner reported that fingerprint for production's recipient certificate on 2026-09-29, immediately
+  before the Organization production backup certified in the cutover record §3. That is owner-supplied evidence of that day, not of
+  today: the `recipient` read confirms whether it is still installed, and its result supplies G6-BV-S's recipient input (§19.5).
+- **Access rules:** the owner supplies the production address and a host-key fingerprint verified independently of any work session;
+  one pinned host key, strict checking, no trust-on-first-use, every SSH configuration file ignored, no forwarding; the block is sent
+  on SSH standard input, never pasted interactively. A failing guard is reported and never corrected.
+
+### 20.3 Comparison rules
+
+- **Both captures must be valid:** every mandatory line present exactly once and well-formed; the seven containers with their four
+  lines each; the five retained containers; the END line last; no failure marker; no unrecognized line. The runner's recorded
+  SHA-256 and run record must vouch for each file, with SSH exit status 0.
+- **Excluded from the comparison, and nothing else:** the timestamps of the first and last line, and the message count of each queue
+  line.
+- **Must be identical:** identity and every guard value; per container the image reference, image ID, repo digests, revision, state,
+  health, restart count, start time, networks, ports and environment names; the retained containers; readiness and agreement; OS,
+  kernel, Docker, PostgreSQL and RabbitMQ versions; the networks; the migration lines; broker users, permissions, exchanges,
+  bindings, queue names and consumer counts; backup stamps and results; schedule and timer counts.
+- **Any other difference, a changed line order included:** check 6 is not met. Nothing is corrected on production.
+- **SSH's own messages:** none, or only OpenSSH's post-quantum key-exchange notice, is accepted and recorded. Any other text is
+  accepted only after the owner has read it and recorded an acknowledgement of that exact file.
+
+### 20.4 Script versions
+
+Held by the owner outside the repository; a hash identifies a version and is **not** an approval to run it. **None has been run
+against production.**
+
+| Script | SHA-256 | Role |
+|---|---|---|
+| `g6-prod-refresh-block.sh` | `281567ce3f4561feb125e5da99cac01f3b5104f79ec8ad313e971fdb86faf866` | the unmodified 2026-10-12 block |
+| `g6-prod-fingerprint-run-v2.sh` | `4e6ed2501b9f63be250254153ba28c943015042f5efda26046896c990358ef4e` | performs one read (`pre`, `recipient` or `post`) per run; refuses without that run's own authorization |
+| `g6-prod-fingerprint-compare-v2.sh` | `2ce7bcaeece3c9781f66314410db8222bfde05d68da79f20778f87da6994089c` | local only: validates a capture; compares `pre` with `post` |
+
+The first versions of the runner (`4389a8fd…6573`) and the comparator (`74557cb7…d670`) are superseded and were never used. The
+second versions call `ssh` and `ssh-keygen` by full path under a fixed system `PATH`, check the recorded hash and run record of every
+capture, treat SSH's messages the same way in all three modes, and verify the evidence directory before writing.
+
+**Validation so far: local only.** `bash -n` passes; 74 local cases passed against a stand-in for `ssh` and hand-made captures;
+ShellCheck was not run (not installed on the workstation). The comparator's rules come from the block's own output statements and a
+hand-made capture, not from real output: an unanticipated line shape would fail closed and need a local correction.
+
+### 20.5 Evidence and confidentiality
+
+- **Owner workstation only.** The access inputs and the captures are kept in two private directories (mode 700, files mode 600).
+  Nothing is overwritten. Nothing is copied to the lab host or the guest.
+- **Never in this repository:** the production address, the host key or its fingerprint, the raw captures, and SSH's message files
+  (they can name the host).
+- **May be recorded here:** script hashes, run times, output hashes, line counts, verdicts, and whether the recipient certificate is
+  the 2026-09-29 replacement.
+- **Content:** the captures hold no secret value, but they hold production identifiers (Company ID, image digests, variable names,
+  broker users).
+- **Retention:** kept until G6 is certified. Removing the access inputs afterwards is a separate owner decision.
+
+### 20.6 Remaining G6-BV-S prerequisites and limitations
+
+In order, each with its own owner authorization where it touches a server:
+1. The owner supplies the production address, the independently verified host-key fingerprint and the SSH key path.
+2. The `pre` read, with a valid capture.
+3. The `recipient` read, passing.
+4. The two G6-BV-S inputs on the lab, and the decision on keeping them there (§19.5).
+5. The G6-BV-S run with `g6-bv-s-check-v4.sh`, ending with exit 3.
+6. The `post` read, identical to `pre`.
+
+**G6-BV-S passes only with items 5 and 6 together.** G6-C stays **NOT AUTHORIZED**.
+
+**Limitations.** The block's own host-identity check is self-reported; the pinned host key is the control. Container IDs, firewall
+state, file contents and database contents are not compared. The comparison shows that the captured state is unchanged; it cannot
+prove that nothing contacted production in between.
+
+**Unchanged:** ADR-0062; B1, B2 and B3 (§17.2–§17.4); the §17.5 gates; §6.1's checks 1–5 and the §16.4 additions; for production
+after G6, §15.8.
