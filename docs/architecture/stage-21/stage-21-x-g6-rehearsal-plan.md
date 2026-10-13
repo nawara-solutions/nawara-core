@@ -15,6 +15,8 @@
   digest approved for the isolated rehearsal only (B3). **G6-S1, G6-S2 and G6-C are not authorized.**
 - **Result (2026-10-13, §18):** **G6-S1 PASS**, owner-authorized and owner-run; the script versions used are recorded (§18.3).
   **G6-S2, G6-BV-S and G6-C are not authorized.**
+- **Result (2026-10-13, §19):** **G6-S2 PASS**, owner-authorized and owner-run (supporting evidence, not a §9.1 G1–G3 PASS). A
+  corrected G6-BV-S script is prepared and **not executed**. **G6-BV-S has not run; G6-C is not authorized.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -415,8 +417,8 @@ recorded deviation, §16.5). **Amended 2026-10-13** to the B1 order (§17.2): G6
 | 3 | G6-B (VM provisioning) | **DONE** on `nawara-lab-01` (§15.6, §16.3) |
 | 4 | G6-BV-I (infrastructure isolation) | **PASS** (§17.1), after the `ipv6=off` restart |
 | 5 | G6-S1: offline image transfer, guest Docker and its dependencies, image loading by exact digest (§16.3) | **PASS** (2026-10-13, §18) |
-| 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | NOT AUTHORIZED — step 5 passed (§18); needs its own owner authorization |
-| 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | NOT STARTED — not before step 6 passes |
+| 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | **PASS** (2026-10-13, §19) |
+| 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | NOT STARTED — step 6 passed (§19); its inputs, its authorization and the check 6 evidence are missing (§19.5) |
 | 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | NOT AUTHORIZED — not before step 7 passes |
 | 9 | G6 CERTIFIED | — |
 
@@ -722,6 +724,7 @@ The rehearsal's `backup.sh` reaches the guest's MinIO over HTTP, accepted **for 
 - **Decision:** the owner approves this provider and digest **for the isolated G6 rehearsal only**.
 - **Runtime S3 compatibility: NOT YET VERIFIED.** G6-S2 must prove it on the guest. The probe runs put-object, head-object (size),
   list-objects-v2, get-object (byte-identical round trip) and delete-object. **Any failed operation is a STOP.**
+  **Status (2026-10-13, §19.1):** the G6-S2 probe passed all five operations on the guest.
 
 ### 17.5 Permanent IPv6 requirement and dual-family gates
 
@@ -790,6 +793,9 @@ versions and assesses their effect on indexes and on the §7 restore. A differen
 1. G6-S2 PASS.
 2. `g6-bv-s-check-v2.sh` gains checks 3 and 4, is re-reviewed, and G6-BV-S passes.
 3. A separate owner authorization of G6-C.
+
+**Status (2026-10-13, §19.5):** item 1 is met. Items 2 and 3 are **not met**: the corrected script (§19.4) has not run, and G6-C is
+not authorized.
 
 **Before any new G6 VM:** `g6-vm-provision-qemu.sh` carries `ipv6=off`.
 
@@ -875,7 +881,129 @@ The four scripts carry the same gate text. Status of §17.5's corrective items:
 
 ### 18.5 Remaining gates
 
+*Superseded 2026-10-13 by §19.5 for G6-S2 and the S3 compatibility. The text is kept as history.*
+
 - **Before G6-S2 (§17.7):** G6-S1 PASS and the `stack` wording are met. **Owner authorization of G6-S2 is not given.**
 - **G6-S2: NOT AUTHORIZED.** B1, B2 and B3 (§17.2–§17.4) are unchanged; the MinIO runtime S3 compatibility is still **not verified**.
 - **G6-BV-S: NOT STARTED. G6-C: NOT AUTHORIZED.** §17.7's gates before G6-C and before any new G6 VM are unchanged.
 - **Unchanged, for production after G6:** §15.8.
+
+## 19. G6-S2: PASS (2026-10-13); G6-BV-S tooling prepared, not executed
+
+It records two separate things: the **G6-S2 result**, which is accepted evidence (§19.1–§19.3), and a **corrected G6-BV-S script**,
+which is tooling that has **not run** and is not evidence (§19.4). It **authorizes no G6-BV-S or G6-C step, no deployment and no
+production change**. The evidence kind is the same as in §16–§18: **OWNER-SUPPLIED TERMINAL OUTPUT**. The owner authorized and ran
+every G6-S2 step; this record's author read the owner's saved copy of each complete output. The scripts and outputs are retained by the
+owner outside the repository; none contains a credential, token or configuration value.
+
+### 19.1 G6-S2 result
+
+All times are 2026-10-13, UTC. Every step printed the §17.5 gate with the pinned host key, `v4_default_all=0 v6_default_all=0
+v6_nonlocal_addr=0` and the boot ID of §17.1 run 2.
+
+| Step | Start | Result | Output copy SHA-256 |
+|---|---|---|---|
+| Deployment: `g6-guest-stack-prepare-v5.sh stack`, with `G6_S2_AUTHORIZED=yes` and `G6_STACK_DECISIONS=B1,B2,B3` | 16:20:21 | **PASS**, exit 0; gate at start and end | `be560eafc3e8c4409881afe37cec69bc84622c7a21b4389f513d2c8f0357f2b7` |
+| Guest inspection, read-only: the `evidence` mode, then `g6-s2-evidence-inspect.sh` | 16:32:39 | **PASS**, both exit 0; gate at start and end | `5e0b5ac6767713f67eca0d8350914ba4ce81dd11281ec61fc34cec4c6e7b529d` |
+| Host check `after`, read-only (Server 2 and R3) | 16:34:13 | **PASS**, 12 checks; seven fingerprint files byte-identical to both S1-0's and S1-6's | `ac6e8d6cb84028b278bd14c25adbd5b7cf8a9ff9a6fcda71d96ebbf70db7d605` |
+
+- **Deployed, in order:** the broker, Audit, Organization, Auth (each deploy script read out of its own approved image), then MinIO.
+- **Containers (inspection):** exactly eight exist: the broker, the three services, their three databases and MinIO.
+  - Each was created from its full pinned reference, and its image ID is the pinned digest (§16.1, the pinned infrastructure digests,
+    the B3 MinIO digest).
+  - All are running with 0 restarts, no published port and not privileged. Seven are healthy; MinIO has no health check.
+- **Networks and volumes (inspection):** the Core network and the backup network are internal; IPv6 is off on the four bridge networks; MinIO is
+  alone on the backup network; exactly five named volumes exist; no `docker-proxy` process runs.
+- **MinIO (B2, B3):** all capabilities dropped, `no-new-privileges`, a 512 MB limit. The five-operation S3 probe passed: put-object,
+  head-object (size), list-objects-v2, get-object (byte-identical round trip) and delete-object. This is the runtime S3
+  compatibility that §17.4 left open, **for the isolated rehearsal only**.
+- **Auth and Organization:** `AUTH_EVENTS=off` and `AUTH_HIERARCHY_SOURCE` unset, on disk and in the running container; Auth holds no
+  Organization credential; Organization has no caller token, no caller policy and no activation switch; no caller was registered.
+- **Not run:** no ownership command, no caller registration, no backup and no restore.
+- **Server 2 and R3:** the new evidence directory is `~/g6-vm/state/s1-host-after-20261013T163413Z/`, the one directory that run
+  created. The checks and the compared files are those of §18.2.
+- **Standing (B1):** this is supporting evidence. It is **not** a §9.1 G1–G3 PASS, which is accepted only within G6-C.
+
+### 19.2 Deviations and limitations
+
+- **The inspection script is new.** `g6-s2-evidence-inspect.sh` was written after the deployment, because the `evidence` mode only
+  lists and asserts nothing.
+- **Not independently inspected:** in-database state (ownership phase, migrations, role privileges) and the broker topology. The
+  deploy scripts assert the privileges and the topology themselves and reported success.
+- **Auth's database is on `deploy_edge`**, a non-internal bridge, as in production. The guest has no route out (§17.5 gate).
+- **The `stack` mode is not re-entrant;** it ran once.
+- **Hash checks:** the prepared commands check each script's hash before running it; for the two guest runs that check's own line is
+  not in the saved output.
+- **The host check's label** is `after` again; the directory is told apart by its timestamp. Its coverage limits are those of §18.4.
+- **Open for G6-C and G6-E:** `BACKUP_S3_ALLOW_INSECURE_HTTP=local-test` (§17.3) is read by `backup.sh` from its environment; G6-S2
+  does not set it anywhere.
+
+### 19.3 Script versions
+
+Held by the owner outside the repository; a hash identifies a version and is **not** an approval to run it.
+
+| Script | SHA-256 | Status |
+|---|---|---|
+| `g6-guest-stack-prepare-v5.sh` | `245fe36a6f43fcdc1e1da3468799f8def3a7917e599b263fced8a341bf65ce1c` | `stack` and `evidence` executed (§19.1) |
+| `g6-s2-evidence-inspect.sh` | `da20c10b7a71e235c607d372e3be87887892b0ca95028823ccf02dba1de20522` | executed (§19.1); read-only |
+| `g6-s1-host-check.sh` | `9433890d9cdbbbaa6e6b01e06fa5a56b3cb583437d6840b4f20583d1b3ae4eda` | executed (§19.1); read-only |
+| `g6-bv-s-check-v3.sh` | `b44ff3fea55529a7b24f05477db0c8ca5e84996d19c09429cf7561d2c1ce4437` | **never executed; superseded** (§19.4) |
+| `g6-bv-s-check-v4.sh` | `2e7a8ad7761310b5cc109877ad1f6b74777330656249cbdf8e48fe12f71fa5c9` | **not executed**; the reviewed candidate for G6-BV-S (§19.4) |
+
+### 19.4 G6-BV-S tooling: prepared, not executed
+
+Nothing in this subsection is a G6-BV-S result. **G6-BV-S has not run.**
+
+**Why v3 is superseded.** It carries the §17.5 checks 3 and 4 that §17.7 asked for, but a review against the G6-S2 output found:
+- its image check reads names from `docker ps`, which prints short forms in this guest, so it would fail on a correct stack;
+- it exits 0 even when it reports a failure;
+- its header says the production names arrive on standard input and are never stored, while it passes them on a command line and
+  writes them to a temporary file in the guest;
+- it writes its evidence directly into `~/g6-vm/state`, which would make the host check's "earlier evidence identical" comparison fail
+  afterwards.
+
+**What v4 does instead.**
+- **Images:** `docker inspect` on each of the eight containers: the full pinned reference, the pinned digest as image ID, and the same
+  digest in the image store; plus the exact container set, networks and unpublished ports.
+- **§6.1 checks 1–5,** with check 2 extended to every `*URL` variable (`AUTH_SERVICE_URL` included), on disk and in the running
+  containers, and check 3 extended to container environments and labels.
+- **Inputs:** two owner-prepared files on the lab; they travel on the SSH session's standard input, are never printed or saved, and
+  nothing is written in the guest. Production names are validated first: blank, short, unsafe or over-broad entries are refused.
+- **Gates:** the pinned key before the guest is contacted; the §17.5 gate at the start and end of the guest half; an incomplete or
+  aborted guest half is a failure.
+- **Host half:** the checks of `g6-s1-host-check.sh`, plus v3's own.
+- **Evidence:** `~/g6-vm/bv-s-evidence/bv-s-<UTC>/` on the lab; nothing under `~/g6-vm/state`.
+
+**Exit status.** It never exits 0.
+
+| Exit | Meaning |
+|---|---|
+| 3 | every automated check passed; **G6-BV-S is still not PASS**: check 6 is pending |
+| 1 | a check failed, did not run or did not report |
+| 2 | STOP before anything was inspected (wrong host, or a missing, unsafe or over-broad input) |
+
+**Validation so far: local only.**
+- `bash -n` passes. ShellCheck was not run (not installed on the workstation).
+- 37 local cases passed against stub commands and dummy fixtures: success; digest mismatch; wrong reference; extra container; a
+  default route; failing subprocesses; credentials; a service URL outside the guest; production names; published ports; network
+  errors; Auth events on; equal recipient fingerprints; a wrong pinned key; R3 and baseline changes; missing, malformed, loose and
+  over-broad inputs. No test input appeared in any output.
+- **Not runtime-tested:** three Docker format expressions (the combined environment-and-labels template, the hostname fields, and the
+  six-field container line), and the real `sudo`, `systemctl` and SSH behaviour. A wrong expression would show as a failure, not as a
+  pass.
+
+### 19.5 Remaining gates
+
+**Before G6-BV-S:**
+1. The owner prepares the two inputs on the lab: the production names, and the production backup recipient certificate fingerprint,
+   which the owner verifies. Neither is recorded in this repository.
+2. An owner decision on where those inputs are kept on Server 2 and whether they stay afterwards.
+3. Owner authorization of the G6-BV-S run with `g6-bv-s-check-v4.sh`.
+
+**For G6-BV-S to pass:**
+1. The run ends with exit 3 (every automated check).
+2. **Check 6 (§6.1):** evidence that the G6-A production fingerprint is unchanged afterwards. This needs a separately authorized,
+   read-only production step; G6-A itself is not rerun (cutover record §5). The script cannot supply it, and exit 3 alone is not a PASS.
+
+**Unchanged:** G6-C is **NOT AUTHORIZED** and does not start before G6-BV-S passes; `g6-vm-provision-qemu.sh` still lacks `ipv6=off`
+(§17.5); B1, B2 and B3 (§17.2–§17.4); for production after G6, §15.8.
