@@ -13,6 +13,8 @@
 - **Amendment (2026-10-13, §17):** G6-BV-I **PASS** after the guest's IPv6 default route was removed (QEMU `ipv6=off`); the order is
   G6-BV-I → G6-S1 → G6-S2 → G6-BV-S → G6-C (B1); MinIO over internal HTTP accepted for the rehearsal only (B2); the Chainguard MinIO
   digest approved for the isolated rehearsal only (B3). **G6-S1, G6-S2 and G6-C are not authorized.**
+- **Result (2026-10-13, §18):** **G6-S1 PASS**, owner-authorized and owner-run; the script versions used are recorded (§18.3).
+  **G6-S2, G6-BV-S and G6-C are not authorized.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -412,8 +414,8 @@ recorded deviation, §16.5). **Amended 2026-10-13** to the B1 order (§17.2): G6
 | 2 | PostgreSQL parity decision (§15.3) | **DONE** — difference accepted as a limitation (§16.2) |
 | 3 | G6-B (VM provisioning) | **DONE** on `nawara-lab-01` (§15.6, §16.3) |
 | 4 | G6-BV-I (infrastructure isolation) | **PASS** (§17.1), after the `ipv6=off` restart |
-| 5 | G6-S1: offline image transfer, guest Docker and its dependencies, image loading by exact digest (§16.3) | NOT AUTHORIZED |
-| 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | NOT AUTHORIZED — not before step 5 passes |
+| 5 | G6-S1: offline image transfer, guest Docker and its dependencies, image loading by exact digest (§16.3) | **PASS** (2026-10-13, §18) |
+| 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | NOT AUTHORIZED — step 5 passed (§18); needs its own owner authorization |
 | 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | NOT STARTED — not before step 6 passes |
 | 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | NOT AUTHORIZED — not before step 7 passes |
 | 9 | G6 CERTIFIED | — |
@@ -753,6 +755,10 @@ Outstanding corrective items, all documentation-tracked and none done by this re
 
   Per B1, that output is G6-S2 supporting evidence only. Both must be aligned before G6-S2.
 
+**Status (2026-10-13, §18.3):** the transfer and guest-preparation items and the wording item are resolved by
+`g6-offline-image-transfer-v4.sh` and `g6-guest-stack-prepare-v5.sh`. The `g6-vm-provision-qemu.sh` and `g6-bv-s-check` items remain
+outstanding.
+
 ### 17.6 PostgreSQL limitation (unchanged)
 
 §16.2 stands. G6-S2 and G6-C use the candidates' `postgres:16-alpine@sha256:721873c3…`, while production runs
@@ -778,6 +784,8 @@ versions and assesses their effect on indexes and on the §7 restore. A differen
 3. Owner authorization of G6-S2.
 4. During G6-S2, the B2 conditions (§17.3) and the five-operation S3 probe (§17.4) must hold; any failure is a STOP.
 
+**Status (2026-10-13, §18.5):** items 1 and 2 are met. Item 3 is **not given**: G6-S2 is not authorized.
+
 **Before G6-C:**
 1. G6-S2 PASS.
 2. `g6-bv-s-check-v2.sh` gains checks 3 and 4, is re-reviewed, and G6-BV-S passes.
@@ -786,3 +794,88 @@ versions and assesses their effect on indexes and on the §7 restore. A differen
 **Before any new G6 VM:** `g6-vm-provision-qemu.sh` carries `ipv6=off`.
 
 **Unchanged, for production after G6:** production Tier B and the other §16.1 checks, the pre-G7 backup, G7, F6 and F7 (§15.8).
+
+## 18. G6-S1: PASS (2026-10-13)
+
+It records the G6-S1 result and the script versions used, as §17.7 requires before G6-S2. It **authorizes no G6-S2, G6-BV-S or G6-C
+step, no deployment and no production change**. The evidence kind is the same as in §16 and §17: **OWNER-SUPPLIED TERMINAL OUTPUT**.
+The owner authorized and ran every stage; this record's author read the owner's saved copy of each complete output. The scripts and
+outputs are retained by the owner outside the repository; none contains a credential, token or configuration value.
+
+### 18.1 Stages
+
+All times are 2026-10-13, UTC. Every stage that reached the guest printed the §17.5 gate with the pinned host key,
+`v4_default_all=0 v6_default_all=0 v6_nonlocal_addr=0` and the boot ID of §17.1 run 2: the VM was not restarted during G6-S1.
+
+| Stage | Where | Start | Result | Output copy SHA-256 |
+|---|---|---|---|---|
+| S1-0 host check `before` | Server 2, read-only | 08:55:23 | **PASS**, 12 checks | `c3df75d2b829b083fd82e9ed242276e2f8d3db75b900a18e1c357e754dd97a53` |
+| S1-1 export | owner workstation | 09:05:32 | **PASS**: seven images by pinned digest, `linux/amd64`, every blob verified; three Docker `.debs` from the signature-verified index; three infra scripts at their pinned hashes; a 14-file manifest | `2d610b7e05685bd1bd87e3f66bfe759a512e2ce198d5a1278a6178a88a74a51c` |
+| S1-2 transfer | workstation → guest, loopback forward | 09:50:58 | **PASS**: gate before and after; the guest verified every file against the manifest | `ed4be79476cbbe58d107c2cd7c0395de059f9173c192c924276f1ccb99b8229f` |
+| S1-2 read-only inspection | guest | 15:45:41 | **COMPLETE**: the expected manifest, 14 listed files verified, 15 files present, none partial, linked, extra or foreign-owned | `389c71ca13d2cf2b2263abe2c67ab11cdd531da8b9c170a3138ead634a07dade` |
+| S1-3 `check` | guest | 15:48:28 | **PASS**: capacity, `DOCKER_HOST` unset, manifest, image list equal to the pinned list, offline resolution to exactly the three `.debs` | `788ecbd538d8d536e201ff6a6359514bfa4362697e154609b1221e09957e0137` |
+| S1-4 `install-docker` | guest | 15:51:17 | **PASS**: Docker Server 29.1.3, containerd image store, guest-local context; gate at start and end | `83439b2eab05ee13cf2e6f327321172737fdc35710340037612cabba3e332c24` |
+| S1-5 `load-images` | guest | 15:55:23 | **PASS**: each of the seven references resolves to its pinned digest, `linux/amd64`; no container started; gate at start and end | `ed55b0a04edd6b30b144db41c13720028cbc9975a63676159a3620b5397e8dee` |
+| S1-6 host check `after` | Server 2, read-only | 15:59:22 | **PASS**, 12 checks; seven fingerprint files byte-identical to S1-0's | `a2be8ee32bc510d87e86c9a01bb41d85cee58775714688d1dab7b27d4db244b9` |
+
+### 18.2 Evidence
+
+- **Server 2:** `~/g6-vm/state/s1-host-before-20261013T085523Z/` and `~/g6-vm/state/s1-host-after-20261013T155922Z/`.
+- **Final output (owner workstation):** `s1-6-host-after-20261013T155910Z.out`.
+- **Export manifest:** SHA-256 `7c4352e8e74e1f90d91b040084447fea42d09101b88290c965855a8f80f5e58c`, printed by the export, the transfer,
+  the guest's own verification and the inspection.
+- **Images:** the seven references of the transfer script's list, which the guest script requires to equal its own pinned list: the
+  §16.1 digest set, the PostgreSQL, RabbitMQ and AWS CLI images the scripts pin, and the B3 MinIO digest (§17.4).
+- **Docker packages:** `docker-ce` and `docker-ce-cli` `5:29.1.3-1~ubuntu.24.04~noble`; `containerd.io`
+  `2.4.1-2~ubuntu.24.04~noble`, SHA-256 `893c9ddf70deacfb79db14ec3845164f1649807f82634bc453c12a1cc40a88c4`.
+- **S1-6 comparison with S1-0:** `qemu-argv`, `unit`, `r3`, `r3x`, `net`, `host` and `state-files` are byte-identical. Both runs
+  passed the same 12 checks: the unit, the single QEMU process, the QEMU arguments (`ipv6=off`, `restrict=on`, the loopback forward
+  only), the 23 unit properties, loopback-only sockets, the pinned guest key, the guest gate, R3 (containers, volumes, networks, timer;
+  queue), the host network and host state fingerprints, and every earlier evidence file in `~/g6-vm/state`.
+
+### 18.3 Script versions
+
+Held by the owner outside the repository; a hash identifies a version and is **not** an approval to run it.
+
+| Script | SHA-256 | Used for | Route checks (§17.5) |
+|---|---|---|---|
+| `g6-s1-host-check.sh` | `9433890d9cdbbbaa6e6b01e06fa5a56b3cb583437d6840b4f20583d1b3ae4eda` | S1-0, S1-6 | all four |
+| `g6-offline-image-transfer-v4.sh` | `4ab1453f2c3b6b399c4aab4fe70f29db95db1207861296b3072e59866224573e` | S1-1, S1-2 | all four |
+| `g6-guest-stack-prepare-v5.sh` | `245fe36a6f43fcdc1e1da3468799f8def3a7917e599b263fced8a341bf65ce1c` | S1-3, S1-4, S1-5; its `stack` and `evidence` modes were **not executed** | all four |
+| `g6-s1-2-transfer-inspect.sh` | `1dffd436ed15b5bf0f6bfbacb45156d98ed66d0800e1a1b8e1e9d7f1de5821ec` | the S1-2 read-only inspection | all four |
+
+The four scripts carry the same gate text. Status of §17.5's corrective items:
+- **Resolved:** the transfer script and the `check`, `install-docker` and `load-images` modes carry checks 3 and 4.
+- **Resolved (read, not executed):** the `stack` mode of `g6-guest-stack-prepare-v5.sh` requires `G6_S2_AUTHORIZED=yes` and
+  `G6_STACK_DECISIONS=B1,B2,B3`, its header names the same token, and its result line calls its output supporting evidence, not a
+  §9.1 G1–G3 PASS.
+- **Outstanding:** `g6-vm-provision-qemu.sh` still lacks `ipv6=off`; the G6-BV-S script is not recorded here and is re-reviewed before
+  G6-BV-S (§17.7).
+
+### 18.4 Deviations and limitations
+
+- **Hashes recorded after the run.** §17.7 asked for the corrected scripts' hashes to be recorded before G6-S1. The owner authorized and
+  ran G6-S1 with the versions above first; this section records them afterwards.
+- **A second transfer attempt** at 15:41:30 was refused by the script because the guest's transfer directory existed, and changed
+  nothing (output copy SHA-256 `8945424cff72c0e1b44c45fdfe7f398bc5b9e6545b8a74a918139ab8e03e7dc7`). The inspection then confirmed the
+  09:50:58 transfer.
+- **`check` is not strictly read-only:** every mode of the guest script creates the empty directory `~/g6-stack-logs`.
+- **`containerd.io` was not pinned in advance:** the export took the newest version in the signed index; its version and hash are in
+  §18.2.
+- **Transferred files are mode 664** (the guest's default umask), owned by the guest user; each later stage re-verified the manifest.
+- **S1-5's command** set the guest-local Docker socket and unset `DOCKER_CONTEXT`; the guest's load log lists the seven images and no
+  unpack error.
+- **Not inspected:** Docker's own bridge, firewall rules and forwarding setting inside the guest. The gates after the install and the
+  load show no default route and no nonlocal IPv6 address.
+- **Host check coverage:** it does not fingerprint the host's image list, the host's IPv6 routes or non-main routing tables, or host
+  sysctls other than `ip_forward`.
+- **Not reviewed:** the detail files in the two Server 2 directories; their results are in the outputs that were read.
+- **Kept on the owner workstation:** the export and its temporary copies (public image content only).
+- The limitations of §17.1 are unchanged: the VM is transient and does not survive a host reboot.
+
+### 18.5 Remaining gates
+
+- **Before G6-S2 (§17.7):** G6-S1 PASS and the `stack` wording are met. **Owner authorization of G6-S2 is not given.**
+- **G6-S2: NOT AUTHORIZED.** B1, B2 and B3 (§17.2–§17.4) are unchanged; the MinIO runtime S3 compatibility is still **not verified**.
+- **G6-BV-S: NOT STARTED. G6-C: NOT AUTHORIZED.** §17.7's gates before G6-C and before any new G6 VM are unchanged.
+- **Unchanged, for production after G6:** §15.8.
