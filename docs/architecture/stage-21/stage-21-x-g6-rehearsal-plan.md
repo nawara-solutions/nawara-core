@@ -20,6 +20,8 @@
 - **Procedure (2026-10-13, §20):** owner decision on how §6.1's check 6 is evidenced: a fresh production capture immediately before
   G6-BV-S, compared with one immediately after (a recorded deviation from the G6-A reference). **Not executed; no production access
   is authorized by it.**
+- **Result (2026-10-14, §21):** **G6-BV-S PASS**, owner-authorized and owner-run: every automated check passed and check 6 is met
+  (the two production captures are identical). **G6-C is not authorized.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -427,8 +429,8 @@ recorded deviation, §16.5). **Amended 2026-10-13** to the B1 order (§17.2): G6
 | 4 | G6-BV-I (infrastructure isolation) | **PASS** (§17.1), after the `ipv6=off` restart |
 | 5 | G6-S1: offline image transfer, guest Docker and its dependencies, image loading by exact digest (§16.3) | **PASS** (2026-10-13, §18) |
 | 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | **PASS** (2026-10-13, §19) |
-| 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | NOT STARTED — step 6 passed (§19); its inputs, its authorization and the check 6 evidence are missing (§19.5) |
-| 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | NOT AUTHORIZED — not before step 7 passes |
+| 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | **PASS** (2026-10-14, §21) |
+| 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | NOT AUTHORIZED — step 7 passed (§21); needs its own owner authorization |
 | 9 | G6 CERTIFIED | — |
 
 After G6, these production steps keep their own checkpoints (§12; cutover record §7):
@@ -806,6 +808,9 @@ versions and assesses their effect on indexes and on the §7 restore. A differen
 **Status (2026-10-13, §19.5):** item 1 is met. Items 2 and 3 are **not met**: the corrected script (§19.4) has not run, and G6-C is
 not authorized.
 
+**Status (2026-10-14, §21):** items 1 and 2 are met (G6-BV-S PASS with `g6-bv-s-check-v4.sh` and the §20 check 6). Item 3 is **not
+given**: G6-C is not authorized.
+
 **Before any new G6 VM:** `g6-vm-provision-qemu.sh` carries `ipv6=off`.
 
 **Unchanged, for production after G6:** production Tier B and the other §16.1 checks, the pre-G7 backup, G7, F6 and F7 (§15.8).
@@ -1090,7 +1095,7 @@ against production.**
 |---|---|---|
 | `g6-prod-refresh-block.sh` | `281567ce3f4561feb125e5da99cac01f3b5104f79ec8ad313e971fdb86faf866` | the unmodified 2026-10-12 block |
 | `g6-prod-fingerprint-run-v3.sh` | `d2845ed58912485adac78798b29393fe832e1fe7f9ea1d0d5512dd9bc9ea7448` | performs one read (`pre`, `recipient` or `post`) per run; refuses without that run's own authorization |
-| `g6-prod-fingerprint-compare-v3.sh` | `0faec02772062afb6f4df0348ffb6fafa6b04bc517e6aae050dadbbdceb78341` | local only: validates a capture; compares `pre` with `post` |
+| `g6-prod-fingerprint-compare-v4.sh` | `febf930527c893d5f7fd07c99c0664a536074efb368756d301b7396e206b79f4` | local only: validates a capture; compares `pre` with `post` |
 
 The first versions of the runner (`4389a8fd…6573`) and the comparator (`74557cb7…d670`) are superseded and were never used. The
 second versions call `ssh` and `ssh-keygen` by full path under a fixed system `PATH`, check the recorded hash and run record of every
@@ -1103,7 +1108,13 @@ an SSH key file and switched password login off, while Server 1 is reached by pa
   host key and strict checking are unchanged.
 - **Comparator v3** differs from v2 only in accepting run records written by the v3 runner.
 
-**Validation so far: local only.** `bash -n` passes; 85 local cases passed against a stand-in for `ssh` and hand-made captures;
+**Corrected 2026-10-14: comparator v3 is superseded by v4.** v3 (`0faec027…8341`) rejected the real `pre` capture of 2026-10-14
+because its rules came from a hand-made capture: it expected exactly five retained-container listing lines, indented by two spaces.
+Production prints that listing without indentation and lists every `-previous-` container (fourteen on that day). v4 matches the
+real lines, still requires each of the five containers named in the block's stage 0 exactly once, and still compares the whole
+listing between `pre` and `post`; nothing else changed. The capture itself was unchanged and was not repeated.
+
+**Validation so far: local only.** `bash -n` passes; 92 local cases passed against a stand-in for `ssh` and hand-made captures;
 ShellCheck was not run (not installed on the workstation). The comparator's rules come from the block's own output statements and a
 hand-made capture, not from real output: an unanticipated line shape would fail closed and need a local correction. **No production
 connection has been tested or authorized:** the real `ssh` password prompt has not been exercised.
@@ -1133,9 +1144,60 @@ In order, each with its own owner authorization where it touches a server:
 
 **G6-BV-S passes only with items 5 and 6 together.** G6-C stays **NOT AUTHORIZED**.
 
+**Status (2026-10-14, §21):** items 1 to 6 are done; G6-BV-S is PASS.
+
 **Limitations.** The block's own host-identity check is self-reported; the pinned host key is the control. Container IDs, firewall
 state, file contents and database contents are not compared. The comparison shows that the captured state is unchanged; it cannot
 prove that nothing contacted production in between.
 
 **Unchanged:** ADR-0062; B1, B2 and B3 (§17.2–§17.4); the §17.5 gates; §6.1's checks 1–5 and the §16.4 additions; for production
 after G6, §15.8.
+
+## 21. G6-BV-S: PASS (2026-10-14)
+
+It records the G6-BV-S result. It **authorizes no G6-C step, no deployment and no production change**. The evidence kind is the
+same as in §16–§20: **OWNER-SUPPLIED TERMINAL OUTPUT**. The owner authorized and ran every step separately; this record's author
+read the owner's saved copy of each output. The outputs are retained by the owner outside the repository; none contains a
+credential, a production address or a production backup name.
+
+### 21.1 Steps and results
+
+All times are 2026-10-14, UTC, in the order run.
+
+| Step | Start | Result | Output SHA-256 |
+|---|---|---|---|
+| `pre` production capture (§20.2; runner v3) | 09:32:44 | SSH exit 0; 115 lines; identity, guards, readiness and agreement PASS. **VALID** with comparator v4, consistent with the 2026-10-12 summary | `3f585cc5eeb813cf6c6f360ebd07e9502d6357c2e74571adcc0d341a880d11e3` |
+| `recipient` production read (§20.2) | 09:43:07 | **PASS**: the production `recipient.pem` is the 2026-09-29 replacement certificate (fingerprint `88b7f905…613f`); public certificate only, no private-key line | `bed185196cf6ded7066c8e8b406bb379356dbbbe20c9e23d5686b252f56a9807` |
+| G6-BV-S inputs to the lab (§19.5) | 09:53:03 | **TRANSFERRED AND VERIFIED**: `~/g6-vm/bv-s-inputs` 700, two files 600, both hashes match; `~/g6-vm/state` unchanged | `90dea0d7796aa9eca90168a110e9ac4a46d1c34f0996afec753bdb6f6fab36ec` |
+| G6-BV-S, `g6-bv-s-check-v4.sh` (§19.4) | 09:56:43 | **exit 3: every automated check passed** — checks 1–5, A, N and AUTH, both guest gates, and the host half (QEMU sandbox, R3, host network and state, earlier evidence byte-identical) | `2fcca30964930387342f0d875fb9329762094874d817649b41ca012ba3e50eb3` |
+| `post` production capture (§20.2) | 09:57:44 | SSH exit 0; 115 lines; VALID | `219a56ebc379643bae0eed0bb3c85c502a1fbc81c4e5d72bff7a1ee2ead41ec2` |
+| Check 6 comparison, comparator v4 (§20.3) | 09:58:43 | **IDENTICAL**: every compared line unchanged across 115 lines; excluded only the two timestamps and the message count of 3 queue lines | `b50908f975c5244096610496502fa76a830b94996f6e93980e6f3c2732d9b696` |
+
+**Certification: G6-BV-S PASS.** The automated run ended with exit 3 and check 6 is met, as §20.6 requires (items 5 and 6
+together).
+
+### 21.2 Evidence
+
+- **Owner workstation:** `~/g6-evidence/bv-s-run-20261014T095632Z.out`; the captures, run records, recorded hashes, validation
+  reports and the comparison report in `~/g6-evidence/prod/` (mode 700, files 600); the transfer log
+  `~/g6-evidence/bv-s-inputs-transfer-20261014T095303Z.out`.
+- **Lab:** `~/g6-vm/bv-s-evidence/bv-s-20261014T095643Z/`; the two inputs in `~/g6-vm/bv-s-inputs/`, kept until G6 is
+  certified and removed only under a separate owner authorization.
+- **Inputs:** `prod-patterns` (4 names; SHA-256 `baab059b…46a7`) and `prod-recipient.sha256` (`c0b7be9e…837b`). Their contents are
+  not recorded here (§20.5). The production backup endpoint and bucket in them are the values used by the certified restore drill
+  of 2026-09-29; the backup prefix also appears in that day's certified production backup.
+
+### 21.3 Deviations and limitations
+
+- **Comparator v3 superseded by v4** (§20.4): v3 rejected the valid `pre` capture; the capture was kept unchanged and validated
+  with v4. Two v4 validation reports were written for it because the exit status of the first was not captured; the earlier v3
+  report is kept.
+- **Lab host key:** pinned from the key already trusted and used under strict checking for every G6 lab step; it was not read on
+  the lab's console. Server 1's key was confirmed on the physical machine.
+- **Limitations of §20.6 apply:** the captures compare the recorded state only; they cannot prove that nothing contacted
+  production in between.
+
+### 21.4 Remaining gates
+
+- **G6-C: NOT AUTHORIZED.** It needs its own owner authorization (§17.7); each step of §9.1 is then separately authorized.
+- **Unchanged:** ADR-0062; B1, B2 and B3; the §17.5 gates; the scope of G6-C, G6-D, G6-E and G6-F; for production after G6, §15.8.
