@@ -5,7 +5,8 @@
 - **Scope:** ADR-0040 fresh path (A2.5, F1–F7) and gates G1–G7, plus the Stage 21.x T1 relay gate.
 - **Later status:** dated later-status notes are appended as [§10](#10-later-status-note-2026-10-02-v2-a),
   [§11](#11-later-status-note-2026-10-03-v2-a2), [§12](#12-later-status-note-2026-10-04-v2-a3--a35) and
-  [§13](#13-later-status-note-2026-10-04-v2-a0). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
+  [§13](#13-later-status-note-2026-10-04-v2-a0), [§14](#14-later-status-note-2026-10-12-g6-baseline-refresh) and
+  [§15](#15-later-status-note-2026-10-14-g6-rehearsal). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
 - **Related:** [ADR-0040](../../adr/0040-organization-ownership-migration-decisions.md),
   [G1 topology](stage-21-x-g1-organization-topology.md), [G6 rehearsal plan](stage-21-x-g6-rehearsal-plan.md),
   [organization-production runbook](../../runbooks/organization-production.md),
@@ -201,11 +202,11 @@ locally — previously executed result requires later evidence attachment.* G6-B
 | **G6-S1** (offline images, guest Docker) | **PASS** (2026-10-13): seven images loaded in the guest by exact digest; Docker Server 29.1.3 installed offline; Server 2 and R3 fingerprints identical before and after; script hashes recorded (plan §18) |
 | **G6-S2** (initial guest-only deployment) | **PASS** (2026-10-13): eight guest containers on their pinned digests; the MinIO five-operation S3 probe passed; guest inspection passed; Server 2 and R3 fingerprints identical to S1-0 and S1-6; no ownership command, backup or restore; supporting evidence, not a G1–G3 PASS (plan §19) |
 | **G6-BV-S** (service level) | **PASS** (2026-10-14): every automated check of `g6-bv-s-check-v4.sh` passed (exit 3); check 6 met: the production captures before and after are IDENTICAL; the production recipient certificate is the 2026-09-29 replacement (plan §21) |
-| **G6-C** | **DEFERRED** — not authorized; not before G6-BV-S passes; G1–G3 accepted only here |
-| **G6-D** | **DEFERRED** |
-| **G6-E** | **DEFERRED** |
-| **G6-F** | **DEFERRED** |
-| **OVERALL G6** | **NOT CERTIFIED** |
+| **G6-C** | **PASS** (2026-10-14): G1–G3 accepted; F1–F7 with the rollback proof, ACTIVATE (source first, seven readiness cases) and the post-activation refusal; `RETIRED`, MATCH, digest unchanged ([G6 record](stage-21-x-g6-rehearsal-record.md) §4) |
+| **G6-D** | **PASS** (2026-10-14): every §8.1 signal observed and restored; §8.2 cited from CI (G6 record §6) |
+| **G6-E** | **PASS** (2026-10-14): RPO 3757 s, RTO 24 s; restored `RETIRED`, `org_authoritative`, MATCH (G6 record §8) |
+| **G6-F** | record **PROPOSED** (2026-10-14): [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md), with the ICU and collation assessment and the migration fingerprints |
+| **OVERALL G6** | **NOT CERTIFIED** until the owner approves the G6 record by merging it; rehearsal result PASS |
 
 **Reason.** The approved rehearsal (plan D-1) requires a disposable, isolated Ubuntu VM. That requirement remains approved. Where
 the VM runs and which virtualization technology hosts it are not specified by the plan and remain an owner decision. The owner has
@@ -363,3 +364,20 @@ The detailed parity values are held in the owner's terminal output: **PENDING at
 
 G6 stays **NOT CERTIFIED** and the rehearsal is **not authorized**. G7, F6 and F7 stay locked. Final Core Validation stays the
 absolute last full Core validation.
+
+## 15. Later-status note (2026-10-14, G6 rehearsal)
+
+Appended. §1–§14 are unchanged, except the G6-C to OVERALL G6 rows of §6 and the header's list of later-status notes.
+
+- **Rehearsal:** G6-C, G6-D and G6-E **PASS** on the isolated guest, each step owner-authorized and owner-run; the Project Owner was the
+  operator and the approver (self-approved). Results, evidence hashes, deviations and limitations: the
+  [G6 record](stage-21-x-g6-rehearsal-record.md). It is **proposed**: G6 is certified only when the owner approves it by merging it.
+- **G4:** the live monitoring demonstration deferred in §3.1 ran in G6-D.
+- **§8 (F6/F7 image pinning): closed for G6 only.** The question was answered by V2 A0 (owner decision D5; §13), and G6 rehearsed exactly
+  the digest set approved for isolated rehearsal use (G6 plan §16.1). This does not authorize a production deployment: the first
+  production digest deployment of each service, with its production Tier B configuration check, stays a separate, owner-authorized
+  checkpoint (G6 plan §15.8).
+- **Migrations:** the rehearsal's Auth and Organization fingerprints equal §5's; Audit differs only by the planned `0004` (G6 record
+  §2.4).
+- **Unchanged:** production was not changed; the §7 gates stay blocked until G6 is certified and then each needs its own
+  authorization; G7, F6 and F7 locked; Final Core Validation absolute last.
