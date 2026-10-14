@@ -1089,16 +1089,24 @@ against production.**
 | Script | SHA-256 | Role |
 |---|---|---|
 | `g6-prod-refresh-block.sh` | `281567ce3f4561feb125e5da99cac01f3b5104f79ec8ad313e971fdb86faf866` | the unmodified 2026-10-12 block |
-| `g6-prod-fingerprint-run-v2.sh` | `4e6ed2501b9f63be250254153ba28c943015042f5efda26046896c990358ef4e` | performs one read (`pre`, `recipient` or `post`) per run; refuses without that run's own authorization |
-| `g6-prod-fingerprint-compare-v2.sh` | `2ce7bcaeece3c9781f66314410db8222bfde05d68da79f20778f87da6994089c` | local only: validates a capture; compares `pre` with `post` |
+| `g6-prod-fingerprint-run-v3.sh` | `d2845ed58912485adac78798b29393fe832e1fe7f9ea1d0d5512dd9bc9ea7448` | performs one read (`pre`, `recipient` or `post`) per run; refuses without that run's own authorization |
+| `g6-prod-fingerprint-compare-v3.sh` | `0faec02772062afb6f4df0348ffb6fafa6b04bc517e6aae050dadbbdceb78341` | local only: validates a capture; compares `pre` with `post` |
 
 The first versions of the runner (`4389a8fd…6573`) and the comparator (`74557cb7…d670`) are superseded and were never used. The
 second versions call `ssh` and `ssh-keygen` by full path under a fixed system `PATH`, check the recorded hash and run record of every
 capture, treat SSH's messages the same way in all three modes, and verify the evidence directory before writing.
 
-**Validation so far: local only.** `bash -n` passes; 74 local cases passed against a stand-in for `ssh` and hand-made captures;
+**Corrected 2026-10-13: v2 is superseded by v3.** The second versions (runner `4e6ed250…ef4e`, comparator `2ce7bcae…089c`) required
+an SSH key file and switched password login off, while Server 1 is reached by password. They were never used.
+- **Runner v3** keeps everything above and changes only the login: `ssh` itself asks for the password on the owner's terminal, once,
+  with no retry. The script never reads, stores, prints or logs it, and no key, agent or password helper is used. The single pinned
+  host key and strict checking are unchanged.
+- **Comparator v3** differs from v2 only in accepting run records written by the v3 runner.
+
+**Validation so far: local only.** `bash -n` passes; 85 local cases passed against a stand-in for `ssh` and hand-made captures;
 ShellCheck was not run (not installed on the workstation). The comparator's rules come from the block's own output statements and a
-hand-made capture, not from real output: an unanticipated line shape would fail closed and need a local correction.
+hand-made capture, not from real output: an unanticipated line shape would fail closed and need a local correction. **No production
+connection has been tested or authorized:** the real `ssh` password prompt has not been exercised.
 
 ### 20.5 Evidence and confidentiality
 
@@ -1115,7 +1123,8 @@ hand-made capture, not from real output: an unanticipated line shape would fail 
 ### 20.6 Remaining G6-BV-S prerequisites and limitations
 
 In order, each with its own owner authorization where it touches a server:
-1. The owner supplies the production address, the independently verified host-key fingerprint and the SSH key path.
+1. The owner supplies the production address and port and the independently verified host-key fingerprint. Login is by password as
+   `ubuntu`, typed by the owner at `ssh`'s own prompt on the terminal; no SSH key is used, and the password is never recorded.
 2. The `pre` read, with a valid capture.
 3. The `recipient` read, passing.
 4. The two G6-BV-S inputs on the lab, and the decision on keeping them there (§19.5).
