@@ -179,6 +179,28 @@
 > changed. No alert implementation, restore-drill change, runbook or G6-plan edit, implementation of A5.4-A5, merge, deployment or
 > activation is authorized by this note.
 
+> **Clarification (2026-10-14, F6 retry exhaustion and forward completion; architecture-owner ruling 11, ADOPTED 2026-10-14;
+> a clarification, not a supersession; this ADR's status, this section's original text below and the clarifications above,
+> rulings 1 to 10 included, are unchanged).** The [F6 readiness decision record](../architecture/core-v2-a5-4-f6-transitional-readiness.md)
+> allows at most one pre-authorized retry, requires a fresh architecture-owner review and authorization after a second failure, and
+> says "the step is completed forward or escalated" and "the only continuation after a stop is an authorized retry under the retry
+> policy". It did not say what that review may authorize once the retry is consumed. The owner rules:
+> 11. **Retry exhaustion.** After a second or unexplained redeploy failure, F6 MUST stop and escalate. No additional
+>     redeploy retry is permitted after the authorized retry has been consumed. A fresh, explicit architecture-owner decision may
+>     authorize forward completion without another redeploy only when the running Auth deployment passes all pre-retirement checks,
+>     evidence E1/E2 is identical, authority and reference state are unchanged, and no other STOP condition remains. Otherwise, no
+>     ownership or mirror mutation may continue. Automatic recovery is prohibited.
+>
+>     **Interpretation adopted with it (the G6 rehearsal, plan §15.4 item 5).**
+>     - Case 3 consumes the single authorized redeploy retry.
+>     - Case 7 is a separately pre-authorized, rehearsal-only fault-injection deployment, not a retry. It neither extends nor resets
+>       the retry limit, and its expected failure requires an immediate stop and escalation.
+>     - The fresh authorization for forward completion is given after reviewing the actual evidence.
+>
+> **Not changed and not authorized.** Ruling 7's one-retry limit, the stop and escalation, the evidence equality, the in-window
+> restrictions and the one-way door (§3, §9; ADR-0040 A2.6) are unchanged. No rehearsal step, F6 execution, merge, deployment or
+> activation is authorized by this note.
+
 Once Auth's marker is `org_authoritative`:
 
 - `AUTH_HIERARCHY_SOURCE` other than `organization-service` makes Auth **not ready** (`/ready` fails, naming the check, in the A12
