@@ -364,6 +364,84 @@ item 3).
      drill of a backup taken under a freeze).
    - Added to §7, as ADR-0063 requires: a restore drill of a post-F6 backup detects a `local` marker. A wrong-side restore stays
      procedural (core-backup-restore §7) and is recorded as not rehearsed.
+5. **How item 2 is rehearsed: one transition window. Amended 2026-10-14 (owner-approved; ADR-0063 §4 ruling 11); it authorizes
+   no rehearsal step.**
+   The F6 readiness decision record governs where this differs from it. Item 2's seven cases and every stop condition are unchanged.
+   - **One window, the current guest.** `ownership activate` runs once. All seven cases are rehearsed inside that one transition
+     window. There is no second rehearsal state, snapshot or rebuild: G6-S2 authorized only the first deployment (§17.2).
+   - **Controlled failure (cases 3 and 7).**
+     - Append `ORGANIZATION_SERVICE_TIMEOUT_MS=50` to Auth's `.env` after the source line, then run the Auth redeploy.
+     - Confirmed in the pinned Auth image (§15.2): with the Organization URL and token set, the configuration loader refuses the
+       value (minimum 100), naming only the variable. The deploy script runs that check before any migration and stops with "the
+       running service was not touched", so the running Auth container is unchanged.
+     - The fault line is removed by truncating `.env` to its previous size; its digest must then equal the previous one.
+     - Precondition: the variable is absent from `.env`.
+   - **Retry (case 3).** One retry, pre-authorized by the Part A authorization, with the identical certified digest and
+     configuration (the source line only). E1 is taken again before it.
+   - **Second failure (case 7) and escalation** (ADR-0063 §4 ruling 11, adopted 2026-10-14).
+     - After the successful retry (the disagreement window), one fault-line redeploy attempt is the **second** failure.
+       - It is **not a retry**: the retry is already consumed, and nothing failed that this attempt repeats.
+       - It is a deliberate configuration change, pre-authorized by the Part A authorization, as the decision record requires.
+       - This rehearsal-only fault injection does not extend the one-retry limit; its failure requires an immediate stop and
+         escalation.
+     - On it: remove the fault line; stop; keep the evidence; escalate.
+       - **No additional redeploy retry is permitted:** the authorized retry has been consumed.
+       - No ownership or mirror mutation follows.
+       - Automatic recovery is prohibited.
+     - The verified disagreement-window container keeps running, because the refused deploy never touched it.
+     - Continuing is Part B, **forward completion without another redeploy**. It needs a fresh, explicit architecture-owner
+       decision under ruling 11, and it runs `hierarchy-retire --fresh` only if all of these are verified immediately before it:
+       - the running Auth deployment passes every pre-retirement check;
+       - E2 equals E1;
+       - authority and reference state are unchanged;
+       - no other STOP condition remains.
+
+       Otherwise no ownership or mirror mutation continues and the transition stays stopped and escalated.
+   - **Part A / Part B boundary (case 4).**
+     - Part A ends inside the disagreement window, after the case 7 stop: Organization `ACTIVE`, Auth marker `local`, source
+       `organization-service`, Auth `/ready` not ready with `source_ahead_of_marker`.
+     - Until Part B completes, nothing else runs: no Auth hierarchy CLI command except the read-only `hierarchy-verify`, no
+       ownership command, no redeploy, no administrative first touch, no mutating SQL, no backup or restore, no `.env` edit, and
+       no restart other than case 4's.
+     - Part B starts with **one** `docker restart nawara-core-auth-service`, then checks the start-up line (`source=organization-service`,
+       `marker=local`) and `/ready` (`source_ahead_of_marker` only).
+   - **In-window restrictions reconciled.** The decision record allows only the Auth redeploy with the new source,
+     `hierarchy-retire --fresh` and read-only verification inside the window. For this rehearsal only, it is extended by exactly:
+     - the fault-line append and removal (cases 3 and 7);
+     - the two refused redeploy attempts (cases 3 and 7);
+     - one Auth container restart (case 4).
+
+     Nothing else is added, and none of these runs in production.
+   - **Evidence E1 and E2 (case 2).** E1 is taken before the first redeploy and again before the retry; E2 before
+     `hierarchy-retire --fresh`. Each records:
+     - Auth's `hierarchy-verify` content digest;
+     - Organization's phase, verified digest and live content digest (`ownership status`);
+     - the count of Auth `hierarchy_authority_event` rows: two, the §8.1 freeze and unfreeze.
+
+     E2 must equal the last E1 exactly. Any difference, or any Auth hierarchy-reference row change, is a stop.
+   - **Abandoned transition (case 5).** Observed twice, and revealed only by the agreement check (runbook §6.2) and the start-up line:
+     - after `activate`: `ACTIVE|local|unset`, with `/ready` ready;
+     - after the case 3 failure: `.env` shows the source, but the running container's start-up line still reports `local`, and
+       `/ready` is ready.
+   - **Durations (case 6).** Recorded, not enforced:
+     - the approval latency;
+     - each redeploy and each verification;
+     - the Part A/B pause;
+     - the whole window, from `activate` to MATCH.
+
+     The hard limit is set later from these; G6 sets none.
+   - **Order.**
+     - **Part A** (one authorization, covering the retry and the case 7 attempt): preflight → `activate` (**the first irreversible
+       step**) → case 5 → E1 → case 3 failure → fault removed, E1 again → retry and its checks → case 7 failure → fault removed →
+       stop and escalate.
+     - **Part B** (a fresh architecture-owner decision under ruling 11; no redeploy): case 4 restart →
+       pre-retirement checks, E2 = E1, authority and reference state unchanged → `hierarchy-retire --fresh` (**the second
+       irreversible step**) → MATCH, `/ready` ready, durations.
+     - F7, separately authorized, completes case 1.
+   - **Added stop conditions:**
+     - a refused deploy that was not the injected fault;
+     - a fault deploy that is not refused;
+     - `.env` not byte-identical after a fault removal.
 
 ### 15.5 Deferred items (owner decision, 2026-10-12)
 

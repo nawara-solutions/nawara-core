@@ -96,8 +96,8 @@ ownership() {   # usage: ownership <command> [flags]   (never the runtime role)
 | **F5** | `ownership verify --expect-digest <D> --actor <NAME>` | `VERIFIED` |
 | **G6** | production-like rehearsal of F1–F7 recorded | — |
 | **G7** | only after G1–G6 **and T1**: `ownership approve --reference <G7 record> --actor <APPROVER>` | `ACTIVATABLE` |
-| **F6** | `OWNERSHIP_PRODUCTION_ACTIVATION=enabled` for this one run, `ownership activate --confirm ACTIVATE-AUTHORITY --actor <NAME>`; mirror: Auth `AUTH_HIERARCHY_SOURCE=organization-service` and its marker | `ACTIVE`. **No rollback from here** |
-| **F7** | retire Auth's hierarchy writes; post-activation verification; then open other callers | `RETIRED` |
+| **F6** | `OWNERSHIP_PRODUCTION_ACTIVATION=enabled` for this one run, `ownership activate --confirm ACTIVATE-AUTHORITY --actor <NAME>`; then the Auth mirror, **source first** ([F6 readiness decision record](../architecture/core-v2-a5-4-f6-transitional-readiness.md)): (1) content evidence E1; (2) redeploy Auth with `AUTH_HIERARCHY_SOURCE=organization-service`; (3) verify it: start-up line `source=organization-service`, `/ready` not ready only for `source_ahead_of_marker`, §6.2 `ACTIVE`/`local`/`organization-service`; (4) content evidence E2, equal to E1; (5) `hierarchy-retire --fresh --evidence <the activate event> --actor <NAME>`; (6) §6.2 **MATCH**. At most one redeploy retry, and only if pre-authorized. After a second or unexplained failure: stop and escalate; no additional redeploy retry once the retry is consumed; no automatic recovery. Forward completion without another redeploy only by a fresh, explicit architecture-owner decision, and only if the running Auth passes every pre-retirement check, E1 and E2 are identical, authority and reference state are unchanged and no other stop condition remains (ADR-0063 §4 ruling 11) | `ACTIVE`, then MATCH. **No rollback from here** |
+| **F7** | `ownership retire --evidence <Auth's hierarchy-retire event> --actor <NAME>`; post-activation verification; then open other callers | `RETIRED` |
 
 F4's one-time owner password never touches a command line, a log or the shell history:
 
@@ -177,18 +177,21 @@ echo "organization=$org auth_marker=$marker auth_source=${source:-local (unset)}
 ```
 
 Valid combinations on the fresh path (production is a fresh environment). F6 activates in organization-service first, then mirrors in
-Auth (the `org_authoritative` marker via `hierarchy-retire --fresh`, and `AUTH_HIERARCHY_SOURCE=organization-service` with an Auth
-redeploy); F7's `ownership retire` cites Auth's retirement.
+Auth **source first**: the Auth redeploy with `AUTH_HIERARCHY_SOURCE=organization-service`, verified, then the `org_authoritative`
+marker via `hierarchy-retire --fresh` (§3 F6). F7's `ownership retire` cites Auth's retirement. This query reads the source from
+`.env`: after a failed redeploy it can show `organization-service` while the restored container still runs `local`. Only the Auth
+start-up line (`auth_hierarchy_source source=…`) confirms the running source.
 
 | When | `ownership_state.phase` | `hierarchy_authority.mode` | `AUTH_HIERARCHY_SOURCE` | Verdict |
 |---|---|---|---|---|
 | F1 to F5, G7 (before `ownership activate`) | `PREPARED`, `VERIFIED`, `ACTIVATABLE` | `local` | unset (`local`) | **MATCH** |
-| inside the attended F6 step, after `activate` and before the mirror is complete | `ACTIVE` | `local` or `org_authoritative` | unset or `organization-service` | **TRANSITIONAL**: expected only while the F6 step is running |
+| inside the attended F6 step, after `activate` and before `hierarchy-retire --fresh` | `ACTIVE` | `local` | unset or `organization-service` | **TRANSITIONAL**: expected only while the F6 step is running |
 | F6 complete, before F7 | `ACTIVE` | `org_authoritative` | `organization-service` | **MATCH** |
 | after F7 `ownership retire` | `RETIRED` | `org_authoritative` | `organization-service` | **MATCH** |
 
 **MISMATCH** is every other combination, and a TRANSITIONAL one seen outside the F6 step. For example:
 - `org_authoritative` while the phase is not `ACTIVE` or `RETIRED`;
+- `org_authoritative` with the source unset (the marker ahead of the source: never expected in the source-first order);
 - `frozen` (never used on the fresh path);
 - `RETIRED` with `local`;
 - a source that disagrees with the marker once F6 is complete.
