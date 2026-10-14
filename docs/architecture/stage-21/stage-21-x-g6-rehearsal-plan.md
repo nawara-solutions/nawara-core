@@ -22,6 +22,8 @@
   is authorized by it.**
 - **Result (2026-10-14, §21):** **G6-BV-S PASS**, owner-authorized and owner-run: every automated check passed and check 6 is met
   (the two production captures are identical). **G6-C is not authorized.**
+- **Result (2026-10-14, §22):** **G6-C, G6-D and G6-E PASS**, each step owner-authorized and owner-run; the G6-F captures are done and
+  the G6 record is proposed. **G6 is certified only when the owner approves the record by merging it.**
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -508,8 +510,8 @@ recorded deviation, §16.5). **Amended 2026-10-13** to the B1 order (§17.2): G6
 | 5 | G6-S1: offline image transfer, guest Docker and its dependencies, image loading by exact digest (§16.3) | **PASS** (2026-10-13, §18) |
 | 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | **PASS** (2026-10-13, §19) |
 | 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | **PASS** (2026-10-14, §21) |
-| 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | NOT AUTHORIZED — step 7 passed (§21); needs its own owner authorization |
-| 9 | G6 CERTIFIED | — |
+| 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | **PASS** (2026-10-14, §22): G6-C, G6-D and G6-E executed, each step separately authorized; G6-F record proposed |
+| 9 | G6 CERTIFIED | on the owner's approval (merge) of the [G6 record](stage-21-x-g6-rehearsal-record.md) |
 
 After G6, these production steps keep their own checkpoints (§12; cutover record §7):
 - the first digest deployment of each service in the set (R3 installed in production before any Auth deployment containing the
@@ -1279,3 +1281,26 @@ together).
 
 - **G6-C: NOT AUTHORIZED.** It needs its own owner authorization (§17.7); each step of §9.1 is then separately authorized.
 - **Unchanged:** ADR-0062; B1, B2 and B3; the §17.5 gates; the scope of G6-C, G6-D, G6-E and G6-F; for production after G6, §15.8.
+
+**Status (2026-10-14, §22):** G6-C was authorized and ran, followed by G6-D, G6-E and the G6-F captures.
+
+## 22. G6-C to G6-F: rehearsal PASS; record proposed (2026-10-14)
+
+It records where the results are. It **authorizes no deployment and no production change**. The evidence kind is the same as in
+§16–§21: **OWNER-SUPPLIED TERMINAL OUTPUT**; the owner authorized and ran every step separately, and was its operator and approver.
+
+- **Results:** the [G6 record](stage-21-x-g6-rehearsal-record.md) (D-14, §10), with every step's output hash:
+  - **G6-C PASS:** G1–G3, F1, F2, F4, T1-equivalent, F5, the rollback proof, G7-equivalent, F6 (source first, the seven readiness cases of
+    §15.4, Part A's planned stop and Part B under ruling 11), the post-activation refusal and F7: `RETIRED`, §6.2 MATCH, digest D unchanged;
+  - **G6-D PASS:** every §8.1 signal observed and restored, with the §15.4 item 3 `/ready` reasons; §8.2 cited from the passing CI run at
+    the rehearsed Auth revision;
+  - **G6-E PASS:** after a STOP at the first drill (a missing local image alias, corrected on the guest) the original checkpoint X was
+    drilled (B1) and recovered (B2): **RPO 3757 s, RTO 24 s**; restored `RETIRED`, D, `org_authoritative`, MATCH;
+  - **G6-F:** the §16.2 ICU and collation assessment, **PASS WITH RECORDED LIMITATIONS** (images not identical; collation versions not
+    tracked; production capture owner-reported); the rehearsal migration fingerprints, Auth and Organization equal to production's and
+    Audit differing only by the planned `0004` (§15.3).
+- **Cutover record §8** is closed for G6 only (A0, owner decision D5, and the §16.1 digest set); production's first digest deployment
+  stays a separate checkpoint (§15.8).
+- **G6 CERTIFIED** takes effect only with the owner's approval of the record, by its merge. The G7 reference
+  `G6-REHEARSAL-<YYYYMMDD>@<commit of the certified record>` is fixed after that merge.
+- **Unchanged:** for production after G6, §15.8; G7, F6 and F7 stay locked; Final Core Validation stays the absolute last.

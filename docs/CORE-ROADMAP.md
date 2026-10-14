@@ -56,7 +56,7 @@ was closed by [ADR-0052](adr/0052-core-v1-capability-closure.md).
 | In production | auth-service, organization-service (**not authoritative**: Auth still owns the hierarchy), audit-service, RabbitMQ (the Auth → Audit relay) |
 | Implemented, not in production | billing-service, payment-service, notification-service, file-service, release-service |
 | Outside Core | AI runtime: the separate future `nawara-ia` repository ([ADR-0055](adr/0055-ai-service-repository-boundary.md)); Core's `ai-service` scaffold was removed |
-| Ownership cutover | gates G1–G5 and steps F1–F5 executed; **G6 not certified** (see below); G7, F6, F7 blocked behind G6 |
+| Ownership cutover | gates G1–G5 and steps F1–F5 executed; the G6 rehearsal passed, **G6 not certified** until its record is approved (see below); G7, F6, F7 blocked behind G6 |
 | Organization and Audit deployment | **by exact index digest** (V2 A0): a merge only builds a revision-labelled image; a deployment verifies and deploys a selected digest after approval, never rebuilding. Production still runs their legacy images, which the new workflows refuse ([runbook](runbooks/digest-deployments.md)) |
 | Auth deployment | **build ≠ deploy** (V2-A.2): a merge touching Auth, `libs/service-kit`, the package files or the Auth image workflow only builds a revision-labelled image; production changes only by an explicit, owner-authorized deployment of an exact index digest ([runbook](runbooks/auth-service-deploy.md)). Before V2-A.2, seven automatic deployments followed the cutover record's certified revision, so production Auth has drifted from the recorded digest ([V2-A record](architecture/core-v2-a-baseline-and-change-safety.md) §1, §6); it was observed on 2026-10-02 running the legacy image `sha256:26164d42…5eaf`, unchanged by the V2-A.2 merge ([certification record](architecture/core-v2-a-2-certification.md) §6) |
 | `main` protection | **repository ruleset `main` active** (V2-A.3 / A3.3): pull request required (0 approvals, sole maintainer), required check `core-ci-passed` on an up-to-date branch, conversation resolution, no force push, no deletion; administrator bypass on pull requests only ([record](architecture/core-v2-a-3-ci-and-ruleset.md)) |
@@ -69,8 +69,9 @@ Production facts change only through authorized checkpoints; re-verify against t
 ### G6: production-like rehearsal
 
 G6 is **one successful rehearsal of the complete ownership-transition procedure in an isolated, disposable, production-like Ubuntu
-environment** ([G6 plan](architecture/stage-21/stage-21-x-g6-rehearsal-plan.md), decision D-1). It is **not certified**: the owner has
-intentionally deferred the rest of the rehearsal.
+environment** ([G6 plan](architecture/stage-21/stage-21-x-g6-rehearsal-plan.md), decision D-1). The rehearsal **passed** on
+2026-10-14; G6 is **not certified** until the owner approves the [G6 record](architecture/stage-21/stage-21-x-g6-rehearsal-record.md)
+by merging it.
 
 **Update (2026-10-12):**
 - The read-only **G6 baseline refresh passed** on production (owner-supplied evidence; [cutover record](architecture/stage-21/stage-21-x-cutover-record.md) §14).
@@ -106,6 +107,17 @@ evidence, not a G1–G3 PASS. **G6-BV-S has not run:** a corrected script is pre
 verified production recipient fingerprint, its own authorization and separately authorized production fingerprint evidence. G6-C is
 **not authorized**.
 
+**Update (2026-10-14, G6 plan §21–§22; G6 record):**
+- **G6-BV-S passed**, then **G6-C, G6-D and G6-E passed** on the isolated guest, each step owner-authorized and owner-run: the full
+  fresh path through ACTIVATE and F7 (`RETIRED`, MATCH, digest unchanged), every monitoring signal, and a restore with RPO and RTO well
+  inside 24 h and 4 h.
+- The ICU and collation assessment passed with recorded limitations (PostgreSQL 16.15 on both, images not identical, collation versions
+  not tracked, production capture owner-reported). The rehearsal migration fingerprints equal production's, except Audit's planned
+  migration 0004.
+- Cutover record §8 (image pinning) is closed **for G6 only**; production's first digest deployment, G7, F6 and F7 each still need
+  their own authorization.
+- **G6 is certified only when the owner approves the G6 record by merging it.**
+
 G6 is not tied to any particular hardware. The plan requires an isolated, disposable Ubuntu VM; where it runs is an owner decision,
 for example:
 
@@ -120,7 +132,7 @@ Whatever the host, the plan's isolation rules apply (no production credentials, 
 production activation of 🟡 items that depend on the cutover, and Final Core Validation.
 **What G6 does not block:** Core V2 development of 🟢 and 🟡 items, and Nawara Admin development.
 
-**G6 is a dependency gate, not a calendar phase** (owner decision, V2-A). It is deferred: not cancelled, not waived, not passed.
+**G6 is a dependency gate, not a calendar phase** (owner decision, V2-A). Its rehearsal has passed; it is not certified until its record is approved.
 Every Core V2 work item carries one label:
 
 | Label | Meaning |
@@ -260,7 +272,7 @@ A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (re
     R3 Auth readiness alert carrier            ✅ CERTIFIED — PASS WITH LIMITATIONS (NONPRODUCTION, 2026-10-11); not installed in production
   A5.5  certification                          not started; acceptance criteria ADOPTED 2026-10-12 (C1–C6 binding, C7 production boundary)
 
-G6                                             ⏸ DEFERRED (dependency gate); G7, F6, F7 🔒
+G6                                             rehearsal PASS; record proposed, certified on its approval; G7, F6, F7 🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
 ```
 
@@ -455,7 +467,7 @@ rescoping moves work; it weakens nothing:
 | A12.2 to A12.6 (local observability) | certified | A12 record |
 | A13 Audit backup tooling; A14 supply chain and provenance | certified (production evidence gated) | A13, A14 records |
 | Cutover G1–G5, F1–F5 | executed in production; never re-run | cutover record |
-| G6-A, the G6 baseline refresh, the digest-set approval (rehearsal only), G6-B, G6-BV-I, G6-S1, G6-S2 | certified, done or PASS | G6 plan §15–§19 |
+| G6-A, the G6 baseline refresh, the digest-set approval (rehearsal only), G6-B, G6-BV-I, G6-S1, G6-S2, G6-BV-S, G6-C, G6-D, G6-E | certified, done or PASS | G6 plan §15–§22; G6 record |
 | A5.1 to A5.3; the merged A5.4 work (T1, D1, D2, AC1, A1, A2, A3, A5, R2); R3 alert carrier | merged or certified as recorded; not deployed, not activated | A5 record §9.2 |
 | File Service V1 lifecycle (Stages 17.2–17.10) | certified; not in production | 17.10 record |
 
@@ -463,7 +475,7 @@ rescoping moves work; it weakens nothing:
 
 | # | Work (original stage) | Depends on | Security relevance |
 |---|---|---|---|
-| M1 | G6 remainder: BV-S → C (F1–F7 rehearsal, including the F6 first-touch `ensure()` / marker item, A5 record §9.2) → D → E (restore, RPO and RTO) → F (G6) | G6-S2 (done) | proves rollback, activation and restore before production |
+| M1 | G6 remainder: BV-S → C (F1–F7 rehearsal, including the F6 first-touch `ensure()` / marker item, A5 record §9.2) → D → E (restore, RPO and RTO) → F (G6). Rehearsal passed (2026-10-14), the first-touch item as the F6 readiness safeguard (the A5 code item stays open); remaining: the owner's approval of the G6 record | G6-S2 (done) | proves rollback, activation and restore before production |
 | M2 | Fresh pre-G7 Auth + Organization backup, verification, `CORE_BACKUP_SCHEDULE` (cutover record §7) | M1 | recovery point before the one-way door |
 | M3 | G7, then F6 (one-way door) and F7, then the post-F7 backup and its verification (cutover record §7; A4 production checkpoint: the Auth digest deployment, inside the certified digest set) | M2 | authority transition; production Tier B configuration check before each digest deployment (G6 plan §16.1) |
 | M4 | A3.7 organization-secret restriction; A3.6 production access proof (performed with the first digest deployment) | none (A3.7); M3 (A3.6) | production credentials held only by the protected environment |
