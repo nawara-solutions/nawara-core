@@ -140,13 +140,18 @@ the irreversible marker change**, and must be equal:
   - "source ahead" before the redeploy, or after the disagreement window has closed;
   - a failed Auth redeploy. The deploy restores the previous container, so no mismatch is shown and Auth looks consistent while
     organization-service is `ACTIVE`: **the step is incomplete and the marker change is not run**. Continue only under the retry
-    policy above; otherwise stop and escalate;
+    policy above: at most one retry, and once it is consumed no further redeploy retry; otherwise stop and escalate (ADR-0063 §4
+    ruling 11);
   - any other readiness check failing, an anchor mismatch, or a rejected or failed authority event;
   - the transition window exceeding its hard limit;
   - any difference in the verification evidence, including any Auth hierarchy-reference row change.
 - **Escalation.** Stop; run no further ownership or mirror command; keep the evidence; never edit either side to make them agree;
   escalate to the owner. After `ownership activate` there is no rollback (ADR-0040 A2.6): the step is completed forward or
-  escalated. The only continuation after a stop is an authorized retry under the retry policy.
+  escalated. The only continuation after a stop is an authorized retry under the retry policy. After a second or unexplained
+  redeploy failure no additional retry is permitted; a fresh, explicit architecture-owner decision, taken after reviewing the actual
+  evidence, may authorize forward completion without another redeploy only when the running Auth deployment passes all
+  pre-retirement checks, evidence E1/E2 is identical, authority and reference state are unchanged, and no other stop condition
+  remains. Otherwise no ownership or mirror mutation continues. Automatic recovery is prohibited (ADR-0063 §4 ruling 11).
 
 ### Consequences for the comparison below
 
