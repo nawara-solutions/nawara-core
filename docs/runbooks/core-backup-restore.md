@@ -10,8 +10,9 @@ audit-service evidence store ([A13 record](../architecture/core-v2-a13-audit-bac
   or a command line. The tools print names, sizes, sha256 digests and PASS/FAIL only.
 - **Monitoring detects, the operator decides, this runbook governs the action.** Nothing here restores automatically.
 - **Manual only since V2-A.3 / A3.5 (owner decision B1).** `core-backup.yml` has no schedule; each run is dispatched and then approved
-  through the protected `production` environment. Scheduled backups return later through a separately reviewed `production-backup`
-  environment and job (they do not exist); enabling them stays G6-gated.
+  through the protected `production` environment. **Scheduled backups (Core V2 M2 B1):** `core-backup-scheduled.yml` and the server
+  entry `infra/backup/scheduled-backup.sh` exist in the repository and are **inactive**: nothing is installed, the `production-backup`
+  environment and its secrets do not exist, and `CORE_BACKUP_SCHEDULE` is unset (§2, *Scheduled backups*).
 - A backup that has never been restored is not a backup: G5 is met only with the drills of §5 (ADR-0040 G5: a documented procedure
   is not a verified restore).
 
@@ -58,12 +59,64 @@ recipient.pem        the recipient certificate
 The script refuses a plain-http endpoint, an empty or climbing prefix, a credentials file not 0600, a missing certificate, and **any
 private key under that directory**.
 
-**Schedule (current state, V2-A.3 / A3.5).** There is **no** scheduled backup. The workflow is dispatch-only and its job is bound to
-the `production` environment, whose reviewer approval would make a nightly run wait. The former mechanism (set
-`CORE_BACKUP_SCHEDULE=enabled` and `CORE_BACKUP_SERVICES`, daily at `17 2 * * *` UTC) is removed and the two variables are no longer
-read. A schedule returns only through a separately reviewed change: a `production-backup` environment (no interactive reviewer, `main`
-only, its own credentials) and a scheduled job bound to it. Enabling it stays G6-gated. Until then the RPO is met only by manual runs,
-and the staleness rule of §4 is the reminder.
+**Schedule (V2-A.3 / A3.5).** `core-backup.yml` is dispatch-only and its job is bound to the `production` environment, whose
+reviewer approval would make a nightly run wait. Its former schedule (`CORE_BACKUP_SCHEDULE=enabled` plus `CORE_BACKUP_SERVICES`,
+daily at `17 2 * * *` UTC) is removed; `core-backup.yml` reads neither variable, and no workflow but the scheduled one below may read
+`CORE_BACKUP_SCHEDULE` (`scripts/lib/checks.mjs`). Until the scheduled backup is active, the RPO is met only by manual runs, and the
+staleness rule of §4 is the reminder.
+
+### Scheduled backups (Core V2 M2 B1; INACTIVE)
+
+Design and owner decisions: [M2 design](../architecture/stage-21/stage-21-x-m2-pre-g7-backup-design.md) §5, §12, §14. **Nothing below
+has been performed.** Each numbered step is a separate, owner-authorized production action; production access is the owner-operated
+console only (OD-M2-12), never an unattended administrative path.
+
+**How it works.** `core-backup-scheduled.yml` runs daily at 02:17 UTC, only when the repository variable `CORE_BACKUP_SCHEDULE` is
+`enabled`, only on `main`, in the `production-backup` environment (no interactive reviewer, `main` only), in the production queue. It
+runs nothing from the repository on the server: it opens one SSH session with the dedicated scheduled-backup key and sends no command.
+The key's `authorized_keys` line is `restrict,command="/usr/local/libexec/nawara-core-backup/scheduled-backup.sh"`, so the server runs
+only the installed entry script, which runs the installed, hash-pinned copy of `backup.sh` for exactly `auth-service organization-service`.
+Manual backups stay in `core-backup.yml` behind the `production` approval.
+
+**Entry script exit codes** (in addition to `backup.sh`'s 0, 1 and 3 of §3): 64 a command or argument was sent with the key (refused,
+never run); 65 the installation is unsafe (not in the install directory, inside `$HOME/nawara-core/backup`, a symbolic link, not owned
+by root, writable by group or others); 66 the installed `backup.sh` does not match the pin; 69 a required tool is missing; 75 another run
+holds the lock (`$HOME/nawara-core/.scheduled-backup.lock`); nothing was done.
+
+**Order** (design §11, §14):
+
+1. **E1, the environment** (GitHub settings): create `production-backup` with deployment branch policy `main` only and administrator
+   bypass off, without secrets. Only then is the B1 pull request merged: a merge before E1 could let GitHub create the environment
+   without protection (unverified behaviour; design §14).
+2. **P1, console preflight (read-only).** The production verifications the scheduled path depends on, recorded without any key,
+   secret or address: the runtime user's `id` and groups (membership of `docker` is root-equivalent), `sudo -n -l`; `sshd -T` for
+   `pubkeyauthentication`, `authorizedkeysfile`, `permituserenvironment` and `acceptenv`; the OpenSSH version (`restrict` needs 7.2 or
+   later); `command -v flock`. **The scheduled identity is not called isolated until this is recorded**: root-owned files stop this key
+   and the job paths from changing what runs, not a root-equivalent runtime user.
+3. **E2, installation (console, as root):** `install -d -o root -g root -m 0755 /usr/local/libexec/nawara-core-backup`, then
+   `install -o root -g root -m 0555` the reviewed `infra/backup/scheduled-backup.sh` and `install -o root -g root -m 0444` the reviewed
+   `infra/backup/backup.sh` into it, both from the merged revision; verify `sha256sum` of the installed `backup.sh` against the script's
+   `BACKUP_SH_SHA256`. Never install them under `$HOME/nawara-core/backup`: `backup.sh` refuses a private-key marker there, and its own text
+   contains one. Generate the dedicated ed25519 key pair **off the server**; add exactly one line, the
+   [template](../../infra/backup/scheduled-backup.authorized_keys.template) with its placeholder replaced by the public key, to the
+   runtime user's `authorized_keys`. The private key goes only into the `production-backup` environment.
+4. **E3, secrets** of `production-backup`: `BACKUP_SSH_HOST`, `BACKUP_SSH_PORT`, `BACKUP_SSH_USER`, `BACKUP_SSH_KEY`,
+   `BACKUP_SSH_KNOWN_HOSTS` (the server's host key line, taken from the console, never by `ssh-keyscan` over the network). Never the
+   `DEPLOY_SSH_*` credentials.
+5. The pre-G7 backup, its verification and the required isolated drills (design §10, §11; P2–P4) and the evidence copy (OD-M2-5).
+6. **E4, activation:** set the repository variable `CORE_BACKUP_SCHEDULE` to `enabled`. **E5:** observe the first scheduled run and
+   the status files of §4.
+
+**Deactivation:** unset `CORE_BACKUP_SCHEDULE` (the next run is skipped). To revoke the path, also remove the `authorized_keys` line
+and the environment's secrets at the console and in GitHub.
+
+**After a reviewed `backup.sh` change:** the repository check refuses the change until the entry script's `BACKUP_SH_SHA256` is updated
+with it. The scheduled path keeps running the installed version until an authorized reinstallation (step 3); record which revision is
+installed.
+
+**Not decided here (OPEN, design §12):** the evidence prefix and its owner-held credential; the freshness monitor's list-only credential,
+run time and the 26 h threshold; storage versioning and immutability; the recovery machine.
+
 
 ## 3. Backup
 
@@ -124,6 +177,9 @@ and retention failed (the new backup is intact).
 | `backup/status/<service>.last-success` `stamp=` | older than **24 h** (the RPO) | a missed or failed run: run §3 now (there is no schedule since V2-A.3 / A3.5; see §2) |
 | `backup/status/<service>.last-attempt` | `result=failed` | as the first row |
 | a restore drill (§5) | any FAIL | the backups are **not** recoverable until fixed: stop any cutover step that depends on G5 |
+| the `core database backup (scheduled)` run (once active) | failed, or exit 64, 65, 66, 69 (§2, *Scheduled backups*) | the entry script refused before any backup: read the reason line; fix the installation or the key at the console under its own authorization; run §3 manually meanwhile |
+| the same | exit 75 | another run held the lock; the next run or a manual §3 covers it, judged by the staleness row above |
+| the same | skipped or missing | expected while `CORE_BACKUP_SCHEDULE` is unset; otherwise GitHub did not start it: the staleness row above applies |
 
 ```bash
 for s in auth-service organization-service audit-service; do [ -f ~/nawara-core/backup/status/$s.last-success ] && sed -n 's/^stamp=/'"$s"' last success: /p' ~/nawara-core/backup/status/$s.last-success; done

@@ -10,6 +10,7 @@ import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
+import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry } from './lib/checks.mjs';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
@@ -764,7 +765,7 @@ test('Stage 21.C.2: only the reference-cache protocol may open Auth\'s hierarchy
 
 
 // ================================================================================ V2 A14: supply chain and provenance
-const ALL_WORKFLOWS = ['audit-service-deploy.yml', 'audit-service-image.yml', 'auth-db-credential-rotate.yml', 'auth-service-deploy.yml', 'auth-service-docker-build.yml',
+const ALL_WORKFLOWS = ['audit-service-deploy.yml', 'audit-service-image.yml', 'auth-db-credential-rotate.yml', 'auth-service-deploy.yml', 'auth-service-docker-build.yml', 'core-backup-scheduled.yml',
   'core-backup.yml', 'core-ci.yml', 'core-rabbitmq-provision.yml', 'organization-service-deploy.yml', 'organization-service-image.yml'];
 const CHECKOUT_PIN = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1';
 
@@ -2575,4 +2576,141 @@ test('A5.4-A3 O2: the reference-repair audit actions are named only inside their
     const text = readFileSync(new URL(`../libs/audit-contract/test/${spec}`, import.meta.url), 'utf8');
     assert.ok(!/is producer-less/.test(text) && /check:repo/.test(text), `${spec} must point to the repository check that replaced its producer-less assertion`);
   }
+});
+
+
+// ================================================================================ Core V2 M2 B1: the restricted scheduled backup
+const SCHED = 'core-backup-scheduled.yml';
+const SCHEDULED = workflow(SCHED);
+const schedProblems = (text, file = SCHED) => checkWorkflowSafety(file, text).join('\n');
+const SSH_LINE = '          ssh -F /dev/null -T -n -i "$d/key" -p "$BACKUP_SSH_PORT" \\\n';
+const SSH_TARGET = '            -- "$BACKUP_SSH_USER@$BACKUP_SSH_HOST"\n';
+const GUARD_LINE = `    if: ${SCHEDULED_BACKUP_GUARD}\n`;
+const repoText = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+const ENTRY = repoText('infra/backup/scheduled-backup.sh');
+const BACKUP_SH = repoText('infra/backup/backup.sh');
+const TEMPLATE = repoText('infra/backup/scheduled-backup.authorized_keys.template');
+
+test('B1: the scheduled backup workflow passes: schedule-only at 02:17 UTC, inactive by guard, production-backup, no action, no token', () => {
+  assert.deepEqual(checkWorkflowSafety(SCHED, SCHEDULED), []);
+  const doc = parse(SCHEDULED);
+  assert.deepEqual(Object.keys(doc.on), ['schedule']);
+  assert.equal(doc.on.schedule[0].cron, SCHEDULED_BACKUP_CRON);
+  assert.equal(SCHEDULED_BACKUP_CRON, '17 2 * * *');
+  assert.deepEqual(doc.permissions, {});
+  assert.deepEqual(Object.keys(doc.jobs), ['backup']);
+  const job = doc.jobs.backup;
+  assert.equal(job.if, SCHEDULED_BACKUP_GUARD);
+  assert.equal(job.environment, BACKUP_ENVIRONMENT);
+  assert.equal(job.concurrency.group, PRODUCTION_GROUP);
+  assert.equal(job.steps.length, 1);
+  assert.equal(job.steps[0].uses, undefined);
+  assert.deepEqual(Object.keys(job.steps[0].env).sort(), [...SCHEDULED_BACKUP_SECRETS].sort());
+  assert.doesNotMatch(JSON.stringify(job), /DEPLOY_SSH_|toJSON/);
+  assert.ok(job.steps[0].run.trimEnd().endsWith('-- "$BACKUP_SSH_USER@$BACKUP_SSH_HOST"'), 'no remote command');
+});
+
+test('B1: every weakening of the scheduled backup workflow is refused', () => {
+  const cases = [
+    ['a manual trigger', 'on:\n  schedule:\n', 'on:\n  workflow_dispatch:\n  schedule:\n', /on its schedule only/],
+    ['a push trigger', 'on:\n  schedule:\n', 'on:\n  push:\n    branches: [main]\n  schedule:\n', /on its schedule only/],
+    ['a workflow_call trigger', 'on:\n  schedule:\n', 'on:\n  workflow_call:\n  schedule:\n', /on its schedule only/],
+    ['another cron', "- cron: '17 2 * * *'", "- cron: '*/5 * * * *'", /exactly one cron '17 2 \* \* \*'/],
+    ['a second cron', "    - cron: '17 2 * * *'\n", "    - cron: '17 2 * * *'\n    - cron: '17 14 * * *'\n", /exactly one cron/],
+    ['no guard', GUARD_LINE, '', /guarded by exactly/],
+    ['a weakened guard', "vars.CORE_BACKUP_SCHEDULE == 'enabled'", "vars.CORE_BACKUP_SCHEDULE != 'disabled'", /guarded by exactly/],
+    ['a guard without main', GUARD_LINE, "    if: vars.CORE_BACKUP_SCHEDULE == 'enabled'\n", /guarded by exactly[\s\S]*restricted to refs\/heads\/main/],
+    ['the production environment', 'environment: production-backup', 'environment: production', /BACKUP_SSH_\* credentials are used only[\s\S]*must be in a workflow_dispatch-only workflow[\s\S]*must declare "environment: production-backup"/],
+    ['no environment', '    environment: production-backup\n', '', /must declare a protected environment/],
+    ['an expression environment', 'environment: production-backup', 'environment: ${{ vars.ENVIRONMENT }}', /literal name/],
+    ['a deploy password', 'BACKUP_SSH_KEY: ${{ secrets.BACKUP_SSH_KEY }}', 'BACKUP_SSH_KEY: ${{ secrets.DEPLOY_SSH_PASSWORD }}', /never uses the DEPLOY_SSH_\*/],
+    ['every secret at once', '          BACKUP_SSH_KEY: ${{ secrets.BACKUP_SSH_KEY }}\n', '          BACKUP_SSH_KEY: ${{ secrets.BACKUP_SSH_KEY }}\n          ALL: ${{ toJSON(secrets) }}\n', /never uses the DEPLOY_SSH_\* credentials or every secret at once/],
+    ['an extra env value', '          BACKUP_SSH_KEY: ${{ secrets.BACKUP_SSH_KEY }}\n', '          BACKUP_SSH_KEY: ${{ secrets.BACKUP_SSH_KEY }}\n          EXTRA: x\n', /step env must be exactly/],
+    ['a secret interpolated into the script', '          umask 077\n', '          umask 077\n          echo "${{ secrets.BACKUP_SSH_HOST }}"\n', /no expression is interpolated/],
+    ['no host-key checking', 'StrictHostKeyChecking=yes', 'StrictHostKeyChecking=no', /weakens host-key checking[\s\S]*must pass -o StrictHostKeyChecking=yes/],
+    ['accept-new host keys', 'StrictHostKeyChecking=yes', 'StrictHostKeyChecking=accept-new', /weakens host-key checking/],
+    ['an unpinned known-hosts file', '-o UserKnownHostsFile="$d/known_hosts"', '-o UserKnownHostsFile=~/.ssh/known_hosts', /must pass -o UserKnownHostsFile="\$d\/known_hosts"/],
+    ['the global known-hosts file', ' -o GlobalKnownHostsFile=/dev/null', '', /must pass -o GlobalKnownHostsFile=\/dev\/null/],
+    ['an ssh config file', SSH_LINE, SSH_LINE.replace('-F /dev/null ', ''), /must pass -F \/dev\/null/],
+    ['an agent', ' -o ForwardAgent=no', ' -o ForwardAgent=yes', /must pass -o ForwardAgent=no/],
+    ['a remote command', SSH_TARGET, '            -- "$BACKUP_SSH_USER@$BACKUP_SSH_HOST" /bin/sh\n', /must end with -- "\$BACKUP_SSH_USER@\$BACKUP_SSH_HOST"/],
+    ['a script on stdin', SSH_TARGET, '            -- "$BACKUP_SSH_USER@$BACKUP_SSH_HOST" <backup.sh\n', /must end with/],
+    ['a proxy command', ' -o ConnectTimeout=30', ' -o ConnectTimeout=30 -o ProxyCommand=nc', /proxy, local command/],
+    ['environment passing', ' -o ConnectTimeout=30', ' -o ConnectTimeout=30 -o SendEnv=LC_ALL', /proxy, local command, environment passing/],
+    ['a port forwarding', ' -o ConnectTimeout=30', ' -o ConnectTimeout=30 -L 5432:localhost:5432', /forwarding option/],
+    ['a download', '          umask 077\n', '          umask 077\n          curl -fsS -o "$RUNNER_TEMP/x" https://example.invalid/x\n', /transfer, fetch, decode or interpreter/],
+    ['a decoded script', '          umask 077\n', '          umask 077\n          echo eA== | base64 -d >"$RUNNER_TEMP/x"\n', /transfer, fetch, decode or interpreter/],
+    ['a pipe into a shell', '          umask 077\n', '          umask 077\n          echo true | bash\n', /pipes a script into a shell/],
+    ['a second ssh', '          umask 077\n', '          umask 077\n          ssh -V\n', /exactly one ssh invocation/],
+    ['an scp', '          umask 077\n', '          umask 077\n          scp x y:\n', /transfer[\s\S]*exactly one ssh invocation/],
+    ['a checkout step', '    steps:\n', '    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n', /exactly one step/],
+    ['a shell override', '        run: |\n', '        shell: sh\n        run: |\n', /may only have name, env and run/],
+    ['another queue', 'group: production-deploy-core-api', 'group: backups', /concurrency group must be/],
+    ['a cancellable run', 'cancel-in-progress: false', 'cancel-in-progress: true', /cancel-in-progress must be explicitly false/],
+    ['a second job', 'jobs:\n', 'jobs:\n  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n', /exactly one job, "backup"/],
+    ['token permissions', 'permissions: {}', 'permissions:\n  contents: read', /must declare "permissions: \{\}"/],
+    ['job permissions', '    timeout-minutes: 30\n', '    timeout-minutes: 30\n    permissions:\n      contents: write\n', /"permissions" is not allowed/],
+    ['a self-hosted runner', 'runs-on: ubuntu-latest', 'runs-on: self-hosted', /runs-on must be ubuntu-latest/],
+    ['no timeout', '    timeout-minutes: 30\n', '', /timeout-minutes must be an integer/],
+    ['a workflow-level secret', 'permissions: {}\n', 'permissions: {}\nenv:\n  K: ${{ secrets.BACKUP_SSH_KEY }}\n', /never set at workflow level/],
+    ['a reusable workflow', '    timeout-minutes: 30\n', '    timeout-minutes: 30\n    uses: ./.github/workflows/other.yml\n', /"uses" is not allowed/],
+  ];
+  for (const [label, from, to, re] of cases) assert.match(schedProblems(swap(SCHEDULED, from, to)), re, label);
+});
+
+test('B1: production-backup, the BACKUP_SSH_* credentials and the guard are refused in every other workflow', () => {
+  assert.match(schedProblems(SCHEDULED, 'core-backup-copy.yml'), /reserved for the scheduled backup job of core-backup-scheduled\.yml[\s\S]*activation guard CORE_BACKUP_SCHEDULE is read only/);
+  const other = (job, on = 'workflow_dispatch:') => `name: o\non:\n  ${on}\njobs:\n  x:\n${job}`;
+  const dispatchBackupKey = other("    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"$K\"\n        env:\n          K: ${{ secrets.BACKUP_SSH_KEY }}\n");
+  assert.match(schedProblems(dispatchBackupKey, 'o.yml'), /must declare a protected environment[\s\S]*BACKUP_SSH_\* credentials are used only/);
+  const productionBackupKey = other("    if: github.ref == 'refs/heads/main'\n    environment: production\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"$K\"\n        env:\n          K: ${{ secrets['BACKUP_SSH_KEY'] }}\n");
+  assert.match(schedProblems(productionBackupKey, 'o.yml'), /BACKUP_SSH_\* credentials are used only/);
+  const guardRead = other("    if: vars.CORE_BACKUP_SCHEDULE == 'enabled'\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n");
+  assert.match(schedProblems(guardRead, 'o.yml'), /read only by core-backup-scheduled\.yml/);
+  assert.match(schedProblems(other("    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n").replace("  x:\n", "  x:\n    environment: production-backup\n"), 'o.yml'), /reserved for the scheduled backup/);
+});
+
+test('B1: a native ssh, scp or sftp is production access in any workflow (environment, main only, the queue, never automatic)', () => {
+  const job = (run, extra = '') => `name: n\non:\n  push:\n    branches: [main]\njobs:\n  x:\n${extra}    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          ${run}\n`;
+  for (const run of ['ssh user@host true', 'scp a host:b', 'sftp host', 'ssh-keyscan host', 'rsync -e ssh a host:b', 'docker run x ssh host']) {
+    assert.match(schedProblems(job(run), 'n.yml'), /must declare a protected environment[\s\S]*never automatically[\s\S]*restricted to refs\/heads\/main[\s\S]*no concurrency group/, run);
+  }
+  for (const run of ['ssh-keygen -t ed25519 -f k -N ""', 'echo "$RUNNER_TEMP/backup-ssh.x"', 'cat ~/.ssh/config.d/x']) {
+    assert.deepEqual(checkWorkflowSafety('n.yml', job(run)), [], run);
+  }
+  const manual = `name: m\non:\n  workflow_dispatch:\njobs:\n  x:\n    if: github.ref == 'refs/heads/main'\n    environment: production\n    concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false\n    runs-on: ubuntu-latest\n    steps:\n      - run: ssh host true\n`;
+  assert.deepEqual(checkWorkflowSafety('m.yml', manual), [], 'a manual native ssh behind the production approval is the existing model');
+});
+
+test('B1: core-backup.yml stays manual-only behind production; its schedule stays removed', () => {
+  assert.deepEqual(checkWorkflowSafety('core-backup.yml', workflow('core-backup.yml')), []);
+  assert.deepEqual(Object.keys(parse(workflow('core-backup.yml')).on), ['workflow_dispatch']);
+  assert.doesNotMatch(workflow('core-backup.yml'), /vars\s*\.\s*CORE_BACKUP_SCHEDULE/);
+});
+
+test('B1: the entry script pins and the authorized_keys template pass and match the repository', () => {
+  assert.deepEqual(checkScheduledBackupEntry({ entry: ENTRY, backupSh: BACKUP_SH, template: TEMPLATE }), []);
+  assert.equal(ENTRY.match(/^readonly BACKUP_SH_SHA256='([0-9a-f]{64})'$/m)[1], createHash('sha256').update(BACKUP_SH).digest('hex'));
+});
+
+test('B1: every weakening of the entry script or the template is refused', () => {
+  const entry = (from, to) => checkScheduledBackupEntry({ entry: swap(ENTRY, from, to), backupSh: BACKUP_SH, template: TEMPLATE }).join('\n');
+  const pin = ENTRY.match(/^readonly BACKUP_SH_SHA256='([0-9a-f]{64})'$/m)[1];
+  assert.match(entry(pin, '0'.repeat(64)), /BACKUP_SH_SHA256 .* must equal the SHA-256/);
+  assert.match(checkScheduledBackupEntry({ entry: ENTRY, backupSh: `${BACKUP_SH}# changed\n`, template: TEMPLATE }).join(), /must equal the SHA-256 of infra\/backup\/backup\.sh/);
+  assert.match(entry("readonly INSTALL_DIR='/usr/local/libexec/nawara-core-backup'", "readonly INSTALL_DIR='/home/ubuntu/nawara-core/backup/bin'"), /INSTALL_DIR must be/);
+  assert.match(entry('readonly OWNER_UID=0', 'readonly OWNER_UID=1000'), /OWNER_UID must be 0/);
+  assert.match(entry("readonly SERVICES='auth-service organization-service'", "readonly SERVICES='auth-service organization-service audit-service'"), /SERVICES must be exactly/);
+  assert.match(entry('log "finished: exit $rc"\n', 'log "finished: exit $rc"\nbash -c "$SSH_ORIGINAL_COMMAND"\n'), /SSH_ORIGINAL_COMMAND is only ever tested/);
+  assert.match(entry('[ -z "${SSH_ORIGINAL_COMMAND:-}" ] && [ "$#" -eq 0 ] || refuse 64', 'true'), /SSH_ORIGINAL_COMMAND is only ever tested/);
+  assert.match(entry('flock -n 9 || refuse 75 ', 'flock 9 || refuse 75 '), /flock -n/);
+  assert.match(entry('env -i HOME="$HOME" PATH="$PATH" BACKUP_SERVICES', 'HOME="$HOME" PATH="$PATH" BACKUP_SERVICES'), /must be run with "env -i"/);
+  assert.match(entry('log "finished: exit $rc"\n', 'log "finished: exit $rc"\neval "$X"\n'), /no eval and no sourcing/);
+  assert.match(entry('log "finished: exit $rc"\n', 'log "finished: exit $rc"\nsource "$HOME/x"\n'), /no eval and no sourcing/);
+  assert.match(checkScheduledBackupEntry({ entry: '', backupSh: BACKUP_SH, template: TEMPLATE }).join(), /scheduled-backup\.sh is missing/);
+  const template = (t) => checkScheduledBackupEntry({ entry: ENTRY, backupSh: BACKUP_SH, template: t }).join('\n');
+  assert.match(template(TEMPLATE.replace('restrict,', '')), /must hold exactly one line/);
+  assert.match(template(TEMPLATE.replace('restrict,', 'restrict,port-forwarding,')), /must hold exactly one line/);
+  assert.match(template(`${TEMPLATE}ssh-ed25519 REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY second\n`), /must hold exactly one line/);
+  assert.match(template(TEMPLATE.replace('REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY', `AAAAC3NzaC1lZDI1NTE5AAAA${'x'.repeat(40)}`)), /must hold no key material/);
 });

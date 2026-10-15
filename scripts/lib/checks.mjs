@@ -37,6 +37,39 @@ export const PRODUCTION_ENVIRONMENTS = ['production'];
 /** A use of the production SSH credentials, in any spelling, or of every secret at once. */
 const PRODUCTION_CREDENTIAL = /secrets\s*(?:\.\s*|\[\s*\\?['"])DEPLOY_SSH_|toJSON\(\s*secrets\s*\)/;
 
+/**
+ * Core V2 M2 B1: the scheduled backup. ONE workflow, schedule-only, in its own environment `production-backup` (main only, no
+ * interactive reviewer) with only the dedicated BACKUP_SSH_* secrets. It runs nothing from the repository on the server: one native SSH
+ * session, host key pinned, no remote command; the server's `restrict,command=` line runs the installed entry script
+ * (infra/backup/scheduled-backup.sh). Inactive until the repository variable CORE_BACKUP_SCHEDULE is `enabled`.
+ */
+export const BACKUP_ENVIRONMENT = 'production-backup';
+export const SCHEDULED_BACKUP_WORKFLOW = 'core-backup-scheduled.yml';
+export const SCHEDULED_BACKUP_CRON = '17 2 * * *';
+export const SCHEDULED_BACKUP_GUARD = "github.ref == 'refs/heads/main' && vars.CORE_BACKUP_SCHEDULE == 'enabled'";
+export const SCHEDULED_BACKUP_SECRETS = ['BACKUP_SSH_HOST', 'BACKUP_SSH_PORT', 'BACKUP_SSH_USER', 'BACKUP_SSH_KEY', 'BACKUP_SSH_KNOWN_HOSTS'];
+export const SCHEDULED_BACKUP_INSTALL_DIR = '/usr/local/libexec/nawara-core-backup';
+export const SCHEDULED_BACKUP_SERVICES = 'auth-service organization-service';
+/** The only remote target of the scheduled job: no command after it (the server's forced command decides what runs). */
+const SCHEDULED_BACKUP_TARGET = '-- "$BACKUP_SSH_USER@$BACKUP_SSH_HOST"';
+/** The ssh options the scheduled job must pass: no config file, no agent, no password, the pinned host key only, nothing forwarded. */
+export const SCHEDULED_BACKUP_SSH_OPTIONS = ['-F /dev/null', '-T', '-n', 'BatchMode=yes', 'IdentitiesOnly=yes', 'IdentityAgent=none', 'PasswordAuthentication=no',
+  'KbdInteractiveAuthentication=no', 'StrictHostKeyChecking=yes', 'UserKnownHostsFile="$d/known_hosts"', 'GlobalKnownHostsFile=/dev/null', 'UpdateHostKeys=no',
+  'ForwardAgent=no', 'ForwardX11=no', 'ClearAllForwardings=yes', 'RequestTTY=no'];
+/** What the scheduled job's shell must never do: weaken the host key, fetch or decode a script, pipe into a shell, or run a local command. */
+const SCHEDULED_BACKUP_FORBIDDEN = [
+  [/StrictHostKeyChecking=(?!yes\b)/, 'weakens host-key checking'],
+  [/(^|[^\w.-])(ssh-keyscan|scp|sftp|rsync|curl|wget|git|base64|eval|source|python3?|node|perl)(?=\s|$)/m, 'runs a transfer, fetch, decode or interpreter command'],
+  [/\bbash\s+-s\b|\|\s*(ba|z|da)?sh\b/, 'pipes a script into a shell'],
+  [/ProxyCommand|ProxyJump|LocalCommand|PermitLocalCommand|SendEnv|SetEnv|RemoteCommand|-J\s|-W\s|-[LRD]\s/, 'uses an ssh proxy, local command, environment passing, remote command or forwarding option'],
+];
+/** A use of the scheduled-backup credentials, in any spelling. */
+const BACKUP_CREDENTIAL = /secrets\s*(?:\.\s*|\[\s*\\?['"])BACKUP_SSH_/;
+/** A native remote shell or transfer: production access as much as the SSH action is. */
+const NATIVE_REMOTE_SHELL = /(^|[^\w.$/-])(ssh|scp|sftp|ssh-keyscan)(?=\s|$)/m;
+/** The activation guard of the scheduled backup; read by no other workflow (the removed mechanism of core-backup.yml stays removed). */
+const SCHEDULE_GUARD_READ = /vars\s*(?:\.\s*|\[\s*['"])CORE_BACKUP_SCHEDULE\b/;
+
 const usesSsh = (steps) => steps.some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
 
 /** The environment a job declares (`environment: name` or `environment: {name}`), as written. */
@@ -58,6 +91,104 @@ function concurrencyProblems(where, cfg) {
   if (!cfg || typeof cfg !== 'object' || typeof cfg.group !== 'string') return [`${where}: has no concurrency group`];
   if (cfg.group !== PRODUCTION_GROUP) out.push(`${where}: concurrency group must be "${PRODUCTION_GROUP}" (got "${cfg.group}")`);
   if (cfg['cancel-in-progress'] !== false) out.push(`${where}: cancel-in-progress must be explicitly false (a running production deployment is never cancelled)`);
+  return out;
+}
+
+/** Core V2 M2 B1: the scheduled-backup workflow as a whole: schedule-only at the approved time, no permissions, one job. */
+function scheduledBackupWorkflowProblems(fileName, doc, triggers) {
+  const out = [];
+  if (triggers.length !== 1 || triggers[0] !== 'schedule') {
+    out.push(`${fileName}: the scheduled backup runs on its schedule only (found: ${triggers.join(', ') || 'nothing'}); manual backups stay in core-backup.yml behind the production approval`);
+  }
+  const on = doc?.on ?? doc?.true;
+  const crons = asArray(on?.schedule).map((s) => s?.cron);
+  if (crons.length !== 1 || crons[0] !== SCHEDULED_BACKUP_CRON) out.push(`${fileName}: the schedule must be exactly one cron '${SCHEDULED_BACKUP_CRON}' (found: ${crons.join(', ') || 'none'})`);
+  const perms = doc?.permissions;
+  if (!perms || typeof perms !== 'object' || Object.keys(perms).length !== 0) out.push(`${fileName}: the workflow must declare "permissions: {}" (no token permission at all)`);
+  for (const key of ['env', 'defaults', 'concurrency']) if (doc?.[key] !== undefined) out.push(`${fileName}: no workflow-level "${key}"`);
+  const jobIds = Object.keys(doc?.jobs ?? {});
+  if (jobIds.length !== 1 || jobIds[0] !== 'backup') out.push(`${fileName}: exactly one job, "backup" (found: ${jobIds.join(', ') || 'none'})`);
+  const job = doc?.jobs?.backup;
+  if (job && job.environment !== BACKUP_ENVIRONMENT) out.push(`${fileName} job "backup": must declare "environment: ${BACKUP_ENVIRONMENT}" as a literal name`);
+  return out;
+}
+
+/** Core V2 M2 B1: the scheduled-backup job: the guard, the queue, one native ssh session with a pinned host key and no remote command. */
+function scheduledBackupJobProblems(where, jobId, job) {
+  const out = [];
+  if (jobId !== 'backup') out.push(`${where}: the scheduled backup job must be "backup"`);
+  if (String(job.if ?? '').replace(/\s+/g, ' ').trim() !== SCHEDULED_BACKUP_GUARD) {
+    out.push(`${where}: the job must be guarded by exactly "if: ${SCHEDULED_BACKUP_GUARD}" (main only; inactive until the owner enables it)`);
+  }
+  // The production queue is checked with every native ssh job (checkWorkflowSafety); the job's own concurrency is required there.
+  if (job.concurrency === undefined) out.push(`${where}: the job must declare its own concurrency (the production queue)`);
+  if (job['runs-on'] !== 'ubuntu-latest') out.push(`${where}: runs-on must be ubuntu-latest (a GitHub-hosted, ephemeral runner)`);
+  const timeout = job['timeout-minutes'];
+  if (!Number.isInteger(timeout) || timeout < 1 || timeout > 60) out.push(`${where}: timeout-minutes must be an integer from 1 to 60`);
+  for (const key of ['uses', 'with', 'secrets', 'container', 'services', 'permissions', 'strategy', 'needs', 'outputs', 'defaults', 'env', 'continue-on-error']) {
+    if (job[key] !== undefined) out.push(`${where}: "${key}" is not allowed on the scheduled backup job`);
+  }
+  const steps = asArray(job.steps);
+  if (steps.length !== 1) return [...out, `${where}: exactly one step (found ${steps.length}); no checkout, no action`];
+  const step = steps[0];
+  const extra = Object.keys(step).filter((k) => !['name', 'env', 'run'].includes(k));
+  if (extra.length > 0) out.push(`${where}: the step may only have name, env and run (found: ${extra.join(', ')}); no action, no shell override`);
+  const env = step.env ?? {};
+  const keys = Object.keys(env).sort();
+  if (keys.join() !== [...SCHEDULED_BACKUP_SECRETS].sort().join()) out.push(`${where}: the step env must be exactly ${SCHEDULED_BACKUP_SECRETS.join(', ')}`);
+  for (const k of keys) {
+    if (SCHEDULED_BACKUP_SECRETS.includes(k) && String(env[k]).replace(/\s+/g, '') !== `\${{secrets.${k}}}`) out.push(`${where}: env ${k} must be exactly \${{ secrets.${k} }}`);
+  }
+  if (PRODUCTION_CREDENTIAL.test(JSON.stringify(job))) out.push(`${where}: the scheduled backup never uses the DEPLOY_SSH_* credentials or every secret at once`);
+  const run = String(step.run ?? '');
+  if (run.includes('${{')) out.push(`${where}: no expression is interpolated into the script (pass values through env)`);
+  if (firstCommandLine(run) !== 'set -euo pipefail') out.push(`${where}: the script must start with "set -euo pipefail"`);
+  for (const [re, why] of SCHEDULED_BACKUP_FORBIDDEN) if (re.test(run)) out.push(`${where}: the script ${why}`);
+  const joined = run.replace(/\\\n\s*/g, ' ');
+  const invocations = joined.split('\n').map((l) => l.trim()).filter((l) => /^ssh(\s|$)/.test(l));
+  const shells = (joined.match(new RegExp(NATIVE_REMOTE_SHELL.source, 'gm')) ?? []).length;
+  if (invocations.length !== 1 || shells !== 1) {
+    out.push(`${where}: exactly one ssh invocation, as a command of its own (found ${invocations.length} ssh line(s), ${shells} remote-shell command(s))`);
+  } else {
+    const inv = invocations[0];
+    for (const opt of SCHEDULED_BACKUP_SSH_OPTIONS) {
+      const present = opt.startsWith('-') ? new RegExp(`(^|\\s)${opt.replace(/[/]/g, '\\/')}(\\s|$)`).test(inv) : inv.includes(`-o ${opt}`);
+      if (!present) out.push(`${where}: the ssh invocation must pass ${opt.startsWith('-') ? opt : `-o ${opt}`}`);
+    }
+    if (!inv.endsWith(SCHEDULED_BACKUP_TARGET)) out.push(`${where}: the ssh invocation must end with ${SCHEDULED_BACKUP_TARGET}: no remote command, no input redirection (the server's forced command decides what runs)`);
+  }
+  return out;
+}
+
+/**
+ * Core V2 M2 B1: the installed side of the scheduled backup. The entry script's pins equal the repository (the SHA-256 of backup.sh, the
+ * install directory, the services), it never runs a client command, and the authorized_keys template holds exactly the restricted line
+ * with a placeholder instead of a key.
+ */
+export function checkScheduledBackupEntry({ entry, backupSh, template }) {
+  const out = [];
+  const where = 'infra/backup/scheduled-backup.sh';
+  if (!entry) return [`${where} is missing (the forced-command entry of ${SCHEDULED_BACKUP_WORKFLOW})`];
+  const pin = entry.match(/^readonly BACKUP_SH_SHA256='([0-9a-f]{64})'$/m)?.[1];
+  const actual = createHash('sha256').update(backupSh ?? '').digest('hex');
+  if (pin !== actual) out.push(`${where}: BACKUP_SH_SHA256 (${pin ?? 'missing'}) must equal the SHA-256 of infra/backup/backup.sh (${actual}); after a reviewed backup.sh change, update the pin and reinstall (runbook §2)`);
+  if (!entry.includes(`readonly INSTALL_DIR='${SCHEDULED_BACKUP_INSTALL_DIR}'`)) out.push(`${where}: INSTALL_DIR must be '${SCHEDULED_BACKUP_INSTALL_DIR}'`);
+  if (!/^readonly OWNER_UID=0$/m.test(entry)) out.push(`${where}: OWNER_UID must be 0 (root-owned installation)`);
+  if (!entry.includes(`readonly SERVICES='${SCHEDULED_BACKUP_SERVICES}'`)) out.push(`${where}: SERVICES must be exactly '${SCHEDULED_BACKUP_SERVICES}'`);
+  const original = entry.match(/SSH_ORIGINAL_COMMAND/g) ?? [];
+  if (original.length !== 1 || !entry.includes('[ -z "${SSH_ORIGINAL_COMMAND:-}" ] && [ "$#" -eq 0 ] || refuse 64')) {
+    out.push(`${where}: SSH_ORIGINAL_COMMAND is only ever tested for emptiness, then refused (exit 64); it is never run or printed`);
+  }
+  if (!/^\s*flock -n 9 \|\| refuse 75 /m.test(entry)) out.push(`${where}: the run must take the lock with "flock -n" and refuse with exit 75`);
+  if (!/^env -i HOME="\$HOME" PATH="\$PATH" BACKUP_SERVICES="\$SERVICES" bash --noprofile --norc -- "\$INSTALL_DIR\/backup\.sh" \|\| rc=\$\?$/m.test(entry)) {
+    out.push(`${where}: backup.sh must be run with "env -i" and only HOME, PATH and BACKUP_SERVICES`);
+  }
+  if (/(^|[;&|\s])(eval|source|\.)\s/m.test(entry.replace(/^\s*#.*$/gm, ''))) out.push(`${where}: no eval and no sourcing`);
+  if (entry.includes('PRIVATE KEY')) out.push(`${where}: must not contain a private-key marker`);
+  const lines = String(template ?? '').split('\n').filter((l) => l.trim() !== '' && !l.trim().startsWith('#'));
+  const line = `restrict,command="${SCHEDULED_BACKUP_INSTALL_DIR}/scheduled-backup.sh" ssh-ed25519 REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY nawara-core-scheduled-backup`;
+  if (lines.length !== 1 || lines[0] !== line) out.push(`infra/backup/scheduled-backup.authorized_keys.template: must hold exactly one line, ${line}`);
+  if (/AAAA[0-9A-Za-z+/]{20,}|PRIVATE KEY/.test(String(template ?? ''))) out.push('infra/backup/scheduled-backup.authorized_keys.template: must hold no key material');
   return out;
 }
 
@@ -90,14 +221,29 @@ export function checkWorkflowSafety(fileName, text) {
     // V2-A.3 (A3.5): production credentials and production SSH only inside an approved, protected environment, and a protected
     // environment only behind an explicit dispatch (never push, pull_request, workflow_run or a schedule waiting for approval).
     const environment = environmentOf(job);
-    const usesProduction = usesSsh(steps) || PRODUCTION_CREDENTIAL.test(JSON.stringify(job));
+    // Core V2 M2 B1: a native ssh / scp / sftp in a step, or the scheduled-backup credentials, are production access too.
+    const nativeShell = steps.some((s) => NATIVE_REMOTE_SHELL.test(String(s.run ?? '')));
+    const backupCredential = BACKUP_CREDENTIAL.test(JSON.stringify(job));
+    const usesProduction = usesSsh(steps) || PRODUCTION_CREDENTIAL.test(JSON.stringify(job)) || nativeShell || backupCredential;
     if (usesProduction) {
       if (environment === undefined) {
-        problems.push(`${where}: a job using production SSH or the DEPLOY_SSH_* credentials must declare a protected environment (${PRODUCTION_ENVIRONMENTS.join(', ')})`);
+        problems.push(`${where}: a job using production SSH or the DEPLOY_SSH_* credentials must declare a protected environment (${PRODUCTION_ENVIRONMENTS.join(', ')}); the scheduled backup alone uses "${BACKUP_ENVIRONMENT}" in ${SCHEDULED_BACKUP_WORKFLOW}`);
       } else if (environment.includes('${{')) {
         problems.push(`${where}: the environment must be a literal name, never an expression (got "${environment}")`);
+      } else if (environment === BACKUP_ENVIRONMENT) {
+        // Checked below: reserved for the scheduled backup job.
       } else if (!PRODUCTION_ENVIRONMENTS.includes(environment)) {
         problems.push(`${where}: environment "${environment}" is not an approved production environment (${PRODUCTION_ENVIRONMENTS.join(', ')})`);
+      }
+    }
+    if (backupCredential && environment !== BACKUP_ENVIRONMENT) {
+      problems.push(`${where}: the BACKUP_SSH_* credentials are used only by the scheduled backup job of ${SCHEDULED_BACKUP_WORKFLOW}, in the "${BACKUP_ENVIRONMENT}" environment`);
+    }
+    if (environment === BACKUP_ENVIRONMENT) {
+      if (fileName !== SCHEDULED_BACKUP_WORKFLOW) {
+        problems.push(`${where}: environment "${BACKUP_ENVIRONMENT}" is not an approved production environment for ${fileName}: it is reserved for the scheduled backup job of ${SCHEDULED_BACKUP_WORKFLOW}`);
+      } else {
+        problems.push(...scheduledBackupJobProblems(where, jobId, job));
       }
     }
     if (environment !== undefined && PRODUCTION_ENVIRONMENTS.includes(environment) && (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch')) {
@@ -118,12 +264,29 @@ export function checkWorkflowSafety(fileName, text) {
       const guard = String(job.if ?? '');
       if (!guard.includes('refs/heads/main')) problems.push(`${where}: a production deployment must be restricted to refs/heads/main`);
       problems.push(...concurrencyProblems(where, job.concurrency ?? doc.concurrency));
+    } else if (nativeShell) {
+      // Core V2 M2 B1: a native ssh session to production obeys the same rules as the SSH action: never automatic, main only, the queue.
+      deploys = true;
+      if (automatic.length > 0) {
+        problems.push(`${where}: a production SSH job must only run on workflow_dispatch or schedule, never automatically (found: ${automatic.join(', ')})`);
+      }
+      if (!String(job.if ?? '').includes('refs/heads/main')) problems.push(`${where}: a production deployment must be restricted to refs/heads/main`);
+      problems.push(...concurrencyProblems(where, job.concurrency ?? doc.concurrency));
     }
     if (pushesProdTag) {
       problems.push(...concurrencyProblems(`${where} (publishes the :production image)`, job.concurrency ?? doc.concurrency));
       if (!String(job.if ?? '').includes('refs/heads/main')) problems.push(`${where}: publishing :production must be restricted to refs/heads/main`);
     }
   }
+
+  // Core V2 M2 B1: the scheduled backup's guard, workflow and credentials stay where they belong.
+  if (fileName !== SCHEDULED_BACKUP_WORKFLOW && SCHEDULE_GUARD_READ.test(text)) {
+    problems.push(`${fileName}: the activation guard CORE_BACKUP_SCHEDULE is read only by ${SCHEDULED_BACKUP_WORKFLOW} (the schedule of core-backup.yml stays removed)`);
+  }
+  const outsideJobs = { ...doc };
+  delete outsideJobs.jobs;
+  if (BACKUP_CREDENTIAL.test(JSON.stringify(outsideJobs))) problems.push(`${fileName}: the BACKUP_SSH_* credentials are never set at workflow level`);
+  if (fileName === SCHEDULED_BACKUP_WORKFLOW) problems.push(...scheduledBackupWorkflowProblems(fileName, doc, triggers));
 
   if (deploys) {
     const branches = triggerBranches(doc, 'push');

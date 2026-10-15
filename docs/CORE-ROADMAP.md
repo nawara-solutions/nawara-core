@@ -283,7 +283,7 @@ A5 Organization                                🔄 OPEN, 🔴 (design 🟡) (re
   A5.5  certification                          not started; acceptance criteria ADOPTED 2026-10-12 (C1–C6 binding, C7 production boundary)
 
 G6                                             ✅ CERTIFIED 2026-10-14 (PR #311, 64b5030); G7 reference G6-REHEARSAL-20261014@64b5030…
-M2 pre-G7 backup, verification, schedule       design PROPOSED; NOT CERTIFIED; no production step authorized
+M2 pre-G7 backup, verification, schedule       design APPROVED IN PRINCIPLE; B1 scheduled path implemented, inactive; NOT CERTIFIED
 G7, F6, F7                                     🔒
 Final Core Validation (Stage 22)               🔒 ABSOLUTE LAST
 ```
@@ -489,7 +489,7 @@ rescoping moves work; it weakens nothing:
 | # | Work (original stage) | Depends on | Security relevance |
 |---|---|---|---|
 | M1 | G6 remainder: BV-S → C (F1–F7 rehearsal, including the F6 first-touch `ensure()` / marker item, A5 record §9.2) → D → E (restore, RPO and RTO) → F (G6). Rehearsal passed (2026-10-14), the first-touch item as the F6 readiness safeguard (the A5 code item stays open). **Done: G6 CERTIFIED 2026-10-14** (record approved by merge, PR #311, `64b5030`) | G6-S2 (done) | proves rollback, activation and restore before production |
-| M2 | Fresh pre-G7 Auth + Organization backup, verification, `CORE_BACKUP_SCHEDULE` (cutover record §7; the removed variable's role is now taken by the schedule design, [M2 design](architecture/stage-21/stage-21-x-m2-pre-g7-backup-design.md), PROPOSED). **NOT CERTIFIED**; no production step authorized | M1 (done) | recovery point before the one-way door |
+| M2 | Fresh pre-G7 Auth + Organization backup, verification, `CORE_BACKUP_SCHEDULE` (cutover record §7; the removed variable's role is now taken by the schedule design, [M2 design](architecture/stage-21/stage-21-x-m2-pre-g7-backup-design.md), approved in principle 2026-10-15; B1, the scheduled path, implemented and inactive). **NOT CERTIFIED**; no production step authorized | M1 (done) | recovery point before the one-way door |
 | M3 | G7, then F6 (one-way door) and F7, then the post-F7 backup and its verification (cutover record §7; A4 production checkpoint: the Auth digest deployment, inside the certified digest set) | M2 | authority transition; production Tier B configuration check before each digest deployment (G6 plan §16.1) |
 | M4 | A3.7 organization-secret restriction; A3.6 production access proof (performed with the first digest deployment) | none (A3.7); M3 (A3.6) | production credentials held only by the protected environment |
 | M5 | A5.4 post-F7 prerequisites of ADR-0062: the corrected and certified `register-caller.sh` (`allowedPlatforms` reset), the attended `allowedPlatforms` scope procedure, the retirement of the Company-provisioning credential | M3 (decision gate DG-5 for early development) | least-privilege service scope; no standing provisioning credential |
