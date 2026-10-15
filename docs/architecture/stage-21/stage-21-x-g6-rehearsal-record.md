@@ -1,8 +1,9 @@
 # Stage 21.x G6 — production-like rehearsal record
 
-- **Status:** RECORD — PROPOSED for owner approval. The rehearsal result below is **PASS**. Under the
-  [G6 plan](stage-21-x-g6-rehearsal-plan.md) §13, G6 PASS also requires that "the record is complete and approved": **G6 is CERTIFIED
-  only when the owner approves this record by merging it into `main`.** Until that merge, G6 is not certified.
+- **Status:** RECORD — **APPROVED; G6 CERTIFIED (2026-10-14)**. The owner approved this record by merging it into `main` (PR #311,
+  merge commit `64b503095674a8227527c7f0b68819cdf703669d`), as the [G6 plan](stage-21-x-g6-rehearsal-plan.md) §13 requires ("the
+  record is complete and approved"). Sections 1–13 are the certified content, unchanged; [§14](#14-certification-and-the-g7-reference)
+  records the certification and the G7 reference. The rehearsal result is **PASS**.
 - **Gate:** ADR-0040 decision 7, G6 (with the parts of G4 and G5 that ADR-0040 assigns to the rehearsal); plan decision D-14 and §10.
 - **Operator:** the Project Owner. **Approver:** the Project Owner (self-approved; no independent second-party approval).
 - **Authorizes nothing.** No production step, no digest deployment and no G7, F6 or F7 action follows from this record; each keeps its
@@ -363,3 +364,25 @@ then; nothing in this record is a G7 reference yet.
 
 **Unchanged:** production; G7, F6 and F7 stay locked behind their own authorizations; the preserved rehearsal state (checkpoint X, the
 B2 lock, the recovered guest, the evidence) is not cleaned up by this record; Final Core Validation stays the absolute last.
+
+## 14. Certification and the G7 reference
+
+Appended after the merge; §1–§13 are unchanged and are the content the owner approved.
+
+- **G6 CERTIFIED (2026-10-14).** The owner approved this record by merging PR #311 into `main` at 2026-10-14T23:05:44Z (`core-ci-passed`
+  green). Merge commit `64b503095674a8227527c7f0b68819cdf703669d`; content commit `1f80083bc7d22f8937aee124ad4fe7e70e73c5c4`. The file
+  at both commits has SHA-256 `ad40c9072d4e2a8e2c5b4f2de68a1f38ab059010249fb5e5fd2491957cb9e03a`.
+- **G7 reference (plan §10, D-14; fixed now, as §13 provides):**
+
+  ```text
+  G6-REHEARSAL-20261014@64b503095674a8227527c7f0b68819cdf703669d
+  ```
+
+  - **Date:** 2026-10-14, the date of the rehearsal in UTC, the time base of this record (§2). The certifying merge is also on that UTC
+    date.
+  - **Commit:** the merge commit at which this record became certified on `main`. The content commit `1f80083` is not used: at that
+    commit the record was not yet on `main` and not yet approved. The certified content is identical at both.
+  - **Use:** `ownership approve --reference` requires only a non-empty value and stores it as text; it is passed exactly as above.
+- **Authorizes nothing.** The pre-G7 backup, its verification and the backup schedule (M2), and G7, F6 and F7 (M3), each keep their own
+  owner-authorized checkpoint ([cutover record](stage-21-x-cutover-record.md) §7, §16). M2 is **not certified**; G7, F6 and F7 stay
+  **locked**. The preserved rehearsal state of §13 is unchanged.
