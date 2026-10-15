@@ -24,6 +24,9 @@
   (the two production captures are identical). **G6-C is not authorized.**
 - **Result (2026-10-14, §22):** **G6-C, G6-D and G6-E PASS**, each step owner-authorized and owner-run; the G6-F captures are done and
   the G6 record is proposed. **G6 is certified only when the owner approves the record by merging it.**
+- **Result (2026-10-14, §23):** **G6 CERTIFIED**: the owner approved the G6 record by merging it (PR #311, merge commit
+  `64b5030`). G7 reference `G6-REHEARSAL-20261014@64b503095674a8227527c7f0b68819cdf703669d`. **No production step is authorized
+  by it**; the §12 steps 10–18 keep their own checkpoints.
 - **Record of results:** [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md) (written after the rehearsal).
 
 ## 1. Purpose
@@ -511,7 +514,7 @@ recorded deviation, §16.5). **Amended 2026-10-13** to the B1 order (§17.2): G6
 | 6 | G6-S2: initial guest-only deployment of the broker, Auth, Organization, Audit and MinIO into new disposable databases, with the rehearsal credentials (§17.2) | **PASS** (2026-10-13, §19) |
 | 7 | G6-BV-S (service-level isolation, §6.1, §16.4) | **PASS** (2026-10-14, §21) |
 | 8 | G6-C: attended G1–G3 deployment and redeployment acceptance (§9.1), then the separately authorized rehearsal steps; G6-D to G6-F | **PASS** (2026-10-14, §22): G6-C, G6-D and G6-E executed, each step separately authorized; G6-F record proposed |
-| 9 | G6 CERTIFIED | on the owner's approval (merge) of the [G6 record](stage-21-x-g6-rehearsal-record.md) |
+| 9 | G6 CERTIFIED | **CERTIFIED** (2026-10-14): the owner approved the [G6 record](stage-21-x-g6-rehearsal-record.md) by merging it (PR #311, `64b5030`; §23) |
 
 After G6, these production steps keep their own checkpoints (§12; cutover record §7):
 - the first digest deployment of each service in the set (R3 installed in production before any Auth deployment containing the
@@ -1304,3 +1307,21 @@ It records where the results are. It **authorizes no deployment and no productio
 - **G6 CERTIFIED** takes effect only with the owner's approval of the record, by its merge. The G7 reference
   `G6-REHEARSAL-<YYYYMMDD>@<commit of the certified record>` is fixed after that merge.
 - **Unchanged:** for production after G6, §15.8; G7, F6 and F7 stay locked; Final Core Validation stays the absolute last.
+
+## 23. G6 CERTIFIED (2026-10-14); the G7 reference; the §12 schedule step
+
+Appended; §1–§22 are unchanged except the header's result line and row 9 of §15.8. It **authorizes no production step**.
+
+- **G6 CERTIFIED.** The owner approved the [G6 record](stage-21-x-g6-rehearsal-record.md) by merging PR #311 (merge commit
+  `64b503095674a8227527c7f0b68819cdf703669d`, 2026-10-14T23:05:44Z). §13's last PASS condition ("the record is complete and approved")
+  is met.
+- **G7 reference (§10, D-14):** `G6-REHEARSAL-20261014@64b503095674a8227527c7f0b68819cdf703669d`, the UTC rehearsal date and the merge
+  commit of the certified record (G6 record §14).
+- **§12 steps 10–12 (M2).** Step 12 names a mechanism that no longer exists (later-status note of 2026-10-04). Its replacement, a
+  scheduled job bound to a separate `production-backup` environment, is drafted in the
+  [M2 design](stage-21-x-m2-pre-g7-backup-design.md) and is **PROPOSED, not approved**; the step order 10 → 11 → 12 → 13 is unchanged.
+  M2 is **not certified**.
+- **Retention (§11, D-15):** the rehearsal VM and volumes stay stopped through G7 + 14 days; the raw logs are kept until F7
+  certification + 90 days; checkpoint X, the B2 lock and the evidence are preserved. The M2 design forbids using the G6 guest as the
+  recovery environment.
+- **Unchanged:** G7, F6 and F7 locked, each behind its own authorization; Final Core Validation the absolute last.

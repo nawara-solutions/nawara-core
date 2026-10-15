@@ -5,8 +5,9 @@
 - **Scope:** ADR-0040 fresh path (A2.5, F1–F7) and gates G1–G7, plus the Stage 21.x T1 relay gate.
 - **Later status:** dated later-status notes are appended as [§10](#10-later-status-note-2026-10-02-v2-a),
   [§11](#11-later-status-note-2026-10-03-v2-a2), [§12](#12-later-status-note-2026-10-04-v2-a3--a35) and
-  [§13](#13-later-status-note-2026-10-04-v2-a0), [§14](#14-later-status-note-2026-10-12-g6-baseline-refresh) and
-  [§15](#15-later-status-note-2026-10-14-g6-rehearsal). Sections 1–9 are unchanged and remain the record as of 2026-09-30.
+  [§13](#13-later-status-note-2026-10-04-v2-a0), [§14](#14-later-status-note-2026-10-12-g6-baseline-refresh),
+  [§15](#15-later-status-note-2026-10-14-g6-rehearsal) and [§16](#16-later-status-note-2026-10-15-g6-certified-m2-design).
+  Sections 1–9 are unchanged and remain the record as of 2026-09-30, except the G6-C to OVERALL G6 rows of §6.
 - **Related:** [ADR-0040](../../adr/0040-organization-ownership-migration-decisions.md),
   [G1 topology](stage-21-x-g1-organization-topology.md), [G6 rehearsal plan](stage-21-x-g6-rehearsal-plan.md),
   [organization-production runbook](../../runbooks/organization-production.md),
@@ -205,8 +206,8 @@ locally — previously executed result requires later evidence attachment.* G6-B
 | **G6-C** | **PASS** (2026-10-14): G1–G3 accepted; F1–F7 with the rollback proof, ACTIVATE (source first, seven readiness cases) and the post-activation refusal; `RETIRED`, MATCH, digest unchanged ([G6 record](stage-21-x-g6-rehearsal-record.md) §4) |
 | **G6-D** | **PASS** (2026-10-14): every §8.1 signal observed and restored; §8.2 cited from CI (G6 record §6) |
 | **G6-E** | **PASS** (2026-10-14): RPO 3757 s, RTO 24 s; restored `RETIRED`, `org_authoritative`, MATCH (G6 record §8) |
-| **G6-F** | record **PROPOSED** (2026-10-14): [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md), with the ICU and collation assessment and the migration fingerprints |
-| **OVERALL G6** | **NOT CERTIFIED** until the owner approves the G6 record by merging it; rehearsal result PASS |
+| **G6-F** | record **APPROVED** (2026-10-14): [`stage-21-x-g6-rehearsal-record.md`](stage-21-x-g6-rehearsal-record.md), with the ICU and collation assessment and the migration fingerprints; merged by the owner (PR #311) |
+| **OVERALL G6** | **CERTIFIED** (2026-10-14): the owner approved the G6 record by merging it, merge commit `64b503095674a8227527c7f0b68819cdf703669d`; rehearsal result PASS; G7 reference in §16 |
 
 **Reason.** The approved rehearsal (plan D-1) requires a disposable, isolated Ubuntu VM. That requirement remains approved. Where
 the VM runs and which virtualization technology hosts it are not specified by the plan and remain an owner decision. The owner has
@@ -381,3 +382,36 @@ Appended. §1–§14 are unchanged, except the G6-C to OVERALL G6 rows of §6 an
   §2.4).
 - **Unchanged:** production was not changed; the §7 gates stay blocked until G6 is certified and then each needs its own
   authorization; G7, F6 and F7 locked; Final Core Validation absolute last.
+
+## 16. Later-status note (2026-10-15, G6 certified; M2 design)
+
+Appended. §1–§15 are unchanged, except the G6-F and OVERALL G6 rows of §6 and the header's list of later-status notes. §7 is kept as
+written; this note states how its rows read now.
+
+- **G6 CERTIFIED (2026-10-14).** The owner approved the [G6 record](stage-21-x-g6-rehearsal-record.md) by merging PR #311 into `main`
+  at 2026-10-14T23:05:44Z. Merge commit `64b503095674a8227527c7f0b68819cdf703669d`; the record's content commit is
+  `1f80083bc7d22f8937aee124ad4fe7e70e73c5c4`, and the record file is byte-identical at both
+  (SHA-256 `ad40c9072d4e2a8e2c5b4f2de68a1f38ab059010249fb5e5fd2491957cb9e03a`).
+- **G7 reference (fixed; G6 plan §10, D-14; G6 record §14):**
+  `G6-REHEARSAL-20261014@64b503095674a8227527c7f0b68819cdf703669d`. The date is the rehearsal date in UTC, the time base of the G6
+  record; the commit is the merge commit at which the record became certified on `main`. `ownership approve --reference` accepts any
+  non-empty text (stored in `approved_reference`, `text`), so the value is used exactly as written. Using it is **not authorized**
+  by this note: G7 is a separate, owner-authorized production step.
+- **§7 rows, as they read now:**
+
+| Step | Status |
+|---|---|
+| Fresh pre-G7 production Auth + Organization backup | G6 gate met; **not authorized**; M2, preflight first ([M2 design](stage-21-x-m2-pre-g7-backup-design.md)) |
+| Verify the pre-G7 backup artifacts | G6 gate met; **not authorized**; M2 |
+| Enable `CORE_BACKUP_SCHEDULE` | the mechanism no longer exists (§12); G6 gate met; the replacement schedule design is **PROPOSED, not approved** (M2 design) |
+| **G7** `ownership approve --reference …` | **LOCKED** behind M2 and its own authorization (M3) |
+| **F6** ACTIVATE AUTHORITY and the Auth mirror | **LOCKED** behind G7 |
+| **F7** retirement and post-activation verification | **LOCKED** behind F6 |
+| Post-F7 Auth + Organization backup | **LOCKED** behind F7 |
+| Opening other callers | **LOCKED** |
+| Stage 22 Final Core Validation | **ABSOLUTE LAST** |
+
+- **M2 is NOT CERTIFIED.** Nothing in M2 has run in production. The pre-G7 backup, its verification and the schedule each need their
+  own owner authorization; the schedule also needs an approved design and its implementation.
+- **Unchanged:** production; the retained containers of §9; the preserved G6 rehearsal state (checkpoint X, the B2 lock, the stopped
+  guest, the evidence; G6 plan §11); G7, F6 and F7 locked; Final Core Validation absolute last.
