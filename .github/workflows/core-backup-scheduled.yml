@@ -1,0 +1,56 @@
+name: core database backup (scheduled)
+
+# Core V2 M2 B1: the daily scheduled backup of auth-service and organization-service
+# (docs/architecture/stage-21/stage-21-x-m2-pre-g7-backup-design.md §5, §14; docs/runbooks/core-backup-restore.md §2).
+#
+# INACTIVE until the owner sets the repository variable CORE_BACKUP_SCHEDULE to `enabled` (a separately authorized step, after the
+# console installation and the verifications of runbook §2). Merging this file enables nothing.
+#
+# It runs NOTHING from this repository on the server: no checkout, no script, no remote command. It opens one SSH session with the
+# dedicated scheduled-backup key, whose authorized_keys line is `restrict,command="/usr/local/libexec/nawara-core-backup/scheduled-backup.sh"`:
+# the server ignores any command and runs only its installed, root-owned, hash-pinned entry script (infra/backup/scheduled-backup.sh),
+# which runs the installed copy of backup.sh for exactly auth-service and organization-service. The server host key is pinned
+# (BACKUP_SSH_KNOWN_HOSTS; no other known-hosts file is read). The DEPLOY_SSH_* credentials are never used here.
+#
+# Manual backups stay in core-backup.yml, dispatch-only behind the `production` approval. Both share the production queue, so a backup
+# never runs during a deployment. scripts/lib/checks.mjs enforces every property of this file.
+on:
+  schedule:
+    - cron: '17 2 * * *'
+
+permissions: {}
+
+jobs:
+  backup:
+    if: github.ref == 'refs/heads/main' && vars.CORE_BACKUP_SCHEDULE == 'enabled'
+    # The scheduled-backup environment: main only, no interactive reviewer, only the BACKUP_SSH_* secrets (design §5).
+    environment: production-backup
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Start the restricted scheduled backup on the server
+        env:
+          BACKUP_SSH_HOST: ${{ secrets.BACKUP_SSH_HOST }}
+          BACKUP_SSH_PORT: ${{ secrets.BACKUP_SSH_PORT }}
+          BACKUP_SSH_USER: ${{ secrets.BACKUP_SSH_USER }}
+          BACKUP_SSH_KEY: ${{ secrets.BACKUP_SSH_KEY }}
+          BACKUP_SSH_KNOWN_HOSTS: ${{ secrets.BACKUP_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for v in BACKUP_SSH_HOST BACKUP_SSH_PORT BACKUP_SSH_USER BACKUP_SSH_KEY BACKUP_SSH_KNOWN_HOSTS; do
+            [ -n "${!v:-}" ] || { echo "::error::$v is not set in the production-backup environment"; exit 1; }
+          done
+          [[ $BACKUP_SSH_PORT =~ ^[0-9]{1,5}$ ]] || { echo "::error::BACKUP_SSH_PORT is not a port number"; exit 1; }
+          d=$(mktemp -d "$RUNNER_TEMP/backup-ssh.XXXXXX")
+          trap 'rm -rf -- "$d"' EXIT
+          printf '%s\n' "$BACKUP_SSH_KEY" >"$d/key"
+          printf '%s\n' "$BACKUP_SSH_KNOWN_HOSTS" >"$d/known_hosts"
+          ssh -F /dev/null -T -n -i "$d/key" -p "$BACKUP_SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$d/known_hosts" -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no \
+            -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o RequestTTY=no -o ConnectTimeout=30 \
+            -- "$BACKUP_SSH_USER@$BACKUP_SSH_HOST"

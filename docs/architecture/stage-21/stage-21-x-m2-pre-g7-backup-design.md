@@ -1,6 +1,8 @@
 # Stage 21.x M2 — pre-G7 production backup, verification and schedule: design
 
-- **Status:** DESIGN — **PROPOSED**, not approved. **M2 is NOT CERTIFIED.** Nothing in this document has been implemented or run.
+- **Status:** DESIGN — **APPROVED IN PRINCIPLE** by the owner (2026-10-15; decision record §12). **M2 is NOT CERTIFIED.** B1, the
+  repository side of the scheduled backup, is implemented and **inactive** (§14): nothing is installed on the server, no environment,
+  secret or variable exists, and nothing has run in production. Provider- and production-dependent details stay OPEN (§12).
 - **Authorizes nothing.** No production, guest or lab access; no backup, restore, deployment or migration; no GitHub environment,
   secret, variable or workflow change; no scheduled-backup implementation. Each step of §11 needs its own explicit owner
   authorization. **M3 (G7, F6, F7, the post-F7 backup) stays LOCKED.**
@@ -70,12 +72,12 @@ turns every merge to `main` into an unattended production execution path. With o
 approvals (V2-A.3 D-5), that is a silent bypass of the `production` approval. The scheduled path must therefore be unable to change
 **what** runs in production, not only **when** it runs.
 
-## 5. Proposed scheduling model: restricted SSH from GitHub Actions (PROPOSED)
+## 5. Scheduling model: restricted SSH from GitHub Actions (APPROVED IN PRINCIPLE; implemented by B1, §14)
 
 | Element | Proposal |
 |---|---|
 | Credential | A dedicated SSH key pair for the scheduled backup only, never the deploy password. The public key is one line in the runtime user's `authorized_keys` with `restrict` and a forced `command=` naming the server entry script, so the command the client sends is ignored: no shell, no PTY, no port, agent or X11 forwarding. The private key is held only as a `production-backup` environment secret |
-| Server entry script | A small script installed by an attended, owner-authorized action (never streamed from GitHub). It fixes `BACKUP_SERVICES="auth-service organization-service"`, ignores `SSH_ORIGINAL_COMMAND`, verifies the installed `backup.sh` against a pinned SHA-256 before running it, and exits with `backup.sh`'s exit code |
+| Server entry script | A small script installed by an attended, owner-authorized action (never streamed from GitHub). It fixes `BACKUP_SERVICES="auth-service organization-service"`, refuses (never runs) any `SSH_ORIGINAL_COMMAND`, verifies the installed `backup.sh` against a pinned SHA-256 before running it, and exits with `backup.sh`'s exit code |
 | Environment | `production-backup`: no reviewers, deployment branch policy `main` only, administrator bypass off; secrets limited to the backup host, port, user, private key and the pinned host-key fingerprint. It never holds `DEPLOY_SSH_*` |
 | Workflow | A separate scheduled workflow (for example `core-backup-scheduled.yml`), trigger `schedule` only. Manual backups keep using `core-backup.yml` under `production` approval. The job pins the server's host-key fingerprint (today's backup job pins none), uses the concurrency group `production-deploy-core-api` with `cancel-in-progress: false`, and carries an activation guard that is off when merged |
 | Repository guard | `checks.mjs` allows `production-backup` only for a schedule-only job that uses the backup credentials and a pinned fingerprint, no `DEPLOY_SSH_*` and no script payload; it recognizes the backup credentials and a plain `ssh` step as production access; `production` stays dispatch-only |
@@ -94,7 +96,7 @@ that supersedes D-2.
 
 ## 6. Risks of the scheduling model
 
-| Risk | Detail | Mitigation (PROPOSED) |
+| Risk | Detail | Mitigation (B1 implements the repository side, §14) |
 |---|---|---|
 | Production credential scope | The organization-level `DEPLOY_SSH_*` secrets stay readable by any workflow until A3.7; a mistake could wire them into the scheduled job | `checks.mjs` refuses `DEPLOY_SSH_*` in a `production-backup` job; the backup key exists only in that environment; A3.7 stays required (roadmap M4) |
 | Forced-command escape | Options other than `restrict`/`command=`, an entry script that reads `SSH_ORIGINAL_COMMAND`, or a writable entry script reopen a shell path | `restrict` plus `command=`; the entry script takes no input; the M2 record captures the `authorized_keys` line form (not the key) and the script's hash |
@@ -179,7 +181,7 @@ service (runbook §5) of the **exact stamp**, never `latest`, in a recovery envi
 older than the execution of `ownership approve`; otherwise the backup and its verification are repeated. Whether a later scheduled
 backup with verified artifacts can be that recovery point, and whether digest deployments before G7 require a new backup, are OPEN.
 
-## 11. Dependencies and step order (PROPOSED)
+## 11. Dependencies and step order (APPROVED IN PRINCIPLE)
 
 ```text
 [D1 this design reviewed; §12 decisions recorded] ─► [I1 implementation PR: scheduled workflow (guard off), checks.mjs + tests,
@@ -215,25 +217,70 @@ backup with verified artifacts can be that recovery point, and whether digest de
 unplanned touches production; a G6-preserved artifact would be touched. On STOP: record, do not correct automatically, escalate to the
 owner.
 
-## 12. Open owner decisions (before implementation)
+## 12. Owner decision record (2026-10-15)
 
-| # | Decision |
-|---|---|
-| OD-M2-1 | Scheduling model: the restricted-SSH GitHub Actions model of §5, or the server timer alternative (which supersedes D-2) |
-| OD-M2-2 | Activation guard: reuse the variable name `CORE_BACKUP_SCHEDULE` (the roadmap's name; its old meaning was removed) or a new name |
-| OD-M2-3 | Cron time (formerly 02:17 UTC) and the freshness-check threshold |
-| OD-M2-4 | Account of the forced command: the runtime user (proposed) or a dedicated system account |
-| OD-M2-5 | Historic evidence versus retention: §7 option 1, 2 or 3 |
-| OD-M2-6 | Old recovery keys: kept indefinitely, or until their last backup set is deleted |
-| OD-M2-7 | The freshness check of §9 and its list/head-only bucket credential |
-| OD-M2-8 | Bucket immutability (§9), and which form |
-| OD-M2-9 | The recovery environment: which machine (never the G6 guest), its image access (read-only registry credential or offline transfer) and a read-only bucket credential |
-| OD-M2-10 | The isolated drill (§10): required for M2 or optional; the PostgreSQL pin; the service images |
-| OD-M2-11 | Freshness: confirm 24 h, measured from the stamp to `ownership approve`; whether a verified scheduled backup can be the pre-G7 recovery point; whether digest deployments before G7 require a new backup |
-| OD-M2-12 | The production access path for P1 and E2 after the 2026-10-14 SSH refusal |
+The owner approved the M2 design in principle on 2026-10-15 with twelve directions, then four B1 implementation decisions. The owner's
+numbering does not match the OD-M2 numbering; the mapping is recorded here. **APPROVED** binds; **OPEN** is a detail still to be
+confirmed, mostly on production or the storage provider, and binds nothing.
+
+| OD-M2 | Decision | Owner direction | State |
+|---|---|---|---|
+| OD-M2-1 | Scheduling model | 1: GitHub Actions with a dedicated restricted SSH key and a server-side forced command (§5) | **APPROVED** |
+| OD-M2-2 | Activation guard | 2: `CORE_BACKUP_SCHEDULE`, initially unset (disabled); the schedule runs only when it is `enabled` | **APPROVED** |
+| OD-M2-3 | Cron and freshness threshold | 2: daily at 02:17 UTC. 5: freshness threshold 26 h | cron **APPROVED**; 26 h **OPEN** (to verify against GitHub's schedule delays and the monitor's run time) |
+| OD-M2-4 | Forced-command account and installation | B1 decision 1: the runtime user's `authorized_keys`, executables root-owned under `/usr/local/libexec/nawara-core-backup/`, installed later through a separately authorized owner-operated console session | **APPROVED**; that the scheduled identity is isolated is **NOT established** until the production privilege verification of §14 passes |
+| OD-M2-5 | Historic evidence versus retention | 3: 30 routine backup days per service; the historic certification evidence kept separately protected | **APPROVED**; the mechanism (a separate prefix the server credential cannot reach, written with an owner-held credential, §7 option 2) and its deadline (before 30 newer backup days exist) **OPEN**, provider-dependent |
+| OD-M2-6 | Recovery keys | 4: the required passphrase-protected recovery keys kept in two independent offline locations | **APPROVED**; "required" covers every key that a retained backup or evidence set needs; the duration follows the evidence decision (**OPEN**) |
+| OD-M2-7 | Freshness monitor | 5: GitHub Actions failure notifications plus an independent read-only freshness monitor | **APPROVED**; its list-only credential and run time **OPEN** (provider-dependent; not part of B1) |
+| OD-M2-8 | Storage immutability | 6: versioning and time-limited immutability | **APPROVED subject to** provider support and cost (**OPEN**) |
+| OD-M2-9 | Recovery environment | 7: a dedicated isolated recovery VM or machine, never production and never the G6 guest | **APPROVED**; the machine, its image access and its read-only bucket credential **OPEN** |
+| OD-M2-10 | Isolated drills | 8: successful isolated Auth and Organization recovery drills are **required** before M2 certification | **APPROVED**; the PostgreSQL pin and the service images **OPEN** |
+| OD-M2-11 | Freshness of the G7 recovery point | 9: a verified pre-G7 recovery point no older than 24 h, reassessed after significant production changes. 12: a newer scheduled backup may replace the manually approved recovery point only after equivalent artifact verification, authority-state checks and isolated drills | **APPROVED**; what counts as a "significant production change" **OPEN** (proposed: any deployment, migration, credential rotation, ownership command or restore) |
+| OD-M2-12 | Production access path | 11: initial production access only through the owner-operated console; never unattended administrative access | **APPROVED** |
+| — | Recurring drill cadence (runbook §1; production readiness §3; A13 O6) | 10: monthly attended recovery drills, each separately authorized | **APPROVED** |
+
+**B1 implementation decisions (2026-10-15):** root-owned executables under `/usr/local/libexec/nawara-core-backup/` (OD-M2-4); native
+OpenSSH with strict host-key verification against a pinned known-hosts entry; `flock -n` in the entry script, `backup.sh` unchanged;
+this record in the B1 pull request.
 
 ## 13. Boundary
 
 M2 ends when its record (C1) is merged. M3 starts only under its own authorization: the production Tier B configuration checks and the
 first digest deployments (G6 plan §16.1; R3 installed before any Auth image carrying the readiness check), G7 with the reference of R8,
 F6, F7 and the post-F7 backup. Nothing in this document changes G7, F6, F7 or Final Core Validation, which stays the absolute last.
+
+## 14. B1: the repository side of the scheduled backup (implemented, inactive)
+
+B1 implements §5 in the repository only. **Nothing is installed, configured or activated**: the server, the `production-backup`
+environment, its secrets and the `CORE_BACKUP_SCHEDULE` variable are untouched, and each later step keeps its own authorization (§11).
+
+| Component | What it does |
+|---|---|
+| `.github/workflows/core-backup-scheduled.yml` | `schedule` only (`17 2 * * *`); `if: github.ref == 'refs/heads/main' && vars.CORE_BACKUP_SCHEDULE == 'enabled'`; `environment: production-backup`; the production queue (`production-deploy-core-api`, never cancelled); `permissions: {}`; no checkout, no action, no script: one native `ssh` with `-F /dev/null`, no agent, no password, `StrictHostKeyChecking=yes` against the pinned `BACKUP_SSH_KNOWN_HOSTS` only, nothing forwarded, and **no remote command** |
+| `infra/backup/scheduled-backup.sh` | The forced-command entry. Refuses any client command or argument (64; never run, never printed); refuses an unsafe installation (65: not in `INSTALL_DIR`, inside the backup working directory, a symbolic link, not owned by uid 0, writable by group or others); refuses a `backup.sh` that does not match its embedded SHA-256 (66); refuses a missing tool (69); takes `flock -n` (75 when held); then runs `env -i HOME PATH BACKUP_SERVICES="auth-service organization-service" bash <INSTALL_DIR>/backup.sh` and returns its exit code (0, 1, 3) |
+| `infra/backup/scheduled-backup.authorized_keys.template` | The one line `restrict,command="/usr/local/libexec/nawara-core-backup/scheduled-backup.sh" ssh-ed25519 <placeholder> …`; holds no key |
+| `scripts/lib/checks.mjs` | A native `ssh`, `scp`, `sftp` or `ssh-keyscan`, and any `BACKUP_SSH_*` secret, is production access in every workflow. `production-backup` is reserved for this one job, which is held to every property above; `CORE_BACKUP_SCHEDULE` may be read by no other workflow; `production` stays dispatch-only. The entry script's pins must equal the repository (the SHA-256 of `backup.sh`, the install directory, uid 0, the two services), and the template must be exactly the restricted line |
+
+`backup.sh`, `restore-drill.sh` and `core-backup.yml` are **unchanged**. The installed copy of `backup.sh` lies outside
+`$HOME/nawara-core/backup/`: `backup.sh` refuses any file there containing a private-key marker, and its own text contains one.
+
+**Security limits (not claimed):**
+- **Root-owned files are not isolation.** A runtime user with Docker access (the backup needs `docker exec` into the database containers)
+  or sudo is root-equivalent and can replace the installed files. B1 closes the path *GitHub `main` → production*; it does not make the
+  runtime user less privileged. Before activation, the console session records, read-only: `id` and the groups of the runtime user
+  (docker membership is root-equivalent), `sudo -n -l`, the owner and modes of `/usr/local/libexec/nawara-core-backup/` and its files, and
+  the `authorized_keys` line form (no key). The scheduled identity is not called isolated until that verification is recorded.
+- **The login shell runs first.** sshd starts the forced command through the runtime user's shell, so that user's own shell start-up files
+  run before it (`restrict` disables only `~/.ssh/rc`). They are part of the same trust boundary as the runtime user.
+- **Unverified platform behaviour** (§6): whether GitHub creates an unprotected environment for a skipped job that references a missing
+  one; whether a queued run cancels a pending one in the production queue; who receives scheduled-run failure notifications; the 60-day
+  schedule disable in a public repository. `sshd` key authentication, the OpenSSH version for `restrict`, `AuthorizedKeysFile`, sudo and
+  `flock` on the server are verified at the console (P1).
+
+**Merge blocker:** B1 is merged only after the `production-backup` environment exists with its `main`-only branch policy and
+administrator bypass off (E1), or after GitHub's environment-creation behaviour for a skipped job is independently verified. Until then a
+merge could let GitHub create the environment without protection.
+
+**Next, each separately authorized:** E1 the environment; the merge; P1 the console preflight (including the privilege verification
+above); E2 the root-owned installation and the `authorized_keys` line; E3 the secrets; P2–P4 the pre-G7 backup, its verification and the
+required drills; the evidence copy (OD-M2-5); E4 `CORE_BACKUP_SCHEDULE=enabled`; E5 the first scheduled run; C1 the M2 record.

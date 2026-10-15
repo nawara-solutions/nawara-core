@@ -1,0 +1,6 @@
+# Core V2 M2 B1: the ONE authorized_keys line of the scheduled-backup key (docs/runbooks/core-backup-restore.md §2). TEMPLATE ONLY:
+# it holds no key. At the separately authorized console installation, the owner replaces the placeholder with the PUBLIC half of the
+# dedicated scheduled-backup key (generated off the server; the private half lives only in the production-backup environment) and adds
+# the resulting line to the runtime user's authorized_keys. No other option, no second line, never this key without `restrict`.
+# `restrict` disables every forwarding, the PTY, ~/.ssh/rc and X11; `command=` makes the server ignore whatever command the client sends.
+restrict,command="/usr/local/libexec/nawara-core-backup/scheduled-backup.sh" ssh-ed25519 REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY nawara-core-scheduled-backup
