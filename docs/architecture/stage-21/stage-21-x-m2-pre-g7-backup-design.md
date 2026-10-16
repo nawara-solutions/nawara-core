@@ -100,7 +100,7 @@ that supersedes D-2.
 |---|---|---|
 | Production credential scope | The organization-level `DEPLOY_SSH_*` secrets stay readable by any workflow until A3.7; a mistake could wire them into the scheduled job | `checks.mjs` refuses `DEPLOY_SSH_*` in a `production-backup` job; the backup key exists only in that environment; A3.7 stays required (roadmap M4) |
 | Forced-command escape | Options other than `restrict`/`command=`, an entry script that reads `SSH_ORIGINAL_COMMAND`, or a writable entry script reopen a shell path | `restrict` plus `command=`; the entry script takes no input; the M2 record captures the `authorized_keys` line form (not the key) and the script's hash |
-| Server file ownership | The forced command runs as the runtime user, who can already run Docker (root-equivalent) and owns `$HOME/nawara-core/backup`; anything able to write as that user can change the entry script | The entry script and the pinned `backup.sh` copy are installed read-only (mode 0500/0400), their hashes recorded; a change is an attended, authorized reinstall. A dedicated system account would need Docker access too and is not simpler (OPEN) |
+| Server file ownership | The forced command runs as the runtime user, who can already run Docker (root-equivalent) and owns `$HOME/nawara-core/backup`; anything able to write as that user can change the entry script | The entry script and the pinned `backup.sh` copy are installed root-owned and read-only (mode 0555/0444, directory 0755: the runtime user must execute and read them; E2 corrects the earlier 0500/0400, which the runtime user could not run), their hashes recorded; a change is an attended, authorized reinstall. A dedicated system account would need Docker access too and is not simpler (OPEN) |
 | Script drift | Scheduled runs use the installed `backup.sh`, not `main`'s; a later `backup.sh` change does not reach the schedule until reinstalled | Record the installed hash in the M2 record; after any `backup.sh` change, an authorized reinstall or a recorded decision to keep the installed version |
 | Key authentication on the server | Today's deploy path uses password authentication; whether production `sshd` accepts key authentication for the runtime user is not recorded | TO VERIFY read-only in the preflight (§11 P1) |
 | Workflow scheduling | GitHub may delay or drop scheduled runs under load, and disables schedules of a public repository after 60 days of inactivity (TO VERIFY); a run that never starts produces no failure | An off-the-hour cron; the freshness check of §9; the runbook §4 staleness rule stays |
@@ -281,6 +281,27 @@ environment, its secrets and the `CORE_BACKUP_SCHEDULE` variable are untouched, 
 administrator bypass off (E1), or after GitHub's environment-creation behaviour for a skipped job is independently verified. Until then a
 merge could let GitHub create the environment without protection.
 
+**E2 repository preparation (§15).** The installation itself is still unperformed.
+
 **Next, each separately authorized:** E1 the environment; the merge; P1 the console preflight (including the privilege verification
 above); E2 the root-owned installation and the `authorized_keys` line; E3 the secrets; P2–P4 the pre-G7 backup, its verification and the
 required drills; the evidence copy (OD-M2-5); E4 `CORE_BACKUP_SCHEDULE=enabled`; E5 the first scheduled run; C1 the M2 record.
+
+## 15. E2: the restricted identity, repository preparation (installation NOT performed)
+
+E2 installs the B1 entry and the restricted `authorized_keys` line at the console (§11, OD-M2-4, OD-M2-12). This section prepares it in
+the repository only. **Nothing is installed**: E1 and P1 (PASSED 2026-10-16) are the only production steps done; E2, E3, E4 and P2 to P4
+each keep their own authorization, and `CORE_BACKUP_SCHEDULE` stays absent.
+
+| Component | What it adds |
+|---|---|
+| `infra/backup/scheduled-backup.sh` | One refusal: the entry never runs as root (exit 65), so the key works only from the runtime user's `authorized_keys`. `backup.sh` and its pin are unchanged |
+| `infra/backup/verify-scheduled-backup-install.sh` | The **read-only** console verification after the installation: install path and ancestors, the two files' owner, exact modes and hashes (the entry against the hash computed off the server, `backup.sh` against the entry's pin), `sshd -T` for the runtime user (`pubkeyauthentication yes`, `forcecommand none`, `authorizedkeyscommand none`, `permituserenvironment no`, `strictmodes yes`, OpenSSH ≥ 7.2), exactly one scheduled line in every `AuthorizedKeysFile`, of exactly the template's form, whose key appears on no other line, and the entry's refusal (64) of a command and an argument, probed as the runtime user. Prints the key's fingerprint, never the key. Exit 0 / 1 / 2 |
+| `scripts/lib/checks.mjs` | `checkScheduledBackupEntry` also requires the root refusal; `checkScheduledBackupVerifier` pins the verifier to the entry and the template and keeps it read-only (no write, mode, container, network or privilege command) |
+| [E2 runbook](../../runbooks/core-backup-scheduled-install.md) | The owner-operated installation: prerequisites, the exact three changes, verification, stop conditions, rollback, the record, and the open decisions |
+
+**Corrected:** §6 recorded modes 0500/0400. A root-owned 0500 entry cannot be run by the runtime user, so the scheduled session would
+fail. The runbook, the B1 tests and E2 use 0555/0444 with the directory at 0755.
+
+**Still not claimed:** isolation of the runtime user (§14). The verifier only records the user's groups. **Not part of E2:** an SSH
+login with the scheduled key, because without a command it runs a production backup (P2).

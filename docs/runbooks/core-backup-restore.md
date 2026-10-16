@@ -93,7 +93,9 @@ holds the lock (`$HOME/nawara-core/.scheduled-backup.lock`); nothing was done.
    `pubkeyauthentication`, `authorizedkeysfile`, `permituserenvironment` and `acceptenv`; the OpenSSH version (`restrict` needs 7.2 or
    later); `command -v flock`. **The scheduled identity is not called isolated until this is recorded**: root-owned files stop this key
    and the job paths from changing what runs, not a root-equivalent runtime user.
-3. **E2, installation (console, as root):** `install -d -o root -g root -m 0755 /usr/local/libexec/nawara-core-backup`, then
+3. **E2, installation (console, as root):** the step-by-step procedure, its verification
+   (`infra/backup/verify-scheduled-backup-install.sh`, read-only), stop conditions and rollback are in the
+   [E2 runbook](core-backup-scheduled-install.md). In short: `install -d -o root -g root -m 0755 /usr/local/libexec/nawara-core-backup`, then
    `install -o root -g root -m 0555` the reviewed `infra/backup/scheduled-backup.sh` and `install -o root -g root -m 0444` the reviewed
    `infra/backup/backup.sh` into it, both from the merged revision; verify `sha256sum` of the installed `backup.sh` against the script's
    `BACKUP_SH_SHA256`. Never install them under `$HOME/nawara-core/backup`: `backup.sh` refuses a private-key marker there, and its own text
