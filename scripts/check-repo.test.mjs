@@ -12,6 +12,14 @@ import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOAR
 import ts from 'typescript';
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
 
+// V2-A.3 A3.6: the host-key guard step, exactly as every real production SSH job carries it.
+const HOST_KEY_GUARD_STEP = `      - name: Require the pinned production host key
+        env:
+          DEPLOY_SSH_FINGERPRINT: \${{ secrets.DEPLOY_SSH_FINGERPRINT }}
+        run: |
+          [[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] \\
+            || { echo "::error::DEPLOY_SSH_FINGERPRINT is missing or is not a SHA256 host-key fingerprint; nothing was sent to the server"; exit 1; }
+`;
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
 on:
@@ -23,8 +31,9 @@ jobs:
     ${concurrency}
     runs-on: ubuntu-latest
     steps:
-      - uses: appleboy/ssh-action@v1
+${HOST_KEY_GUARD_STEP}      - uses: appleboy/ssh-action@v1
         with:
+          fingerprint: \${{ secrets.DEPLOY_SSH_FINGERPRINT }}
           script: |
 ${script.split('\n').map((l) => '            ' + l).join('\n')}
 `;
@@ -234,6 +243,81 @@ test('A3.5: removing the environment from any real production workflow is refuse
     assert.notEqual(without, text, name);
     assert.match(checkWorkflowSafety(name, without).join(), /must declare a protected environment/, name);
   }
+});
+
+// ---------------------------------------------------------------- V2-A.3 A3.6: the production host key is pinned
+const FINGERPRINT_INPUT = '          fingerprint: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}\n';
+const GUARD_BLOCK = /      - name: Require the pinned production host key\n(?:.*\n){5}/;
+
+test('A3.6: every real production SSH step pins the host key behind the guard', () => {
+  for (const name of PRODUCTION_WORKFLOWS) {
+    const text = workflow(name);
+    const doc = parse(text);
+    const [, job] = Object.entries(doc.jobs).find(([, j]) => (j.steps ?? []).some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action')));
+    const sshAt = job.steps.findIndex((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
+    assert.equal(job.steps[sshAt].with.fingerprint, '${{ secrets.DEPLOY_SSH_FINGERPRINT }}', name);
+    assert.equal(job.steps[sshAt - 1].name, 'Require the pinned production host key', name);
+    assert.equal(job.steps[sshAt - 1].env.DEPLOY_SSH_FINGERPRINT, '${{ secrets.DEPLOY_SSH_FINGERPRINT }}', name);
+    assert.match(text, GUARD_BLOCK, name);
+  }
+});
+
+test('A3.6: a missing, literal or substituted fingerprint is refused in every real production workflow', () => {
+  for (const name of PRODUCTION_WORKFLOWS) {
+    const text = workflow(name);
+    assert.match(checkWorkflowSafety(name, swap(text, FINGERPRINT_INPUT, '')).join(), /must pin the production host key/, name);
+    for (const value of [`SHA256:${'A'.repeat(43)}`, '${{ secrets.DEPLOY_SSH_HOST_KEY }}', '${{ vars.DEPLOY_SSH_FINGERPRINT }}', "${{ secrets.DEPLOY_SSH_FINGERPRINT || '' }}", "''"]) {
+      const changed = swap(text, FINGERPRINT_INPUT, `          fingerprint: ${value}\n`);
+      assert.match(checkWorkflowSafety(name, changed).join(), /fingerprint must be exactly \$\{\{ secrets\.DEPLOY_SSH_FINGERPRINT \}\}/, `${name}: ${value}`);
+    }
+  }
+});
+
+test('A3.6: removing the guard from any real production workflow is refused', () => {
+  for (const name of PRODUCTION_WORKFLOWS) {
+    const text = workflow(name);
+    const without = text.replace(GUARD_BLOCK, '');
+    assert.notEqual(without, text, name);
+    assert.match(checkWorkflowSafety(name, without).join(), /must be preceded by the host-key guard step/, name);
+  }
+});
+
+test('A3.6: a guard after the SSH step, without failure, skippable or reading another value is refused', () => {
+  const after = deploy().replace(HOST_KEY_GUARD_STEP, '') + HOST_KEY_GUARD_STEP;
+  assert.match(checkWorkflowSafety('d.yml', after).join(), /must be preceded by the host-key guard step/);
+  const weakened = [
+    HOST_KEY_GUARD_STEP.replace('exit 1; }', 'exit 0; }'),
+    HOST_KEY_GUARD_STEP.replace(' exit 1; }', ' }'),
+    HOST_KEY_GUARD_STEP.replace('{43}', '+'),
+    HOST_KEY_GUARD_STEP.replace('^SHA256:', '^'),
+    HOST_KEY_GUARD_STEP.replace('        env:\n', '        if: false\n        env:\n'),
+    HOST_KEY_GUARD_STEP.replace('        env:\n', '        continue-on-error: true\n        env:\n'),
+    HOST_KEY_GUARD_STEP.replace('        env:\n', '        shell: sh\n        env:\n'),
+    HOST_KEY_GUARD_STEP.replace('${{ secrets.DEPLOY_SSH_FINGERPRINT }}', '${{ vars.DEPLOY_SSH_FINGERPRINT }}'),
+    HOST_KEY_GUARD_STEP.replace('${{ secrets.DEPLOY_SSH_FINGERPRINT }}', `SHA256:${'A'.repeat(43)}`),
+  ];
+  for (const guard of weakened) {
+    assert.notEqual(guard, HOST_KEY_GUARD_STEP);
+    assert.match(checkWorkflowSafety('d.yml', deploy().replace(HOST_KEY_GUARD_STEP, guard)).join(), /must be preceded by the host-key guard step/, guard);
+  }
+});
+
+test('A3.6: a fingerprint variable in any env, or a proxy, is refused', () => {
+  const workflowEnv = deploy().replace('\njobs:\n', '\nenv:\n  PLUGIN_FINGERPRINT: x\njobs:\n');
+  assert.match(checkWorkflowSafety('d.yml', workflowEnv).join(), /no fingerprint variable may be set at workflow level \(found: PLUGIN_FINGERPRINT\)/);
+  const jobEnv = deploy().replace('    runs-on: ubuntu-latest\n', '    runs-on: ubuntu-latest\n    env:\n      SSH_FINGERPRINT: x\n');
+  assert.match(checkWorkflowSafety('d.yml', jobEnv).join(), /no fingerprint variable may be set at job level \(found: SSH_FINGERPRINT\)/);
+  const stepEnv = deploy().replace('      - uses: appleboy/ssh-action@v1\n', '      - uses: appleboy/ssh-action@v1\n        env:\n          INPUT_FINGERPRINT: x\n');
+  assert.match(checkWorkflowSafety('d.yml', stepEnv).join(), /no fingerprint variable may be set at step 2 level \(found: INPUT_FINGERPRINT\)/);
+  for (const input of ['proxy_fingerprint: x', 'proxy_host: x']) {
+    const proxied = deploy().replace(FINGERPRINT_INPUT, `${FINGERPRINT_INPUT}          ${input}\n`);
+    assert.match(checkWorkflowSafety('d.yml', proxied).join(), /must not use a proxy/, input);
+  }
+});
+
+test('A3.6: the fingerprint secret stays out of the Auth verify job (no production credential before the approval)', () => {
+  const leaked = swap(DEPLOY, '          DIGEST: ${{ inputs.digest }}\n', '          DIGEST: ${{ inputs.digest }}\n          FP: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}\n');
+  assert.match(checkDigestDeployFor('d.yml', leaked, AUTH).join(), /job "verify": must not use production SSH or the DEPLOY_SSH_\* credentials/);
 });
 
 test('A3.5: core-backup is manual only (B1): re-adding its schedule is refused', () => {

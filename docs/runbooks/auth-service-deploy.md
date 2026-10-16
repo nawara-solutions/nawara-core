@@ -102,6 +102,13 @@ The typed confirmation, the `main` guard and the artifact validation stay as ind
 reviewer gate and the deployment was one job.* **Known limitation until A3.7:** the organization-level `DEPLOY_SSH_*` secrets still
 exist and are readable by a workflow that does not declare the environment.
 
+**Pinned host key (V2-A.3 A3.6).** The deploy job pins Server 1's SSH host key: `fingerprint: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}`,
+behind a guard step that stops the job while that `production` environment secret is absent or is not `SHA256:` + 43 base64
+characters. Until the owner installs it, **every run fails at that guard, before any connection**. A wrong value fails as a
+fingerprint mismatch before authentication. The value is the fingerprint of the key type the action negotiates (ECDSA if Server 1
+offers it, otherwise RSA, otherwise Ed25519), read at a trusted console, never from a network scan
+([V2-A.3 record §9](../architecture/core-v2-a-3-ci-and-ruleset.md)).
+
 ## 3. Rollback
 
 - To an earlier **labelled** `main` artifact: deploy its index digest (section 2).

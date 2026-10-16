@@ -36,6 +36,20 @@ const INPUT_INTERPOLATION = /\$\{\{\s*(inputs|github\.event\.inputs)\./;
 export const PRODUCTION_ENVIRONMENTS = ['production'];
 /** A use of the production SSH credentials, in any spelling, or of every secret at once. */
 const PRODUCTION_CREDENTIAL = /secrets\s*(?:\.\s*|\[\s*\\?['"])DEPLOY_SSH_|toJSON\(\s*secrets\s*\)/;
+/**
+ * V2-A.3 A3.6: the production host key is pinned. appleboy/ssh-action (drone-ssh / easyssh-proxy) accepts ANY host key when its
+ * `fingerprint` is empty, so every SSH step reads exactly this secret, and a guard step before it stops the job while the secret is
+ * absent or malformed. drone-ssh also reads the fingerprint from PLUGIN_FINGERPRINT and SSH_FINGERPRINT (before INPUT_FINGERPRINT), so
+ * no fingerprint variable may be set in an `env:` other than the guard's own.
+ */
+export const HOST_KEY_SECRET = 'DEPLOY_SSH_FINGERPRINT';
+const HOST_KEY_EXPRESSION = /^\$\{\{\s*secrets\.DEPLOY_SSH_FINGERPRINT\s*\}\}$/;
+/** The guard's script, line by line (compared after trimming each line). */
+export const HOST_KEY_GUARD_RUN = [
+  '[[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] \\',
+  '|| { echo "::error::DEPLOY_SSH_FINGERPRINT is missing or is not a SHA256 host-key fingerprint; nothing was sent to the server"; exit 1; }',
+];
+const FINGERPRINT_VARIABLE = /FINGERPRINT/i;
 
 /**
  * Core V2 M2 B1: the scheduled backup. ONE workflow, schedule-only, in its own environment `production-backup` (main only, no
@@ -84,6 +98,34 @@ function firstCommandLine(script) {
     .split('\n')
     .map((l) => l.trim())
     .find((l) => l !== '' && !l.startsWith('#'));
+}
+
+/** V2-A.3 A3.6: every production SSH step pins the host key, behind a fail-closed guard; no fingerprint override in any env. */
+function hostKeyPinProblems(where, doc, job, steps) {
+  const out = [];
+  const isGuard = (s) => String(s?.env?.[HOST_KEY_SECRET] ?? '').trim().match(HOST_KEY_EXPRESSION) !== null && s.if === undefined
+    && s['continue-on-error'] === undefined && s.shell === undefined && s.uses === undefined
+    && String(s.run ?? '').split('\n').map((l) => l.trim()).filter((l) => l !== '').join('\n') === HOST_KEY_GUARD_RUN.join('\n');
+  steps.forEach((step, i) => {
+    if (!String(step.uses ?? '').startsWith('appleboy/ssh-action')) return;
+    const fingerprint = step.with?.fingerprint;
+    if (fingerprint === undefined) {
+      out.push(`${where}: the SSH step must pin the production host key (fingerprint: \${{ secrets.${HOST_KEY_SECRET} }}); without it any host key is accepted`);
+    } else if (!HOST_KEY_EXPRESSION.test(String(fingerprint).trim())) {
+      out.push(`${where}: the SSH step's fingerprint must be exactly \${{ secrets.${HOST_KEY_SECRET} }} (no literal, other secret or variable)`);
+    }
+    const proxy = Object.keys(step.with ?? {}).filter((k) => k.startsWith('proxy_'));
+    if (proxy.length > 0) out.push(`${where}: the SSH step must not use a proxy (found: ${proxy.join(', ')})`);
+    if (!steps.slice(0, i).some(isGuard)) {
+      out.push(`${where}: the SSH step must be preceded by the host-key guard step (env ${HOST_KEY_SECRET} from the secret, the exact check, exit 1; no if, continue-on-error or shell override)`);
+    }
+  });
+  const envs = [['workflow', doc?.env], ['job', job.env], ...steps.map((s, i) => [`step ${i + 1}`, isGuard(s) ? {} : s.env])];
+  for (const [level, env] of envs) {
+    const keys = Object.keys(env && typeof env === 'object' ? env : {}).filter((k) => FINGERPRINT_VARIABLE.test(k));
+    if (keys.length > 0) out.push(`${where}: no fingerprint variable may be set at ${level} level (found: ${keys.join(', ')}); drone-ssh would read it instead of the pinned input`);
+  }
+  return out;
 }
 
 function concurrencyProblems(where, cfg) {
@@ -291,6 +333,7 @@ export function checkWorkflowSafety(fileName, text) {
         if (first !== 'set -euo pipefail') problems.push(`${where}: the remote script must start with "set -euo pipefail" (starts with: ${first ?? 'nothing'})`);
         if (/\$\{\{\s*secrets\./.test(String(step.with?.script ?? ''))) problems.push(`${where}: a secret is interpolated into the remote script (pass it through env instead)`);
       }
+      problems.push(...hostKeyPinProblems(where, doc, job, steps));
       const guard = String(job.if ?? '');
       if (!guard.includes('refs/heads/main')) problems.push(`${where}: a production deployment must be restricted to refs/heads/main`);
       problems.push(...concurrencyProblems(where, job.concurrency ?? doc.concurrency));
