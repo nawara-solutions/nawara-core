@@ -142,6 +142,12 @@ does the job start and receive the production SSH credentials (environment secre
 prevent self-approval here, so this is a deliberate second owner action, not independent review. **Reject** (or cancel) a run you no
 longer want instead of leaving it waiting: whether a waiting run holds the `production-deploy-core-api` queue has not been observed yet.
 
+**Pinned host key (V2-A.3 A3.6).** The manual backup pins Server 1's SSH host key (`DEPLOY_SSH_FINGERPRINT`, a `production`
+environment secret), as every production SSH workflow does. Until it is installed, the run stops at the guard step before any
+connection, and nothing is backed up. Install it before relying on this workflow
+([V2-A.3 record §9](../architecture/core-v2-a-3-ci-and-ruleset.md)). The scheduled backup is unaffected: it pins its own host key
+through `BACKUP_SSH_KNOWN_HOSTS`.
+
 Per service, a run succeeds only when every step does, in this order: `pg_dump -Fc` **inside the database container** (its own
 PostgreSQL major; a newer client's dump does not restore on an older server) over the local socket as the least-privileged identity
 that reads everything (`organization_migrator` and `audit_migrator`, the non-superuser owners; `auth_app`, read-only use, no privilege

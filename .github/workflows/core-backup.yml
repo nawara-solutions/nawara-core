@@ -37,12 +37,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Package the backup script
         run: echo "BACKUP_B64=$(base64 -w0 infra/backup/backup.sh)" >> "$GITHUB_ENV"
+      # V2-A.3 A3.6: the production host key is pinned. An empty fingerprint would make the SSH action accept ANY host key, so the run
+      # stops here, before any connection, until DEPLOY_SSH_FINGERPRINT holds the SHA256 fingerprint of the key the server negotiates.
+      - name: Require the pinned production host key
+        env:
+          DEPLOY_SSH_FINGERPRINT: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}
+        run: |
+          [[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] \
+            || { echo "::error::DEPLOY_SSH_FINGERPRINT is missing or is not a SHA256 host-key fingerprint; nothing was sent to the server"; exit 1; }
       - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
           host: ${{ secrets.DEPLOY_SSH_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          fingerprint: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}
           envs: BACKUP_B64,BACKUP_SERVICES
           script: |
             set -euo pipefail

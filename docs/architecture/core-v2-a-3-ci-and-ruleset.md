@@ -265,3 +265,55 @@ work certified in [`core-v2-a0-immutable-deployments.md`](core-v2-a0-immutable-d
 deferred**. The immutable-digest deployment work is unchanged by this section.
 
 **Unchanged:** A3.6 and A3.7 deferred; G6 deferred; G7, F6 and F7 locked; A12.10 not started; Final Core Validation absolute last.
+
+## 9. A3.6 in progress: the environment credentials and the pinned host key (2026-10-16)
+
+**What the first use of the environment showed.** The first production SSH run through the `production` environment (the M2 P2
+backup, run `38965127911`) logged in to Server 1 but stopped in `backup.sh` preflight, before any write: the environment's user value
+was not the runtime user (`ubuntu`) whose home holds the production state. Every earlier production SSH run had used the organization
+secrets. The run also showed, in practice, that the environment secrets take precedence over the same-named organization secrets. The
+owner corrected the four environment secrets on 2026-10-16 (user `ubuntu`; host and port from the pinned Server 1 record; the password
+from the owner's custody). This is verified at the metadata level only (names and dates); a production run has not yet used them.
+
+**The host key was never verified.** The six production SSH workflows run `appleboy/ssh-action@0ff4204` (v1.2.5), which downloads
+`drone-ssh` 1.8.2 (`easyssh-proxy` 1.5.0, Go `x/crypto` 0.45.0). With an empty `fingerprint` input it uses
+`ssh.InsecureIgnoreHostKey()` and accepts any host key; with a value it accepts only a key whose `ssh.FingerprintSHA256` equals it
+exactly (`SHA256:` + 43 base64 characters). The production password was therefore sent without authenticating the server.
+
+**The change (this section's pull request).** Every production SSH step reads `fingerprint: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}`, and
+a guard step before it, in the same job, stops the job unless that secret is exactly `SHA256:` + 43 base64 characters. The guard is
+needed because an empty secret would silently turn verification off. `scripts/lib/checks.mjs` refuses a production SSH step:
+- without that exact input (a literal, another secret, a variable or an expression);
+- without the guard before it (the exact check and `exit 1`; no `if`, `continue-on-error` or `shell` override; the value from the
+  secret);
+- with any `proxy_*` input;
+- in a workflow, job or step that sets any other `*FINGERPRINT*` variable. drone-ssh reads `PLUGIN_FINGERPRINT` and
+  `SSH_FINGERPRINT` before the action's input.
+
+The secret falls under the existing `DEPLOY_SSH_` rules, so it never reaches Auth's `verify` job, an image build or `production-backup`.
+Triggers, environment, queue, credentials and remote scripts are unchanged.
+
+**Which key is negotiated (tested, `scripts/deploy-tests/ssh-host-key-pinning.test.mjs`).** The release binary runs only after its
+SHA-256 equals the pin (`1e10a997…bb24`, from the release API's digest and its `checksums.txt`), against throwaway local `sshd`
+instances with synthetic keys:
+- with ECDSA, RSA and Ed25519 offered, it negotiates **ECDSA**;
+- without ECDSA, it negotiates **RSA**;
+- with Ed25519 alone, it negotiates **Ed25519**;
+- a wrong pin fails during key exchange, and the server logs no authentication, so no credential is sent;
+- an empty pin connects to any host key.
+
+The G6 Ed25519 pin of Server 1 is therefore the right value only if Server 1 offers neither ECDSA nor RSA.
+
+**Operational dependency.** This change may be merged before the fingerprint is installed. Until `DEPLOY_SSH_FINGERPRINT` holds the
+correct value, **every manual production SSH workflow fails closed at the guard, before any connection**: the backup, the three digest
+deployments, the RabbitMQ provisioning and the Auth credential rotation. The value is set only after the negotiated key type of
+Server 1 is established from trusted console evidence: the host keys `sshd` offers, and that key's fingerprint, read in a session
+whose Ed25519 fingerprint matches the G6 pin. Never from a network scan. A wrong value also fails closed, as a fingerprint mismatch
+before authentication.
+
+**Still open (A3.6):**
+- the console evidence and the secret, each separately authorized;
+- the first production run that proves the corrected credentials and the pin together;
+- the observations deferred in §8.
+
+A3.7 (restricting the organization secrets) stays deferred. G7, F6 and F7 stay locked.
