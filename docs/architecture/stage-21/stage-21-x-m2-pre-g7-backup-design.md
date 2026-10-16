@@ -305,3 +305,17 @@ fail. The runbook, the B1 tests and E2 use 0555/0444 with the directory at 0755.
 
 **Still not claimed:** isolation of the runtime user (§14). The verifier only records the user's groups. **Not part of E2:** an SSH
 login with the scheduled key, because without a command it runs a production backup (P2).
+
+## 16. E3: the credentials, repository preparation (no key generated, no secret set)
+
+E3 sets the five `production-backup` environment secrets that connect the B1 job to the E2 identity (§5, §11). This section prepares E3
+in the repository only: **no key exists, no secret is set, and nothing in GitHub or production changed.**
+
+| Component | What it adds |
+|---|---|
+| [E3 runbook](../../runbooks/core-backup-scheduled-credentials.md) | The credential set, with each secret's exact value and source: `BACKUP_SSH_KNOWN_HOSTS` is one `[HOST]:PORT ssh-ed25519 …` line, never the host's `.pub` file. Also what the credential can and cannot do, the order (E2 → E3 → E4, with P2 independent), and the owner procedure: console host key, workstation checks, read-only GitHub pre-state, setting the secrets from files or prompts, read-only verification. Plus stop conditions, custody, revocation, rotation, the record, and residual risks |
+| `scripts/deploy-tests/scheduled-backup-credentials.test.mjs` | The credential contract, end to end with synthetic keys: the real workflow step and real OpenSSH against a loopback, unprivileged `sshd`, whose template-form `restrict,command=` line runs the real entry. It proves: correct values run only the entry; a wrong known-hosts form, host key, host or port fails closed; a missing secret or a malformed port stops before connecting; a wrong key or user has no fallback; a command, a shell, sftp, a PTY and forwarding are all refused; and nothing is left on the runner. Skipped where no `sshd` can be started |
+
+**Order (§11, unchanged):** E2 (console installation, verifier PASS) → E3 → E4 after P3 (and P4 if decided) → E5. P2, the manual pre-G7
+backup through `core-backup.yml`, does not use the scheduled key and is independent of E2 and E3. **Open:** the deletion timing of the
+workstation key copy, and an optional attended refusal probe before E5 (E3 runbook §9).

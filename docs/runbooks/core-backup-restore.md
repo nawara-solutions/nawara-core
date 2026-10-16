@@ -102,7 +102,8 @@ holds the lock (`$HOME/nawara-core/.scheduled-backup.lock`); nothing was done.
    contains one. Generate the dedicated ed25519 key pair **off the server**; add exactly one line, the
    [template](../../infra/backup/scheduled-backup.authorized_keys.template) with its placeholder replaced by the public key, to the
    runtime user's `authorized_keys`. The private key goes only into the `production-backup` environment.
-4. **E3, secrets** of `production-backup`: `BACKUP_SSH_HOST`, `BACKUP_SSH_PORT`, `BACKUP_SSH_USER`, `BACKUP_SSH_KEY`,
+4. **E3, secrets** of `production-backup` (the step-by-step procedure, value formats and checks are in the
+   [E3 runbook](core-backup-scheduled-credentials.md)): `BACKUP_SSH_HOST`, `BACKUP_SSH_PORT`, `BACKUP_SSH_USER`, `BACKUP_SSH_KEY`,
    `BACKUP_SSH_KNOWN_HOSTS` (the server's host key line, taken from the console, never by `ssh-keyscan` over the network). Never the
    `DEPLOY_SSH_*` credentials.
 5. The pre-G7 backup, its verification and the required isolated drills (design §10, §11; P2–P4) and the evidence copy (OD-M2-5).
