@@ -11,7 +11,7 @@
 #   env -i HOME=… PATH=<fixed> BACKUP_SERVICES="auth-service organization-service" bash INSTALL_DIR/backup.sh
 #
 # Exit: backup.sh's own 0 / 1 / 3 (runbook §3); 64 a client command was sent (refused, never run); 65 the installation is unsafe
-# (location, owner, mode, symbolic link); 66 the installed backup.sh does not match the pin; 69 a required tool is missing; 75 another run
+# (location, owner, mode, symbolic link) or it runs as root (M2 E2: the key belongs to the runtime user only); 66 the installed backup.sh does not match the pin; 69 a required tool is missing; 75 another run
 # holds the lock (nothing was done).
 #
 # NOT isolation by itself: root-owned files stop this key and the other job paths from changing what runs, but a runtime user with Docker
@@ -33,6 +33,8 @@ refuse() { local code=$1; shift; printf '[scheduled-backup] REFUSED: %s\n' "$*" 
 
 # 1. The key starts this script only. A command sent with it is refused and never run, and its text is never printed.
 [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && [ "$#" -eq 0 ] || refuse 64 "a command or argument was sent with the scheduled-backup key; it is never run (the key only starts the scheduled backup)"
+# M2 E2: the scheduled identity is the runtime user, never root (a line in root's authorized_keys would run the backup as root).
+[ "$EUID" -ne 0 ] || refuse 65 "the scheduled backup never runs as root; its key belongs in the runtime user's authorized_keys; nothing was done"
 
 for c in bash env flock sha256sum stat readlink dirname; do
   command -v "$c" >/dev/null 2>&1 || refuse 69 "$c is required on the server; nothing was done"

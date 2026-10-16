@@ -10,7 +10,7 @@ import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
-import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry } from './lib/checks.mjs';
+import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
 
 const deploy = ({ script = 'set -euo pipefail\ndocker pull "$IMAGE"', concurrency = `concurrency:\n      group: ${PRODUCTION_GROUP}\n      cancel-in-progress: false`, guard = "if: github.ref == 'refs/heads/main'", push = 'workflow_dispatch:', environment = 'environment: production' } = {}) => `
 name: d
@@ -2590,6 +2590,7 @@ const repoText = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'u
 const ENTRY = repoText('infra/backup/scheduled-backup.sh');
 const BACKUP_SH = repoText('infra/backup/backup.sh');
 const TEMPLATE = repoText('infra/backup/scheduled-backup.authorized_keys.template');
+const VERIFIER = repoText('infra/backup/verify-scheduled-backup-install.sh');
 
 test('B1: the scheduled backup workflow passes: schedule-only at 02:17 UTC, inactive by guard, production-backup, no action, no token', () => {
   assert.deepEqual(checkWorkflowSafety(SCHED, SCHEDULED), []);
@@ -2704,6 +2705,7 @@ test('B1: every weakening of the entry script or the template is refused', () =>
   assert.match(entry('log "finished: exit $rc"\n', 'log "finished: exit $rc"\nbash -c "$SSH_ORIGINAL_COMMAND"\n'), /SSH_ORIGINAL_COMMAND is only ever tested/);
   assert.match(entry('[ -z "${SSH_ORIGINAL_COMMAND:-}" ] && [ "$#" -eq 0 ] || refuse 64', 'true'), /SSH_ORIGINAL_COMMAND is only ever tested/);
   assert.match(entry('flock -n 9 || refuse 75 ', 'flock 9 || refuse 75 '), /flock -n/);
+  assert.match(entry('[ "$EUID" -ne 0 ] || refuse 65 ', 'true || refuse 65 '), /must refuse to run as root/);
   assert.match(entry('env -i HOME="$HOME" PATH="$PATH" BACKUP_SERVICES', 'HOME="$HOME" PATH="$PATH" BACKUP_SERVICES'), /must be run with "env -i"/);
   assert.match(entry('log "finished: exit $rc"\n', 'log "finished: exit $rc"\neval "$X"\n'), /no eval and no sourcing/);
   assert.match(entry('log "finished: exit $rc"\n', 'log "finished: exit $rc"\nsource "$HOME/x"\n'), /no eval and no sourcing/);
@@ -2713,4 +2715,29 @@ test('B1: every weakening of the entry script or the template is refused', () =>
   assert.match(template(TEMPLATE.replace('restrict,', 'restrict,port-forwarding,')), /must hold exactly one line/);
   assert.match(template(`${TEMPLATE}ssh-ed25519 REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY second\n`), /must hold exactly one line/);
   assert.match(template(TEMPLATE.replace('REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY', `AAAAC3NzaC1lZDI1NTE5AAAA${'x'.repeat(40)}`)), /must hold no key material/);
+});
+
+test('E2: the installation verifier passes and carries the entry and template pins', () => {
+  assert.deepEqual(checkScheduledBackupVerifier({ verifier: VERIFIER, entry: ENTRY, template: TEMPLATE }), []);
+});
+
+test('E2: a verifier that drifts from the pins, writes, or runs a mutating command is refused', () => {
+  const v = (from, to) => checkScheduledBackupVerifier({ verifier: swap(VERIFIER, from, to), entry: ENTRY, template: TEMPLATE }).join('\n');
+  assert.match(checkScheduledBackupVerifier({ verifier: '', entry: ENTRY, template: TEMPLATE }).join(), /verify-scheduled-backup-install\.sh is missing/);
+  assert.match(v("readonly INSTALL_DIR='/usr/local/libexec/nawara-core-backup'", "readonly INSTALL_DIR='/opt/x'"), /must pin readonly INSTALL_DIR=/);
+  assert.match(v('readonly OWNER_UID=0', 'readonly OWNER_UID=1000'), /must pin readonly OWNER_UID=0/);
+  assert.match(v('readonly RUN_AS_UID=0', 'readonly RUN_AS_UID=1000'), /must pin readonly RUN_AS_UID=0/);
+  assert.match(v("readonly TRUST_ROOT='/'", "readonly TRUST_ROOT='/usr'"), /must pin readonly TRUST_ROOT='\/'/);
+  assert.match(v("readonly KEY_COMMENT='nawara-core-scheduled-backup'", "readonly KEY_COMMENT='x'"), /must pin readonly KEY_COMMENT=/);
+  assert.match(v('restrict,command=', 'command='), /must pin readonly FORCED_OPTIONS=/);
+  const template = TEMPLATE.replace('restrict,command=', 'restrict,no-pty,command=');
+  assert.match(checkScheduledBackupVerifier({ verifier: VERIFIER, entry: ENTRY, template }).join(), /FORCED_OPTIONS must equal the template's options/);
+  assert.match(v('[ "$EUID" -eq "$RUN_AS_UID" ] || usage ', '[ 1 ] || usage '), /must refuse to run as anyone but root/);
+  for (const cmd of ['rm -f "$f"', 'chmod 0644 "$f"', 'docker exec x true', 'sudo -n true', 'install -m 0555 a b', 'sed -i s/a/b/ "$f"', 'curl https://x']) {
+    assert.match(v('ENTRY_OK=0\n', `ENTRY_OK=0\n${cmd}\n`), /must stay read-only/, cmd);
+  }
+  for (const write of ['echo x >"$HOME/x"', 'echo x >> /tmp/x', 'printf x > "$f"']) {
+    assert.match(v('ENTRY_OK=0\n', `ENTRY_OK=0\n${write}\n`), /must write no file/, write);
+  }
+  assert.deepEqual(checkScheduledBackupVerifier({ verifier: swap(VERIFIER, 'ENTRY_OK=0\n', 'ENTRY_OK=0\n# rm -rf / in a comment is fine\ntrue >/dev/null 2>&1\n'), entry: ENTRY, template: TEMPLATE }), []);
 });

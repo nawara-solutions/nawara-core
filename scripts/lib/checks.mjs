@@ -179,6 +179,7 @@ export function checkScheduledBackupEntry({ entry, backupSh, template }) {
   if (original.length !== 1 || !entry.includes('[ -z "${SSH_ORIGINAL_COMMAND:-}" ] && [ "$#" -eq 0 ] || refuse 64')) {
     out.push(`${where}: SSH_ORIGINAL_COMMAND is only ever tested for emptiness, then refused (exit 64); it is never run or printed`);
   }
+  if (!entry.includes('[ "$EUID" -ne 0 ] || refuse 65 ')) out.push(`${where}: the entry must refuse to run as root (exit 65; M2 E2: the key belongs to the runtime user only)`);
   if (!/^\s*flock -n 9 \|\| refuse 75 /m.test(entry)) out.push(`${where}: the run must take the lock with "flock -n" and refuse with exit 75`);
   if (!/^env -i HOME="\$HOME" PATH="\$PATH" BACKUP_SERVICES="\$SERVICES" bash --noprofile --norc -- "\$INSTALL_DIR\/backup\.sh" \|\| rc=\$\?$/m.test(entry)) {
     out.push(`${where}: backup.sh must be run with "env -i" and only HOME, PATH and BACKUP_SERVICES`);
@@ -189,6 +190,35 @@ export function checkScheduledBackupEntry({ entry, backupSh, template }) {
   const line = `restrict,command="${SCHEDULED_BACKUP_INSTALL_DIR}/scheduled-backup.sh" ssh-ed25519 REPLACE_WITH_THE_SCHEDULED_BACKUP_PUBLIC_KEY nawara-core-scheduled-backup`;
   if (lines.length !== 1 || lines[0] !== line) out.push(`infra/backup/scheduled-backup.authorized_keys.template: must hold exactly one line, ${line}`);
   if (/AAAA[0-9A-Za-z+/]{20,}|PRIVATE KEY/.test(String(template ?? ''))) out.push('infra/backup/scheduled-backup.authorized_keys.template: must hold no key material');
+  return out;
+}
+
+/** Core V2 M2 E2: the pins of the read-only installation verifier, and what makes it read-only. */
+const SCHEDULED_BACKUP_VERIFIER_PINS = [
+  `readonly INSTALL_DIR='${SCHEDULED_BACKUP_INSTALL_DIR}'`, 'readonly OWNER_UID=0', 'readonly OWNER_GID=0', 'readonly RUN_AS_UID=0', "readonly TRUST_ROOT='/'",
+  "readonly KEY_COMMENT='nawara-core-scheduled-backup'", `readonly FORCED_OPTIONS='restrict,command="${SCHEDULED_BACKUP_INSTALL_DIR}/scheduled-backup.sh"'`,
+];
+const SCHEDULED_BACKUP_VERIFIER_FORBIDDEN = /(^|[;&|(\s])(rm|mv|cp|ln|mkdir|rmdir|touch|chmod|chown|chgrp|install|tee|truncate|dd|sed\s+-i|docker|systemctl|service|curl|wget|nc|ssh-keyscan|scp|sftp|rsync|eval|source|sudo|su|crontab|gh)(?=\s|$)/m;
+
+/**
+ * Core V2 M2 E2: infra/backup/verify-scheduled-backup-install.sh, the console verification of the installation, must check exactly
+ * what the entry script and the authorized_keys template pin, and must stay read-only (no write, move, delete, mode change, container,
+ * network or privilege command; no redirection into a file).
+ */
+export function checkScheduledBackupVerifier({ verifier, entry, template }) {
+  const where = 'infra/backup/verify-scheduled-backup-install.sh';
+  if (!verifier) return [`${where} is missing (the read-only verification of the E2 installation)`];
+  const out = [];
+  for (const pin of SCHEDULED_BACKUP_VERIFIER_PINS) if (!verifier.includes(`\n${pin}\n`)) out.push(`${where}: must pin ${pin}`);
+  const options = String(template ?? '').split('\n').find((l) => l.startsWith('restrict,'))?.split(' ')[0];
+  if (!options || !verifier.includes(`readonly FORCED_OPTIONS='${options}'`)) out.push(`${where}: FORCED_OPTIONS must equal the template's options (${options ?? 'none'})`);
+  if (entry && !entry.includes(`readonly INSTALL_DIR='${SCHEDULED_BACKUP_INSTALL_DIR}'`)) out.push(`${where}: the entry script's INSTALL_DIR differs from the verifier's`);
+  const code = verifier.replace(/(^|\s)#(\s.*)?$/gm, '');
+  const forbidden = SCHEDULED_BACKUP_VERIFIER_FORBIDDEN.exec(code);
+  if (forbidden) out.push(`${where}: must stay read-only (found "${forbidden[2]}")`);
+  const unquoted = code.replace(/[0-9]?>\s*\/dev\/null|[0-9]?>&[0-9]/g, '').replace(/'[^'\n]*'|"[^"\n]*"/g, 'S');
+  if (/>{1,2}[ \t]*[^ \t\n&(]/.test(unquoted)) out.push(`${where}: must write no file (output only to the console, /dev/null or stderr)`);
+  if (!/^\[ "\$EUID" -eq "\$RUN_AS_UID" \] \|\| usage /m.test(verifier)) out.push(`${where}: must refuse to run as anyone but root`);
   return out;
 }
 
