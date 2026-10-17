@@ -1,0 +1,90 @@
+name: core network probe
+
+# Core V2 M2 T6: a network-only check of the private route GitHub Actions → Tailscale → Server 1. It joins the tailnet as an ephemeral
+# node tagged tag:nawara-ci-probe (workload identity federation: a GitHub OIDC token, no reusable auth key or OAuth secret), opens a TCP
+# connection to the SSH port of TS_PROBE_HOST, reads the server's ECDSA host key WITHOUT authenticating and compares its SHA-256
+# fingerprint with the pinned DEPLOY_SSH_FINGERPRINT (V2-A.3 A3.6). It prints PASS/FAIL lines only: no address, port, fingerprint or token.
+#
+# MANUAL ONLY:  gh workflow run core-network-probe.yml --ref main
+#   The job is bound to the protected `production` environment: a required reviewer approves each run before it starts.
+# NEVER: an SSH login (it has no user name, password or key), a remote command, a checkout or repository script, a backup. It does not
+#   read DEPLOY_SSH_HOST, DEPLOY_SSH_USER, DEPLOY_SSH_PASSWORD or BACKUP_SSH_*, and changes none of them; core-backup.yml is untouched.
+# The Tailscale federated credential accepts only this workflow on main, in `production`, on workflow_dispatch, on GitHub-hosted runners;
+# the tailnet grants tag:nawara-ci-probe one TCP port on tag:nawara-prod-server1. scripts/lib/checks.mjs enforces every property of this
+# file. docs/runbooks/core-network-probe.md.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main'
+    # The protected environment: a required reviewer approves before this job starts; TS_PROBE_* and DEPLOY_SSH_* are its secrets.
+    environment: production
+    # The production queue: never during a deployment or a backup, never cancelled once running.
+    concurrency:
+      group: production-deploy-core-api
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The GitHub OIDC token the Tailscale action exchanges for an ephemeral node key. Nothing else: no contents, no checkout.
+    permissions:
+      id-token: write
+    steps:
+      # Fail closed before anything joins the tailnet: the destination must be a tailnet (CGNAT) IPv4 address, never a public or LAN one.
+      - name: Validate the probe configuration
+        env:
+          TS_PROBE_HOST: ${{ secrets.TS_PROBE_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_FINGERPRINT: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          python3 -I -c 'import ipaddress, os, sys
+          try:
+              a = ipaddress.IPv4Address(os.environ.get("TS_PROBE_HOST", ""))
+          except ValueError:
+              sys.exit(1)
+          sys.exit(0 if a in ipaddress.IPv4Network("100.64.0.0/10") else 1)' \
+            || { echo "::error::FAIL destination: TS_PROBE_HOST is missing or is not an IPv4 address inside 100.64.0.0/10"; exit 1; }
+          echo "PASS destination: a tailnet IPv4 address"
+          { [[ $DEPLOY_SSH_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( DEPLOY_SSH_PORT <= 65535 )); } \
+            || { echo "::error::FAIL port: DEPLOY_SSH_PORT is missing or is not a TCP port"; exit 1; }
+          echo "PASS port: a valid TCP port"
+          [[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] \
+            || { echo "::error::FAIL fingerprint: DEPLOY_SSH_FINGERPRINT is missing or is not a SHA256 host-key fingerprint"; exit 1; }
+          echo "PASS fingerprint: a SHA256 host-key fingerprint"
+      # Reviewed release v4.2.0 at its commit. The client tarball is pinned by version and SHA-256 (Tailscale's published checksum,
+      # independently verified); no cache. The node is ephemeral and logged out after the job. No args: no exit node, route or Tailscale SSH.
+      - name: Join the tailnet (ephemeral node, tag:nawara-ci-probe)
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_PROBE_OIDC_CLIENT_ID }}
+          audience: ${{ secrets.TS_PROBE_OIDC_AUDIENCE }}
+          tags: tag:nawara-ci-probe
+          version: 1.94.2
+          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
+          use-cache: 'false'
+      # ssh-keyscan performs the key exchange only: it never authenticates. Its output (which names the address) stays in a variable.
+      - name: Probe the SSH port and host key (no authentication)
+        env:
+          TS_PROBE_HOST: ${{ secrets.TS_PROBE_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_FINGERPRINT: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if timeout 10 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$TS_PROBE_HOST" "$DEPLOY_SSH_PORT" 2>/dev/null; then
+            echo "PASS tcp: the SSH port answers over the tailnet"
+          else
+            echo "::error::FAIL tcp: the SSH port does not answer over the tailnet"; exit 1
+          fi
+          keys=$(ssh-keyscan -T 10 -t ecdsa -p "$DEPLOY_SSH_PORT" "$TS_PROBE_HOST" 2>/dev/null | grep -v '^#' || true)
+          [ "$(grep -c . <<<"$keys" || true)" = 1 ] && [ "$(awk '{print $2}' <<<"$keys")" = ecdsa-sha2-nistp256 ] \
+            || { echo "::error::FAIL host key: the server did not offer exactly one ecdsa-sha2-nistp256 host key"; exit 1; }
+          fp=$(ssh-keygen -l -E sha256 -f - <<<"$keys" 2>/dev/null | awk '{print $2}' || true)
+          if [ -n "$fp" ] && [ "$fp" = "$DEPLOY_SSH_FINGERPRINT" ]; then
+            echo "PASS host key: matches the pinned DEPLOY_SSH_FINGERPRINT"
+          else
+            echo "::error::FAIL host key: does NOT match the pinned DEPLOY_SSH_FINGERPRINT"; exit 1
+          fi
+          echo "PASS T6 network probe: tailnet route and host identity verified (no authentication, no remote command)"

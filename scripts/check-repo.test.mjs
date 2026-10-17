@@ -11,6 +11,7 @@ import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
+import { PROBE_ENV, PROBE_GUARD, PROBE_JOB, PROBE_SECRETS, PROBE_TAG, PROBE_TAILSCALE_WITH, PROBE_WORKFLOW, TAILSCALE_ACTION, TAILSCALE_ACTION_RELEASE, TAILSCALE_CLIENT_SHA256, TAILSCALE_CLIENT_VERSION } from './lib/checks.mjs';
 
 // V2-A.3 A3.6: the host-key guard step, exactly as every real production SSH job carries it.
 const HOST_KEY_GUARD_STEP = `      - name: Require the pinned production host key
@@ -2824,4 +2825,176 @@ test('E2: a verifier that drifts from the pins, writes, or runs a mutating comma
     assert.match(v('ENTRY_OK=0\n', `ENTRY_OK=0\n${write}\n`), /must write no file/, write);
   }
   assert.deepEqual(checkScheduledBackupVerifier({ verifier: swap(VERIFIER, 'ENTRY_OK=0\n', 'ENTRY_OK=0\n# rm -rf / in a comment is fine\ntrue >/dev/null 2>&1\n'), entry: ENTRY, template: TEMPLATE }), []);
+});
+
+// ================================================================================ Core V2 M2 T6: the network probe
+const PROBE = workflow(PROBE_WORKFLOW);
+const probeProblems = (text, file = PROBE_WORKFLOW) => checkWorkflowSafety(file, text).join('\n');
+const PROBE_STEP = '      - name: Probe the SSH port and host key (no authentication)\n        env:\n';
+const VALIDATE_STEP = '      - name: Validate the probe configuration\n        env:\n';
+const AFTER_TAILSCALE = "          use-cache: 'false'\n";
+const PROBE_RUN = '        run: |\n          set -euo pipefail\n          if timeout';
+const KEYSCAN = 'keys=$(ssh-keyscan -T 10 -t ecdsa -p "$DEPLOY_SSH_PORT" "$TS_PROBE_HOST" 2>/dev/null';
+const COMPARE = 'if [ -n "$fp" ] && [ "$fp" = "$DEPLOY_SSH_FINGERPRINT" ]; then';
+
+test('T6: the network probe passes: dispatch-only without inputs, main, production, the queue, id-token only, validate → Tailscale → probe', () => {
+  assert.deepEqual(checkWorkflowSafety(PROBE_WORKFLOW, PROBE), []);
+  assert.deepEqual(checkActionPins(PROBE_WORKFLOW, PROBE), []);
+  const doc = parse(PROBE);
+  assert.deepEqual(Object.keys(doc.on), ['workflow_dispatch']);
+  assert.equal(doc.on.workflow_dispatch, null, 'no inputs');
+  assert.deepEqual(doc.permissions, {});
+  assert.deepEqual(Object.keys(doc.jobs), [PROBE_JOB]);
+  const job = doc.jobs[PROBE_JOB];
+  assert.equal(job.if, PROBE_GUARD);
+  assert.equal(job.environment, 'production');
+  assert.deepEqual(job.concurrency, { group: PRODUCTION_GROUP, 'cancel-in-progress': false });
+  assert.equal(job['runs-on'], 'ubuntu-24.04');
+  assert.equal(job['timeout-minutes'], 10);
+  assert.deepEqual(job.permissions, { 'id-token': 'write' });
+  assert.equal(job.steps.length, 3);
+  assert.deepEqual(job.steps.map((s) => s.uses), [undefined, TAILSCALE_ACTION, undefined], 'no checkout, no other action');
+  assert.deepEqual(job.steps[1].with, PROBE_TAILSCALE_WITH);
+  assert.equal(PROBE_TAILSCALE_WITH.tags, 'tag:nawara-ci-probe');
+  assert.equal(PROBE_TAG, 'tag:nawara-ci-probe');
+  assert.equal(TAILSCALE_ACTION, 'tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd');
+  assert.equal(TAILSCALE_ACTION_RELEASE, 'v4.2.0');
+  assert.equal(TAILSCALE_CLIENT_VERSION, '1.94.2');
+  assert.equal(TAILSCALE_CLIENT_SHA256, 'c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32');
+  assert.deepEqual(job.steps[0].env, PROBE_ENV);
+  assert.deepEqual(job.steps[2].env, PROBE_ENV);
+  assert.deepEqual([...PROBE_SECRETS].sort(), ['DEPLOY_SSH_FINGERPRINT', 'DEPLOY_SSH_PORT', 'TS_PROBE_HOST', 'TS_PROBE_OIDC_AUDIENCE', 'TS_PROBE_OIDC_CLIENT_ID']);
+  assert.doesNotMatch(JSON.stringify(doc), /DEPLOY_SSH_(HOST|USER|PASSWORD)|BACKUP_SSH_|toJSON|appleboy|actions\/checkout|backup/i);
+});
+
+test('T6: every relaxation of the probe workflow is refused', () => {
+  const cases = [
+    // triggers and inputs
+    ['a push trigger', 'on:\n  workflow_dispatch:\n', 'on:\n  workflow_dispatch:\n  push:\n    branches: [main]\n', /workflow_dispatch only[\s\S]*never automatically/],
+    ['a schedule', 'on:\n  workflow_dispatch:\n', "on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 * * * *'\n", /workflow_dispatch only/],
+    ['a reusable-workflow trigger', 'on:\n  workflow_dispatch:\n', 'on:\n  workflow_dispatch:\n  workflow_call:\n', /workflow_dispatch only/],
+    ['a pull_request_target trigger', 'on:\n  workflow_dispatch:\n', 'on:\n  pull_request_target:\n', /must be in a workflow_dispatch-only workflow[\s\S]*never automatically[\s\S]*workflow_dispatch only/],
+    ['an input', 'on:\n  workflow_dispatch:\n', 'on:\n  workflow_dispatch:\n    inputs:\n      host:\n        required: true\n', /takes no input/],
+    // the job's gates
+    ['no main guard', `    if: ${PROBE_GUARD}\n`, '', /guarded by exactly[\s\S]*restricted to refs\/heads\/main/],
+    ['a widened guard', PROBE_GUARD, "startsWith(github.ref, 'refs/heads/')", /guarded by exactly/],
+    ['no environment', '    environment: production\n', '', /must declare a protected environment[\s\S]*must declare "environment: production"/],
+    ['another environment', '    environment: production\n', '    environment: staging\n', /not an approved production environment[\s\S]*must declare "environment: production"/],
+    ['an expression environment', '    environment: production\n', '    environment: ${{ vars.ENV }}\n', /literal name/],
+    ['another queue', 'group: production-deploy-core-api', 'group: probes', /concurrency group must be/],
+    ['a cancellable run', 'cancel-in-progress: false', 'cancel-in-progress: true', /cancel-in-progress must be explicitly false/],
+    ['a self-hosted runner', 'runs-on: ubuntu-24.04', 'runs-on: self-hosted', /runs-on must be exactly ubuntu-24\.04/],
+    ['a floating runner label', 'runs-on: ubuntu-24.04', 'runs-on: ubuntu-latest', /runs-on must be exactly ubuntu-24\.04/],
+    ['a longer timeout', 'timeout-minutes: 10', 'timeout-minutes: 60', /timeout-minutes must be exactly 10/],
+    ['no timeout', '    timeout-minutes: 10\n', '', /timeout-minutes must be exactly 10/],
+    ['a second job', 'jobs:\n', 'jobs:\n  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n', /exactly one job, "probe"/],
+    ['a job env', '    timeout-minutes: 10\n', '    timeout-minutes: 10\n    env:\n      X: y\n', /"env" not allowed on the probe job/],
+    ['a reusable workflow', '    timeout-minutes: 10\n', '    timeout-minutes: 10\n    uses: ./.github/workflows/other.yml\n', /"uses" not allowed on the probe job/],
+    ['continue-on-error', '    timeout-minutes: 10\n', '    timeout-minutes: 10\n    continue-on-error: true\n', /"continue-on-error" not allowed/],
+    // permissions
+    ['contents on the job', '      id-token: write\n', '      id-token: write\n      contents: read\n', /permissions must be exactly "id-token: write"/],
+    ['no job permissions', '    permissions:\n      id-token: write\n', '', /permissions must be exactly "id-token: write"/],
+    ['write-all on the job', '    permissions:\n      id-token: write\n', '    permissions: write-all\n', /permissions must be exactly "id-token: write"/],
+    ['workflow-level id-token', 'permissions: {}\n', 'permissions:\n  id-token: write\n', /must declare "permissions: \{\}"/],
+    ['a workflow-level env', 'permissions: {}\n', 'permissions: {}\nenv:\n  H: ${{ secrets.TS_PROBE_HOST }}\n', /TS_\* secrets are never set at workflow level[\s\S]*no workflow-level "env"/],
+    // the Tailscale step
+    ['a floating tag', `uses: ${TAILSCALE_ACTION} # v4.2.0`, 'uses: tailscale/github-action@v4', /must be pinned to a full 40-hex|second step must be exactly/],
+    ['another commit', TAILSCALE_ACTION, `tailscale/github-action@${'0'.repeat(40)}`, /second step must be exactly[\s\S]*must be written exactly/],
+    ['another release comment', '# v4.2.0', '# v4.1.3', /must be written exactly/],
+    ['the latest client', 'version: 1.94.2', 'version: latest', /input version must be exactly 1\.94\.2/],
+    ['an unpinned client', `          sha256sum: ${TAILSCALE_CLIENT_SHA256}\n`, '', /input sha256sum must be exactly/],
+    ['another checksum', TAILSCALE_CLIENT_SHA256, 'f'.repeat(64), /input sha256sum must be exactly/],
+    ['the cache', "use-cache: 'false'", "use-cache: 'true'", /input use-cache must be exactly false/],
+    ['the deploy tag', 'tags: tag:nawara-ci-probe', 'tags: tag:nawara-ci-prod', /input tags must be exactly tag:nawara-ci-probe/],
+    ['a second tag', 'tags: tag:nawara-ci-probe', 'tags: tag:nawara-ci-probe,tag:nawara-ci-prod', /input tags must be exactly/],
+    ['another OIDC client', 'secrets.TS_PROBE_OIDC_CLIENT_ID', 'secrets.TS_OIDC_CLIENT_ID', /may read only[\s\S]*found secrets\.TS_OIDC_CLIENT_ID[\s\S]*oauth-client-id must be exactly/],
+    ['a reusable auth key', AFTER_TAILSCALE, `${AFTER_TAILSCALE}          authkey: \${{ secrets.TS_PROBE_HOST }}\n`, /accepts only[\s\S]*found: authkey/],
+    ['an OAuth secret', AFTER_TAILSCALE, `${AFTER_TAILSCALE}          oauth-secret: \${{ secrets.TS_PROBE_OIDC_AUDIENCE }}\n`, /found: oauth-secret/],
+    ['an exit node', AFTER_TAILSCALE, `${AFTER_TAILSCALE}          args: --exit-node=100.64.0.1\n`, /found: args/],
+    ['route advertisement', AFTER_TAILSCALE, `${AFTER_TAILSCALE}          args: --advertise-routes=10.0.0.0/8\n`, /found: args/],
+    ['Tailscale SSH', AFTER_TAILSCALE, `${AFTER_TAILSCALE}          args: --ssh\n`, /found: args/],
+    ['daemon arguments', AFTER_TAILSCALE, `${AFTER_TAILSCALE}          tailscaled-args: --tun=userspace-networking\n`, /found: tailscaled-args/],
+    ['a skippable join', "        uses: tailscale/", "        continue-on-error: true\n        uses: tailscale/", /Tailscale step may only have name, uses and with/],
+    // secrets and credentials
+    ['the deploy user', PROBE_STEP, `${PROBE_STEP}          DEPLOY_SSH_USER: \${{ secrets.DEPLOY_SSH_USER }}\n`, /may read only[\s\S]*found secrets\.DEPLOY_SSH_USER[\s\S]*probe step env must be exactly/],
+    ['the deploy password', PROBE_STEP, `${PROBE_STEP}          DEPLOY_SSH_PASSWORD: \${{ secrets.DEPLOY_SSH_PASSWORD }}\n`, /found secrets\.DEPLOY_SSH_PASSWORD/],
+    ['the deploy host', 'TS_PROBE_HOST: ${{ secrets.TS_PROBE_HOST }}', 'TS_PROBE_HOST: ${{ secrets.DEPLOY_SSH_HOST }}', /found secrets\.DEPLOY_SSH_HOST[\s\S]*env TS_PROBE_HOST must be exactly/],
+    ['a bracketed deploy password', VALIDATE_STEP, `${VALIDATE_STEP}          P: \${{ secrets['DEPLOY_SSH_PASSWORD'] }}\n`, /found secrets\.DEPLOY_SSH_PASSWORD/],
+    ['a backup key', PROBE_STEP, `${PROBE_STEP}          BACKUP_SSH_KEY: \${{ secrets.BACKUP_SSH_KEY }}\n`, /BACKUP_SSH_\* credentials are used only[\s\S]*found secrets\.BACKUP_SSH_KEY/],
+    ['every secret at once', PROBE_STEP, `${PROBE_STEP}          ALL: \${{ toJSON(secrets) }}\n`, /never reads every secret at once/],
+    ['a host as a variable', 'TS_PROBE_HOST: ${{ secrets.TS_PROBE_HOST }}', 'TS_PROBE_HOST: ${{ vars.TS_PROBE_HOST }}', /env TS_PROBE_HOST must be exactly \$\{\{ secrets\.TS_PROBE_HOST \}\}/],
+    // steps and scripts
+    ['a checkout', '    steps:\n', '    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n', /exactly three steps/],
+    ['the SSH action', '    steps:\n', `    steps:\n${HOST_KEY_GUARD_STEP}      - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5\n        with:\n          fingerprint: \${{ secrets.DEPLOY_SSH_FINGERPRINT }}\n          script: |\n            set -euo pipefail\n            true\n`, /exactly three steps/],
+    ['the SSH action instead of a step', VALIDATE_STEP, `      - name: Validate the probe configuration\n        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5\n        env:\n`, /validate step may only have name, env and run[\s\S]*validate step must contact nothing/],
+    ['an SSH login', COMPARE, `ssh -p "$DEPLOY_SSH_PORT" "u@$TS_PROBE_HOST" true\n          ${COMPARE}`, /runs an SSH login or a file transfer[\s\S]*exactly one remote tool/],
+    ['a remote command over sshpass', COMPARE, `sshpass -e ssh "$TS_PROBE_HOST" uptime\n          ${COMPARE}`, /runs an SSH login/],
+    ['a file transfer', COMPARE, `scp x "$TS_PROBE_HOST":\n          ${COMPARE}`, /runs an SSH login or a file transfer/],
+    ['the backup script', COMPARE, `bash infra/backup/backup.sh\n          ${COMPARE}`, /refers to a backup or a repository script/],
+    ['a backup dispatch', COMPARE, `gh workflow run core-backup.yml --ref main\n          ${COMPARE}`, /network, transfer[\s\S]*refers to a backup/],
+    ['a download', COMPARE, `curl -fsS https://example.invalid/x\n          ${COMPARE}`, /network, transfer, decode/],
+    ['a Tailscale command', COMPARE, `tailscale status\n          ${COMPARE}`, /network, transfer, decode/],
+    ['a netcat', COMPARE, `nc -z "$TS_PROBE_HOST" 22\n          ${COMPARE}`, /network, transfer, decode/],
+    ['a pipe into a shell', COMPARE, `echo true | bash\n          ${COMPARE}`, /pipes a script into a shell/],
+    ['command tracing', PROBE_RUN, '        run: |\n          set -euo pipefail\n          set -x\n          if timeout', /enables command tracing/],
+    ['xtrace', PROBE_RUN, '        run: |\n          set -euo pipefail\n          set -o xtrace\n          if timeout', /enables command tracing/],
+    ['a printed address', COMPARE, `echo "reached $TS_PROBE_HOST"\n          ${COMPARE}`, /prints a variable or command output/],
+    ['a printed fingerprint', COMPARE, `printf '%s\\n' "$fp"\n          ${COMPARE}`, /prints a variable or command output/],
+    ['a printed scan', COMPARE, `{ echo "$keys"; }\n          ${COMPARE}`, /prints a variable or command output/],
+    ['a file written', COMPARE, `echo PASS >"$RUNNER_TEMP/x"\n          ${COMPARE}`, /writes a file/],
+    ['an interpolated secret', COMPARE, `test -n "\${{ secrets.TS_PROBE_HOST }}"\n          ${COMPARE}`, /no expression is interpolated/],
+    ['no strict mode', PROBE_RUN, '        run: |\n          if timeout', /must start with "set -euo pipefail"/],
+    ['a second keyscan', COMPARE, `ssh-keyscan -t rsa "$TS_PROBE_HOST" 2>/dev/null\n          ${COMPARE}`, /exactly one remote tool/],
+    ['a keyscan of another host', KEYSCAN, 'keys=$(ssh-keyscan -T 10 -t ecdsa -p "$DEPLOY_SSH_PORT" example.invalid 2>/dev/null', /exactly one remote tool/],
+    ['a keyscan of every key type', KEYSCAN, 'keys=$(ssh-keyscan -T 10 -p "$DEPLOY_SSH_PORT" "$TS_PROBE_HOST" 2>/dev/null', /exactly one remote tool/],
+    ['no TCP test', 'if timeout 10 bash -c \'exec 3<>"/dev/tcp/$0/$1"\' "$TS_PROBE_HOST" "$DEPLOY_SSH_PORT" 2>/dev/null; then', 'if true; then', /must test the TCP connection/],
+    ['no comparison', COMPARE, 'if [ -n "$fp" ]; then', /must compare the scanned fingerprint/],
+    ['an inverted comparison', COMPARE, 'if [ -n "$fp" ] || [ "$fp" = "$DEPLOY_SSH_FINGERPRINT" ]; then', /must compare the scanned fingerprint/],
+    ['key generation', COMPARE, `ssh-keygen -t ed25519 -N "" -f k\n          ${COMPARE}`, /ssh-keygen may only print a fingerprint/],
+    ['no key type check', '[ "$(awk \'{print $2}\' <<<"$keys")" = ecdsa-sha2-nistp256 ]', 'true', /exactly one ecdsa-sha2-nistp256/],
+    ['no key count check', '[ "$(grep -c . <<<"$keys" || true)" = 1 ] && ', '', /exactly one ecdsa-sha2-nistp256/],
+    ['no CIDR check', 'ipaddress.IPv4Network("100.64.0.0/10")', 'ipaddress.IPv4Network("0.0.0.0/0")', /inside 100\.64\.0\.0\/10/],
+    ['no IPv4 parse', 'ipaddress.IPv4Address(os.environ.get("TS_PROBE_HOST", ""))', 'ipaddress.ip_address("100.64.0.1")', /parsed as an IPv4 address/],
+    ['no port check', '[[ $DEPLOY_SSH_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( DEPLOY_SSH_PORT <= 65535 ))', 'true', /checked to be a TCP port/],
+    ['no fingerprint format check', '[[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]', 'true', /checked to be a SHA256 fingerprint/],
+    ['a validation that cannot fail', 'exit 1; }\n          echo "PASS destination', 'true; }\n          echo "PASS destination', /must exit 1 on each failed check/],
+    ['a contact before the join', '          echo "PASS destination: a tailnet IPv4 address"\n', '          ssh-keyscan "$TS_PROBE_HOST" 2>/dev/null\n          echo "PASS destination: a tailnet IPv4 address"\n', /validate step must contact nothing/],
+    ['a skippable probe', '      - name: Probe the SSH port and host key (no authentication)\n', '      - name: Probe the SSH port and host key (no authentication)\n        continue-on-error: true\n', /probe step may only have name, env and run/],
+    ['a conditional validation', '      - name: Validate the probe configuration\n', "      - name: Validate the probe configuration\n        if: false\n", /validate step may only have name, env and run/],
+    ['a shell override', PROBE_RUN, `        shell: sh\n${PROBE_RUN}`, /probe step may only have name, env and run/],
+  ];
+  for (const [label, from, to, re] of cases) assert.match(probeProblems(swap(PROBE, from, to)), re, label);
+});
+
+test('T6: the tailnet identity stays in the probe job: id-token, the Tailscale action and TS_* secrets are refused anywhere else', () => {
+  // A copy of the probe under another name gets none of the probe's allowances.
+  assert.match(probeProblems(PROBE, 'core-network-probe-copy.yml'), /id-token: write is allowed only on the network probe job[\s\S]*Tailscale action is used only by the network probe job[\s\S]*TS_\* secrets are read only by the network probe job/);
+  const tailscaleStep = `      - uses: ${TAILSCALE_ACTION} # ${TAILSCALE_ACTION_RELEASE}\n        with:\n          oauth-client-id: \${{ secrets.TS_PROBE_OIDC_CLIENT_ID }}\n          audience: \${{ secrets.TS_PROBE_OIDC_AUDIENCE }}\n          tags: tag:nawara-ci-probe\n`;
+  // core-backup.yml stays untouched: no Tailscale step, no id-token, no TS_* secret (T6 changes nothing in the backup).
+  const BACKUP = workflow('core-backup.yml');
+  assert.deepEqual(checkWorkflowSafety('core-backup.yml', BACKUP), []);
+  assert.doesNotMatch(BACKUP, /tailscale|id-token|TS_/i);
+  const backupJoin = swap(BACKUP, '      - uses: actions/checkout@', `${tailscaleStep}      - uses: actions/checkout@`);
+  assert.match(probeProblems(backupJoin, 'core-backup.yml'), /Tailscale action is used only by the network probe job[\s\S]*TS_\* secrets are read only by the network probe job/);
+  const backupToken = swap(BACKUP, '    runs-on: ubuntu-latest\n', '    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      id-token: write\n');
+  assert.match(probeProblems(backupToken, 'core-backup.yml'), /id-token: write is allowed only on the network probe job/);
+  const backupWriteAll = swap(BACKUP, 'permissions:\n  contents: read\n', 'permissions: write-all\n');
+  assert.match(probeProblems(backupWriteAll, 'core-backup.yml'), /id-token: write is allowed only on the network probe job/);
+  // Every real production workflow and every other job: no id-token unless it is an image workflow's build-image job.
+  for (const name of readdirSync(new URL('../.github/workflows/', import.meta.url)).filter((n) => n.endsWith('.yml') && n !== PROBE_WORKFLOW)) {
+    const doc = parse(workflow(name));
+    for (const [jobId, job] of Object.entries(doc.jobs)) {
+      const perms = job.permissions ?? doc.permissions ?? {};
+      if (perms === 'write-all' || perms['id-token'] === 'write') assert.equal(jobId, 'build-image', `${name} ${jobId}`);
+      assert.doesNotMatch(JSON.stringify(job), /tailscale\/|secrets\.TS_/, `${name} ${jobId}`);
+    }
+  }
+  const other = (job, perms = '') => `name: o\non:\n  workflow_dispatch:\n${perms}jobs:\n  x:\n${job}`;
+  assert.match(probeProblems(other('    permissions:\n      id-token: write\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n'), 'o.yml'), /id-token: write is allowed only/);
+  assert.match(probeProblems(other('    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n', 'permissions:\n  id-token: write\n'), 'o.yml'), /id-token: write is allowed only/);
+  assert.match(probeProblems(other("    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"$H\"\n        env:\n          H: ${{ secrets['TS_PROBE_HOST'] }}\n"), 'o.yml'), /TS_\* secrets are read only by the network probe job/);
+  // The image build keeps its attestation token (unchanged rule).
+  assert.deepEqual(checkWorkflowSafety('auth-service-docker-build.yml', BUILD), []);
+  // A probe job anywhere but core-network-probe.yml is not the probe: renaming the job in the real file is refused too.
+  assert.match(probeProblems(swap(PROBE, 'jobs:\n  probe:\n', 'jobs:\n  check:\n')), /id-token: write is allowed only[\s\S]*exactly one job, "probe"/);
 });

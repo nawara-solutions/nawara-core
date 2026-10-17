@@ -84,6 +84,56 @@ const NATIVE_REMOTE_SHELL = /(^|[^\w.$/-])(ssh|scp|sftp|ssh-keyscan)(?=\s|$)/m;
 /** The activation guard of the scheduled backup; read by no other workflow (the removed mechanism of core-backup.yml stays removed). */
 const SCHEDULE_GUARD_READ = /vars\s*(?:\.\s*|\[\s*['"])CORE_BACKUP_SCHEDULE\b/;
 
+/**
+ * Core V2 M2 T6: the network probe. ONE workflow, dispatch-only, one job behind the `production` approval, that joins the tailnet as an
+ * ephemeral tag:nawara-ci-probe node (GitHub OIDC → Tailscale workload identity federation), reaches the SSH port of TS_PROBE_HOST and
+ * compares the server's ECDSA host key with DEPLOY_SSH_FINGERPRINT without authenticating. It is the only job that may hold
+ * `id-token: write` in a production environment, use the Tailscale action or read a TS_* secret. No checkout, no SSH login, no remote
+ * command, no backup; never DEPLOY_SSH_HOST/USER/PASSWORD or BACKUP_SSH_*.
+ */
+export const PROBE_WORKFLOW = 'core-network-probe.yml';
+export const PROBE_JOB = 'probe';
+export const PROBE_GUARD = "github.ref == 'refs/heads/main'";
+export const PROBE_RUNNER = 'ubuntu-24.04';
+export const PROBE_TIMEOUT_MINUTES = 10;
+/** The reviewed action release, at its commit (the tag v4.2.0 points directly to it), and the client it installs. */
+export const TAILSCALE_ACTION = 'tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd';
+export const TAILSCALE_ACTION_RELEASE = 'v4.2.0';
+export const TAILSCALE_CLIENT_VERSION = '1.94.2';
+/** Tailscale's published SHA-256 of tailscale_1.94.2_amd64.tgz, independently verified against the downloaded tarball (2026-10-17). */
+export const TAILSCALE_CLIENT_SHA256 = 'c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32';
+export const PROBE_TAG = 'tag:nawara-ci-probe';
+/** The Tailscale step's inputs, exactly: OIDC client id and audience, the tag, the pinned client, no cache. Nothing else is accepted. */
+export const PROBE_TAILSCALE_WITH = {
+  'oauth-client-id': '${{ secrets.TS_PROBE_OIDC_CLIENT_ID }}',
+  audience: '${{ secrets.TS_PROBE_OIDC_AUDIENCE }}',
+  tags: PROBE_TAG,
+  version: TAILSCALE_CLIENT_VERSION,
+  sha256sum: TAILSCALE_CLIENT_SHA256,
+  'use-cache': 'false',
+};
+/** The env of both script steps, exactly: the tailnet destination and the two values the probe checks, read and never changed. */
+export const PROBE_ENV = {
+  TS_PROBE_HOST: '${{ secrets.TS_PROBE_HOST }}',
+  DEPLOY_SSH_PORT: '${{ secrets.DEPLOY_SSH_PORT }}',
+  DEPLOY_SSH_FINGERPRINT: '${{ secrets.DEPLOY_SSH_FINGERPRINT }}',
+};
+/** Every secret the probe may read (in its env and the Tailscale inputs); any other secret reference is refused. */
+export const PROBE_SECRETS = ['TS_PROBE_OIDC_CLIENT_ID', 'TS_PROBE_OIDC_AUDIENCE', 'TS_PROBE_HOST', 'DEPLOY_SSH_PORT', 'DEPLOY_SSH_FINGERPRINT'];
+/** What the probe's scripts must never do. */
+const PROBE_FORBIDDEN = [
+  [/(^|[^\w.$/-])(ssh|scp|sftp|sshpass|rsync)(?=\s|$)/m, 'runs an SSH login or a file transfer'],
+  [/(^|[^\w.-])(nc|ncat|netcat|socat|telnet|curl|wget|gh|git|docker|tailscale|base64|eval|source|sudo|node|perl)(?=\s|$)/m, 'runs a network, transfer, decode, privilege or interpreter command'],
+  [/\bbash\s+-s\b|\|\s*(ba|z|da)?sh\b/, 'pipes a script into a shell'],
+  [/\bset\s+-[a-wyz]*x|\bset\s+-o\s+xtrace|\bxtrace\b/, 'enables command tracing (it would print the values)'],
+  [/backup|infra\//i, 'refers to a backup or a repository script'],
+  [/(?<!<)>{1,2}\s*(?!\/dev\/null\b|&)[^\s]/, 'writes a file (output only to the log)'],
+];
+/** A use of any TS_* secret, in any spelling: only the probe reads them. */
+const TAILNET_CREDENTIAL = /secrets\s*(?:\.\s*|\[\s*\\?['"])TS_/;
+/** Every `secrets.NAME` reference, in any spelling. */
+const SECRET_REFERENCE = /secrets\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*\\?['"]([A-Za-z_][A-Za-z0-9_]*)\\?['"]\s*\])/g;
+
 const usesSsh = (steps) => steps.some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
 
 /** The environment a job declares (`environment: name` or `environment: {name}`), as written. */
@@ -199,6 +249,112 @@ function scheduledBackupJobProblems(where, jobId, job) {
     }
     if (!inv.endsWith(SCHEDULED_BACKUP_TARGET)) out.push(`${where}: the ssh invocation must end with ${SCHEDULED_BACKUP_TARGET}: no remote command, no input redirection (the server's forced command decides what runs)`);
   }
+  return out;
+}
+
+/** Core V2 M2 T6: the token permissions a job effectively has (its own block, or the workflow's when it declares none). */
+function effectivePermissions(doc, job) {
+  const perms = job?.permissions !== undefined ? job.permissions : doc?.permissions;
+  if (perms === 'write-all') return { 'id-token': 'write', contents: 'write', attestations: 'write', packages: 'write' };
+  return perms && typeof perms === 'object' ? perms : {};
+}
+
+/** Core V2 M2 T6: the probe workflow as a whole: dispatch-only without inputs, no token permission at workflow level, one job. */
+function probeWorkflowProblems(fileName, doc, triggers) {
+  const out = [];
+  if (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch') {
+    out.push(`${fileName}: the network probe runs on workflow_dispatch only (found: ${triggers.join(', ') || 'nothing'}); never automatically, on a schedule or as a reusable workflow`);
+  }
+  const dispatch = (doc?.on ?? doc?.true)?.workflow_dispatch;
+  if (dispatch !== null && dispatch !== undefined && (typeof dispatch !== 'object' || Object.keys(dispatch).length > 0)) {
+    out.push(`${fileName}: the network probe takes no input (found: workflow_dispatch ${JSON.stringify(dispatch)})`);
+  }
+  const perms = doc?.permissions;
+  if (!perms || typeof perms !== 'object' || Object.keys(perms).length !== 0) out.push(`${fileName}: the workflow must declare "permissions: {}" (the job alone holds id-token: write)`);
+  const extra = Object.keys(doc ?? {}).filter((k) => !['name', 'on', 'true', 'permissions', 'jobs'].includes(k));
+  if (extra.length > 0) out.push(`${fileName}: no workflow-level ${extra.map((k) => `"${k}"`).join(', ')}`);
+  const jobIds = Object.keys(doc?.jobs ?? {});
+  if (jobIds.length !== 1 || jobIds[0] !== PROBE_JOB) out.push(`${fileName}: exactly one job, "${PROBE_JOB}" (found: ${jobIds.join(', ') || 'none'})`);
+  return out;
+}
+
+/** Core V2 M2 T6: the probe job: main only, the production approval and queue, id-token only, validate → Tailscale → probe, nothing else. */
+function probeJobProblems(where, job) {
+  const out = [];
+  const allowedKeys = ['name', 'if', 'environment', 'concurrency', 'runs-on', 'timeout-minutes', 'permissions', 'steps'];
+  const extra = Object.keys(job).filter((k) => !allowedKeys.includes(k));
+  if (extra.length > 0) out.push(`${where}: ${extra.map((k) => `"${k}"`).join(', ')} not allowed on the probe job (no reusable workflow, container, service, env, matrix or continue-on-error)`);
+  if (String(job.if ?? '').replace(/\s+/g, ' ').trim() !== PROBE_GUARD) out.push(`${where}: the job must be guarded by exactly "if: ${PROBE_GUARD}" (main only)`);
+  if (job.environment !== 'production') out.push(`${where}: must declare "environment: production" as a literal name (the required reviewer approves every run)`);
+  if (job.concurrency === undefined) out.push(`${where}: the job must declare its own concurrency (the production queue)`);
+  if (job['runs-on'] !== PROBE_RUNNER) out.push(`${where}: runs-on must be exactly ${PROBE_RUNNER} (a GitHub-hosted, ephemeral runner)`);
+  if (job['timeout-minutes'] !== PROBE_TIMEOUT_MINUTES) out.push(`${where}: timeout-minutes must be exactly ${PROBE_TIMEOUT_MINUTES}`);
+  const perms = job.permissions;
+  if (!perms || typeof perms !== 'object' || Object.keys(perms).length !== 1 || perms['id-token'] !== 'write') {
+    out.push(`${where}: the job permissions must be exactly "id-token: write" (found: ${JSON.stringify(perms ?? null)}); no contents, no checkout`);
+  }
+
+  const steps = asArray(job.steps);
+  for (const step of steps) {
+    for (const m of JSON.stringify(step).matchAll(SECRET_REFERENCE)) {
+      const name = m[1] ?? m[2];
+      if (!PROBE_SECRETS.includes(name)) out.push(`${where}: the probe may read only ${PROBE_SECRETS.join(', ')} (found secrets.${name})`);
+    }
+  }
+  if (/toJSON\(\s*secrets\s*\)/.test(JSON.stringify(job))) out.push(`${where}: the probe never reads every secret at once`);
+  if (steps.length !== 3) return [...out, `${where}: exactly three steps, validate → Tailscale → probe (found ${steps.length}); no checkout, no other action`];
+  const [validate, tailscale, probe] = steps;
+
+  const scriptStep = (label, step) => {
+    const keys = Object.keys(step).filter((k) => !['name', 'env', 'run'].includes(k));
+    if (keys.length > 0) out.push(`${where}: the ${label} step may only have name, env and run (found: ${keys.join(', ')}); no action, condition, shell override or continue-on-error`);
+    const env = step.env ?? {};
+    const names = Object.keys(env).sort();
+    if (names.join() !== Object.keys(PROBE_ENV).sort().join()) out.push(`${where}: the ${label} step env must be exactly ${Object.keys(PROBE_ENV).join(', ')}`);
+    for (const k of names) {
+      if (PROBE_ENV[k] !== undefined && String(env[k]).replace(/\s+/g, '') !== PROBE_ENV[k].replace(/\s+/g, '')) out.push(`${where}: the ${label} step env ${k} must be exactly ${PROBE_ENV[k]}`);
+    }
+    const run = String(step.run ?? '');
+    if (run.includes('${{')) out.push(`${where}: no expression is interpolated into the ${label} script (pass values through env)`);
+    if (firstCommandLine(run) !== 'set -euo pipefail') out.push(`${where}: the ${label} script must start with "set -euo pipefail"`);
+    for (const [re, why] of PROBE_FORBIDDEN) if (re.test(run)) out.push(`${where}: the ${label} script ${why}`);
+    // Only fixed words are printed: no echo or printf line expands a variable or a command (the values would reach the log).
+    for (const line of run.split('\n')) {
+      const printed = line.match(/(?:^|[;&|{]\s*)(echo|printf)\s+(.*)$/)?.[2];
+      if (printed !== undefined && /\$/.test(printed)) out.push(`${where}: the ${label} script prints a variable or command output ("${line.trim()}"); only PASS/FAIL words are printed`);
+    }
+    return run;
+  };
+
+  const validateRun = scriptStep('validate', validate);
+  if (validate.uses !== undefined || NATIVE_REMOTE_SHELL.test(validateRun)) out.push(`${where}: the validate step must contact nothing (it runs before the tailnet join)`);
+  for (const [needle, why] of [['ipaddress.IPv4Network("100.64.0.0/10")', 'the destination is checked to be inside 100.64.0.0/10'],
+    ['ipaddress.IPv4Address(os.environ.get("TS_PROBE_HOST", ""))', 'TS_PROBE_HOST is parsed as an IPv4 address'],
+    ['[[ $DEPLOY_SSH_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( DEPLOY_SSH_PORT <= 65535 ))', 'DEPLOY_SSH_PORT is checked to be a TCP port'],
+    ['[[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]', 'DEPLOY_SSH_FINGERPRINT is checked to be a SHA256 fingerprint']]) {
+    if (!validateRun.includes(needle)) out.push(`${where}: the validate step must fail closed unless ${why}`);
+  }
+  if ((validateRun.match(/exit 1/g) ?? []).length < 3) out.push(`${where}: the validate step must exit 1 on each failed check`);
+
+  const tsKeys = Object.keys(tailscale).filter((k) => !['name', 'uses', 'with'].includes(k));
+  if (tsKeys.length > 0) out.push(`${where}: the Tailscale step may only have name, uses and with (found: ${tsKeys.join(', ')})`);
+  if (tailscale.uses !== TAILSCALE_ACTION) out.push(`${where}: the second step must be exactly ${TAILSCALE_ACTION} # ${TAILSCALE_ACTION_RELEASE} (got "${tailscale.uses ?? 'no action'}")`);
+  const withKeys = Object.keys(tailscale.with ?? {});
+  const unexpected = withKeys.filter((k) => !(k in PROBE_TAILSCALE_WITH));
+  if (unexpected.length > 0) out.push(`${where}: the Tailscale step accepts only ${Object.keys(PROBE_TAILSCALE_WITH).join(', ')} (found: ${unexpected.join(', ')}); no auth key, OAuth secret, args, routes, exit node or Tailscale SSH`);
+  for (const [k, v] of Object.entries(PROBE_TAILSCALE_WITH)) {
+    if (String(tailscale.with?.[k] ?? '').replace(/\s+/g, '') !== v.replace(/\s+/g, '')) out.push(`${where}: the Tailscale input ${k} must be exactly ${v}`);
+  }
+
+  const probeRun = scriptStep('probe', probe);
+  const remote = probeRun.match(new RegExp(NATIVE_REMOTE_SHELL.source, 'gm')) ?? [];
+  if (remote.length !== 1 || !/(^|[^\w.-])ssh-keyscan -T 10 -t ecdsa -p "\$DEPLOY_SSH_PORT" "\$TS_PROBE_HOST" 2>\/dev\/null/m.test(probeRun)) {
+    out.push(`${where}: the probe script runs exactly one remote tool, ssh-keyscan -T 10 -t ecdsa -p "$DEPLOY_SSH_PORT" "$TS_PROBE_HOST" 2>/dev/null (found ${remote.length} remote-shell command(s))`);
+  }
+  if (/ssh-keygen(?![^\n]*\s-l\s)/.test(probeRun)) out.push(`${where}: ssh-keygen may only print a fingerprint (-l)`);
+  if (!probeRun.includes('timeout 10 bash -c \'exec 3<>"/dev/tcp/$0/$1"\' "$TS_PROBE_HOST" "$DEPLOY_SSH_PORT"')) out.push(`${where}: the probe script must test the TCP connection to "$TS_PROBE_HOST" "$DEPLOY_SSH_PORT" with a timeout`);
+  if (!probeRun.includes('[ -n "$fp" ] && [ "$fp" = "$DEPLOY_SSH_FINGERPRINT" ]')) out.push(`${where}: the probe script must compare the scanned fingerprint with "$DEPLOY_SSH_FINGERPRINT" (non-empty, exact)`);
+  if (!probeRun.includes('[ "$(grep -c . <<<"$keys" || true)" = 1 ] && [ "$(awk \'{print $2}\' <<<"$keys")" = ecdsa-sha2-nistp256 ]')) out.push(`${where}: the probe script must require exactly one ecdsa-sha2-nistp256 host key`);
   return out;
 }
 
@@ -318,6 +474,18 @@ export function checkWorkflowSafety(fileName, text) {
         problems.push(...scheduledBackupJobProblems(where, jobId, job));
       }
     }
+    // Core V2 M2 T6: the tailnet identity belongs to the probe job alone: id-token, the Tailscale action and the TS_* secrets.
+    const isProbeJob = fileName === PROBE_WORKFLOW && jobId === PROBE_JOB;
+    if (effectivePermissions(doc, job)['id-token'] === 'write' && !isProbeJob && !(jobId === 'build-image' && environment === undefined)) {
+      problems.push(`${where}: id-token: write is allowed only on the network probe job ("${PROBE_JOB}" of ${PROBE_WORKFLOW}) and on an image workflow's build-image job (its attestation)`);
+    }
+    if (steps.some((s) => /^tailscale\//i.test(String(s.uses ?? ''))) && !isProbeJob) {
+      problems.push(`${where}: the Tailscale action is used only by the network probe job ("${PROBE_JOB}" of ${PROBE_WORKFLOW})`);
+    }
+    if (TAILNET_CREDENTIAL.test(JSON.stringify(job)) && !isProbeJob) {
+      problems.push(`${where}: the TS_* secrets are read only by the network probe job ("${PROBE_JOB}" of ${PROBE_WORKFLOW})`);
+    }
+    if (isProbeJob) problems.push(...probeJobProblems(where, job));
     if (environment !== undefined && PRODUCTION_ENVIRONMENTS.includes(environment) && (triggers.length !== 1 || triggers[0] !== 'workflow_dispatch')) {
       problems.push(`${where}: a job bound to the "${environment}" environment must be in a workflow_dispatch-only workflow (found: ${triggers.join(', ') || 'nothing'}); a scheduled or automatic run would wait for manual approval`);
     }
@@ -360,6 +528,13 @@ export function checkWorkflowSafety(fileName, text) {
   delete outsideJobs.jobs;
   if (BACKUP_CREDENTIAL.test(JSON.stringify(outsideJobs))) problems.push(`${fileName}: the BACKUP_SSH_* credentials are never set at workflow level`);
   if (fileName === SCHEDULED_BACKUP_WORKFLOW) problems.push(...scheduledBackupWorkflowProblems(fileName, doc, triggers));
+  if (TAILNET_CREDENTIAL.test(JSON.stringify(outsideJobs))) problems.push(`${fileName}: the TS_* secrets are never set at workflow level`);
+  if (fileName === PROBE_WORKFLOW) {
+    problems.push(...probeWorkflowProblems(fileName, doc, triggers));
+    if (!text.split('\n').some((l) => l.trim() === `uses: ${TAILSCALE_ACTION} # ${TAILSCALE_ACTION_RELEASE}`)) {
+      problems.push(`${fileName}: the Tailscale action must be written exactly "uses: ${TAILSCALE_ACTION} # ${TAILSCALE_ACTION_RELEASE}"`);
+    }
+  }
 
   if (deploys) {
     const branches = triggerBranches(doc, 'push');

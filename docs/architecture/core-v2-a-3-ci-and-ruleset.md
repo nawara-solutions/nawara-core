@@ -317,3 +317,68 @@ before authentication.
 - the observations deferred in §8.
 
 A3.7 (restricting the organization secrets) stays deferred. G7, F6 and F7 stay locked.
+
+## 10. M2 T6: the network probe, the first tailnet identity (2026-10-17)
+
+**Why.** GitHub-hosted runners cannot reach the deploy target `DEPLOY_SSH_HOST` (a private LAN address; the second P2 run,
+`38978679865`, timed out), so the owner chose a Tailscale route over restoring a public SSH endpoint. Before any production workflow
+uses that route, `core-network-probe.yml` proves it, network-only: an ephemeral `tag:nawara-ci-probe` node, a TCP connection to the SSH
+port, and the server's ECDSA host key compared with `DEPLOY_SSH_FINGERPRINT`. It never authenticates. The runbook is
+[core-network-probe.md](../runbooks/core-network-probe.md).
+
+**The OIDC claim finding.** GitHub documents `job_workflow_ref` only for jobs that run a reusable workflow. In practice an ordinary job
+carries it too, equal to its own workflow: this repository's Auth image attestation shows Fulcio's Build Signer URI (from
+`job_workflow_ref`) and Build Config URI (from `workflow_ref`) both equal to `auth-service-docker-build.yml@refs/heads/main`. Because
+the claim names a workflow, not a job, every job of a workflow satisfies a credential bound to it. So the probe is its own workflow with
+its **own** federated credential, which requires both `workflow_ref` and `job_workflow_ref` to name the probe file. The probe does not
+reuse the `core-backup.yml` credential, and adds no job to `core-backup.yml`.
+
+**What `scripts/lib/checks.mjs` enforces (Core V2 M2 T6):**
+- **The workflow:**
+  - `workflow_dispatch` only, with no inputs;
+  - `permissions: {}`, and nothing else at workflow level;
+  - exactly one job, `probe`.
+- **The job:**
+  - `if: github.ref == 'refs/heads/main'` exactly;
+  - the literal `production` environment and the production queue (never cancelled);
+  - `ubuntu-24.04` and `timeout-minutes: 10`;
+  - permissions exactly `id-token: write`;
+  - no job `env`, `uses`, container or `continue-on-error`.
+- **The steps:** exactly validate → Tailscale → probe.
+  - **The two script steps** read exactly `TS_PROBE_HOST`, `DEPLOY_SSH_PORT` and `DEPLOY_SSH_FINGERPRINT` from secrets.
+    - Each starts with `set -euo pipefail`.
+    - No expression is interpolated.
+    - No line echoes a variable, and nothing is written to a file.
+    - There is no tracing.
+    - There is no `ssh`, `scp`, `sftp`, `sshpass`, `rsync`, `nc`, `curl`, `wget`, `gh`, `git`, `docker`, `tailscale`, `base64` or
+      `eval`, and no mention of a backup or a repository script.
+  - **The validate step** contacts nothing and keeps the tailnet-range, port and fingerprint checks.
+  - **The probe step** runs exactly one remote tool, `ssh-keyscan -T 10 -t ecdsa -p "$DEPLOY_SSH_PORT" "$TS_PROBE_HOST"`, plus the TCP
+    test, the one-ECDSA-key check and the exact comparison.
+  - **The Tailscale step** is exactly `tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0`. Its inputs are exactly
+    the probe's OIDC client ID and audience secrets, `tag:nawara-ci-probe`, client `1.94.2`, its SHA-256 and `use-cache: 'false'`.
+- **The secrets:** the probe may read only `TS_PROBE_OIDC_CLIENT_ID`, `TS_PROBE_OIDC_AUDIENCE`, `TS_PROBE_HOST`, `DEPLOY_SSH_PORT` and
+  `DEPLOY_SSH_FINGERPRINT`; any other secret, or `toJSON(secrets)`, is refused.
+- **Repository-wide:**
+  - `id-token: write`, effective at job or workflow level (including `write-all`), is allowed only on this probe job and on an image
+    workflow's `build-image` job;
+  - the Tailscale action and every `TS_*` secret are allowed only in this probe job.
+
+  So `core-backup.yml` and every other production workflow stay without a tailnet identity until a later, reviewed change (T7).
+
+**Verified before implementation.** The tag `v4.2.0` resolves directly to commit `d1b6cd2…`, a verified commit. The action's bundle
+does the following:
+- requests the OIDC token with the configured audience, and `@actions/core` masks it;
+- joins with `?preauthorized=true&ephemeral=true`;
+- runs `tailscaled` with in-memory state and a kernel TUN;
+- verifies the client tarball against `sha256sum` and fails on a mismatch.
+
+The downloaded `tailscale_1.94.2_amd64.tgz` hashes to Tailscale's published `c6f99a5d…dc32`. The action always passes
+`--accept-routes`, which is harmless only while the tailnet has no subnet router.
+
+**Not done in T6.1:**
+- no Tailscale policy entry, credential or secret;
+- no dispatch;
+- no change to `core-backup.yml`, `DEPLOY_SSH_HOST` or Server 1.
+
+The negative check against a non-granted port is deferred. G7, F6 and F7 stay locked.
