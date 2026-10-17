@@ -382,3 +382,63 @@ The downloaded `tailscale_1.94.2_amd64.tgz` hashes to Tailscale's published `c6f
 - no change to `core-backup.yml`, `DEPLOY_SSH_HOST` or Server 1.
 
 The negative check against a non-granted port is deferred. G7, F6 and F7 stay locked.
+
+## 11. M2 T7: the manual backup over the tailnet, and the SSH-client override rules (2026-10-17)
+
+**The change.** `core-backup.yml` keeps its trigger, its `services` input, the `production` approval, the queue, the checkout, the
+packaging, the A3.6 guard, the pinned SSH action, the login, the host-key pin, the forwarded variables and the remote script. It
+gains:
+- job-level `contents: read` and `id-token: write`;
+- after the guard, a destination check (`TS_BACKUP_HOST` must be exactly one IPv4 address inside `100.64.0.0/10`; `DEPLOY_SSH_PORT`
+  must be one TCP port);
+- the T6-reviewed Tailscale step, with the same pin, client, checksum and no cache, but its own `TS_BACKUP_OIDC_*` and
+  `tag:nawara-ci-prod`.
+
+The SSH step now connects to `${{ secrets.TS_BACKUP_HOST }}` on `${{ secrets.DEPLOY_SSH_PORT }}`, the `|| 22` fallback removed.
+`DEPLOY_SSH_HOST` is unchanged, and the backup never reads it. The other five SSH workflows, the probe and the scheduled backup are
+unchanged. The runbook is [core-backup-restore.md §3](../runbooks/core-backup-restore.md).
+
+**What the investigation found in the SSH client.** These were verified against the pinned `drone-ssh` 1.8.2 binary in
+`scripts/deploy-tests/ssh-host-key-pinning.test.mjs`:
+- every setting is read from `PLUGIN_*` and `SSH_*` (`PROXY_SSH_*` for the proxy) **before** the action's `INPUT_*`, so `SSH_HOST` or
+  `PLUGIN_PORT` silently replaces the reviewed host or port;
+- a comma-separated `host` connects to, and runs the script on, **every** host;
+- a `host:port` value overrides the port;
+- `host` is read from a `.host` file in the working directory when no variable sets it. The composite action always sets `INPUT_HOST`,
+  so the file only matters without it.
+
+**What `scripts/lib/checks.mjs` now enforces.**
+- **Every `appleboy/ssh-action` job (all six workflows, files unchanged):**
+  - only the inputs `host`, `username`, `password`, `port`, `fingerprint`, `envs` and `script`;
+  - no `PLUGIN_*`, `SSH_*`, `PROXY_*`, `INPUT_*` or `DEBUG` variable at workflow, job or SSH-step level;
+  - `$GITHUB_ENV` written only as one literal `echo "NAME=value" >> "$GITHUB_ENV"` line, whose name is neither an override nor a
+    fingerprint variable. Any other form cannot be ruled out, so it is refused;
+  - never `$GITHUB_PATH`.
+
+  No tracked `.host` or `.port` file may exist anywhere.
+- **The backup job, pinned whole:**
+  - main only, the literal `production` environment, `ubuntu-latest`, permissions exactly `contents: read` and `id-token: write`;
+  - no job `env`, `defaults` or `continue-on-error`;
+  - exactly six steps, in this order: checkout (no inputs) → the exact packaging line → the guard → the destination check → the
+    Tailscale step → the SSH step. No condition or `continue-on-error` on any of them;
+  - the destination check reads exactly the two expressions the SSH step connects to, contacts nothing, prints no value and fails
+    closed on each check;
+  - the Tailscale inputs are exactly those above;
+  - the SSH inputs are exactly the tailnet host, the validated port, the unchanged user, password and fingerprint, and
+    `envs: BACKUP_B64,BACKUP_SERVICES`, with the remote script and `BACKUP_SERVICES: ${{ inputs.services }}` unchanged;
+  - it reads only `TS_BACKUP_*` and `DEPLOY_SSH_USER`/`PASSWORD`/`PORT`/`FINGERPRINT`; never `DEPLOY_SSH_HOST` or `toJSON(secrets)`.
+- **The workflow:** keeps exactly the `services` input and `contents: read`.
+- **The tailnet identity:** it belongs to two jobs, each with its own prefix:
+  - the probe (`TS_PROBE_*`);
+  - the backup (`TS_BACKUP_*`).
+
+  `id-token: write` in production, the Tailscale action and any `TS_*` secret are refused everywhere else.
+
+**Before the first run (owner, separately authorized):**
+1. Confirm the backup credential's claims in the Tailscale console: the immutable subject, `workflow_ref` and `job_workflow_ref` both
+   set to `core-backup.yml@refs/heads/main`, `ref`, `event_name`, `runner_environment`, the tag `tag:nawara-ci-prod` only, scope
+   `auth_keys` only, and no `*`.
+2. Create the three `production` secrets.
+3. Dispatch once and approve it. There is no automatic retry.
+
+G7, F6 and F7 stay locked.

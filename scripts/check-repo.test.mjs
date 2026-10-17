@@ -5,12 +5,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parse } from 'yaml';
+import { parse, parseDocument } from 'yaml';
 import { AUTH_NEVER_CALL, AUTH_ORGANIZATION_CLIENT, AUTH_ORGANIZATION_OPERATIONS, checkAuthOrganizationBoundary } from './lib/checks.mjs';
 import { REPAIR_AUDIT_ACTIONS, REPAIR_AUDIT_PRODUCER, REPAIR_AUDIT_SCAN, REPAIR_AUDIT_TESTS, checkRepairAuditProducerScope, repairAuditScanned } from './lib/checks.mjs';
 import { ALERT_CATALOG, BROKER_ALARMS, CI_AGGREGATE, CORE_JOBS, GRAFANA_DASHBOARDS, PROMETHEUS_SELF_METRICS, PRODUCTION_GROUP, checkAlertRules, checkAuthErrorCoverage, checkCiAggregate, checkCiCoverage, checkActionPins, checkDigestDeploy, checkHierarchyFixtures, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, SBOM_GENERATOR, checkMetricsClientImport, metricsClientReferences, CALLER_POLICY_MODULES, checkCallerPolicyInventory, checkCallerPolicyModule, staticModuleSpecifiers, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, DOCKER_CONTEXT_EXCLUDED, ENV_PATHS_IGNORED, PROCESS_ENV_BOUNDARY, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, developmentSecretCatalog, dockerIgnoreExcludes, envAssignments, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, sourceFacts, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, nodeMajor, checkCiWorkspaceCoverage, GENERICITY_HISTORICAL_LINES, checkEventContracts, usesEventTraffic, EVENT_CONTRACT_EXEMPT, checkOutboxRetentionEligibility, outboxIdSources, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
 import ts from 'typescript';
 import { BACKUP_ENVIRONMENT, SCHEDULED_BACKUP_CRON, SCHEDULED_BACKUP_GUARD, SCHEDULED_BACKUP_SECRETS, checkScheduledBackupEntry, checkScheduledBackupVerifier } from './lib/checks.mjs';
+import { BACKUP_DESTINATION_ENV, BACKUP_JOB, BACKUP_JOB_SECRETS, BACKUP_PACKAGE_RUN, BACKUP_PERMISSIONS, BACKUP_REMOTE_SCRIPT, BACKUP_SSH_ACTION, BACKUP_SSH_WITH, BACKUP_TAG, BACKUP_TAILSCALE_WITH, BACKUP_WORKFLOW, SSH_ACTION_INPUTS, checkDroneSshFiles } from './lib/checks.mjs';
 import { PROBE_ENV, PROBE_GUARD, PROBE_JOB, PROBE_SECRETS, PROBE_TAG, PROBE_TAILSCALE_WITH, PROBE_WORKFLOW, TAILSCALE_ACTION, TAILSCALE_ACTION_RELEASE, TAILSCALE_CLIENT_SHA256, TAILSCALE_CLIENT_VERSION } from './lib/checks.mjs';
 
 // V2-A.3 A3.6: the host-key guard step, exactly as every real production SSH job carries it.
@@ -257,8 +258,10 @@ test('A3.6: every real production SSH step pins the host key behind the guard', 
     const [, job] = Object.entries(doc.jobs).find(([, j]) => (j.steps ?? []).some((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action')));
     const sshAt = job.steps.findIndex((s) => String(s.uses ?? '').startsWith('appleboy/ssh-action'));
     assert.equal(job.steps[sshAt].with.fingerprint, '${{ secrets.DEPLOY_SSH_FINGERPRINT }}', name);
-    assert.equal(job.steps[sshAt - 1].name, 'Require the pinned production host key', name);
-    assert.equal(job.steps[sshAt - 1].env.DEPLOY_SSH_FINGERPRINT, '${{ secrets.DEPLOY_SSH_FINGERPRINT }}', name);
+    // The guard sits right before the SSH step; in core-backup.yml (Core V2 M2 T7) the destination check and the tailnet join follow it.
+    const guardAt = sshAt - (name === 'core-backup.yml' ? 3 : 1);
+    assert.equal(job.steps[guardAt].name, 'Require the pinned production host key', name);
+    assert.equal(job.steps[guardAt].env.DEPLOY_SSH_FINGERPRINT, '${{ secrets.DEPLOY_SSH_FINGERPRINT }}', name);
     assert.match(text, GUARD_BLOCK, name);
   }
 });
@@ -2966,22 +2969,26 @@ test('T6: every relaxation of the probe workflow is refused', () => {
   for (const [label, from, to, re] of cases) assert.match(probeProblems(swap(PROBE, from, to)), re, label);
 });
 
-test('T6: the tailnet identity stays in the probe job: id-token, the Tailscale action and TS_* secrets are refused anywhere else', () => {
+test('T6/T7: the tailnet identity stays in the two tailnet jobs: id-token, the Tailscale action and TS_* secrets are refused anywhere else', () => {
   // A copy of the probe under another name gets none of the probe's allowances.
-  assert.match(probeProblems(PROBE, 'core-network-probe-copy.yml'), /id-token: write is allowed only on the network probe job[\s\S]*Tailscale action is used only by the network probe job[\s\S]*TS_\* secrets are read only by the network probe job/);
-  const tailscaleStep = `      - uses: ${TAILSCALE_ACTION} # ${TAILSCALE_ACTION_RELEASE}\n        with:\n          oauth-client-id: \${{ secrets.TS_PROBE_OIDC_CLIENT_ID }}\n          audience: \${{ secrets.TS_PROBE_OIDC_AUDIENCE }}\n          tags: tag:nawara-ci-probe\n`;
-  // core-backup.yml stays untouched: no Tailscale step, no id-token, no TS_* secret (T6 changes nothing in the backup).
-  const BACKUP = workflow('core-backup.yml');
-  assert.deepEqual(checkWorkflowSafety('core-backup.yml', BACKUP), []);
-  assert.doesNotMatch(BACKUP, /tailscale|id-token|TS_/i);
-  const backupJoin = swap(BACKUP, '      - uses: actions/checkout@', `${tailscaleStep}      - uses: actions/checkout@`);
-  assert.match(probeProblems(backupJoin, 'core-backup.yml'), /Tailscale action is used only by the network probe job[\s\S]*TS_\* secrets are read only by the network probe job/);
-  const backupToken = swap(BACKUP, '    runs-on: ubuntu-latest\n', '    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      id-token: write\n');
-  assert.match(probeProblems(backupToken, 'core-backup.yml'), /id-token: write is allowed only on the network probe job/);
-  const backupWriteAll = swap(BACKUP, 'permissions:\n  contents: read\n', 'permissions: write-all\n');
-  assert.match(probeProblems(backupWriteAll, 'core-backup.yml'), /id-token: write is allowed only on the network probe job/);
-  // Every real production workflow and every other job: no id-token unless it is an image workflow's build-image job.
-  for (const name of readdirSync(new URL('../.github/workflows/', import.meta.url)).filter((n) => n.endsWith('.yml') && n !== PROBE_WORKFLOW)) {
+  assert.match(probeProblems(PROBE, 'core-network-probe-copy.yml'), /id-token: write is allowed only on the network probe job[\s\S]*Tailscale action is used only by the network probe job[\s\S]*TS_\* secrets are read only by the tailnet jobs/);
+  // So does a copy of the backup.
+  assert.match(probeProblems(workflow(BACKUP_WORKFLOW), 'core-backup-copy.yml'), /id-token: write is allowed only[\s\S]*Tailscale action is used only[\s\S]*TS_\* secrets are read only by the tailnet jobs[\s\S]*found secrets\.TS_BACKUP_/);
+  const tailscaleStep = (prefix, tag) => `      - uses: ${TAILSCALE_ACTION} # ${TAILSCALE_ACTION_RELEASE}\n        with:\n          oauth-client-id: \${{ secrets.${prefix}OIDC_CLIENT_ID }}\n          audience: \${{ secrets.${prefix}OIDC_AUDIENCE }}\n          tags: ${tag}\n`;
+  // Every other production SSH workflow stays without a tailnet identity (unchanged files; adding one is refused).
+  for (const name of PRODUCTION_WORKFLOWS.filter((n) => n !== BACKUP_WORKFLOW)) {
+    const text = workflow(name);
+    assert.doesNotMatch(text, /tailscale|id-token|TS_/i, name);
+    const join = text.replace(/\n {6}- uses: appleboy\/ssh-action@/, `\n${tailscaleStep('TS_BACKUP_', BACKUP_TAG).trimEnd()}\n      - uses: appleboy/ssh-action@`);
+    assert.notEqual(join, text, name);
+    assert.match(probeProblems(join, name), /Tailscale action is used only by the network probe job[\s\S]*TS_\* secrets are read only by the tailnet jobs[\s\S]*found secrets\.TS_BACKUP_OIDC_CLIENT_ID/, name);
+    const edited = parseDocument(text);
+    const sshJob = Object.entries(parse(text).jobs).find(([, j]) => (j.steps ?? []).some((st) => String(st.uses ?? '').startsWith('appleboy/ssh-action')))[0];
+    edited.setIn(['jobs', sshJob, 'permissions', 'id-token'], 'write');
+    assert.match(probeProblems(String(edited), name), /id-token: write is allowed only/, name);
+  }
+  // Every workflow but the two tailnet ones: no id-token unless it is an image workflow's build-image job; no action, no TS_* secret.
+  for (const name of readdirSync(new URL('../.github/workflows/', import.meta.url)).filter((n) => n.endsWith('.yml') && n !== PROBE_WORKFLOW && n !== BACKUP_WORKFLOW)) {
     const doc = parse(workflow(name));
     for (const [jobId, job] of Object.entries(doc.jobs)) {
       const perms = job.permissions ?? doc.permissions ?? {};
@@ -2992,9 +2999,223 @@ test('T6: the tailnet identity stays in the probe job: id-token, the Tailscale a
   const other = (job, perms = '') => `name: o\non:\n  workflow_dispatch:\n${perms}jobs:\n  x:\n${job}`;
   assert.match(probeProblems(other('    permissions:\n      id-token: write\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n'), 'o.yml'), /id-token: write is allowed only/);
   assert.match(probeProblems(other('    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n', 'permissions:\n  id-token: write\n'), 'o.yml'), /id-token: write is allowed only/);
-  assert.match(probeProblems(other("    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"$H\"\n        env:\n          H: ${{ secrets['TS_PROBE_HOST'] }}\n"), 'o.yml'), /TS_\* secrets are read only by the network probe job/);
+  for (const secret of ['TS_PROBE_HOST', 'TS_BACKUP_HOST', 'TS_OTHER']) {
+    assert.match(probeProblems(other(`    runs-on: ubuntu-latest\n    steps:\n      - run: echo "$H"\n        env:\n          H: \${{ secrets['${secret}'] }}\n`), 'o.yml'), new RegExp(`TS_\\* secrets are read only by the tailnet jobs[\\s\\S]*found secrets\\.${secret}`), secret);
+  }
+  // Each tailnet job reads only its own prefix: the backup never the probe's identity, the probe never the backup's.
+  assert.match(probeProblems(swap(workflow(BACKUP_WORKFLOW), 'secrets.TS_BACKUP_OIDC_CLIENT_ID', 'secrets.TS_PROBE_OIDC_CLIENT_ID'), BACKUP_WORKFLOW), /found secrets\.TS_PROBE_OIDC_CLIENT_ID[\s\S]*may read only/);
+  assert.match(probeProblems(swap(PROBE, 'secrets.TS_PROBE_OIDC_CLIENT_ID', 'secrets.TS_BACKUP_OIDC_CLIENT_ID')), /may read only[\s\S]*found secrets\.TS_BACKUP_OIDC_CLIENT_ID|found secrets\.TS_BACKUP_OIDC_CLIENT_ID[\s\S]*may read only/);
   // The image build keeps its attestation token (unchanged rule).
   assert.deepEqual(checkWorkflowSafety('auth-service-docker-build.yml', BUILD), []);
   // A probe job anywhere but core-network-probe.yml is not the probe: renaming the job in the real file is refused too.
   assert.match(probeProblems(swap(PROBE, 'jobs:\n  probe:\n', 'jobs:\n  check:\n')), /id-token: write is allowed only[\s\S]*exactly one job, "probe"/);
+  assert.match(probeProblems(swap(workflow(BACKUP_WORKFLOW), 'jobs:\n  backup:\n', 'jobs:\n  run:\n'), BACKUP_WORKFLOW), /id-token: write is allowed only[\s\S]*exactly one job, "backup"/);
+});
+
+// ================================================================================ Core V2 M2 T7: the manual backup over the tailnet
+const BACKUP_WF = workflow(BACKUP_WORKFLOW);
+const backupProblems = (text, file = BACKUP_WORKFLOW) => checkWorkflowSafety(file, text).join('\n');
+const DEST_STEP = '      - name: Validate the private backup destination\n';
+const JOIN_STEP = '      - name: Join the tailnet (ephemeral node, tag:nawara-ci-prod)\n';
+const SSH_STEP = '      - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5\n';
+const BACKUP_JOIN_END = "          use-cache: 'false'\n";
+const blockOf = (text, header) => {
+  const start = text.indexOf(header);
+  assert.ok(start >= 0, `fixture drift: ${header}`);
+  const next = text.slice(start + header.length).search(/\n {6}(- |# )/);
+  return text.slice(start, start + header.length + next + 1);
+};
+
+test('T7: the manual backup joins the tailnet and keeps every existing control', () => {
+  assert.deepEqual(checkWorkflowSafety(BACKUP_WORKFLOW, BACKUP_WF), []);
+  assert.deepEqual(checkActionPins(BACKUP_WORKFLOW, BACKUP_WF), []);
+  const doc = parse(BACKUP_WF);
+  // Unchanged: trigger, input, workflow permissions, guard, environment, queue, runner, no timeout.
+  assert.deepEqual(Object.keys(doc.on), ['workflow_dispatch']);
+  assert.deepEqual(Object.keys(doc.on.workflow_dispatch.inputs), ['services']);
+  assert.equal(doc.on.workflow_dispatch.inputs.services.required, true);
+  assert.equal(doc.on.workflow_dispatch.inputs.services.default, 'auth-service');
+  assert.deepEqual(doc.permissions, { contents: 'read' });
+  assert.deepEqual(Object.keys(doc.jobs), [BACKUP_JOB]);
+  const job = doc.jobs[BACKUP_JOB];
+  assert.equal(job.if, "github.ref == 'refs/heads/main'");
+  assert.equal(job.environment, 'production');
+  assert.deepEqual(job.concurrency, { group: PRODUCTION_GROUP, 'cancel-in-progress': false });
+  assert.equal(job['runs-on'], 'ubuntu-latest');
+  assert.equal(job['timeout-minutes'], undefined, 'the backup timeout behaviour is unchanged');
+  // New: the job token, the destination check and the join, in order before the unchanged SSH step.
+  assert.deepEqual(job.permissions, BACKUP_PERMISSIONS);
+  assert.deepEqual(job.steps.map((s) => s.name ?? s.uses.split('@')[0]), ['actions/checkout', undefined, 'Require the pinned production host key',
+    'Validate the private backup destination', 'Join the tailnet (ephemeral node, tag:nawara-ci-prod)', 'appleboy/ssh-action'].map((n, i) => (i === 1 ? job.steps[1].name : n)));
+  assert.equal(job.steps[1].run.trim(), BACKUP_PACKAGE_RUN);
+  assert.deepEqual(job.steps[3].env, BACKUP_DESTINATION_ENV);
+  assert.equal(job.steps[4].uses, TAILSCALE_ACTION);
+  assert.deepEqual(job.steps[4].with, BACKUP_TAILSCALE_WITH);
+  assert.equal(BACKUP_TAILSCALE_WITH.tags, 'tag:nawara-ci-prod');
+  assert.equal(job.steps[5].uses, BACKUP_SSH_ACTION);
+  const { script, ...sshWith } = job.steps[5].with;
+  assert.deepEqual(sshWith, BACKUP_SSH_WITH);
+  assert.equal(sshWith.host, job.steps[3].env.TS_BACKUP_HOST, 'the SSH host is the validated value');
+  assert.equal(sshWith.port, job.steps[3].env.DEPLOY_SSH_PORT, 'the SSH port is the validated value, without the former || 22');
+  assert.deepEqual(script.trim().split('\n').map((l) => l.trim()), BACKUP_REMOTE_SCRIPT);
+  assert.deepEqual(job.steps[5].env, { BACKUP_SERVICES: '${{ inputs.services }}' });
+  assert.doesNotMatch(JSON.stringify(doc), /DEPLOY_SSH_HOST|TS_PROBE_|toJSON|proxy_|PLUGIN_|"SSH_/);
+  assert.deepEqual([...BACKUP_JOB_SECRETS].sort(), ['DEPLOY_SSH_FINGERPRINT', 'DEPLOY_SSH_PASSWORD', 'DEPLOY_SSH_PORT', 'DEPLOY_SSH_USER', 'TS_BACKUP_HOST', 'TS_BACKUP_OIDC_AUDIENCE', 'TS_BACKUP_OIDC_CLIENT_ID']);
+});
+
+test('T7: the network probe is unchanged by T7 and still passes every T6 rule', () => {
+  assert.deepEqual(checkWorkflowSafety(PROBE_WORKFLOW, PROBE), []);
+  assert.equal(createHash('sha256').update(PROBE).digest('hex'), createHash('sha256').update(workflow(PROBE_WORKFLOW)).digest('hex'));
+  assert.doesNotMatch(PROBE, /TS_BACKUP_|tag:nawara-ci-prod\b/);
+});
+
+test('T7: every relaxation of the backup job is refused', () => {
+  const dest = blockOf(BACKUP_WF, DEST_STEP);
+  const join = blockOf(BACKUP_WF, JOIN_STEP);
+  const cases = [
+    // destination
+    ['the shared LAN host', 'host: ${{ secrets.TS_BACKUP_HOST }}', 'host: ${{ secrets.DEPLOY_SSH_HOST }}', /SSH input host must be exactly[\s\S]*never reads DEPLOY_SSH_HOST/],
+    ['a LAN fallback', 'host: ${{ secrets.TS_BACKUP_HOST }}', 'host: ${{ secrets.TS_BACKUP_HOST || secrets.DEPLOY_SSH_HOST }}', /SSH input host must be exactly[\s\S]*no fallback/],
+    ['a literal host', 'host: ${{ secrets.TS_BACKUP_HOST }}', 'host: 203.0.113.7', /SSH input host must be exactly/],
+    ['two hosts', 'host: ${{ secrets.TS_BACKUP_HOST }}', 'host: ${{ secrets.TS_BACKUP_HOST }},203.0.113.7', /SSH input host must be exactly/],
+    ['a port suffix', 'host: ${{ secrets.TS_BACKUP_HOST }}', 'host: ${{ secrets.TS_BACKUP_HOST }}:22', /SSH input host must be exactly/],
+    ['a variable host', 'host: ${{ secrets.TS_BACKUP_HOST }}', 'host: ${{ vars.TS_BACKUP_HOST }}', /SSH input host must be exactly/],
+    ['the port fallback', 'port: ${{ secrets.DEPLOY_SSH_PORT }}\n', 'port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}\n', /SSH input port must be exactly[\s\S]*no fallback/],
+    ['a literal port', 'port: ${{ secrets.DEPLOY_SSH_PORT }}\n', 'port: 22\n', /SSH input port must be exactly/],
+    ['validating another host', '          TS_BACKUP_HOST: ${{ secrets.TS_BACKUP_HOST }}\n', '          TS_BACKUP_HOST: ${{ secrets.TS_PROBE_HOST }}\n', /destination check, must read exactly[\s\S]*found secrets\.TS_PROBE_HOST/],
+    ['validating another port', "          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}\n        run: |\n          set -euo pipefail\n          python3", "          DEPLOY_SSH_PORT: '2222'\n        run: |\n          set -euo pipefail\n          python3", /destination check, must read exactly/],
+    ['no CIDR check', 'ipaddress.IPv4Network("100.64.0.0/10")', 'ipaddress.IPv4Network("0.0.0.0/0")', /inside 100\.64\.0\.0\/10/],
+    ['a lenient parse', 'ipaddress.IPv4Address(os.environ.get("TS_BACKUP_HOST", ""))', 'ipaddress.ip_address(os.environ.get("TS_BACKUP_HOST", "").split(",")[0])', /parsed as exactly one IPv4 address/],
+    ['no port check', '[[ $DEPLOY_SSH_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( DEPLOY_SSH_PORT <= 65535 ))', 'true', /checked to be one TCP port/],
+    ['a check that cannot fail', 'exit 1; }\n          echo "PASS destination', 'true; }\n          echo "PASS destination', /must exit 1 on each failed check/],
+    ['a printed destination', '          echo "PASS destination: one tailnet IPv4 address"\n', '          echo "PASS destination: $TS_BACKUP_HOST"\n', /prints a variable/],
+    ['tracing', '          set -euo pipefail\n          python3', '          set -euo pipefail\n          set -x\n          python3', /enables command tracing/],
+    ['a contact before the join', '          echo "PASS port: one TCP port"\n', '          echo "PASS port: one TCP port"\n          ssh-keyscan "$TS_BACKUP_HOST" 2>/dev/null\n', /must contact nothing/],
+    ['a GITHUB_ENV write in the check', '          echo "PASS port: one TCP port"\n', '          echo "PASS port: one TCP port"\n          echo "SSH_HOST=203.0.113.7" >> "$GITHUB_ENV"\n', /writes a file[\s\S]*must not set SSH_HOST/],
+    // skipping and ordering
+    ['a skippable check', DEST_STEP, `${DEST_STEP}        continue-on-error: true\n`, /destination check step may only have/],
+    ['a conditional check', DEST_STEP, `${DEST_STEP}        if: false\n`, /destination check step may only have/],
+    ['a skippable join', JOIN_STEP, `${JOIN_STEP}        continue-on-error: true\n`, /Tailscale step may only have/],
+    ['a conditional join', JOIN_STEP, `${JOIN_STEP}        if: always()\n`, /Tailscale step may only have/],
+    ['a conditional SSH step', SSH_STEP, SSH_STEP.replace('\n', "\n        if: success() || failure()\n"), /SSH step may only have/],
+    ['no check', dest, '', /exactly six steps/],
+    ['no join', join, '', /exactly six steps/],
+    ['a checkout of another ref', '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n', '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          ref: other\n', /checkout step may only have name, uses/],
+    ['another package step', BACKUP_PACKAGE_RUN, 'echo "BACKUP_B64=$(base64 -w0 other.sh)" >> "$GITHUB_ENV"', /step 2 must be exactly/],
+    // permissions
+    ['workflow-level id-token', 'permissions:\n  contents: read\n', 'permissions:\n  contents: read\n  id-token: write\n', /workflow permissions must be exactly "contents: read"/],
+    ['no job id-token', '      contents: read\n      id-token: write\n', '      contents: read\n', /job permissions must be exactly/],
+    ['no job contents', '      contents: read\n      id-token: write\n', '      id-token: write\n', /job permissions must be exactly/],
+    ['write-all on the job', '    permissions:\n      contents: read\n      id-token: write\n', '    permissions: write-all\n', /job permissions must be exactly/],
+    ['an extra job permission', '      id-token: write\n', '      id-token: write\n      packages: write\n', /job permissions must be exactly/],
+    // the Tailscale step
+    ['the probe tag', 'tags: tag:nawara-ci-prod', 'tags: tag:nawara-ci-probe', /input tags must be exactly tag:nawara-ci-prod/],
+    ['a second tag', 'tags: tag:nawara-ci-prod', 'tags: tag:nawara-ci-prod,tag:nawara-ci-probe', /input tags must be exactly/],
+    ['the probe identity', 'secrets.TS_BACKUP_OIDC_AUDIENCE', 'secrets.TS_PROBE_OIDC_AUDIENCE', /found secrets\.TS_PROBE_OIDC_AUDIENCE[\s\S]*input audience must be exactly/],
+    ['another action commit', `uses: ${TAILSCALE_ACTION} # v4.2.0`, `uses: tailscale/github-action@${'1'.repeat(40)} # v4.2.0`, /step 5 must be exactly[\s\S]*must be written exactly/],
+    ['a floating action', `uses: ${TAILSCALE_ACTION} # v4.2.0`, 'uses: tailscale/github-action@v4', /step 5 must be exactly/],
+    ['the latest client', 'version: 1.94.2', 'version: latest', /input version must be exactly 1\.94\.2/],
+    ['another checksum', TAILSCALE_CLIENT_SHA256, 'e'.repeat(64), /input sha256sum must be exactly/],
+    ['the cache', `use-cache: 'false'\n      - uses: appleboy`, `use-cache: 'true'\n      - uses: appleboy`, /input use-cache must be exactly false/],
+    ['an auth key', BACKUP_JOIN_END, `${BACKUP_JOIN_END}          authkey: \${{ secrets.TS_BACKUP_HOST }}\n`, /found: authkey/],
+    ['an OAuth secret', BACKUP_JOIN_END, `${BACKUP_JOIN_END}          oauth-secret: \${{ secrets.TS_BACKUP_OIDC_AUDIENCE }}\n`, /found: oauth-secret/],
+    ['an exit node', BACKUP_JOIN_END, `${BACKUP_JOIN_END}          args: --exit-node=100.64.0.1\n`, /found: args/],
+    ['Tailscale SSH', BACKUP_JOIN_END, `${BACKUP_JOIN_END}          args: --ssh\n`, /found: args/],
+    // SSH authentication and the remote script stay as they were
+    ['another user', 'username: ${{ secrets.DEPLOY_SSH_USER }}', 'username: ${{ secrets.BACKUP_SSH_USER }}', /SSH input username must be exactly[\s\S]*BACKUP_SSH_\* credentials are used only/],
+    ['another password', 'password: ${{ secrets.DEPLOY_SSH_PASSWORD }}', 'password: ${{ secrets.TS_BACKUP_HOST }}', /SSH input password must be exactly/],
+    ['no pin', '          fingerprint: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}\n          envs:', '          envs:', /must pin the production host key[\s\S]*SSH input fingerprint must be exactly/],
+    ['a forwarded tailnet value', 'envs: BACKUP_B64,BACKUP_SERVICES', 'envs: BACKUP_B64,BACKUP_SERVICES,TS_BACKUP_HOST', /SSH input envs must be exactly/],
+    ['every variable forwarded', 'envs: BACKUP_B64,BACKUP_SERVICES', 'envs: BACKUP_B64,BACKUP_SERVICES\n          allenvs: true', /may set only[\s\S]*found: allenvs/],
+    ['a changed remote script', '| BACKUP_SERVICES="$BACKUP_SERVICES" bash -s', '| BACKUP_SERVICES="auth-service organization-service audit-service" bash -s', /remote script must stay exactly/],
+    ['another service source', 'BACKUP_SERVICES: ${{ inputs.services }}', "BACKUP_SERVICES: auth-service", /SSH step env must stay exactly/],
+    ['another SSH action pin', 'appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5', `appleboy/ssh-action@${'2'.repeat(40)} # v1.2.5`, /step 6 must be exactly/],
+    ['a proxy', 'envs: BACKUP_B64,BACKUP_SERVICES', 'envs: BACKUP_B64,BACKUP_SERVICES\n          proxy_host: 203.0.113.7', /must not use a proxy[\s\S]*found: proxy_host/],
+    ['a protocol switch', 'envs: BACKUP_B64,BACKUP_SERVICES', 'envs: BACKUP_B64,BACKUP_SERVICES\n          protocol: tcp6', /found: protocol/],
+    // job and workflow shape
+    ['another environment', '    environment: production\n', '    environment: production-backup\n', /reserved for the scheduled backup[\s\S]*must declare "environment: production"/],
+    ['no main guard', "    if: github.ref == 'refs/heads/main'\n", '', /guarded by exactly[\s\S]*restricted to refs\/heads\/main/],
+    ['a cancellable run', 'cancel-in-progress: false', 'cancel-in-progress: true', /cancel-in-progress must be explicitly false/],
+    ['a self-hosted runner', 'runs-on: ubuntu-latest', 'runs-on: self-hosted', /runs-on must stay ubuntu-latest/],
+    ['a job working directory', '    runs-on: ubuntu-latest\n', '    runs-on: ubuntu-latest\n    defaults:\n      run:\n        working-directory: infra\n', /"defaults" not allowed on the backup job/],
+    ['a workflow env', 'permissions:\n  contents: read\n', 'permissions:\n  contents: read\nenv:\n  X: y\n', /no workflow-level "env"/],
+    ['a second input', '        default: auth-service\n', '        default: auth-service\n      host:\n        required: false\n', /keeps exactly one input/],
+    ['a schedule', 'on:\n  workflow_dispatch:\n', "on:\n  schedule:\n    - cron: '0 2 * * *'\n  workflow_dispatch:\n", /must be in a workflow_dispatch-only workflow/],
+    ['a second job', 'jobs:\n', 'jobs:\n  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo x\n', /exactly one job, "backup"/],
+    ['every secret at once', '          BACKUP_SERVICES: ${{ inputs.services }}\n', '          BACKUP_SERVICES: ${{ inputs.services }}\n          ALL: ${{ toJSON(secrets) }}\n', /never reads every secret at once[\s\S]*SSH step env must stay exactly/],
+  ];
+  // Each part between [\s\S]* must be reported, in any order.
+  for (const [label, from, to, re] of cases) {
+    const out = backupProblems(swap(BACKUP_WF, from, to));
+    for (const part of re.source.split('[\\s\\S]*')) assert.match(out, new RegExp(part), `${label}: ${part}`);
+  }
+});
+
+test('T7: every reordering of guard → destination check → Tailscale → SSH is refused', () => {
+  // The original YAML nodes are moved (their pin comments kept), so only the order differs.
+  const reordered = (order) => {
+    const d = parseDocument(BACKUP_WF);
+    const seq = d.getIn(['jobs', BACKUP_JOB, 'steps']);
+    seq.items = order.map((i) => seq.items[i]);
+    return backupProblems(String(d));
+  };
+  for (const [label, order, re] of [
+    ['the join after the SSH step', [0, 1, 2, 3, 5, 4], /step 5 must be exactly[\s\S]*step 6 must be exactly/],
+    ['the check after the join', [0, 1, 2, 4, 3, 5], /step 4, the destination check[\s\S]*step 5 must be exactly/],
+    ['the join before the guard', [0, 1, 4, 2, 3, 5], /step 3 must be the host-key guard/],
+    ['the check before the guard', [0, 1, 3, 2, 4, 5], /step 3 must be the host-key guard[\s\S]*step 4, the destination check/],
+    ['the SSH step first', [5, 0, 1, 2, 3, 4], /step 1 must be the pinned actions\/checkout/],
+    ['the guard after the SSH step', [0, 1, 3, 4, 5, 2], /must be preceded by the host-key guard step/],
+  ]) {
+    const out = reordered(order);
+    for (const part of re.source.split('[\\s\\S]*')) assert.match(out, new RegExp(part), `${label}: ${part}`);
+  }
+  assert.equal(reordered([0, 1, 2, 3, 4, 5]), '', 'control: the real order passes');
+});
+
+test('T7: no drone-ssh override variable, $GITHUB_ENV override or extra SSH input in any production SSH workflow (files unchanged)', () => {
+  const OVERRIDES = ['PLUGIN_HOST', 'SSH_HOST', 'PLUGIN_PORT', 'SSH_PORT', 'PLUGIN_USERNAME', 'SSH_PASSWORD', 'PLUGIN_FINGERPRINT', 'PROXY_SSH_HOST', 'INPUT_HOST', 'INPUT_ALLENVS', 'DEBUG', 'plugin_host'];
+  for (const name of PRODUCTION_WORKFLOWS) {
+    const text = workflow(name);
+    assert.deepEqual(checkWorkflowSafety(name, text), [], name);
+    const doc = parseDocument(text);
+    const sshJob = Object.entries(parse(text).jobs).find(([, j]) => (j.steps ?? []).some((st) => String(st.uses ?? '').startsWith('appleboy/ssh-action')))[0];
+    const sshAt = parse(text).jobs[sshJob].steps.findIndex((st) => String(st.uses ?? '').startsWith('appleboy/ssh-action'));
+    for (const key of OVERRIDES) {
+      for (const [level, path] of [['workflow', ['env', key]], ['job', ['jobs', sshJob, 'env', key]], ['SSH-step', ['jobs', sshJob, 'steps', sshAt, 'env', key]]]) {
+        const d = doc.clone();
+        d.setIn(path, '203.0.113.7');
+        assert.match(checkWorkflowSafety(name, String(d)).join('\n'), new RegExp(`no drone-ssh override variable may be set at ${level} level \\(found: ${key}\\)`), `${name} ${level} ${key}`);
+      }
+    }
+    for (const input of ['proxy_host', 'protocol', 'allenvs', 'debug', 'key', 'key_path', 'timeout', 'sync', 'request_pty', 'script_path']) {
+      const d = doc.clone();
+      d.setIn(['jobs', sshJob, 'steps', sshAt, 'with', input], 'x');
+      assert.match(checkWorkflowSafety(name, String(d)).join('\n'), new RegExp(`may set only ${SSH_ACTION_INPUTS.join(', ')} \\(found: ${input}\\)`), `${name} ${input}`);
+    }
+    // A step before the SSH step that writes an override, or $GITHUB_ENV in any non-literal form, or $GITHUB_PATH.
+    for (const [run, re] of [
+      ['echo "SSH_HOST=203.0.113.7" >> "$GITHUB_ENV"', /must not set SSH_HOST/],
+      ['echo "PLUGIN_PORT=22" >> "$GITHUB_ENV"', /must not set PLUGIN_PORT/],
+      ['echo "SSH_FINGERPRINT=x" >> "$GITHUB_ENV"', /must not set SSH_FINGERPRINT/],
+      ['echo "X=1" >> "$GITHUB_ENV"; echo "SSH_HOST=h" >> "$GITHUB_ENV"', /may only be written as one literal line/],
+      ['printf "SSH_HOST=h\\n" >> $GITHUB_ENV', /may only be written as one literal line/],
+      ['cat >> "$GITHUB_ENV" <<EOF', /may only be written as one literal line/],
+      ['f="$GITHUB_ENV"', /may only be written as one literal line/],
+      ['echo "/tmp/x" >> "$GITHUB_PATH"', /never writes \$GITHUB_PATH/],
+    ]) {
+      const d = doc.clone();
+      d.setIn(['jobs', sshJob, 'steps', 0], d.createNode({ name: 'x', run }));
+      assert.match(checkWorkflowSafety(name, String(d)).join('\n'), re, `${name}: ${run}`);
+    }
+  }
+  // The existing literal package lines stay accepted (ROTATE_B64, PROVISION_B64, BACKUP_B64): legitimate behaviour is preserved.
+  for (const name of ['auth-db-credential-rotate.yml', 'core-rabbitmq-provision.yml', 'core-backup.yml']) assert.match(workflow(name), /_B64=\$\(base64 -w0 [^)]+\)" >> "\$GITHUB_ENV"/, name);
+});
+
+test('T7: no committed .host or .port file can choose a production SSH destination', () => {
+  assert.deepEqual(checkDroneSshFiles(gitTrackedFiles(new URL('..', import.meta.url).pathname)), []);
+  assert.deepEqual(checkDroneSshFiles(['README.md', 'apps/x/host.ts', '.hosts', 'port']), []);
+  for (const path of ['.host', '.port', 'infra/.host', 'apps/auth-service/.port']) assert.match(checkDroneSshFiles([path]).join(), /drone-ssh \(the production SSH client\) can read its destination/, path);
+  assert.match(checkDroneSshFiles(undefined).join(), /cannot run/);
 });

@@ -12,6 +12,11 @@ name: core database backup
 #   CORE_BACKUP_SERVICES are no longer read by this workflow.
 # The script arrives base64-encoded through the SSH environment (no scp); the S3 credentials and the certificate live on the server,
 # never in GitHub. A failed run is the failure signal (red in Actions; the server keeps backup/status/<service>.last-attempt).
+# PRIVATE ROUTE (Core V2 M2 T7): GitHub-hosted runners cannot reach the server's LAN address, so the job joins the tailnet as an ephemeral
+#   tag:nawara-ci-prod node (GitHub OIDC → the backup's Tailscale federated credential; no auth key, no OAuth secret) and connects to
+#   TS_BACKUP_HOST, Server 1's tailnet IPv4 address, validated inside 100.64.0.0/10 before anything is contacted. The tailnet grants that
+#   tag the SSH port of Server 1 only. Login, host-key pin and the remote script are unchanged; DEPLOY_SSH_HOST is never read here.
+#   docs/runbooks/core-backup-restore.md §3.
 on:
   workflow_dispatch:
     inputs:
@@ -33,6 +38,10 @@ jobs:
       group: production-deploy-core-api
       cancel-in-progress: false
     runs-on: ubuntu-latest
+    # Core V2 M2 T7: contents for the checkout; id-token for the GitHub OIDC token the Tailscale action exchanges for an ephemeral node.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Package the backup script
@@ -45,12 +54,42 @@ jobs:
         run: |
           [[ $DEPLOY_SSH_FINGERPRINT =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] \
             || { echo "::error::DEPLOY_SSH_FINGERPRINT is missing or is not a SHA256 host-key fingerprint; nothing was sent to the server"; exit 1; }
+      # Core V2 M2 T7: the destination is exactly one tailnet IPv4 address (no name, list, port suffix or fallback) and the port one TCP
+      # port, the same secret expressions the SSH step reads. drone-ssh would connect to EVERY host of a comma-separated value.
+      - name: Validate the private backup destination
+        env:
+          TS_BACKUP_HOST: ${{ secrets.TS_BACKUP_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+        run: |
+          set -euo pipefail
+          python3 -I -c 'import ipaddress, os, sys
+          try:
+              a = ipaddress.IPv4Address(os.environ.get("TS_BACKUP_HOST", ""))
+          except ValueError:
+              sys.exit(1)
+          sys.exit(0 if a in ipaddress.IPv4Network("100.64.0.0/10") else 1)' \
+            || { echo "::error::FAIL destination: TS_BACKUP_HOST is missing or is not one IPv4 address inside 100.64.0.0/10; nothing was sent to the server"; exit 1; }
+          echo "PASS destination: one tailnet IPv4 address"
+          { [[ $DEPLOY_SSH_PORT =~ ^[1-9][0-9]{0,4}$ ]] && (( DEPLOY_SSH_PORT <= 65535 )); } \
+            || { echo "::error::FAIL port: DEPLOY_SSH_PORT is missing or is not one TCP port; nothing was sent to the server"; exit 1; }
+          echo "PASS port: one TCP port"
+      # The reviewed release v4.2.0 at its commit, the client pinned by version and SHA-256, no cache (as the T6 probe). The node is
+      # ephemeral and logged out after the job. No args: no exit node, route or Tailscale SSH. A failed join stops the job before SSH.
+      - name: Join the tailnet (ephemeral node, tag:nawara-ci-prod)
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_BACKUP_OIDC_CLIENT_ID }}
+          audience: ${{ secrets.TS_BACKUP_OIDC_AUDIENCE }}
+          tags: tag:nawara-ci-prod
+          version: 1.94.2
+          sha256sum: c6f99a5d774c7783b56902188d69e9756fc3dddfb08ac6be4cb2585f3fecdc32
+          use-cache: 'false'
       - uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
         with:
-          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          host: ${{ secrets.TS_BACKUP_HOST }}
           username: ${{ secrets.DEPLOY_SSH_USER }}
           password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
-          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          port: ${{ secrets.DEPLOY_SSH_PORT }}
           fingerprint: ${{ secrets.DEPLOY_SSH_FINGERPRINT }}
           envs: BACKUP_B64,BACKUP_SERVICES
           script: |
