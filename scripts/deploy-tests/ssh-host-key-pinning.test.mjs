@@ -183,6 +183,59 @@ test('A3.6: an EMPTY pin accepts any host key, which is why the guard step must 
   }
 });
 
+// ---------------------------------------------------------------- Core V2 M2 T7: why no connection setting may come from elsewhere
+// The pinned drone-ssh reads every setting from PLUGIN_* and SSH_* before the action's INPUT_*, splits a comma-separated host into
+// several targets, takes a port from a host:port value, and reads `host` from a `.host` file when no variable sets it. Each case below is
+// shown against the synthetic loopback server; scripts/lib/checks.mjs refuses each source in every production SSH workflow, and the
+// backup's destination check refuses any host value that is not exactly one tailnet IPv4 address.
+function connectEnv(server, settings, cwd = T) {
+  const env = { PATH: process.env.PATH, HOME: join(T, 'runner-home'), INPUT_PROTOCOL: 'tcp', INPUT_USERNAME: USER, INPUT_KEY: client.priv,
+    INPUT_FINGERPRINT: server.ecdsa.fp, INPUT_TIMEOUT: '10s', INPUT_COMMAND_TIMEOUT: '30s', INPUT_SCRIPT: 'echo pinned-session-ok', ...settings };
+  for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k];
+  const r = spawnSync(binary, [], { env, cwd, encoding: 'utf8', timeout: 60000 });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+}
+const sessions = (out) => (out.match(/pinned-session-ok/g) ?? []).length;
+
+test('T7: SSH_HOST and PLUGIN_HOST replace the action input host; SSH_PORT and PLUGIN_PORT replace its port', async (t) => {
+  if (skip) return t.skip(skip);
+  const s = servers.all;
+  const closed = await freePort();
+  // Control: the input alone points at an address where nothing listens, so the connection fails.
+  assert.notEqual(connectEnv(s, { INPUT_HOST: '127.0.0.2', INPUT_PORT: String(s.port) }).code, 0);
+  assert.notEqual(connectEnv(s, { INPUT_HOST: '127.0.0.1', INPUT_PORT: String(closed) }).code, 0);
+  for (const override of ['SSH_HOST', 'PLUGIN_HOST']) {
+    const r = connectEnv(s, { INPUT_HOST: '127.0.0.2', INPUT_PORT: String(s.port), [override]: '127.0.0.1' });
+    assert.equal(r.code, 0, `${override}: ${r.out}`);
+    assert.equal(sessions(r.out), 1, override);
+  }
+  for (const override of ['SSH_PORT', 'PLUGIN_PORT']) {
+    const r = connectEnv(s, { INPUT_HOST: '127.0.0.1', INPUT_PORT: String(closed), [override]: String(s.port) });
+    assert.equal(r.code, 0, `${override}: ${r.out}`);
+  }
+});
+
+test('T7: a comma-separated host runs the script on every host, and a host:port value overrides the port', async (t) => {
+  if (skip) return t.skip(skip);
+  const s = servers.all;
+  const list = connectEnv(s, { INPUT_HOST: '127.0.0.1,127.0.0.1', INPUT_PORT: String(s.port) });
+  assert.equal(list.code, 0, list.out);
+  assert.equal(sessions(list.out), 2, 'two targets, two sessions: a list is never a single destination');
+  const suffixed = connectEnv(s, { INPUT_HOST: `127.0.0.1:${s.port}`, INPUT_PORT: String(await freePort()) });
+  assert.equal(suffixed.code, 0, suffixed.out);
+});
+
+test('T7: a .host file in the working directory chooses the host when no variable sets one; the action always sets INPUT_HOST', (t) => {
+  if (skip) return t.skip(skip);
+  const s = servers.all;
+  const dir = mkdtempSync(join(T, 'checkout-'));
+  writeFileSync(join(dir, '.host'), '127.0.0.1');
+  const fromFile = connectEnv(s, { INPUT_PORT: String(s.port) }, dir);
+  assert.equal(fromFile.code, 0, `the file is read when no host variable exists: ${fromFile.out}`);
+  const inputWins = connectEnv(s, { INPUT_HOST: '127.0.0.2', INPUT_PORT: String(s.port) }, dir);
+  assert.notEqual(inputWins.code, 0, 'INPUT_HOST (always set by the composite action) takes precedence over the file');
+});
+
 // ---------------------------------------------------------------- the guard step, as GitHub runs a `run:` step (bash -e, pipefail)
 function runGuard(value) {
   const env = { PATH: process.env.PATH };

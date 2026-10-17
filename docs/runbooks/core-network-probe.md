@@ -110,7 +110,9 @@ gh workflow run core-network-probe.yml --ref main
 4. One dispatch and its approval (§3). No automatic retry.
 
 Later, and outside T6:
-- T7 adds the tailnet join to the production SSH workflows;
-- T8 moves the scheduled backup's `BACKUP_SSH_*` to the tailnet.
+- **T7** gives the manual backup (`core-backup.yml`) its own tailnet join, with `tag:nawara-ci-prod`, the `TS_BACKUP_*` secrets and its
+  own federated credential ([backup runbook §3](core-backup-restore.md)). This workflow and its identity are unchanged. Before the first
+  backup over the tailnet, this probe is the safe way to check the route.
+- **T8** moves the scheduled backup's `BACKUP_SSH_*` to the tailnet.
 
 Each is separately reviewed and authorized.

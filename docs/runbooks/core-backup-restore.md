@@ -148,6 +148,62 @@ connection, and nothing is backed up. Install it before relying on this workflow
 ([V2-A.3 record §9](../architecture/core-v2-a-3-ci-and-ruleset.md)). The scheduled backup is unaffected: it pins its own host key
 through `BACKUP_SSH_KNOWN_HOSTS`.
 
+**Private route (Core V2 M2 T7).** GitHub-hosted runners cannot reach Server 1's LAN address, which `DEPLOY_SSH_HOST` holds. The manual
+backup therefore reaches Server 1 through the tailnet. It never reads `DEPLOY_SSH_HOST`, which the other production workflows share and
+which is unchanged. After the host-key guard, the job runs two new steps:
+
+1. **Validate the private backup destination.** `TS_BACKUP_HOST` must be **exactly one IPv4 address inside `100.64.0.0/10`**, and
+   `DEPLOY_SSH_PORT` exactly one TCP port. The check refuses a host name, a list, whitespace, a port suffix, a URL, and any LAN or public
+   address. The check matters because the SSH client would connect to *every* host of a comma-separated value and would take a port
+   from `host:port`. The check contacts nothing and prints PASS/FAIL only.
+2. **Join the tailnet.** The pinned `tailscale/github-action` (v4.2.0, client 1.94.2, checksum-pinned, no cache) exchanges the job's
+   GitHub OIDC token for an **ephemeral** `tag:nawara-ci-prod` node, using the backup's own federated credential. There is no auth key,
+   no OAuth secret, no route, no exit node and no Tailscale SSH. The node is logged out after the job.
+
+The SSH step then connects to `TS_BACKUP_HOST` on `DEPLOY_SSH_PORT`, with the former `|| 22` fallback removed. Everything else in that
+step is unchanged:
+- the user and password;
+- the pinned host key (still checked before any authentication);
+- the forwarded variables and the remote script.
+
+The trigger, the `services` input, the approval, the queue and the absence of a timeout are unchanged too. `scripts/lib/checks.mjs` pins
+the whole job, refuses every connection-setting override of the SSH client, and allows the Tailscale action, `id-token: write` and the
+`TS_BACKUP_*` secrets only here.
+
+| `production` environment secret | Value |
+|---|---|
+| `TS_BACKUP_HOST` | Server 1's tailnet IPv4 address, the same value as `TS_PROBE_HOST`. If Server 1 ever re-enrols with a new address, update both |
+| `TS_BACKUP_OIDC_CLIENT_ID` | The client ID of the backup's Tailscale federated credential (`tag:nawara-ci-prod`) |
+| `TS_BACKUP_OIDC_AUDIENCE` | That credential's audience |
+
+These are environment secrets, never repository or organization secrets. **None exists yet**, and creating them is a separate owner
+step. The credential must accept only `core-backup.yml` on `main`, in `production`, on `workflow_dispatch`, on GitHub-hosted runners,
+with the immutable subject `repo:nawara-solutions@328690360/nawara-core@1369892111:environment:production`. Require both
+`workflow_ref` and `job_workflow_ref` (`nawara-solutions/nawara-core/.github/workflows/core-backup.yml@refs/heads/main`), scope
+`auth_keys` only, tag `tag:nawara-ci-prod` only, and no `*`. Confirm this in the Tailscale console before the first run.
+
+**The first backup over the tailnet needs its own owner authorization:**
+- the credential confirmed;
+- the three secrets set;
+- optionally, a T6 probe run on the same day;
+- then exactly one dispatch and its approval.
+
+It is also the first run that proves the corrected `DEPLOY_SSH_USER` and `DEPLOY_SSH_PASSWORD`.
+
+**If it fails, stop.** Report only the failing step and its sanitized line, and never retry automatically or with debug logging.
+
+| Failing step | Meaning | Password sent? | Server changed? |
+|---|---|---|---|
+| Validate the private backup destination | A secret is missing or malformed. Fix the secret | No | No |
+| Join the tailnet | The GitHub token (permission), the credential's claims, the tag or the scope is wrong. Fix it in the Tailscale console | No | No |
+| SSH step, dial timeout | The tailnet grant, the port, or Server 1's tailnet state. Run the T6 probe to diagnose | No | No |
+| SSH step, `host key fingerprint mismatch` | **A security finding.** Stop; do not re-run | No | No |
+| SSH step, authentication failure | Check `DEPLOY_SSH_USER`/`PASSWORD` under their own authorization. The password reached only the verified host | Yes, to the verified host | No |
+| `backup.sh` | As below: exit 1 or 3, the stage named in the log | — | Existing `backup.sh` behaviour |
+
+**Rollback:** revert the T7 change through a pull request. Optionally, disable the backup credential in Tailscale or delete the three
+secrets. T7 changes nothing on Server 1.
+
 Per service, a run succeeds only when every step does, in this order: `pg_dump -Fc` **inside the database container** (its own
 PostgreSQL major; a newer client's dump does not restore on an older server) over the local socket as the least-privileged identity
 that reads everything (`organization_migrator` and `audit_migrator`, the non-superuser owners; `auth_app`, read-only use, no privilege
