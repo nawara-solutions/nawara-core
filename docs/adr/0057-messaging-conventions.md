@@ -12,6 +12,11 @@
 > [ADR-0053](./0053-core-v1-production-rabbitmq.md) and [ADR-0056](./0056-core-architecture-and-api-conventions.md). Where this ADR and
 > an Accepted ADR differ, the Accepted ADR wins until this one is Accepted.
 
+> **Core V2 S0 revision (2026-10-21).** §13 (producer authenticity and provenance) and the [S0] items in §7 and §8 were added by the
+> Core V2 S0 architecture freeze ([S0 record](../architecture/core-v2-s0-architecture-freeze.md)), which is the decision P-A1 / A14
+> that §7 leaves open. The owner approved their direction and wording at S0; nothing in them is implemented, and this ADR's status
+> stays `Proposed` until the owner changes it explicitly. Every [CURRENT] statement below still describes `main`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -121,6 +126,9 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   `amq.default` (ADR-0053 §4). Integrity rests on each consumer's own facts (Billing applies an outcome only if it matches what Billing
   recorded through its authenticated calls) and on the rule above. Broker-enforced publisher identity (AMQP `user_id`, signing) would be
   new authentication infrastructure and needs its own decision (P-A1 / A14).
+- **[S0, not implemented]** That decision is §13: broker-enforced `user_id`, generated topic permissions and first-intake
+  provenance. Each consumer's durable de-duplication record keeps the event id **and the verified source** (the OD-A3M-3 conditions
+  below), and a consumer that uses the kit `InboxService` keys it by (`source`, `eventId`).
 - **[CURRENT]** The per-component idempotency matrix (event identity, atomicity, duplicates, failures, crash recovery, with the test
   behind each row) and the open findings F1 to F7 are in the [A3M record](../architecture/core-v2-a3m-messaging.md) §13. Transport is
   at least once; business effects are idempotent per consumer; an external notification send is never exactly once.
@@ -173,6 +181,9 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   consumer identity may publish to `nawara.events.dlx` (ADR-0053 §4); a topology change (R2 a per-queue dead-letter exchange, R3 a
   non-fanout one) needs separate owner authorization (§12). While a dead-letter queue keeps refusing copies, a failing message cycles
   (one prefetch slot per retry delay) instead of being parked; the `DeadLetterCopyFailing` alert reports it (A3M record §7).
+- **[S0, not implemented]** A retry (`Q.retry` expires back into `Q` through the default exchange), an operator replay
+  (`nawara-dlq`) or any other delivery that arrives through the default exchange carries no broker-verified producer identity. Such a
+  delivery is processed only under §13.4; a replay never establishes provenance.
 
 ### 9. Queue naming
 
@@ -223,6 +234,43 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   publisher widens a grant deliberately. Enabling `AUTH_EVENTS` in production, identities for Billing, Payment or Notification, and any
   retention activation are separately authorized production work.
 
+### 13. Producer authenticity and provenance (Core V2 S0, not implemented)
+
+13.1 A publisher sets the AMQP `user_id` property to its own broker username; broker users have no impersonation tag, so the broker
+refuses a mismatch. Topic-write permissions are generated per producer from the audit catalog and the event-family table: Auth
+domain events (auth-service); `invoice.*` and `billing.*` (billing-service); `payment.*` and `refund.*` (payment-service); and each
+producer's own `audit.*` actions only. Consumers read exact names (Notification) or their own families.
+
+13.2 On a first delivery through `nawara.events`, a consumer verifies broker `user_id` = `headers.source` = the family owner of the
+event name, routing key = message type = envelope name, and a well-formed `eventId`. It then commits
+`event_provenance(source, eventId, name, routingKey, bodySha256, producerUserId, verified, firstSeenAt)` in its own database, in a
+transaction of its own, **before** the handler runs. A stored row that differs from the delivery is a permanent
+`provenance_conflict`.
+
+13.3 If that commit fails, the handler does not run: the delivery is held and requeued, so it keeps its original identity. It is never
+sent to `Q.retry`.
+
+13.4 A delivery through the default exchange (a retry, a replay, an injection) is processed only if a stored row matches
+(`source`, `eventId`), `name` and `bodySha256`; downstream code uses the stored tuple, never the delivery's metadata. Otherwise it
+is a permanent `unverified_provenance` failure, which a replay cannot turn into a verified event.
+
+13.5 Financial consumers (billing-service for `payment.*` and `refund.*`) never process an unverified event. Other consumers may
+accept one only during an explicitly configured compatibility phase, and must record it as unverified.
+
+13.6 No historical event is ever labelled verified, and provenance is never backfilled.
+
+13.7 A producer whose event ids are deterministic may re-emit one named outbox row, under owner authorization and with an audit
+record, through its own broker connection; consumers de-duplicate it. Producers with random ids (auth-service) can re-emit only while
+their published rows are retained.
+
+13.8 Provenance is retained at least as long as dead-letter retention plus the retry window.
+
+13.9 In production, financial and notification consumers refuse an event whose `liveMode` is missing or false.
+
+13.10 Rollout, each step separately authorized: publisher identity → provenance recorded in observe-only mode → narrowed broker
+permissions (a production action, §12) → retry queues drained and dead letters inventoried (historical Auth → Audit dead letters are
+a pending owner decision) → enforcement per consumer. Billing ← Payment enforcement is on from Billing's first deployment.
+
 ## Consequences
 
 - One reviewable statement of how Core services exchange events; [CURRENT] rules describe `main`, so this ADR changes no behaviour.
@@ -243,4 +291,6 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
 | [0049](./0049-audit-trail-architecture.md) audit trail | **follows**: `audit.<action>`, `(sourceService, eventId)` uniqueness, data minimization, the redacting dead-letter policy |
 | [0052](./0052-core-v1-capability-closure.md) decisions 4–5 | **follows**: `AUTH_EVENTS`; code-bearing events and their purge |
 | [0053](./0053-core-v1-production-rabbitmq.md) production RabbitMQ | **follows**: topology, identities and deployment order are binding (§12) |
+| [0067](./0067-auth-authorization-receipts-for-owner-approved-refunds.md) refund receipts (Proposed) | **related**: Payment's refund effects are published under §13; receipts are not events |
+| [0069](./0069-verified-audit-producers-and-audit-contract-v2.md) verified audit producers (Proposed) | **completes**: applies §13 to `audit.*` and amends ADR-0049; to be accepted with or after this ADR |
 | [0056](./0056-core-architecture-and-api-conventions.md) conventions | **follows**, and does not override: no new HTTP endpoint (readiness and health stay §10); ADR-0056 §7's inbox wording stays binding; the broader de-duplication interpretation of §7 above applies only if this ADR is accepted or ADR-0056 is amended |
