@@ -39,6 +39,27 @@ cash and gateway payments, refunds, tax and a double-entry ledger, without coupl
   invoice is an open decision (financial-architecture.md, item 10).
 - The services **not** to create are listed in the financial architecture document; a later review may justify a split.
 
+### Clarifications (Core V2 S0, 2026-10-21)
+
+The architecture owner approved these clarifications at the Core V2 S0 freeze
+([S0 record](../architecture/core-v2-s0-architecture-freeze.md)). They clarify, and do not change, the boundaries above; this ADR's
+status stays `Proposed`.
+
+- **C1. Cash obligations.** payment-service's *cash workflow* covers cash received by an invoice's seller as a payment method. Cash
+  collected by a school from a student under Pay with School is a commercial obligation between school and student; billing-service
+  owns its records (collection time, report time, deadline, corrections, disputes, return obligation, violations). Those records
+  never create, settle or modify a payment. For Nawara-sold products no cash settlement path exists
+  ([ADR-0068](./0068-no-cash-settlement-for-nawara-sold-products.md)).
+- **C2. Provider transactions.** payment-service records every provider-reported money movement as an immutable provider transaction
+  fact, committed independently of any commercial processing. Commercial meaning (allocation to an approved refund, excess,
+  reconciliation) is layered on top by append-only records and never alters the fact.
+- **C3. FinancialLoss is not a ledger.** billing-service's `FinancialLoss` is an operational record of money Nawara did not retain or
+  recover, evidenced by recorded provider facts or an owner write-off ([ADR-0044](./0044-subscription-entitlement-final-model.md)
+  B11). It drives reconciliation. It is not a journal entry; a future accounting service would derive entries from events. "Payments
+  and invoices are never used as the ledger" stands.
+- **C4. No back-calls.** "Payment never calls billing back" stands. payment-service's only new call to auth-service is the consumption of
+  refund authorization receipts (its existing live verification of users through Auth, ADR-0033, is unchanged) ([ADR-0067](./0067-auth-authorization-receipts-for-owner-approved-refunds.md)).
+
 ## Consequences
 
 - Each service can be reasoned about, tested and secured on its own; accounting failures cannot block payments.

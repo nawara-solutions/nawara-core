@@ -2,12 +2,16 @@
 
 - **Status:** Proposed. Records the Stage 13.5 disposition of fields that already exist; it changes no code, schema,
   API or event.
-- **Date:** 2026-09-22
+- **Date:** 2026-09-22 (Revision 1: 2026-10-21)
 - **Deciders:** Anwar (project owner)
 
 > **Governed by [ADR-0044](./0044-subscription-entitlement-final-model.md)**, which stays the authority for the
 > commercial model. This ADR does not amend it: it only records why two leftover `entitlementKind` fields are kept, what
 > they mean today, and what must happen before they could ever be retired.
+
+> **Revision 1 (Core V2 S0, 2026-10-21).** Aligns the wording with ADR-0044 Revision 1 (Personal Subscription, routing by
+> `subscriptionTarget`) and changes no field, schema, API or event. The architecture owner approved the wording at S0
+> ([S0 record](../architecture/core-v2-s0-architecture-freeze.md)); the status stays `Proposed` until the owner changes it explicitly.
 
 ## Context
 
@@ -32,6 +36,10 @@ Payment ──► settlement only (payment.succeeded) ──► Billing links a 
 Settlement is linked to a Subscription from `invoice_line.interval` (a snapshot of `price.interval`) alone. No part of
 Subscription, `deriveEntitlement()`, the entitlement API or Payment settlement branches on either `entitlementKind`.
 
+**Revision 1.** ADR-0044 Revision 1 adds a Personal Subscription and routes every settlement by an explicit
+`product.subscriptionTarget` and an immutable routing record (`invoice_entitlement`). That routing deliberately does not read
+`entitlementKind`, so this ADR's decision is unchanged in substance.
+
 The fields are nonetheless **not unused** (Stage 13.5 investigation):
 
 | Field | Observable roles today | Commercial decision-making reader |
@@ -49,7 +57,8 @@ published event is a backward-incompatible contract change, whatever this reposi
 1. **Remove both fields now** — drops the superseded vocabulary, but breaks the Product API (an unknown field is a
    `400`), changes replay/conflict semantics, removes a field from a published event without versioning, and needs a
    schema migration over append-only history. Rejected: the contract cost is unknown, the benefit is cosmetic.
-2. **Repurpose them as entitlement drivers** — would restore ADR-0038's model against ADR-0044. Rejected.
+2. **Repurpose them as entitlement drivers** — would restore ADR-0038's model against ADR-0044. Rejected. *Revision 1:* also
+   rejected as the routing input for ADR-0044 Revision 1, which uses `subscriptionTarget` instead.
 3. **Keep both as documented compatibility fields, with explicit retirement prerequisites** — no contract changes;
    documentation stops presenting them as either authority or dead code.
 
@@ -64,9 +73,12 @@ We chose **option 3**.
 - **`invoice_line.entitlementKind` is retained for event and snapshot compatibility.** It stays written at line creation,
   append-only, and in the `invoice.created` payload. Having no in-repository decision-making reader is not a reason to
   remove it.
-- **Commercial access has one source**: Billing's effective entitlement derived from the Organization's Subscription
-  (ADR-0044). Neither `entitlementKind` is an authentication, security-status, authorization or entitlement check, and
-  no service may treat it as one.
+- **Commercial access has one source:** Billing's effective entitlements — the Organization Subscription and the Personal
+  Subscription (ADR-0044, Revision 1). Routing to either is decided only by `product.subscriptionTarget` and the invoice's routing
+  record. Neither `entitlementKind` is a routing input or an authentication, security-status, authorization or entitlement check,
+  and no service may treat it as one. *(Revision 1; the original wording named only "the Organization's Subscription (ADR-0044)".)*
+- **No coupling (Revision 1):** no constraint, default, derivation or validation may tie `subscriptionTarget` to
+  `entitlementKind`; the two values may differ without error.
 - **`requiresSubscription`** (on Auth's `organization_join_code`) remains governed by ADR-0044: non-authoritative
   onboarding/UI metadata that Auth stores and returns. It **must not** be used as commercial access authority. This ADR
   does not redefine it.
@@ -87,11 +99,13 @@ at least:
 ## Consequences
 
 - **Easier:** no API break, no event break, no database migration, no historical data rewrite; ADR-0044's Subscription
-  model remains the only commercial authority, and the docs now say so consistently.
+  model remains the only commercial authority, and the docs now say so consistently. *Revision 1:* that model now comprises the
+  Organization and the Personal Subscription.
 - **Harder / given up:** the superseded `organization_license` / `user_subscription` vocabulary stays visible in the
   Product API, the schema and the event, and some conceptual redundancy remains (the line copy always equals the
   immutable product value). Any cleanup needs deliberate deprecation and event versioning. This is accepted technical
-  debt.
+  debt. *Revision 1:* a second, unrelated product field (`subscriptionTarget`) with different names and values is added;
+  documentation must say clearly which one routes.
 - **Follow-up:** none required now. The Billing SDD (sections 10 and 11, R-2) and the Auth ADD were corrected alongside
   this ADR. Auth migration `0004` still carries a comment saying payment-service owns entitlement; applied migrations are
   checksummed and immutable, so it is intentionally left as a historical artifact and corrected here and in the docs

@@ -71,6 +71,8 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 
 ## Index
 
+Number 0066 is not used on `main`: a draft ADR-0066 exists on an unmerged branch, so the Core V2 S0 ADRs start at 0067.
+
 | #   | Title | Status |
 | --- | ----- | ------ |
 | [0001](./0001-generic-organization-id-scoping-claim.md) | Generic `organizationId` as the multi-tenancy scoping claim | Accepted (partly superseded by 0030, formal 2026-10-09) |
@@ -107,7 +109,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0032](./0032-database-per-service-on-a-shared-server.md) | Database per service on a shared PostgreSQL server | Proposed |
 | [0033](./0033-service-to-service-authentication-and-user-identity.md) | Service-to-service authentication, and how services identify the end user | Accepted (2026-09-26, Stage 19.1 D1) |
 | [0034](./0034-shared-service-kit-and-api-conventions.md) | A small shared service-kit library, and one set of API conventions | Superseded by ADR-0056 (2026-10-07) |
-| [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed |
+| [0035](./0035-financial-service-boundaries.md) | Financial service boundaries: billing, payment and accounting | Proposed (Core V2 S0 clarifications C1–C4, 2026-10-21) |
 | [0036](./0036-money-parties-and-source-references.md) | Money, explicit parties and generic source references | Proposed |
 | [0037](./0037-reliable-events-outbox-inbox.md) | Reliable events: RabbitMQ with a transactional outbox and an inbox | Proposed |
 | [0038](./0038-entitlement-in-billing-service.md) | Entitlement (licenses and subscriptions) lives in billing-service | Proposed (schema superseded in part by 0044; ownership principle stands) |
@@ -116,8 +118,8 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0041](./0041-administrative-capabilities-are-domain-owned-client-neutral-apis.md) | Administrative capabilities are domain-owned, client-neutral APIs (no client technology decided) | Accepted (2026-09-26, Stage 19.1 D1) |
 | [0042](./0042-service-token-scopes-and-administrative-authorization.md) | Service-token scopes, hierarchy validation and administrative authorization (BD-4) | Accepted (Amendment 1, 2026-09-20; Amendment 3, 2026-09-26: `auth-service` no longer admitted to Payment); clarified by ADR-0065 (2026-10-10: the Auth-local repair step-up purpose is outside the generic verification path) |
 | [0043](./0043-product-specific-entry-context-and-licensed-organization-participation.md) | Product-specific entry context and licensed organization participation: products declare their own entry model; Flow's organization participation is licensed, not universal | Proposed |
-| [0044](./0044-subscription-entitlement-final-model.md) | Subscription and Entitlement final model: one organization-scoped Subscription, no License/UserSubscription split | Proposed (records already-merged Stage 12.1-12.7) |
-| [0045](./0045-commercial-entitlementkind-compatibility-fields.md) | Commercial `entitlementKind` compatibility fields: kept as compatibility/event fields, never entitlement authority | Proposed |
+| [0044](./0044-subscription-entitlement-final-model.md) | Subscription and Entitlement final model: one organization-scoped Subscription, no License/UserSubscription split | Proposed (records already-merged Stage 12.1-12.7; Core V2 S0 Revision 1, 2026-10-21: Personal Subscription, explicit settlement routing, not implemented) |
+| [0045](./0045-commercial-entitlementkind-compatibility-fields.md) | Commercial `entitlementKind` compatibility fields: kept as compatibility/event fields, never entitlement authority | Proposed (Core V2 S0 Revision 1 wording, 2026-10-21) |
 | [0046](./0046-notification-service-architecture.md) | Notification service architecture: Notification → Delivery → Attempt, persisted versioned templates, canonical event intake, ambiguity and secret policy | Accepted (2026-09-24, Stage 16.9 acceptance note) |
 | [0047](./0047-resend-as-the-email-provider.md) | Resend as the notification email provider (direct HTTPS, request idempotency keys) | Accepted (2026-09-24) |
 | [0048](./0048-file-service-architecture.md) | File Service architecture: generic immutable file objects, proxy streaming, storage port, caller policies and product-issued access tickets | Accepted (2026-09-24, Stage 17.1) |
@@ -129,7 +131,7 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0054](./0054-localized-error-messages-and-stable-error-codes.md) | Error responses: a stable machine `code` and a server-localized `message` (EN / FR / AR) | Accepted (2026-10-01, Core V1 refactor R1; #161) |
 | [0055](./0055-ai-service-repository-boundary.md) | AI service repository boundary: the AI runtime lives outside `nawara-core` (future `nawara-ia`); the Core scaffold is removed | Accepted (2026-10-06, owner decision; #208) |
 | [0056](./0056-core-architecture-and-api-conventions.md) | Core architecture and API conventions: **the current Core convention** (consolidated; supersedes 0034) | Accepted (2026-10-07, by the architecture owner, A1.2) |
-| [0057](./0057-messaging-conventions.md) | Messaging conventions: envelope, naming, versioning, delivery, de-duplication, retry and dead letters, catalogs (reconciles 0018 and 0037) | Proposed |
+| [0057](./0057-messaging-conventions.md) | Messaging conventions: envelope, naming, versioning, delivery, de-duplication, retry and dead letters, catalogs (reconciles 0018 and 0037) | Proposed (Core V2 S0 revision, 2026-10-21: §13 producer authenticity and provenance, not implemented) |
 | [0058](./0058-access-token-signing-key-ring.md) | Access-token signing key ring: HS256 keys selected by `kid`, the existing `JWT_SECRET` as a kid-less legacy key, no fallback, staged rotation with a stated rollback boundary | Accepted (2026-10-08, by the architecture owner, A4.6) |
 | [0059](./0059-company-ownership-transfer-and-exceptional-owner-recovery.md) | Company ownership transfer and exceptional owner recovery: exactly one active Owner, pending → active → retired, recovery stewards, default-off activation gates | Accepted (2026-10-09, A5.3 owner authorization; nothing implemented or activated; OD-S1 deferred) |
 | [0060](./0060-company-platform-organization-lifecycle.md) | Company, Platform and Organization lifecycle: ACTIVE, SUSPENDED, ARCHIVED; effective state from ancestors; Organization Service authority; E4 + E1 + E5 enforcement; no deletion | Accepted (2026-10-09, A5.3 OD-A5-1 owner authorization; nothing implemented or activated) |
@@ -138,3 +140,6 @@ Numbers are sequential and never reused, even if an ADR is later superseded or r
 | [0063](./0063-post-f7-authority-mode-cli-and-recovery-convergence.md) | Post-F7 authority-mode, CLI and recovery convergence: one-way door kept, source/marker mismatch fails readiness, narrowed Auth ↔ Organization dependency with a static boundary test, retained read-only diagnostics, capability-based retirement, post-F6 restore rule | Accepted (2026-10-09, A5.3 OD-A5-5 and OD-A5-4(e) owner authorization; nothing implemented or activated) |
 | [0064](./0064-reference-repair-failure-and-incident-audit.md) | Reference-repair failure and incident audit: infrastructure failures recorded locally (partly supersedes ADR-0061 §6), own actions for the collapsed `404` and the anchor mismatch, best-effort refusal audit | Accepted (2026-10-10, A5.4-AC1 batch 2 owner decisions D1 to D4; nothing implemented, declared or activated) |
 | [0065](./0065-reference-repair-pre-f7-development-and-step-up-consumption.md) | Reference repair: pre-F7 development order (partly supersedes ADR-0061 acceptance item 2 for local implementation and merge only), generic verification refuses the repair purpose, dedicated committed consumption | Accepted (2026-10-10, architecture-owner acceptance with three clarifications; nothing implemented, authorized or activated) |
+| [0067](./0067-auth-authorization-receipts-for-owner-approved-refunds.md) | Auth authorization receipts for owner-approved refunds: purpose-bound, single-use, consumed by payment-service; durable intent and recovery | Proposed (Core V2 S0 wording approved 2026-10-21; not implemented) |
+| [0068](./0068-no-cash-settlement-for-nawara-sold-products.md) | No cash settlement for Nawara-sold products in Core V2; partly supersedes ADR-0007 (effective on acceptance) | Proposed (Core V2 S0 decision D1, 2026-10-21; not implemented) |
+| [0069](./0069-verified-audit-producers-and-audit-contract-v2.md) | Verified audit producers, audit contract v2 and scoped human reads; amends ADR-0049 (effective on acceptance) | Proposed (Core V2 S0 wording approved 2026-10-21; not implemented) |
