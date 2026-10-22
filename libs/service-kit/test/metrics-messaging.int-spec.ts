@@ -80,7 +80,8 @@ describeWithEnv('messaging metrics (real RabbitMQ)', ['TEST_RABBITMQ_URL'], (env
     proxy.freeze();
     await expect(bus.publish(envelope('probe.stalled'))).rejects.toBeInstanceOf(PublisherConfirmTimeoutError);
     proxy.thaw();
-    const dead = observedBus({ url: 'amqp://127.0.0.1:1', connectTimeoutMs: 300 }, m);
+    // S1a: a named user, so this stays the unreachable-broker failure (a URL without one now fails earlier, on identity).
+    const dead = observedBus({ url: 'amqp://unreachable:x@127.0.0.1:1', connectTimeoutMs: 300 }, m);
     await expect(dead.bus.publish(envelope('probe.unreachable'))).rejects.toThrow();
     const body = (await m.render()).body;
     expect(body).toMatch(/^nawara_events_published_total\{outcome="confirmed"\} 1$/m);

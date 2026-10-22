@@ -98,6 +98,18 @@ export class PublisherConfirmTimeoutError extends Error {
   }
 }
 
+/**
+ * Core V2 S1a (ADR-0057 §13.1): thrown, before anything reaches the broker, when the bus has no explicit publisher identity: its URL names
+ * no broker user, so amqplib would authenticate as its implicit default and the message would carry no attributable `user_id`. The
+ * caller (the outbox relay) keeps the event pending; nothing is published under an identity the configuration did not state.
+ */
+export class PublisherIdentityUnavailableError extends Error {
+  constructor() {
+    super('no publisher identity: the RabbitMQ URL names no broker user, so nothing is published (ADR-0057 §13.1)');
+    this.name = 'PublisherIdentityUnavailableError';
+  }
+}
+
 export type NoticeLevel = 'info' | 'warn' | 'error';
 
 // Message ids reach a log line: anything that is not a short, predictable token (a malformed or foreign message) is not echoed.
@@ -220,6 +232,13 @@ export class RabbitMqEventBus implements EventBus {
   private publisher?: ConfirmChannel;
   private readonly consumers = new Set<ConsumerHandle>();
   private readonly url: string;
+  /**
+   * Core V2 S1a (ADR-0057 §13.1): the broker user this bus authenticates as, and therefore the AMQP `user_id` of everything it publishes.
+   * Both come from the ONE pair of credentials below, so the identity asserted and the identity authenticated cannot differ; the broker
+   * (whose service users carry no impersonator tag) refuses any other `user_id`. Never taken from an event, a header or a caller.
+   */
+  private readonly publisherUserId?: string;
+  private readonly credentials?: ReturnType<typeof amqp.credentials.plain>;
   private observer?: EventBusObserver;
   /**
    * How long a close/cancel may wait before it is abandoned: the heartbeat's worst-case detection (3 intervals). By then a silent
@@ -241,13 +260,28 @@ export class RabbitMqEventBus implements EventBus {
     const heartbeatS = opts.heartbeatS ?? DEFAULT_RABBITMQ_HEARTBEAT_S;
     const url = new URL(opts.url);
     url.searchParams.set('heartbeat', String(heartbeatS)); // amqplib reads the client's requested heartbeat from the URL
+    if (url.username !== '') {
+      let username: string;
+      let password: string;
+      try {
+        username = decodeURIComponent(url.username);
+        password = decodeURIComponent(url.password);
+      } catch {
+        throw new Error('RabbitMqEventBus url has a malformed percent-encoded user or password'); // never echoes either value
+      }
+      this.publisherUserId = username;
+      this.credentials = amqp.credentials.plain(username, password);
+      // The credentials travel only as the explicit PLAIN credentials above, never also in the URL.
+      url.username = '';
+      url.password = '';
+    }
     this.url = url.toString();
     this.closeBoundMs = 3 * (heartbeatS || DEFAULT_RABBITMQ_HEARTBEAT_S) * 1000;
   }
 
   private async connect(): Promise<ChannelModel> {
     if (this.connection) return this.connection;
-    const conn = await amqp.connect(this.url, { timeout: this.opts.connectTimeoutMs ?? 5000 });
+    const conn = await amqp.connect(this.url, { timeout: this.opts.connectTimeoutMs ?? 5000, ...(this.credentials ? { credentials: this.credentials } : {}) });
     const reset = () => {
       if (this.connection === conn) {
         this.connection = undefined;
@@ -280,15 +314,23 @@ export class RabbitMqEventBus implements EventBus {
     return ch;
   }
 
+  /** The identity every publish carries as `user_id` (ADR-0057 §13.1); without one the publish fails before reaching the broker. */
+  private publisherIdentity(): string {
+    if (this.publisherUserId === undefined) throw new PublisherIdentityUnavailableError();
+    return this.publisherUserId;
+  }
+
   async publish(event: EventEnvelope): Promise<void> {
     const started = performance.now();
     try {
+      const userId = this.publisherIdentity();
       const ch = await this.publishChannel();
       ch.publish(this.exchange, event.name, Buffer.from(JSON.stringify(event.payload)), {
         persistent: true,
         contentType: 'application/json',
         messageId: event.id,
         type: event.name,
+        userId,
         timestamp: Math.floor(new Date(event.headers.occurredAt).getTime() / 1000),
         headers: { ...event.headers },
       });
@@ -595,6 +637,8 @@ export class RabbitMqEventBus implements EventBus {
    * Same body, message id, type, timestamp and headers, plus `annotations`; `mandatory` so a missing queue is an error, not a silent drop.
    */
   private async republish(queue: string, msg: ConsumeMessage, annotations: Record<string, unknown>, expiration?: string, copy?: DeadLetterCopy): Promise<void> {
+    // The copy is published by THIS bus, so it carries this bus's identity, never the original publisher's (ADR-0057 §13.1, §13.4).
+    const userId = this.publisherIdentity();
     const ch = await this.publishChannel();
     let returned = false;
     const onReturn = (m: { properties: { messageId?: unknown } }) => {
@@ -608,6 +652,7 @@ export class RabbitMqEventBus implements EventBus {
         contentType: copy ? copy.contentType : msg.properties.contentType,
         messageId: copy ? copy.messageId : msg.properties.messageId,
         type: copy ? copy.type : msg.properties.type,
+        userId,
         timestamp: msg.properties.timestamp,
         headers: { ...(copy ? copy.headers : withoutBrokerHistory(msg.properties.headers)), ...annotations },
         ...(expiration ? { expiration } : {}),
