@@ -2906,6 +2906,116 @@ export function checkEventProvenanceOptIn(contracts, sources, files = {}) {
   return problems;
 }
 
+// ─────────────────────────────────────────────────────────────── Core V2 S1c-3 R1: the restricted producer re-emission foundation
+
+/**
+ * Core V2 S1c-3 R1 (ADR-0057 §13.7 "S0-C4"): the kit's re-emission foundation stays a restricted library, never a publisher.
+ * - `REEMISSION_APPROVALS` in the kit equals the S0-C4 decision below, entry for entry (no wildcard, no other producer, version 1), and
+ *   each entry is an event its producer's contract declares, at that version, and not code-bearing;
+ * - `CODE_BEARING_EVENTS` in the kit names every produced event any contract marks `codeBearing` (the contracts are the authority);
+ * - ONE serialization path (pipeline v1): the relay builds envelopes with `outboxEnvelope`, `publish` and `publishReemission` build the
+ *   message with `eventMessage`, nothing else in the bus serializes a payload, and the ordinary `publish` never sets `mandatory`;
+ * - `publishReemission` consumes an issued plan first, refuses a `source` that is not its own broker user, publishes to its topic exchange
+ *   (never `sendToQueue`) with `mandatory`;
+ * - `ProducerReemission.reemit` runs its checks in order: request, code-bearing, authorization, the row, the durable intent, the
+ *   `publishing` state, and only then the publish;
+ * - no kit CLI or bin re-emits, and no application uses the foundation until its integration is reviewed and listed in
+ *   `REEMISSION_INTEGRATED_SERVICES` (empty in R1: R2 adds payment-service).
+ * Limits: a presence and order scan of source text; `test/reemission.spec.ts` and `test/reemission.int-spec.ts` prove the behaviour.
+ */
+export const S0C4_REEMISSION_APPROVALS = Object.freeze({
+  'payment-service': Object.freeze(['payment.succeeded@1', 'payment.failed@1', 'payment.cancelled@1', 'payment.expired@1']),
+});
+export const REEMISSION_INTEGRATED_SERVICES = Object.freeze([]);
+export const KIT_REEMISSION = 'libs/service-kit/src/events/reemission.ts';
+export const KIT_SERIALIZATION = 'libs/service-kit/src/events/serialization.ts';
+export const KIT_OUTBOX_RELAY = 'libs/service-kit/src/events/outbox-relay.ts';
+export const KIT_PACKAGE = 'libs/service-kit/package.json';
+const REEMISSION_USE = /\b(ProducerReemission|publishReemission|reemissionPolicy|REEMISSION_APPROVALS)\b/;
+
+/** The text between `start` and the first `end` after it, or '' when `start` is absent. */
+function between(text, start, end) {
+  const at = text.indexOf(start);
+  if (at < 0) return '';
+  const stop = text.indexOf(end, at + start.length);
+  return text.slice(at, stop < 0 ? undefined : stop);
+}
+
+/**
+ * `contracts`: application directory -> contracts/events.json text. `files`: KIT_REEMISSION, KIT_SERIALIZATION, KIT_EVENT_BUS,
+ * KIT_OUTBOX_RELAY, KIT_PACKAGE -> text. `sources`: application directory -> { relPath: text } of its non-test source, plus the kit's
+ * CLI sources under the key `libs/service-kit/src/cli`.
+ */
+export function checkEventReemission(contracts, files, sources = {}) {
+  const problems = [];
+  const why = 'producer re-emission stays the restricted S0-C4 foundation (ADR-0057 §13.7 "S0-C4")';
+  const kit = files[KIT_REEMISSION] ?? '';
+  const parsed = new Map();
+  for (const [app, text] of Object.entries(contracts)) {
+    try { parsed.set(app, JSON.parse(text)); } catch { /* reported by checkEventContracts */ }
+  }
+  // the approvals, entry for entry
+  const approvals = between(kit, 'export const REEMISSION_APPROVALS', '\n});');
+  const found = {};
+  let producer;
+  for (const line of approvals.split('\n')) {
+    const p = /^\s*'([^']+)': Object\.freeze\(\[/.exec(line);
+    if (p) { producer = p[1]; found[producer] = []; continue; }
+    const e = /\{ name: '([^']+)', version: (\d+) \}/.exec(line);
+    if (e && producer) found[producer].push(`${e[1]}@${e[2]}`);
+  }
+  const expected = Object.fromEntries(Object.entries(S0C4_REEMISSION_APPROVALS).map(([k, v]) => [k, [...v]]));
+  if (approvals === '' || JSON.stringify(found) !== JSON.stringify(expected) || /[*#]/.test(approvals.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*\*[\s\S]*?\*\//g, ''))) {
+    problems.push(`${KIT_REEMISSION}: REEMISSION_APPROVALS must be exactly the S0-C4 approvals (${JSON.stringify(expected)}), with no pattern; widening it is an architecture decision first; ${why}`);
+  }
+  const codeBearing = new Set();
+  for (const [, c] of parsed) for (const e of Array.isArray(c?.produces) ? c.produces : []) if (e?.codeBearing === true) codeBearing.add(e.name);
+  for (const [app, entries] of Object.entries(S0C4_REEMISSION_APPROVALS)) {
+    const produced = Array.isArray(parsed.get(app)?.produces) ? parsed.get(app).produces : [];
+    for (const entry of entries) {
+      const [name, version] = entry.split('@');
+      const declared = produced.find((e) => e?.name === name);
+      if (!declared || declared.version !== Number(version) || declared.codeBearing === true) {
+        problems.push(`apps/${app}/contracts/events.json: the re-emission approval ${entry} must be an event ${app} produces, at that version, and not code-bearing; ${why}`);
+      }
+    }
+  }
+  const denied = between(kit, 'export const CODE_BEARING_EVENTS', ']);');
+  for (const name of codeBearing) {
+    if (!denied.includes(`'${name}'`)) problems.push(`${KIT_REEMISSION}: CODE_BEARING_EVENTS must name the code-bearing ${name} (its contract marks it codeBearing); code-bearing events are never re-emitted (ADR-0052 decision 5); ${why}`);
+  }
+  // one serialization path
+  const serialization = files[KIT_SERIALIZATION] ?? '';
+  if (!serialization.includes('export function outboxEnvelope(') || !serialization.includes('content: Buffer.from(JSON.stringify(event.payload)),')) {
+    problems.push(`${KIT_SERIALIZATION}: must define pipeline v1 (\`outboxEnvelope\`, and \`eventMessage\` serializing exactly \`JSON.stringify(event.payload)\`); ${why}`);
+  }
+  const relay = files[KIT_OUTBOX_RELAY] ?? '';
+  if (!relay.includes('outboxEnvelope(r, this.opts.source)')) problems.push(`${KIT_OUTBOX_RELAY}: the relay must build its envelopes with \`outboxEnvelope(r, this.opts.source)\` (pipeline v1); ${why}`);
+  const bus = files[KIT_EVENT_BUS] ?? '';
+  const publish = between(bus, '\n  async publish(event: EventEnvelope)', '\n  }\n');
+  const reemit = between(bus, '\n  async publishReemission(', '\n  }\n');
+  if (!publish.includes('eventMessage(event, userId)') || /mandatory/.test(publish)) problems.push(`${KIT_EVENT_BUS}: \`publish\` must build its message with \`eventMessage(event, userId)\` and never set \`mandatory\`; ${why}`);
+  if (/JSON\.stringify\(event\.payload\)/.test(bus)) problems.push(`${KIT_EVENT_BUS}: serializes a payload itself; only \`eventMessage\` (serialization.ts) does; ${why}`);
+  if (!inOrder(reemit, ['if (!consumeIssuedReemissionPlan(plan)) throw', 'event.headers.source !== this.publisherUserId', "this.exchange === ''", 'eventMessage(event, this.publisherUserId)', 'ch.publish(this.exchange, message.routingKey, message.content, { ...message.options, mandatory: true }'])
+    || /sendToQueue/.test(reemit)) {
+    problems.push(`${KIT_EVENT_BUS}: \`publishReemission\` must consume an issued plan, refuse a source that is not its own broker user and the default exchange, build the message with \`eventMessage\` and publish it to its topic exchange with \`mandatory\`; ${why}`);
+  }
+  const reemitFlow = between(kit, '\n  async reemit(input: unknown)', '\n  /** Step 4');
+  if (!inOrder(reemitFlow, ['reemissionRequest(input)', 'isCodeBearingEvent(request.eventName)', 'this.opts.authorizer.verify(', 'this.selectRow(', 'outboxEnvelope(row, policy.producer)', 'this.opts.attempts.commitIntent(intent)', "to: 'publishing'", 'issued.add(plan)', 'this.opts.publisher.publishReemission(plan)'])
+    || (reemitFlow.match(/publishReemission\(/g) ?? []).length !== 1) {
+    problems.push(`${KIT_REEMISSION}: \`reemit\` must check the request, code-bearing names, the authorization and the row, record the durable intent and the publishing state, and only then publish (exactly once); ${why}`);
+  }
+  // no CLI, no bin, no application until its integration is reviewed
+  if (/reemi/i.test(between(files[KIT_PACKAGE] ?? '', '"bin"', '}'))) problems.push(`${KIT_PACKAGE}: no kit command re-emits events; ${why}`);
+  for (const [owner, appFiles] of Object.entries(sources)) {
+    if (REEMISSION_INTEGRATED_SERVICES.includes(owner)) continue;
+    for (const [relPath, text] of Object.entries(appFiles)) {
+      if (REEMISSION_USE.test(text)) problems.push(`${relPath}: uses the re-emission foundation, but ${owner} is not on REEMISSION_INTEGRATED_SERVICES: a producer integration is a separately authorized, reviewed change; ${why}`);
+    }
+  }
+  return problems;
+}
+
 // ─────────────────────────────────────────────────────────────── V2 A5.4-T1: the Auth → Organization Service dependency boundary
 
 /**

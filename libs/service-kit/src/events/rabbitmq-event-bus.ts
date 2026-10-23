@@ -1,6 +1,8 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
 import { bodySha256, evaluateProvenanceFacts, replayCandidate, type ReplayClassification, type ReplayOriginal, type ReplayClassificationOutcome } from './provenance.js';
+import { consumeIssuedReemissionPlan, type ReemissionPlan, type ReemissionPublishOutcome, type ReemissionPublisher } from './reemission.js';
+import { eventMessage } from './serialization.js';
 import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
@@ -259,7 +261,7 @@ interface ConsumerHandle {
  * retries. The message is republished with its original id, type and headers (so the event and correlation ids never change) and
  * acknowledged only after the broker has confirmed the copy.
  */
-export class RabbitMqEventBus implements EventBus {
+export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
   private readonly exchange: string;
   private readonly prefetch: number;
   private connection?: ChannelModel;
@@ -359,15 +361,8 @@ export class RabbitMqEventBus implements EventBus {
     try {
       const userId = this.publisherIdentity();
       const ch = await this.publishChannel();
-      ch.publish(this.exchange, event.name, Buffer.from(JSON.stringify(event.payload)), {
-        persistent: true,
-        contentType: 'application/json',
-        messageId: event.id,
-        type: event.name,
-        userId,
-        timestamp: Math.floor(new Date(event.headers.occurredAt).getTime() / 1000),
-        headers: { ...event.headers },
-      });
+      const message = eventMessage(event, userId); // serialization pipeline v1 (serialization.ts)
+      ch.publish(this.exchange, message.routingKey, message.content, message.options);
       await this.confirmed(ch, `eventId=${messageIdOf(event.id)} name=${event.name}`);
       this.observe({ type: 'publish', outcome: 'confirmed', durationMs: performance.now() - started });
     } catch (e) {
@@ -375,6 +370,64 @@ export class RabbitMqEventBus implements EventBus {
       this.observe({ type: 'publish', outcome: e instanceof PublisherConfirmTimeoutError ? 'confirm_timeout' : 'failed', durationMs: performance.now() - started });
       throw e;
     }
+  }
+
+  /**
+   * Core V2 S1c-3 R1 (ADR-0057 §13.7 "S0-C4"): publishes a re-emission plan issued by `ProducerReemission` (once; anything else throws),
+   * and reports what the broker answered instead of throwing. The message is built by the same `eventMessage` as `publish` (serialization
+   * pipeline v1) and goes to this bus's topic exchange (never the default exchange) under this bus's own `user_id`, which must be the
+   * envelope's `source`: a producer re-emits only as the broker user it authenticated as. It uses a confirm channel of its OWN on this
+   * bus's connection, with `mandatory`, so a return is attributable and the ordinary publish channel and `publish` are untouched.
+   */
+  async publishReemission(plan: ReemissionPlan): Promise<ReemissionPublishOutcome> {
+    if (!consumeIssuedReemissionPlan(plan)) throw new Error('not an issued re-emission plan: only ProducerReemission publishes one, once');
+    const event = plan.event;
+    const subject = `eventId=${messageIdOf(event.id)} name=${safeToken(event.name, EVENT_NAME, '-')}`;
+    const done = (r: ReemissionPublishOutcome): ReemissionPublishOutcome => {
+      this.notice(`event_reemission_publish ${subject} outcome=${r.outcome}${'stage' in r ? ` stage=${r.stage}` : ''}`, r.outcome === 'confirmed' ? 'info' : 'error');
+      return r;
+    };
+    if (this.publisherUserId === undefined || event.headers.source !== this.publisherUserId || this.exchange === '') return done({ outcome: 'failed', stage: 'not_sent' });
+    let ch: ConfirmChannel;
+    try {
+      ch = await (await this.connect()).createConfirmChannel();
+      await ch.assertExchange(this.exchange, 'topic', { durable: true });
+    } catch {
+      return done({ outcome: 'failed', stage: 'not_sent' });
+    }
+    let returned = false;
+    let nacked = false;
+    let refused = false;
+    ch.on('return', (m: { properties: { messageId?: unknown } }) => {
+      if (m.properties.messageId === event.id) returned = true;
+    });
+    ch.on('nack', () => {
+      nacked = true;
+    });
+    ch.on('error', (e: { code?: unknown }) => {
+      // the broker closes the channel on the offending publish (403 access refused, 404 no exchange, 406 precondition): nothing was routed
+      if (e?.code === 403 || e?.code === 404 || e?.code === 406) refused = true;
+    });
+    const message = eventMessage(event, this.publisherUserId);
+    const timeoutMs = this.opts.confirmTimeoutMs ?? 5000;
+    let timer: NodeJS.Timeout | undefined;
+    // a basic.return, if any, arrives before the confirm; the listeners above run in the same turn as the confirm callback
+    const answer = await new Promise<'ack' | 'error' | 'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs);
+      try {
+        ch.publish(this.exchange, message.routingKey, message.content, { ...message.options, mandatory: true }, (err) => resolve(err === null ? 'ack' : 'error'));
+      } catch {
+        resolve('error');
+      }
+    }).finally(() => clearTimeout(timer));
+    const closing = Promise.resolve().then(() => ch.close());
+    if (answer === 'timeout') void closing.catch(() => undefined); // a silent broker never answers the close either; a late confirm is never read
+    else await abandonAfter(closing, this.closeBoundMs);
+    if (answer === 'ack') return done({ outcome: returned ? 'unroutable' : 'confirmed' });
+    if (answer === 'timeout') return done({ outcome: 'uncertain', stage: 'confirm_timeout' });
+    if (nacked) return done({ outcome: 'failed', stage: 'nacked' });
+    if (refused) return done({ outcome: 'failed', stage: 'refused' });
+    return done({ outcome: 'uncertain', stage: 'channel_closed' });
   }
 
   /**

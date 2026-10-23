@@ -2,6 +2,7 @@ import { describeFailure, failureFacts, type FailureKind } from '../logging/fail
 import { redactString } from '../logging/redact.js';
 import { PollLoop, type DrainOutcome } from '../workers/poll-loop.js';
 import type { Queryable } from '../db/db.service.js';
+import { outboxEnvelope } from './serialization.js';
 import type { EventBus, EventEnvelope } from './types.js';
 
 /**
@@ -116,12 +117,7 @@ export class OutboxRelay {
       );
       let published = 0;
       for (const r of rows) {
-        const event: EventEnvelope = {
-          id: r.id,
-          name: r.name,
-          payload: r.payload,
-          headers: { eventId: r.id, occurredAt: r.occurredAt.toISOString(), correlationId: r.correlationId ?? undefined, source: this.opts.source, version: r.eventVersion },
-        };
+        const event: EventEnvelope = outboxEnvelope(r, this.opts.source); // serialization pipeline v1 (serialization.ts)
         try {
           await this.bus.publish(event);
         } catch (e) {
