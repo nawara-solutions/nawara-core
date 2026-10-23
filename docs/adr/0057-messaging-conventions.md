@@ -36,6 +36,11 @@
 > §13.7 are unchanged; the architecture is approved, its implementation is not started and nothing is authorized in production. This is
 > not an acceptance: this ADR's status stays `Proposed`.
 
+> **Core V2 S0-C5 clarification (2026-10-23, owner-approved).** How the §13.1 topic-write permissions are generated, which families are
+> granted, and what they do not protect ("S0-C5" after §13.1). §13.1 is unchanged; S1d is planned in four slices, nothing is
+> implemented, no broker permission is changed and nothing is authorized in production. This is not an acceptance: this ADR's status
+> stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -259,6 +264,71 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
 refuses a mismatch. Topic-write permissions are generated per producer from the audit catalog and the event-family table: Auth
 domain events (auth-service); `invoice.*` and `billing.*` (billing-service); `payment.*` and `refund.*` (payment-service); and each
 producer's own `audit.*` actions only. Consumers read exact names (Notification) or their own families.
+
+**S0-C5 — broker topic permissions (S0 clarification, owner-approved 2026-10-23; S1d).**
+- **Five layers, each with its own job.** (1) The broker-authenticated connection identity (one user per service, ADR-0053 §4, no
+  impersonator tag). (2) Resource permissions: which exchanges and queues an identity may configure, write to and read from. (3) Topic
+  permissions on the topic exchange `nawara.events`: which routing keys it may publish (write) and bind (read). (4) The AMQP `user_id`
+  check (§13.1, S1a): the broker refuses a `user_id` that differs from the authenticated user; it does **not** require one, so a message
+  without `user_id` is accepted and is unverified for its consumers (§13.2 `missing_user_id`). (5) Consumer provenance (§13.2–§13.4),
+  observe-only until S1e. Topic permissions decide which keys reach the topic exchange; they authenticate no message that arrives in a
+  work queue by any other path, and they never replace (4) or (5).
+- **Exact, catalog-driven grants (H1).** A producer's topic-write grant is the exact set of routing keys it is entitled to publish: the
+  events its own event contract declares as produced (`apps/<service>/contracts/events.json`, `produces`) and the audit actions the
+  audit catalog (`libs/audit-contract`) assigns to it as `producer`, each routed as `audit.<action>`. A consumer's topic-read grant is the
+  exact set of binding keys of its reviewed subscriptions (Notification's intake names; Audit's `audit.#`; Billing's consumed Payment
+  events). Generated names are escaped and anchored (`^(a\.b|c\.d)$`); a prefix, wildcard or unescaped value never widens a grant, and no
+  producer holds every `audit.*` key. The families named in §13.1 state **ownership** (who may ever be granted an event of that family),
+  not grants: a family with no declared event (today `billing.*` and `refund.*`) grants nothing, and a declared event is granted only to
+  its family owner. The contracts and the catalog are the source of truth; when they are missing, inconsistent, ambiguous (two owners
+  for one key) or invalid, generation fails closed. No event is invented to fill a family. A new event is granted only through a reviewed
+  permission change provisioned before its producer publishes it.
+- **Activated families only (H2).** A declared domain-event family is granted only when an explicit, reviewed activation manifest (or an
+  equivalent trustworthy, reviewed configuration) records it as active for that environment; never from a developer's environment, an
+  unset flag, a runtime string or an undocumented default, and an unknown activation state fails closed. Today Auth's domain events are
+  not active in production (`AUTH_EVENTS=off`; enabling it is separately authorized production work, §12): Auth is granted its audit
+  actions only. Activating a family follows this order:
+  the event contract is approved; the exact grants are generated and reviewed; they are applied by the separately authorized
+  provisioning workflow and verified; only then is the producer's publication enabled (a producer that publishes first is refused by the
+  broker and its rows wait in its outbox).
+- **Default exchange and shared DLX: retained, residual risk (H3).** Consumers keep `write` on `amq.default` (their retry and
+  dead-letter copies and the `nawara-dlq` replay publish through it; the broker also returns an expired `<queue>.retry` message through
+  it, which needs no user grant) and on the fanout `nawara.events.dlx` shared by every `<queue>.dead` (§12). Topic permissions do not constrain either: an identity with `amq.default` write can send a message to any
+  queue it can name, and one with DLX write can place a message in every consumer's dead-letter queue. S1c's classification observes
+  such deliveries and refuses none. S1d is therefore **not** complete broker-level isolation and is never described as preventing queue
+  injection. The protection against it is consumer enforcement: S1e stays required, and Billing ← Payment enforcement is fail-closed
+  before Billing's first production consumption of Payment events (§13.5, §13.10). Per-consumer retry and dead-letter exchanges, removing
+  the `amq.default` and DLX write grants, a dedicated replay identity and their C-4 dead-letter implications are a later, separate
+  decision: none is approved here. The replay tooling is unchanged, and a default-exchange replay is never an authenticated original
+  publication (§13.4); producer re-emission (§13.7, S0-C4) is a separate, Owner-gated capability.
+- **Billing: one identity (H4).** Billing keeps one broker identity for publishing and consuming, granted the union of exactly what it
+  needs: topic write on `invoice.created` and its own audit actions; topic read on the Payment events it consumes; the resource
+  permissions of a consumer of `billing.payment-events` and of a producer on `nawara.events`. No wildcard. A later topology decision may
+  revisit it.
+- **Replay identity (H5): deferred** with the H3 hardening; retry and dead-letter behaviour is unchanged.
+- **Billing and Payment grants: defined, not provisioned (H6).** Their grants are defined in repository code (S1d-2) and provisioned only
+  by the separately authorized rollout (S1-R): no production user, credential, permission or deployment follows from S1d. Payment is a
+  producer only (no topic read): its declared events `payment.created`, `payment.cancelled`, `payment.succeeded`, `payment.failed`,
+  `payment.expired` and its own audit actions. That complete producer catalog is not the S0-C4 re-emission allow-list, which excludes
+  `payment.created`. A re-emission (R2b) publishes through Payment's own identity under these ordinary grants: it needs no wildcard,
+  impersonation, cross-service publisher or wider exchange permission. The proposed `payment.event_reemitted` audit action is not
+  registered and receives no grant until its catalog change is approved and rolled out.
+- **Generator (S1d-1).** Reads the contracts and the audit catalog's producer ownership; applies the approved activation state; emits
+  exact, escaped, anchored write and read grants, kept distinct, deterministically; refuses a duplicate or ambiguous owner, an invalid
+  event name, an unknown activation state and any wildcard or prefix; supports Billing's combined identity and Payment's producer-only
+  one. `npm run check:repo` fails when the provisioning code (S1d-2) drifts from it. Generated grants never invent or activate a
+  production family.
+- **Rollout and rollback (S1-R).** The narrowed permissions are a production action (§12, §13.10), separately authorized through the
+  protected production approval, with: the generated expected grants; an inventory of the current grants before provisioning; a review
+  of every right added and removed; verification of the activation state; verification of the grants afterwards; and monitoring of
+  outbox lag, Audit delivery and retry and dead-letter depth. Rolling back to an earlier provisioning that grants more is **not** a safe
+  default: restoring a broader permission is a security-impacting exception needing its own authorization; a missing grant is corrected
+  by adding exactly that grant. The rollback procedure is reviewed separately.
+- **Certification (S1d-3, disposable broker).** An approved exact key publishes; another producer's audit action or domain event, an
+  unknown key and another exchange are refused; a forged `user_id` is refused; ordinary relay publication, Audit and Notification
+  delivery and Billing's Payment intake still work; retry and dead-letter paths still work; the default-exchange injection residual is
+  characterized, not reported as fixed; a Payment R1 re-emission stays within Payment's grants; an unknown activation state widens
+  nothing; a new family needs a reviewed permission change.
 
 13.2 On a first delivery through `nawara.events`, a consumer verifies broker `user_id` = `headers.source` = the family owner of the
 event name, routing key = message type = envelope name, and a well-formed `eventId`. It then commits
