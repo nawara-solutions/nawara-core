@@ -3126,6 +3126,38 @@ export function checkEnforcementPolicies(contracts, sources) {
   return problems;
 }
 
+// ─────────────────────────────────────────────────────────────── Core V2 OD-BRK-1: opt-in broker dead-lettering topology
+
+/**
+ * Core V2 OD-BRK-1 (ADR-0057 §8 "OD-BRK-0"): `noBrokerDeadLettering()` is an opt-in kit capability; adopting it is a service's own,
+ * separately authorized slice (OD-BRK-2 Notification, OD-BRK-3 Billing), because an opted-in consumer is production-ready only after the
+ * protected effective-topology verification. So:
+ * - only the services listed here may name it (none yet: the list grows with each adoption slice);
+ * - the kit's DEFAULT declaration is unchanged: the work queue keeps `x-dead-letter-exchange` and `.dead` stays bound to the fanout,
+ *   both only skipped for an opted-in subscription.
+ * `sources`: application -> { relPath: text } of its non-test source; `bus`: the kit bus's text.
+ */
+export const BROKER_DEAD_LETTERING_ADOPTERS = Object.freeze([]);
+export function checkBrokerDeadLettering(sources, bus) {
+  const problems = [];
+  const why = 'broker dead-lettering topology follows ADR-0057 §8 "OD-BRK-0" (adoption is a separately authorized slice)';
+  for (const [app, files] of Object.entries(sources)) {
+    if (BROKER_DEAD_LETTERING_ADOPTERS.includes(app)) continue;
+    for (const [rel, text] of Object.entries(files)) {
+      if (/\bnoBrokerDeadLettering\b|\bbrokerDeadLettering\s*:/.test(text)) problems.push(`${rel}: ${app} may not opt out of broker dead-lettering yet; ${why}`);
+    }
+  }
+  const attach = bus === undefined ? '' : bus.slice(bus.indexOf('private async attach('), bus.indexOf('private async attach(') + 4000);
+  if (!/const isolated = sub\.brokerDeadLettering !== undefined;/.test(attach)
+    || !/if \(!isolated\) await ch\.assertExchange\(dlx, 'fanout'/.test(attach)
+    || !/if \(!isolated\) await ch\.bindQueue\(deadQueueName\(sub\.queue\), dlx, ''\)/.test(attach)
+    || !/isolated \? \{ durable: true \} : \{ durable: true, arguments: \{ 'x-dead-letter-exchange': dlx \} \}/.test(attach)
+    || !/if \(!sub\.brokerDeadLettering\) await ch\.bindQueue\(deadQueueName\(sub\.queue\), `\$\{this\.exchange\}\.dlx`, ''\)/.test(bus ?? '')) {
+    problems.push(`${'libs/service-kit/src/events/rabbitmq-event-bus.ts'}: the default topology (work queue -> \`<exchange>.dlx\`, \`.dead\` bound to it) must stay unchanged and be skipped ONLY for an opted-in subscription; ${why}`);
+  }
+  return problems;
+}
+
 // ─────────────────────────────────────────────────────────────── V2 A5.4-T1: the Auth → Organization Service dependency boundary
 
 /**

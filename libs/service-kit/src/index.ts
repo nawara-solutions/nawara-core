@@ -96,4 +96,5 @@ export { LABEL_NAMES, OTHER, UNMATCHED, closedSet, isForbiddenLabelName, type La
 export { canonicalJson, sha256Hex, digestRows, sealSnapshot, serializeSnapshot, verifySnapshot, SnapshotError, type SealedSnapshot, type SealInput, type SnapshotRow, type VerifyResult } from './snapshot/snapshot.js';
 export { inspectDeadLetters, replayDeadLetter, type DeadLetterInfo, type Inspection, type ReplayOutcome, type ReplayResult } from './events/dlq-tools.js';
 export { HEADER as DEAD_LETTER_HEADER, deadQueueName, retryQueueName } from './events/dead-letter.js';
+export { noBrokerDeadLettering, type IsolatedTopologyStatus, type NoBrokerDeadLettering } from './events/broker-dead-lettering.js';
 export { PollLoop, DEFAULT_DRAIN_TIMEOUT_MS, type DrainOutcome } from './workers/poll-loop.js';

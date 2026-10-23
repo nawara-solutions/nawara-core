@@ -1,4 +1,5 @@
 import type { KeyedProvenanceOptions, ProvenanceOptions } from './provenance.js';
+import type { NoBrokerDeadLettering } from './broker-dead-lettering.js';
 import type { EnforcementPolicy, HandlerTrust } from './trust.js';
 
 /** Metadata carried in message HEADERS so the payload keeps the flat shape each service documents. */
@@ -77,6 +78,15 @@ export interface EventSubscription {
    * identity. Without it the bus behaves exactly as before. The in-memory bus has no raw bytes and ignores it.
    */
   admission?(event: EventEnvelope, body: Buffer): EventAdmission;
+  /**
+   * Core V2 OD-BRK-1 (optional; RabbitMQ implementation; ADR-0057 §8 "OD-BRK-0"): `noBrokerDeadLettering(...)` declares the work queue
+   * with NO broker dead-letter exchange and never binds its `.dead` queue to the shared `<exchange>.dlx` fanout, while the kit's own
+   * retries, holds and policy-applied dead-letter copies (published directly to `.dead`) are unchanged. Without it the topology is
+   * exactly as before. The kit verifies only the queue's arguments; an opted-in consumer is production-ready only once a separate,
+   * protected verification of the broker's EFFECTIVE topology (policies, bindings, permissions) has passed (see
+   * `broker-dead-lettering.ts`). The in-memory bus ignores it.
+   */
+  brokerDeadLettering?: NoBrokerDeadLettering;
 }
 
 /** What an `admission` check answers: admitted, or refused with a short stable reason code (never payload data). */

@@ -3721,6 +3721,28 @@ test('Core V2 S1e-4: Notification\'s intake is strict, redacts every code-bearin
   assert.match(checkEnforcementPolicies(contracts, { 'notification-service': {} }).join(), /the Notification intake consumer was not found/);
 });
 
+test('Core V2 OD-BRK-1: no service adopts the no-broker-dead-lettering option yet, and the kit\'s default topology is unchanged', async () => {
+  const { checkBrokerDeadLettering, BROKER_DEAD_LETTERING_ADOPTERS, KIT_EVENT_BUS } = await import('./lib/checks.mjs');
+  const bus = readFileSync(new URL(`../${KIT_EVENT_BUS}`, import.meta.url), 'utf8');
+  assert.deepEqual(BROKER_DEAD_LETTERING_ADOPTERS, []);
+  assert.deepEqual(checkBrokerDeadLettering({}, bus), []);
+  for (const [app, text] of [['notification-service', 'brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: \'external\' })'], ['billing-service', 'import { noBrokerDeadLettering } from \'@nawara/service-kit\';'], ['audit-service', 'brokerDeadLettering: opt,']]) {
+    assert.match(checkBrokerDeadLettering({ [app]: { [`apps/${app}/src/x.ts`]: text } }, bus).join(), /may not opt out of broker dead-lettering yet/, app);
+  }
+  const mutations = [
+    ["      if (!isolated) await ch.assertExchange(dlx, 'fanout', { durable: true });", "      await ch.assertExchange(dlx, 'fanout', { durable: true });"],
+    ["      if (!isolated) await ch.bindQueue(deadQueueName(sub.queue), dlx, '');", ''],
+    ["isolated ? { durable: true } : { durable: true, arguments: { 'x-dead-letter-exchange': dlx } }", '{ durable: true }'],
+    ["      if (!sub.brokerDeadLettering) await ch.bindQueue(deadQueueName(sub.queue), `${this.exchange}.dlx`, '');", ''],
+    ['const isolated = sub.brokerDeadLettering !== undefined;', 'const isolated = true;'],
+  ];
+  for (const [from, to] of mutations) {
+    assert.ok(bus.includes(from), `fixture drifted: ${from}`);
+    assert.match(checkBrokerDeadLettering({}, bus.replace(from, to)).join(), /default topology .* must stay unchanged/, from);
+  }
+  assert.match(checkBrokerDeadLettering({}, undefined).join(), /default topology/);
+});
+
 test('Core V2 S1e-2: Billing\'s payment-event subscription is strict and its handler never reads the trusted values from delivery headers', async () => {
   const { checkEnforcementPolicies, STRICT_FINANCIAL_CONSUMERS } = await import('./lib/checks.mjs');
   const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
