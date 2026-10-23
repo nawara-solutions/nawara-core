@@ -8,6 +8,7 @@ import type { ProviderRegistry } from '../../src/delivery/provider.js';
 import { mountDocs } from '../../src/docs/mount-docs.js';
 import { EventConsumer, INTAKE_EVENT_BUS } from '../../src/intake/event-consumer.js';
 import { IntakeService } from '../../src/intake/intake.service.js';
+import { TrustedDeliveryBus } from './trusted-delivery-bus.js';
 import { ProbeModule } from './probe.js';
 
 export interface TestApp {
@@ -46,7 +47,8 @@ export const openPolicy = (callers: string[]) =>
 
 /**
  * Builds the REAL application module (`AppModule.register`, the same function `main.ts` uses) plus the test-only probe routes, wired
- * exactly as `main.ts` wires the HTTP baseline. The event bus is the kit's in-memory bus unless `bus: 'rabbitmq'` asks for the real one
+ * exactly as `main.ts` wires the HTTP baseline. The event bus is the test-only `TrustedDeliveryBus` (an in-memory bus that accepts the
+ * strict intake subscription and delivers with explicit trust decisions; Core V2 S1e-4) unless `bus: 'rabbitmq'` asks for the real one
  * (then `RABBITMQ_URL` must reach a broker) or a bus is passed.
  */
 export async function createTestApp(
@@ -76,7 +78,7 @@ export async function createTestApp(
       : {}),
     ...opts.env,
   });
-  const bus = opts.bus === 'rabbitmq' ? undefined : (opts.bus ?? new InMemoryEventBus());
+  const bus = opts.bus === 'rabbitmq' ? undefined : (opts.bus ?? new TrustedDeliveryBus());
   const logger = new JsonLogger(config.serviceName, 'debug', (l) => logs.push(JSON.parse(l)));
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule.register(config, { migrationsDirs: opts.migrationsDirs, bus, providers: opts.providers }), ...(opts.probes === false ? [] : [ProbeModule])],

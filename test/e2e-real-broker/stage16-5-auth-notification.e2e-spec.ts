@@ -7,6 +7,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
+import { createAuthIdentity, type AuthIdentity } from './support/auth-identity.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 
@@ -72,7 +73,9 @@ function openSecret(sealed: Buffer, notificationId: string): Record<string, stri
   return JSON.parse(Buffer.concat([d.update(sealed.subarray(13, sealed.length - 16)), d.final()]).toString('utf8'));
 }
 
-describeWithEnv('Stage 16.5: real Auth → real RabbitMQ → real Notification intake', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('Stage 16.5: real Auth → real RabbitMQ → real Notification intake', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  /** Core V2 S1e-4: the live Auth publishes as a disposable, least-privilege `auth-service` broker user (support/auth-identity.ts). */
+  let authIdentity: AuthIdentity | undefined;
   let authDb: TestDatabase;
   let notificationDb: TestDatabase;
   let auth: LiveService;
@@ -118,6 +121,7 @@ describeWithEnv('Stage 16.5: real Auth → real RabbitMQ → real Notification i
     await runMigrations(notificationDb.url, [kitMigrationsDir, `${NOTIFICATION_DIR}/db/migrations/`]);
     await sql(authDb.url, `INSERT INTO company(id, name) VALUES ($1, 'E2E Co')`, [companyId]);
     conn = await amqp.connect(env.TEST_RABBITMQ_URL);
+    authIdentity = await createAuthIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
     await deleteQueues();
     notification = spawnService('notification', NOTIFICATION_DIR, {
       NODE_ENV: 'test', PORT: String(NOTIFICATION_PORT), DATABASE_URL: notificationDb.url, RABBITMQ_URL: env.TEST_RABBITMQ_URL,
@@ -125,7 +129,7 @@ describeWithEnv('Stage 16.5: real Auth → real RabbitMQ → real Notification i
       NOTIFICATION_REQUEST_HASH_KEY: randomBytes(32).toString('base64'),
     });
     auth = spawnService('auth', AUTH_DIR, {
-      NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, AUTH_EVENTS: 'on', RABBITMQ_URL: env.TEST_RABBITMQ_URL,
+      NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, AUTH_EVENTS: 'on', RABBITMQ_URL: authIdentity.url(env.TEST_RABBITMQ_URL),
       JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(), JOIN_CODE_PEPPER: rand(),
       TOTP_ENCRYPTION_KEYS: `k1:${rand()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1', WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
       BCRYPT_COST: '4', WORK_TIMEZONE: 'UTC', ...Object.fromEntries(RATE_BUCKETS.map((b) => [`RATE_${b}_LIMIT`, '100000'])),
@@ -136,6 +140,7 @@ describeWithEnv('Stage 16.5: real Auth → real RabbitMQ → real Notification i
 
   afterAll(async () => {
     await auth?.stop();
+    await authIdentity?.remove();
     await notification?.stop();
     await deleteQueues().catch(() => undefined);
     await conn?.close().catch(() => undefined);

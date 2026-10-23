@@ -3689,10 +3689,36 @@ test('Core V2 S1e-1: only audit-service may use the compatibility phase; a consu
     assert.match(checkEnforcementPolicies(contracts, src(app, 'enforcement: auditCompatibilityEnforcement()')).join(), /only audit-service may use the compatibility phase/, app);
   }
   assert.match(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'original_reviewed' })")).join(), /consumes a code-bearing event/);
-  assert.deepEqual(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'dead_letter_policy' })")), []);
+  // (a one-line fixture: the S1e-4 Notification check below reports its missing consumer, not a code-bearing problem)
+  assert.doesNotMatch(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'dead_letter_policy' })")).join(), /consumes a code-bearing event/);
   // Payment events carry no code: Billing may keep a refused body (its real files, which the S1e-2 financial check also reads)
   const billing = Object.fromEntries(['apps/billing-service/src/payment-integration/payment-event-consumer.ts', 'apps/billing-service/src/payment-integration/payment-event-origin.ts'].map((rel) => [rel, read(rel)]));
   assert.deepEqual(checkEnforcementPolicies(contracts, { 'billing-service': billing }), []);
+});
+
+test('Core V2 S1e-4: Notification\'s intake is strict, redacts every code-bearing dead letter and runs only on the trusted envelope', async () => {
+  const { checkEnforcementPolicies, STRICT_NOTIFICATION_CONSUMER } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const contracts = Object.fromEntries(['auth-service', 'notification-service'].map((a) => [a, read(`apps/${a}/contracts/events.json`)]));
+  const n = STRICT_NOTIFICATION_CONSUMER;
+  const real = Object.fromEntries(Object.values(n).map((rel) => [rel, read(rel)]));
+  assert.deepEqual(checkEnforcementPolicies(contracts, { 'notification-service': real }), []);
+  const mutate = (rel, from, to) => {
+    assert.ok(real[rel].includes(from), `fixture drifted: ${from}`);
+    return { 'notification-service': { ...real, [rel]: real[rel].replace(from, to) } };
+  };
+  const mutations = [
+    [n.consumer, '        enforcement: this.enforcement,\n', '', /must be strict/],
+    [n.consumer, "strictEnforcement({ refusedBody: 'dead_letter_policy' })", "strictEnforcement({ refusedBody: 'original_reviewed' })", /consumes a code-bearing event/],
+    [n.consumer, 'deadLetterPolicy: notificationDeadLetterPolicy,', '', /must pass `deadLetterPolicy: notificationDeadLetterPolicy`/],
+    [n.consumer, 'handler: (e, trust) => this.handle(e, trust),', 'handler: (e) => this.handle(e, undefined),', /only on the trusted envelope/],
+    [n.consumer, 'await this.intake.handle(trusted);', 'await this.intake.handle(event);', /only on the trusted envelope/],
+    [n.deadLetterPolicy, 'CODE_BEARING_EVENTS.has(m.name)', 'false', /must redact every code-bearing event/],
+    [n.deadLetterPolicy, '!isCanonicalJsonBody(body)', 'false', /must redact every code-bearing event/],
+    [n.trustedEvent, 'delete headers.correlationId;', 'headers.correlationId = event.headers.correlationId;', /never take a delivery's own correlation header/],
+  ];
+  for (const [rel, from, to, expected] of mutations) assert.match(checkEnforcementPolicies(contracts, mutate(rel, from, to)).join('\n'), expected, `${rel}: ${from}`);
+  assert.match(checkEnforcementPolicies(contracts, { 'notification-service': {} }).join(), /the Notification intake consumer was not found/);
 });
 
 test('Core V2 S1e-2: Billing\'s payment-event subscription is strict and its handler never reads the trusted values from delivery headers', async () => {

@@ -8,6 +8,7 @@ import { notificationMigrationsDir } from '../src/app.module.js';
 import { INTAKE_QUEUE } from '../src/intake/event-map.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { sql } from './support/db.js';
+import { createAuthIdentity, type AuthIdentity } from './support/auth-identity.js';
 import { describeWithEnv } from './support/env.js';
 
 /**
@@ -21,7 +22,9 @@ const DEAD = `${INTAKE_QUEUE}.dead`;
 const CODE = '591730';
 const PHONE = '+21620000007';
 
-describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  /** Core V2 S1e-4: genuine Auth events are published as a disposable, least-privilege `auth-service` broker user (support/auth-identity.ts). */
+  let authIdentity: AuthIdentity | undefined;
   let db: TestDatabase;
   let conn: ChannelModel;
   let ch: Channel;
@@ -58,13 +61,15 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     ch = await conn.createChannel();
     ch.on('error', () => undefined);
     await deleteQueues();
-    publisher = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL });
+    authIdentity = await createAuthIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+    publisher = new RabbitMqEventBus({ url: authIdentity.url(env.TEST_RABBITMQ_URL) });
   });
   afterEach(async () => {
     for (const t of apps.splice(0)) await t.app.close();
   });
   afterAll(async () => {
     await publisher?.close();
+    await authIdentity?.remove();
     await deleteQueues();
     await conn?.close().catch(() => undefined);
     await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${dbName()}" WITH ALLOW_CONNECTIONS true`).catch(() => undefined);
@@ -125,7 +130,7 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     expect(JSON.stringify(t.logs)).not.toContain(CODE);
   });
 
-  it('V2 A3M.6: an event from an UNMAPPED source is dead-lettered once (unmapped_event), never retried, nothing written, no payload leaked', async () => {
+  it('V2 A3M.6: an event from an UNMAPPED source is dead-lettered once (S1e-4: refused before intake, unverified), never retried, nothing written, no payload leaked', async () => {
     const t = await start();
     await ready(t);
     const before = await count();
@@ -141,7 +146,8 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     const h = (dead && dead.properties.headers) || {};
     expect(dead && dead.properties.messageId).toBe(e.id);
     expect(h['x-nawara-failure']).toBe('permanent');
-    expect(h['x-nawara-failure-reason']).toBe('unmapped_event');
+    // Core V2 S1e-4: a source the broker identity does not own is unverified, refused before intake (its `unmapped_event` check stays behind)
+    expect(h['x-nawara-failure-reason']).toBe('untrusted_unverified_original');
     expect(Number(h['x-nawara-retry-count'] ?? 0)).toBe(0); // permanent: it went straight to the dead-letter queue
     expect(await depth(`${INTAKE_QUEUE}.retry`)).toBe(0);
     expect(await depth(INTAKE_QUEUE)).toBe(0);
@@ -168,7 +174,9 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     });
     const e = event();
     await publisher.publish(e);
-    await until(async () => t.logs.some((l) => String(l.msg).startsWith('notification_duplicate') && l.correlationId === e.headers.correlationId), 20_000);
+    // Core V2 S1e-4: the kit's retry comes back through the default exchange, a verified REPLAY: its correlation header is not trusted
+    // (not stored), so the duplicate is recognized by its event identity
+    await until(async () => t.logs.some((l) => String(l.msg).startsWith('notification_duplicate') && l.eventId === e.id), 20_000);
     await until(async () => (await depth(INTAKE_QUEUE)) === 0 && (await depth(`${INTAKE_QUEUE}.retry`)) === 0);
     expect(await count('"sourceEventId" = $1', [e.id])).toBe(1);
     expect(t.logs.some((l) => String(l.msg).startsWith('event_retry_scheduled'))).toBe(true);
@@ -185,7 +193,8 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     const e = event();
     try {
       await publisher.publish(e);
-      await until(async () => t.logs.some((l) => String(l.msg).startsWith('event_provenance_deferred')), 15_000);
+      // Core V2 S1e-4: the enforced subscription holds it (no trust decision without the store), the intake never running
+      await until(async () => t.logs.some((l) => String(l.msg).startsWith('event_trust_held')), 15_000);
       await request(t.app.getHttpServer()).get('/ready').expect(503);
       expect(t.logs.some((l) => String(l.msg).startsWith('event_retry_scheduled'))).toBe(false);
       expect(await depth(`${INTAKE_QUEUE}.retry`)).toBe(0);

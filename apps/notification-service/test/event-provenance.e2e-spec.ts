@@ -109,6 +109,25 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
     return t;
   };
   const logged = (prefixText: string) => t!.logs.some((l) => String(l.msg).startsWith(prefixText));
+  /**
+   * Core V2 S1e-4: the dead-letter copy of message `id` (removed from the DLQ, with every other copy seen meanwhile), once it arrived. A
+   * strict refusal is a permanent dead letter, so each test takes its own copies (the later depth assertions stay exact).
+   */
+  const takeDead = async (id: string) => {
+    const seen: amqp.GetMessage[] = [];
+    let found: amqp.GetMessage | undefined;
+    await until(async () => {
+      for (;;) {
+        const m = await ch.get(`${INTAKE_QUEUE}.dead`, { noAck: true });
+        if (!m) break;
+        seen.push(m);
+      }
+      found = seen.find((m) => m.properties.messageId === id);
+      return found !== undefined;
+    });
+    const h = found!.properties.headers ?? {};
+    return { reason: h['x-nawara-failure-reason'], redacted: h['x-nawara-body-redacted'] === 'true', content: found!.content, headers: h };
+  };
 
   beforeAll(async () => {
     const existing = await api('GET', `/users/${OWNER}`);
@@ -207,12 +226,16 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       }
     }, 120_000);
 
-    it('a forged source (another broker user) is UNVERIFIED and the intake is unchanged (observe-only); the genuine event later is verified, the difference kept as evidence', async () => {
+    it('a forged source (another broker user) is UNVERIFIED and refused BEFORE the intake (S1e-4), its copy redacted; the genuine event later is verified and taken, the difference kept as evidence', async () => {
       const e = envelope('admin.operator_code_issued');
       await intruder.publish(e);
-      await until(async () => (await intents(e.id)) === 1);
+      const dead = await takeDead(e.id);
+      expect(dead).toMatchObject({ reason: 'untrusted_unverified_original', redacted: true });
+      expect(dead.content.toString('latin1')).not.toContain(CODE);
+      expect(await intents(e.id)).toBe(0); // the forger claimed no first-writer slot
       expect(await provenance(e.id)).toEqual([expect.objectContaining({ source: OWNER, producerUserId: INTRUDER, verified: false, reason: 'source_mismatch' })]);
       await owner.publish(e);
+      await until(async () => (await intents(e.id)) === 1);
       await until(async () => (await provenance(e.id)).length === 2);
       expect((await provenance(e.id))[1]).toMatchObject({ producerUserId: OWNER, verified: true });
       expect(await intents(e.id)).toBe(1);
@@ -229,6 +252,10 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       expect(await conflicts(e.id)).toEqual([]);
       const changed = envelope('member.contact_verification_requested', { ...e.payload, code: '000001' }, e.id);
       await owner.publish(changed);
+      // S1e-4: it contradicts the stored verified observation: refused before the intake, its code never in the dead letter
+      const dead = await takeDead(e.id);
+      expect(dead).toMatchObject({ reason: 'untrusted_verified_conflict', redacted: true });
+      expect(dead.content.toString('latin1')).not.toContain('000001');
       await until(async () => (await conflicts(e.id)).length === 1);
       expect((await provenance(e.id))[0]).toMatchObject({ bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(e)) });
       expect((await conflicts(e.id))[0]).toMatchObject({ verified: true, bodyMacKeyId: 'p1', bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(changed)), comparison: 'differs' });
@@ -252,6 +279,7 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       expect(await conflicts(genuine.id)).toEqual([]); // MACs under different keys were never compared
       const changed = envelope(genuine.name, { ...genuine.payload, code: '000002' }, genuine.id);
       await owner.publish(changed);
+      expect(await takeDead(genuine.id)).toMatchObject({ reason: 'untrusted_verified_conflict', redacted: true }); // S1e-4
       await until(async () => (await conflicts(genuine.id)).length === 1);
       expect((await conflicts(genuine.id))[0]).toMatchObject({ bodyMacKeyId: 'p2', bodyMac: bodyMac(P2, bytes(changed)), comparison: 'differs' }); // compared under p1
       const fresh = envelope('membership.revoked');
@@ -264,7 +292,8 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       await startApp({ NOTIFICATION_PROVENANCE_KEYS: ring([['p3', P3]]), NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p3' });
       const evidenceBefore = (await conflicts(other.id)).length;
       await owner.publish(other); // its stored row is under p1, which this ring neither holds nor retired
-      await until(() => logged('event_provenance_deferred'), 20_000);
+      await until(() => logged('event_trust_held'), 20_000); // S1e-4: the enforced subscription holds it (basis provenance_unavailable)
+      expect(t!.logs.some((l) => String(l.msg).startsWith('event_trust_held') && String(l.msg).includes('basis=provenance_unavailable'))).toBe(true);
       expect(logged('notification_duplicate')).toBe(false); // the intake never ran
       expect((await conflicts(other.id)).length).toBe(evidenceBefore);
       expect(await provenance(other.id)).toHaveLength(1);
@@ -277,16 +306,19 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       expect((await conflicts(other.id)).length).toBe(evidenceBefore);
     });
 
-    it('a stored key that was deliberately RETIRED makes its row unverifiable: never a duplicate, appended once as `unverifiable` evidence, never `differs` (S1c-1)', async () => {
+    it('a stored key that was deliberately RETIRED makes its row unverifiable: never a duplicate, appended once as `unverifiable` evidence, never `differs` (S1c-1); S1e-4: a permanent refusal, never verified, never processed', async () => {
       await startApp({ NOTIFICATION_PROVENANCE_KEYS: ring([['p2', P2]]), NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p2', NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS: 'p1' });
       await owner.publish(other); // identical to its p1 row, which can no longer be verified
       await until(async () => (await conflicts(other.id)).some((c) => c.bodyMacKeyId === 'p2'));
       const evidence = (await conflicts(other.id)).filter((c) => c.bodyMacKeyId === 'p2');
       expect(evidence).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodyMacKeyId: 'p2', bodyMac: bodyMac(P2, bytes(other)), comparison: 'unverifiable' }]);
-      expect(logged('event_provenance_unverifiable')).toBe(true);
+      // S1e-4: a retired key cannot establish trust: refused (a distinct reason, not a hold, not a proven difference), the intake never running
+      expect(await takeDead(other.id)).toMatchObject({ reason: 'untrusted_verified_unverifiable' });
+      expect(t!.logs.some((l) => String(l.msg).startsWith('event_trust_refused') && String(l.msg).includes('basis=verified_unverifiable'))).toBe(true);
       expect(logged('event_provenance_conflict')).toBe(false); // a retired key is never reported as a proven difference
       await owner.publish(other); // again: the same evidence, compared under its own key (p2), is not appended twice
-      await until(() => t!.logs.filter((l) => String(l.msg).startsWith('notification_duplicate')).length >= 2);
+      expect(await takeDead(other.id)).toMatchObject({ reason: 'untrusted_verified_unverifiable' });
+      expect(logged('notification_duplicate')).toBe(false);
       expect((await conflicts(other.id)).filter((c) => c.bodyMacKeyId === 'p2')).toHaveLength(1);
       expect(await provenance(other.id)).toHaveLength(1); // the p1 row is never changed
       expect(await intents(other.id)).toBe(1);
@@ -321,14 +353,15 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       expect(await intents(e.id)).toBe(0);
     });
 
-    it('an injection through the default exchange is processed as before (observe-only) and no provenance is invented for it', async () => {
+    it('an injection through the default exchange is refused before the intake (S1e-4: `replay_no_provenance`) and no provenance is invented for it', async () => {
       const e = envelope('membership.approved');
       const c = await amqp.connect(urlFor(INTRUDER));
       const cc = await c.createConfirmChannel();
       cc.sendToQueue(INTAKE_QUEUE, bytes(e), { persistent: true, messageId: e.id, type: e.name, userId: INTRUDER, headers: e.headers });
       await cc.waitForConfirms();
       await c.close();
-      await until(async () => (await intents(e.id)) === 1);
+      expect(await takeDead(e.id)).toMatchObject({ reason: 'untrusted_replay_no_provenance' });
+      expect(await intents(e.id)).toBe(0);
       expect(await provenance(e.id)).toEqual([]);
     });
   });

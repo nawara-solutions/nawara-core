@@ -3,11 +3,16 @@ import {
   Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { DbService, DB_OPTIONS, PgKeyedProvenanceStore, ReadinessRegistry, pendingMigrations, runWithEventContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import {
+  DbService, DB_OPTIONS, PgKeyedProvenanceStore, ReadinessRegistry, assertEnforceable, pendingMigrations, runWithEventContext, strictEnforcement, type DbOptions,
+  type EnforcementPolicy, type EventBus, type EventEnvelope, type HandlerTrust,
+} from '@nawara/service-kit';
 import { NOTIFICATION_CONFIG } from '../config/notification-config.token.js';
 import type { NotificationConfig } from '../config/notification-config.js';
 import { EVENT_MAP, INTAKE_BINDINGS, INTAKE_QUEUE } from './event-map.js';
+import { notificationDeadLetterPolicy } from './dead-letter-policy.js';
 import { IntakeService } from './intake.service.js';
+import { trustedIntakeEvent } from './trusted-event.js';
 
 export const INTAKE_EVENT_BUS = Symbol('INTAKE_EVENT_BUS');
 /** A bus that can report whether its consumers are attached (the kit's `RabbitMqEventBus`; tests may inject the in-memory bus). */
@@ -34,6 +39,10 @@ const START_RETRY = { baseMs: 250, maxMs: 5_000 };
  * - SHUTDOWN (Stage 15.5): the consumer is closed at shutdown START (no new delivery; in-flight handlers finish and settle within the
  *   kit's bound) while the pool is still open; the bus closes in `onApplicationShutdown`; the kit closes the pool last.
  * Each handler runs in the event's request context, so the kit's log lines carry its correlation id.
+ * - ENFORCEMENT (Core V2 S1e-4, ADR-0057 §13.5, "S0-C6"): verified-only, from the first deployment, always. There is no compatibility,
+ *   observe-only or bypass mode and no setting that weakens it. The policy is checked at bootstrap (a subscription that could not be
+ *   enforced fails the start of the process); a bus that refuses it (the in-memory bus has no broker identity) leaves the intake waiting,
+ *   `/ready` 503, never consuming in another mode.
  */
 @Injectable()
 export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
@@ -44,6 +53,8 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
   private timer?: NodeJS.Timeout;
   private attempts = 0;
   private lastBlocker = '';
+  /** S1e-4: one strict policy, frozen; the object checked at bootstrap is the one `subscribe` receives. */
+  private readonly enforcement: EnforcementPolicy = strictEnforcement({ refusedBody: 'dead_letter_policy' });
 
   constructor(
     private readonly intake: IntakeService,
@@ -66,6 +77,13 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
   }
 
   onApplicationBootstrap(): void {
+    // S1e-4: refused here (the process does not start), never retried as if the broker were unavailable. Without the key ring there is no
+    // store to enforce with: the intake then waits (`provenance_keys_missing`, below), never consuming.
+    const keys = this.config.provenanceKeys;
+    if (keys) {
+      const store = new PgKeyedProvenanceStore(this.db, keys);
+      assertEnforceable({ queue: INTAKE_QUEUE, provenance: { keyedStore: store }, enforcement: this.enforcement, deadLetterPolicy: notificationDeadLetterPolicy });
+    }
     void this.tryStart();
   }
 
@@ -81,13 +99,20 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
       if (blocker) throw new Error(blocker);
       const keys = this.config.provenanceKeys;
       if (!keys) throw new Error('intake:provenance_keys_missing');
-      // Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2", observe-only): each delivery's provenance is committed in Notification's database before
-      // `handle` runs, its body only as a KEYED commitment (HMAC-SHA-256 under the provenance ring): three of these events carry a
-      // one-time code that an unkeyed digest would expose. The intake's mapping, de-duplication, sealing, delivery and privacy behaviour
-      // are unchanged. Enforcement is S1c/S1e (separately gated).
+      // Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2"): each delivery's provenance is committed in Notification's database, its body only as a
+      // KEYED commitment (HMAC-SHA-256 under the provenance ring): three of these events carry a one-time code that an unkeyed digest
+      // would expose.
       const sub = await this.bus.subscribe({
-        queue: INTAKE_QUEUE, bindings: [...INTAKE_BINDINGS], handler: (e) => this.handle(e),
+        queue: INTAKE_QUEUE, bindings: [...INTAKE_BINDINGS], handler: (e, trust) => this.handle(e, trust),
         provenance: { ownerOf: intakeEventOwner, keyedStore: new PgKeyedProvenanceStore(this.db, keys) },
+        // Core V2 S1e-4 (ADR-0057 §13.5, "S0-C6"): the trust decision is durable before `handle`, which runs only for a verified original,
+        // its verified redelivery or a replay matching the stored verified observation: a forged or unverified delivery never reaches the
+        // intake's `(sourceService, sourceEventId)` de-duplication. A retired key's row is unverifiable (refused); an unavailable key, an
+        // unknown commitment version or a database failure is held and requeued, the handler never running.
+        enforcement: this.enforcement,
+        // ADR-0052 decision 5: every dead-letter copy (a refusal, an intake refusal, a malformed message, an exhausted retry) goes through
+        // this policy: a code-bearing event's body is always redacted.
+        deadLetterPolicy: notificationDeadLetterPolicy,
       });
       if (this.stopped) {
         await sub.close();
@@ -96,9 +121,12 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
       this.subscription = sub;
       this.attempts = 0;
       this.lastBlocker = '';
-      this.log.log(`event_intake_started queue=${INTAKE_QUEUE} bindings=${INTAKE_BINDINGS.length}`);
+      this.log.log(`event_intake_started queue=${INTAKE_QUEUE} bindings=${INTAKE_BINDINGS.length} enforcement=strict`);
     } catch (e) {
-      const blocker = e instanceof Error && e.message.startsWith('intake:') ? e.message : `intake:broker_unavailable error=${e instanceof Error ? e.name : 'Error'}`;
+      // S1e-4: a bus that refuses the enforced subscription is named as such, never as an outage; nothing is consumed meanwhile
+      const blocker = e instanceof Error && e.message.startsWith('intake:') ? e.message
+        : e instanceof Error && e.message.startsWith('enforcement for ') ? 'intake:enforcement_unavailable'
+          : `intake:broker_unavailable error=${e instanceof Error ? e.name : 'Error'}`;
       if (blocker !== this.lastBlocker) this.log.warn(`event_intake_waiting reason=${blocker.slice(7)} — retrying; /ready answers 503 until the intake runs`);
       this.lastBlocker = blocker;
       const ceiling = Math.min(START_RETRY.maxMs, START_RETRY.baseMs * 2 ** Math.min(this.attempts++, 10));
@@ -128,10 +156,19 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     return undefined;
   }
 
-  /** V2 A12.4.3: the log context is restored from VALIDATED event values (a hostile id or correlation header is never echoed). */
-  private handle(event: EventEnvelope): Promise<void> {
-    return runWithEventContext(event, async () => {
-      await this.intake.handle(event);
+  /**
+   * V2 A12.4.3: the log context is restored from VALIDATED event values (a hostile id or correlation header is never echoed).
+   * Core V2 S1e-4: intake receives the TRUSTED envelope (`trustedIntakeEvent`); without an accepted decision it is refused before intake.
+   */
+  private handle(event: EventEnvelope, trust: HandlerTrust | undefined): Promise<void> {
+    let trusted: EventEnvelope;
+    try {
+      trusted = trustedIntakeEvent(event, trust);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    return runWithEventContext(trusted, async () => {
+      await this.intake.handle(trusted);
     });
   }
 
