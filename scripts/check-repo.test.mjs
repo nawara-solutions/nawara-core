@@ -3350,3 +3350,43 @@ test('S1c-1: the replay classification stays OBSERVE-ONLY and keyed for Notifica
   ];
   for (const [rel, from, to, expected] of mutations) assert.match(keyedCommitmentProblems(mutate(rel, from, to), sources).join('\n'), expected, `${rel}: ${from}`);
 });
+
+test('Core V2 S1c-3 R1: producer re-emission stays the restricted S0-C4 foundation', async () => {
+  const { checkEventReemission, KIT_REEMISSION, KIT_SERIALIZATION, KIT_EVENT_BUS, KIT_OUTBOX_RELAY, KIT_PACKAGE, REEMISSION_INTEGRATED_SERVICES } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const contracts = {};
+  for (const app of ['payment-service', 'auth-service', 'notification-service', 'billing-service']) contracts[app] = read(`apps/${app}/contracts/events.json`);
+  const files = Object.fromEntries([KIT_REEMISSION, KIT_SERIALIZATION, KIT_EVENT_BUS, KIT_OUTBOX_RELAY, KIT_PACKAGE].map((rel) => [rel, read(rel)]));
+  assert.deepEqual(checkEventReemission(contracts, files), []);
+  assert.deepEqual(REEMISSION_INTEGRATED_SERVICES, []); // R1 activates no producer
+  const withFile = (rel, from, to) => {
+    assert.ok(files[rel].includes(from), `fixture drifted: ${from}`);
+    return { ...files, [rel]: files[rel].replace(from, to) };
+  };
+  const cases = [
+    ['a widened approval', withFile(KIT_REEMISSION, "Object.freeze({ name: 'payment.expired', version: 1 }),", "Object.freeze({ name: 'payment.expired', version: 1 }),\n    Object.freeze({ name: 'payment.created', version: 1 }),"), /REEMISSION_APPROVALS must be exactly/],
+    ['a wildcard approval', withFile(KIT_REEMISSION, "name: 'payment.expired'", "name: 'payment.*'"), /REEMISSION_APPROVALS must be exactly/],
+    ['another version', withFile(KIT_REEMISSION, "name: 'payment.failed', version: 1", "name: 'payment.failed', version: 2"), /REEMISSION_APPROVALS must be exactly/],
+    ['a code-bearing event dropped from the denylist', withFile(KIT_REEMISSION, "  'admin.operator_code_issued',\n", ''), /CODE_BEARING_EVENTS must name the code-bearing admin\.operator_code_issued/],
+    ['a relay with its own envelope', withFile(KIT_OUTBOX_RELAY, 'outboxEnvelope(r, this.opts.source)', '{ id: r.id } as never'), /the relay must build its envelopes/],
+    ['an ordinary publish with mandatory', withFile(KIT_EVENT_BUS, 'ch.publish(this.exchange, message.routingKey, message.content, message.options);', 'ch.publish(this.exchange, message.routingKey, message.content, { ...message.options, mandatory: true });'), /`publish` must build its message/],
+    ['a second serializer in the bus', withFile(KIT_EVENT_BUS, 'const message = eventMessage(event, userId);', 'const message = { ...eventMessage(event, userId), content: Buffer.from(JSON.stringify(event.payload)) };'), /serializes a payload itself/],
+    ['a re-emission without the identity check', withFile(KIT_EVENT_BUS, 'event.headers.source !== this.publisherUserId || ', ''), /`publishReemission` must consume an issued plan/],
+    ['a re-emission to the default exchange', withFile(KIT_EVENT_BUS, 'ch.publish(this.exchange, message.routingKey, message.content, { ...message.options, mandatory: true }', "ch.sendToQueue('q', message.content, { ...message.options, mandatory: true }"), /`publishReemission` must consume an issued plan/],
+    ['publication before the durable intent', withFile(KIT_REEMISSION, '      receipt = await this.opts.attempts.commitIntent(intent);', '      await this.opts.publisher.publishReemission(plan as never);\n      receipt = await this.opts.attempts.commitIntent(intent);'), /`reemit` must check the request/],
+    ['a re-emission command', withFile(KIT_PACKAGE, '"nawara-migrate":', '"nawara-reemit": "./dist/cli/reemit.js",\n    "nawara-migrate":'), /no kit command re-emits/],
+  ];
+  for (const [title, mutated, expected] of cases) assert.match(checkEventReemission(contracts, mutated).join('\n'), expected, title);
+  // an approval its producer's contract does not declare
+  const contract = JSON.parse(contracts['payment-service']);
+  contract.produces = contract.produces.filter((e) => e.name !== 'payment.expired');
+  assert.match(checkEventReemission({ ...contracts, 'payment-service': JSON.stringify(contract) }, files).join(), /re-emission approval payment\.expired@1 must be an event payment-service produces/);
+  // a newly code-bearing contract event the denylist does not name
+  const auth = JSON.parse(contracts['auth-service']);
+  auth.produces.push({ name: 'member.recovery_code_issued', version: 1, codeBearing: true, payload: {} });
+  assert.match(checkEventReemission({ ...contracts, 'auth-service': JSON.stringify(auth) }, files).join(), /CODE_BEARING_EVENTS must name the code-bearing member\.recovery_code_issued/);
+  // no application (and no kit CLI) uses the foundation before its integration is reviewed
+  for (const [owner, rel] of [['payment-service', 'apps/payment-service/src/recovery.ts'], ['libs/service-kit/src/cli', 'libs/service-kit/src/cli/reemit.ts']]) {
+    assert.match(checkEventReemission(contracts, files, { [owner]: { [rel]: 'new ProducerReemission({ policy })' } }).join(), /is not on REEMISSION_INTEGRATED_SERVICES/);
+  }
+});

@@ -62,6 +62,16 @@ export {
 } from './events/provenance.js';
 export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventAdmission, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
 export { isCanonicalJsonBody } from './events/canonical-body.js';
+// Core V2 S1c-3 R1 (ADR-0057 §13.7 "S0-C4"): serialization pipeline v1 and the restricted re-emission foundation (inert without a producer integration).
+export { SERIALIZATION_PIPELINE_VERSION, eventMessage, outboxEnvelope, type EventMessage, type OutboxEnvelopeRow } from './events/serialization.js';
+export {
+  CODE_BEARING_EVENTS, REEMISSION_APPROVALS, REEMISSION_COMPATIBLE_PIPELINES, REEMISSION_OPERATION, ProducerReemission, ReemissionRefused, isCodeBearingEvent,
+  mayTransition, migrationOwnership, reemissionAttemptOutcome, reemissionAuditFacts, reemissionPolicy, reemissionRequest, type DatabaseOwnership,
+  type DurableIntentReceipt, type ProducerReemissionOptions, type PublicationEvidence, type PublicationFacts, type PublishedOutboxRow, type ReemissionAttemptState,
+  type ReemissionAttemptStore, type ReemissionAuditFacts, type ReemissionAuthorizationClaims, type ReemissionAuthorizer, type ReemissionIntent, type ReemissionPlan,
+  type ReemissionPolicy, type ReemissionPublishOutcome, type ReemissionPublisher, type ReemissionRefusalCode, type ReemissionRequest, type ReemissionResult,
+  type ReemissionTransition, type ReemittableEvent,
+} from './events/reemission.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
 export { RabbitMqEventBus, PublisherConfirmTimeoutError, PublisherIdentityUnavailableError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, DEFAULT_PREFETCH, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus, type ConsumeOutcome, type ProvenanceOutcome, type EventBusObservation, type EventBusObserver } from './events/rabbitmq-event-bus.js';
 
