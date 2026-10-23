@@ -8,9 +8,13 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
 const refStub = await startReferenceStub();
+/** Core V2 S1e-2: the authenticated `payment-service` broker identity for this file, and its capture of Payment's own messages. */
+let paymentIdentity: PaymentIdentity | undefined;
+let tap: Awaited<ReturnType<typeof tapPaymentEvents>> | undefined;
 afterAll(() => refStub.close());
 
 /**
@@ -53,7 +57,7 @@ const RECONCILE_STALE_MS = 1500;
 
 describeWithEnv(
   'Stage 4 reconciliation over a real RabbitMQ broker: repairs a genuinely missed event',
-  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'],
+  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'],
   (env) => {
     let billingDb: TestDatabase;
     let paymentDb: TestDatabase;
@@ -91,6 +95,8 @@ describeWithEnv(
       await runMigrations(paymentDb.url, [kitMigrationsDir, `${PAYMENT_DIR}/db/migrations/`]);
 
       amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL);
+      paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+      tap = await tapPaymentEvents(amqpConn);
       await purgeBillingQueues();
 
       payment = spawnService('payment', PAYMENT_DIR, {
@@ -98,7 +104,7 @@ describeWithEnv(
         PORT: String(PAYMENT_PORT),
         DATABASE_URL: paymentDb.url,
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
-        RABBITMQ_URL: env.TEST_RABBITMQ_URL,
+        RABBITMQ_URL: paymentIdentity!.url(env.TEST_RABBITMQ_URL), // Core V2 S1e-2: Payment publishes as its own broker identity
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
       });
@@ -129,6 +135,8 @@ describeWithEnv(
     afterAll(async () => {
       await billing?.stop();
       await payment?.stop();
+      await tap?.close();
+      await paymentIdentity?.remove();
       if (amqpConn) {
         // Restore the normal, fully-bound queue for any other suite/run reusing this broker before purging/closing.
         await withChannel(async (ch) => {

@@ -9,9 +9,13 @@ import { describeWithEnv } from './support/env.js';
 import { startFakeAuthServer, type FakeAuthServer } from './support/fake-auth.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
 const refStub = await startReferenceStub();
+/** Core V2 S1e-2: the authenticated `payment-service` broker identity for this file, and its capture of Payment's own messages. */
+let paymentIdentity: PaymentIdentity | undefined;
+let tap: Awaited<ReturnType<typeof tapPaymentEvents>> | undefined;
 afterAll(() => refStub.close());
 
 /**
@@ -51,7 +55,6 @@ const BILLING_PORT = 13201;
 const PAYMENT_PORT = 13202;
 const BILLING_URL = `http://127.0.0.1:${BILLING_PORT}`;
 const PAYMENT_URL = `http://127.0.0.1:${PAYMENT_PORT}`;
-const EXCHANGE = 'nawara.events';
 const BILLING_QUEUE = 'billing.payment-events';
 const BILLING_DEAD_QUEUE = `${BILLING_QUEUE}.dead`;
 const PAYER_TOKEN = 'e2e-payer-jwt';
@@ -59,7 +62,7 @@ const PAYER_ID = 'e2e0e2e0-0000-4000-8000-00000000fa01'; // Stage 18.7: a real A
 
 describeWithEnv(
   'Stage 12.7: Payment settlement -> real RabbitMQ -> Billing -> Subscription -> Effective Access',
-  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'],
+  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'],
   (env) => {
     let billingDb: TestDatabase;
     let paymentDb: TestDatabase;
@@ -109,6 +112,8 @@ describeWithEnv(
       paymentAdmin = new pg.Pool({ connectionString: paymentDb.url });
 
       amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL); // the suite's own admin connection: NEVER routed through the proxy
+      paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+      tap = await tapPaymentEvents(amqpConn);
       await purgeBillingQueues();
 
       fakeAuth = await startFakeAuthServer({ [PAYER_TOKEN]: { id: PAYER_ID, isActive: true } });
@@ -125,7 +130,7 @@ describeWithEnv(
         PORT: String(PAYMENT_PORT),
         DATABASE_URL: paymentDb.url,
         AUTH_SERVICE_URL: fakeAuth.url,
-        RABBITMQ_URL: proxy.url,
+        RABBITMQ_URL: paymentIdentity!.url(proxy.url), // Core V2 S1e-2: Payment publishes as its own broker identity (through the proxy)
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
         PAYMENT_TEST_PROVIDER: 'true',
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
@@ -154,6 +159,8 @@ describeWithEnv(
     afterAll(async () => {
       await billing?.stop();
       await payment?.stop();
+      await tap?.close();
+      await paymentIdentity?.remove();
       await fakeAuth?.stop();
       if (amqpConn) {
         await purgeBillingQueues();
@@ -290,25 +297,8 @@ describeWithEnv(
 
       // ---- duplicate delivery over the REAL broker: the same eventId redelivered must have ZERO additional effect ----
       const dlqBefore = await deadLetterDepth();
-      const invoice = await asProducer('GET', `/billing/invoices/${(await asProducer('GET', `/billing/payment-requests/${requestId}`)).json.invoiceId}`);
-      const dupCh = await amqpConn.createChannel();
-      dupCh.on('error', () => undefined);
-      try {
-        dupCh.publish(
-          EXCHANGE,
-          'payment.succeeded',
-          Buffer.from(
-            JSON.stringify({
-              paymentId, producer: 'billing-service', paymentRequestId: requestId, sourceType: 'invoice', sourceId: invoice.json.id,
-              payer: { type: 'user', id: PAYER_ID }, seller: { type: 'organization', id: organizationId }, organizationId,
-              currency: invoice.json.currency, revision: 1, amount: Number(invoice.json.total),
-            }),
-          ),
-          { messageId: capturedEventId, type: 'payment.succeeded', headers: { occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } },
-        );
-      } finally {
-        await dupCh.close().catch(() => undefined);
-      }
+      // Core V2 S1e-2: the redelivery is the EXACT message Payment published (captured from the broker), delivered again as Payment
+      await paymentIdentity!.redeliver(await tap!.take(capturedEventId));
       await new Promise((r) => setTimeout(r, 2000)); // let the real consumer receive and process it
       const receiptAfter = await billingAdmin.query(`SELECT count(*)::int AS n FROM payment_event_receipt WHERE "eventId" = $1`, [capturedEventId]);
       expect(receiptAfter.rows[0].n).toBe(1); // still exactly one receipt row for this event id
@@ -332,24 +322,20 @@ describeWithEnv(
       // snapshot mismatch must make it a `conflict`, never a mutation.
       const attackerOrg = randomUUID();
       const dlqBefore = await deadLetterDepth();
-      const ch = await amqpConn.createChannel();
-      ch.on('error', () => undefined);
-      try {
-        ch.publish(
-          EXCHANGE,
-          'payment.succeeded',
-          Buffer.from(
-            JSON.stringify({
-              paymentId: randomUUID(), producer: 'billing-service', paymentRequestId: victim.requestId, sourceType: 'invoice', sourceId: randomUUID(),
-              payer: { type: 'user', id: 'attacker-payer' }, seller: { type: 'organization', id: attackerOrg }, organizationId: attackerOrg,
-              currency: 'TND', revision: 1, amount: 1,
-            }),
-          ),
-          { messageId: randomUUID(), type: 'payment.succeeded', headers: { occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } },
-        );
-      } finally {
-        await ch.close().catch(() => undefined);
-      }
+      // Core V2 S1e-2: "a compromised or misconfigured producer" is the authenticated payment-service itself (any other identity is
+      // refused before Billing decides anything); its well-formed but wrong facts must still be a `conflict`, never a mutation.
+      const spoofId = randomUUID();
+      await paymentIdentity!.publish(
+        'payment.succeeded',
+        Buffer.from(
+          JSON.stringify({
+            paymentId: randomUUID(), producer: 'billing-service', paymentRequestId: victim.requestId, sourceType: 'invoice', sourceId: randomUUID(),
+            payer: { type: 'user', id: 'attacker-payer' }, seller: { type: 'organization', id: attackerOrg }, organizationId: attackerOrg,
+            currency: 'TND', revision: 1, amount: 1,
+          }),
+        ),
+        { messageId: spoofId, type: 'payment.succeeded', headers: { eventId: spoofId, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } },
+      );
 
       // A receipt IS recorded (the delivery was seen and decided), but the outcome must be `conflict`, and the
       // victim's own request/invoice/subscription must be byte-identical to before.

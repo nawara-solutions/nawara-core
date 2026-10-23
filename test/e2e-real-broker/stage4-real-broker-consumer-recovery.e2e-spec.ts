@@ -8,9 +8,13 @@ import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/serv
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
 const refStub = await startReferenceStub();
+/** Core V2 S1e-2: the authenticated `payment-service` broker identity for this file, and its capture of Payment's own messages. */
+let paymentIdentity: PaymentIdentity | undefined;
+let tap: Awaited<ReturnType<typeof tapPaymentEvents>> | undefined;
 afterAll(() => refStub.close());
 
 /**
@@ -32,13 +36,12 @@ const BILLING_PORT = 13111;
 const PAYMENT_PORT = 13112;
 const BILLING_URL = `http://127.0.0.1:${BILLING_PORT}`;
 const PAYMENT_URL = `http://127.0.0.1:${PAYMENT_PORT}`;
-const EXCHANGE = 'nawara.events';
 const BILLING_QUEUE = 'billing.payment-events';
 const BILLING_DEAD_QUEUE = `${BILLING_QUEUE}.dead`;
 
 describeWithEnv(
   'Billing consumer recovery after a lost broker connection, over a real broker and two live processes',
-  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'],
+  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'],
   (env) => {
     let billingDb: TestDatabase;
     let paymentDb: TestDatabase;
@@ -74,6 +77,8 @@ describeWithEnv(
       await runMigrations(paymentDb.url, [kitMigrationsDir, `${PAYMENT_DIR}/db/migrations/`]);
       billingAdmin = new pg.Pool({ connectionString: billingDb.url });
       amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL);
+      paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+      tap = await tapPaymentEvents(amqpConn);
       await purgeBillingQueues();
 
       const target = new URL(env.TEST_RABBITMQ_URL);
@@ -85,7 +90,7 @@ describeWithEnv(
         PORT: String(PAYMENT_PORT),
         DATABASE_URL: paymentDb.url,
         AUTH_SERVICE_URL: 'http://127.0.0.1:9',
-        RABBITMQ_URL: env.TEST_RABBITMQ_URL,
+        RABBITMQ_URL: paymentIdentity!.url(env.TEST_RABBITMQ_URL), // Core V2 S1e-2: Payment publishes as its own broker identity
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
       });
@@ -112,6 +117,8 @@ describeWithEnv(
     afterAll(async () => {
       await billing?.stop();
       await payment?.stop();
+      await tap?.close();
+      await paymentIdentity?.remove();
       await proxy?.sever();
       if (amqpConn) {
         await purgeBillingQueues();
@@ -185,14 +192,8 @@ describeWithEnv(
 
       // redelivery after recovery (same event id) changes nothing and is not dead-lettered
       const dlqBefore = await deadLetterDepth();
-      const paymentId = (await asProducer('GET', `/billing/payment-requests/${first.requestId}`)).json.paymentId as string;
-      await withChannel(async (ch) => {
-        ch.publish(EXCHANGE, 'payment.cancelled', Buffer.from(JSON.stringify({
-          paymentId, producer: 'billing-service', paymentRequestId: first.requestId, sourceType: 'invoice', sourceId: first.invoiceId,
-          payer: { type: 'user', id: first.payerId }, seller: { type: 'organization', id: first.sellerId }, organizationId: first.sellerId, currency: 'TND', revision: 0, amount: 1000,
-        })), { messageId: rows[0]!.eventId, type: 'payment.cancelled', headers: { occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } });
-        await ch.checkQueue(BILLING_QUEUE); // round-trip so the publish has been flushed before the channel closes
-      }, undefined);
+      // Core V2 S1e-2: the redelivery is the EXACT message Payment published (captured from the broker), delivered again as Payment
+      await paymentIdentity!.redeliver(await tap!.take(rows[0]!.eventId));
       await new Promise((r) => setTimeout(r, 2000));
       expect(await receipts(first.requestId)).toHaveLength(1);
       expect(await status(first.requestId)).toBe('cancelled');

@@ -9,6 +9,7 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { PAYMENT_USER, createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 const refStub = await startReferenceStub();
 afterAll(() => refStub.close());
@@ -21,7 +22,12 @@ afterAll(() => refStub.close());
  * - C (G11): a forged `payment.cancelled` carrying the id Payment's real event WILL have (its deterministic id) and the right source header
  *   but a wrong amount is decided as a conflict and RECORDED, acknowledged, not dead-lettered (the accepted contract for a well-formed
  *   message that does not apply); it claims nothing, so the genuine event Payment then publishes under that same id still applies.
- * - D: the genuine event delivered again changes nothing: it is a replay of the applied receipt.
+ * - D: the genuine event delivered again (the EXACT message Payment published, as at-least-once delivery does) changes nothing.
+ * Core V2 S1e-2 (ADR-0057 §13.5, "S0-C6"): Billing is verified-only, so Payment runs, and every GENUINE Payment message is published, as the
+ * authenticated broker user `payment-service` (support/payment-identity.ts). Anything else is refused BEFORE any receipt: a `source` that is
+ * not the publishing identity (B: refused by the trust decision, `untrusted_unverified_original`, before Billing's own `wrong_source`
+ * check could run), a G11 forger publishing as another identity (C), a message without `user_id`, a `user_id` the broker refuses (406),
+ * and a key outside Payment's generated topic grant (403).
  * Determinism: every wait polls real state (the dead-letter queue, the receipt table, Billing's own log lines); no sleep decides a
  * result. Isolation: the queue names are the production ones (fixed by ADR-0053), so, exactly like Stage 4, the two Billing queues are
  * purged before and after on the disposable test broker; this package's files run one at a time (`fileParallelism: false`); own ports.
@@ -56,7 +62,9 @@ function paymentEventId(paymentId: string, name: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
-describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitMQ broker', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitMQ broker', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  let paymentIdentity: PaymentIdentity;
+  let tap: Awaited<ReturnType<typeof tapPaymentEvents>>;
   let billingDb: TestDatabase;
   let paymentDb: TestDatabase;
   let billing: LiveService;
@@ -90,10 +98,15 @@ describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitM
       expect(m.properties.messageId).toBe(messageId);
       return { headers: (m.properties.headers ?? {}) as Record<string, unknown>, body: m.content.toString('utf8') };
     }, undefined as never);
-  const publish = (name: string, payload: Record<string, unknown>, id: string, headers: Record<string, unknown>) =>
-    withChannel(async (ch) => {
-      ch.publish(EXCHANGE, name, Buffer.from(JSON.stringify(payload)), { messageId: id, type: name, persistent: true, contentType: 'application/json', headers: { eventId: id, occurredAt: new Date().toISOString(), ...headers } });
+  /** `as: 'payment'`: authenticated as `payment-service` (a genuine or a compromised Payment); `as: 'guest'`: the test's own identity (a forger). */
+  const publish = (name: string, payload: Record<string, unknown>, id: string, headers: Record<string, unknown>, as: 'payment' | 'guest' = 'payment') => {
+    const content = Buffer.from(JSON.stringify(payload));
+    const properties = { messageId: id, type: name, persistent: true, contentType: 'application/json', headers: { eventId: id, occurredAt: new Date().toISOString(), ...headers } };
+    if (as === 'payment') return paymentIdentity.publish(name, content, properties);
+    return withChannel(async (ch) => {
+      ch.publish(EXCHANGE, name, content, properties);
     }, undefined);
+  };
   const receipts = async (eventId: string) =>
     (await billingAdmin.query<{ outcome: string; detailCode: string | null }>(`SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = $1 ORDER BY "receivedAt"`, [eventId])).rows;
   const billingLogLines = (marker: string, eventId: string) => billing.tail().split('\n').filter((l) => l.includes(marker) && l.includes(eventId)).length;
@@ -142,8 +155,10 @@ describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitM
     billingAdmin = new pg.Pool({ connectionString: billingDb.url, max: 2 });
     amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL);
     await purgeBillingQueues(); // a stray message from an earlier file or a crashed run must not reach these assertions
+    paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+    tap = await tapPaymentEvents(amqpConn);
     payment = spawnService('payment', PAYMENT_DIR, {
-      NODE_ENV: 'test', PORT: String(PAYMENT_PORT), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: env.TEST_RABBITMQ_URL,
+      NODE_ENV: 'test', PORT: String(PAYMENT_PORT), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: paymentIdentity.url(env.TEST_RABBITMQ_URL),
       PAYMENT_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
     });
     billing = spawnService('billing', BILLING_DIR, {
@@ -163,6 +178,8 @@ describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitM
   afterAll(async () => {
     await billing?.stop();
     await payment?.stop();
+    await tap?.close();
+    await paymentIdentity?.remove();
     if (amqpConn) {
       await purgeBillingQueues();
       await amqpConn.close().catch(() => undefined);
@@ -175,7 +192,9 @@ describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitM
   describe('A, B: permanent refusals before any receipt', () => {
     it.each([
       ['A: version 2', { source: 'payment-service', version: 2 }, 'unsupported_version'],
-      ['B: source evil-service', { source: 'evil-service', version: 1 }, 'wrong_source'],
+      // published as payment-service under another `source`: the trust decision refuses it (user_id ≠ source) before Billing's own
+      // wrong_source check, which stays as defence in depth
+      ['B: source evil-service', { source: 'evil-service', version: 1 }, 'untrusted_unverified_original'],
     ] as const)('%s → one dead letter (%s), never retried, no receipt, no state change', async (_label, headers, reason) => {
       const { requestId, facts } = await requestedPayment();
       const id = randomUUID();
@@ -196,37 +215,107 @@ describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitM
   });
 
   describe('C, D: G11 over the real broker, then a redelivery', () => {
-    it('C: a forged-first message with the genuine id is recorded but claims nothing; the genuine Payment event still applies, once', async () => {
+    it('C: a forged-first message with the genuine id, from another identity, is refused before any receipt; the genuine Payment event still applies, once', async () => {
       const { requestId, paymentId, facts } = await requestedPayment();
       const id = paymentEventId(paymentId, 'payment.cancelled'); // the id Payment's own payment.cancelled will carry
       const deadBefore = await depth(BILLING_DEAD_QUEUE);
 
-      // The forged message: right name, right source header, the genuine deterministic id, a wrong amount.
-      await publish('payment.cancelled', facts({ amount: 999_999 }), id, { source: 'payment-service', version: 1 });
-      await waitFor(async () => (await receipts(id)).length === 1, 20_000, 'the forged event to be decided and recorded');
-      expect(await receipts(id)).toEqual([{ outcome: 'conflict', detailCode: 'amount_mismatch' }]); // recorded, non-applied
-      expect(await depth(BILLING_DEAD_QUEUE)).toBe(deadBefore); // a well-formed message that does not apply is acknowledged, not dead-lettered
+      // The forged message: right name, right source header, the genuine deterministic id, a wrong amount, published by an identity that
+      // is not payment-service. Core V2 S1e-2: it never reaches Billing's decision, so it records and claims nothing at all.
+      await publish('payment.cancelled', facts({ amount: 999_999 }), id, { source: 'payment-service', version: 1 }, 'guest');
+      await waitFor(async () => (await depth(BILLING_DEAD_QUEUE)) === deadBefore + 1, 20_000, 'the forged event to be refused');
+      expect((await takeDead(id)).headers['x-nawara-failure-reason']).toBe('untrusted_unverified_original');
+      expect(await receipts(id)).toEqual([]); // nothing recorded
       expect(await requestStatus(requestId)).toBe('requested'); // it cannot settle the request
 
       // The genuine event: Billing cancels through Payment's REAL API, and Payment's REAL relay publishes payment.cancelled under that id.
       expect((await asProducer('POST', `/billing/payment-requests/${requestId}/cancel`)).status).toBe(200);
-      await waitFor(async () => (await requestStatus(requestId)) === 'cancelled', 30_000, 'the genuine payment.cancelled to apply despite the forged-first receipt');
-      expect(await receipts(id)).toEqual([{ outcome: 'conflict', detailCode: 'amount_mismatch' }, { outcome: 'applied', detailCode: null }]);
+      await waitFor(async () => (await requestStatus(requestId)) === 'cancelled', 30_000, 'the genuine payment.cancelled to apply despite the forged-first message');
+      expect(await receipts(id)).toEqual([{ outcome: 'applied', detailCode: null }]);
       expect(await transitionsTo(requestId, 'cancelled')).toBe(1); // settled exactly once
       // the applied receipt keeps migration 0016's uniqueness: a second applied row for this id is refused at the database
       await expect(billingAdmin.query(`INSERT INTO payment_event_receipt ("eventId", "eventName", outcome, "causeType") VALUES ($1, 'payment.cancelled', 'applied', 'payment_event')`, [id]))
         .rejects.toMatchObject({ code: '23505' });
       expect(await depth(BILLING_DEAD_QUEUE)).toBe(deadBefore);
 
-      // D: the genuine event delivered again (an ack lost after processing) is a replay of the applied receipt.
+      // D: the genuine event delivered again (an ack lost after processing): the EXACT message Payment published, as Payment
+      const genuine = await tap.take(id);
+      expect(genuine.userId).toBe(PAYMENT_USER); // Payment's relay published it under its own broker identity
       const appliedLinesBefore = billingLogLines('payment_event_applied', id);
-      await publish('payment.cancelled', facts(), id, { source: 'payment-service', version: 1 });
+      await paymentIdentity.redeliver(genuine);
       await waitFor(async () => billingLogLines('payment_event_applied', id) === appliedLinesBefore + 1, 20_000, 'the redelivered genuine event to be handled');
-      expect(await receipts(id)).toEqual([{ outcome: 'conflict', detailCode: 'amount_mismatch' }, { outcome: 'applied', detailCode: null }]); // no new receipt
+      expect(await receipts(id)).toEqual([{ outcome: 'applied', detailCode: null }]); // no new receipt
       expect(await transitionsTo(requestId, 'cancelled')).toBe(1); // no second effect
       expect(await requestStatus(requestId)).toBe('cancelled');
       expect(await depth(BILLING_DEAD_QUEUE)).toBe(deadBefore); // acknowledged, not dead-lettered
       expect(await depth(BILLING_QUEUE)).toBe(0);
+    });
+  });
+
+  describe('Core V2 S1e-2: publisher authentication over the real broker', () => {
+    /** Raw publish on a connection authenticated as `who`, with exactly the `userId` given (or none); resolves with the channel error, if any. */
+    const rawAs = async (connUrl: string, name: string, payload: Record<string, unknown>, id: string, userId: string | undefined) => {
+      const conn = await amqp.connect(connUrl);
+      conn.on('error', () => undefined);
+      let refusal: { code?: number } | undefined;
+      try {
+        const ch = await conn.createConfirmChannel();
+        ch.on('error', (e: { code?: number }) => { refusal ??= e; });
+        ch.publish(EXCHANGE, name, Buffer.from(JSON.stringify(payload)), {
+          messageId: id, type: name, persistent: true, contentType: 'application/json', ...(userId ? { userId } : {}),
+          headers: { eventId: id, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 },
+        });
+        await ch.waitForConfirms().catch((e: { code?: number }) => { refusal ??= e; });
+        await ch.close().catch(() => undefined);
+      } finally {
+        await conn.close().catch(() => undefined);
+      }
+      return refusal;
+    };
+    const refusedBeforeAnyReceipt = async (requestId: string, id: string, deadBefore: number) => {
+      await waitFor(async () => (await depth(BILLING_DEAD_QUEUE)) === deadBefore + 1, 20_000, `${id} to be refused`);
+      expect((await takeDead(id)).headers['x-nawara-failure-reason']).toBe('untrusted_unverified_original');
+      expect(await receipts(id)).toEqual([]);
+      expect(await requestStatus(requestId)).toBe('requested');
+    };
+
+    it('a genuine-looking Payment event published as guest is refused before any receipt', async () => {
+      const { requestId, facts } = await requestedPayment();
+      const id = randomUUID();
+      const deadBefore = await depth(BILLING_DEAD_QUEUE);
+      expect(await rawAs(env.TEST_RABBITMQ_URL, 'payment.succeeded', facts(), id, undefined)).toBeUndefined(); // the broker accepts it
+      await refusedBeforeAnyReceipt(requestId, id, deadBefore);
+    });
+
+    it('a Payment event WITHOUT user_id, even on Payment\'s own connection, is refused before any receipt', async () => {
+      const { requestId, facts } = await requestedPayment();
+      const id = randomUUID();
+      const deadBefore = await depth(BILLING_DEAD_QUEUE);
+      expect(await rawAs(paymentIdentity.url(env.TEST_RABBITMQ_URL), 'payment.succeeded', facts(), id, undefined)).toBeUndefined();
+      await refusedBeforeAnyReceipt(requestId, id, deadBefore);
+    });
+
+    it('a forged user_id cannot impersonate payment-service: the broker refuses it (406) and nothing reaches Billing', async () => {
+      const { requestId, facts } = await requestedPayment();
+      const id = randomUUID();
+      const deadBefore = await depth(BILLING_DEAD_QUEUE);
+      const refusal = await rawAs(env.TEST_RABBITMQ_URL, 'payment.succeeded', facts(), id, PAYMENT_USER);
+      expect(refusal?.code).toBe(406);
+      await new Promise((r) => setTimeout(r, 500));
+      expect(await depth(BILLING_DEAD_QUEUE)).toBe(deadBefore);
+      expect(await receipts(id)).toEqual([]);
+      expect(await requestStatus(requestId)).toBe('requested');
+    });
+
+    it('payment-service cannot publish outside its generated topic grant (403); a correctly authenticated Payment publication is accepted and applied', async () => {
+      const { requestId, facts } = await requestedPayment();
+      const outside = await rawAs(paymentIdentity.url(env.TEST_RABBITMQ_URL), 'invoice.created', { invoiceId: randomUUID() }, randomUUID(), PAYMENT_USER);
+      expect(outside?.code).toBe(403);
+      const id = randomUUID();
+      await publish('payment.succeeded', facts(), id, { source: 'payment-service', version: 1 });
+      await waitFor(async () => (await requestStatus(requestId)) === 'paid', 20_000, 'the authenticated payment.succeeded to apply');
+      expect(await receipts(id)).toEqual([{ outcome: 'applied', detailCode: null }]);
+      expect(await transitionsTo(requestId, 'paid')).toBe(1);
     });
   });
 });

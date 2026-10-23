@@ -8,9 +8,13 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
 const refStub = await startReferenceStub();
+/** Core V2 S1e-2: the authenticated `payment-service` broker identity for this file, and its capture of Payment's own messages. */
+let paymentIdentity: PaymentIdentity | undefined;
+let tap: Awaited<ReturnType<typeof tapPaymentEvents>> | undefined;
 afterAll(() => refStub.close());
 
 /**
@@ -57,13 +61,12 @@ const BILLING_PORT = 13101;
 const PAYMENT_PORT = 13102;
 const BILLING_URL = `http://127.0.0.1:${BILLING_PORT}`;
 const PAYMENT_URL = `http://127.0.0.1:${PAYMENT_PORT}`;
-const EXCHANGE = 'nawara.events';
 const BILLING_QUEUE = 'billing.payment-events';
 const BILLING_DEAD_QUEUE = `${BILLING_QUEUE}.dead`;
 
 describeWithEnv(
   'Stage 4 over a real RabbitMQ broker and real HTTP between two live processes',
-  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'],
+  ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'],
   (env) => {
     let billingDb: TestDatabase;
     let paymentDb: TestDatabase;
@@ -110,6 +113,8 @@ describeWithEnv(
       await runMigrations(paymentDb.url, [kitMigrationsDir, `${PAYMENT_DIR}/db/migrations/`]);
 
       amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL);
+      paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+      tap = await tapPaymentEvents(amqpConn);
       // A stray message from a previous crashed run must never leak into this run's assertions.
       await purgeBillingQueues();
 
@@ -118,7 +123,7 @@ describeWithEnv(
         PORT: String(PAYMENT_PORT),
         DATABASE_URL: paymentDb.url,
         AUTH_SERVICE_URL: 'http://127.0.0.1:9', // never called: both routes this suite drives are ServiceTokenGuard-only
-        RABBITMQ_URL: env.TEST_RABBITMQ_URL,
+        RABBITMQ_URL: paymentIdentity!.url(env.TEST_RABBITMQ_URL), // Core V2 S1e-2: Payment publishes as its own broker identity
         PAYMENT_SUPPORTED_CURRENCIES: 'TND',
         SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env, // the caller name IS the `producer` on every event (EXPECTED_PRODUCER)
       });
@@ -149,6 +154,8 @@ describeWithEnv(
     afterAll(async () => {
       await billing?.stop();
       await payment?.stop();
+      await tap?.close();
+      await paymentIdentity?.remove();
       if (amqpConn) {
         await purgeBillingQueues();
         await amqpConn.close().catch(() => undefined);
@@ -247,32 +254,8 @@ describeWithEnv(
       //      "seen" check (SDD 21.4) runs BEFORE `decidePaymentEvent` and short-circuits on a matching `eventId`
       //      alone, so this must be ACKED, not dead-lettered, and must never write a second receipt row. ----
       const dlqBeforeDup = await deadLetterDepth();
-      const dupCh = await amqpConn.createChannel();
-      dupCh.on('error', () => undefined);
-      try {
-        dupCh.publish(
-          EXCHANGE,
-          'payment.cancelled',
-          Buffer.from(
-            JSON.stringify({
-              paymentId: requested.paymentId,
-              producer: 'billing-service',
-              paymentRequestId: requestId,
-              sourceType: 'invoice',
-              sourceId: invoice.json.id,
-              payer: { type: 'user', id: 'e2e-payer-1' },
-              seller: { type: 'organization', id: sellerId },
-              organizationId: sellerId,
-              currency: 'TND',
-              revision: 0,
-              amount: 1000,
-            }),
-          ),
-          { messageId: capturedEventId, type: 'payment.cancelled', headers: { occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 } },
-        );
-      } finally {
-        await dupCh.close().catch(() => undefined);
-      }
+      // Core V2 S1e-2: the redelivery is the EXACT message Payment published (captured from the broker), delivered again as Payment
+      await paymentIdentity!.redeliver(await tap!.take(capturedEventId));
       // Give the real consumer time to receive and process it, then assert it changed nothing: no new receipt row,
       // no dead letter, and the request's status is unchanged.
       await new Promise((r) => setTimeout(r, 2000));
@@ -285,17 +268,13 @@ describeWithEnv(
 
       // ---- a genuinely malformed event (missing every required field) is dead-lettered, never silently dropped ----
       const dlqBeforeBad = await deadLetterDepth();
-      const badCh = await amqpConn.createChannel();
-      badCh.on('error', () => undefined);
-      try {
-        badCh.publish(EXCHANGE, 'payment.succeeded', Buffer.from(JSON.stringify({ nonsense: true })), {
-          messageId: randomUUID(),
-          type: 'payment.succeeded',
-          headers: { occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 },
-        });
-      } finally {
-        await badCh.close().catch(() => undefined);
-      }
+      // published by an authenticated Payment (Core V2 S1e-2), so it reaches Billing's own payload validation
+      const badId = randomUUID();
+      await paymentIdentity!.publish('payment.succeeded', Buffer.from(JSON.stringify({ nonsense: true })), {
+        messageId: badId,
+        type: 'payment.succeeded',
+        headers: { eventId: badId, occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 },
+      });
       await waitFor(async () => (await deadLetterDepth()) > dlqBeforeBad, 10_000, 'a malformed payment.succeeded event to be dead-lettered');
     });
   },
