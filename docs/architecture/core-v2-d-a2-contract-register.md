@@ -81,7 +81,7 @@ is replaced by class M at implementation (S0 §3.7; roadmap S4g).
 | I-12 | Actual physical cash collection starts the 72-hour deadline (`settleBy = cashCollectedAt + 72h`); report time is separate | S0 §1.2 (D-6), FC-8 |
 | I-13 | No manual or trust-based cash settlement of Nawara-sold products | [ADR-0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md); S0 DB-16, S-7, FC-11 |
 | I-14 | Core V2 is implemented and certified against a simulation provider only; production refuses the test or simulation provider | S0 §1.1, FC-10 |
-| I-15 | Broker-verified producer provenance and per-family topic permissions for every event family | ADR-0057 §13; [ADR-0069](../adr/0069-verified-audit-producers-and-audit-contract-v2.md) decision 1; S0 §1.2 (D-2/D-3) |
+| I-15 | Broker-verified producer provenance and per-family topic permissions for every event family | ADR-0057 §13; [ADR-0069](../adr/0069-verified-audit-producers-and-audit-contract-v2.md) decision 1; S0 §1.2 (D-2/D-3); S0-C5 (2026-10-23, ADR-0057 after §13.1): granted as exact generated keys of activated, declared events of the family owner; the default-exchange and shared-DLX residual is deferred (OD-BRK) |
 | I-16 | No new refund case while a payment dispute is open; a completed refund case refuses every new attempt (`409 refund_case_completed`) | [OD] D3; S0 FC-3, V-3 |
 | I-17 | A provisional dispute never cancels Premium; a direct purchase lost at final stage reverses only that purchase and is written off; an assisted purchase lost at final stage keeps the student protected and opens a school recovery obligation for the base amount only | S0 §1.1; ADR-0044 B10; [OD] D5 |
 | I-18 | Fee caps set and approved by the Owner; delegated operators propose; operators never approve | S0 §1.1 |
@@ -976,6 +976,7 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 | OD-13 | Audit legal-hold caller and route | AUD-05 |
 | OD-14 | Audit human-read cursor format, window limits and page size | AUD-03, AUD-04 |
 | OD-15 | Re-emission mechanism (route or command) and its caller. **Resolved for payment-service (S0-C4, 2026-10-23): a command, Owner only; OPEN for every other producer** | EVT-09 |
+| OD-BRK | Broker isolation beyond S1d (deferred by S0-C5, 2026-10-23): per-consumer retry and dead-letter exchanges, removing consumers' `amq.default` and shared-DLX write grants, a dedicated restricted replay identity, their C-4 dead-letter implications. Until decided, queue injection through the default exchange or the DLX is a residual risk carried by consumer enforcement (S1e) | complete broker-level isolation (not S1d) |
 
 Every route name, DTO, error code and idempotency class marked PROPOSED in §4 to §6 also awaits Owner approval at implementation
 review (S0 §3.10), even when it is not listed here.
@@ -986,7 +987,7 @@ The gates are those of the [roadmap](./core-v2-s-execution-roadmap.md) §7; this
 
 | Stage | Register entries | Open decisions | Roadmap gates |
 |---|---|---|---|
-| S1 | EVT-01, EVT-04, EVT-07 to EVT-09 | OD-15 | G-1, C-4 (before enforcement) |
+| S1 | EVT-01, EVT-04, EVT-07 to EVT-09 | OD-15, OD-BRK (not blocking S1d) | G-1, C-4 (before enforcement) |
 | S2-Auth | AUTH-01 to AUTH-08 | Q1 to Q9, Q11, Q12, OD-R6a | G-1, G-3, G-7 (production) |
 | S2-Audit | AUD-01 to AUD-05, AUD-07 | Q5, OD-13, OD-14 | S1b, G-1 |
 | S2-File | FIL-01 to FIL-07 | OD-FILE | G-1 |
