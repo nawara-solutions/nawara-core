@@ -109,6 +109,17 @@ status change still needs its own explicit owner authorization.
   a verification failure is never a verification. Notification conflict evidence records `differs` or `unverifiable` (a retired key is
   never evidence of changed content), through an additive migration with S1c. Re-emission (§13.7) waits for OD-15. Safeguard S-8, S0-C1,
   S0-C2's commitment and every financial invariant are unchanged. This is not an implementation authorization or an ADR status change.
+- **S0-C4 Payment-first re-emission (2026-10-23, owner-approved clarification; resolves OD-15 for Payment only).**
+  [ADR-0057](../adr/0057-messaging-conventions.md) §13.7 ("S0-C4"), with a pointer in §13.6. A §13.7 re-emission is a new
+  authenticated publication, not a backfill: it may establish a new verified observation and never rewrites, deletes, replaces or
+  promotes an earlier one or claims the earlier publication was authenticated. Owner only, through the protected production execution
+  gate bound to the exact event; no caller argument authorizes. A restricted command inside payment-service republishes one existing,
+  published, unchanged outbox row (`payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired`, version 1) through
+  its own broker identity, with serialization pipeline version 1 established for the row (otherwise ineligible); no caller content, no
+  row modification. Intent and producer audit evidence are durable before publication; outcomes (confirmed, unroutable, failed,
+  uncertain) after. Code-bearing Auth events are never eligible. S1e evaluates the stored verified observation. Auth and Organization
+  stay undecided (G-7 / M3). Safeguard S-8, §13.6, every financial invariant and the outbox relay are unchanged; architecture only: no
+  implementation, schema, audit-catalog or production authorization.
 
 ## 2. ADR disposition
 
@@ -124,7 +135,7 @@ immutable; a later decision is a new ADR). Reciprocal notes on Accepted ADRs nee
 | [0045](../adr/0045-commercial-entitlementkind-compatibility-fields.md) `entitlementKind` | Proposed | Revision 1: wording aligned; no field change |
 | [0046](../adr/0046-notification-service-architecture.md) notification | Accepted | none; commercial IN_APP stays excluded (§5) |
 | [0049](../adr/0049-audit-trail-architecture.md) audit trail | Accepted | not edited; amended by 0069 when 0069 is Accepted; reciprocal note pending approval |
-| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5); S0-C2 Notification keyed body commitment, a normative revision of §13.2 (2026-10-23, §1.5); S0-C3 replay verification rollout, a clarification of §13.4 (2026-10-23, §1.5) |
+| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5); S0-C2 Notification keyed body commitment, a normative revision of §13.2 (2026-10-23, §1.5); S0-C3 replay verification rollout, a clarification of §13.4 (2026-10-23, §1.5); S0-C4 Payment-first re-emission, a clarification of §13.7 resolving OD-15 for Payment (2026-10-23, §1.5) |
 | [0060](../adr/0060-company-platform-organization-lifecycle.md) lifecycle | Accepted | not edited; decision note DN-1 recorded here (§3.6) |
 | [0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md) refund receipts | Proposed (new) | new |
 | [0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md) no Nawara cash settlement | Proposed (new) | new; partly supersedes 0007 |

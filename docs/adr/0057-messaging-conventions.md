@@ -31,6 +31,11 @@
 > S0-C2), the open re-emission decision (§13.7) and the key dependency (§13.8). The §13.4 requirement itself is unchanged. Nothing is
 > implemented, and this is not an acceptance: this ADR's status stays `Proposed`.
 
+> **Core V2 S0-C4 clarification (2026-10-23, owner-approved; resolves OD-15 for Payment-first only).** The meaning of a §13.7
+> re-emission against §13.6, and its Payment-first mechanism, eligibility and serialization requirement ("S0-C4" after §13.7). §13.6 and
+> §13.7 are unchanged; the architecture is approved, its implementation is not started and nothing is authorized in production. This is
+> not an acceptance: this ADR's status stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -370,12 +375,82 @@ mismatch. No classification is a new processing permission.
 13.5 Financial consumers (billing-service for `payment.*` and `refund.*`) never process an unverified event. Other consumers may
 accept one only during an explicitly configured compatibility phase, and must record it as unverified.
 
-13.6 No historical event is ever labelled verified, and provenance is never backfilled.
+13.6 No historical event is ever labelled verified, and provenance is never backfilled. (An authorized §13.7 re-emission is a new
+authenticated publication, not a backfill: S0-C4 below §13.7.)
 
 13.7 A producer whose event ids are deterministic may re-emit one named outbox row, under owner authorization and with an audit
 record, through its own broker connection; consumers de-duplicate it. Producers with random ids (auth-service) can re-emit only while
 their published rows are retained. The mechanism (route or command), its caller and its audit record are an open decision (OD-15 of the
-[contract register](../architecture/core-v2-d-a2-contract-register.md)); nothing re-emits until it is decided (S0-C3).
+[contract register](../architecture/core-v2-d-a2-contract-register.md)); nothing re-emits until it is decided (S0-C3). S0-C4 below
+decides it for Payment-first only; every other producer stays undecided.
+
+**S0-C4 — §13.7 re-emission, Payment-first (S0 clarification, owner-approved 2026-10-23; OD-15 resolved for Payment only).**
+- **Meaning (with §13.6).** An authorized re-emission is a **new authenticated publication** of the producer's own immutable outbox
+  row, not a retrospective verification of the earlier publication. Each consumer observes it like any delivery through `nawara.events`
+  (§13.2): where §13.2 holds it may establish a **new** verified observation. It never rewrites, deletes, replaces or promotes an
+  earlier observation (an earlier unverified one stays unverified; an authoritative verified one stays authoritative), never claims that
+  the earlier publication was authenticated, and an approval reference is never producer identity. §13.6 is unchanged by this.
+- **Mechanism.** A restricted command run inside the producing service's own trusted environment (no route, no new service): it selects
+  ONE existing, published, immutable outbox row of that producer by its id and expected name, and republishes it through the producer's
+  own broker connection (its §13.1 `user_id`) to `nawara.events` with the original event id, name, routing key, version, `occurredAt`,
+  correlation id and body. No caller supplies, replaces or constructs event content; no outbox row is ever modified (the relay's
+  published-row immutability is unchanged); it is not a general publishing facility and never publishes for another producer. Any
+  shared Core code is a library behind each producer's own allow-listed entry point, never a generic publisher. A re-emission is a
+  delivery through `nawara.events` (an original delivery for §13.2), not a default-exchange replay in the sense of §13.4.
+- **Authority.** The Owner only. An Owner approval through the protected production execution gate is the authorization, and it must be
+  bound to the producer, the exact event (outbox) id, the event name, the reason, the approval reference, the execution environment and
+  the operation; a caller-supplied argument (`--service`, an actor or an approval reference) is never by itself authentication or
+  authorization. No Platform Operator, Organization operator or user inherits it. The production execution mechanism is separately
+  authorized.
+- **Payment-first eligibility (all required).** Producer payment-service; an existing outbox row that is already published and
+  unchanged; event name and version explicitly allow-listed: `payment.succeeded`, `payment.failed`, `payment.cancelled`,
+  `payment.expired`, each version 1 (as declared by payment-service's event contract); serialization pipeline version 1 established for
+  the row (below); the same event id and the same serialized body as the original; publication through payment-service's authenticated
+  broker identity; the Owner approval above; a durable attempt record and producer audit evidence written before publication (below);
+  consumers' de-duplication unchanged. Ineligible: unpublished, missing or purged rows; any other name or version (no wildcard;
+  payment-service's audit events only once their catalog actions and compatibility are verified and allow-listed); an unknown or
+  incompatible serialization version; a row whose content cannot be reproduced exactly; any caller-provided payload; a known
+  contradiction with an authoritative verified observation; anything created solely for recovery. Auth and Organization re-emission stay
+  undecided (and need G-7 / M3 first).
+- **Code-bearing events never.** `member.contact_verification_requested`, `admin.operator_code_issued` and
+  `admin.operator_confirmation_code_issued` (ADR-0052 decision 5) are never eligible for any producer: no expired or deleted code is
+  reconstructed, no code-bearing row is retained longer to allow recovery, and no command exports, logs, copies or replays such a body.
+- **Serialization pipeline version 1.** The original body is not the application object's serialization: `OutboxService.enqueue`
+  stores the payload as PostgreSQL `jsonb`, the relay reads the row, node-postgres parses `jsonb` with `JSON.parse`, the relay passes
+  that parsed payload as the envelope payload, and the bus publishes exactly `JSON.stringify` of it. Version 1 is that pipeline. A
+  re-emission must reuse the same shared serialization path as the relay (never a separately built, semantically equivalent body), so
+  byte identity holds by construction for a row published by version 1. The message id, type, routing key and headers (`eventId`,
+  `source` = the producer's own service name, `occurredAt` from the row, `correlationId`, `version`) and the AMQP timestamp are likewise
+  built from the row by that same relay and bus path, never by separate code. Eligibility needs evidence that the row was published by
+  version 1 (source-history evidence, exact-byte fixtures, byte-for-byte regression tests, a guard that fails on any change to the
+  pipeline, an explicit version-compatibility policy); where the publishing version cannot be established, the row is ineligible
+  (fail closed: no best-effort reconstruction). Any incompatible change to the pipeline is a new, explicitly versioned pipeline with its
+  own reviewed compatibility decision. A publish-time body digest is a possible later hardening, not required for Payment-first.
+- **Existing provenance (§13.2 store behaviour, unchanged).** The stores keep at most one verified and one unverified observation per
+  (consumer, source, event id), append-only, with conflict evidence beside them; a difference between them is recorded as that evidence
+  and never replaces either. No observation: the re-emission may establish the verified one. A
+  verified observation with the same content: a duplicate, and business de-duplication applies. An unverified observation: a separate
+  verified observation may be added; the unverified one stays intact and is never promoted; conflict evidence is kept. A verified
+  observation with different content: a security conflict, never resolved or overwritten; recovery is blocked when this is known before
+  publication, and when a consumer detects it, it stays an observable conflict to investigate.
+- **Attempts, audit and outcomes.** The recovery intent (the approval evidence, producer and event references, reason) is recorded
+  durably in the producer, append-only, together with its producer-specific audit evidence written through the producer's own outbox,
+  BEFORE publication, so an unavailable Audit never loses the authorization trail; the outcome is recorded afterwards, without
+  rewriting the intent: confirmed, unroutable, failed, or uncertain (a lost publisher confirmation is never reported as a failure).
+  A database commit and a broker confirmation are not atomic; a repeated request republishes the same event id and body and relies on
+  consumers' de-duplication. Payment's audit action is a proposal for implementation (`payment.event_reemitted`, recording the actor and
+  approval reference, producer, source event id, event family, attempt id, reason, outcome and time, never the body, a code, a
+  credential or a digest); if chronology needs separate requested and completed facts, the implementation provides them. The audit
+  catalog is changed only with that implementation.
+- **Broker and finance.** The recovery publish uses publisher confirmation and must detect an unroutable publish; any `mandatory`
+  publish capability is narrow and reviewed, never a change to normal publishing. A re-emitted Payment event is the existing immutable
+  fact, never a new payment, settlement, receipt, entitlement or override: Billing's receipt uniqueness, Payment's deterministic event
+  ids and terminal-state rules and the existing ordering and reconciliation behaviour stay authoritative.
+- **Retention.** Only while the original row is retained and unchanged (§13.8, the A3M outbox-retention rules); no payload is retained
+  longer, no secret-bearing evidence is added and nothing is backfilled.
+- **S1e.** Enforcement evaluates the authoritative stored verified observation: an earlier unverified observation never by itself
+  invalidates a later authenticated publication (even when the delivery was reported as a conflict against that unverified
+  observation), and conflicting verified evidence is never ignored. This is a requirement on S1e, not its authorization.
 
 13.8 Provenance is retained at least as long as dead-letter retention plus the retry window. This is a minimum, not a requirement
 of permanent retention. For Audit (S0 clarification, 2026-10-23), a provenance row or digest must not outlive, and so undermine, the
