@@ -95,6 +95,28 @@ Topology per consumer queue `Q` (all durable, all declared by the consumer's `su
 | `Q.retry` | delay queue: nothing consumes it; a message's own `expiration` dead-letters it (default exchange) straight back into `Q` |
 | `Q.dead` | the dead-letter queue: holds a failed message until an operator replays it. Nothing deletes it automatically |
 
+By default `Q` is declared with `x-dead-letter-exchange = <exchange>.dlx`, a **fanout** that every `Q.dead` is bound to. Only the
+broker ever uses that route (a reject without requeue, an expiry, an overflow): the kit's own dead-letter copies go straight to `Q.dead`
+through the default exchange, after the subscription's `deadLetterPolicy`, and its holds requeue. A broker-driven dead-lettering
+therefore never runs the policy, and it copies the raw message into every consumer's `.dead` queue.
+
+**Opt-in: `brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: 'external' })`** (Core V2 OD-BRK-1, ADR-0057 §8
+"OD-BRK-0").
+- **What it changes:**
+  - `Q` gets no dead-letter argument;
+  - `Q.dead` is never bound to the fanout, and the fanout is not declared for that subscription;
+  - a broker-driven dead-lettering of `Q` then **discards** the message instead of copying it raw anywhere (D3).
+- **What is unchanged:** `Q.retry`, the holds and requeues, and the confirmed, policy-applied copy to `Q.dead`.
+- **Without the option:** the topology is exactly as above.
+- **Existing queues:** RabbitMQ refuses (406) a declaration whose arguments differ from an existing queue, so neither topology attaches
+  to the other's queue. The kit never deletes or re-creates a queue to resolve that.
+- **What the kit cannot see:** a regular policy (or an operator policy) applied by name, a binding left by an older declaration, or the
+  identity's effective permissions. AMQP 0-9-1 exposes none of them; a policy can add a dead-letter route to an argument-less queue,
+  invisibly. So `consumerStatus()` reports `topology.effectivePolicy: 'not_verified_by_kit'`.
+- **Precondition:** an opted-in consumer is **not production-ready** until a separately authorized, protected verification of the
+  broker's effective topology has passed, and keeps passing (OD-BRK-2).
+- **Who may use it:** no service may adopt the option until its own slice; `check:repo` enforces this.
+
 **Failure handling.** A handler that rejects is classified by what it throws:
 
 * `PermanentEventFailure(reason)` (a malformed payload, an identifier that is not a valid id): dead-lettered at once, no retry.

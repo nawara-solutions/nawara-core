@@ -1,6 +1,7 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
 import { bodySha256, evaluateProvenanceFacts, replayCandidate, type ReplayClassification, type ReplayOriginal, type ReplayClassificationOutcome } from './provenance.js';
+import { assertBrokerDeadLettering, type IsolatedTopologyStatus } from './broker-dead-lettering.js';
 import { assertEnforceable, decideOriginal, decideReplayTrust, refusalReason, type HandlerTrust, type TrustDecision } from './trust.js';
 import { consumeIssuedReemissionPlan, type ReemissionPlan, type ReemissionPublishOutcome, type ReemissionPublisher } from './reemission.js';
 import { eventMessage } from './serialization.js';
@@ -231,6 +232,8 @@ export type ConsumerState = 'consuming' | 'reconnecting' | 'closed';
 export interface ConsumerStatus {
   queue: string;
   state: ConsumerState;
+  /** Core V2 OD-BRK-1: present only for a subscription that opted out of broker dead-lettering (a default one reports as before). */
+  topology?: IsolatedTopologyStatus;
 }
 
 /** One consumer subscription and the state needed to re-establish it. */
@@ -461,11 +464,15 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
 
   /** Per-consumer state, for readiness: `consuming` only while the consumer is actually attached to its queue. */
   consumerStatus(): ConsumerStatus[] {
-    return [...this.consumers].map((h) => ({ queue: h.sub.queue, state: h.state }));
+    return [...this.consumers].map((h) => ({
+      queue: h.sub.queue, state: h.state,
+      ...(h.sub.brokerDeadLettering ? { topology: { brokerDeadLettering: 'none' as const, effectivePolicy: 'not_verified_by_kit' as const } } : {}),
+    }));
   }
 
   async subscribe(sub: EventSubscription) {
     assertEnforceable(sub); // Core V2 S1e-1: an enforced subscription that could not be enforced as declared never starts
+    assertBrokerDeadLettering(sub); // Core V2 OD-BRK-1: only an issued topology option
     const handle: ConsumerHandle = { sub, state: 'reconnecting', attempts: 0, closed: false, inFlight: new Set(), stopping: new AbortController() };
     this.consumers.add(handle);
     try {
@@ -486,11 +493,15 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
       ch.on('error', () => this.notice(`rabbitmq_channel_error queue=${sub.queue}`));
       ch.on('close', () => this.consumerLost(h, ch));
       const dlx = `${this.exchange}.dlx`;
+      // Core V2 OD-BRK-1: an opted-in subscription has no broker dead-letter route at all (no DLX argument, no fanout binding, no fanout)
+      const isolated = sub.brokerDeadLettering !== undefined;
       await ch.assertExchange(this.exchange, 'topic', { durable: true });
-      await ch.assertExchange(dlx, 'fanout', { durable: true });
+      if (!isolated) await ch.assertExchange(dlx, 'fanout', { durable: true });
       await ch.assertQueue(deadQueueName(sub.queue), { durable: true });
-      await ch.bindQueue(deadQueueName(sub.queue), dlx, '');
-      await ch.assertQueue(sub.queue, { durable: true, arguments: { 'x-dead-letter-exchange': dlx } }); // arguments unchanged: redeclaring an existing queue with different ones fails
+      if (!isolated) await ch.bindQueue(deadQueueName(sub.queue), dlx, '');
+      // Arguments are part of a queue's identity: RabbitMQ refuses (406) a declaration that differs from the existing queue, so neither
+      // topology ever attaches to the other's queue, and the kit never deletes or re-creates one to resolve it (fail closed).
+      await ch.assertQueue(sub.queue, isolated ? { durable: true } : { durable: true, arguments: { 'x-dead-letter-exchange': dlx } });
       // Delay queue: nothing consumes it; a message's own `expiration` dead-letters it through the default exchange back into the work queue.
       await ch.assertQueue(retryQueueName(sub.queue), { durable: true, arguments: { 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': sub.queue } });
       for (const b of sub.bindings) await ch.bindQueue(sub.queue, this.exchange, b);
@@ -866,7 +877,7 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
   private async ensureDeadQueue(ch: Channel, sub: EventSubscription): Promise<void> {
     try {
       await ch.assertQueue(deadQueueName(sub.queue), { durable: true });
-      await ch.bindQueue(deadQueueName(sub.queue), `${this.exchange}.dlx`, '');
+      if (!sub.brokerDeadLettering) await ch.bindQueue(deadQueueName(sub.queue), `${this.exchange}.dlx`, ''); // OD-BRK-1: never for an opted-in one
     } catch {
       // a closed channel or a broker fault: the republish that follows reports it and the caller falls back
     }
