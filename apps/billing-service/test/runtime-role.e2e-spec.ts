@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, expect, it } from 'vitest';
-import { InboxService, OutboxService, RateLimitService, DbService, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
+import { InboxService, OutboxService, PgProvenanceStore, RateLimitService, DbService, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
 import { billingMigrationsDir } from '../src/app.module.js';
 import { normaliseCreateInvoiceInput } from '../src/domain/invoice-input.js';
 import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
@@ -102,6 +102,29 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     const limiter = t.app.get(RateLimitService);
     expect((await limiter.hit('probe', 'someone', { limit: 1, windowSec: 60 })).allowed).toBe(true);
     expect((await limiter.hit('probe', 'someone', { limit: 1, windowSec: 60 })).allowed).toBe(false);
+  });
+
+  it('Core V2 S1b: the provenance store works as the runtime role (advisory lock, insert, conflict evidence), and its rows stay append-only', async () => {
+    const store = new PgProvenanceStore(t.app.get(DbService));
+    const eventId = crypto.randomUUID();
+    const o = {
+      source: 'payment-service', eventId, name: 'payment.succeeded', routingKey: 'payment.succeeded', exchange: 'nawara.events', bodySha256: 'a'.repeat(64),
+      producerUserId: 'payment-service', verified: true, reason: 'verified' as const,
+    };
+    expect(await store.record('billing.payment-events', o)).toBe('recorded');
+    expect(await store.record('billing.payment-events', o)).toBe('duplicate');
+    expect(await store.record('billing.payment-events', { ...o, bodySha256: 'b'.repeat(64) })).toBe('conflict');
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await app.connect();
+    try {
+      for (const table of ['event_provenance', 'event_provenance_conflict']) {
+        await expect(app.query(`UPDATE ${table} SET verified = verified`)).rejects.toMatchObject({ code: '23514' });
+        await expect(app.query(`DELETE FROM ${table}`)).rejects.toMatchObject({ code: '23514' });
+        await expect(app.query(`TRUNCATE ${table} CASCADE`)).rejects.toMatchObject({ code: '42501' }); // no TRUNCATE privilege at all
+      }
+    } finally {
+      await app.end();
+    }
   });
 
   it('the runtime role cannot change the schema, disable a trigger, truncate, or rewrite an event', async () => {

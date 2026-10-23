@@ -1,3 +1,5 @@
+import type { ProvenanceOptions } from './provenance.js';
+
 /** Metadata carried in message HEADERS so the payload keeps the flat shape each service documents. */
 export interface EventHeaders {
   eventId: string;
@@ -44,6 +46,16 @@ export interface EventSubscription {
    * dead-lettering (which would move the untouched original).
    */
   deadLetterPolicy?(input: DeadLetterInput): DeadLetterDecision;
+  /**
+   * Core V2 S1b (optional; RabbitMQ implementation; ADR-0057 §13.2, §13.3, observe-only): record the provenance of every delivery that
+   * arrives through the event exchange in the consumer's own database BEFORE the handler runs. The handler is called only once that record
+   * is committed; if it cannot be, the delivery is held for the retry delay and requeued (never retried through `<queue>.retry`, never
+   * dead-lettered). Whether the delivery was verified, or differed from what was stored, never changes what the handler is given or
+   * whether it runs. Without it the bus behaves exactly as before. The in-memory bus has no broker metadata and ignores it.
+   * The record keeps an UNKEYED SHA-256 of every delivered body, permanently: never opt in for a queue that can receive a low-entropy
+   * secret (a code-bearing event, ADR-0052 decision 5). `npm run check:repo` allows it only for reviewed services (`EVENT_PROVENANCE_APPROVED_SERVICES`).
+   */
+  provenance?: ProvenanceOptions;
 }
 
 /** What a dead-letter policy is told: the parsed envelope (absent when the message was not an event at all) and why it failed. */

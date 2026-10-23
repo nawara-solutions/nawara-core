@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkActionPins, checkScheduledBackupEntry, checkScheduledBackupVerifier, checkAuthErrorCoverage, checkAuthOrganizationBoundary, checkRepairAuditProducerScope, repairAuditScanned, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, checkDroneSshFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic, checkOutboxRetentionEligibility, OUTBOX_RETENTION_APPROVED_SERVICES } from './lib/checks.mjs';
+import { checkActionPins, checkScheduledBackupEntry, checkScheduledBackupVerifier, checkAuthErrorCoverage, checkAuthOrganizationBoundary, checkRepairAuditProducerScope, repairAuditScanned, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, checkDroneSshFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic, checkOutboxRetentionEligibility, OUTBOX_RETENTION_APPROVED_SERVICES, checkEventProvenanceOptIn } from './lib/checks.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -202,6 +202,20 @@ problems.push(...checkEnvReaderClis(Object.fromEntries([...ENV_READER_CLIS, ENV_
     if (usesEventTraffic(texts)) required.push(app);
   }
   problems.push(...checkEventContracts(contracts, required));
+  // Core V2 S1b: event provenance (an unkeyed body digest) only in reviewed services that receive no code-bearing event.
+  const sources = {};
+  for (const app of appPackages.values()) {
+    const files = {};
+    try {
+      for (const f of walk(join(root, 'apps', app, 'src'))) {
+        if (f.endsWith('.ts') && !f.endsWith('.spec.ts') && !f.endsWith('.d.ts')) files[relative(root, f).split('\\').join('/')] = readFileSync(f, 'utf8');
+      }
+    } catch {
+      continue;
+    }
+    sources[app] = files;
+  }
+  problems.push(...checkEventProvenanceOptIn(contracts, sources));
 }
 // V2 A3M.5: the manual outbox retention stays limited to the reviewed services, which still let the outbox generate their event ids.
 {
@@ -259,4 +273,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, scheduled-backup pins and installation verifier, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, outbox retention eligibility, Auth to Organization dependency boundary, reference-repair audit producer scope');
+console.log('repository checks passed: workflow safety, scheduled-backup pins and installation verifier, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, event provenance opt-in, outbox retention eligibility, Auth to Organization dependency boundary, reference-repair audit producer scope');

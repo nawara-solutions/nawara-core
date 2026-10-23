@@ -32,7 +32,7 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
   const build = (apply: (...a: unknown[]) => Promise<unknown>) => {
     let handler!: (e: EventEnvelope) => Promise<void>;
     const bus = { subscribe: vi.fn(async (sub: { handler: typeof handler }) => { handler = sub.handler; return { close: async () => undefined }; }) };
-    const consumer = new PaymentEventConsumer({ applyPaymentEvent: apply } as never, bus as never);
+    const consumer = new PaymentEventConsumer({ applyPaymentEvent: apply } as never, bus as never, {} as never);
     return { start: () => consumer.onApplicationBootstrap().then(() => handler) };
   };
   beforeEach(() => {
@@ -203,5 +203,18 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
     const handler = await build(apply).start();
     await handler(envelope({}, { correlationId: 'corr-12345678' }));
     expect(logs.join('\n')).toContain(`payment_event_applied eventId=e1111111-1111-4111-8111-111111111111 eventType=payment.cancelled paymentRequestId=${PRID} correlationId=corr-12345678`);
+  });
+});
+
+describe('PaymentEventConsumer provenance wiring (Core V2 S1b, observe-only)', () => {
+  it('subscribes the same queue and bindings, with a provenance store and the catalog as the only event-owner resolver', async () => {
+    let sub!: { queue: string; bindings: string[]; provenance?: { ownerOf(name: string): string | undefined; store: unknown } };
+    const bus = { subscribe: vi.fn(async (s: typeof sub) => { sub = s; return { close: async () => undefined }; }) };
+    await new PaymentEventConsumer({} as never, bus as never, { tx: vi.fn() } as never).onApplicationBootstrap();
+    expect(sub.queue).toBe('billing.payment-events');
+    expect(sub.bindings).toEqual(['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired']); // payment.created still not bound
+    expect(sub.provenance?.store).toBeDefined();
+    for (const name of sub.bindings) expect(sub.provenance?.ownerOf(name)).toBe('payment-service');
+    for (const name of ['payment.created', 'refund.succeeded', 'invoice.created', 'audit.payment_succeeded']) expect(sub.provenance?.ownerOf(name)).toBeUndefined();
   });
 });

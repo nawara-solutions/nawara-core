@@ -11,7 +11,10 @@ export const CONSUME_OUTCOMES = [
   'dead_lettered_retries_exhausted',
   'dead_letter_deferred',
   'dead_letter_unannotated',
+  'provenance_deferred',
 ] as const;
+/** Core V2 S1b: what became of each delivery's provenance (`ProvenanceOutcome`). New stored rows: the two `recorded_*` and `conflict`. */
+export const PROVENANCE_OUTCOMES = ['recorded_verified', 'recorded_unverified', 'duplicate', 'conflict', 'not_original', 'failed'] as const;
 /** Publisher-confirm round trip (seconds), up to the default 5 s confirm bound and beyond. */
 export const PUBLISH_DURATION_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 /** Handler duration (seconds): the HTTP request scale. */
@@ -57,6 +60,12 @@ export function messagingMetrics(metrics: BoundedMetrics): (o: EventBusObservati
     labels: [queue],
     maxSeries: series,
   });
+  const provenance = metrics.counter({
+    name: 'nawara_event_provenance_total',
+    help: 'Core V2 S1b (observe-only): delivery provenance by consumer queue and outcome (recorded verified or unverified, duplicate, conflict, not an original delivery, could not be recorded).',
+    labels: [queue, closedSet('outcome', PROVENANCE_OUTCOMES)],
+    maxSeries: series * (PROVENANCE_OUTCOMES.length + 1),
+  });
   const up = metrics.gauge({ name: 'nawara_event_consumer_up', help: 'Whether each consumer is attached to its queue: 1 consuming, 0 lost or closed.', labels: [queue], maxSeries: series });
   const losses = metrics.counter({ name: 'nawara_event_consumer_losses_total', help: 'Consumers lost (channel or connection gone, broker cancel), by queue.', labels: [queue], maxSeries: series });
   const recoveries = metrics.counter({ name: 'nawara_event_consumer_recoveries_total', help: 'Consumers re-attached after a loss, by queue.', labels: [queue], maxSeries: series });
@@ -77,6 +86,9 @@ export function messagingMetrics(metrics: BoundedMetrics): (o: EventBusObservati
         consumed.inc({ queue: o.queue, outcome: o.outcome });
         if (o.handlerMs !== undefined) handlerDuration.observe({ queue: o.queue }, o.handlerMs / 1000);
         if (o.redelivered) redeliveries.inc({ queue: o.queue });
+        return;
+      case 'provenance':
+        provenance.inc({ queue: o.queue, outcome: o.outcome });
         return;
       case 'consumer':
         if (o.state === 'consuming') up.set({ queue: o.queue }, 1);

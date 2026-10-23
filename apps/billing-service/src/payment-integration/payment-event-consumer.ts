@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
-import { EVENT_BUS, EVENT_NAME, PermanentEventFailure, pgCode, runWithEventContext, SAFE_ID, safeToken, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import { DbService, EVENT_BUS, EVENT_NAME, PermanentEventFailure, PgProvenanceStore, pgCode, runWithEventContext, SAFE_ID, safeToken, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
 import { CONSUMED_EVENTS as CATALOG } from '../events/event-catalog.js';
@@ -78,6 +78,7 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
   constructor(
     private readonly requests: PaymentRequestRepository,
     @Inject(EVENT_BUS) private readonly bus: EventBus,
+    private readonly db: DbService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -85,6 +86,10 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
       queue: 'billing.payment-events',
       bindings: [...CONSUMED_EVENTS],
       handler: (event) => this.handle(event),
+      // Core V2 S1b (ADR-0057 §13.2, observe-only): each delivery's provenance is committed in Billing's database before `handle` runs;
+      // the owner of each consumed name is the catalog's (payment-service for payment.*). It changes nothing below: the source, version
+      // and payload checks, the receipts and every financial outcome are exactly as before. Enforcement is S1e (separately gated).
+      provenance: { ownerOf: (name) => EXPECTED_SOURCE.get(name), store: new PgProvenanceStore(this.db) },
     });
   }
 
