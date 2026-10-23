@@ -3,9 +3,10 @@ import {
   Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { DbService, DB_OPTIONS, ReadinessRegistry, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import { DbService, DB_OPTIONS, PgProvenanceStore, ReadinessRegistry, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
 import type { AuditConfig } from '../config/audit-config.js';
+import { auditEventOwner } from './admission.js';
 import { BrokerNotices } from './broker-notices.js';
 import { auditDeadLetterPolicy } from './dead-letter-policy.js';
 import { AUDIT_BINDINGS, AUDIT_QUEUE, OPS_SNAPSHOT_INTERVAL_MS } from './ingestion.constants.js';
@@ -86,6 +87,12 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
       const sub = await this.bus.subscribe({
         queue: AUDIT_QUEUE, bindings: [...AUDIT_BINDINGS], handler: (e) => this.handle(e),
         deadLetterPolicy: auditDeadLetterPolicy, // Stage 18.8: refused content is not kept verbatim in the DLQ
+        // Core V2 S1b-2 (ADR-0057 §13.2 "Audit admission", observe-only): every delivery, on any exchange, is admitted (canonical bytes,
+        // the Stage 18.8 screen, the full contract) BEFORE provenance; a refusal is dead-lettered at once with no provenance row and no
+        // body digest. An admitted original delivery's provenance is committed in Audit's database before `handle` runs; whether it was
+        // verified never changes ingestion (enforcement is S1c/S1e, separately gated). Retention: none yet (gate AP-R, P-A2 open).
+        admission: (e, body) => this.ingestion.admit(e, body),
+        provenance: { ownerOf: auditEventOwner, store: new PgProvenanceStore(this.db) },
       });
       if (this.stopped) {
         await sub.close();

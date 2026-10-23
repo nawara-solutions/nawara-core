@@ -1,11 +1,12 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditContractError } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
-import { PermanentEventFailure, type EventEnvelope } from '@nawara/service-kit';
+import { PermanentEventFailure, type EventAdmission, type EventEnvelope } from '@nawara/service-kit';
 import { SERVICE_NAME } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
 import { AuditRecordRepository, sameEvidence } from '../persistence/audit-record.repository.js';
 import { AuditPersistenceError } from '../persistence/persistence-error.js';
+import { auditAdmission } from './admission.js';
 import { CLOCK_SKEW_TOLERANCE_MS } from './ingestion.constants.js';
 import { IngestionCounters, type IngestionRefusal } from './ingestion-counters.js';
 
@@ -43,6 +44,25 @@ export class IngestionService {
     @Inject(AuditRecordRepository) private readonly records: AuditRecordRepository,
     @Inject(IngestionCounters) private readonly counters: IngestionCounters,
   ) {}
+
+  /**
+   * Core V2 S1b-2: the kit's `admission` check for this consumer (`auditAdmission`), counted and logged like an ingestion refusal (the kit
+   * then dead-letters the delivery under `auditDeadLetterPolicy`; it never reaches provenance or `ingest`). An unexpected error is a
+   * refusal too (`admission_error`): it fails closed here, and the kit would do the same.
+   */
+  admit(event: EventEnvelope, body: Buffer): EventAdmission {
+    let decision: EventAdmission;
+    try {
+      decision = auditAdmission(event, body);
+    } catch {
+      decision = { admitted: false, reason: 'admission_error' };
+    }
+    if (!decision.admitted) {
+      this.counters.bump('received');
+      this.refuse(decision.reason as IngestionRefusal, `eventId=${safeId(event?.id)}`);
+    }
+    return decision;
+  }
 
   async ingest(event: EventEnvelope): Promise<IngestOutcome> {
     const release = this.counters.enter();

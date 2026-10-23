@@ -2722,25 +2722,91 @@ export function checkOutboxRetentionEligibility(kit, serviceSources) {
 /**
  * Core V2 S1b (ADR-0057 §13.2): a consumer that opts into the kit's event provenance keeps an UNKEYED SHA-256 of every delivered body,
  * permanently. Over a body holding a low-entropy secret (a one-time code, ADR-0052 decision 5) that digest is an offline oracle for the
- * secret, which the producer purges and the consumer seals for exactly this reason. So the opt-in is an allowlist:
+ * secret, which the producer purges and the consumer seals for exactly this reason. So the opt-in is an allowlist, each entry with the
+ * basis on which its digests were reviewed:
  * - only a service on `EVENT_PROVENANCE_APPROVED_SERVICES` may name the provenance store or pass `provenance:` in its (non-test) source;
  *   adding one is a reviewed change here;
- * - an approved service must have an event contract, and must consume no event its producer's contract marks `codeBearing`.
+ * - `contract` (billing-service): the service has an event contract and consumes no event its producer's contract marks `codeBearing`;
+ * - `audit-admission` (audit-service, Core V2 S1b-2, ADR-0057 §13.2 "Audit admission" / S0-C1): Audit has no event contract (its events
+ *   are governed by `@nawara/audit-contract`), so its basis is the admission boundary, checked in its fixed files: the subscription that
+ *   passes `provenance:` also passes `admission:` and `auditDeadLetterPolicy`; the admission calls `isCanonicalJsonBody`, then
+ *   `mayRetainRefusedAuditBody`, then `validateAuditEvent` (canonical bytes, the Stage 18.8 screen, the full contract) and the consumer's
+ *   hook goes through it; the dead-letter policy judges the raw bytes too; and the kit bus runs `admission` BEFORE provenance.
  * Notification (which consumes Auth's code-bearing events) is deliberately absent: its provenance waits for a separate security design.
- * Limits: a presence scan of source text; the contract is what binds a consumer to the events it receives (`checkEventContracts`).
+ * Limits: a presence and order scan of source text, not a proof of every data flow; the real-broker suites prove the behaviour.
  */
-export const EVENT_PROVENANCE_APPROVED_SERVICES = ['billing-service'];
+export const EVENT_PROVENANCE_APPROVED = Object.freeze({ 'billing-service': 'contract', 'audit-service': 'audit-admission' });
+export const EVENT_PROVENANCE_APPROVED_SERVICES = Object.keys(EVENT_PROVENANCE_APPROVED);
 const PROVENANCE_OPT_IN = /ProvenanceStore\b|\bprovenance\s*:/;
+export const AUDIT_ADMISSION_FILES = Object.freeze({
+  consumer: 'apps/audit-service/src/ingestion/audit-consumer.ts',
+  ingestion: 'apps/audit-service/src/ingestion/ingestion.service.ts',
+  admission: 'apps/audit-service/src/ingestion/admission.ts',
+  deadLetterPolicy: 'apps/audit-service/src/ingestion/dead-letter-policy.ts',
+});
+export const KIT_EVENT_BUS = 'libs/service-kit/src/events/rabbitmq-event-bus.ts';
+
+/** The text of the function `name` in `text` (from its declaration to the next top-level declaration), or undefined. */
+function functionBody(text, name) {
+  const at = text.search(new RegExp(`(^|\\n)(export )?function ${name}\\(`));
+  if (at < 0) return undefined;
+  const rest = text.slice(at + 1);
+  const next = rest.search(/\n(export |function |const |class |\/\*\*)/);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+/** Whether every one of `needles` occurs in `text`, in this order. */
+function inOrder(text, needles) {
+  let from = 0;
+  for (const n of needles) {
+    const i = text.indexOf(n, from);
+    if (i < 0) return false;
+    from = i + n.length;
+  }
+  return true;
+}
+
+/** Core V2 S1b-2: the Audit admission boundary in its fixed files (see above). `files`: relPath -> text (undefined when absent). */
+export function auditAdmissionProblems(files) {
+  const problems = [];
+  const why = 'Audit keeps event provenance only behind its admission boundary (ADR-0057 §13.2 "Audit admission")';
+  const consumer = files[AUDIT_ADMISSION_FILES.consumer];
+  const subscribe = consumer === undefined ? undefined : consumer.slice(consumer.indexOf('.subscribe({'), consumer.indexOf('});', consumer.indexOf('.subscribe({')));
+  if (subscribe === undefined || consumer.indexOf('.subscribe({') < 0 || !/\bprovenance\s*:/.test(subscribe)) {
+    problems.push(`${AUDIT_ADMISSION_FILES.consumer}: the provenance subscription was not found where the guard reads it; ${why}`);
+  } else {
+    if (!/\badmission\s*:\s*\(e, body\) => this\.ingestion\.admit\(e, body\)/.test(subscribe)) problems.push(`${AUDIT_ADMISSION_FILES.consumer}: the subscription that passes \`provenance:\` must pass \`admission: (e, body) => this.ingestion.admit(e, body)\`; ${why}`);
+    if (!/\bdeadLetterPolicy\s*:\s*auditDeadLetterPolicy\b/.test(subscribe)) problems.push(`${AUDIT_ADMISSION_FILES.consumer}: the subscription that passes \`provenance:\` must pass \`deadLetterPolicy: auditDeadLetterPolicy\`; ${why}`);
+  }
+  const ingestion = files[AUDIT_ADMISSION_FILES.ingestion] ?? '';
+  const admitAt = ingestion.indexOf('\n  admit(');
+  const admit = admitAt < 0 ? '' : ingestion.slice(admitAt, ingestion.indexOf('\n  }\n', admitAt));
+  if (!admit.includes('auditAdmission(')) problems.push(`${AUDIT_ADMISSION_FILES.ingestion}: \`admit\` must decide through \`auditAdmission(\`; ${why}`);
+  const admission = functionBody(files[AUDIT_ADMISSION_FILES.admission] ?? '', 'auditAdmission');
+  const contract = functionBody(files[AUDIT_ADMISSION_FILES.admission] ?? '', 'contractRefusal');
+  const ordered = ['if (!isCanonicalJsonBody(body)) return', 'if (!mayRetainRefusedAuditBody(event)) return', 'const refusal = contractRefusal(event);', 'if (refusal) return'];
+  if (admission === undefined || !inOrder(admission, ordered) || contract === undefined || !contract.includes('validateAuditEvent(event)')) {
+    problems.push(`${AUDIT_ADMISSION_FILES.admission}: \`auditAdmission\` must check canonical bytes (\`isCanonicalJsonBody\`), then the Stage 18.8 screen (\`mayRetainRefusedAuditBody\`), then the full contract (\`validateAuditEvent\`); ${why}`);
+  }
+  const policy = functionBody(files[AUDIT_ADMISSION_FILES.deadLetterPolicy] ?? '', 'auditDeadLetterPolicy');
+  if (policy === undefined || !policy.includes('isCanonicalJsonBody(') || !policy.includes('mayRetainRefusedAuditBody(')) {
+    problems.push(`${AUDIT_ADMISSION_FILES.deadLetterPolicy}: \`auditDeadLetterPolicy\` must keep an original body only when it is canonical (\`isCanonicalJsonBody\`) and passes \`mayRetainRefusedAuditBody\`; ${why}`);
+  }
+  const bus = files[KIT_EVENT_BUS];
+  const deliver = bus === undefined ? undefined : bus.slice(bus.indexOf('private async deliver('), bus.indexOf('private async provenanceCommitted('));
+  if (deliver === undefined || !inOrder(deliver, ['if (sub.admission) admit(', 'if (sub.provenance'])) problems.push(`${KIT_EVENT_BUS}: \`deliver\` must run \`admission\` before provenance; ${why}`);
+  return problems;
+}
 
 /**
  * `contracts`: application directory -> the text of its contracts/events.json. `sources`: application directory -> { relPath: text } of
- * its non-test source.
+ * its non-test source. `files`: the fixed files of the Audit admission boundary (`AUDIT_ADMISSION_FILES`, `KIT_EVENT_BUS`) -> text.
  */
-export function checkEventProvenanceOptIn(contracts, sources) {
+export function checkEventProvenanceOptIn(contracts, sources, files = {}) {
   const problems = [];
-  for (const [app, files] of Object.entries(sources)) {
+  for (const [app, appFiles] of Object.entries(sources)) {
     if (EVENT_PROVENANCE_APPROVED_SERVICES.includes(app)) continue;
-    for (const [relPath, text] of Object.entries(files)) {
+    for (const [relPath, text] of Object.entries(appFiles)) {
       if (PROVENANCE_OPT_IN.test(text)) problems.push(`${relPath}: opts into event provenance, but ${app} is not on EVENT_PROVENANCE_APPROVED_SERVICES: the unkeyed body digest needs a review that the service never receives a low-entropy secret (ADR-0057 §13.2, ADR-0052 decision 5)`);
     }
   }
@@ -2750,7 +2816,12 @@ export function checkEventProvenanceOptIn(contracts, sources) {
   }
   const codeBearing = new Set();
   for (const [app, c] of parsed) for (const e of Array.isArray(c?.produces) ? c.produces : []) if (e?.codeBearing === true) codeBearing.add(`${app}|${e.name}`);
-  for (const app of EVENT_PROVENANCE_APPROVED_SERVICES) {
+  for (const [app, basis] of Object.entries(EVENT_PROVENANCE_APPROVED)) {
+    if (basis === 'audit-admission') {
+      const optedIn = Object.values(sources[app] ?? {}).some((text) => PROVENANCE_OPT_IN.test(text));
+      if (optedIn) problems.push(...auditAdmissionProblems(files));
+      continue;
+    }
     const c = parsed.get(app);
     if (c === undefined) { problems.push(`apps/${app}/contracts/events.json is missing or invalid: an event-provenance service must declare what it consumes`); continue; }
     for (const e of Array.isArray(c.consumes) ? c.consumes : []) {

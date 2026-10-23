@@ -3222,7 +3222,7 @@ test('T7: no committed .host or .port file can choose a production SSH destinati
 
 test('S1b: event provenance (an unkeyed body digest) is allowed only in reviewed services that consume no code-bearing event', async () => {
   const { EVENT_PROVENANCE_APPROVED_SERVICES, checkEventProvenanceOptIn } = await import('./lib/checks.mjs');
-  assert.deepEqual(EVENT_PROVENANCE_APPROVED_SERVICES, ['billing-service']);
+  assert.deepEqual(EVENT_PROVENANCE_APPROVED_SERVICES, ['billing-service', 'audit-service']);
   const contract = (service, produces, consumes) => JSON.stringify({ service, produces, consumes });
   const contracts = {
     'auth-service': contract('auth-service', [{ name: 'member.contact_verification_requested', version: 1, codeBearing: true, payload: {} }, { name: 'user.registered', version: 1, payload: {} }], []),
@@ -3234,7 +3234,7 @@ test('S1b: event provenance (an unkeyed body digest) is allowed only in reviewed
   assert.deepEqual(checkEventProvenanceOptIn(contracts, { 'billing-service': billing, 'notification-service': { 'apps/notification-service/src/c.ts': 'bus.subscribe({ queue, handler })' } }), []);
   // any other service naming the store or passing `provenance:` is refused (Notification, Audit, ...)
   for (const text of [optIn, 'subscribe({ queue, handler, provenance: p })', "import { PgProvenanceStore } from '@nawara/service-kit';", 'class S implements ProvenanceStore {}']) {
-    for (const app of ['notification-service', 'audit-service']) {
+    for (const app of ['notification-service', 'file-service']) {
       assert.match(checkEventProvenanceOptIn(contracts, { 'billing-service': billing, [app]: { [`apps/${app}/src/c.ts`]: text } }).join(), /is not on EVENT_PROVENANCE_APPROVED_SERVICES/, `${app}: ${text}`);
     }
   }
@@ -3247,4 +3247,39 @@ test('S1b: event provenance (an unkeyed body digest) is allowed only in reviewed
   // a non-code-bearing event of the same producer is fine
   const consumesPlain = { ...contracts, 'billing-service': contract('billing-service', [], [{ source: 'auth-service', name: 'user.registered', version: 1, requires: {} }]) };
   assert.deepEqual(checkEventProvenanceOptIn(consumesPlain, { 'billing-service': billing }), []);
+});
+
+test('S1b-2: Audit keeps event provenance only behind its admission boundary; removing any part of it is refused', async () => {
+  const { AUDIT_ADMISSION_FILES, KIT_EVENT_BUS, auditAdmissionProblems, checkEventProvenanceOptIn } = await import('./lib/checks.mjs');
+  const root = new URL('..', import.meta.url).pathname;
+  const files = Object.fromEntries([...Object.values(AUDIT_ADMISSION_FILES), KIT_EVENT_BUS].map((rel) => [rel, readFileSync(join(root, rel), 'utf8')]));
+  assert.deepEqual(auditAdmissionProblems(files), []); // the repository as it stands
+  const contracts = Object.fromEntries(['billing-service', 'payment-service', 'auth-service'].map((app) => [app, readFileSync(join(root, 'apps', app, 'contracts/events.json'), 'utf8')]));
+  const audit = { 'audit-service': { [AUDIT_ADMISSION_FILES.consumer]: files[AUDIT_ADMISSION_FILES.consumer] } };
+  assert.deepEqual(checkEventProvenanceOptIn(contracts, audit, files), []);
+  assert.match(checkEventProvenanceOptIn(contracts, audit, {}).join(), /admission boundary/); // opted in, boundary files unreadable: refused
+  assert.deepEqual(checkEventProvenanceOptIn(contracts, { 'audit-service': { 'apps/audit-service/src/x.ts': 'bus.subscribe({ queue, handler })' } }, {}), []); // not opted in
+  const mutate = (rel, from, to) => {
+    assert.ok(files[rel].includes(from), `${rel} no longer contains ${from}`);
+    return { ...files, [rel]: files[rel].replace(from, to) };
+  };
+  const mutations = [
+    [AUDIT_ADMISSION_FILES.consumer, 'admission: (e, body) => this.ingestion.admit(e, body),', '', /must pass `admission:/],
+    [AUDIT_ADMISSION_FILES.consumer, 'deadLetterPolicy: auditDeadLetterPolicy,', 'deadLetterPolicy: () => ({ body: "original", headers: {} }),', /must pass `deadLetterPolicy: auditDeadLetterPolicy`/],
+    [AUDIT_ADMISSION_FILES.ingestion, 'decision = auditAdmission(event, body);', 'decision = { admitted: true };', /must decide through `auditAdmission\(`/],
+    [AUDIT_ADMISSION_FILES.admission, 'if (!isCanonicalJsonBody(body))', 'if (false)', /must check canonical bytes/],
+    [AUDIT_ADMISSION_FILES.admission, 'if (!mayRetainRefusedAuditBody(event))', 'if (false)', /must check canonical bytes/],
+    [AUDIT_ADMISSION_FILES.admission, 'const refusal = contractRefusal(event);', 'const refusal = undefined;', /must check canonical bytes/],
+    [AUDIT_ADMISSION_FILES.admission, 'if (refusal) return', 'if (false) return', /must check canonical bytes/],
+    [AUDIT_ADMISSION_FILES.admission, '    validateAuditEvent(event);', '', /must check canonical bytes/],
+    [AUDIT_ADMISSION_FILES.deadLetterPolicy, 'isCanonicalJsonBody(body) && ', '', /must keep an original body only when it is canonical/],
+    [KIT_EVENT_BUS, 'if (sub.admission) admit(sub, event, msg.content);', '', /must run `admission` before provenance/],
+  ];
+  for (const [rel, from, to, expected] of mutations) assert.match(auditAdmissionProblems(mutate(rel, from, to)).join('\n'), expected, `${rel}: ${from}`);
+  // admission moved AFTER provenance in the kit bus is refused too
+  const bus = files[KIT_EVENT_BUS];
+  const admitLine = '      if (sub.admission) admit(sub, event, msg.content);\n';
+  assert.ok(bus.includes(admitLine));
+  const moved = bus.replace(admitLine, '').replace('      handlerStarted = performance.now();', `${admitLine}      handlerStarted = performance.now();`);
+  assert.match(auditAdmissionProblems({ ...files, [KIT_EVENT_BUS]: moved }).join(), /must run `admission` before provenance/);
 });

@@ -14,6 +14,8 @@ export const BROKER_SIGNALS = [
   'dead_letter_retained', 'dead_letter_redacted', 'dead_letter_deferred',
   'consumer_lost', 'consumer_recovered', 'consumer_reconnect_failed', 'consumer_drain_timeout',
   'channel_error', 'confirm_timeout', 'settle_failed', 'connection_abandoned',
+  // Core V2 S1b-2: a delivery held and requeued because its provenance could not be committed (§13.3), and conflict evidence recorded.
+  'provenance_deferred', 'provenance_conflict',
 ] as const;
 export type BrokerSignal = (typeof BROKER_SIGNALS)[number];
 
@@ -30,6 +32,8 @@ const BY_NAME: Record<string, BrokerSignal> = {
   rabbitmq_confirm_timeout: 'confirm_timeout',
   rabbitmq_settle_failed: 'settle_failed',
   rabbitmq_connection_abandoned: 'connection_abandoned',
+  event_provenance_deferred: 'provenance_deferred',
+  event_provenance_conflict: 'provenance_conflict',
 };
 const CLASS = /\bclassification=(malformed|permanent|retries_exhausted)\b/;
 

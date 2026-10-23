@@ -56,7 +56,8 @@ export {
   PgProvenanceStore, PROVENANCE_REASONS, bodySha256, evaluateProvenance, type ProvenanceDelivery, type ProvenanceEvaluation, type ProvenanceObservation,
   type ProvenanceOptions, type ProvenanceReason, type ProvenanceRecordResult, type ProvenanceStore,
 } from './events/provenance.js';
-export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
+export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventAdmission, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
+export { isCanonicalJsonBody } from './events/canonical-body.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
 export { RabbitMqEventBus, PublisherConfirmTimeoutError, PublisherIdentityUnavailableError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, DEFAULT_PREFETCH, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus, type ConsumeOutcome, type ProvenanceOutcome, type EventBusObservation, type EventBusObserver } from './events/rabbitmq-event-bus.js';
 

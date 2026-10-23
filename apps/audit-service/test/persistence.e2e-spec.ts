@@ -70,7 +70,7 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
       const foundation = await runMigrations(up.migratorUrl, [kitMigrationsDir]); // the 18.2 state: the kit baseline, no audit migration
       expect(foundation.applied.every((n) => n.startsWith('kit_'))).toBe(true);
       const upgrade = await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
-      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql']);
+      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql', '0005_event_provenance.sql']);
       expect((await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]);
       const grants = await sql<{ p: string }>(up.adminUrl, `SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'audit_record' AND grantee = $1 ORDER BY 1`, [up.app]);
       expect(grants.map((g) => g.p)).toEqual(['INSERT', 'SELECT']);
@@ -91,10 +91,29 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
     for (const c of cols) expect(c.c).not.toMatch(/email|phone|name|ip|agent|password|token|secret|payload|snapshot|metadata|updated/i);
     expect(await sql(d.adminUrl, `SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'audit_record'::regclass`)).toEqual([]);
     const tables = await sql<{ t: string }>(d.adminUrl, `SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('outbox', 'inbox', 'kit_rate_limit', 'schema_migrations')`);
-    // Stage 18.8: plus the retention policy and its ledger (owner-only / retention-only: never the runtime's).
-    expect(tables.map((r) => r.t).sort()).toEqual(['audit_record', 'audit_retention_policy', 'audit_retention_run']);
+    // Stage 18.8: plus the retention policy and its ledger (owner-only / retention-only: never the runtime's); Core V2 S1b-2: plus the
+    // append-only event provenance and its conflict evidence (0005; no payload column: the tuple of ADR-0057 §13.2 only).
+    expect(tables.map((r) => r.t).sort()).toEqual(['audit_record', 'audit_retention_policy', 'audit_retention_run', 'event_provenance', 'event_provenance_conflict']);
     const [owner] = await sql<{ o: string }>(d.adminUrl, `SELECT tableowner AS o FROM pg_tables WHERE tablename = 'audit_record'`);
     expect(owner!.o).toBe(d.migrator);
+  });
+
+  it('Core V2 S1b-2: the provenance tables are append-only like audit_record: the runtime holds exactly INSERT and SELECT, no role may mutate them, no payload column', async () => {
+    const privileges = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
+    for (const table of ['event_provenance', 'event_provenance_conflict']) {
+      const held = [];
+      for (const p of privileges) {
+        const [r] = await sql<{ ok: boolean }>(d.adminUrl, `SELECT has_table_privilege($1, $2, $3) AS ok`, [d.app, table, p]);
+        if (r!.ok) held.push(p);
+      }
+      expect(held, table).toEqual(['SELECT', 'INSERT']);
+      expect(await sql(d.adminUrl, `SELECT a.grantee::regrole::text AS role FROM pg_class c, aclexplode(c.relacl) a
+        WHERE c.oid = $1::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')`, [table]), table).toEqual([]);
+      const [owner] = await sql<{ o: string }>(d.adminUrl, `SELECT tableowner AS o FROM pg_tables WHERE tablename = $1`, [table]);
+      expect(owner!.o).toBe(d.migrator);
+      const cols = await sql<{ c: string }>(d.adminUrl, `SELECT column_name AS c FROM information_schema.columns WHERE table_name = $1`, [table]);
+      for (const c of cols) expect(c.c).not.toMatch(/payload|body$|changes|actor|organization|resource|subject|email|phone|token|secret/i);
+    }
   });
 
   it('the runtime role holds exactly INSERT and SELECT on audit_record (the Core default UPDATE / DELETE taken back); no other role may mutate it', async () => {

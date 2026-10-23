@@ -293,34 +293,70 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
 
   // ────────────────────────────────────────────────────────────────────────────────────── transient failures and retries
 
-  it('DATABASE OUTAGE: nothing is acknowledged or written while PostgreSQL refuses connections; the kit retries; on recovery exactly one row, no DLQ', async () => {
+  // Core V2 S1b-2 (ADR-0057 §13.3): a database outage now stops a delivery at its provenance record, BEFORE ingestion, so it is held and
+  // requeued with its original broker metadata, never copied to `.retry` and never dead-lettered, however long the outage lasts.
+  it('DATABASE OUTAGE: nothing is acknowledged or written while PostgreSQL refuses connections; the delivery is held and requeued (never .retry); on recovery exactly one row, no DLQ', async () => {
     const t = await start({ retry: { maxRetries: 3, delayMs: 1500 } });
     await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS false`);
     await sql(env.TEST_DATABASE_ADMIN_URL, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND application_name = 'audit-service'`, [d.name]);
     const e = auditEnvelope('payment.succeeded');
-    await publish(e);
-    await until(() => notices.some((n) => n.startsWith('event_retry_scheduled') && n.includes(e.id)));
-    expect(t.logs.some((l) => String(l.msg).startsWith(`audit_ingest_transient_failure eventId=${e.id}`))).toBe(true);
-    await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS true`);
+    try {
+      await publish(e);
+      await until(() => notices.some((n) => n.startsWith('event_provenance_deferred') && n.includes(e.id)));
+      expect(notices.some((n) => n.startsWith('event_retry_scheduled') && n.includes(e.id))).toBe(false);
+      expect(t.logs.some((l) => String(l.msg).startsWith(`audit_ingest_transient_failure eventId=${e.id}`))).toBe(false); // ingestion never ran
+      expect(await depth(ch, RETRY_QUEUE)).toBe(0);
+      expect(await depth(ch, DEAD_QUEUE)).toBe(0);
+    } finally {
+      await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS true`);
+    }
     await until(async () => (await rowCount(e.id)) === 1, 30_000);
     await until(idle);
     expect(await depth(ch, DEAD_QUEUE)).toBe(0);
     expect(await rowCount(e.id)).toBe(1);
+    expect(await sql(d.adminUrl, `SELECT 1 FROM event_provenance WHERE "eventId" = $1`, [e.id])).toHaveLength(1); // recorded once, then ingested
+  }, 60_000);
+
+  // The kit's transient retry of INGESTION (after provenance committed) is unchanged: proven by refusing only the audit_record insert,
+  // with a transient SQLSTATE (57P03, not one Audit classifies as a refused record), through a test-only trigger.
+  const failInserts = (on: boolean) => sql(d.adminUrl, on
+    ? `CREATE OR REPLACE FUNCTION test_audit_insert_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '57P03'; END $$;
+       CREATE OR REPLACE TRIGGER audit_record_00_test_fault BEFORE INSERT ON audit_record FOR EACH ROW EXECUTE FUNCTION test_audit_insert_fault()`
+    : `DROP TRIGGER IF EXISTS audit_record_00_test_fault ON audit_record`);
+
+  it('INGESTION FAILURE: the provenance is committed, then a transient insert failure is retried by the kit; on recovery exactly one row, no DLQ', async () => {
+    const t = await start({ retry: { maxRetries: 3, delayMs: 1500 } });
+    const e = auditEnvelope('payment.succeeded');
+    await failInserts(true);
+    try {
+      await publish(e);
+      await until(() => notices.some((n) => n.startsWith('event_retry_scheduled') && n.includes(e.id)));
+      expect(t.logs.some((l) => String(l.msg).startsWith(`audit_ingest_transient_failure eventId=${e.id}`))).toBe(true);
+      expect(await sql(d.adminUrl, `SELECT 1 FROM event_provenance WHERE "eventId" = $1`, [e.id])).toHaveLength(1);
+    } finally {
+      await failInserts(false);
+    }
+    await until(async () => (await rowCount(e.id)) === 1, 30_000);
+    await until(idle);
+    expect(await depth(ch, DEAD_QUEUE)).toBe(0);
+    expect(await sql(d.adminUrl, `SELECT 1 FROM event_provenance WHERE "eventId" = $1`, [e.id])).toHaveLength(1); // the retry recorded nothing
   }, 60_000);
 
   it('RETRY EXHAUSTION then REPLAY: a failure that outlasts the retry budget is dead-lettered `retries_exhausted` (bounded, never lost); replayed after recovery it is stored once', async () => {
     await start({ retry: { maxRetries: 2, delayMs: 300 } });
-    await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS false`);
-    await sql(env.TEST_DATABASE_ADMIN_URL, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND application_name = 'audit-service'`, [d.name]);
+    await failInserts(true);
     const e = auditEnvelope('price.created');
-    await publish(e);
-    await until(async () => (await depth(ch, DEAD_QUEUE)) === 1, 30_000);
+    try {
+      await publish(e);
+      await until(async () => (await depth(ch, DEAD_QUEUE)) === 1, 30_000);
+    } finally {
+      await failInserts(false);
+    }
     expect(notices.filter((n) => n.startsWith('event_retry_scheduled') && n.includes(e.id))).toHaveLength(2);
     expect(notices.some((n) => n.startsWith('event_retry_exhausted') && n.includes(e.id))).toBe(true);
     const info = await ch.get(DEAD_QUEUE, { noAck: false });
     expect(info && info.properties.headers?.['x-nawara-failure']).toBe('retries_exhausted');
     ch.nack(info as amqp.GetMessage, false, true); // back into the DLQ, untouched
-    await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS true`);
     const r = await replayDeadLetter(conn, DEAD_QUEUE, e.id, { waitMs: 15_000 });
     expect(r.outcome).toBe('consumed');
     expect(await rowCount(e.id)).toBe(1);
@@ -329,6 +365,8 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     await until(() => logs().some((m) => m.startsWith(`audit_event_duplicate eventId=${e.id}`)));
     expect(await rowCount(e.id)).toBe(1);
     expect(await depth(ch, DEAD_QUEUE)).toBe(0);
+    // the original and its identical re-publication share one provenance row; the replay (default exchange) recorded nothing
+    expect(await sql(d.adminUrl, `SELECT 1 FROM event_provenance WHERE "eventId" = $1`, [e.id])).toHaveLength(1);
   }, 60_000);
 
   it('REPLAY of a conflicting event is refused again (`rejected_again`) and never rewrites history', async () => {

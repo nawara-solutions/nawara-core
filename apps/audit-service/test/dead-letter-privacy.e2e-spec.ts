@@ -174,14 +174,19 @@ describeWithEnv('dead-letter privacy (real RabbitMQ, real PostgreSQL 16)', ['TES
     await everywhere([x!]);
   });
 
+  // Core V2 S1b-2: the database refuses only the audit_record insert (a test-only trigger, transient SQLSTATE 57P03), so the provenance
+  // is committed first and ingestion fails transiently (a whole-database outage now holds the delivery at its provenance, §13.3).
   it('RETRIES EXHAUSTED (database refusing) keeps the valid body for replay, hostile headers stripped; the replay stores it once', async () => {
     await start({ maxRetries: 1, delayMs: 200 });
-    await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS false`);
-    await sql(env.TEST_DATABASE_ADMIN_URL, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, [d.name]);
+    await sql(d.adminUrl, `CREATE FUNCTION test_audit_insert_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '57P03'; END $$;
+      CREATE TRIGGER audit_record_00_test_fault BEFORE INSERT ON audit_record FOR EACH ROW EXECUTE FUNCTION test_audit_insert_fault()`);
     const e = auditEnvelope('membership.revoked');
-    await publish(e);
-    await until(async () => (await depth(ch, DEAD_QUEUE)) === 1, 30_000);
-    await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${d.name}" WITH ALLOW_CONNECTIONS true`);
+    try {
+      await publish(e);
+      await until(async () => (await depth(ch, DEAD_QUEUE)) === 1, 30_000);
+    } finally {
+      await sql(d.adminUrl, `DROP TRIGGER audit_record_00_test_fault ON audit_record; DROP FUNCTION test_audit_insert_fault()`);
+    }
     const m = await ch.get(DEAD_QUEUE, { noAck: false });
     if (!m) throw new Error('no dead letter');
     expect(m.properties.headers?.['x-nawara-failure']).toBe('retries_exhausted');
