@@ -19,6 +19,7 @@ export class TrustedDeliveryBus extends InMemoryEventBus {
     return {
       close: async () => {
         this.enforced = undefined;
+        return undefined; // the base subscription's close resolves to `undefined`
       },
     };
   }
