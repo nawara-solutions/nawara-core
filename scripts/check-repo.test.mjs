@@ -3690,5 +3690,25 @@ test('Core V2 S1e-1: only audit-service may use the compatibility phase; a consu
   }
   assert.match(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'original_reviewed' })")).join(), /consumes a code-bearing event/);
   assert.deepEqual(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'dead_letter_policy' })")), []);
-  assert.deepEqual(checkEnforcementPolicies(contracts, src('billing-service', "strictEnforcement({ refusedBody: 'original_reviewed' })")), []); // Payment events carry no code
+  // Payment events carry no code: Billing may keep a refused body (its real files, which the S1e-2 financial check also reads)
+  const billing = Object.fromEntries(['apps/billing-service/src/payment-integration/payment-event-consumer.ts', 'apps/billing-service/src/payment-integration/payment-event-origin.ts'].map((rel) => [rel, read(rel)]));
+  assert.deepEqual(checkEnforcementPolicies(contracts, { 'billing-service': billing }), []);
+});
+
+test('Core V2 S1e-2: Billing\'s payment-event subscription is strict and its handler never reads the trusted values from delivery headers', async () => {
+  const { checkEnforcementPolicies, STRICT_FINANCIAL_CONSUMERS } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const files = STRICT_FINANCIAL_CONSUMERS['billing-service'];
+  const sources = { 'billing-service': { [files.consumer]: read(files.consumer), [files.origin]: read(files.origin) } };
+  assert.deepEqual(checkEnforcementPolicies({}, sources), []);
+  const mutate = (rel, from, to) => {
+    assert.ok(sources['billing-service'][rel].includes(from), `fixture drifted: ${from}`);
+    return { 'billing-service': { ...sources['billing-service'], [rel]: sources['billing-service'][rel].replace(from, to) } };
+  };
+  const strict = "enforcement: strictEnforcement({ refusedBody: 'original_reviewed' }),";
+  assert.match(checkEnforcementPolicies({}, mutate(files.consumer, strict, '')).join(), /must declare `enforcement: strictEnforcement/);
+  assert.match(checkEnforcementPolicies({}, mutate(files.consumer, strict, 'enforcement: auditCompatibilityEnforcement(),')).join(), /only audit-service may use the compatibility phase/);
+  assert.match(checkEnforcementPolicies({}, mutate(files.consumer, 'settledAt = new Date(t.occurredAt);', 'settledAt = new Date(event.headers.occurredAt);')).join(), /reads a delivery header Billing must take from the trusted envelope/);
+  assert.match(checkEnforcementPolicies({}, mutate(files.consumer, 'const correlationId = t.correlationId ??', 'const correlationId = event.headers.correlationId ??')).join(), /reads a delivery header/);
+  assert.match(checkEnforcementPolicies({}, { 'billing-service': {} }).join(), /the financial consumer was not found/);
 });

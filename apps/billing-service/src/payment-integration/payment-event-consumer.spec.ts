@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
-import { PermanentEventFailure, getRequestContext, type EventEnvelope } from '@nawara/service-kit';
+import { InMemoryEventBus, PermanentEventFailure, getRequestContext, type EventEnvelope, type HandlerTrust } from '@nawara/service-kit';
+import type { TrustedPaymentEnvelope } from './payment-event-origin.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PaymentEventConsumer } from './payment-event-consumer.js';
 
@@ -29,11 +30,26 @@ describe('PaymentEventConsumer failure classification and replay logging', () =>
       const fields = { ...(rest.find((r) => typeof r === 'object' && r !== null) as Record<string, unknown> | undefined), correlationId: getRequestContext()?.correlationId };
       logs.push(`${level}: ${String(m)} ${Object.entries(fields).map(([k, v]) => `${k}=${String(v)}`).join(' ')}`);
     });
-  const build = (apply: (...a: unknown[]) => Promise<unknown>) => {
-    let handler!: (e: EventEnvelope) => Promise<void>;
+  /**
+   * The consumer behind a fake bus. Core V2 S1e-2: its subscription is strict, so the handler is called here as the RabbitMQ bus calls it
+   * after accepting a delivery: with the trust of a verified original built from the delivery's own published values (what the kit
+   * passes for a broker-verified original). The origin store is a fake recorder.
+   */
+  const verifiedOriginal = (e: EventEnvelope): HandlerTrust => {
+    const f = <T>(v: T | undefined) => (v === undefined ? ({ available: false, reason: 'absent' } as const) : ({ available: true, value: v, from: 'verified_delivery' } as const));
+    return {
+      decision: 'accept', basis: 'verified_original',
+      origin: { from: 'verified_delivery', source: e.headers.source, eventId: e.id, name: e.name, routingKey: e.name, producerUserId: 'payment-service', occurredAt: f(e.headers.occurredAt), version: f(e.headers.version), correlationId: f(e.headers.correlationId) },
+    };
+  };
+  const build = (apply: (...a: unknown[]) => Promise<unknown>, origins: { recordVerified: (t: TrustedPaymentEnvelope) => Promise<string>; find: (id: string) => Promise<TrustedPaymentEnvelope | undefined> } = { recordVerified: async () => 'recorded', find: async () => undefined }) => {
+    let handler!: (e: EventEnvelope, trust?: HandlerTrust) => Promise<void>;
     const bus = { subscribe: vi.fn(async (sub: { handler: typeof handler }) => { handler = sub.handler; return { close: async () => undefined }; }) };
-    const consumer = new PaymentEventConsumer({ applyPaymentEvent: apply } as never, bus as never, {} as never);
-    return { start: () => consumer.onApplicationBootstrap().then(() => handler) };
+    const consumer = new PaymentEventConsumer({ applyPaymentEvent: apply } as never, bus as never, {} as never, origins as never);
+    return {
+      start: () => consumer.onApplicationBootstrap().then(() => (e: EventEnvelope, trust: HandlerTrust | null = verifiedOriginal(e)) => handler(e, trust ?? undefined)),
+      bus,
+    };
   };
   beforeEach(() => {
     logs = [];
@@ -210,7 +226,7 @@ describe('PaymentEventConsumer provenance wiring (Core V2 S1b, observe-only)', (
   it('subscribes the same queue and bindings, with a provenance store and the catalog as the only event-owner resolver', async () => {
     let sub!: { queue: string; bindings: string[]; provenance?: { ownerOf(name: string): string | undefined; store: unknown } };
     const bus = { subscribe: vi.fn(async (s: typeof sub) => { sub = s; return { close: async () => undefined }; }) };
-    await new PaymentEventConsumer({} as never, bus as never, { tx: vi.fn() } as never).onApplicationBootstrap();
+    await new PaymentEventConsumer({} as never, bus as never, { tx: vi.fn() } as never, {} as never).onApplicationBootstrap();
     expect(sub.queue).toBe('billing.payment-events');
     expect(sub.bindings).toEqual(['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired']); // payment.created still not bound
     expect(sub.provenance?.store).toBeDefined();
@@ -218,3 +234,121 @@ describe('PaymentEventConsumer provenance wiring (Core V2 S1b, observe-only)', (
     for (const name of ['payment.created', 'refund.succeeded', 'invoice.created', 'audit.payment_succeeded']) expect(sub.provenance?.ownerOf(name)).toBeUndefined();
   });
 });
+
+describe('Core V2 S1e-2: Billing is verified-only (ADR-0057 §13.5, "S0-C6")', () => {
+  const STORED: TrustedPaymentEnvelope = {
+    eventId: 'e1111111-1111-4111-8111-111111111111', name: 'payment.cancelled', source: 'payment-service', version: 1, occurredAt: '2026-01-01T00:00:00.000Z', correlationId: 'corr-original',
+  };
+  const replayTrust = (over: Partial<Extract<HandlerTrust, { decision: 'accept' }>['origin']> = {}): HandlerTrust => ({
+    decision: 'accept', basis: 'verified_replay',
+    origin: {
+      from: 'stored_verified_observation', source: 'payment-service', eventId: STORED.eventId, name: 'payment.cancelled', routingKey: 'payment.cancelled', producerUserId: 'payment-service',
+      occurredAt: { available: false, reason: 'not_stored' }, version: { available: false, reason: 'not_stored' }, correlationId: { available: false, reason: 'not_stored' }, ...over,
+    },
+  });
+  const consumerWith = (apply: ReturnType<typeof vi.fn>, origins: { recordVerified?: (t: TrustedPaymentEnvelope) => Promise<string>; find?: (id: string) => Promise<TrustedPaymentEnvelope | undefined> } = {}) => {
+    let handler!: (e: EventEnvelope, trust?: HandlerTrust) => Promise<void>;
+    let sub!: { enforcement?: { mode: string; refusedBody?: string }; provenance?: unknown };
+    const bus = { subscribe: vi.fn(async (s: typeof sub & { handler: typeof handler }) => { sub = s; handler = s.handler; return { close: async () => undefined }; }) };
+    const consumer = new PaymentEventConsumer({ applyPaymentEvent: apply } as never, bus as never, {} as never, { recordVerified: origins.recordVerified ?? (async () => 'recorded'), find: origins.find ?? (async () => STORED) } as never);
+    return { start: async () => { await consumer.onApplicationBootstrap(); return { handler, sub }; } };
+  };
+  const event = (headers: Partial<EventEnvelope['headers']> = {}): EventEnvelope => ({
+    id: STORED.eventId, name: 'payment.cancelled',
+    payload: { paymentId: 'p-1', producer: 'billing-service', paymentRequestId: PRID, sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: 'u' }, seller: { type: 'organization', id: 'o' }, organizationId: 'o', currency: 'TND', revision: 0, amount: 1000 },
+    headers: { eventId: STORED.eventId, occurredAt: '2030-12-31T23:59:59.000Z', correlationId: 'corr-forged', source: 'payment-service', version: 1, ...headers },
+  });
+  beforeEach(() => {
+    for (const level of ['log', 'warn', 'error'] as const) vi.spyOn(Logger.prototype, level).mockImplementation(() => undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('subscribes with a STRICT policy (never compatibility, no unenforced mode), and the in-memory bus refuses it: Billing then fails to start', async () => {
+    const { sub } = await consumerWith(vi.fn()).start();
+    expect(sub.enforcement).toMatchObject({ mode: 'strict', refusedBody: 'original_reviewed' });
+    expect(Object.isFrozen(sub.enforcement)).toBe(true);
+    await expect(new PaymentEventConsumer({} as never, new InMemoryEventBus(), {} as never, {} as never).onApplicationBootstrap()).rejects.toThrow(/needs the RabbitMQ bus/);
+  });
+
+  it.each([
+    ['no trust decision at all', undefined],
+    ['a compatibility (unverified) acceptance', { decision: 'compatibility', basis: 'unverified_original', verified: false } as HandlerTrust],
+  ])('%s never reaches applyPaymentEvent (permanent untrusted_no_decision)', async (_t, trust) => {
+    const apply = vi.fn();
+    const { handler } = await consumerWith(apply).start();
+    const err = await handler(event(), trust).catch((e: unknown) => e);
+    expect((err as PermanentEventFailure).reason).toBe('untrusted_no_decision');
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('a verified REPLAY takes settledAt, version and correlation id from the RECORDED original, never from its own headers', async () => {
+    const apply = vi.fn().mockResolvedValue({ outcome: 'applied', detail: null, firstDelivery: true, subscription: null });
+    const { handler } = await consumerWith(apply).start();
+    await handler(event({ occurredAt: '2030-12-31T23:59:59.000Z', correlationId: 'corr-forged', version: 7 }), replayTrust());
+    expect(apply).toHaveBeenCalledTimes(1);
+    const [eventId, , ctx, settledAt] = apply.mock.calls[0]! as [string, unknown, { correlationId: string; cause: { id: string } }, Date];
+    expect(eventId).toBe(STORED.eventId);
+    expect(settledAt.toISOString()).toBe(STORED.occurredAt);
+    expect(ctx.correlationId).toBe('corr-original');
+  });
+
+  it('a verified replay with no recorded original values is refused (untrusted_origin_unavailable): nothing is invented', async () => {
+    const apply = vi.fn();
+    for (const find of [async () => undefined, async () => ({ ...STORED, name: 'payment.succeeded' }), async () => ({ ...STORED, source: 'billing-service' })]) {
+      const { handler } = await consumerWith(apply, { find }).start();
+      const err = await handler(event(), replayTrust()).catch((e: unknown) => e);
+      expect((err as PermanentEventFailure).reason).toBe('untrusted_origin_unavailable');
+    }
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('a verified original whose values contradict the recorded ones is refused (untrusted_origin_conflict), never overwriting them', async () => {
+    const apply = vi.fn();
+    const recordVerified = vi.fn(async () => 'contradicts');
+    const { handler } = await consumerWith(apply, { recordVerified }).start();
+    const err = await handler(event(), verifiedOriginalOf(event())).catch((e: unknown) => e);
+    expect((err as PermanentEventFailure).reason).toBe('untrusted_origin_conflict');
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('a verified original is recorded (its own published values) BEFORE applyPaymentEvent; an unsupported version is refused and records nothing', async () => {
+    const order: string[] = [];
+    const apply = vi.fn(async () => (order.push('apply'), { outcome: 'applied', detail: null, firstDelivery: true, subscription: null }));
+    const recordVerified = vi.fn(async (t: TrustedPaymentEnvelope) => (order.push(`record:${t.occurredAt}:${t.correlationId}`), 'recorded'));
+    const { handler } = await consumerWith(apply, { recordVerified }).start();
+    await handler(event({ occurredAt: '2026-02-02T02:02:02.002Z', correlationId: 'corr-x' }), verifiedOriginalOf(event({ occurredAt: '2026-02-02T02:02:02.002Z', correlationId: 'corr-x' })));
+    expect(order).toEqual(['record:2026-02-02T02:02:02.002Z:corr-x', 'apply']);
+    const err = await handler(event({ version: 2 }), verifiedOriginalOf(event({ version: 2 }))).catch((e: unknown) => e);
+    expect((err as PermanentEventFailure).reason).toBe('unsupported_version');
+    expect(recordVerified).toHaveBeenCalledTimes(1);
+  });
+
+  it('a verified original missing the settlement instant or the version is malformed (permanent), never defaulted', async () => {
+    const apply = vi.fn();
+    const { handler } = await consumerWith(apply).start();
+    for (const headers of [{ occurredAt: undefined }, { occurredAt: 'yesterday' }, { occurredAt: '2026-01-01T00:00:00+01:00' }, { version: undefined }]) {
+      const e = event(headers as never);
+      const err = await handler(e, verifiedOriginalOf(e)).catch((x: unknown) => x);
+      expect((err as PermanentEventFailure).reason).toBe('malformed_payload');
+    }
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('a database failure while reading or recording the origin is TRANSIENT (retried by the bus), with no financial call', async () => {
+    const apply = vi.fn();
+    const failing = new Error('connection lost');
+    const { handler } = await consumerWith(apply, { find: async () => { throw failing; }, recordVerified: async () => { throw failing; } }).start();
+    expect(await handler(event(), replayTrust()).catch((e: unknown) => e)).toBe(failing);
+    expect(await handler(event(), verifiedOriginalOf(event())).catch((e: unknown) => e)).toBe(failing);
+    expect(apply).not.toHaveBeenCalled();
+  });
+});
+
+/** The trust the kit passes for a broker-verified original: its own published values. */
+function verifiedOriginalOf(e: EventEnvelope): HandlerTrust {
+  const f = <T>(v: T | undefined) => (v === undefined ? ({ available: false, reason: 'absent' } as const) : ({ available: true, value: v, from: 'verified_delivery' } as const));
+  return {
+    decision: 'accept', basis: 'verified_original',
+    origin: { from: 'verified_delivery', source: 'payment-service', eventId: e.id, name: e.name, routingKey: e.name, producerUserId: 'payment-service', occurredAt: f(e.headers.occurredAt), version: f(e.headers.version), correlationId: f(e.headers.correlationId) },
+  };
+}

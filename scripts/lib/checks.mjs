@@ -3055,6 +3055,16 @@ export function checkEventReemission(contracts, files, sources = {}) {
  * `contracts`: application -> contracts/events.json text; `sources`: application -> { relPath: text } of its non-test source.
  */
 export const ENFORCEMENT_COMPATIBILITY_SERVICES = Object.freeze(['audit-service']);
+/**
+ * Core V2 S1e-2 (ADR-0057 §13.5, "S0-C6"): the financial consumer's subscription is strict, and its handler takes the envelope values it
+ * relies on from the trusted envelope only (a verified original's, or the recorded original's for a replay), never the delivery headers.
+ */
+export const STRICT_FINANCIAL_CONSUMERS = Object.freeze({
+  'billing-service': Object.freeze({
+    consumer: 'apps/billing-service/src/payment-integration/payment-event-consumer.ts',
+    origin: 'apps/billing-service/src/payment-integration/payment-event-origin.ts',
+  }),
+});
 export function checkEnforcementPolicies(contracts, sources) {
   const problems = [];
   const why = 'consumer enforcement follows ADR-0057 S0-C6';
@@ -3069,6 +3079,17 @@ export function checkEnforcementPolicies(contracts, sources) {
     for (const [relPath, text] of Object.entries(files)) {
       if (!ENFORCEMENT_COMPATIBILITY_SERVICES.includes(app) && /\bauditCompatibilityEnforcement\b/.test(text)) problems.push(`${relPath}: only audit-service may use the compatibility phase (auditCompatibilityEnforcement); ${why}`);
       if (consumesCode && /refusedBody\s*:\s*['"]original_reviewed['"]/.test(text)) problems.push(`${relPath}: ${app} consumes a code-bearing event, so a refusal must use its redacting dead-letter policy (refusedBody 'dead_letter_policy'), never keep the original body; ${why}`);
+    }
+  }
+  for (const [app, files] of Object.entries(STRICT_FINANCIAL_CONSUMERS)) {
+    if (sources[app] === undefined) continue; // the application was not scanned
+    const consumer = sources[app][files.consumer];
+    if (consumer === undefined) { problems.push(`${files.consumer}: the financial consumer was not found; ${why}`); continue; }
+    const at = consumer.indexOf('.subscribe({');
+    const subscribe = at < 0 ? '' : consumer.slice(at, consumer.indexOf('});', at));
+    if (!/\benforcement:\s*strictEnforcement\(/.test(subscribe)) problems.push(`${files.consumer}: the financial subscription must declare \`enforcement: strictEnforcement(...)\` (verified-only, no other mode); ${why}`);
+    for (const rel of [files.consumer, files.origin]) {
+      if (/\bevent\.headers\.(occurredAt|version|source|correlationId)\b/.test(sources[app]?.[rel] ?? '')) problems.push(`${rel}: reads a delivery header Billing must take from the trusted envelope (occurredAt, version, source, correlationId); ${why}`);
     }
   }
   return problems;

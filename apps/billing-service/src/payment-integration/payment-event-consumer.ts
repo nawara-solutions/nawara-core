@@ -1,9 +1,10 @@
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
-import { DbService, EVENT_BUS, EVENT_NAME, PermanentEventFailure, PgProvenanceStore, pgCode, runWithEventContext, SAFE_ID, safeToken, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import { DbService, EVENT_BUS, EVENT_NAME, PermanentEventFailure, PgProvenanceStore, pgCode, runWithEventContext, SAFE_ID, safeToken, strictEnforcement, type EventBus, type EventEnvelope, type HandlerTrust } from '@nawara/service-kit';
 import type { PaymentEventName } from '../domain/payment-event-decision.js';
 import type { PaymentEventFacts } from '../domain/payment-event-decision.js';
 import { CONSUMED_EVENTS as CATALOG } from '../events/event-catalog.js';
 import { PaymentRequestRepository } from '../invoices/payment-request.repository.js';
+import { PaymentEventOriginRepository, trustedEnvelope, type TrustedPaymentEnvelope } from './payment-event-origin.js';
 
 /** V2 A3M.2: the consumed names and their supported versions come from the event catalog (`events/event-catalog.ts`). */
 const CONSUMED_EVENTS: readonly PaymentEventName[] = CATALOG.map((c) => c.name);
@@ -29,10 +30,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * trusts an event blindly). A payload that fails this parse is malformed (never a valid case Payment could produce)
  * and the handler throws, so the broker dead-letters it rather than silently dropping or misapplying it.
  */
-function parseFacts(event: EventEnvelope): PaymentEventFacts {
+function parseFacts(event: EventEnvelope, t: TrustedPaymentEnvelope): PaymentEventFacts {
   const p = event.payload;
   if (
-    !CONSUMED_EVENTS.includes(event.name as PaymentEventName) ||
+    !CONSUMED_EVENTS.includes(t.name as PaymentEventName) ||
     typeof p.paymentId !== 'string' ||
     typeof p.producer !== 'string' ||
     typeof p.paymentRequestId !== 'string' ||
@@ -47,8 +48,8 @@ function parseFacts(event: EventEnvelope): PaymentEventFacts {
     throw new MalformedPaymentEventError();
   }
   return {
-    name: event.name as PaymentEventName,
-    source: event.headers.source,
+    name: t.name as PaymentEventName,
+    source: t.source, // the broker-verified producer, never the `source` header
     paymentId: p.paymentId,
     producer: p.producer,
     paymentRequestId: p.paymentRequestId,
@@ -79,17 +80,23 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     private readonly requests: PaymentRequestRepository,
     @Inject(EVENT_BUS) private readonly bus: EventBus,
     private readonly db: DbService,
+    private readonly origins: PaymentEventOriginRepository,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
     this.subscription = await this.bus.subscribe({
       queue: 'billing.payment-events',
       bindings: [...CONSUMED_EVENTS],
-      handler: (event) => this.handle(event),
-      // Core V2 S1b (ADR-0057 §13.2, observe-only): each delivery's provenance is committed in Billing's database before `handle` runs;
-      // the owner of each consumed name is the catalog's (payment-service for payment.*). It changes nothing below: the source, version
-      // and payload checks, the receipts and every financial outcome are exactly as before. Enforcement is S1e (separately gated).
+      handler: (event, trust) => this.handle(event, trust),
+      // Core V2 S1b: each delivery's provenance is committed in Billing's database before anything else; the owner of each consumed name
+      // is the catalog's (payment-service for payment.*).
       provenance: { ownerOf: (name) => EXPECTED_SOURCE.get(name), store: new PgProvenanceStore(this.db) },
+      // Core V2 S1e-2 (ADR-0057 §13.5, "S0-C6"): Billing is a FINANCIAL consumer, verified-only, always. Only a verified original (or its
+      // verified redelivery) or a replay matching the stored verified original reaches `handle`; every other delivery is refused before
+      // it (no receipt, no financial effect), and a provenance failure is held, never processed. There is no other mode: on a bus that
+      // cannot enforce this (the in-memory bus), `subscribe` is refused and Billing consumes nothing. Payment events carry no secret, so a
+      // refused delivery's dead letter keeps its body for an operator.
+      enforcement: strictEnforcement({ refusedBody: 'original_reviewed' }),
     });
   }
 
@@ -131,23 +138,37 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
    * V2 A12.4.3: every log line of a delivery carries its context (requestId `event:<id>`, the VALIDATED correlation id); the delivery
    * itself, its acknowledgement and its retries are exactly what `process` does.
    */
-  private handle(event: EventEnvelope): Promise<void> {
-    return runWithEventContext(event, () => this.process(event));
+  /**
+   * Core V2 S1e-2: first the TRUSTED envelope (`trustedEnvelope`: the verified original's own values, recorded before anything financial,
+   * or the recorded values for a verified replay); then everything below uses it, never the delivery's headers. The log context is the
+   * trusted one too.
+   */
+  private async handle(event: EventEnvelope, trust: HandlerTrust | undefined): Promise<void> {
+    let t: TrustedPaymentEnvelope;
+    try {
+      t = await trustedEnvelope(trust, this.origins, (name) => SUPPORTED_VERSION.get(name));
+    } catch (e) {
+      if (e instanceof PermanentEventFailure) {
+        this.logger.error(`payment_event_dead_letter classification=permanent reason=${e.reason}`, { eventId: safeToken(event.id, SAFE_ID), eventType: safeToken(event.name, EVENT_NAME) });
+      }
+      throw e;
+    }
+    return runWithEventContext({ id: t.eventId, headers: { correlationId: t.correlationId ?? undefined } }, () => this.process(event, t));
   }
 
-  private async process(event: EventEnvelope): Promise<void> {
-    const correlationId = event.headers.correlationId ?? `event:${event.id}`; // business data (recorded with the receipt), unchanged
-    const replay = event.headers.replayCount ?? 0;
+  private async process(event: EventEnvelope, t: TrustedPaymentEnvelope): Promise<void> {
+    const correlationId = t.correlationId ?? `event:${t.eventId}`; // business data (recorded with the receipt), from the trusted envelope
+    const replay = event.headers.replayCount ?? 0; // operator bookkeeping, used to name log lines only
     // Broker-supplied values reach the log only as validated fields, never echoed when malformed.
-    const who = { eventId: safeToken(event.id, SAFE_ID), eventType: safeToken(event.name, EVENT_NAME) };
+    const who = { eventId: safeToken(t.eventId, SAFE_ID), eventType: safeToken(t.name, EVENT_NAME) };
     // An operator replay of a dead-lettered message is the same delivery in every respect but this marker, which only names the log lines.
     const tag = (base: string, replayed: string) => (replay > 0 ? `${replayed} replays=${replay}` : base);
     // V2 A3M.2 (ADR-0057 §5): a version Billing does not support is refused before the payload is interpreted, before any receipt and
     // before any business decision; permanent, so it is dead-lettered for an operator, never retried. Version 1, the only version
     // Payment publishes (a message without the header reads as 1), passes unchanged.
-    const supported = SUPPORTED_VERSION.get(event.name);
-    if (supported !== undefined && event.headers.version !== supported) {
-      const version = Number.isSafeInteger(event.headers.version) ? event.headers.version : '-';
+    const supported = SUPPORTED_VERSION.get(t.name);
+    if (supported !== undefined && t.version !== supported) {
+      const version = Number.isSafeInteger(t.version) ? t.version : '-';
       this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=unsupported_version version=${version}`, who);
       throw new PermanentEventFailure('unsupported_version');
     }
@@ -155,20 +176,20 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     // decision, permanently (dead-lettered for an operator). The header is asserted by whoever publishes, so this only filters the
     // obvious case; what protects the outcome is that a message that does not apply never claims the event id (migration 0016) and
     // that application requires Billing's own recorded facts (decidePaymentEvent).
-    const expectedSource = EXPECTED_SOURCE.get(event.name);
-    if (expectedSource !== undefined && event.headers.source !== expectedSource) {
+    const expectedSource = EXPECTED_SOURCE.get(t.name);
+    if (expectedSource !== undefined && t.source !== expectedSource) {
       this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=wrong_source`, who);
       throw new PermanentEventFailure('wrong_source');
     }
     let facts: PaymentEventFacts;
     let settledAt: Date;
     try {
-      facts = parseFacts(event); // throws on malformed input — the caller (EventBus) dead-letters it
+      facts = parseFacts(event, t); // throws on malformed input — the caller (EventBus) dead-letters it
       // Stage 12.4: the authoritative settlement instant for any resulting Subscription activation/renewal — Payment's
       // own header, set once when the fact was recorded in its outbox, unchanged across every retry or operator
       // replay of this SAME delivery (never `new Date()` here, which would let a late/replayed delivery shift the
       // period). A missing or unparseable header is exactly as malformed as a bad payload: never retryable.
-      settledAt = new Date(event.headers.occurredAt);
+      settledAt = new Date(t.occurredAt); // the TRUSTED original instant (S1e-2), never a replay's header
       if (Number.isNaN(settledAt.getTime())) throw new MalformedPaymentEventError();
     } catch (e) {
       this.logger.error(`${tag('payment_event_dead_letter', 'payment_event_replay_rejected')} classification=permanent reason=malformed_payload`, who);
@@ -177,9 +198,9 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     let result;
     try {
       result = await this.requests.applyPaymentEvent(
-        event.id,
+        t.eventId,
         facts,
-        { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: event.id }, correlationId },
+        { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: t.eventId }, correlationId },
         settledAt,
       );
     } catch (e) {

@@ -1,7 +1,7 @@
 import { Test } from '@nestjs/testing';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import {
-  EVENT_BUS, InMemoryEventBus, JsonLogger, ReadinessRegistry, configureApp, kitMigrationsDir, type AuthClient, type OrganizationReferenceResolver, type ServiceTokenEntry,
+  EVENT_BUS, JsonLogger, ReadinessRegistry, configureApp, kitMigrationsDir, type AuthClient, type OrganizationReferenceResolver, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { AppModule, billingMigrationsDir } from '../../src/app.module.js';
 import { loadBillingConfig, type BillingConfig } from '../../src/config/billing-config.js';
@@ -10,6 +10,7 @@ import { PAYMENT_CLIENT } from '../../src/payment-integration/payment-client.tok
 import type { PaymentClient } from '../../src/payment-integration/payment-client.js';
 import { ProbeModule } from './probe.js';
 import { BILLING_OPERATIONS } from '../../src/admission/caller-admission.policy.js';
+import { TrustedDeliveryBus } from './trusted-delivery-bus.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -18,7 +19,7 @@ export interface TestApp {
   /** Every structured log line the application wrote, at DEBUG level. */
   logs: Record<string, unknown>[];
   /** Typed as the concrete in-memory bus (tests only ever run against it) so a test can inspect `.published`/`.deadLettered`. */
-  bus: InMemoryEventBus;
+  bus: TrustedDeliveryBus;
 }
 
 const noopAuthClient: AuthClient = {
@@ -79,7 +80,7 @@ export async function createTestApp(opts: {
     ...opts.env,
   });
   const logger = new JsonLogger(config.serviceName, 'debug', (l) => logs.push(JSON.parse(l)));
-  const bus = new InMemoryEventBus();
+  const bus = new TrustedDeliveryBus(); // Core V2 S1e-2: Billing's strict payment-event subscription needs explicit trust in tests
 
   let builder = Test.createTestingModule({
     imports: [
@@ -99,5 +100,5 @@ export async function createTestApp(opts: {
   configureApp(app, config, logger);
   mountDocs(app, config);
   await app.listen(0, '127.0.0.1');
-  return { app, config, registry: app.get(ReadinessRegistry), logs, bus: app.get<InMemoryEventBus>(EVENT_BUS) };
+  return { app, config, registry: app.get(ReadinessRegistry), logs, bus: app.get<TrustedDeliveryBus>(EVENT_BUS) };
 }

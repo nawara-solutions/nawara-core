@@ -16,6 +16,8 @@ import type { PaymentCreateBody } from '../src/domain/payment-request-mapping.js
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 
+const OCCURRED_AT = new Date().toISOString();
+
 /**
  * V2 A3M.3, finding G11 (A3M record §12): Billing's `payment_event_receipt` is the de-duplication record of a Payment outcome. An event id
  * must never be claimed by a message that did not apply: Payment's event ids (and the reconciler's) are deterministic, and a publisher can
@@ -111,14 +113,15 @@ describeWithEnv('G11: a message that does not apply never claims the event id (r
   });
   const envelope = (f: PaymentEventFacts, id: string): EventEnvelope => {
     const { name, source, ...payload } = f;
-    return { id, name, payload: payload as Record<string, unknown>, headers: { eventId: id, occurredAt: new Date().toISOString(), source, version: 1 } };
+    // one fixed instant: a redelivery of the same event carries its original envelope (S1e-2 records it and refuses a different one)
+    return { id, name, payload: payload as Record<string, unknown>, headers: { eventId: id, occurredAt: OCCURRED_AT, source, version: 1 } };
   };
   const status = async (requestId: string) => (await admin.query(`SELECT status FROM payment_request WHERE id = $1`, [requestId])).rows[0].status as string;
   const receipts = async (eventId: string) => (await admin.query(`SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = $1 ORDER BY "receivedAt"`, [eventId])).rows;
   /** Publishes, then reports what the run left behind; never lets a dead-letter throw stop the test. */
   const deliver = async (e: EventEnvelope) => {
     const before = t.bus.deadLettered.length;
-    await t.bus.publish(e);
+    await t.bus.deliver(e);
     return { deadLettered: t.bus.deadLettered.length - before };
   };
 
