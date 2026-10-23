@@ -57,11 +57,16 @@ export {
   type ProvenanceOptions, type ProvenanceReason, type ProvenanceRecordResult, type ProvenanceStore,
   BODY_COMMITMENT_VERSION, PgKeyedProvenanceStore, ProvenanceCommitmentVersionError, ProvenanceKeyUnavailableError, assertProvenanceKeyRing, bodyMac,
   evaluateProvenanceFacts, type KeyedProvenanceObservation, type KeyedProvenanceOptions, type KeyedProvenanceStore, type ProvenanceFacts,
-  type ProvenanceFactsEvaluation, type ProvenanceKeyRing, REPLAY_ORIGINALS, REPLAY_OUTCOMES, replayCandidate, type ReplayCandidate, type ReplayClassification,
+  type ProvenanceFactsEvaluation, type ProvenanceKeyRing, type ProvenanceAssessment, REPLAY_ORIGINALS, REPLAY_OUTCOMES, replayCandidate, type ReplayCandidate, type ReplayClassification,
   type ReplayOriginal, type ReplayClassificationOutcome,
 } from './events/provenance.js';
 export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventAdmission, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
 export { isCanonicalJsonBody } from './events/canonical-body.js';
+// Core V2 S1e-1 (ADR-0057 S0-C6): consumer trust decisions and the per-subscription enforcement policy (no consumer adopts one yet).
+export {
+  COMPATIBILITY_QUEUES, TRUST_BASES, TRUST_DECISIONS, assertEnforceable, auditCompatibilityEnforcement, decideOriginal, decideReplayTrust, refusalReason, strictEnforcement,
+  type AuditCompatibilityEnforcement, type EnforcementPolicy, type HandlerTrust, type StrictEnforcement, type TrustBasis, type TrustDecision, type TrustedField, type TrustedOrigin,
+} from './events/trust.js';
 // Core V2 S1c-3 R1 (ADR-0057 §13.7 "S0-C4"): serialization pipeline v1 and the restricted re-emission foundation (inert without a producer integration).
 export { SERIALIZATION_PIPELINE_VERSION, eventMessage, outboxEnvelope, type EventMessage, type OutboxEnvelopeRow } from './events/serialization.js';
 export {

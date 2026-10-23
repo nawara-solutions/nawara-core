@@ -1,4 +1,5 @@
 import type { KeyedProvenanceOptions, ProvenanceOptions } from './provenance.js';
+import type { EnforcementPolicy, HandlerTrust } from './trust.js';
 
 /** Metadata carried in message HEADERS so the payload keeps the flat shape each service documents. */
 export interface EventHeaders {
@@ -34,7 +35,7 @@ export interface EventSubscription {
    * (RabbitMQ implementation) and then dead-lettered for an operator to inspect and replay. A rejection with a
    * `PermanentEventFailure` is dead-lettered at once (retrying cannot change the outcome).
    */
-  handler(event: EventEnvelope): Promise<void>;
+  handler(event: EventEnvelope, trust?: HandlerTrust): Promise<void>;
   /**
    * Stage 18.8 (optional; RabbitMQ implementation): what the DEAD-LETTER copy of a failed delivery may keep. Without it the copy is the
    * original message, body and headers, plus the kit annotations (unchanged). With it, the bus asks once per dead-lettering and:
@@ -58,6 +59,15 @@ export interface EventSubscription {
    * bodies are committed with a keyed MAC and no unkeyed digest of them is ever computed.
    */
   provenance?: ProvenanceOptions | KeyedProvenanceOptions;
+  /**
+   * Core V2 S1e-1 (optional; RabbitMQ implementation; ADR-0057 §13.4, §13.5, "S0-C6"): enforce the trust decision BEFORE the handler. With a
+   * policy, every delivery (after `admission`) is decided from its provenance: accepted (the handler gets `trust`, with the trusted origin),
+   * refused (a permanent `untrusted_<basis>` failure: dead-lettered at once, the handler never runs, no business de-duplication slot is
+   * claimed) or held (a provenance store or key failure: requeued after the retry delay, never processed). Only a policy created by
+   * `strictEnforcement()` or `auditCompatibilityEnforcement()` is accepted, and the subscription fails to start if it cannot be enforced as
+   * declared (see `assertEnforceable`). Without it the bus behaves exactly as before (observe-only provenance). The in-memory bus refuses it.
+   */
+  enforcement?: EnforcementPolicy;
   /**
    * Core V2 S1b-2 (optional; RabbitMQ implementation; ADR-0057 §13.2 "Audit admission"): a deterministic, side-effect-free check of every
    * delivery (through the event exchange or the default exchange alike) that runs after the kit's envelope checks and BEFORE provenance

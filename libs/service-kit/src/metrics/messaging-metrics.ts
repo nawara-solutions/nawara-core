@@ -1,4 +1,5 @@
 import { REPLAY_ORIGINALS, REPLAY_OUTCOMES } from '../events/provenance.js';
+import { TRUST_BASES, TRUST_DECISIONS } from '../events/trust.js';
 import type { EventBusObservation } from '../events/rabbitmq-event-bus.js';
 import { closedSet, growingSet } from './label-policy.js';
 import type { BoundedMetrics } from './metrics.js';
@@ -73,6 +74,12 @@ export function messagingMetrics(metrics: BoundedMetrics): (o: EventBusObservati
     labels: [queue, closedSet('outcome', REPLAY_OUTCOMES), closedSet('kind', REPLAY_ORIGINALS)],
     maxSeries: series * (REPLAY_OUTCOMES.length + 1) * (REPLAY_ORIGINALS.length + 1),
   });
+  const trust = metrics.counter({
+    name: 'nawara_event_trust_total',
+    help: 'Core V2 S1e: trust decisions of enforced subscriptions, by queue, outcome (the decision: accept, compatibility, refuse, hold) and kind (its basis).',
+    labels: [queue, closedSet('outcome', TRUST_DECISIONS), closedSet('kind', TRUST_BASES)],
+    maxSeries: series * (TRUST_DECISIONS.length + 1) * (TRUST_BASES.length + 1),
+  });
   const up = metrics.gauge({ name: 'nawara_event_consumer_up', help: 'Whether each consumer is attached to its queue: 1 consuming, 0 lost or closed.', labels: [queue], maxSeries: series });
   const losses = metrics.counter({ name: 'nawara_event_consumer_losses_total', help: 'Consumers lost (channel or connection gone, broker cancel), by queue.', labels: [queue], maxSeries: series });
   const recoveries = metrics.counter({ name: 'nawara_event_consumer_recoveries_total', help: 'Consumers re-attached after a loss, by queue.', labels: [queue], maxSeries: series });
@@ -99,6 +106,9 @@ export function messagingMetrics(metrics: BoundedMetrics): (o: EventBusObservati
         return;
       case 'replay':
         replay.inc({ queue: o.queue, outcome: o.outcome, kind: o.original });
+        return;
+      case 'trust':
+        trust.inc({ queue: o.queue, outcome: o.decision, kind: o.basis });
         return;
       case 'consumer':
         if (o.state === 'consuming') up.set({ queue: o.queue }, 1);
