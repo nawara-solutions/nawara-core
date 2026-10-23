@@ -17,6 +17,10 @@
 > that §7 leaves open. The owner approved their direction and wording at S0; nothing in them is implemented, and this ADR's status
 > stays `Proposed` until the owner changes it explicitly. Every [CURRENT] statement below still describes `main`.
 
+> **Core V2 S0 clarification (2026-10-23, owner-approved).** The owner approved one normative clarification of §13 for the Audit
+> consumer (S1b-2): admission checks before provenance (§13.2, "Audit admission"), with cross-references in §13.4 and §13.8. It changes
+> no other consumer, the provenance tuple or §13.3, and it is not an acceptance: this ADR's status stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -247,12 +251,30 @@ event name, routing key = message type = envelope name, and a well-formed `event
 transaction of its own, **before** the handler runs. A stored row that differs from the delivery is a permanent
 `provenance_conflict`.
 
+**Audit admission (S0 clarification, owner-approved 2026-10-23).** The Audit consumer (`audit-service.audit`) may refuse a delivery
+before provenance is recorded, through deterministic, side-effect-free admission checks run after the kit's envelope checks and in
+this order: the body bytes are canonical (they equal the serialization of their parsed value); the audit contract's
+catalog-independent confidentiality screen passes (the dead-letter body screen of
+[Stage 18.8](../architecture/stage-18/stage-18-8-security-privacy-retention.md)); and the complete applicable audit-contract validation
+succeeds. No admission check treats a caller-controlled field (such as `headers.source`) as authenticated identity: producer
+verification stays as stated above, from the broker `user_id` and the catalog owner. A failed check, including any exception, is a
+permanent refusal: the handler does not run, the delivery is never sent to `Q.retry`, and no provenance row and no persistent digest of
+its body is kept; its dead-letter copy follows the existing privacy-safe dead-letter rules, redacted where they require it, and a copy
+that cannot be confirmed is held and requeued as those rules already require (never `Q.retry`). Admission
+applies to deliveries through `nawara.events` and through the default exchange alike. An admitted delivery through `nawara.events`
+commits its provenance before the handler runs, as stated above, and §13.3 applies unchanged. A delivery refused at admission has no
+original provenance row, so it can never become eligible as a verified replay (§13.4); recovering a legitimate event refused for lack
+of catalog knowledge needs a separately designed and authorized mechanism consistent with §13.7. While Audit provenance is
+observe-only, the existing replay of such a dead letter after a catalog upgrade (Stage 18.1 A50) is unchanged. This paragraph applies to
+Audit only; it changes no other consumer.
+
 13.3 If that commit fails, the handler does not run: the delivery is held and requeued, so it keeps its original identity. It is never
 sent to `Q.retry`.
 
 13.4 A delivery through the default exchange (a retry, a replay, an injection) is processed only if a stored row matches
 (`source`, `eventId`), `name` and `bodySha256`; downstream code uses the stored tuple, never the delivery's metadata. Otherwise it
-is a permanent `unverified_provenance` failure, which a replay cannot turn into a verified event.
+is a permanent `unverified_provenance` failure, which a replay cannot turn into a verified event. An Audit delivery refused at
+admission (§13.2) never has a stored row, so a later default-exchange delivery of it is never a verified replay.
 
 13.5 Financial consumers (billing-service for `payment.*` and `refund.*`) never process an unverified event. Other consumers may
 accept one only during an explicitly configured compatibility phase, and must record it as unverified.
@@ -263,7 +285,10 @@ accept one only during an explicitly configured compatibility phase, and must re
 record, through its own broker connection; consumers de-duplicate it. Producers with random ids (auth-service) can re-emit only while
 their published rows are retained.
 
-13.8 Provenance is retained at least as long as dead-letter retention plus the retry window.
+13.8 Provenance is retained at least as long as dead-letter retention plus the retry window. This is a minimum, not a requirement
+of permanent retention. For Audit (S0 clarification, 2026-10-23), a provenance row or digest must not outlive, and so undermine, the
+lawful purge of its Audit record: authorized expiry, erasure and legal holds of Audit provenance need an explicit policy (P-A2 is open),
+and the production gate of the [execution roadmap](../architecture/core-v2-s-execution-roadmap.md) (§7, AP-R) applies until then.
 
 13.9 In production, financial and notification consumers refuse an event whose `liveMode` is missing or false.
 
