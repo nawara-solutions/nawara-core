@@ -65,6 +65,12 @@ export const EVENT_MAP: readonly EventMapping[] = [
   membership('membership.revoked'),
 ];
 
+/**
+ * Core V2 S1e-4 (ADR-0052 decision 5, ADR-0057 "S0-C6"): the events whose payload carries a one-time code (the `code(...)` mappings above,
+ * which a unit test pins to the Auth contract's `codeBearing` events). A dead-letter copy of any of them is always redacted.
+ */
+export const CODE_BEARING_EVENTS: ReadonlySet<string> = new Set(EVENT_MAP.filter((m) => 'code' in m.payload).map((m) => m.name));
+
 /** The durable queue this service owns (SDD §7.1), bound only to the mapped routing keys. */
 export const INTAKE_QUEUE = 'notification.events';
 export const INTAKE_BINDINGS: readonly string[] = [...new Set(EVENT_MAP.map((m) => m.name))];

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { JsonLogger, PermanentEventFailure, kitMigrationsDir, runMigrations, type EventEnvelope } from '@nawara/service-kit';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { JsonLogger, PermanentEventFailure, kitMigrationsDir, runMigrations, type EventEnvelope, type HandlerTrust } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { notificationMigrationsDir } from '../src/app.module.js';
 import { EVENT_MAP, mappingFor } from '../src/intake/event-map.js';
 import { NotificationSecretCipher } from '../src/secrets/secret-cipher.js';
 import { stableUuid } from '../src/templates/catalog.js';
 import { createTestApp, type TestApp } from './support/app.js';
+import { TrustedDeliveryBus, testTrust } from './support/trusted-delivery-bus.js';
+import { notificationDeadLetterPolicy } from '../src/intake/dead-letter-policy.js';
 import { sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -66,6 +68,18 @@ describeWithEnv('event intake: canonical event → durable intent (real PostgreS
   afterAll(async () => {
     await t?.app.close();
     await db.drop();
+  });
+
+  it('Core V2 S1e-4: the intake subscribes STRICTLY (verified only, no other mode), keyed, behind the redacting dead-letter policy', async () => {
+    await vi.waitFor(() => expect(t.consumer.started).toBe(true), { timeout: 20_000, interval: 100 });
+    const sub = (t.bus as TrustedDeliveryBus).strictSubscription!;
+    expect(sub.queue).toBe('notification.events');
+    expect(sub.enforcement).toEqual({ mode: 'strict', refusedBody: 'dead_letter_policy' });
+    expect(Object.isFrozen(sub.enforcement)).toBe(true);
+    expect(sub.deadLetterPolicy).toBe(notificationDeadLetterPolicy);
+    expect(sub.provenance && 'keyedStore' in sub.provenance && sub.provenance.keyedStore).toBeTruthy();
+    expect(sub.provenance && 'store' in sub.provenance).toBe(false); // never an unkeyed store (S0-C2)
+    expect(t.logs.some((l) => String(l.msg).startsWith('event_intake_started') && String(l.msg).includes('enforcement=strict'))).toBe(true);
   });
 
   describe('every mapped event (table-driven: the nine SDD §7.1 mappings)', () => {
@@ -244,7 +258,8 @@ describeWithEnv('event intake: canonical event → durable intent (real PostgreS
     });
   });
   describe('V2 A12.4.3: broker values in log lines', () => {
-    const handle = (e: EventEnvelope) => (t.consumer as unknown as { handle(e: EventEnvelope): Promise<void> }).handle(e);
+    // Core V2 S1e-4: the consumer's handler as the strict bus calls it, with the kit's decision for a verified original (support/trusted-delivery-bus.ts)
+    const handle = (e: EventEnvelope) => (t.consumer as unknown as { handle(e: EventEnvelope, trust: HandlerTrust): Promise<void> }).handle(e, testTrust(e));
     // Nest's Logger is process-wide: an earlier test's second app (`other`) re-routed it, so route it back to this app's capture.
     beforeAll(() => t.app.useLogger(new JsonLogger('notification-service', 'debug', (l) => t.logs.push(JSON.parse(l)))));
 

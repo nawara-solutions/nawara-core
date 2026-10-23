@@ -7,6 +7,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { RabbitMqEventBus, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
+import { createAuthIdentity, type AuthIdentity } from './support/auth-identity.js';
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 
@@ -64,7 +65,9 @@ async function sql<R extends pg.QueryResultRow = any>(url: string, text: string,
   }
 }
 
-describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live processes', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live processes', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  /** Core V2 S1e-4: the live Auth publishes as a disposable, least-privilege `auth-service` broker user (support/auth-identity.ts). */
+  let authIdentity: AuthIdentity | undefined;
   let authDb: TestDatabase;
   let notificationDb: TestDatabase;
   let auth: LiveService;
@@ -108,6 +111,7 @@ describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live proce
     await runMigrations(notificationDb.url, [kitMigrationsDir, `${NOTIFICATION_DIR}/db/migrations/`]);
     await sql(authDb.url, `INSERT INTO company(id, name) VALUES ($1, 'E2E Co')`, [companyId]);
     conn = await amqp.connect(env.TEST_RABBITMQ_URL);
+    authIdentity = await createAuthIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
     await deleteQueues();
     notification = spawnService('notification', NOTIFICATION_DIR, {
       NODE_ENV: 'test', PORT: String(NOTIFICATION_PORT), DATABASE_URL: notificationDb.url, RABBITMQ_URL: env.TEST_RABBITMQ_URL,
@@ -121,7 +125,7 @@ describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live proce
     const viaProxy = new URL(env.TEST_RABBITMQ_URL);
     viaProxy.host = `127.0.0.1:${proxy.port}`;
     authEnv = {
-      NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, AUTH_EVENTS: 'on', RABBITMQ_URL: viaProxy.toString(), RABBITMQ_CONFIRM_TIMEOUT_MS: '500',
+      NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, AUTH_EVENTS: 'on', RABBITMQ_URL: authIdentity.url(viaProxy.toString()), RABBITMQ_CONFIRM_TIMEOUT_MS: '500',
       JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(), JOIN_CODE_PEPPER: rand(),
       TOTP_ENCRYPTION_KEYS: `k1:${rand()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1', WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
       BCRYPT_COST: '4', WORK_TIMEZONE: 'UTC', ...Object.fromEntries(RATE_BUCKETS.map((b) => [`RATE_${b}_LIMIT`, '100000'])),
@@ -131,6 +135,7 @@ describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live proce
 
   afterAll(async () => {
     await auth?.stop();
+    await authIdentity?.remove();
     await notification?.stop();
     await proxy?.sever();
     await deleteQueues().catch(() => undefined);
@@ -168,7 +173,8 @@ describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live proce
   });
 
   it('a duplicate delivery of the same event id (a relay crash between publish and stamp) creates no second notification', async () => {
-    const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL });
+    // Core V2 S1e-4: the duplicate is Auth's own re-send (the relay crashed between publish and stamp): published as auth-service
+    const bus = new RabbitMqEventBus({ url: authIdentity!.url(env.TEST_RABBITMQ_URL) });
     try {
       const envelope = {
         id: crashed.rowId!, name: 'admin.operator_code_issued', payload: crashed.payload!,

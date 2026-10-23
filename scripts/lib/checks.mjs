@@ -3065,6 +3065,36 @@ export const STRICT_FINANCIAL_CONSUMERS = Object.freeze({
     origin: 'apps/billing-service/src/payment-integration/payment-event-origin.ts',
   }),
 });
+/**
+ * Core V2 S1e-4 (ADR-0057 "S0-C6" Notification, ADR-0052 decision 5): Notification's intake is strict from its first deployment, with a
+ * dead-letter policy that never keeps a code-bearing body, and intake sees only the trusted envelope (never a replay's own correlation).
+ */
+export const STRICT_NOTIFICATION_CONSUMER = Object.freeze({
+  consumer: 'apps/notification-service/src/intake/event-consumer.ts',
+  deadLetterPolicy: 'apps/notification-service/src/intake/dead-letter-policy.ts',
+  trustedEvent: 'apps/notification-service/src/intake/trusted-event.ts',
+});
+function notificationEnforcementProblems(files, why) {
+  const problems = [];
+  const n = STRICT_NOTIFICATION_CONSUMER;
+  const consumer = files[n.consumer];
+  if (consumer === undefined) return [`${n.consumer}: the Notification intake consumer was not found; ${why}`];
+  const at = consumer.indexOf('.subscribe({');
+  const subscribe = at < 0 ? '' : consumer.slice(at, consumer.indexOf('});', at));
+  if (!/strictEnforcement\(\{\s*refusedBody:\s*'dead_letter_policy'\s*\}\)/.test(consumer) || !/\benforcement:\s*this\.enforcement\b/.test(subscribe)) {
+    problems.push(`${n.consumer}: the intake subscription must be strict (\`enforcement: this.enforcement\`, \`strictEnforcement({ refusedBody: 'dead_letter_policy' })\`): verified-only, no other mode; ${why}`);
+  }
+  if (!/\bdeadLetterPolicy:\s*notificationDeadLetterPolicy\b/.test(subscribe)) problems.push(`${n.consumer}: the intake subscription must pass \`deadLetterPolicy: notificationDeadLetterPolicy\` (a code-bearing body is never kept); ${why}`);
+  if (!/handler:\s*\(e, trust\) => this\.handle\(e, trust\)/.test(subscribe) || !/trustedIntakeEvent\(event, trust\)/.test(consumer) || !/this\.intake\.handle\(trusted\)/.test(consumer) || /this\.intake\.handle\(event\)/.test(consumer)) {
+    problems.push(`${n.consumer}: the intake must run only on the trusted envelope (\`trustedIntakeEvent(event, trust)\`, then \`this.intake.handle(trusted)\`); ${why}`);
+  }
+  const policy = files[n.deadLetterPolicy] ?? '';
+  if (!policy.includes('CODE_BEARING_EVENTS.has(') || !policy.includes('isCanonicalJsonBody(body)') || !policy.includes('carriesCode(JSON.parse(body')) {
+    problems.push(`${n.deadLetterPolicy}: \`notificationDeadLetterPolicy\` must redact every code-bearing event and keep a body only when its canonical bytes carry no \`code\`; ${why}`);
+  }
+  if (/\bevent\.headers\.correlationId\b/.test(files[n.trustedEvent] ?? 'event.headers.correlationId')) problems.push(`${n.trustedEvent}: the trusted envelope must never take a delivery's own correlation header (a replay's is not trusted); ${why}`);
+  return problems;
+}
 export function checkEnforcementPolicies(contracts, sources) {
   const problems = [];
   const why = 'consumer enforcement follows ADR-0057 S0-C6';
@@ -3081,6 +3111,7 @@ export function checkEnforcementPolicies(contracts, sources) {
       if (consumesCode && /refusedBody\s*:\s*['"]original_reviewed['"]/.test(text)) problems.push(`${relPath}: ${app} consumes a code-bearing event, so a refusal must use its redacting dead-letter policy (refusedBody 'dead_letter_policy'), never keep the original body; ${why}`);
     }
   }
+  if (sources['notification-service'] !== undefined) problems.push(...notificationEnforcementProblems(sources['notification-service'], why));
   for (const [app, files] of Object.entries(STRICT_FINANCIAL_CONSUMERS)) {
     if (sources[app] === undefined) continue; // the application was not scanned
     const consumer = sources[app][files.consumer];

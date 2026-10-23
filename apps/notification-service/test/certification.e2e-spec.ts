@@ -13,6 +13,7 @@ import { SecretPurgeWorker } from '../src/delivery/secret-purge.worker.js';
 import { INTAKE_QUEUE } from '../src/intake/event-map.js';
 import { TEST_DESTINATION_LIMIT_KEY, TEST_REQUEST_HASH_KEY, TEST_SECRET_KEYS, createTestApp, type TestApp } from './support/app.js';
 import { sql } from './support/db.js';
+import { createAuthIdentity, type AuthIdentity } from './support/auth-identity.js';
 import { describeWithEnv } from './support/env.js';
 import { ProviderStub } from './support/provider-stub.js';
 
@@ -44,7 +45,9 @@ const AR_SMS = 'رمز التحقق الخاص بك هو {{code}}. لا تشار
 const future = (ms: number) => new Date(Date.now() + ms).toISOString();
 const SID = (n: number) => `SM${n.toString(16).padStart(32, '0')}`;
 
-describeWithEnv('Notification V1 focused certification (integrated: real RabbitMQ, real adapters, real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('Notification V1 focused certification (integrated: real RabbitMQ, real adapters, real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  /** Core V2 S1e-4: genuine Auth events are published as a disposable, least-privilege `auth-service` broker user (support/auth-identity.ts). */
+  let authIdentity: AuthIdentity | undefined;
   let db: TestDatabase;
   let conn: ChannelModel;
   let ch: Channel;
@@ -109,7 +112,8 @@ describeWithEnv('Notification V1 focused certification (integrated: real RabbitM
     ch = await conn.createChannel();
     ch.on('error', () => undefined);
     for (const q of EXCHANGE_QUEUES) await ch.deleteQueue(q).catch(() => undefined);
-    publisher = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL });
+    authIdentity = await createAuthIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+    publisher = new RabbitMqEventBus({ url: authIdentity.url(env.TEST_RABBITMQ_URL) });
     // EN (published) + FR email and AR SMS versions for locale certification, and an Arabic SMS too long for its one segment.
     await publishVersion('identity.contact_verification_code', 'EMAIL', 'fr', FR_SUBJECT, 'Votre code : {{code}}. Il expire à {{expiresAt}}. Ne le partagez jamais.', null);
     await publishVersion('identity.contact_verification_code', 'SMS', 'ar', null, AR_SMS, 1);
@@ -128,6 +132,7 @@ describeWithEnv('Notification V1 focused certification (integrated: real RabbitM
   afterAll(async () => {
     await t?.app.close();
     await publisher?.close();
+    await authIdentity?.remove();
     for (const q of EXCHANGE_QUEUES) await ch?.deleteQueue(q).catch(() => undefined);
     await conn?.close().catch(() => undefined);
     await db.drop();

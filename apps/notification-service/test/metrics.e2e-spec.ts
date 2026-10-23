@@ -7,13 +7,16 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { notificationMigrationsDir } from '../src/app.module.js';
 import { INTAKE_QUEUE } from '../src/intake/event-map.js';
 import { createTestApp, type TestApp } from './support/app.js';
+import { createAuthIdentity, type AuthIdentity } from './support/auth-identity.js';
 import { describeWithEnv } from './support/env.js';
 
 /**
  * V2 A12.3: notification-service's intake bus (its own token, wired explicitly in main.ts and the test helper) feeds the kit messaging
  * metrics: labelled by the intake queue and a closed outcome only. The destination, code, ids and payload never reach the exposition.
  */
-describeWithEnv('notification-service messaging metrics (real RabbitMQ)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('notification-service messaging metrics (real RabbitMQ)', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  /** Core V2 S1e-4: genuine Auth events are published as a disposable, least-privilege `auth-service` broker user (support/auth-identity.ts). */
+  let authIdentity: AuthIdentity | undefined;
   let db: TestDatabase;
   let conn: ChannelModel;
   let ch: Channel;
@@ -38,11 +41,13 @@ describeWithEnv('notification-service messaging metrics (real RabbitMQ)', ['TEST
     await deleteQueues();
     t = await createTestApp({ databaseUrl: db.url, bus: 'rabbitmq', env: { RABBITMQ_URL: env.TEST_RABBITMQ_URL, METRICS_ENABLED: 'true', METRICS_PORT: '0' } });
     await vi.waitFor(async () => expect((await request(t.app.getHttpServer()).get('/ready')).status).toBe(200), { timeout: 20_000, interval: 100 });
-    publisher = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL });
+    authIdentity = await createAuthIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+    publisher = new RabbitMqEventBus({ url: authIdentity.url(env.TEST_RABBITMQ_URL) });
   });
   afterAll(async () => {
     await t?.app.close();
     await publisher?.close();
+    await authIdentity?.remove();
     await deleteQueues().catch(() => undefined);
     await conn?.close().catch(() => undefined);
     await db?.drop();

@@ -8,6 +8,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
+import { createAuthIdentity, type AuthIdentity } from './support/auth-identity.js';
 import { describeWithEnv } from './support/env.js';
 import { waitFor, waitForHealth } from './support/process.js';
 
@@ -71,7 +72,9 @@ function live(name: string, cwd: string, env: NodeJS.ProcessEnv) {
   };
 }
 
-describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
+  /** Core V2 S1e-4: the live Auth publishes as a disposable, least-privilege `auth-service` broker user (support/auth-identity.ts). */
+  let authIdentity: AuthIdentity | undefined;
   let authDb: TestDatabase;
   let notificationDb: TestDatabase;
   let proxy: BrokerProxy;
@@ -126,6 +129,7 @@ describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes',
     await runMigrations(notificationDb.url, [kitMigrationsDir, `${NOTIFICATION_DIR}/db/migrations/`]);
     await sql(authDb.url, `INSERT INTO company(id, name) VALUES ($1, 'Cert Co')`, [companyId]);
     conn = await amqp.connect(env.TEST_RABBITMQ_URL);
+    authIdentity = await createAuthIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
     const ch = await conn.createChannel();
     for (const q of [QUEUE, `${QUEUE}.retry`, `${QUEUE}.dead`]) await ch.deleteQueue(q).catch(() => undefined);
     await ch.close().catch(() => undefined);
@@ -140,7 +144,7 @@ describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes',
     const viaProxy = new URL(env.TEST_RABBITMQ_URL);
     viaProxy.host = `127.0.0.1:${proxy.port}`;
     authEnvBase = {
-      NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, RABBITMQ_URL: viaProxy.toString(), RABBITMQ_CONFIRM_TIMEOUT_MS: '500',
+      NODE_ENV: 'test', PORT: String(AUTH_PORT), DATABASE_URL: authDb.url, RABBITMQ_URL: authIdentity.url(viaProxy.toString()), RABBITMQ_CONFIRM_TIMEOUT_MS: '500',
       JWT_SECRET: rand(), OPERATOR_CODE_PEPPER: rand(), SECRET_KEY_PEPPER: rand(), THROTTLE_KEY_PEPPER: rand(), JOIN_CODE_PEPPER: rand(),
       TOTP_ENCRYPTION_KEYS: `k1:${rand()}`, TOTP_ENCRYPTION_ACTIVE_KEY_ID: 'k1', WEBAUTHN_RP_ID: 'auth.test', WEBAUTHN_ORIGINS: 'https://auth.test',
       BCRYPT_COST: '4', WORK_TIMEZONE: 'UTC', ...Object.fromEntries(RATE_BUCKETS.map((b) => [`RATE_${b}_LIMIT`, '100000'])),
@@ -150,6 +154,7 @@ describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes',
 
   afterAll(async () => {
     await auth?.stop();
+    await authIdentity?.remove();
     await notification?.stop();
     await proxy?.sever();
     const ch = await conn.createChannel();
@@ -204,7 +209,7 @@ describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes',
     expect(againRow.sourceEventId).not.toBe(pendingRow.id);
   }, 180_000);
 
-  it('§22/§23 canaries: a rejected code event is dead-lettered, and the DLQ tool shows its ordinary fields but never the code', async () => {
+  it('§22/§23 canaries: a rejected code event is dead-lettered REDACTED (Core V2 S1e-4): the DLQ tool shows its safe headers, never the code or the destination', async () => {
     const uid = randomUUID();
     await enqueueDirect(randomUUID(), { userId: uid, channel: 'fax', destination: 'x@example.test', code: CANARY_DLQ, expiresAt: new Date(Date.now() + 600_000).toISOString(), timestamp: new Date().toISOString() });
     await waitFor(async () => {
@@ -215,10 +220,12 @@ describeWithEnv('Stage 21.C.3: Auth outbox certification across live processes',
     const out = `${dlq.stdout}\n${dlq.stderr}`;
     allLines.push(out);
     expect(dlq.status, out).toBe(0);
-    expect(out).toContain('code=redacted');
-    expect(out).toContain('channel=fax'); // an ordinary diagnostic field stays useful
-    expect(out).toContain(`userId=${uid}`);
+    // S1e-4 (ADR-0052 decision 5): Notification's dead-letter policy replaces a code-bearing body entirely: the copy keeps its event id,
+    // the refusal reason and the validated headers, and none of its fields (a code, a destination, the user id)
+    expect(out).toContain('malformed_payload');
     expect(out).not.toContain(CANARY_DLQ);
+    expect(out).not.toContain('x@example.test');
+    expect(out).not.toContain(uid);
   });
 
   it('§22 a valid canary code is delivered sealed: Notification keeps no plaintext copy', async () => {

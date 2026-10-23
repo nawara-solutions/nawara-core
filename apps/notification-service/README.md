@@ -42,6 +42,21 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
   is acknowledged only after the commit, and a redelivery or replay is a duplicate.
 - **Refused (dead-lettered once, nothing written):** a malformed envelope or payload, an unsupported version, an unmapped event, no
   destination, invalid template data, or an unknown template.
+- **Verified only (Core V2 S1e-4, ADR-0057 "S0-C6"):** from the first deployment, with no compatibility, observe-only or bypass mode
+  and no setting that weakens it. Only a verified Auth original (broker `user_id` = `auth-service`), its verified duplicate, or a
+  replay matching the stored verified keyed commitment reaches the intake. Everything else is refused permanently BEFORE the intake,
+  so a forger can never take the `(sourceService, sourceEventId)` slot: no `user_id`, another identity, a forged `source`, a
+  default-exchange injection, a mismatched body, a match against unverified evidence only, a contradiction, or a retired key
+  (`untrusted_<basis>`). An unavailable key, an unknown commitment version or a database failure is held and requeued, and the intake
+  never runs. A replay's own correlation header is never trusted. A bus that cannot enforce leaves the intake waiting
+  (`enforcement_unavailable`, `/ready` 503).
+- **Dead letters (ADR-0052 decision 5):** every copy in `notification.events.dead` goes through `notificationDeadLetterPolicy`. That
+  covers refusals, intake refusals, malformed messages and exhausted retries. A code-bearing event's body is always replaced by
+  `{"redacted":true,"failure":…,"reason":…,"bodyBytes":n}` (never replayable). So is anything that could hide a code: non-canonical
+  bytes, an unmapped name or source, or a `code` member anywhere. A code-free event keeps its body. Only the validated headers survive.
+  Broker-driven dead-lettering bypasses any application policy, so no genuine Auth message may ever reach it: the kit never rejects
+  without requeue, Auth publishes with no expiry, and `notification.events` has no TTL or length policy. The shared `nawara.events.dlx`
+  carries only what its own publisher sent (register OD-BRK).
 - **Invalid destination** (SMS must be E.164; no country is ever guessed): a durable `FAILED invalid_destination` delivery.
 - **Codes:** sealed with AES-256-GCM (`NOTIFICATION_SECRET_KEYS`), never in `data` or a log.
 - **Start order:** the consumer starts only after the database, the migrations and the default-locale coverage are verified.
