@@ -3,7 +3,10 @@ import {
   Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { DbService, DB_OPTIONS, PgProvenanceStore, ReadinessRegistry, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import {
+  DbService, DB_OPTIONS, PgProvenanceStore, ReadinessRegistry, assertEnforceable, pendingMigrations, runWithRequestContext, type DbOptions, type EventBus, type EventEnvelope,
+  type EnforcementPolicy, type HandlerTrust,
+} from '@nawara/service-kit';
 import { AUDIT_CONFIG } from '../config/audit-config.token.js';
 import type { AuditConfig } from '../config/audit-config.js';
 import { auditEventOwner } from './admission.js';
@@ -12,6 +15,7 @@ import { auditDeadLetterPolicy } from './dead-letter-policy.js';
 import { AUDIT_BINDINGS, AUDIT_QUEUE, OPS_SNAPSHOT_INTERVAL_MS } from './ingestion.constants.js';
 import { IngestionCounters } from './ingestion-counters.js';
 import { IngestionService } from './ingestion.service.js';
+import { auditEnforcement, untrustedReason } from './trust-policy.js';
 
 export const AUDIT_EVENT_BUS = Symbol('AUDIT_EVENT_BUS');
 /** A bus that can report whether its consumers are attached (the kit's `RabbitMqEventBus`). */
@@ -34,6 +38,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  *   settled within the kit's bound (an unfinished one is left unacknowledged → redelivered: at least once), while the pool is still open;
  *   the bus closes in `onApplicationShutdown`; the kit closes the pool last. `/ready` is 503 from the first moment (the kit's drain).
  * Each delivery runs in a request context whose correlation id is the event's (when it has the kit grammar), so log lines join.
+ * - ENFORCEMENT (Core V2 S1e-3, ADR-0057 "S0-C6"): the subscription is always enforced, in the configured mode (`trust-policy.ts`):
+ *   the compatibility phase (default) or strict. Its policy is checked at bootstrap: a subscription that could not be enforced as declared
+ *   fails the start of the process, never falling back to another mode or to no enforcement.
  */
 @Injectable()
 export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy, BeforeApplicationShutdown, OnApplicationShutdown {
@@ -45,6 +52,9 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
   private snapshotTimer?: NodeJS.Timeout;
   private attempts = 0;
   private lastBlocker = '';
+  /** S1e-3: the subscription's provenance and policy, created once: the objects checked at bootstrap are the ones `subscribe` receives. */
+  private readonly provenance: { ownerOf: typeof auditEventOwner; store: PgProvenanceStore };
+  private readonly enforcement: EnforcementPolicy;
 
   constructor(
     @Inject(IngestionService) private readonly ingestion: IngestionService,
@@ -55,7 +65,10 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     @Inject(ReadinessRegistry) private readonly readiness: ReadinessRegistry,
     @Inject(AUDIT_CONFIG) private readonly config: AuditConfig,
     @Inject(BrokerNotices) private readonly notices: BrokerNotices,
-  ) {}
+  ) {
+    this.provenance = { ownerOf: auditEventOwner, store: new PgProvenanceStore(this.db) };
+    this.enforcement = auditEnforcement(this.config.provenanceEnforcement); // throws on any other mode: never a fallback
+  }
 
   onModuleInit(): void {
     this.readiness.register('rabbitmq', async () => {
@@ -69,6 +82,8 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
   }
 
   onApplicationBootstrap(): void {
+    // S1e-3: refused here (the process does not start), not retried as if the broker were unavailable
+    assertEnforceable({ queue: AUDIT_QUEUE, provenance: this.provenance, enforcement: this.enforcement, deadLetterPolicy: auditDeadLetterPolicy });
     this.snapshotTimer = setInterval(() => this.snapshot(), OPS_SNAPSHOT_INTERVAL_MS);
     this.snapshotTimer.unref();
     void this.tryStart();
@@ -85,14 +100,16 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
       const blocker = await this.startBlocker();
       if (blocker) throw new Error(blocker);
       const sub = await this.bus.subscribe({
-        queue: AUDIT_QUEUE, bindings: [...AUDIT_BINDINGS], handler: (e) => this.handle(e),
+        queue: AUDIT_QUEUE, bindings: [...AUDIT_BINDINGS], handler: (e, trust) => this.handle(e, trust),
         deadLetterPolicy: auditDeadLetterPolicy, // Stage 18.8: refused content is not kept verbatim in the DLQ
-        // Core V2 S1b-2 (ADR-0057 §13.2 "Audit admission", observe-only): every delivery, on any exchange, is admitted (canonical bytes,
-        // the Stage 18.8 screen, the full contract) BEFORE provenance; a refusal is dead-lettered at once with no provenance row and no
-        // body digest. An admitted original delivery's provenance is committed in Audit's database before `handle` runs; whether it was
-        // verified never changes ingestion (enforcement is S1c/S1e, separately gated). Retention: none yet (gate AP-R, P-A2 open).
+        // Core V2 S1b-2 (ADR-0057 §13.2 "Audit admission", S0-C1): every delivery, on any exchange, is admitted (canonical bytes, the Stage
+        // 18.8 screen, the full contract) BEFORE provenance; a refusal is dead-lettered at once with no provenance row and no body digest.
         admission: (e, body) => this.ingestion.admit(e, body),
-        provenance: { ownerOf: auditEventOwner, store: new PgProvenanceStore(this.db) },
+        provenance: this.provenance,
+        // Core V2 S1e-3 (ADR-0057 §13.5, "S0-C6"): an admitted delivery's trust decision is durable before `handle`, which runs only for an
+        // accepted one (or, in the compatibility phase, an unverified one); refusals are permanent (under the policy above), failures held.
+        // Retention: none yet (gate AP-R, P-A2 open).
+        enforcement: this.enforcement,
       });
       if (this.stopped) {
         await sub.close();
@@ -101,9 +118,13 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
       this.subscription = sub;
       this.attempts = 0;
       this.lastBlocker = '';
-      this.log.log(`audit_ingestion_started queue=${AUDIT_QUEUE} bindings=${AUDIT_BINDINGS.join(',')}`);
+      this.log.log(`audit_ingestion_started queue=${AUDIT_QUEUE} bindings=${AUDIT_BINDINGS.join(',')} enforcement=${this.config.provenanceEnforcement}`);
     } catch (e) {
-      const blocker = e instanceof Error && e.message.startsWith('ingestion:') ? e.message : `ingestion:broker_unavailable error=${e instanceof Error ? e.name : 'Error'}`;
+      // S1e-3: a bus that refuses the enforced subscription (e.g. one with no broker identity) is named as such, never as an outage, and
+      // nothing is consumed in another mode meanwhile
+      const blocker = e instanceof Error && e.message.startsWith('ingestion:') ? e.message
+        : e instanceof Error && e.message.startsWith('enforcement for ') ? 'ingestion:enforcement_unavailable'
+          : `ingestion:broker_unavailable error=${e instanceof Error ? e.name : 'Error'}`;
       if (blocker !== this.lastBlocker) this.log.warn(`audit_ingestion_waiting reason=${blocker.slice(10)} — retrying; /ready answers 503 until ingestion runs`);
       this.lastBlocker = blocker;
       const ceiling = Math.min(START_RETRY.maxMs, START_RETRY.baseMs * 2 ** Math.min(this.attempts++, 10));
@@ -122,7 +143,10 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     return undefined;
   }
 
-  private handle(event: EventEnvelope): Promise<void> {
+  private handle(event: EventEnvelope, trust: HandlerTrust | undefined): Promise<void> {
+    // S1e-3: defence in depth behind the kit's decision; a refusal here happens before ingestion (no record, no de-duplication slot)
+    const untrusted = untrustedReason(this.config.provenanceEnforcement, event, trust);
+    if (untrusted) return Promise.reject(this.ingestion.refuseUntrusted(untrusted, event));
     const id = typeof event.id === 'string' && UUID.test(event.id) ? event.id : 'unknown';
     const header = event.headers?.correlationId;
     const correlationId = typeof header === 'string' && CORRELATION.test(header) ? header : `event:${id}`;

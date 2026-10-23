@@ -47,6 +47,24 @@ describe('audit-service configuration', () => {
     expect(() => loadAuditConfig(env({ RABBITMQ_URL: 'ftp://audit_consumer:mq-not-real@broker' }))).toThrow(/^(?!.*mq-not-real)/);
   });
 
+  it('Core V2 S1e-3: provenance enforcement is the compatibility phase unless strict is selected explicitly; any other value refuses to start', () => {
+    expect(loadAuditConfig(env()).provenanceEnforcement).toBe('compatibility'); // production's current configuration sets nothing
+    expect(loadAuditConfig(env({ AUDIT_PROVENANCE_ENFORCEMENT: 'compatibility' })).provenanceEnforcement).toBe('compatibility');
+    expect(loadAuditConfig(env({ AUDIT_PROVENANCE_ENFORCEMENT: 'strict' })).provenanceEnforcement).toBe('strict');
+    expect(loadAuditConfig(env({ AUDIT_PROVENANCE_ENFORCEMENT: ' strict ' })).provenanceEnforcement).toBe('strict'); // the kit reader trims
+    for (const value of ['observe', 'observe-only', 'off', 'none', 'disabled', 'Strict', 'STRICT', 'strict,compatibility', 'true', '0', 'secret-looking-value-0123']) {
+      let err: unknown;
+      try {
+        loadAuditConfig(env({ AUDIT_PROVENANCE_ENFORCEMENT: value }));
+      } catch (e) {
+        err = e;
+      }
+      expect(err, value).toBeInstanceOf(ConfigError);
+      expect(String((err as Error).message)).toMatch(/AUDIT_PROVENANCE_ENFORCEMENT must be one of: compatibility, strict/);
+      expect(String((err as Error).message)).not.toContain('secret-looking-value-0123');
+    }
+  });
+
   it('carries only what the service uses: no queue, prefetch, retention, query-bound, Auth or Organization setting (later stages / never)', () => {
     const keys = Object.keys(loadAuditConfig(env()));
     for (const later of ['queue', 'prefetch', 'retention', 'retentionDays', 'pageSize', 'queryWindowDays', 'authServiceUrl', 'organizationServiceUrl']) {

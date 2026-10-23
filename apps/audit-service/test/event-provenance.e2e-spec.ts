@@ -10,6 +10,7 @@ import { auditMigrationsDir } from '../src/app.module.js';
 import { auditEventOwner } from '../src/ingestion/admission.js';
 import { auditDeadLetterPolicy } from '../src/ingestion/dead-letter-policy.js';
 import { IngestionService } from '../src/ingestion/ingestion.service.js';
+import { auditEnforcement } from '../src/ingestion/trust-policy.js';
 import { AUDIT_EXCHANGE, AUDIT_QUEUE } from '../src/ingestion/ingestion.constants.js';
 import { ALL_LOGS, createTestApp, type TestApp } from './support/app.js';
 import { DEAD_QUEUE, auditEnvelope, deleteAuditQueues, depth } from './support/broker.js';
@@ -18,12 +19,14 @@ import { describeWithEnv } from './support/env.js';
 import { provisionServiceDatabase, type ProvisionedDatabase } from './support/roles.js';
 
 /**
- * Core V2 S1b-2 (ADR-0057 §13.2 with its "Audit admission" clarification S0-C1, §13.3, §13.4; observe-only) over a REAL RabbitMQ and a
- * REAL PostgreSQL 16, through the real module graph, as the runtime role:
+ * Core V2 S1b-2 (ADR-0057 §13.2 with its "Audit admission" clarification S0-C1, §13.3, §13.4) over a REAL RabbitMQ and a REAL PostgreSQL
+ * 16, through the real module graph, as the runtime role, in Audit's default mode (Core V2 S1e-3: the compatibility phase of "S0-C6"; the
+ * strict mode is `audit-enforcement.e2e-spec.ts`):
  * - every delivery, on any exchange, is ADMITTED first (canonical bytes, the Stage 18.8 screen, the full contract); a refused one never
  *   reaches provenance or ingestion, leaves no row and no body digest, and is dead-lettered under the Stage 18.8 policy;
  * - an admitted original delivery's provenance is committed BEFORE ingestion, verified only from the broker `user_id` + the catalog owner;
- *   ingestion (de-duplication, `event_id_conflict`) is unchanged.
+ *   an unverified one is still ingested (compatibility), while a verified delivery contradicting the stored verified one, or a replay that
+ *   differs from the stored original, is refused before ingestion (S0-C6).
  * Broker users: `payment-service` (the catalog producer of the `payment.*` actions; refused if such a user already exists, never
  * overwritten) and an intruder, created through the management API and deleted at the end. The audit queues are the production names,
  * so they are deleted before and after (a disposable / dev broker only).
@@ -125,7 +128,7 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
     await d?.drop();
   });
 
-  describe('admitted original deliveries: provenance before ingestion (observe-only)', () => {
+  describe('admitted original deliveries: provenance before ingestion (compatibility phase)', () => {
     it('a genuine event is recorded VERIFIED, committed BEFORE its audit record is written; the provenance holds no payload value', async () => {
       // Test-only proof of the ORDER: the record's insert (inside ingestion) is refused unless a COMMITTED provenance row of its event exists.
       await sql(d.adminUrl, `CREATE FUNCTION test_requires_provenance() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
@@ -159,7 +162,7 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
       expect(await conflicts(e.id)).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodySha256: sha(JSON.stringify(e.payload)) }]);
     });
 
-    it('changed content under the same event id is kept as provenance conflict evidence AND refused `event_id_conflict` exactly as before; the stored record is untouched', async () => {
+    it('changed content under the same event id is kept as provenance conflict evidence and refused BEFORE ingestion (S1e-3: it contradicts the stored verified observation); the stored record is untouched', async () => {
       const e = auditEnvelope('payment.succeeded');
       await owner.publish(e);
       await until(async () => (await records(e.id)) === 1);
@@ -168,7 +171,8 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
       expect(JSON.stringify(changed.payload)).not.toBe(JSON.stringify(e.payload));
       await owner.publish(changed);
       const dead = await deadCopy(e.id);
-      expect(dead).toMatchObject({ failure: 'permanent', reason: 'event_id_conflict', redacted: false });
+      // S0-C6: conflicting verified evidence is refused, never reconciled (and never reaches ingestion's own `event_id_conflict`)
+      expect(dead).toMatchObject({ failure: 'permanent', reason: 'untrusted_verified_conflict', redacted: false });
       expect(await sql(d.adminUrl, `SELECT * FROM audit_record WHERE "eventId" = $1`, [e.id])).toEqual(before);
       expect(await provenance(e.id)).toEqual([expect.objectContaining({ verified: true, bodySha256: sha(JSON.stringify(e.payload)) })]);
       expect(await conflicts(e.id)).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodySha256: sha(JSON.stringify(changed.payload)) }]);
@@ -231,16 +235,16 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
       expect(await digestStored(sha(body))).toBe(false);
     });
 
-    it('an injected admitted event is ingested as before (observe-only) and no provenance is invented for it', async () => {
+    it('an injected admitted event is ingested in the compatibility phase (S1e-3: `replay_no_provenance`, strict refuses it) and no provenance is invented for it', async () => {
       const e = auditEnvelope('payment.succeeded');
       await inject(Buffer.from(JSON.stringify(e.payload)), e);
       await until(async () => (await records(e.id)) === 1);
       expect(await provenance(e.id)).toEqual([]);
-      // S1c-1: classified `replay_no_provenance` (observe-only: ingested exactly as before, A50-compatible)
+      // S1c-1: classified `replay_no_provenance`; the compatibility phase still ingests it (A50-compatible)
       await until(() => busNotices.some((m) => m.startsWith(`event_replay_classified queue=${AUDIT_QUEUE} event=${e.id} outcome=replay_no_provenance original=none`)));
     });
 
-    it('S1c-1: a forged injection that changes an admitted original is a mismatch against it; the stored record and the original are untouched', async () => {
+    it('S1c-1: a forged injection that changes an admitted original is a mismatch against it, refused before ingestion (S1e-3); the stored record and the original are untouched', async () => {
       const e = auditEnvelope('payment.succeeded');
       await owner.publish(e);
       await until(async () => (await records(e.id)) === 1);
@@ -248,7 +252,7 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
       const changed = auditEnvelope('payment.succeeded', { id: e.id, variant: 'minimal' }); // still admitted: a valid, different body
       await inject(Buffer.from(JSON.stringify(changed.payload)), changed);
       await until(() => busNotices.some((m) => m.startsWith(`event_replay_classified queue=${AUDIT_QUEUE} event=${e.id} outcome=replay_mismatch original=verified`)));
-      expect(await deadCopy(e.id)).toMatchObject({ failure: 'permanent', reason: 'event_id_conflict' }); // ingestion as before
+      expect(await deadCopy(e.id)).toMatchObject({ failure: 'permanent', reason: 'untrusted_replay_mismatch' }); // S0-C6: refused, even in compatibility
       expect(await sql(d.adminUrl, `SELECT * FROM audit_record WHERE "eventId" = $1`, [e.id])).toEqual(before);
       expect(await provenance(e.id)).toHaveLength(1);
     });
@@ -276,7 +280,10 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
 
   describe('crash windows (the consumer dies before acknowledging; the broker redelivers to a new consumer)', () => {
     let crashOwner: RabbitMqEventBus;
-    /** A consumer wired exactly like `AuditConsumer` (admission, provenance, policy, ingestion), on its own exchange and queue. */
+    /**
+     * A consumer wired like `AuditConsumer` (admission, provenance, dead-letter policy, enforcement, ingestion), on its own exchange and
+     * queue; strict, since the kit allows the compatibility phase on Audit's production queue only (the publisher here is verified).
+     */
     const consumer = async (queue: string, before?: (e: EventEnvelope, ingest: () => Promise<void>, bus: EventBus) => Promise<void>) => {
       const ingestion = t.app.get(IngestionService);
       const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange: CRASH_EXCHANGE, drainTimeoutMs: 200, retry: { maxRetries: 1, delayMs: 200 } });
@@ -290,6 +297,7 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
         admission: (e, body) => ingestion.admit(e, body),
         deadLetterPolicy: auditDeadLetterPolicy,
         provenance: { ownerOf: auditEventOwner, store: new PgProvenanceStore(t.app.get(DbService)) },
+        enforcement: auditEnforcement('strict'),
       });
       return { bus, outcomes };
     };
