@@ -315,6 +315,61 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
     await c.rabbit.close();
   });
 
+  describe('replay classification (S1c-1, OBSERVE-ONLY): financial behaviour unchanged', () => {
+    const replaysOf = (c: { observations: EventBusObservation[] }) => c.observations.flatMap((o) => (o.type === 'replay' ? [`${o.outcome}/${o.original}`] : []));
+    /** A default-exchange injection straight into `queue` (any credential holder can do this until S1d narrows permissions). */
+    const inject = async (queue: string, e: EventEnvelope) => {
+      const ch = await broker.createConfirmChannel();
+      ch.sendToQueue(queue, Buffer.from(JSON.stringify(e.payload)), { persistent: true, messageId: e.id, type: e.name, headers: e.headers });
+      await ch.waitForConfirms();
+      await ch.close();
+    };
+
+    it('a consumer retry of payment.succeeded matches the verified original; applied once, as before', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      let calls = 0;
+      const c = await startConsumer(queue, async (e, real) => {
+        if (++calls === 1) throw new Error('transient'); // the first attempt fails: the kit republishes a retry copy
+        return real(e);
+      });
+      await owner.publish(envelope(s.facts(), s.id));
+      await until(async () => (await status(s.request.id)) === 'paid');
+      expect(replaysOf(c)).toEqual(['replay_matched_verified/verified']);
+      expect(await applied(s.id)).toBe(1);
+      expect(await provenanceOf(s.id, queue)).toHaveLength(1); // the retry recorded nothing
+    });
+
+    it('a forged injection that changes the facts under the same event id is a mismatch; it is handled as before and changes nothing financial', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      const c = await startConsumer(queue);
+      await owner.publish(envelope(s.facts(), s.id));
+      await until(async () => (await status(s.request.id)) === 'paid');
+      const n = c.observations.filter((o) => o.type === 'consume').length;
+      await inject(queue, envelope(s.facts({ revision: 7, amount: 1 }), s.id));
+      await until(() => c.observations.filter((o) => o.type === 'consume').length > n);
+      expect(replaysOf(c)).toEqual(['replay_mismatch/verified']);
+      expect(await applied(s.id)).toBe(1); // the receipt de-duplication is unchanged: no second effect
+      expect(await status(s.request.id)).toBe('paid');
+      expect(c.notices.some((m) => m.startsWith('event_replay_classified') && m.includes('outcome=replay_mismatch original=verified'))).toBe(true);
+    });
+
+    it('an injection of every payment.* name without an original is no_provenance and is handled exactly as before (no provenance invented)', async () => {
+      const queue = newQueue();
+      const c = await startConsumer(queue);
+      for (const name of ['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired'] as const) {
+        const s = await setup();
+        const id = deterministicEventId(s.paymentId, name);
+        const before = c.observations.filter((o) => o.type === 'consume').length;
+        await inject(queue, envelope(s.facts({ name, ...(name === 'payment.failed' ? { failureCode: null } : {}), ...(name === 'payment.expired' ? { expiresAt: new Date().toISOString() } : {}) } as never), id));
+        await until(() => c.observations.filter((o) => o.type === 'consume').length > before);
+        expect(await provenanceOf(id, queue)).toEqual([]);
+      }
+      expect(replaysOf(c)).toEqual(Array(4).fill('replay_no_provenance/none'));
+    });
+  });
+
   describe('crash windows (the consumer dies before acknowledging; the broker redelivers to a new consumer)', () => {
     /** First consumer: runs `before` on the first delivery, then dies (closed with a 200 ms drain while the delivery is still unacknowledged). */
     async function crashThenRecover(callRealBeforeCrash: boolean) {

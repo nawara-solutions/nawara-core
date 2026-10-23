@@ -1,6 +1,6 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
-import { bodySha256, evaluateProvenanceFacts } from './provenance.js';
+import { bodySha256, evaluateProvenanceFacts, replayCandidate, type ReplayClassification, type ReplayOriginal, type ReplayClassificationOutcome } from './provenance.js';
 import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
@@ -37,6 +37,11 @@ export interface RabbitMqOptions {
   confirmTimeoutMs?: number;
   /** Bound on waiting, when a consumer is closed, for deliveries its handler is still processing (default 5000 ms). */
   drainTimeoutMs?: number;
+  /**
+   * Core V2 S1c-1: bound on the observe-only replay lookup of a default-exchange delivery (default 2000 ms). Past it the delivery is
+   * classified `replay_lookup_failure` and handled exactly as before; a late answer is ignored.
+   */
+  replayLookupTimeoutMs?: number;
   /**
    * Stage 15.3 (I9): the AMQP heartbeat THIS client requests, in seconds (default 10). The negotiated value is the smaller of this and the
    * broker's proposal, or this one when the broker proposes 0 (heartbeats off), so the bound no longer depends on broker configuration.
@@ -207,11 +212,13 @@ export type ConsumeOutcome =
  * `duplicate`: identical to one stored; `conflict`: it differs from one stored (appended as conflict evidence); `not_original`: not
  * delivered through the event exchange (a retry, a replay, an injection), so nothing is recorded; `failed`: it could not be recorded.
  */
-export type ProvenanceOutcome = 'recorded_verified' | 'recorded_unverified' | 'duplicate' | 'conflict' | 'not_original' | 'failed';
+export type ProvenanceOutcome = 'recorded_verified' | 'recorded_unverified' | 'duplicate' | 'conflict' | 'unverifiable' | 'not_original' | 'failed';
 export type EventBusObservation =
   | { type: 'publish'; outcome: 'confirmed' | 'failed' | 'confirm_timeout'; durationMs: number }
   | { type: 'consume'; queue: string; outcome: ConsumeOutcome; handlerMs?: number; redelivered: boolean }
   | { type: 'provenance'; queue: string; outcome: ProvenanceOutcome }
+  /** Core V2 S1c-1 (S0-C3, observe-only): a default-exchange delivery classified against the stored originals; never a processing decision. */
+  | { type: 'replay'; queue: string; outcome: ReplayClassificationOutcome; original: ReplayOriginal }
   | { type: 'consumer'; queue: string; state: 'consuming' | 'lost' | 'recovered' | 'closed' }
   | { type: 'settle_failed'; queue: string };
 export type EventBusObserver = (observation: EventBusObservation) => void;
@@ -615,6 +622,7 @@ export class RabbitMqEventBus implements EventBus {
       );
       if (evaluation.origin === 'not_original') {
         this.observe({ type: 'provenance', queue: sub.queue, outcome: 'not_original' });
+        if (msg.fields.exchange === '') await this.classifyReplay(msg, sub, who);
         return true;
       }
       const o = evaluation.facts;
@@ -623,6 +631,7 @@ export class RabbitMqEventBus implements EventBus {
         ? await p.keyedStore.record(sub.queue, { ...o, body: Buffer.from(msg.content) })
         : await p.store.record(sub.queue, { ...o, bodySha256: bodySha256(msg.content) });
       if (result === 'conflict') this.notice(`event_provenance_conflict ${who} verified=${o.verified} reason=${o.reason} — differs from the provenance already recorded for this event id; recorded as conflict evidence (observe-only)`);
+      if (result === 'unverifiable') this.notice(`event_provenance_unverifiable ${who} verified=${o.verified} reason=${o.reason} — the stored provenance was committed under a retired key, so it cannot be compared; recorded as unverifiable evidence, not as a difference (observe-only)`);
       this.observe({ type: 'provenance', queue: sub.queue, outcome: result === 'recorded' ? (o.verified ? 'recorded_verified' : 'recorded_unverified') : result });
       return true;
     } catch (e) {
@@ -633,6 +642,48 @@ export class RabbitMqEventBus implements EventBus {
       await holdUnless(delayMs, stopping);
       this.settle(() => ch.nack(msg, false, true), sub);
       return false;
+    }
+  }
+
+  /**
+   * Core V2 S1c-1 (ADR-0057 §13.4 with S0-C3; OBSERVE-ONLY): classifies a default-exchange delivery (a retry, an operator replay, an
+   * injection) against the consumer's stored ORIGINAL observations, looked up by its `source` header and message id (lookup keys only, never
+   * identity) and compared on name and body (keyed stores under each stored row's own key). Never throws, never writes, never decides: the
+   * delivery is then handled exactly as before, whatever the outcome. A lookup that fails or exceeds `replayLookupTimeoutMs` is
+   * `replay_lookup_failure`, never a verification. Reports a bounded observation, and a notice (ids and closed codes only) for every outcome
+   * but a verified match.
+   */
+  private async classifyReplay(msg: ConsumeMessage, sub: EventSubscription, who: string): Promise<void> {
+    const p = sub.provenance!;
+    const candidate = replayCandidate({ messageId: msg.properties.messageId, type: msg.properties.type, headers: msg.properties.headers ?? {} });
+    let result: ReplayClassification;
+    let errorName = '';
+    if (!('classifyReplay' in (p.keyedStore ?? p.store))) return; // a store without replay classification: unchanged
+    try {
+      const lookup = p.keyedStore
+        ? p.keyedStore.classifyReplay!(sub.queue, { ...candidate, body: Buffer.from(msg.content) })
+        : p.store.classifyReplay!(sub.queue, { ...candidate, bodySha256: bodySha256(msg.content) });
+      lookup.catch(() => undefined); // a late failure after the timeout is not an unhandled rejection
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('replay lookup timed out'), { name: 'ReplayLookupTimeout' })), this.opts.replayLookupTimeoutMs ?? 2000);
+        timer.unref?.();
+      });
+      try {
+        result = await Promise.race([lookup, timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (e) {
+      errorName = safeToken(e instanceof Error ? e.name : undefined, ERROR_NAME, 'Error');
+      result = { outcome: 'replay_lookup_failure', original: 'none' };
+    }
+    this.observe({ type: 'replay', queue: sub.queue, outcome: result.outcome, original: result.original });
+    if (result.outcome !== 'replay_matched_verified') {
+      this.notice(
+        `event_replay_classified ${who} outcome=${result.outcome} original=${result.original}${errorName ? ` error=${errorName}` : ''} — observe-only (S1c); the delivery is handled as before`,
+        result.outcome === 'replay_matched_unverified' ? 'info' : 'warn',
+      );
     }
   }
 

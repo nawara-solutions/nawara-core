@@ -2756,6 +2756,7 @@ export const NOTIFICATION_KEYED_FILES = Object.freeze({
   consumer: 'apps/notification-service/src/intake/event-consumer.ts',
   config: 'apps/notification-service/src/config/notification-config.ts',
   migration: 'apps/notification-service/db/migrations/0003_event_provenance.sql',
+  comparisonMigration: 'apps/notification-service/db/migrations/0004_provenance_conflict_comparison.sql',
 });
 const UNKEYED_DIGEST = /\bbodySha256\b|\bPgProvenanceStore\b|\bevaluateProvenance\(/;
 
@@ -2838,6 +2839,11 @@ export function keyedCommitmentProblems(files, sources = {}) {
   if (migration === undefined || /bodySha256/i.test(migration) || !['"bodyCommitmentVersion"', '"bodyMacKeyId"', '"bodyMac"'].every((c) => migration.includes(c))) {
     problems.push(`${NOTIFICATION_KEYED_FILES.migration}: must store \`bodyCommitmentVersion\`, \`bodyMacKeyId\` and \`bodyMac\` and no unkeyed body digest; ${why}`);
   }
+  // Core V2 S1c-1 (S0-C3): conflict evidence records `differs` or `unverifiable`, and no later migration adds an unkeyed body digest
+  const comparison = files[NOTIFICATION_KEYED_FILES.comparisonMigration];
+  if (comparison === undefined || /bodySha256/i.test(comparison) || !comparison.includes("comparison IN ('differs', 'unverifiable')")) {
+    problems.push(`${NOTIFICATION_KEYED_FILES.comparisonMigration}: must record the evidence \`comparison\` (\`differs\` or \`unverifiable\`) and no unkeyed body digest; ${why}`);
+  }
   const kit = files[KIT_PROVENANCE] ?? '';
   const keyedStore = kit.indexOf('export class PgKeyedProvenanceStore');
   if (keyedStore < 0 || /bodySha256|createHash\(/.test(kit.slice(keyedStore))) problems.push(`${KIT_PROVENANCE}: \`PgKeyedProvenanceStore\` must exist and never compute an unkeyed digest; ${why}`);
@@ -2845,6 +2851,14 @@ export function keyedCommitmentProblems(files, sources = {}) {
   const committed = bus.slice(bus.indexOf('private async provenanceCommitted('), bus.indexOf('private async onFailure('));
   if (!committed.includes('evaluateProvenanceFacts(') || !/p\.keyedStore\s*\n?\s*\?\s*await p\.keyedStore\.record\(sub\.queue, \{ \.\.\.o, body: Buffer\.from\(msg\.content\) \}\)/.test(committed)) {
     problems.push(`${KIT_EVENT_BUS}: \`provenanceCommitted\` must give a keyed store the facts and the raw bytes only (\`evaluateProvenanceFacts\`, no unkeyed digest on that path); ${why}`);
+  }
+  // Core V2 S1c-1 (S0-C3): the replay classification gives a keyed store the raw bytes only, and is OBSERVE-ONLY: it never settles, refuses or
+  // throws, and the default-exchange branch always goes on to the handler
+  const replayAt = bus.indexOf('private async classifyReplay(');
+  const replay = replayAt < 0 ? '' : bus.slice(replayAt, bus.indexOf('\n  }\n', replayAt));
+  if (!replay.includes('p.keyedStore.classifyReplay!(sub.queue, { ...candidate, body: Buffer.from(msg.content) })') || /\b(ack|nack|settle)\(|\bthrow\b|return false/.test(replay)
+    || !committed.includes("if (msg.fields.exchange === '') await this.classifyReplay(msg, sub, who);\n        return true;")) {
+    problems.push(`${KIT_EVENT_BUS}: \`classifyReplay\` must stay observe-only (no ack, nack, settle, throw or refusal; the default-exchange branch returns true) and give a keyed store the raw bytes only; ${why}`);
   }
   return problems;
 }

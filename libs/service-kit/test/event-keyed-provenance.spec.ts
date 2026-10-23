@@ -110,16 +110,23 @@ describe('PgKeyedProvenanceStore (comparisons under the STORED key)', () => {
     expect(await new PgKeyedProvenanceStore(db, rotated).record('q', observation(changed))).toBe('conflict');
     const conflict = inserts.find((i) => i.table === 'event_provenance_conflict')!.params;
     expect(conflict.slice(7, 10)).toEqual([1, 'p2', bodyMac(K2, changed)]);
+    expect(conflict.at(-1)).toBe('differs'); // compared under the stored key (p1) and found different
   });
 
-  it('a RETIRED stored key: unverifiable, never a duplicate; appended as evidence once (later compared under the evidence key)', async () => {
+  it('a RETIRED stored key: UNVERIFIABLE (S1c-1), never a duplicate and never a proven difference; appended as such once', async () => {
     const retired = ring({ activeKeyId: 'p2', keys: new Map([['p2', K2]]), retiredKeyIds: new Set(['p1']) });
     const first = fakeDb([row('p1', undefined)]);
-    expect(await new PgKeyedProvenanceStore(first.db, retired).record('q', observation())).toBe('conflict');
-    expect(first.inserts.filter((i) => i.table === 'event_provenance_conflict')).toHaveLength(1);
-    const again = fakeDb([row('p1', undefined)], [row('p2', K2, BODY, { id: 'e1' })]);
-    expect(await new PgKeyedProvenanceStore(again.db, retired).record('q', observation())).toBe('conflict');
+    expect(await new PgKeyedProvenanceStore(first.db, retired).record('q', observation())).toBe('unverifiable');
+    const evidence = first.inserts.filter((i) => i.table === 'event_provenance_conflict');
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]!.params.at(-1)).toBe('unverifiable');
+    const again = fakeDb([row('p1', undefined)], [row('p2', K2, BODY, { id: 'e1', comparison: 'unverifiable' })]);
+    expect(await new PgKeyedProvenanceStore(again.db, retired).record('q', observation())).toBe('unverifiable');
     expect(again.inserts.filter((i) => i.table === 'event_provenance_conflict')).toEqual([]); // the same evidence is kept once
+    // a retired key never hides a definitive difference in the verified facts: that is still `differs`
+    const forged = fakeDb([row('p1', undefined)]);
+    expect(await new PgKeyedProvenanceStore(forged.db, retired).record('q', { ...observation(), producerUserId: 'intruder', verified: false, reason: 'source_mismatch' })).toBe('conflict');
+    expect(forged.inserts.find((i) => i.table === 'event_provenance_conflict')!.params.at(-1)).toBe('differs');
   });
 
   it('an UNAVAILABLE stored key (neither in the ring nor retired) fails closed: the commit rejects, nothing is decided or inserted as evidence', async () => {

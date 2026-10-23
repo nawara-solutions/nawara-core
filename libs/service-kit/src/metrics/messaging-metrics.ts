@@ -1,3 +1,4 @@
+import { REPLAY_ORIGINALS, REPLAY_OUTCOMES } from '../events/provenance.js';
 import type { EventBusObservation } from '../events/rabbitmq-event-bus.js';
 import { closedSet, growingSet } from './label-policy.js';
 import type { BoundedMetrics } from './metrics.js';
@@ -14,7 +15,7 @@ export const CONSUME_OUTCOMES = [
   'provenance_deferred',
 ] as const;
 /** Core V2 S1b: what became of each delivery's provenance (`ProvenanceOutcome`). New stored rows: the two `recorded_*` and `conflict`. */
-export const PROVENANCE_OUTCOMES = ['recorded_verified', 'recorded_unverified', 'duplicate', 'conflict', 'not_original', 'failed'] as const;
+export const PROVENANCE_OUTCOMES = ['recorded_verified', 'recorded_unverified', 'duplicate', 'conflict', 'unverifiable', 'not_original', 'failed'] as const;
 /** Publisher-confirm round trip (seconds), up to the default 5 s confirm bound and beyond. */
 export const PUBLISH_DURATION_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 /** Handler duration (seconds): the HTTP request scale. */
@@ -66,6 +67,12 @@ export function messagingMetrics(metrics: BoundedMetrics): (o: EventBusObservati
     labels: [queue, closedSet('outcome', PROVENANCE_OUTCOMES)],
     maxSeries: series * (PROVENANCE_OUTCOMES.length + 1),
   });
+  const replay = metrics.counter({
+    name: 'nawara_event_replay_total',
+    help: 'Core V2 S1c (observe-only): default-exchange deliveries (retries, replays, injections) by queue, replay classification and kind of stored original.',
+    labels: [queue, closedSet('outcome', REPLAY_OUTCOMES), closedSet('kind', REPLAY_ORIGINALS)],
+    maxSeries: series * (REPLAY_OUTCOMES.length + 1) * (REPLAY_ORIGINALS.length + 1),
+  });
   const up = metrics.gauge({ name: 'nawara_event_consumer_up', help: 'Whether each consumer is attached to its queue: 1 consuming, 0 lost or closed.', labels: [queue], maxSeries: series });
   const losses = metrics.counter({ name: 'nawara_event_consumer_losses_total', help: 'Consumers lost (channel or connection gone, broker cancel), by queue.', labels: [queue], maxSeries: series });
   const recoveries = metrics.counter({ name: 'nawara_event_consumer_recoveries_total', help: 'Consumers re-attached after a loss, by queue.', labels: [queue], maxSeries: series });
@@ -89,6 +96,9 @@ export function messagingMetrics(metrics: BoundedMetrics): (o: EventBusObservati
         return;
       case 'provenance':
         provenance.inc({ queue: o.queue, outcome: o.outcome });
+        return;
+      case 'replay':
+        replay.inc({ queue: o.queue, outcome: o.outcome, kind: o.original });
         return;
       case 'consumer':
         if (o.state === 'consuming') up.set({ queue: o.queue }, 1);

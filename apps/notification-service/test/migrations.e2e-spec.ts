@@ -9,7 +9,7 @@ import { sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
 
 const KIT = ['kit_0001_outbox_inbox.sql', 'kit_0002_rate_limit.sql', 'kit_0003_generic_triggers.sql'];
-const OWN = ['0001_notification_schema.sql', '0002_publish_templates_v1.sql', '0003_event_provenance.sql'];
+const OWN = ['0001_notification_schema.sql', '0002_publish_templates_v1.sql', '0003_event_provenance.sql', '0004_provenance_conflict_comparison.sql'];
 /** Exactly the schema of this stage: the five frozen tables, Core V2 S1b-3's two provenance tables (0003), the kit's, the migration ledger. Nothing else (no recipient list, no preference). */
 const TABLES = ['event_provenance', 'event_provenance_conflict', 'inbox', 'kit_rate_limit', 'notification', 'notification_delivery', 'notification_delivery_attempt', 'notification_template', 'notification_template_version', 'outbox', 'schema_migrations'];
 /** Every index on the five tables, each justified in the Stage 16.4 record (no duplicate, no speculative one). */
