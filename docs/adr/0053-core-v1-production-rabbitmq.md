@@ -58,6 +58,13 @@ local audit row survives). This was reproduced against a real broker (`scripts/d
    the event's `source` header (Audit's catalog binding still dead-letters a mismatched producer). In particular the four audit-only
    producers share the same `^audit\.` grant, so one of them can still publish under another's `source`; P-A1's broker-side publisher
    validation (Stage 18.1 §19) remains open, and this ADR accepts that residual for the first deployment.
+   **Core V2 OD-BRK-0 (owner-approved 2026-10-23; ADR-0057 §8 "OD-BRK-0", D1 to D3; documentation only, nothing changed here):**
+   - Notification's identity is to hold **no** permission on `nawara.events.dlx`. Its work queue gets no broker dead-letter exchange, and
+     its `.dead` queue no binding to the fanout. This happens before its first production deployment, in slice OD-BRK-2.
+   - Billing's identity follows before its first deployment (OD-BRK-3).
+   - audit-service's grants and live queue are unchanged until the separately authorized OD-BRK-4 migration.
+   - The fanout and its consumer grants are retired only by OD-BRK-5.
+   - Until then, the shared-DLX write grant stays the residual described above.
 5. **Order: broker, then audit-service, then Auth.** audit-service's deploy succeeds only when its container is ready (database,
    migrations, broker and the ingestion consumer attached) **and** the broker shows `audit-service.audit` declared with its dead-letter
    exchange, `.retry`, `.dead`, a consumer and the `nawara.events -> audit.#` binding. Auth's deploy refuses, before migrating or stopping

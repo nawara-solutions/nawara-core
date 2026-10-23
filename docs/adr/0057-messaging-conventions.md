@@ -47,6 +47,11 @@
 > nothing is implemented or enabled, and nothing is authorized in production. This is not an acceptance: this ADR's status stays
 > `Proposed`.
 
+> **Core V2 OD-BRK-0 clarification (2026-10-23, owner-approved decisions D1, D2, D3).** The dead-letter privacy and isolation design
+> that the §8 residual left to a separate decision ("OD-BRK-0" at the end of §8, with §12). The current topology (§8, §12) is unchanged
+> and nothing is implemented. Five implementation slices are named; none is authorized here. No broker, grant or queue is changed. OD-BRK
+> stays open and S1e-5 stays blocked. This is not an acceptance: this ADR's status stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -215,6 +220,116 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   (`nawara-dlq`) or any other delivery that arrives through the default exchange carries no broker-verified producer identity. Such a
   delivery is processed only under §13.4; a replay never establishes provenance.
 
+**OD-BRK-0: dead-letter privacy and isolation (owner-approved 2026-10-23, decisions D1, D2, D3; documentation only).**
+
+*Why.* S1e-5's integrated certification found that a broker-driven dead-lettering never runs a consumer's `deadLetterPolicy`. With every
+work queue declared `x-dead-letter-exchange = nawara.events.dlx`, a fanout bound to every `.dead` queue, a genuine code-bearing
+Notification message that a reader of `notification.events` rejects without requeue is copied RAW into every consumer's dead-letter
+queue (Notification's, Billing's and Audit's). A message whose publisher set an expiry takes the same path. The kit itself never uses
+this route: its dead-letter copies go straight to `Q.dead` through the default exchange, after the policy, and its holds and deferrals
+requeue (above). The route exists only for broker-driven dead-lettering.
+
+- **D1: topology.**
+  - *Notification:*
+    - Its work queue `notification.events` has **no broker dead-letter exchange**.
+    - Its `notification.events.dead` is **not bound** to `nawara.events.dlx`.
+    - Its broker identity holds **no** configure, write or read permission on `nawara.events.dlx`.
+    - Its application-redacted copies (S0-C6, `notificationDeadLetterPolicy`) still go **directly** to its private `.dead` queue
+      through the default exchange, on every permanent refusal, intake refusal, malformed message and exhausted retry.
+    - `Q.retry` and the hold and deferral semantics are unchanged.
+    - No code-bearing plaintext may be durably retained through an unredacted broker-driven dead-letter path.
+  - Removing the broker dead-letter exchange is **not** removing application dead-letter evidence. The application-redacted
+    dead-letter record stays required.
+  - *Billing:* adopts the same broker-DLX isolation **before its first production deployment**, as its own slice. Billing is
+    unchanged here.
+  - *Audit:* its live queue keeps its current arguments until a separately authorized migration (below).
+  - *The shared fanout* `nawara.events.dlx` is **not** removed while any live queue or approved consumer still depends on it. Its
+    complete retirement is a later, gated stage.
+- **D2: policy-drift protection: no broker dead-letter argument, plus verification of the EFFECTIVE configuration.** A queue argument
+  is not the only source of a dead-letter route: a regular RabbitMQ policy or an operator policy can add one to a queue that declares
+  none. A future implementation therefore verifies all of the following:
+  - the declared work-queue arguments;
+  - every applicable regular policy and operator policy;
+  - the effective dead-letter exchange (and routing key) settings;
+  - any binding of the consumer's queues to a shared dead-letter destination;
+  - the identity's effective resource permissions.
+
+  It never relies on searching policy names alone, and it never uses a sentinel or a missing exchange as a substitute. For
+  Notification, when the broker configuration enables an unapproved dead-letter route, the consumer **fails readiness or startup**
+  rather than consume potentially sensitive events.
+
+  The exact mechanism is an OD-BRK-1 proof obligation, demonstrated against a disposable real broker. Two facts bound it: AMQP 0-9-1
+  does not expose a queue's effective policy to a client, and the production broker runs no management API (ADR-0053). Any mechanism
+  that is not the consumer's own check must still keep the consumer from consuming, and is presented to the Owner with that proof.
+- **D3: discard semantics (Notification).** A message that is subject to a privileged broker rejection without requeue, or to a
+  broker expiry, on Notification's work queue may be **discarded** by the broker instead of stored unredacted. This is a
+  privacy-preserving, exceptional broker outcome:
+  - it is **not** a successful notification delivery;
+  - it creates no business acknowledgment and no intake record;
+  - it is distinct from the application-controlled path, where the kit decides, then publishes a confirmed, redacted copy to `.dead`
+    and only then acknowledges.
+
+  Application-controlled retries and recoverable holds are unchanged, and a permanent refusal keeps producing its safe, redacted
+  diagnostic record. Discard never weakens a normal delivery guarantee: no kit path rejects without requeue or sets an expiry on a work
+  queue message, so discard can only follow a privileged or out-of-band broker action. Where the broker supports it, bounded
+  operational evidence of such an event is kept, never a one-time code.
+- **Migration and rollback.** Changing an existing queue's arguments is not an in-place update (§12): RabbitMQ refuses the
+  re-declaration, and a consumer whose declaration differs from the live queue cannot attach.
+  - *Notification and Billing* are not provisioned in production (ADR-0053; `infra/rabbitmq/provision.sh` selects Audit and Auth by
+    default). Their topology is corrected **before** their first production deployment, with no queue migration.
+  - *Audit's* live queue (`audit-service.audit`, `x-dead-letter-exchange = nawara.events.dlx`; its deploy verifies that argument)
+    needs a **separately approved migration**. Its plan must address:
+    - the messages in the queue;
+    - coordination with Auth's publisher and outbox relay (moving messages through the default exchange turns them into §13.4
+      replays);
+    - consumer pause and readiness;
+    - preservation of the historical C-4 dead letters in `audit-service.audit.dead`;
+    - the queue re-creation or another verified supported transition;
+    - recovery from a partial migration;
+    - compatibility with the image versions in service;
+    - the security implications of a rollback.
+
+    No queue deletion or re-creation is authorized here.
+  - A rollback is never "deploy an older image": an image whose declaration differs from the live queue cannot attach. Every rollback
+    is a planned topology transition with its own security review, and returning to a broker dead-letter route for Notification
+    re-opens the exposure D1 closes.
+- **Implementation slices (each separately authorized; none is authorized here, none is complete):**
+  - **OD-BRK-0** this clarification (documentation).
+  - **OD-BRK-1** the shared-kit opt-in topology capability:
+    - a subscription option with no broker dead-letter exchange, and no shared-fanout binding of its `.dead` queue;
+    - fail-closed verification of the queue configuration (D2);
+    - no change to any existing consumer by default;
+    - real-broker tests.
+  - **OD-BRK-2** Notification adoption:
+    - the option is activated, and Notification's broker permissions narrowed (D1);
+    - the application-redacted dead letters are preserved;
+    - policy-drift prevention is verified, and the absence of any plaintext code retention proven.
+  - **OD-BRK-3** Billing adoption, before its first deployment: the financial retry and refusal behaviour, and its financial provenance
+    enforcement, are unchanged.
+  - **OD-BRK-4** Audit migration: a separate, protected production migration plan that preserves durable evidence and the historical
+    dead letters, with explicit S1-R and C-4 authorization.
+  - **OD-BRK-5** shared-fanout retirement: the residual fanout bindings and grants are removed only after every consumer's migration
+    is verified, the provisioning and topology contracts are updated, and a final security certification is run.
+- **Certification (isolated RabbitMQ; for OD-BRK-2 and later, as applicable):**
+  1. Notification's work queue has no broker dead-letter exchange.
+  2. Its `.dead` queue has no shared-fanout binding.
+  3. Its effective permissions exclude the shared dead-letter exchange.
+  4. A broker `reject(requeue = false)` retains no plaintext code in any dead-letter queue.
+  5. A broker expiry retains no plaintext code in any dead-letter queue.
+  6. An application refusal still produces a sanitized dead-letter record.
+  7. Application retries and holds still work.
+  8. An unknown regular or operator policy cannot silently restore a dead-letter route.
+  9. An old-topology queue fails closed rather than being silently accepted.
+  10. Notification cannot publish into the shared fanout.
+  11. Billing's and Audit's existing behaviour is unchanged until their own slices.
+  12. A topology regression is detected by the repository and integration tests.
+
+  The stored bytes of every queue are inspected for the synthetic code.
+- **Status.** OD-BRK is **partially decided and stays open** until the Audit migration (OD-BRK-4) and the shared-fanout retirement
+  (OD-BRK-5) are separately completed: Notification's isolation alone does not resolve the topology risk. S1e-5 stays **blocked**, and
+  resumes only after the applicable remediation (OD-BRK-2) is merged. Stage 22 Final Core Validation stays the final comprehensive Core
+  validation.
+
 ### 9. Queue naming
 
 - **[CURRENT]** Existing queue names are fixed and stay as they are: `audit-service.audit` (ADR-0049, ADR-0053), `notification.events`
@@ -260,6 +375,12 @@ for work that comes later (A3M.2 onwards), not yet implemented; **[OPEN]** is an
   existing queue names and their arguments (`audit-service.audit` with `x-dead-letter-exchange = nawara.events.dlx`) are part of the
   deployed topology. RabbitMQ refuses to re-declare an exchange or queue with a different type or arguments, so changing any of them
   is a **production migration** (drain, re-create, re-provision the grants), never a side effect of a code change.
+- **OD-BRK-0 (owner-approved 2026-10-23).** This binding is unchanged.
+  - The broker dead-letter isolation of D1 applies to Notification and Billing **before** their first production deployment, which
+    needs no migration.
+  - `audit-service.audit` keeps its arguments until the separately authorized OD-BRK-4 migration.
+  - `nawara.events.dlx` (fanout) stays part of the deployed topology until OD-BRK-5 retires it, after every dependent queue has been
+    migrated and verified (§8, "OD-BRK-0").
 - **[CURRENT]** Every broker participant needs an ADR-0053 identity with grants derived from what the kit does; a new binding or a new
   publisher widens a grant deliberately. Enabling `AUTH_EVENTS` in production, identities for Billing, Payment or Notification, and any
   retention activation are separately authorized production work.
