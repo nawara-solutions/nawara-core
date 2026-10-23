@@ -186,7 +186,7 @@ is preserved as evidence even when its commercial processing fails.
 | EVT-06 | Billing | `billing.recovery.*` | S6f | M |
 | EVT-07 | all producers | `audit.*` version 1 and 2 | S1, S2-Audit | H |
 | EVT-08 | Auth | Auth domain events | S1 | H |
-| EVT-09 | producers | Owner-authorized re-emission of one outbox row (OPEN mechanism) | S1c | M |
+| EVT-09 | producers | Owner-authorized re-emission of one outbox row (Payment-first mechanism decided, S0-C4; other producers OPEN) | S1c | M |
 
 ## 5. Contracts by service
 
@@ -926,7 +926,7 @@ verification; production financial and notification consumers refuse missing or 
 | EVT-06 | `billing.recovery.*` | recovery produces only `billing.recovery.*` (ADR-0044 B12) | names PROPOSED (`billing.recovery.payment_recorded`, `billing.recovery.completed`, `billing.recovery.surplus_recorded`) | none | S6f; M |
 | EVT-07 | `audit.*` | version 1 and 2 (AUD-01); broker-verified producers (AUD-02) | catalog-governed (`libs/audit-contract/src/catalog.ts`); new actions such as `authorization_receipt.issued` PROPOSED | version 1 | S1, S2-Audit; H |
 | EVT-08 | Auth domain events (`user.*`, `membership.*`) | §13 applies (S0 §3.7) | IMPLEMENTED names unchanged | `apps/auth-service/src/events/event-catalog.ts`, `domain-events.ts` | S1; H |
-| EVT-09 | Owner-authorized re-emission of one named outbox row | deterministic event ids; Owner authorization; an audit record (ADR-0057 §13.7) | mechanism **OPEN** (route or command) | none | **OD-15**, Q11; S1c; M |
+| EVT-09 | Owner-authorized re-emission of one named outbox row | deterministic event ids; Owner authorization; an audit record (ADR-0057 §13.7) | mechanism **decided for payment-service** (S0-C4): a restricted command inside the producer, no route; Owner only, bound to the exact event; `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` version 1; serialization pipeline version 1; durable intent and producer audit evidence (PROPOSED action `payment.event_reemitted`) before publication; **OPEN** for every other producer | none | **OD-15** (resolved for Payment), Q11; S1c (R1, R2); M |
 
 ## 6. New error codes proposed by this register
 
@@ -975,7 +975,7 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 | OD-12 | Legal-remedy record shape (execution deferred, S0 §5) | BIL-35 |
 | OD-13 | Audit legal-hold caller and route | AUD-05 |
 | OD-14 | Audit human-read cursor format, window limits and page size | AUD-03, AUD-04 |
-| OD-15 | Re-emission mechanism (route or command) and its caller | EVT-09 |
+| OD-15 | Re-emission mechanism (route or command) and its caller. **Resolved for payment-service (S0-C4, 2026-10-23): a command, Owner only; OPEN for every other producer** | EVT-09 |
 
 Every route name, DTO, error code and idempotency class marked PROPOSED in §4 to §6 also awaits Owner approval at implementation
 review (S0 §3.10), even when it is not listed here.
