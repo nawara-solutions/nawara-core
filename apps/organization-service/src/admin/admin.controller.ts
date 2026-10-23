@@ -99,10 +99,20 @@ export class AdminController {
       await this.denied(actor, 'platform.create', { type: 'company', id: company.id }, 'no_authority');
       throw organizationError(403, 'admin_forbidden', ORGANIZATION_MESSAGES.notAuthorizedCreatePlatform);
     }
+    const caller = `user:${actor.userId}`;
+    // CIR S1: a create this key already committed is answered here, AFTER the live authority check above and BEFORE any step-up, so
+    // a completed replay never spends a second proof (ADR-0042 Amendment 1, DEC-1). `reserve` in the create stays the atomic decision.
+    const prior = await this.platforms.completedCreate(caller, key, input);
+    if (prior) {
+      await this.actorRecord.record({ actor, operation: 'platform.create.replay', targetType: 'platform', targetId: prior.id, correlationId: this.correlationId(), outcome: 'succeeded', authority });
+      res.status(200).setHeader('Idempotent-Replayed', 'true');
+      return representPlatform(prior);
+    }
     await this.requireStepUp(actor, bearer, 'platform.create', stepUpToken, { type: 'company', id: company.id });
-    // The success record is written inside the mutation's transaction (`within`): both commit, or neither does.
-    const { platform, replayed } = await this.platforms.create(`user:${actor.userId}`, key, input, humanActor(actor), (q, p) =>
-      this.actorRecord.record({ actor, operation: 'platform.create', targetType: 'platform', targetId: p.id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
+    // The success record is written inside the mutation's transaction (`within`): both commit, or neither does. A replay found only by
+    // `reserve` (a same-key request committed after the lookup) is recorded as a replay, never as a second creation.
+    const { platform, replayed } = await this.platforms.create(caller, key, input, humanActor(actor), (q, p, replayedNow) =>
+      this.actorRecord.record({ actor, operation: replayedNow ? 'platform.create.replay' : 'platform.create', targetType: 'platform', targetId: p.id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     this.log.log(`admin_platform_created id=${platform.id} companyId=${platform.companyId} actor=${actor.userId}`);
@@ -157,9 +167,17 @@ export class AdminController {
       await this.denied(actor, 'organization.create', { type: 'platform', id: platform.id }, 'no_authority');
       throw organizationError(403, 'admin_forbidden', ORGANIZATION_MESSAGES.notAuthorizedCreateOrganization);
     }
+    const caller = `user:${actor.userId}`;
+    // CIR S1: as for a Platform, a committed create with this key is answered after the live authority check and before any step-up.
+    const prior = await this.organizations.completedCreate(caller, key, input);
+    if (prior) {
+      await this.actorRecord.record({ actor, operation: 'organization.create.replay', targetType: 'organization', targetId: prior.id, correlationId: this.correlationId(), outcome: 'succeeded', authority });
+      res.status(200).setHeader('Idempotent-Replayed', 'true');
+      return representOrganization(prior);
+    }
     await this.requireStepUp(actor, bearer, 'organization.create', stepUpToken, { type: 'platform', id: platform.id });
-    const { organization, replayed } = await this.organizations.create(`user:${actor.userId}`, key, input, humanActor(actor), (q, o) =>
-      this.actorRecord.record({ actor, operation: 'organization.create', targetType: 'organization', targetId: o.id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
+    const { organization, replayed } = await this.organizations.create(caller, key, input, humanActor(actor), (q, o, replayedNow) =>
+      this.actorRecord.record({ actor, operation: replayedNow ? 'organization.create.replay' : 'organization.create', targetType: 'organization', targetId: o.id, correlationId: this.correlationId(), outcome: 'succeeded', authority }, q));
     res.status(replayed ? 200 : 201);
     if (replayed) res.setHeader('Idempotent-Replayed', 'true');
     this.log.log(`admin_organization_created id=${organization.id} platformId=${organization.platformId} actor=${actor.userId}`);
