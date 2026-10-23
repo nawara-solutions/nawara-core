@@ -2,10 +2,10 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
-import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
+import { DbService, PgKeyedProvenanceStore, bodyMac, kitMigrationsDir, runMigrations, type KeyedProvenanceObservation } from '@nawara/service-kit';
 import { notificationMigrationsDir } from '../src/app.module.js';
 import { stableUuid } from '../src/templates/catalog.js';
-import { createTestApp, type TestApp } from './support/app.js';
+import { TEST_PROVENANCE_KEY, createTestApp, type TestApp } from './support/app.js';
 import { failure, sql } from './support/db.js';
 import { describeWithEnv } from './support/env.js';
 
@@ -107,5 +107,36 @@ describeWithEnv('runtime database role: DML only, invariants unbypassable (real 
     const [row] = await sql<{ id: string }>(APP(), `SELECT id FROM notification_delivery WHERE status = 'SENT' LIMIT 1`);
     expect(await failure(APP(), `UPDATE notification_delivery SET status = 'PENDING', "nextAttemptAt" = now(), "completedAt" = NULL, "sentAt" = NULL WHERE id = $1`, [row.id])).toMatchObject({ code: '23514' });
     expect(await failure(APP(), `UPDATE notification_delivery_attempt SET outcome = 'TERMINAL_FAILURE' WHERE "deliveryId" = $1`, [row.id])).toMatchObject({ code: '23514' });
+  });
+
+  it('Core V2 S1b-3: the provenance tables are append-only for every role; the runtime holds INSERT and SELECT only and the keyed store works as it', async () => {
+    const privileges = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
+    for (const table of ['event_provenance', 'event_provenance_conflict']) {
+      const held = [];
+      for (const p of privileges) {
+        const [r] = await sql<{ ok: boolean }>(adminTo(dbName), `SELECT has_table_privilege($1, $2, $3) AS ok`, [appRole, table, p]);
+        if (r!.ok) held.push(p);
+      }
+      expect(held, table).toEqual(['SELECT', 'INSERT']);
+    }
+    const ring = { activeKeyId: 'p1', keys: new Map([['p1', TEST_PROVENANCE_KEY]]), retiredKeyIds: new Set<string>() };
+    const store = new PgKeyedProvenanceStore(t.app.get(DbService), ring);
+    const id = randomUUID();
+    const o: KeyedProvenanceObservation = {
+      source: 'auth-service', eventId: id, name: 'membership.approved', routingKey: 'membership.approved', exchange: 'nawara.events', producerUserId: 'auth-service',
+      verified: true, reason: 'verified', body: Buffer.from('{"userId":"u-1","channel":"email","destination":"member@example.test"}'),
+    };
+    expect(await store.record('q.runtime', o)).toBe('recorded');
+    expect(await store.record('q.runtime', o)).toBe('duplicate');
+    expect(await store.record('q.runtime', { ...o, body: Buffer.from('{"userId":"u-2"}') })).toBe('conflict');
+    const [row] = await sql<Record<string, unknown>>(APP(), `SELECT * FROM event_provenance WHERE "eventId" = $1`, [id]);
+    expect(row).toMatchObject({ bodyCommitmentVersion: 1, bodyMacKeyId: 'p1', bodyMac: bodyMac(TEST_PROVENANCE_KEY, o.body) });
+    expect(Object.keys(row!)).not.toContain('bodySha256');
+    for (const table of ['event_provenance', 'event_provenance_conflict']) {
+      for (const statement of [`UPDATE ${table} SET verified = verified`, `DELETE FROM ${table}`, `TRUNCATE ${table} CASCADE`]) {
+        expect((await failure(APP(), statement)).code, `${statement} as the runtime`).toBe('42501'); // no privilege
+        expect((await failure(urlAs(migrator, migPw), statement)).code, `${statement} as the owner`).toBe('23514'); // the trigger
+      }
+    }
   });
 });

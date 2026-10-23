@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -18,8 +18,11 @@ const BROKER_PASSWORD = 'broker-password-never-logged-0043';
 const SECRET_KEY = createHash('sha256').update('process-spec-secret-key').digest().toString('base64');
 /** Production-shaped: every required setting present; the database and the broker are unreachable on purpose. */
 const HASH_KEY = createHash('sha256').update('process-spec-request-hash-key').digest().toString('base64');
+/** Core V2 S1b-3: a synthetic provenance key, random per run (never a published or committed key). */
+const PROVENANCE_KEY = randomBytes(32).toString('base64');
 const REQUIRED = {
   DATABASE_URL: RUNTIME_DB, RABBITMQ_URL: `amqp://notify:${BROKER_PASSWORD}@127.0.0.1:1`, NOTIFICATION_SECRET_KEYS: `k1:${SECRET_KEY}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1',
+  NOTIFICATION_PROVENANCE_KEYS: `p1:${PROVENANCE_KEY}`, NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p1',
   NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: HASH_KEY,
   NOTIFICATION_SERVICE_POLICY: JSON.stringify({ callers: { 'some-core-service': { templates: ['membership.approved'], channels: ['EMAIL'], organizations: 'none' } } }),
 };
@@ -106,12 +109,39 @@ describe('notification-service as a built process (production configuration)', (
     expect(run.out()).not.toContain(BROKER_PASSWORD);
     expect(run.out()).not.toContain(SECRET_KEY);
     expect(run.out()).not.toContain(HASH_KEY);
+    expect(run.out()).not.toContain(PROVENANCE_KEY);
     expect(msgs.some((m) => m.startsWith('event_intake_waiting reason=database_unavailable'))).toBe(true);
     expect(msgs.some((m) => m.startsWith('readiness_check_failed check=database'))).toBe(true); // the cause is logged, as a class only
     expect(run.out()).not.toMatch(/SERVICE_TOKENS|some-core-service/);
   }, 30_000);
 
+  // Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2"): without the provenance key ring the process is live but the intake never consumes (no unkeyed
+  // fallback): /ready stays 503 and the reason is the missing ring, before anything else is tried.
+  it('boots without a provenance key ring: live, never ready, the intake waits on `provenance_keys_missing` (no fallback)', async () => {
+    const port = await freePort();
+    const { NOTIFICATION_PROVENANCE_KEYS: _k, NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: _a, ...withoutRing } = REQUIRED;
+    const { digest } = generateServiceToken();
+    const run = start({ NODE_ENV: 'production', PORT: String(port), ...withoutRing, SERVICE_TOKENS: `some-core-service:${digest}`, DB_CONNECTION_TIMEOUT_MS: '500' });
+    runs.push(run);
+    const base = `http://127.0.0.1:${port}`;
+    await waitHealthy(base, run);
+    const ready = await fetch(`${base}/ready`);
+    expect(ready.status).toBe(503);
+    expect(((await ready.json()) as { failed: string[] }).failed).toContain('event-intake');
+    const msgs = () => run.out().split('\n').filter(Boolean).map((l) => String((JSON.parse(l) as Record<string, unknown>).msg));
+    for (let i = 0; i < 50 && !msgs().some((m) => m.startsWith('event_intake_waiting')); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(msgs().filter((m) => m.startsWith('event_intake_waiting'))[0]).toMatch(/^event_intake_waiting reason=provenance_keys_missing/);
+    expect(msgs().some((m) => m.startsWith('event_intake_started'))).toBe(false);
+  }, 30_000);
+
   it.each([
+    ['a malformed provenance key ring', { NOTIFICATION_PROVENANCE_KEYS: 'p1:c2hvcnQ=' }, /NOTIFICATION_PROVENANCE_KEYS/],
+    ['a provenance active key id not in its ring', { NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p9' }, /NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID/],
+    ['a provenance active key id without a ring', { NOTIFICATION_PROVENANCE_KEYS: '' }, /NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID/],
+    ['a provenance ring without an active key id', { NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: '' }, /NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID/],
+    ['a provenance key shared with the sealing ring', { NOTIFICATION_PROVENANCE_KEYS: `p1:${SECRET_KEY}` }, /NOTIFICATION_PROVENANCE_KEYS must differ/],
+    ['a duplicate provenance key id', { NOTIFICATION_PROVENANCE_KEYS: `p1:${randomBytes(32).toString('base64')},p1:${randomBytes(32).toString('base64')}` }, /NOTIFICATION_PROVENANCE_KEYS/],
+    ['a retired provenance key id still in the ring', { NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS: 'p1' }, /NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS/],
     ['a missing RABBITMQ_URL', { RABBITMQ_URL: '' }, /RABBITMQ_URL/],
     ['a missing secret key ring', { NOTIFICATION_SECRET_KEYS: '' }, /NOTIFICATION_SECRET_KEYS/],
     ['a short secret key', { NOTIFICATION_SECRET_KEYS: 'k1:c2hvcnQ=' }, /NOTIFICATION_SECRET_KEYS/],
@@ -133,6 +163,8 @@ describe('notification-service as a built process (production configuration)', (
     expect(run.out()).toMatch(/ConfigError/);
     expect(run.out()).toMatch(name);
     expect(run.out()).not.toContain('secret-looking-value-0123');
+    expect(run.out()).not.toContain(PROVENANCE_KEY); // key material is never echoed
+    expect(run.out()).not.toContain(SECRET_KEY);
     expect(run.out()).not.toContain(DB_PASSWORD);
     expect(run.out()).not.toContain('service_started');
   }, 30_000);

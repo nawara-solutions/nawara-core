@@ -3222,7 +3222,7 @@ test('T7: no committed .host or .port file can choose a production SSH destinati
 
 test('S1b: event provenance (an unkeyed body digest) is allowed only in reviewed services that consume no code-bearing event', async () => {
   const { EVENT_PROVENANCE_APPROVED_SERVICES, checkEventProvenanceOptIn } = await import('./lib/checks.mjs');
-  assert.deepEqual(EVENT_PROVENANCE_APPROVED_SERVICES, ['billing-service', 'audit-service']);
+  assert.deepEqual(EVENT_PROVENANCE_APPROVED_SERVICES, ['billing-service', 'audit-service', 'notification-service']);
   const contract = (service, produces, consumes) => JSON.stringify({ service, produces, consumes });
   const contracts = {
     'auth-service': contract('auth-service', [{ name: 'member.contact_verification_requested', version: 1, codeBearing: true, payload: {} }, { name: 'user.registered', version: 1, payload: {} }], []),
@@ -3234,7 +3234,7 @@ test('S1b: event provenance (an unkeyed body digest) is allowed only in reviewed
   assert.deepEqual(checkEventProvenanceOptIn(contracts, { 'billing-service': billing, 'notification-service': { 'apps/notification-service/src/c.ts': 'bus.subscribe({ queue, handler })' } }), []);
   // any other service naming the store or passing `provenance:` is refused (Notification, Audit, ...)
   for (const text of [optIn, 'subscribe({ queue, handler, provenance: p })', "import { PgProvenanceStore } from '@nawara/service-kit';", 'class S implements ProvenanceStore {}']) {
-    for (const app of ['notification-service', 'file-service']) {
+    for (const app of ['payment-service', 'file-service']) {
       assert.match(checkEventProvenanceOptIn(contracts, { 'billing-service': billing, [app]: { [`apps/${app}/src/c.ts`]: text } }).join(), /is not on EVENT_PROVENANCE_APPROVED_SERVICES/, `${app}: ${text}`);
     }
   }
@@ -3282,4 +3282,50 @@ test('S1b-2: Audit keeps event provenance only behind its admission boundary; re
   assert.ok(bus.includes(admitLine));
   const moved = bus.replace(admitLine, '').replace('      handlerStarted = performance.now();', `${admitLine}      handlerStarted = performance.now();`);
   assert.match(auditAdmissionProblems({ ...files, [KIT_EVENT_BUS]: moved }).join(), /must run `admission` before provenance/);
+});
+
+test('S1b-3: Notification keeps event provenance only as a KEYED commitment; Billing and Audit stay unkeyed; every regression is refused', async () => {
+  const { AUDIT_ADMISSION_FILES, KIT_EVENT_BUS, KIT_PROVENANCE, NOTIFICATION_KEYED_FILES, checkEventProvenanceOptIn, keyedCommitmentProblems } = await import('./lib/checks.mjs');
+  const root = new URL('..', import.meta.url).pathname;
+  const read = (rel) => readFileSync(join(root, rel), 'utf8');
+  const files = Object.fromEntries([...Object.values(AUDIT_ADMISSION_FILES), ...Object.values(NOTIFICATION_KEYED_FILES), KIT_EVENT_BUS, KIT_PROVENANCE].map((rel) => [rel, read(rel)]));
+  const notificationSources = { [NOTIFICATION_KEYED_FILES.consumer]: files[NOTIFICATION_KEYED_FILES.consumer], [NOTIFICATION_KEYED_FILES.config]: files[NOTIFICATION_KEYED_FILES.config] };
+  const billingConsumer = 'apps/billing-service/src/payment-integration/payment-event-consumer.ts';
+  const sources = {
+    'notification-service': notificationSources,
+    'billing-service': { [billingConsumer]: read(billingConsumer) },
+    'audit-service': { [AUDIT_ADMISSION_FILES.consumer]: files[AUDIT_ADMISSION_FILES.consumer] },
+  };
+  const contracts = Object.fromEntries(['billing-service', 'payment-service', 'auth-service', 'notification-service'].map((app) => [app, read(`apps/${app}/contracts/events.json`)]));
+  assert.deepEqual(keyedCommitmentProblems(files, notificationSources), []); // the repository as it stands
+  assert.deepEqual(checkEventProvenanceOptIn(contracts, sources, files), []);
+  const mutate = (rel, from, to) => {
+    assert.ok(files[rel].includes(from), `${rel} no longer contains ${from}`);
+    return { ...files, [rel]: files[rel].replace(from, to) };
+  };
+  const keyedMutations = [
+    [NOTIFICATION_KEYED_FILES.consumer, 'keyedStore: new PgKeyedProvenanceStore(this.db, keys)', 'store: new PgProvenanceStore(this.db)', /must pass `provenance: \{ ownerOf: intakeEventOwner, keyedStore/],
+    [NOTIFICATION_KEYED_FILES.consumer, "if (!this.config.provenanceKeys) return 'intake:provenance_keys_missing';", '', /must refuse to start without the provenance key ring/],
+    [NOTIFICATION_KEYED_FILES.consumer, "if (!keys) throw new Error('intake:provenance_keys_missing');", '', /must refuse to start without the provenance key ring/],
+    [NOTIFICATION_KEYED_FILES.config, "readOptionalKeyEntries(reader, 'NOTIFICATION_PROVENANCE_KEYS'", "readOptionalKeyEntries(reader, 'NOTIFICATION_SECRET_KEYS'", /must read the dedicated NOTIFICATION_PROVENANCE_KEYS ring/],
+    [NOTIFICATION_KEYED_FILES.config, "['NOTIFICATION_PROVENANCE_KEYS', k] as const", "['NOTIFICATION_OTHER', k] as const", /keep it distinct from every other key/],
+    [NOTIFICATION_KEYED_FILES.migration, '"bodyMac"               text NOT NULL,', '"bodyMac"               text NOT NULL,\n  "bodySha256" text,', /no unkeyed body digest/],
+    [KIT_PROVENANCE, 'if (mac === undefined) macs.set(keyId, (mac = bodyMac(key, o.body)));', "if (mac === undefined) macs.set(keyId, (mac = createHash('sha256').update(o.body).digest('hex')));", /`PgKeyedProvenanceStore` must exist and never compute an unkeyed digest/],
+    [KIT_EVENT_BUS, 'await p.keyedStore.record(sub.queue, { ...o, body: Buffer.from(msg.content) })', 'await p.keyedStore.record(sub.queue, { ...o, bodySha256: bodySha256(msg.content), body: Buffer.from(msg.content) })', /must give a keyed store the facts and the raw bytes only/],
+  ];
+  for (const [rel, from, to, expected] of keyedMutations) {
+    const mutated = mutate(rel, from, to);
+    const src = Object.fromEntries(Object.keys(notificationSources).map((k) => [k, mutated[k]]));
+    assert.match(keyedCommitmentProblems(mutated, src).join('\n'), expected, `${rel}: ${from}`);
+  }
+  // an unkeyed digest anywhere in Notification's source is refused, even outside the fixed files
+  assert.match(keyedCommitmentProblems(files, { ...notificationSources, 'apps/notification-service/src/x.ts': "import { bodySha256 } from '@nawara/service-kit';" }).join(), /names an unkeyed body digest/);
+  // Billing or Audit switched to the keyed store (or off the unkeyed one) is a reviewed change, refused here
+  for (const [app, rel] of [['billing-service', billingConsumer], ['audit-service', AUDIT_ADMISSION_FILES.consumer]]) {
+    const text = sources[app][rel];
+    const switched = text.replace('store: new PgProvenanceStore(this.db)', 'keyedStore: new PgKeyedProvenanceStore(this.db, ring)');
+    assert.notEqual(switched, text, `${rel} no longer uses the unkeyed store`);
+    const changedFiles = rel in files ? { ...files, [rel]: switched } : files;
+    assert.match(checkEventProvenanceOptIn(contracts, { ...sources, [app]: { [rel]: switched } }, changedFiles).join('\n'), new RegExp(`apps/${app}: its event provenance must stay on the unkeyed store`));
+  }
 });

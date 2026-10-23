@@ -1,6 +1,7 @@
 import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertDistinctKeys, assertRuntimeDatabaseRole, decodeKey,
-  loadBaseConfig, parseServiceTokens, readDocsCredentials, readKey, readKeyRing, readOptionalKey, type BaseConfig, type ServiceTokenEntry,
+  loadBaseConfig, parseServiceTokens, readDocsCredentials, readKey, readKeyRing, readOptionalKey, readOptionalKeyEntries, type BaseConfig,
+  type ProvenanceKeyRing, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { NotificationCallerPolicy } from '../api/caller-policy.js';
 import type { ResendConfig } from '../delivery/providers/resend.js';
@@ -44,6 +45,14 @@ export interface NotificationConfig extends BaseConfig {
    */
   secretKeys: Map<string, Buffer>;
   secretActiveKeyId: string;
+  /**
+   * Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2", SDD §12.4): the dedicated event-provenance key ring. `NOTIFICATION_PROVENANCE_KEYS`
+   * (`id:base64(32 bytes)[,…]`), `NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID`, and the optional `NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS` (ids
+   * only: keys deliberately retired, whose rows are unverifiable). HMAC-SHA-256 keys for the intake's keyed body commitment, never the
+   * sealing ring and never sharing material with any other key. Unset: undefined, and the event intake refuses to start (`/ready` 503);
+   * set: validated strictly (a fault is a configuration error). Never generated here, never logged.
+   */
+  provenanceKeys?: ProvenanceKeyRing;
   /**
    * `NOTIFICATION_DEFAULT_LOCALE` (required, BCP 47): the last step of locale resolution (SDD §6.4). The copy and this value are
    * product inputs (D7). The event intake refuses to start while a mapped template lacks a published version in it.
@@ -235,9 +244,12 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
   const requestHashPreviousKeys = previousRaw === undefined ? [] : previousRaw.split(',').map((k) => decodeKey('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', k.trim(), keyRules));
   if (requestHashPreviousKeys.length > 2) throw new ConfigError('NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS holds at most 2 keys (a bounded retirement window)');
   const delivery = deliveryConfig(reader, base);
-  // One key, one purpose (Stage 16.9): the secret ring, the request hash and the destination limiter never share key material.
+  const provenanceKeys = provenanceKeyRing(reader, keyRules);
+  // One key, one purpose (Stage 16.9; S0-C2): the secret ring, the provenance ring, the request hash and the destination limiter never
+  // share key material.
   assertDistinctKeys([
     ...[...ring.keys.values()].map((k) => ['NOTIFICATION_SECRET_KEYS', k] as const),
+    ...[...(provenanceKeys?.keys.values() ?? [])].map((k) => ['NOTIFICATION_PROVENANCE_KEYS', k] as const),
     ['NOTIFICATION_REQUEST_HASH_KEY', requestHashKey],
     ...requestHashPreviousKeys.map((k) => ['NOTIFICATION_REQUEST_HASH_PREVIOUS_KEYS', k] as const),
     ...(delivery.destinationLimit ? [['NOTIFICATION_DESTINATION_LIMIT_KEY', delivery.destinationLimit.key] as const] : []),
@@ -255,6 +267,7 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     secretKeys: ring.keys,
     secretActiveKeyId: ring.activeKeyId,
+    ...(provenanceKeys ? { provenanceKeys } : {}),
     defaultLocale,
     callerPolicy: NotificationCallerPolicy.parse(reader.get('NOTIFICATION_SERVICE_POLICY'), [...new Set(serviceTokens.map((t) => t.caller))]),
     requestHashKey,
@@ -269,4 +282,29 @@ export function loadNotificationConfig(env: NodeJS.ProcessEnv = process.env): No
     docs: readDocsCredentials(reader),
     delivery,
   };
+}
+
+const PROVENANCE_KEY_ID = /^[A-Za-z0-9_-]{1,32}$/;
+
+/** Core V2 S1b-3 (S0-C2): the optional provenance key ring (see `NotificationConfig.provenanceKeys`); undefined when none is configured. */
+function provenanceKeyRing(reader: EnvReader, keyRules: { isProduction: boolean }): ProvenanceKeyRing | undefined {
+  const keys = readOptionalKeyEntries(reader, 'NOTIFICATION_PROVENANCE_KEYS', { ...keyRules, exactBytes: 32 });
+  const activeKeyId = reader.get('NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID');
+  const retiredRaw = reader.get('NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS');
+  if (keys === undefined) {
+    if (activeKeyId !== undefined || retiredRaw !== undefined) {
+      throw new ConfigError('NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID and NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS need NOTIFICATION_PROVENANCE_KEYS');
+    }
+    return undefined;
+  }
+  if (activeKeyId === undefined) throw new ConfigError('NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID is required with NOTIFICATION_PROVENANCE_KEYS');
+  if (!keys.has(activeKeyId)) throw new ConfigError('NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID does not name a key in NOTIFICATION_PROVENANCE_KEYS');
+  const retiredKeyIds = new Set<string>();
+  for (const id of retiredRaw === undefined ? [] : retiredRaw.split(',').map((x) => x.trim())) {
+    if (!PROVENANCE_KEY_ID.test(id)) throw new ConfigError('NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS must be ids of 1 to 32 letters, digits, _ or -, comma-separated');
+    if (retiredKeyIds.has(id)) throw new ConfigError('NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS must not repeat an id');
+    if (keys.has(id)) throw new ConfigError('NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS must not name a key that is still in NOTIFICATION_PROVENANCE_KEYS');
+    retiredKeyIds.add(id);
+  }
+  return { keys, activeKeyId, retiredKeyIds };
 }

@@ -146,7 +146,7 @@ describeWithEnv('Stage 21 shared platform integration (all real processes, real 
     envs.notification = {
       NODE_ENV: 'test', PORT: String(PORT.notification), DATABASE_URL: dbs.notification.url, RABBITMQ_URL: brokerUrl, SERVICE_TOKENS: `product-api:${tok.notif.digest}`,
       NOTIFICATION_SERVICE_POLICY: JSON.stringify({ callers: { 'product-api': { templates: ['membership.approved'], channels: ['EMAIL'], organizations: 'none' } } }),
-      NOTIFICATION_SECRET_KEYS: `k1:${b64()}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: b64(),
+      NOTIFICATION_SECRET_KEYS: `k1:${b64()}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_PROVENANCE_KEYS: `p1:${b64()}`, NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p1', NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: b64(),
     };
 
     dbs.release = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'e2es21release');

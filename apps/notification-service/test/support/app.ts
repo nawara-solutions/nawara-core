@@ -28,6 +28,9 @@ export const UNREACHABLE_DATABASE_URL = 'postgres://nobody:nothing@127.0.0.1:1/n
 export const UNREACHABLE_RABBITMQ_URL = 'amqp://nobody:nothing@127.0.0.1:1';
 /** A fixed test key ring (never a real secret). */
 export const TEST_SECRET_KEYS = `t1:${randomBytes(32).toString('base64')}`;
+/** Core V2 S1b-3: a synthetic provenance key ring, random per run (never a published or committed key). */
+export const TEST_PROVENANCE_KEY = randomBytes(32);
+export const TEST_PROVENANCE_KEYS = `p1:${TEST_PROVENANCE_KEY.toString('base64')}`;
 /** The test request-hash key (never a real secret). */
 export const TEST_REQUEST_HASH_KEY = randomBytes(32);
 /** The test destination-limiter key (Stage 16.9; never a real secret). */
@@ -63,6 +66,8 @@ export async function createTestApp(
     RABBITMQ_URL: opts.rabbitmqUrl ?? process.env.TEST_RABBITMQ_URL ?? UNREACHABLE_RABBITMQ_URL,
     NOTIFICATION_SECRET_KEYS: TEST_SECRET_KEYS,
     NOTIFICATION_SECRET_ACTIVE_KEY_ID: 't1',
+    NOTIFICATION_PROVENANCE_KEYS: TEST_PROVENANCE_KEYS,
+    NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p1',
     NOTIFICATION_DEFAULT_LOCALE: 'en',
     NOTIFICATION_REQUEST_HASH_KEY: TEST_REQUEST_HASH_KEY.toString('base64'),
     NOTIFICATION_DESTINATION_LIMIT_KEY: TEST_DESTINATION_LIMIT_KEY.toString('base64'),
