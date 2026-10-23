@@ -131,6 +131,17 @@ status change still needs its own explicit owner authorization.
   Payment grants are defined in code only, never provisioned by S1d; R2b needs only Payment's ordinary grants. A rollback that restores
   a broader grant is a security-impacting exception needing its own authorization. Documentation only: no code, broker, permission or
   production change.
+- **S0-C6 S1e consumer enforcement (2026-10-23, owner-approved clarification).** [ADR-0057](../adr/0057-messaging-conventions.md)
+  §13.5 ("S0-C6"); §13.2–§13.5, S0-C1 to S0-C5 and safeguard S-8 unchanged. The trust decision is durable before any business handler
+  runs and before any business de-duplication slot is claimed; the stored verified observation is authoritative (S0-C4), never an
+  aggregate conflict. Per-consumer outcomes for every classification; permanent refusals go through privacy-safe dead-letter paths; a
+  transient lookup or commit failure is a bounded hold, never processing. Billing is verified-only from its first production deployment
+  (no observe-only, compatibility, bypass or override), refuses to start without enforcement, and for replays uses trusted values stored
+  from the verified original (an additive migration after a field-use inventory, S1e-2). Audit keeps admission first and alone may run a
+  temporary, explicitly configured compatibility phase, ended only after verified publisher identity, the C-4 disposition, S1-R and its
+  gates, strict testing and Owner approval. Notification is verified-only from its first deployment; a missing key holds, a retired key
+  refuses (`replay_unverifiable`), and refused code-bearing events never keep their code. Documentation only: nothing implemented or
+  enabled, no production change.
 
 ## 2. ADR disposition
 
@@ -146,7 +157,7 @@ immutable; a later decision is a new ADR). Reciprocal notes on Accepted ADRs nee
 | [0045](../adr/0045-commercial-entitlementkind-compatibility-fields.md) `entitlementKind` | Proposed | Revision 1: wording aligned; no field change |
 | [0046](../adr/0046-notification-service-architecture.md) notification | Accepted | none; commercial IN_APP stays excluded (§5) |
 | [0049](../adr/0049-audit-trail-architecture.md) audit trail | Accepted | not edited; amended by 0069 when 0069 is Accepted; reciprocal note pending approval |
-| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5); S0-C2 Notification keyed body commitment, a normative revision of §13.2 (2026-10-23, §1.5); S0-C3 replay verification rollout, a clarification of §13.4 (2026-10-23, §1.5); S0-C4 Payment-first re-emission, a clarification of §13.7 resolving OD-15 for Payment (2026-10-23, §1.5); S0-C5 broker topic permissions, a clarification of §13.1 (2026-10-23, §1.5) |
+| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5); S0-C2 Notification keyed body commitment, a normative revision of §13.2 (2026-10-23, §1.5); S0-C3 replay verification rollout, a clarification of §13.4 (2026-10-23, §1.5); S0-C4 Payment-first re-emission, a clarification of §13.7 resolving OD-15 for Payment (2026-10-23, §1.5); S0-C5 broker topic permissions, a clarification of §13.1 (2026-10-23, §1.5); S0-C6 S1e consumer enforcement, a clarification of §13.5 resolving the S0-C3 per-consumer refusal semantics (2026-10-23, §1.5) |
 | [0060](../adr/0060-company-platform-organization-lifecycle.md) lifecycle | Accepted | not edited; decision note DN-1 recorded here (§3.6) |
 | [0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md) refund receipts | Proposed (new) | new |
 | [0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md) no Nawara cash settlement | Proposed (new) | new; partly supersedes 0007 |
