@@ -16,6 +16,9 @@ export const BROKER_SIGNALS = [
   'channel_error', 'confirm_timeout', 'settle_failed', 'connection_abandoned',
   // Core V2 S1b-2: a delivery held and requeued because its provenance could not be committed (§13.3), and conflict evidence recorded.
   'provenance_deferred', 'provenance_conflict',
+  // Core V2 S1e-3: the trust decisions that are not a plain acceptance (S0-C6): a hold (requeued, the handler not run), a refusal before the
+  // handler, an unverified delivery accepted in the compatibility phase. Their basis is in the kit's bounded trust metric, not a label here.
+  'trust_held', 'trust_refused', 'trust_compatibility',
 ] as const;
 export type BrokerSignal = (typeof BROKER_SIGNALS)[number];
 
@@ -34,6 +37,9 @@ const BY_NAME: Record<string, BrokerSignal> = {
   rabbitmq_connection_abandoned: 'connection_abandoned',
   event_provenance_deferred: 'provenance_deferred',
   event_provenance_conflict: 'provenance_conflict',
+  event_trust_held: 'trust_held',
+  event_trust_refused: 'trust_refused',
+  event_trust_compatibility: 'trust_compatibility',
 };
 const CLASS = /\bclassification=(malformed|permanent|retries_exhausted)\b/;
 

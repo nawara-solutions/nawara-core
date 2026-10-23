@@ -302,7 +302,8 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     const e = auditEnvelope('payment.succeeded');
     try {
       await publish(e);
-      await until(() => notices.some((n) => n.startsWith('event_provenance_deferred') && n.includes(e.id)));
+      // Core V2 S1e-3: the enforced subscription holds it (no trust decision without the store), the handler never running
+      await until(() => notices.some((n) => n.startsWith('event_trust_held') && n.includes(e.id) && n.includes('basis=provenance_unavailable')));
       expect(notices.some((n) => n.startsWith('event_retry_scheduled') && n.includes(e.id))).toBe(false);
       expect(t.logs.some((l) => String(l.msg).startsWith(`audit_ingest_transient_failure eventId=${e.id}`))).toBe(false); // ingestion never ran
       expect(await depth(ch, RETRY_QUEUE)).toBe(0);
@@ -369,7 +370,7 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     expect(await sql(d.adminUrl, `SELECT 1 FROM event_provenance WHERE "eventId" = $1`, [e.id])).toHaveLength(1);
   }, 60_000);
 
-  it('REPLAY of a conflicting event is refused again (`rejected_again`) and never rewrites history', async () => {
+  it('REPLAY of a conflicting event is refused again (`rejected_again`) and never rewrites history (S1e-3: before ingestion, as a replay mismatch)', async () => {
     await start();
     const e = auditEnvelope('file.deleted');
     await publish(e);
@@ -380,7 +381,8 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     const r = await replayDeadLetter(conn, DEAD_QUEUE, e.id, { waitMs: 15_000 });
     expect(r.outcome).toBe('rejected_again');
     const dead = await drainDead(ch);
-    expect(dead.map((x) => x.reason)).toEqual(['event_id_conflict']);
+    // the first refusal was ingestion's `event_id_conflict`; the replay of that copy differs from the stored original (S0-C6: refused)
+    expect(dead.map((x) => x.reason)).toEqual(['untrusted_replay_mismatch']);
     expect(await rows(e.id)).toEqual(before);
   }, 40_000);
 

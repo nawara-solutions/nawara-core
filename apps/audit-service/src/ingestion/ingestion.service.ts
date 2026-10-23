@@ -9,6 +9,7 @@ import { AuditPersistenceError } from '../persistence/persistence-error.js';
 import { auditAdmission } from './admission.js';
 import { CLOCK_SKEW_TOLERANCE_MS } from './ingestion.constants.js';
 import { IngestionCounters, type IngestionRefusal } from './ingestion-counters.js';
+import type { TrustRefusal } from './trust-policy.js';
 
 export type IngestOutcome = 'persisted' | 'duplicate';
 
@@ -62,6 +63,15 @@ export class IngestionService {
       this.refuse(decision.reason as IngestionRefusal, `eventId=${safeId(event?.id)}`);
     }
     return decision;
+  }
+
+  /**
+   * Core V2 S1e-3: the handler's own trust refusal (`trust-policy.ts`), counted and logged like any refusal; the returned failure is thrown
+   * by the caller before `ingest`, so the kit dead-letters the delivery under `auditDeadLetterPolicy` and nothing is stored.
+   */
+  refuseUntrusted(reason: TrustRefusal, event: EventEnvelope): PermanentEventFailure {
+    this.counters.bump('received');
+    return this.refuse(reason, `eventId=${safeId(event?.id)}`);
   }
 
   async ingest(event: EventEnvelope): Promise<IngestOutcome> {

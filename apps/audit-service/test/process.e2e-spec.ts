@@ -114,6 +114,11 @@ describe('audit-service as a built process (production configuration)', () => {
     ['a non-AMQP RABBITMQ_URL', { RABBITMQ_URL: `http://audit_consumer:${MQ_PASSWORD}@broker:5672` }, /RABBITMQ_URL/],
     ['a heartbeat outside its bounds', { RABBITMQ_HEARTBEAT_S: '0' }, /RABBITMQ_HEARTBEAT_S/],
     ['a query deadline not above the statement timeout', { DB_QUERY_TIMEOUT_MS: '1000' }, /DB_QUERY_TIMEOUT_MS/],
+    // Core V2 S1e-3: the enforcement mode is compatibility or strict, exactly; anything else never falls back to either (or to none)
+    ['an unknown enforcement mode', { AUDIT_PROVENANCE_ENFORCEMENT: 'observe' }, /AUDIT_PROVENANCE_ENFORCEMENT/],
+    ['a disabled enforcement mode', { AUDIT_PROVENANCE_ENFORCEMENT: 'off' }, /AUDIT_PROVENANCE_ENFORCEMENT/],
+    ['a strict mode in another case', { AUDIT_PROVENANCE_ENFORCEMENT: 'Strict' }, /AUDIT_PROVENANCE_ENFORCEMENT/],
+    ['two enforcement modes at once', { AUDIT_PROVENANCE_ENFORCEMENT: 'strict,compatibility' }, /AUDIT_PROVENANCE_ENFORCEMENT/],
   ])('refuses to start on %s: non-zero exit, a clear message, the value never echoed', async (_label, env, name) => {
     const { digest } = generateServiceToken();
     const run = start({ NODE_ENV: 'production', PORT: String(await freePort()), ...REQUIRED, SERVICE_TOKENS: `some-core-service:${digest}`, ...env });

@@ -1,6 +1,7 @@
 import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
+import { AUDIT_ENFORCEMENT_MODES, type AuditEnforcementMode } from '../ingestion/trust-policy.js';
 import { AuditCallerPolicy } from '../policy/caller-policy.js';
 
 /** The one identity of this service (Stage 18.1, A68): logs, the database `application_name`, Docker, documentation. */
@@ -37,6 +38,12 @@ export interface AuditConfig extends BaseConfig {
   /** `RABBITMQ_HEARTBEAT_S` (default 10, 5–60): a silent broker is detected within about 3 × this. */
   rabbitmqHeartbeatS: number;
   /**
+   * Core V2 S1e-3 (ADR-0057 "S0-C6"): `AUDIT_PROVENANCE_ENFORCEMENT`, `compatibility` (the default: Audit's temporary compatibility phase,
+   * what production runs until the Owner authorizes its exit) or `strict` (verified deliveries only; selected explicitly). Any other value
+   * refuses to start: there is no observe-only or unenforced mode. See `ingestion/trust-policy.ts`.
+   */
+  provenanceEnforcement: AuditEnforcementMode;
+  /**
    * Stage 18.6 query rate limits, requests per caller per 60 s (A66), every attempt by an authorized caller counted:
    * `AUDIT_QUERY_RATE_PER_CALLER` (organization scope, all organizations together; default 600), `AUDIT_QUERY_RATE_PER_ORGANIZATION`
    * (organization scope, one caller and one organization; default 120; ≤ the per-caller limit), `AUDIT_PLATFORM_QUERY_RATE_PER_CALLER`
@@ -70,6 +77,7 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
     rabbitmqUrl: reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']),
     rabbitmqConfirmTimeoutMs: reader.int('RABBITMQ_CONFIRM_TIMEOUT_MS', { default: 5_000, min: 100, max: 60_000 }),
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
+    provenanceEnforcement: reader.oneOf('AUDIT_PROVENANCE_ENFORCEMENT', AUDIT_ENFORCEMENT_MODES, 'compatibility'),
     queryRates: queryRates(reader),
     ...(reader.get('AUTH_SERVICE_URL') === undefined ? {} : {
       ownerAccess: {

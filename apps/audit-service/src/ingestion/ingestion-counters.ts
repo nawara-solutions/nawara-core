@@ -1,6 +1,7 @@
 import { AUDIT_REFUSALS } from '@nawara/audit-contract';
 import { ADMISSION_REFUSALS } from './admission.js';
 import { LogBudget } from './log-budget.js';
+import { TRUST_REFUSALS } from './trust-policy.js';
 
 /**
  * Process-local ingestion counters for the `audit_ops_snapshot` line (the File / Notification pattern: Core has no metrics platform yet;
@@ -9,7 +10,8 @@ import { LogBudget } from './log-budget.js';
  */
 // (`transaction_required` is the producer writer's and never occurs here; it stays in the set only because the type is the contract's.)
 // Core V2 S1b-2: plus the admission refusals that are not contract codes (`noncanonical_body`, `confidentiality_screen`, `admission_error`).
-export const INGESTION_REFUSALS = [...AUDIT_REFUSALS, 'event_id_conflict', 'invalid_record', ...ADMISSION_REFUSALS] as const;
+// Core V2 S1e-3: plus the handler's own trust refusals (the kit's `untrusted_<basis>` refusals are counted as broker signals).
+export const INGESTION_REFUSALS = [...AUDIT_REFUSALS, 'event_id_conflict', 'invalid_record', ...ADMISSION_REFUSALS, ...TRUST_REFUSALS] as const;
 export type IngestionRefusal = (typeof INGESTION_REFUSALS)[number];
 
 const OUTCOMES = ['received', 'persisted', 'duplicate', 'refused', 'transient_failure', 'clock_skew_future'] as const;
