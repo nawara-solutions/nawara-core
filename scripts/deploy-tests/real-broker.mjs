@@ -83,7 +83,7 @@ test('guest does not exist: the default credentials are refused', async () => {
 
 test('ORDERING HAZARD: an audit event published before the audit queue is bound is confirmed and silently dropped', async () => {
   const auth = track(bus('auth-service'));
-  const early = event('audit.probe.before_binding');
+  const early = event('audit.owner.factor_enrolled');
   await auth.publish(early); // resolves: the broker CONFIRMED it (the relay would now mark the outbox row published)
   const audit = track(bus('audit-service'));
   const seen = [];
@@ -108,22 +108,24 @@ test('Auth publishes audit evidence and Audit receives it; a failing delivery is
   const seen = [];
   await audit.subscribe({
     queue: AUDIT_QUEUE, bindings: ['audit.#'],
-    handler: async (e) => { if (e.name === 'audit.probe.fails') throw new Error('probe failure'); seen.push(e.id); },
+    handler: async (e) => { if (e.name === 'audit.owner.factor_removed') throw new Error('probe failure'); seen.push(e.id); },
   });
   const auth = track(bus('auth-service'));
-  const ok = event('audit.probe.delivered');
+  const ok = event('audit.owner.password_changed');
   await auth.publish(ok);
   assert.ok(await until(() => seen.includes(ok.id)), 'the audit event must arrive');
   const deadBefore = queueDepth('audit-service.audit.dead') ?? 0;
-  await auth.publish(event('audit.probe.fails'));
+  await auth.publish(event('audit.owner.factor_removed'));
   assert.ok(await until(() => queueDepth('audit-service.audit.dead') === deadBefore + 1), 'retry (via .retry) then dead-letter (.dead) must both be permitted');
   await audit.close();
 });
 
-test('Auth may publish ONLY audit.* (topic permission): a domain event is refused and nothing else is allowed', async () => {
+test('Auth may publish ONLY its own audit actions (exact generated topic grants, S1d-2): a domain event, another producer\'s audit action and an uncataloged key are refused', async () => {
   const auth = track(bus('auth-service'));
   await assert.rejects(auth.publish(event('membership.approved')), 'AUTH_EVENTS=off: a domain event must be refused by the broker');
-  await auth.publish(event('audit.probe.after_refusal')); // the bus recovers its channel; audit evidence still flows
+  await assert.rejects(track(bus('auth-service')).publish(event('audit.payment.succeeded')), 'another producer\'s audit action must be refused');
+  await assert.rejects(track(bus('auth-service')).publish(event('audit.probe.uncataloged')), 'an uncataloged key must be refused');
+  await auth.publish(event('audit.owner.secret_key_rotated')); // the bus recovers its channel; audit evidence still flows
   const url = urlOf('auth-service');
   assert.match(String((await brokerRefusal(url, (ch) => ch.assertQueue('rogue-queue')))?.message), /ACCESS_REFUSED/);
   assert.match(String((await brokerRefusal(url, (ch) => ch.consume(AUDIT_QUEUE, () => {})))?.message), /ACCESS_REFUSED/);
@@ -138,9 +140,10 @@ test('Audit cannot publish to the event exchange (it is a consumer only)', async
   assert.match(String(refusal?.message), /ACCESS_REFUSED/);
 });
 
-test('an audit-only producer (organization-service) publishes audit.* and nothing else', async () => {
+test('an audit-only producer (organization-service) publishes its own audit actions and nothing else', async () => {
   const org = track(bus('organization-service'));
-  await org.publish(event('audit.probe.organization', 'organization-service'));
+  await org.publish(event('audit.company.created', 'organization-service'));
+  await assert.rejects(track(bus('organization-service')).publish(event('audit.owner.factor_enrolled', 'organization-service')));
   await assert.rejects(org.publish(event('payment.succeeded', 'organization-service')));
 });
 
@@ -154,7 +157,7 @@ test('notification-service declares its intake queue for its own bindings and ca
 
 test('queued evidence survives recreating the broker container (fixed hostname + volume) and provisioning is idempotent', async () => {
   const auth = track(bus('auth-service'));
-  await auth.publish(event('audit.probe.persisted')); // the audit queue exists and has no consumer now: the message waits
+  await auth.publish(event('audit.account.disabled')); // the audit queue exists and has no consumer now: the message waits
   assert.ok(await until(() => (queueDepth(AUDIT_QUEUE) ?? 0) >= 1));
   const before = queueDepth(AUDIT_QUEUE);
   await auth.close();

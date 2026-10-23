@@ -1,0 +1,8 @@
+{
+  "environment": "production",
+  "domainEvents": {
+    "auth-service": "inactive",
+    "billing-service": "active",
+    "payment-service": "active"
+  }
+}

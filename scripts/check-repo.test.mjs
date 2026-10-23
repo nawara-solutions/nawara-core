@@ -3598,3 +3598,82 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     assert.ok(!/provision\.sh/.test(tp.checkTopicPermissionSources.toString().replace(/\/\/.*$/gm, '')));
   });
 }
+
+// ─────────────────────────────────────────────────────────────── Core V2 S1d-2: provision.sh carries exactly the generated grants
+{
+  const tp = await import('./lib/topic-permissions.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const APPS = readdirSync(new URL('../apps/', import.meta.url));
+  const CONTRACTS = Object.fromEntries(APPS.flatMap((a) => {
+    try {
+      return [[a, read(`apps/${a}/contracts/events.json`)]];
+    } catch {
+      return [];
+    }
+  }));
+  const base = { contracts: CONTRACTS, apps: APPS, auditCatalog: read('libs/audit-contract/src/catalog.ts'), provision: read(tp.PROVISION_FILE), activation: read(tp.ACTIVATION_FILE) };
+  const check = (over = {}) => tp.checkProvisionTopicGrants({ ...base, ...over }).join('\n');
+  const edit = (text, from, to) => {
+    assert.ok(text.includes(from), `fixture drifted: ${from.slice(0, 80)}`);
+    return text.split(from).join(to);
+  };
+  const regenerated = (over) => {
+    const block = tp.renderProvisionTopicGrants(tp.generateTopicPermissions({ ...base, ...over, activation: JSON.parse(over.activation ?? base.activation) }));
+    const current = tp.generatedBlockOf(base.provision);
+    const at = base.provision.indexOf(current);
+    return base.provision.slice(0, at) + block + base.provision.slice(at + current.length);
+  };
+  const authWrite = tp.generateTopicPermissions({ ...base, activation: JSON.parse(base.activation) }).identities['auth-service'].write.regex;
+
+  test('S1d-2 the committed provisioning grants are exactly the generated ones; the activation file is the reviewed production state', () => {
+    assert.equal(check(), '');
+    assert.deepEqual(JSON.parse(base.activation), { environment: 'production', domainEvents: { 'auth-service': 'inactive', 'billing-service': 'active', 'payment-service': 'active' } });
+    assert.match(base.provision, /^SERVICES="\$\{RABBITMQ_SERVICES:-audit-service auth-service\}"$/m, 'the default selection is unchanged');
+  });
+
+  test('S1d-2 drift: any edit of the generated block is refused (widening, removal, extra identity, altered key, wildcard)', () => {
+    const stale = /generated topic grants are stale or edited/;
+    assert.match(check({ provision: edit(base.provision, `TOPIC_WRITE='${authWrite}'`, "TOPIC_WRITE='^audit\\.'") }), stale, 'a broad prefix');
+    assert.match(check({ provision: edit(base.provision, `TOPIC_WRITE='${authWrite}'`, "TOPIC_WRITE='.*'") }), stale, 'a wildcard');
+    assert.match(check({ provision: edit(base.provision, 'audit\\.account\\.disabled|', '') }), stale, 'a removed key');
+    assert.match(check({ provision: edit(base.provision, 'audit\\.account\\.disabled|', 'audit\\.account\\.deleted|') }), stale, 'an altered key');
+    assert.match(check({ provision: edit(base.provision, "TOPIC_READ='^(payment\\.cancelled|", "TOPIC_READ='^(payment\\.created|payment\\.cancelled|") }), stale, 'Billing reading payment.created');
+    assert.match(check({ provision: edit(base.provision, "    *) return 1 ;;\n  esac\n}\n# END GENERATED", "    ghost-service)\n      TOPIC_WRITE='.*'\n      TOPIC_READ='.*' ;;\n    *) return 1 ;;\n  esac\n}\n# END GENERATED") }), stale, 'an extra identity');
+    assert.match(check({ provision: edit(base.provision, '# END GENERATED TOPIC GRANTS\n', '') }), /block .* is missing or malformed/, 'missing markers');
+  });
+
+  test('S1d-2 drift: a source or activation change without a regenerated block is refused, and regenerating resolves it (one direction only)', () => {
+    const stale = /generated topic grants are stale or edited/;
+    const auditActive = JSON.stringify({ environment: 'production', domainEvents: { 'auth-service': 'active', 'billing-service': 'active', 'payment-service': 'active' } });
+    assert.match(check({ activation: auditActive }), stale, 'Auth activated without regenerating');
+    assert.equal(check({ activation: auditActive, provision: regenerated({ activation: auditActive }) }), '');
+    const c = JSON.parse(CONTRACTS['payment-service']);
+    c.produces.push({ name: 'payment.disputed', version: 1, payload: {} });
+    const contracts = { ...CONTRACTS, 'payment-service': JSON.stringify(c) };
+    assert.match(check({ contracts }), stale, 'a new event without a reviewed grant');
+    assert.equal(check({ contracts, provision: regenerated({ contracts }) }), '');
+    const moved = edit(base.auditCatalog, "producer: 'file-service', category: 'business'", "producer: 'release-service', category: 'business'");
+    assert.match(check({ auditCatalog: moved }), stale, 'stale audit ownership');
+  });
+
+  test('S1d-2 no grant outside the generated block, no identity without generated grants, a fail-closed activation file', () => {
+    assert.match(check({ provision: edit(base.provision, 'producer() { PERM_CONF=', "TOPIC_WRITE='^audit\\.'\nproducer() { PERM_CONF=") }), /a topic grant is set outside the generated block/);
+    assert.match(check({ provision: edit(base.provision, '    *) return 1 ;;\n  esac\n  topic_grants_for', '    ghost-service) producer ;;\n    *) return 1 ;;\n  esac\n  topic_grants_for') }), /must be exactly those with generated topic grants/);
+    assert.match(check({ provision: edit(base.provision, '  topic_grants_for "$1" || return 1\n', '  topic_grants_for "$1" || true\n') }), /must take the topic grants from topic_grants_for/);
+    assert.match(check({ provision: base.provision + '\nctl set_topic_permissions -p "$VHOST" x nawara.events ".*" ".*"\n' }), /must be set once/);
+    assert.match(check({ activation: JSON.stringify({ environment: 'staging', domainEvents: JSON.parse(base.activation).domainEvents }) }), /environment must be production/);
+    assert.match(check({ activation: JSON.stringify({ environment: 'production', domainEvents: { 'auth-service': 'inactive', 'payment-service': 'active' } }) }), /does not declare billing-service/);
+    assert.match(check({ activation: JSON.stringify({ environment: 'production', domainEvents: { ...JSON.parse(base.activation).domainEvents, 'auth-service': 'enabled' } }) }), /must be active or inactive/);
+    assert.match(check({ activation: undefined }), /missing or not valid JSON/);
+    assert.match(check({ provision: undefined }), /provision\.sh is missing/);
+  });
+
+  test('S1d-2 the rendered block is safe bash: single-quoted exact grants, refusing any other service, never a quote break-out', () => {
+    const block = tp.generatedBlockOf(base.provision);
+    assert.ok(block.split('\n').filter((l) => /TOPIC_(WRITE|READ)=/.test(l)).every((l) => /^ {6}TOPIC_(WRITE|READ)='(\^\(\?!\)\$|\^\([a-z0-9_\\.|#]+\)\$)'( ;;)?$/.test(l)));
+    assert.match(block, /\n {4}\*\) return 1 ;;\n/);
+    const out = tp.generateTopicPermissions({ ...base, activation: JSON.parse(base.activation) });
+    out.identities['auth-service'].write.regex = "^(x')$";
+    assert.throws(() => tp.renderProvisionTopicGrants(out), /cannot be quoted safely/);
+  });
+}
