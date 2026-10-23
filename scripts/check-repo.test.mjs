@@ -3426,3 +3426,175 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
   assert.match(checkEventReemission(contracts, files, { 'auth-service': { 'apps/auth-service/src/r.ts': "inspectReemissionEligibility(opts, { eventId, eventName: 'admin.operator_code_issued' })" } }).join(), /auth-service is not on REEMISSION_INTEGRATED_SERVICES/);
   assert.match(checkEventReemission(contracts, files, { 'billing-service': { 'apps/billing-service/src/r.ts': 'migrationOwnership(files)' } }).join(), /billing-service is not on REEMISSION_INTEGRATED_SERVICES/);
 });
+
+// ─────────────────────────────────────────────────────────────── Core V2 S1d-1: the catalog-driven topic permission generator
+{
+  const tp = await import('./lib/topic-permissions.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const APPS = readdirSync(new URL('../apps/', import.meta.url));
+  const CONTRACTS = Object.fromEntries(APPS.flatMap((a) => {
+    try {
+      return [[a, read(`apps/${a}/contracts/events.json`)]];
+    } catch {
+      return [];
+    }
+  }));
+  const CATALOG = read('libs/audit-contract/src/catalog.ts');
+  const manifest = (domainEvents = { 'auth-service': 'inactive', 'billing-service': 'active', 'payment-service': 'active' }) => ({ environment: 'test', domainEvents });
+  const gen = (over = {}) => tp.generateTopicPermissions({ contracts: CONTRACTS, auditCatalog: CATALOG, apps: APPS, activation: manifest(), ...over });
+  const refused = (over, pattern, title) => assert.throws(() => gen(over), (e) => e instanceof tp.TopicPermissionError && pattern.test(e.message), title);
+  const contract = (app) => JSON.parse(CONTRACTS[app]);
+  const withContract = (app, c) => ({ ...CONTRACTS, [app]: JSON.stringify(c) });
+  const auditOf = (out, s) => out.identities[s].write.keys.filter((k) => k.startsWith('audit.'));
+  const matches = (regex, key) => new RegExp(regex).test(key);
+
+  test('S1d-1 determinism: the same sources and manifest give identical output, whatever the input order', () => {
+    const a = gen();
+    assert.deepEqual(gen(), a);
+    const reordered = gen({ contracts: Object.fromEntries(Object.entries(CONTRACTS).reverse()), apps: [...APPS].reverse(),
+      activation: manifest({ 'payment-service': 'active', 'billing-service': 'active', 'auth-service': 'inactive' }) });
+    assert.equal(JSON.stringify(reordered), JSON.stringify(a));
+    const shuffled = CATALOG.replace("  'file.deleted': {", "  'zz.reordered_marker': { producer: 'file-service' },\n  'file.deleted': {");
+    assert.deepEqual(gen({ auditCatalog: shuffled }).identities['file-service'].write.keys, ['audit.file.deleted', 'audit.file.integrity_incident', 'audit.zz.reordered_marker']);
+    for (const id of Object.values(a.identities)) for (const g of [id.write, id.read]) assert.deepEqual(g.keys, [...g.keys].sort());
+  });
+
+  test('S1d-1 ownership: each producer gets exactly its own domain events and audit actions, and nothing of anyone else', () => {
+    const out = gen();
+    const catalog = tp.parseAuditCatalog(CATALOG);
+    for (const [service, id] of Object.entries(out.identities)) {
+      const ownAudit = catalog.actions.filter((a) => a.producer === service && !tp.LOCAL_AUDIT_PRODUCERS.includes(service)).map((a) => `audit.${a.action}`).sort();
+      assert.deepEqual(auditOf(out, service), ownAudit, `${service} audit actions`);
+      const domain = id.write.keys.filter((k) => !k.startsWith('audit.'));
+      assert.deepEqual(domain, id.domainEvents === 'active' ? contract(service).produces.map((e) => e.name).sort() : [], `${service} domain events`);
+      for (const k of id.write.keys) for (const [other, o] of Object.entries(out.identities)) if (other !== service) assert.ok(!o.write.keys.includes(k), `${k} granted to ${service} and ${other}`);
+    }
+    // the investigation's counts
+    const counts = Object.fromEntries(Object.entries(out.identities).map(([s, id]) => [s, [id.write.keys.length, id.read.keys.length]]));
+    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [28, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+  });
+
+  test('S1d-1 Payment: its five ordinary events and five audit actions; not the re-emission allow-list; no unregistered action', () => {
+    const p = gen().identities['payment-service'];
+    assert.deepEqual(p.write.keys, ['audit.payment.cancelled', 'audit.payment.created', 'audit.payment.expired', 'audit.payment.failed', 'audit.payment.succeeded',
+      'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded']);
+    assert.ok(p.write.keys.includes('payment.created')); // the producer catalog, not the S0-C4 re-emission allow-list
+    assert.ok(!p.write.keys.some((k) => /reemit/.test(k)));
+    assert.deepEqual(p.read, { keys: [], regex: tp.DENY_ALL }); // producer only
+    assert.ok(!matches(p.write.regex, 'payment.refunded') && !matches(p.write.regex, 'audit.payment.event_reemitted'));
+  });
+
+  test('S1d-1 Billing: one identity, its own writes and exactly the four Payment events it binds', () => {
+    const b = gen().identities['billing-service'];
+    assert.deepEqual(b.read.keys, ['payment.cancelled', 'payment.expired', 'payment.failed', 'payment.succeeded']);
+    assert.ok(b.write.keys.includes('invoice.created') && !b.write.keys.some((k) => k.startsWith('payment.') || k.startsWith('billing.') || k.startsWith('refund.')));
+    assert.ok(!b.read.keys.includes('payment.created'));
+    for (const other of ['payment-service', 'notification-service', 'auth-service']) assert.ok(!gen().identities[other].read.keys.some((k) => b.read.keys.includes(k)));
+  });
+
+  test('S1d-1 consumers: Notification binds its nine names; Audit only its documented `audit.#` binding; neither publishes', () => {
+    const out = gen();
+    const n = out.identities['notification-service'];
+    assert.deepEqual(n.read.keys, contract('notification-service').consumes.map((e) => e.name).sort());
+    assert.equal(n.read.keys.length, 9);
+    assert.equal(n.write.regex, tp.DENY_ALL);
+    const a = out.identities['audit-service'];
+    assert.deepEqual(a.read, { keys: ['audit.#'], regex: '^(audit\\.#)$', bindingException: 'audit-all-actions' });
+    assert.ok(matches(a.read.regex, 'audit.#') && !matches(a.read.regex, '#') && !matches(a.read.regex, 'payment.#') && !matches(a.read.regex, 'audit.#.x'));
+    assert.equal(a.write.regex, tp.DENY_ALL); // its own action is recorded locally, never published
+    assert.deepEqual(a.localOnlyAuditActions, ['audit.platform_query.executed']);
+  });
+
+  test('S1d-1 activation: Auth domain events only when explicitly active; unknown, missing or extra declarations fail closed', () => {
+    const inactive = gen().identities['auth-service'];
+    assert.equal(inactive.domainEvents, 'inactive');
+    assert.equal(inactive.deniedInactive.length, 12);
+    assert.ok(inactive.deniedInactive.includes('member.contact_verification_requested'));
+    assert.ok(inactive.write.keys.every((k) => k.startsWith('audit.')));
+    const active = gen({ activation: manifest({ 'auth-service': 'active', 'billing-service': 'active', 'payment-service': 'active' }) }).identities['auth-service'];
+    assert.equal(active.write.keys.length, 40);
+    assert.ok(matches(active.write.regex, 'admin.operator_code_issued'));
+    refused({ activation: undefined }, /an activation manifest is required/, 'no manifest');
+    refused({ activation: manifest({ 'billing-service': 'active', 'payment-service': 'active' }) }, /does not declare auth-service/, 'missing producer');
+    refused({ activation: manifest({ 'auth-service': 'on', 'billing-service': 'active', 'payment-service': 'active' }) }, /must be active or inactive/, 'unknown state');
+    refused({ activation: manifest({ 'auth-service': 'inactive', 'billing-service': 'active', 'payment-service': 'active', 'file-service': 'active' }) }, /declares file-service, which declares no domain event/, 'undeclared family');
+    refused({ activation: { environment: 'test', domainEvents: {}, defaults: 'active' } }, /exactly `environment` and `domainEvents`/, 'extra field');
+    refused({ activation: { domainEvents: manifest().domainEvents } }, /exactly `environment` and `domainEvents`/, 'no environment');
+    // the code-bearing names stay Auth's even while inactive: nobody else may declare them
+    const c = contract('billing-service');
+    c.produces.push({ name: 'member.contact_verification_requested', version: 1, payload: {} });
+    refused({ contracts: withContract('billing-service', c) }, /two owners/, 'a code-bearing name claimed by another producer');
+  });
+
+  test('S1d-1 regex security: exact, anchored, escaped; no prefix, suffix or wildcard widening; an empty set denies all', () => {
+    const r = tp.exactKeyRegex(['payment.created', 'audit.payment.created']);
+    assert.equal(r, '^(audit\\.payment\\.created|payment\\.created)$');
+    for (const ok of ['payment.created', 'audit.payment.created']) assert.ok(matches(r, ok));
+    for (const no of ['payment.created.x', 'x.payment.created', 'paymentXcreated', 'payment.createdd', 'payment.', 'payment.#', 'payment.*', '', 'audit.payment.created\n']) assert.ok(!matches(r, no), no);
+    assert.equal(tp.escapeRegex('a.b*c+d?e^f$g(h)i[j]k{l}m|n\\o'), 'a\\.b\\*c\\+d\\?e\\^f\\$g\\(h\\)i\\[j\\]k\\{l\\}m\\|n\\\\o');
+    assert.ok(!matches(tp.exactKeyRegex(['a.(b|c)']), 'a.b')); // metacharacters stay literal
+    assert.equal(tp.exactKeyRegex([]), tp.DENY_ALL);
+    for (const k of ['', 'payment.created', 'audit.x', '#', '.*', '\n']) assert.ok(!matches(tp.DENY_ALL, k), `DENY_ALL matched ${JSON.stringify(k)}`);
+    // no grant anywhere is a wildcard, a prefix or a bare `^$`
+    for (const id of Object.values(gen().identities)) for (const g of [id.write, id.read]) {
+      assert.ok(g.regex === tp.DENY_ALL || /^\^\(.+\)\$$/.test(g.regex), g.regex);
+      assert.ok(!/\.\*|\\\.\$|^\^\$$/.test(g.regex) && g.regex !== '' && g.regex !== '.*', g.regex);
+    }
+  });
+
+  test('S1d-1 contract changes: a new event or action reaches only its owner; removal drops it; unowned or contradictory input fails closed', () => {
+    const c = contract('payment-service');
+    c.produces.push({ name: 'payment.disputed', version: 1, payload: {} });
+    const added = gen({ contracts: withContract('payment-service', c) });
+    assert.ok(added.identities['payment-service'].write.keys.includes('payment.disputed'));
+    assert.ok(!Object.entries(added.identities).some(([s, id]) => s !== 'payment-service' && id.write.keys.includes('payment.disputed')));
+    const action = CATALOG.replace("  'file.deleted': {", "  'file.archived': { producer: 'file-service' },\n  'file.deleted': {");
+    const withAction = gen({ auditCatalog: action });
+    assert.ok(withAction.identities['file-service'].write.keys.includes('audit.file.archived'));
+    assert.ok(!Object.entries(withAction.identities).some(([s, id]) => s !== 'file-service' && id.write.keys.includes('audit.file.archived')));
+    const removed = contract('billing-service');
+    removed.produces = [];
+    assert.ok(!gen({ contracts: withContract('billing-service', removed), activation: manifest({ 'auth-service': 'inactive', 'payment-service': 'active' }) }).identities['billing-service'].write.keys.includes('invoice.created'));
+    // unowned / contradictory / invalid sources
+    refused({ auditCatalog: CATALOG.replace("producer: 'file-service', category: 'business'", "producer: 'nobody-service', category: 'business'") }, /unknown producer nobody-service/, 'unknown audit producer');
+    refused({ auditCatalog: CATALOG.replace("producer: 'file-service', category: 'business'", "category: 'business'") }, /has no literal producer/, 'missing audit ownership');
+    refused({ auditCatalog: CATALOG.replace("  'file.deleted': {", "  'File Deleted!': { producer: 'file-service' },\n  'file.deleted': {") }, /not a valid name/, 'invalid action');
+    refused({ auditCatalog: CATALOG.replace("  'file.deleted': {", "  ...EXTRA,\n  'file.deleted': {") }, /literal '<action>'/, 'a spread in the catalog');
+    const dup = contract('payment-service');
+    dup.produces.push({ ...dup.produces[0] });
+    refused({ contracts: withContract('payment-service', dup) }, /declared twice/, 'a duplicate event');
+    const foreign = contract('billing-service');
+    foreign.produces.push({ name: 'payment.created', version: 1, payload: {} });
+    refused({ contracts: withContract('billing-service', foreign) }, /two owners/, 'another producer\'s domain event');
+    const auditName = contract('payment-service');
+    auditName.produces.push({ name: 'audit.billing.invoice_issued', version: 1, payload: {} });
+    refused({ contracts: withContract('payment-service', auditName) }, /audit\.\* keys belong to the audit catalog only/, 'a domain event in the audit namespace');
+    const wildcard = contract('payment-service');
+    wildcard.produces.push({ name: 'payment.*', version: 1, payload: {} });
+    refused({ contracts: withContract('payment-service', wildcard) }, /produces an invalid event/, 'a wildcard event');
+    const prefix = contract('payment-service');
+    prefix.produces.push({ name: 'payment', version: 1, payload: {} });
+    refused({ contracts: withContract('payment-service', prefix) }, /produces an invalid event/, 'a prefix event');
+    const meta = contract('payment-service');
+    meta.produces.push({ name: 'payment.(created|x)', version: 1, payload: {} });
+    refused({ contracts: withContract('payment-service', meta) }, /produces an invalid event/, 'regex metacharacters');
+    const consumesUnknown = contract('billing-service');
+    consumesUnknown.consumes.push({ source: 'payment-service', name: 'payment.refunded', version: 1, requires: {} });
+    refused({ contracts: withContract('billing-service', consumesUnknown) }, /does not declare/, 'consuming an undeclared event');
+    const wrongService = contract('billing-service');
+    wrongService.service = 'payment-service';
+    refused({ contracts: withContract('billing-service', wrongService) }, /must name its own service/, 'a contract for another service');
+    refused({ contracts: { ...CONTRACTS, 'ghost-service': CONTRACTS['payment-service'] } }, /unknown application ghost-service/, 'an unknown service');
+    refused({ apps: [] }, /application list is empty/, 'no applications');
+  });
+
+  test('S1d-1 check:repo: the current sources pass; a broken binding exception, an Audit publisher or an invalid catalog are reported', () => {
+    const base = { contracts: CONTRACTS, apps: APPS, auditCatalog: CATALOG, files: { [tp.AUDIT_BINDINGS_FILE]: read(tp.AUDIT_BINDINGS_FILE) }, auditSources: {} };
+    assert.deepEqual(tp.checkTopicPermissionSources(base), []);
+    assert.match(tp.checkTopicPermissionSources({ ...base, files: { [tp.AUDIT_BINDINGS_FILE]: read(tp.AUDIT_BINDINGS_FILE).replace("['audit.#']", "['#']") } }).join(), /documented read exception/);
+    assert.match(tp.checkTopicPermissionSources({ ...base, auditSources: { 'apps/audit-service/src/x.ts': 'EventsModule.forRoot({})' } }).join(), /local-only/);
+    assert.match(tp.checkTopicPermissionSources({ ...base, auditCatalog: CATALOG.replace("producer: 'file-service', category: 'business'", "category: 'business'") }).join(), /no literal producer/);
+    // it never reads provision.sh: its old broad grants do not fail it
+    assert.ok(!/provision\.sh/.test(tp.checkTopicPermissionSources.toString().replace(/\/\/.*$/gm, '')));
+  });
+}
