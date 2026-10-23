@@ -81,7 +81,7 @@ is replaced by class M at implementation (S0 §3.7; roadmap S4g).
 | I-12 | Actual physical cash collection starts the 72-hour deadline (`settleBy = cashCollectedAt + 72h`); report time is separate | S0 §1.2 (D-6), FC-8 |
 | I-13 | No manual or trust-based cash settlement of Nawara-sold products | [ADR-0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md); S0 DB-16, S-7, FC-11 |
 | I-14 | Core V2 is implemented and certified against a simulation provider only; production refuses the test or simulation provider | S0 §1.1, FC-10 |
-| I-15 | Broker-verified producer provenance and per-family topic permissions for every event family | ADR-0057 §13; [ADR-0069](../adr/0069-verified-audit-producers-and-audit-contract-v2.md) decision 1; S0 §1.2 (D-2/D-3); S0-C5 (2026-10-23, ADR-0057 after §13.1): granted as exact generated keys of activated, declared events of the family owner; the default-exchange and shared-DLX residual is deferred (OD-BRK) |
+| I-15 | Broker-verified producer provenance and per-family topic permissions for every event family | ADR-0057 §13; [ADR-0069](../adr/0069-verified-audit-producers-and-audit-contract-v2.md) decision 1; S0 §1.2 (D-2/D-3); S0-C5 (2026-10-23, ADR-0057 after §13.1): granted as exact generated keys of activated, declared events of the family owner; the default-exchange and shared-DLX residual is deferred (OD-BRK); S0-C6 (2026-10-23, ADR-0057 after §13.5): consumer enforcement decides trust before any handler and any business de-duplication |
 | I-16 | No new refund case while a payment dispute is open; a completed refund case refuses every new attempt (`409 refund_case_completed`) | [OD] D3; S0 FC-3, V-3 |
 | I-17 | A provisional dispute never cancels Premium; a direct purchase lost at final stage reverses only that purchase and is written off; an assisted purchase lost at final stage keeps the student protected and opens a school recovery obligation for the base amount only | S0 §1.1; ADR-0044 B10; [OD] D5 |
 | I-18 | Fee caps set and approved by the Owner; delegated operators propose; operators never approve | S0 §1.1 |
@@ -918,14 +918,14 @@ verification; production financial and notification consumers refuse missing or 
 
 | Id | Event | A. Frozen | B. Names and payload | D. Existing | E. Open, gates; stage; conf. |
 |---|---|---|---|---|---|
-| EVT-01 | `payment.created`, `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` | version 1 compatible; `liveMode` on every event | names IMPLEMENTED; PROPOSED additive `payerType`, `purpose`, `platformId`, `liveMode` | `apps/payment-service/src/events/` | S1, S4; H |
+| EVT-01 | `payment.created`, `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` | version 1 compatible; `liveMode` on every event; Billing processes only verified deliveries, replays with the trusted tuple stored from the verified original (S0-C6) | names IMPLEMENTED; PROPOSED additive `payerType`, `purpose`, `platformId`, `liveMode` | `apps/payment-service/src/events/` | S1, S4; H |
 | EVT-02 | `refund.*` | `refund.case_completed` emitted once (FC-3) | `refund.case_completed` FROZEN; `refund.authorized`, `refund.succeeded`, `refund.failed` PROPOSED | none | S6; M |
 | EVT-03 | dispute and chargeback facts to Billing | Billing applies B10 from verified Payment events only (§13.5) | names PROPOSED (`payment.dispute.opened`, `payment.dispute.closed`); payload **OPEN** (OD-11) | none | S6e; L |
 | EVT-04 | `invoice.created` | version 1 compatible; still flows after S1 (S0 §8) | IMPLEMENTED (the only event Billing publishes today) | `apps/billing-service/src/events/event-catalog.ts` | S1, S3; H |
 | EVT-05 | `billing.subscription.*` | produced only by B3 and B4/B5 effects; idempotent by deterministic identity (ADR-0044 B12) | family FROZEN; names PROPOSED (`billing.subscription.period_started`, `billing.subscription.period_extended`, `billing.personal_subscription.purchase_recorded`, `billing.personal_subscription.purchase_reversed`) | none | S3; M |
 | EVT-06 | `billing.recovery.*` | recovery produces only `billing.recovery.*` (ADR-0044 B12) | names PROPOSED (`billing.recovery.payment_recorded`, `billing.recovery.completed`, `billing.recovery.surplus_recorded`) | none | S6f; M |
-| EVT-07 | `audit.*` | version 1 and 2 (AUD-01); broker-verified producers (AUD-02) | catalog-governed (`libs/audit-contract/src/catalog.ts`); new actions such as `authorization_receipt.issued` PROPOSED | version 1 | S1, S2-Audit; H |
-| EVT-08 | Auth domain events (`user.*`, `membership.*`) | §13 applies (S0 §3.7) | IMPLEMENTED names unchanged | `apps/auth-service/src/events/event-catalog.ts`, `domain-events.ts` | S1; H |
+| EVT-07 | `audit.*` | version 1 and 2 (AUD-01); broker-verified producers (AUD-02); admission first, then Audit's temporary compatibility phase until its S0-C6 exit conditions, then verified only | catalog-governed (`libs/audit-contract/src/catalog.ts`); new actions such as `authorization_receipt.issued` PROPOSED | version 1 | S1, S2-Audit; H |
+| EVT-08 | Auth domain events (`user.*`, `membership.*`) | §13 applies (S0 §3.7); Notification consumes them verified-only and never keeps a code-bearing body on refusal (S0-C6) | IMPLEMENTED names unchanged | `apps/auth-service/src/events/event-catalog.ts`, `domain-events.ts` | S1; H |
 | EVT-09 | Owner-authorized re-emission of one named outbox row | deterministic event ids; Owner authorization; an audit record (ADR-0057 §13.7) | mechanism **decided for payment-service** (S0-C4): a restricted command inside the producer, no route; Owner only, bound to the exact event; `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.expired` version 1; serialization pipeline version 1; durable intent and producer audit evidence (PROPOSED action `payment.event_reemitted`) before publication; **OPEN** for every other producer | none | **OD-15** (resolved for Payment), Q11; S1c (R1, R2); M |
 
 ## 6. New error codes proposed by this register
@@ -987,7 +987,7 @@ The gates are those of the [roadmap](./core-v2-s-execution-roadmap.md) §7; this
 
 | Stage | Register entries | Open decisions | Roadmap gates |
 |---|---|---|---|
-| S1 | EVT-01, EVT-04, EVT-07 to EVT-09 | OD-15, OD-BRK (not blocking S1d) | G-1, C-4 (before enforcement) |
+| S1 | EVT-01, EVT-04, EVT-07 to EVT-09 | OD-15, OD-BRK (not blocking S1d); S0-C6: OD-BRK does not block S1e either, whose enforcement is its residual control | G-1, C-4 (before enforcement) |
 | S2-Auth | AUTH-01 to AUTH-08 | Q1 to Q9, Q11, Q12, OD-R6a | G-1, G-3, G-7 (production) |
 | S2-Audit | AUD-01 to AUD-05, AUD-07 | Q5, OD-13, OD-14 | S1b, G-1 |
 | S2-File | FIL-01 to FIL-07 | OD-FILE | G-1 |

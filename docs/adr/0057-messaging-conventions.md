@@ -41,6 +41,12 @@
 > implemented, no broker permission is changed and nothing is authorized in production. This is not an acceptance: this ADR's status
 > stays `Proposed`.
 
+> **Core V2 S0-C6 clarification (2026-10-23, owner-approved).** The S1e per-consumer enforcement policies that S0-C3 left to S1e: the
+> outcome of every trust classification for Billing, Audit and Notification, enforcement before business de-duplication, the trusted
+> replay tuple, privacy-safe refusal, and Audit's temporary compatibility phase ("S0-C6" after §13.5). §13.2–§13.5 are unchanged;
+> nothing is implemented or enabled, and nothing is authorized in production. This is not an acceptance: this ADR's status stays
+> `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -444,6 +450,83 @@ mismatch. No classification is a new processing permission.
 
 13.5 Financial consumers (billing-service for `payment.*` and `refund.*`) never process an unverified event. Other consumers may
 accept one only during an explicitly configured compatibility phase, and must record it as unverified.
+
+**S0-C6 — S1e consumer enforcement (S0 clarification, owner-approved 2026-10-23; resolves the per-consumer refusal semantics S0-C3
+left to S1e).** §13.2–§13.5 are the rule and stay unchanged; this states how each consumer applies them. Nothing here is implemented.
+- **Trust before business processing.** A consumer's trust decision for a delivery (verified original, verified replay match, or a
+  refusal or hold below) is durable before its business handler runs, and the handler is never invoked otherwise. No handler claims a
+  business de-duplication slot (Billing's `payment_event_receipt`, Audit's first-writer record, Notification's first-writer intake row)
+  before that decision: a forged or unverified delivery can therefore never pre-empt a later genuine event of the same id. Provenance
+  OBSERVATIONS are separate from business de-duplication: an unverified observation stays as append-only evidence even when its
+  processing is refused, and nothing is deleted, rewritten, promoted or backfilled (§13.6).
+- **The stored verified record is authoritative (S0-C4).** A delivery is evaluated against the consumer's stored VERIFIED observation of
+  its (source, event id), not against an aggregate "conflict": a verified delivery that matches it, or arrives where none exists yet
+  (including after an earlier unverified observation), is verified; a verified delivery that contradicts a stored verified observation is
+  a permanent refusal, never reconciled; a conflict that involves only unverified evidence never by itself invalidates a verified
+  delivery. The kit exposes this as a decision, not only as the observe-only `conflict` record (S1e-1).
+- **Outcomes.** Every refusal below is permanent and goes through the consumer's privacy-safe dead-letter path; a refusal is never
+  acknowledged as processing; a hold keeps the ORIGINAL delivery (held for the retry delay and requeued, as §13.3), bounded, with no tight
+  loop and no copy to `<queue>.retry`.
+
+  | Delivery | Billing | Audit | Notification |
+  |---|---|---|---|
+  | Verified original | process | process | process |
+  | Verified broker duplicate (redelivery) | process; receipts de-duplicate | process; de-duplicates | process; de-duplicates |
+  | Verified original after an earlier unverified observation | process (no contradicting verified evidence) | same | same |
+  | Verified original contradicting the stored verified observation | refuse | refuse | refuse |
+  | Unverified original (no `user_id`, another identity, wrong source or owner) | refuse | compatibility phase only (below), else refuse | refuse |
+  | Replay matching the stored verified observation (`replay_matched_verified`) | process, with the trusted tuple | process | process |
+  | Replay matching only an unverified observation | refuse | compatibility phase only, else refuse | refuse |
+  | Replay with no stored observation (`replay_no_provenance`) | refuse | refuse (historical dead letters: after the C-4 disposition) | refuse |
+  | Replay with a different name or body (`replay_mismatch`) | refuse | refuse | refuse |
+  | Replay under a legitimately retired key (`replay_unverifiable`) | n/a | n/a | refuse, privacy-safe, distinct reason |
+  | Transient lookup or commit failure (`replay_lookup_failure`, a failed §13.3 commit) | hold | hold | hold |
+  | Conflicting verified evidence | refuse | refuse | refuse |
+- **Lookup failure is a hold, never a decision (H3).** When the trust decision cannot be established because of a recoverable failure
+  (a database timeout or lost connection, a temporarily unavailable Notification key), the delivery is held and requeued with bounded
+  backoff: it is neither processed nor acknowledged, and an infrastructure failure is never treated as proof of forgery. Only an
+  authoritative negative decision is refused permanently. The existing outbox, retry and dead-letter privacy guarantees are unchanged.
+- **Billing: verified only, from its first production deployment.** Billing never has an observe-only, compatibility or bypass mode in
+  production, and no runtime flag disables its financial provenance enforcement; it refuses to start consuming when enforcement cannot
+  initialize. A forged or unverified event never reaches `applyPaymentEvent` and never claims a receipt; a verified redelivery and an
+  authentic producer re-emission (§13.7, S0-C4) stay idempotent through the receipts, the deterministic event ids and the terminal-state
+  rules. No operator override admits an unverified financial event.
+- **Billing's trusted replay tuple (H6).** The body commitment covers the body bytes only, and Billing today takes financial inputs from
+  delivery headers (at least `occurredAt` as the settlement instant, and `version`). A replay may copy an authentic body and change its
+  headers, so for a verified-match replay every value that can affect a financial outcome is taken from what was committed from the
+  verified original publication, never from the replay's headers (§13.4 "the stored tuple"). S1e-2 first inventories every field Billing's
+  handler reads (at least `occurredAt`, the version, the producer identity, the event name and id, and correlation identifiers where they
+  matter), and its additive migration stores exactly those values with each verified observation as immutable data: existing rows and
+  body commitments stay; no unverified observation is rewritten or promoted; no historical value is invented (a row recorded before that
+  migration has none); a stored verified value is never overwritten. A replay whose trusted values are unavailable has no financial effect
+  and is refused with an explicit fail-closed reason. The original event identity, the receipts and the terminal-state rules apply as before.
+- **Audit (H1, S0-C1 unchanged).** Admission (canonical bytes, the Stage 18.8 confidentiality screen, the complete contract) stays FIRST:
+  before any provenance record, digest, enforcement decision or business processing; a refused delivery is permanent, has no provenance
+  row and keeps the redacting dead-letter policy. Audit alone may run a **temporary, explicitly configured compatibility phase** while it
+  is already in production: an admitted unverified delivery may be processed and is recorded as unverified; nothing historical becomes
+  verified; admission is never bypassed; accepted and refused compatibility outcomes stay observable (bounded metrics). No other consumer
+  can enable it, Billing in particular. The phase ends only when, in order: authenticated publisher identity is deployed and verified for
+  Audit's producers; the C-4 historical Auth → Audit dead letters are dispositioned or gated by the approved recovery procedure; the
+  relevant S1-R prerequisites and Audit's privacy, retention and admission gates (AP-R, M9, G-7) are met; strict enforcement is tested
+  against the actual producers; and the Owner authorizes the transition. Returning to compatibility afterwards is a separately approved
+  security-impacting exception.
+- **Notification (H2, H4, H5; S0-C2 unchanged).** Verified-only from its first production deployment: no observe-only or compatibility
+  mode, and no unverified Auth event reaches business processing. The keyed commitment stays authoritative: no unkeyed fallback; a
+  missing or temporarily unavailable key is a hold (it never permits acceptance); a key that was LEGITIMATELY RETIRED makes a replay
+  `replay_unverifiable`, which is a permanent refusal with its own reason (not a hold, not a match). A refused delivery of a code-bearing
+  event (`member.contact_verification_requested`, `admin.operator_code_issued`, `admin.operator_confirmation_code_issued`) never keeps
+  its plaintext code: its dead-letter copy is redacted or safely replaced (Audit's Stage 18.8 convention is the reference), keeping only
+  non-sensitive diagnostic metadata; no code appears in a metric, log or error; no new sensitive store, longer code retention or re-emission
+  of such events (S0-C4) results. A permanent privacy-safe refusal is never used in place of the hold a recoverable key failure requires.
+- **Monitoring (rollout requirement).** Refusals by bounded reason, holds and requeues, dead-letter depth, Audit delivery health, Billing
+  financial-event lag, Notification delivery health, and evidence that legitimate redeliveries and replays still succeed; never a payload.
+- **Implementation and rollout.** S1e-1 (kit: decision-bearing provenance results, stored-verified precedence, per-consumer policy applied
+  before the handler, hold and refusal outcomes, trusted-tuple support, no observe-only path for a financial consumer); S1e-2 (Billing);
+  S1e-3 (Audit, including the compatibility phase and its exit); S1e-4 (Notification); S1e-5 (real RabbitMQ and PostgreSQL
+  certification). Each is separately authorized; none enables anything in production. Production follows S1-R, with AP-R, NP-K, M9, G-7,
+  C-4 and G6/F7: Billing enters production with strict enforcement certified, Notification with strict enforcement and its keys
+  (NP-K), and strict Audit enforcement never precedes verified upstream publisher identity and the C-4 disposition. OD-BRK, R2b and R4
+  are unaffected.
 
 13.6 No historical event is ever labelled verified, and provenance is never backfilled. (An authorized §13.7 re-emission is a new
 authenticated publication, not a backfill: S0-C4 below §13.7.)
