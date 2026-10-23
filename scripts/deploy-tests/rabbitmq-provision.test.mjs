@@ -4,6 +4,21 @@ import assert from 'node:assert/strict';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { SCRIPTS, assertNothingChanged, runOf, world } from './lib/harness.mjs';
+import { existsSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { ACTIVATION_FILE, DENY_ALL, generateTopicPermissions } from '../lib/topic-permissions.mjs';
+
+// Core V2 S1d-2: the grants the script must apply are the generator's, from the repository's own sources and reviewed activation file.
+const ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const APPS = readdirSync(join(ROOT, 'apps'));
+const GENERATED = generateTopicPermissions({
+  apps: APPS,
+  contracts: Object.fromEntries(APPS.filter((a) => existsSync(join(ROOT, 'apps', a, 'contracts/events.json'))).map((a) => [a, readFileSync(join(ROOT, 'apps', a, 'contracts/events.json'), 'utf8')])),
+  auditCatalog: readFileSync(join(ROOT, 'libs/audit-contract/src/catalog.ts'), 'utf8'),
+  activation: JSON.parse(readFileSync(join(ROOT, ACTIVATION_FILE), 'utf8')),
+}).identities;
+const topicOf = (svc) => ({ exchange: 'nawara.events', write: GENERATED[svc].write.regex, read: GENERATED[svc].read.regex });
+const ALL = ['audit-service', 'auth-service', 'billing-service', 'file-service', 'notification-service', 'organization-service', 'payment-service', 'release-service'];
 
 const BROKER = 'nawara-core-rabbitmq';
 
@@ -38,8 +53,13 @@ test('identities: one per service, non-guest administrator, least-privilege gran
   assert.equal(b.passwordOnArgv, undefined, 'passwords travel on stdin only');
   for (const u of ['audit-service', 'auth-service']) assert.deepEqual(b.users[u].tags, [], `${u} has no management tag`);
   assert.deepEqual(b.perms['auth-service'], { vhost: 'nawara-core', conf: '^nawara\\.events$', write: '^nawara\\.events$', read: '^$' });
-  assert.deepEqual(b.topic['auth-service'], { exchange: 'nawara.events', write: '^audit\\.', read: '^$' }, 'Auth publishes audit.* only');
-  assert.deepEqual(b.topic['audit-service'], { exchange: 'nawara.events', write: '^$', read: '^audit\\.' }, 'Audit binds audit.* only, publishes nothing to the exchange');
+  // Core V2 S1d-2: Auth publishes exactly its own audit actions (its domain events are inactive); Audit binds exactly `audit.#` and
+  // publishes nothing (deny-all, not '^$', which would match the empty routing key).
+  assert.deepEqual(b.topic['auth-service'], topicOf('auth-service'), 'Auth: its generated grants');
+  assert.equal(GENERATED['auth-service'].write.keys.length, 28);
+  assert.ok(GENERATED['auth-service'].write.keys.every((k) => k.startsWith('audit.')), 'no Auth domain event while inactive');
+  assert.equal(b.topic['auth-service'].read, DENY_ALL);
+  assert.deepEqual(b.topic['audit-service'], { exchange: 'nawara.events', write: DENY_ALL, read: '^(audit\\.#)$' }, 'Audit binds audit.# only, publishes nothing to the exchange');
   // Evaluated as RabbitMQ does: each grant is a regex over resource names.
   const may = (svc, kind, resource) => new RegExp(b.perms[svc][kind === 'configure' ? 'conf' : kind]).test(resource);
   assert.equal(may('audit-service', 'write', 'nawara.events'), false, 'Audit may not publish to the event exchange');
@@ -84,12 +104,53 @@ test('idempotent: a re-run creates nothing, rotates nothing and reuses the store
   assert.deepEqual(w.secrets().sort(), before);
 });
 
-test('an unknown service is refused before anything changes (Billing / Payment grants are not defined yet)', () => {
+test('an unknown service is refused before anything changes', () => {
   const w = world();
-  const r = w.run(SCRIPTS.broker, { RABBITMQ_SERVICES: 'audit-service payment-service' });
+  const r = w.run(SCRIPTS.broker, { RABBITMQ_SERVICES: 'audit-service ghost-service' });
   assert.notEqual(r.code, 0);
-  assert.match(r.out, /no broker identity is defined for 'payment-service'.*nothing was changed/);
+  assert.match(r.out, /no broker identity is defined for 'ghost-service'.*nothing was changed/);
   assertNothingChanged(assert, w);
+});
+
+test('S1d-2: the default selection is unchanged; Billing and Payment are defined but never provisioned unless selected', () => {
+  const w = world();
+  assert.equal(w.run(SCRIPTS.broker).code, 0);
+  assert.deepEqual(Object.keys(w.state().broker.users).sort(), ['audit-service', 'auth-service']);
+  assert.deepEqual(Object.keys(w.state().broker.topic).sort(), ['audit-service', 'auth-service']);
+});
+
+test('S1d-2: every identity, when selected, gets exactly its generated topic grants and its role\'s resource permissions', () => {
+  const w = world();
+  const r = w.run(SCRIPTS.broker, { RABBITMQ_SERVICES: ALL.join(' ') });
+  assert.equal(r.code, 0, r.out);
+  const b = w.state().broker;
+  assert.deepEqual(Object.keys(b.users).sort(), ALL);
+  for (const svc of ALL) assert.deepEqual(b.topic[svc], topicOf(svc), `${svc}: generated topic grants`);
+  const counts = Object.fromEntries(ALL.map((s) => [s, [GENERATED[s].write.keys.length, GENERATED[s].read.keys.length]]));
+  assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [28, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+  // RabbitMQ evaluates a topic grant as a regex over the routing key (write) or binding key (read)
+  const pub = (svc, key) => new RegExp(b.topic[svc].write).test(key);
+  const bind = (svc, key) => new RegExp(b.topic[svc].read).test(key);
+  assert.ok(pub('payment-service', 'payment.created') && pub('payment-service', 'audit.payment.succeeded'));
+  assert.ok(!pub('payment-service', 'audit.payment.event_reemitted') && !pub('payment-service', 'invoice.created') && !pub('payment-service', 'payment.refunded'));
+  assert.equal(b.topic['payment-service'].read, DENY_ALL, 'Payment binds nothing');
+  assert.ok(pub('billing-service', 'invoice.created') && pub('billing-service', 'audit.invoice.issued') && !pub('billing-service', 'payment.succeeded'));
+  for (const k of ['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired']) assert.ok(bind('billing-service', k), k);
+  assert.ok(!bind('billing-service', 'payment.created') && !bind('billing-service', 'payment.#') && !bind('billing-service', 'audit.#'));
+  assert.ok(!pub('auth-service', 'membership.approved') && !pub('auth-service', 'audit.payment.created') && !pub('organization-service', 'audit.owner.factor_enrolled'));
+  assert.ok(!pub('audit-service', 'audit.platform_query.executed'), 'Audit records its own action locally: no grant');
+  assert.ok(bind('notification-service', 'member.contact_verification_requested') && !bind('notification-service', 'audit.#'));
+  for (const svc of ALL) for (const k of ['', '#', 'audit.#.x', 'x']) assert.ok(!pub(svc, k), `${svc} may publish ${JSON.stringify(k)}`);
+  // resource permissions: unchanged roles; Billing is the union of a producer and a consumer of billing.payment-events
+  const may = (svc, kind, resource) => new RegExp(b.perms[svc][kind === 'configure' ? 'conf' : kind]).test(resource);
+  assert.deepEqual(b.perms['payment-service'], b.perms['auth-service'], 'Payment: the producer role');
+  assert.ok(may('billing-service', 'write', 'nawara.events') && may('billing-service', 'write', 'amq.default') && may('billing-service', 'read', 'billing.payment-events'));
+  for (const q of ['billing.payment-events', 'billing.payment-events.retry', 'billing.payment-events.dead', 'nawara.events.dlx']) assert.ok(may('billing-service', 'configure', q), q);
+  for (const foreign of ['audit-service.audit', 'notification.events', 'audit-service.audit.dead']) {
+    assert.ok(!may('billing-service', 'read', foreign) && !may('billing-service', 'configure', foreign), `Billing may not touch ${foreign}`);
+  }
+  assert.ok(!may('payment-service', 'write', 'amq.default') && !may('payment-service', 'read', 'billing.payment-events'));
+  assert.ok(r.out.includes("topic nawara.events write ^(?!)$ read ^(audit\\.#)$"), 'the applied grants are logged (names and patterns only)');
 });
 
 test('an existing network that is not --internal is refused (the broker is never placed on a routable network)', () => {

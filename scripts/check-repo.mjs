@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkActionPins, checkScheduledBackupEntry, checkScheduledBackupVerifier, checkAuthErrorCoverage, checkAuthOrganizationBoundary, checkRepairAuditProducerScope, repairAuditScanned, checkCiAggregate, checkCiCoverage, checkDigestDeploy, checkImageBuild, checkImagePins, checkLocalGrafana, checkLocalObservability, checkTypedConfirmation, checkHierarchyFixtures, checkNoPlatformIdOnFinancialRecords, checkSource, checkWorkflowSafety, CALLER_POLICY_MODULES, checkCallerPolicyInventory, workspaceAppPackages, DEVELOPMENT_SECRET_CATALOG, checkDevelopmentSecretCatalog, checkDockerContext, checkEnvIgnorePolicy, checkEnvTemplates, checkReadmeEnvironmentCoverage, checkTrackedEnvFiles, checkDroneSshFiles, gitIgnoreProbe, gitTrackedFiles, isEnvTemplate, isServiceConfigSource, ENV_READER_CLIS, ENV_READER_CLI_RESOLVERS, checkEnvReaderClis, checkNodeToolchain, checkCiWorkspaceCoverage, checkEventContracts, usesEventTraffic, checkOutboxRetentionEligibility, OUTBOX_RETENTION_APPROVED_SERVICES, checkEventProvenanceOptIn, AUDIT_ADMISSION_FILES, KIT_EVENT_BUS, KIT_PROVENANCE, NOTIFICATION_KEYED_FILES, checkEventReemission, KIT_REEMISSION, KIT_SERIALIZATION, KIT_OUTBOX_RELAY, KIT_PACKAGE } from './lib/checks.mjs';
-import { AUDIT_BINDINGS_FILE, checkTopicPermissionSources } from './lib/topic-permissions.mjs';
+import { ACTIVATION_FILE, AUDIT_BINDINGS_FILE, PROVISION_FILE, checkProvisionTopicGrants, checkTopicPermissionSources } from './lib/topic-permissions.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 // A file a check needs but that may be missing: its absence is then reported by the check itself (an empty text fails it).
@@ -246,6 +246,11 @@ problems.push(...checkEnvReaderClis(Object.fromEntries([...ENV_READER_CLIS, ENV_
     contracts, apps, auditCatalog: readOrUndefined('libs/audit-contract/src/catalog.ts') ?? '',
     files: { [AUDIT_BINDINGS_FILE]: readOrUndefined(AUDIT_BINDINGS_FILE) }, auditSources,
   }));
+  // Core V2 S1d-2: provision.sh carries exactly the generated grants for the reviewed activation file (never the reverse).
+  problems.push(...checkProvisionTopicGrants({
+    contracts, apps, auditCatalog: readOrUndefined('libs/audit-contract/src/catalog.ts') ?? '',
+    provision: readOrUndefined(PROVISION_FILE), activation: readOrUndefined(ACTIVATION_FILE),
+  }));
 }
 // V2 A3M.5: the manual outbox retention stays limited to the reviewed services, which still let the outbox generate their event ids.
 {
@@ -303,4 +308,4 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  - ${p}`);
   process.exit(1);
 }
-console.log('repository checks passed: workflow safety, scheduled-backup pins and installation verifier, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, event provenance opt-in, producer re-emission foundation, topic permission sources, outbox retention eligibility, Auth to Organization dependency boundary, reference-repair audit producer scope');
+console.log('repository checks passed: workflow safety, scheduled-backup pins and installation verifier, CI coverage, architecture boundaries, caller-policy delegation, hierarchy fixtures, financial isolation, auth error-code coverage, local observability, local alert rules, local Grafana, configuration and secret hygiene, operator CLI configuration, Node toolchain, CI workspace coverage, event contracts, event provenance opt-in, producer re-emission foundation, topic permission sources, generated provisioning topic grants, outbox retention eligibility, Auth to Organization dependency boundary, reference-repair audit producer scope');
