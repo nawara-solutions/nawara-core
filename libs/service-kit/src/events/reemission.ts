@@ -403,34 +403,91 @@ export class ProducerReemission {
     return { attemptId: intent.attemptId, publish, outcomeRecorded };
   }
 
-  /** Step 4: one read-only transaction on the producer's own database. */
+  /** Step 4: one read-only transaction on the producer's own database (shared with `inspectReemissionEligibility`). */
   private async selectRow(request: ReemissionRequest, allowedVersion: number): Promise<{ row: PublishedOutboxRow; pipelineVersion: number }> {
-    let found: { row?: PublishedOutboxRow; owned: boolean; pipelineVersion?: number };
-    try {
-      found = await this.opts.db.tx(async (q) => {
-        await q.query('SET TRANSACTION READ ONLY');
-        if (!(await this.opts.ownership.confirm(q))) return { owned: false };
-        const { rows } = await q.query<PublishedOutboxRow>(
-          `SELECT id, name, payload, "correlationId", "eventVersion", "occurredAt", "publishedAt" FROM outbox WHERE id = $1`,
-          [request.eventId],
-        );
-        const row = rows[0];
-        if (!row || row.name !== request.eventName || row.publishedAt === null || row.eventVersion !== allowedVersion) return { owned: true, row };
-        const facts: PublicationFacts = Object.freeze({ id: row.id, name: row.name, eventVersion: row.eventVersion, occurredAt: row.occurredAt, publishedAt: row.publishedAt });
-        return { owned: true, row, pipelineVersion: await this.opts.evidence.pipelineVersionOf(q, facts) };
-      });
-    } catch {
-      throw new ReemissionRefused('lookup_failed');
-    }
-    if (!found.owned) throw new ReemissionRefused('database_ownership_unconfirmed');
-    const row = found.row;
-    if (!row) throw new ReemissionRefused('row_missing');
-    if (row.name !== request.eventName) throw new ReemissionRefused('row_name_mismatch');
-    if (row.publishedAt === null) throw new ReemissionRefused('row_unpublished'); // the relay's own responsibility
-    if (row.eventVersion !== allowedVersion) throw new ReemissionRefused('version_not_allowed');
-    const v = found.pipelineVersion;
-    if (v === undefined || !Number.isInteger(v) || v < 1) throw new ReemissionRefused('pipeline_unknown');
-    if (!REEMISSION_COMPATIBLE_PIPELINES.includes(v)) throw new ReemissionRefused('pipeline_incompatible');
-    return { row, pipelineVersion: v };
+    return selectPublishedRow(this.opts, request, allowedVersion);
+  }
+}
+
+/**
+ * Step 4 of `reemit`, and the whole of `inspectReemissionEligibility`: in one READ-ONLY transaction on the producer's own database, the
+ * database is confirmed as the producer's, the row exists, carries the expected name, is published, has the allowed version, and the
+ * producer's publication evidence establishes a compatible pipeline. Refuses with the first failing code.
+ */
+async function selectPublishedRow(
+  opts: Pick<ProducerReemissionOptions, 'db' | 'ownership' | 'evidence'>,
+  request: Pick<ReemissionRequest, 'eventId' | 'eventName'>,
+  allowedVersion: number,
+): Promise<{ row: PublishedOutboxRow; pipelineVersion: number }> {
+  let found: { row?: PublishedOutboxRow; owned: boolean; pipelineVersion?: number };
+  try {
+    found = await opts.db.tx(async (q) => {
+      await q.query('SET TRANSACTION READ ONLY');
+      if (!(await opts.ownership.confirm(q))) return { owned: false };
+      const { rows } = await q.query<PublishedOutboxRow>(
+        `SELECT id, name, payload, "correlationId", "eventVersion", "occurredAt", "publishedAt" FROM outbox WHERE id = $1`,
+        [request.eventId],
+      );
+      const row = rows[0];
+      if (!row || row.name !== request.eventName || row.publishedAt === null || row.eventVersion !== allowedVersion) return { owned: true, row };
+      const facts: PublicationFacts = Object.freeze({ id: row.id, name: row.name, eventVersion: row.eventVersion, occurredAt: row.occurredAt, publishedAt: row.publishedAt });
+      return { owned: true, row, pipelineVersion: await opts.evidence.pipelineVersionOf(q, facts) };
+    });
+  } catch {
+    throw new ReemissionRefused('lookup_failed');
+  }
+  if (!found.owned) throw new ReemissionRefused('database_ownership_unconfirmed');
+  const row = found.row;
+  if (!row) throw new ReemissionRefused('row_missing');
+  if (row.name !== request.eventName) throw new ReemissionRefused('row_name_mismatch');
+  if (row.publishedAt === null) throw new ReemissionRefused('row_unpublished'); // the relay's own responsibility
+  if (row.eventVersion !== allowedVersion) throw new ReemissionRefused('version_not_allowed');
+  const v = found.pipelineVersion;
+  if (v === undefined || !Number.isInteger(v) || v < 1) throw new ReemissionRefused('pipeline_unknown');
+  if (!REEMISSION_COMPATIBLE_PIPELINES.includes(v)) throw new ReemissionRefused('pipeline_incompatible');
+  return { row, pipelineVersion: v };
+}
+
+/**
+ * Core V2 S1c-3 R2a: what a read-only eligibility inspection needs. No authorizer, attempt store or publisher: it can neither authorize
+ * nor record nor publish anything.
+ */
+export type ReemissionEligibilityOptions = Pick<ProducerReemissionOptions, 'policy' | 'db' | 'ownership' | 'evidence'>;
+
+/** The codes an inspection can answer with (a subset of `ReemissionRefusalCode`). */
+export type ReemissionEligibilityRefusal = Extract<ReemissionRefusalCode,
+  'request_invalid' | 'code_bearing_event' | 'event_not_allowed' | 'database_ownership_unconfirmed' | 'lookup_failed' | 'row_missing'
+  | 'row_name_mismatch' | 'row_unpublished' | 'version_not_allowed' | 'pipeline_unknown' | 'pipeline_incompatible'>;
+
+/**
+ * The ROW's eligibility only: never an authorization, never a statement about consumers' provenance, never permission to publish. No
+ * payload or correlation id is returned.
+ */
+export type ReemissionEligibility =
+  | { rowEligible: false; reason: ReemissionEligibilityRefusal }
+  | { rowEligible: true; eventId: string; eventName: string; eventVersion: number; pipelineVersion: number; occurredAt: string; publishedAt: string };
+
+const INSPECTION_FIELDS = ['eventId', 'eventName'];
+
+/**
+ * Core V2 S1c-3 R2a: a read-only inspection of whether ONE outbox row would pass `reemit`'s own row checks (its steps 1, 2 and 4, through
+ * the same `selectPublishedRow`). It takes exactly `{ eventId, eventName }`, issues no plan, writes nothing and reaches no broker.
+ */
+export async function inspectReemissionEligibility(opts: ReemissionEligibilityOptions, input: unknown): Promise<ReemissionEligibility> {
+  const policy = reemissionPolicy(opts.policy.producer, opts.policy.events);
+  if (typeof input !== 'object' || input === null || Array.isArray(input) || Object.getPrototypeOf(input) !== Object.prototype) return { rowEligible: false, reason: 'request_invalid' };
+  const r = input as Record<string, unknown>;
+  if (Reflect.ownKeys(r).length !== INSPECTION_FIELDS.length || !INSPECTION_FIELDS.every((k) => Object.hasOwn(r, k) && typeof r[k] === 'string')) return { rowEligible: false, reason: 'request_invalid' };
+  const request = { eventId: r.eventId as string, eventName: r.eventName as string };
+  if (!UUID.test(request.eventId) || !EVENT_NAME.test(request.eventName)) return { rowEligible: false, reason: 'request_invalid' };
+  if (isCodeBearingEvent(request.eventName)) return { rowEligible: false, reason: 'code_bearing_event' };
+  const allowed = policy.events.find((e) => e.name === request.eventName);
+  if (!allowed) return { rowEligible: false, reason: 'event_not_allowed' };
+  try {
+    const { row, pipelineVersion } = await selectPublishedRow(opts, request, allowed.version);
+    return { rowEligible: true, eventId: row.id, eventName: row.name, eventVersion: row.eventVersion, pipelineVersion, occurredAt: row.occurredAt.toISOString(), publishedAt: row.publishedAt.toISOString() };
+  } catch (e) {
+    if (e instanceof ReemissionRefused) return { rowEligible: false, reason: e.code as ReemissionEligibilityRefusal };
+    throw e;
   }
 }

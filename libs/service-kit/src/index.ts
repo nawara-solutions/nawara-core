@@ -66,11 +66,11 @@ export { isCanonicalJsonBody } from './events/canonical-body.js';
 export { SERIALIZATION_PIPELINE_VERSION, eventMessage, outboxEnvelope, type EventMessage, type OutboxEnvelopeRow } from './events/serialization.js';
 export {
   CODE_BEARING_EVENTS, REEMISSION_APPROVALS, REEMISSION_COMPATIBLE_PIPELINES, REEMISSION_OPERATION, ProducerReemission, ReemissionRefused, isCodeBearingEvent,
-  mayTransition, migrationOwnership, reemissionAttemptOutcome, reemissionAuditFacts, reemissionPolicy, reemissionRequest, type DatabaseOwnership,
+  inspectReemissionEligibility, mayTransition, migrationOwnership, reemissionAttemptOutcome, reemissionAuditFacts, reemissionPolicy, reemissionRequest, type DatabaseOwnership,
   type DurableIntentReceipt, type ProducerReemissionOptions, type PublicationEvidence, type PublicationFacts, type PublishedOutboxRow, type ReemissionAttemptState,
   type ReemissionAttemptStore, type ReemissionAuditFacts, type ReemissionAuthorizationClaims, type ReemissionAuthorizer, type ReemissionIntent, type ReemissionPlan,
   type ReemissionPolicy, type ReemissionPublishOutcome, type ReemissionPublisher, type ReemissionRefusalCode, type ReemissionRequest, type ReemissionResult,
-  type ReemissionTransition, type ReemittableEvent,
+  type ReemissionTransition, type ReemittableEvent, type ReemissionEligibility, type ReemissionEligibilityOptions, type ReemissionEligibilityRefusal,
 } from './events/reemission.js';
 export { InMemoryEventBus, topicMatches, type MemoryBusOptions } from './events/memory-event-bus.js';
 export { RabbitMqEventBus, PublisherConfirmTimeoutError, PublisherIdentityUnavailableError, DEFAULT_RABBITMQ_HEARTBEAT_S, RABBITMQ_HEARTBEAT_BOUNDS, DEFAULT_PREFETCH, type RabbitMqOptions, type NoticeLevel, type ConsumerState, type ConsumerStatus, type ConsumeOutcome, type ProvenanceOutcome, type EventBusObservation, type EventBusObserver } from './events/rabbitmq-event-bus.js';

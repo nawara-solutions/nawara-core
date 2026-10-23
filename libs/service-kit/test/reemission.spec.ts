@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CODE_BEARING_EVENTS, ProducerReemission, REEMISSION_APPROVALS, ReemissionRefused, eventMessage, mayTransition, migrationOwnership, outboxEnvelope,
+  CODE_BEARING_EVENTS, ProducerReemission, inspectReemissionEligibility, REEMISSION_APPROVALS, ReemissionRefused, eventMessage, mayTransition, migrationOwnership, outboxEnvelope,
   reemissionAttemptOutcome, reemissionAuditFacts, reemissionPolicy, reemissionRequest, type ProducerReemissionOptions, type PublishedOutboxRow,
   type ReemissionAuthorizationClaims, type ReemissionIntent, type ReemissionPlan, type ReemissionPublishOutcome, type ReemissionTransition,
 } from '../src/index.js';
@@ -363,5 +363,57 @@ describe('migration ownership evidence', () => {
     expect(await own.confirm(q([{ name: '0001_init.sql', checksum: sum }]))).toBe(false);
     expect(await own.confirm(q([{ name: '0001_init.sql', checksum: sum }, { name: '0002_more.sql', checksum: 'b'.repeat(64) }]))).toBe(false);
     expect(await own.confirm(q([{ name: '0001_init.sql', checksum: sum }, { name: '0002_more.sql', checksum: null }]))).toBe(false);
+  });
+});
+
+describe('read-only eligibility inspection (S1c-3 R2a): the same row checks, nothing else', () => {
+  const inspect = (h: Harness, input: unknown) => inspectReemissionEligibility({ policy: h.opts.policy, db: h.opts.db, ownership: h.opts.ownership, evidence: h.opts.evidence }, input);
+  const target = { eventId: EVENT_ID, eventName: 'payment.succeeded' };
+
+  it('an eligible row: its identity, version and pipeline only (no payload, no correlation id), with nothing authorized, recorded or published', async () => {
+    const h = harness();
+    const r = await inspect(h, target);
+    expect(r).toStrictEqual({ rowEligible: true, eventId: EVENT_ID, eventName: 'payment.succeeded', eventVersion: 1, pipelineVersion: 1, occurredAt: '2026-10-23T08:15:30.123Z', publishedAt: '2026-10-23T08:15:31.000Z' });
+    expect(JSON.stringify(r)).not.toMatch(/TND|corr-/);
+    expect(h.log).toStrictEqual(['tx', 'sql:SET TRANSACTION READ', 'ownership', 'sql:SELECT id, name,', 'evidence:false']);
+    expect(h.log.some((l) => /authorize|commitIntent|append:|publish/.test(l))).toBe(false);
+    expect(h.plans).toStrictEqual([]);
+  });
+
+  it.each([
+    ['the database is not confirmed as the producer\'s', { owned: false }, 'database_ownership_unconfirmed'],
+    ['a missing row', { row: null }, 'row_missing'],
+    ['a row of another name', { row: storedRow({ name: 'payment.failed' }) }, 'row_name_mismatch'],
+    ['an unpublished row', { row: storedRow({ publishedAt: null as never }) }, 'row_unpublished'],
+    ['an unsupported version', { row: storedRow({ eventVersion: 2 }) }, 'version_not_allowed'],
+    ['no publication evidence', { pipeline: undefined }, 'pipeline_unknown'],
+    ['an incompatible pipeline', { pipeline: 2 }, 'pipeline_incompatible'],
+    ['a lookup failure', { lookupThrows: true }, 'lookup_failed'],
+  ] as const)('answers %s with the same code reemit refuses with', async (_t, over, code) => {
+    const h = harness(over as never);
+    expect(await inspect(h, target)).toStrictEqual({ rowEligible: false, reason: code });
+    const r = harness(over as never);
+    expect(await refusal(new ProducerReemission(r.opts).reemit(request()))).toBe(code);
+    expect(h.plans).toStrictEqual([]);
+  });
+
+  it.each([
+    ['a reason (an inspection is not a request)', { ...target, reason: 'consumer_outage' }, 'request_invalid'],
+    ['a payload', { ...target, payload: {} }, 'request_invalid'],
+    ['a source', { ...target, source: 'billing-service' }, 'request_invalid'],
+    ['a malformed id', { ...target, eventId: 'x' }, 'request_invalid'],
+    ['a pattern', { ...target, eventName: 'payment.*' }, 'request_invalid'],
+    ['a code-bearing name', { ...target, eventName: 'admin.operator_code_issued' }, 'code_bearing_event'],
+    ['an event outside the policy', { ...target, eventName: 'payment.expired' }, 'event_not_allowed'],
+    ['nothing', null, 'request_invalid'],
+  ])('refuses %s before reading the database', async (_t, input, code) => {
+    const h = harness();
+    expect(await inspect(h, input)).toStrictEqual({ rowEligible: false, reason: code });
+    expect(h.log).toStrictEqual([]);
+  });
+
+  it('refuses a hand-built policy outside the approvals', async () => {
+    const h = harness();
+    await expect(inspectReemissionEligibility({ ...h.opts, policy: { producer: 'auth-service', events: [{ name: 'member.contact_verification_requested', version: 1 }] } }, target)).rejects.toThrow(ReemissionRefused);
   });
 });
