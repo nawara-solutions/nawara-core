@@ -78,6 +78,18 @@ recommendations:
 This is approval of the architecture, not an implementation authorization: every implementation stage, production action and ADR
 status change still needs its own explicit owner authorization.
 
+### 1.5 Post-freeze clarifications [S0-C]
+
+- **S0-C1 Audit admission before provenance (2026-10-23, owner-approved).** [ADR-0057](../adr/0057-messaging-conventions.md) §13.2
+  ("Audit admission"), with cross-references in §13.4 and §13.8. Before provenance, the Audit consumer refuses permanently, with no
+  handler, no `Q.retry`, no provenance row and no persistent body digest, any delivery whose bytes are not canonical, that fails the
+  Stage 18.8 confidentiality screen, or that fails the complete applicable audit-contract validation; this applies through the event
+  exchange and the default exchange alike. Producer verification still comes only from the broker `user_id` and the catalog owner. A
+  refused delivery is never a verified replay; recovering one needs a separately authorized mechanism consistent with §13.7. Audit
+  provenance retention follows the open P-A2 decision behind the production gate AP-R of the
+  [execution roadmap](./core-v2-s-execution-roadmap.md) §7. Safeguard S-8, the provenance tuple, §13.3 and every other consumer are
+  unchanged. This is a clarification of the frozen wording, not an implementation authorization or an ADR status change.
+
 ## 2. ADR disposition
 
 Statuses are as found in each file; **no status was changed** by S0-DOC. Accepted ADRs are not edited (ADR workflow: an accepted ADR is
@@ -92,7 +104,7 @@ immutable; a later decision is a new ADR). Reciprocal notes on Accepted ADRs nee
 | [0045](../adr/0045-commercial-entitlementkind-compatibility-fields.md) `entitlementKind` | Proposed | Revision 1: wording aligned; no field change |
 | [0046](../adr/0046-notification-service-architecture.md) notification | Accepted | none; commercial IN_APP stays excluded (§5) |
 | [0049](../adr/0049-audit-trail-architecture.md) audit trail | Accepted | not edited; amended by 0069 when 0069 is Accepted; reciprocal note pending approval |
-| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8 |
+| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5) |
 | [0060](../adr/0060-company-platform-organization-lifecycle.md) lifecycle | Accepted | not edited; decision note DN-1 recorded here (§3.6) |
 | [0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md) refund receipts | Proposed (new) | new |
 | [0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md) no Nawara cash settlement | Proposed (new) | new; partly supersedes 0007 |

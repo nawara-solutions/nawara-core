@@ -199,7 +199,8 @@ certification gate; production boundary; migration and recovery; Owner approvals
   |---|---|---|
   | S1a | publisher sets AMQP `user_id` to its own broker username, derived from its own connection so the two cannot differ (§13.1); a real-broker test proving the broker refuses a mismatch (S0 §9) | 🟢 |
   | S1b | `event_provenance` per consumer, committed in its own transaction before the handler; a failed commit holds and requeues, never `Q.retry` (§13.2, §13.3); **observe-only** | 🟢 |
-  | S1c | default-exchange deliveries processed only against a stored row (§13.4); de-duplication by verified source; owner-authorized re-emission of one named outbox row with an audit record (§13.7); retention ≥ dead-letter retention + retry window (§13.8) | 🟢 |
+  | S1b-2 | Audit provenance, observe-only, under the §13.2 Audit admission clarification (S0-C1): canonical body bytes, the Stage 18.8 confidentiality screen and complete audit-contract validation run before provenance, on event-exchange and default-exchange deliveries; a refusal (or any exception) is permanent, with no handler, no `Q.retry`, no provenance row and no persistent body digest, and keeps the privacy-safe dead-letter redaction; Audit's provenance migration follows 0004; no provenance purge; Billing's S1b behaviour unchanged | 🟢 (production: M9, G-7, AP-R) |
+  | S1c | default-exchange deliveries processed only against a stored row (§13.4); de-duplication by verified source; owner-authorized re-emission of one named outbox row with an audit record (§13.7); retention ≥ dead-letter retention + retry window (§13.8). An Audit delivery refused at admission (S0-C1) has no original provenance row and is never treated as a verified replay; recovering a legitimate catalog-lag Audit event needs a separately designed and authorized mechanism consistent with §13.7 | 🟢 |
   | S1d | per-producer topic-write permissions generated from the catalogs and the event-family table (§13.1), code only | 🟢 |
   | S1e | per-consumer enforcement switches; financial consumers never process an unverified event, and Billing ← Payment enforcement is on from Billing's first deployment (§13.5, §13.10); production refuses missing or false `liveMode` in financial and notification consumers (§13.9) | 🟢 |
   | S1-R | production rollout in the §13.10 order: publisher identity → observe-only provenance → narrowed permissions (§12 production action) → retry queues drained and **C-4** dead letters inventoried → enforcement per consumer | 🟡 |
@@ -217,6 +218,13 @@ certification gate; production boundary; migration and recovery; Owner approvals
 - **Migration and recovery.** Provenance tables are new and append-only. Observe-only mode is the recovery position: enforcement can be
   switched off per consumer with no data loss. A production permission change is preceded by a recorded export of the broker
   definitions so it can be restored.
+- **Audit provenance retention (S1b-2, S0-C1).** No automated Audit provenance purge during development, and no permanent-retention
+  requirement: §13.8 is a minimum. A provenance row or digest must not undermine the lawful purge of its Audit record; authorized
+  expiry, erasure and legal holds of Audit provenance need an explicit future policy (P-A2 stays OPEN; no duration is set here).
+  Production is held by gate AP-R (§7).
+- **Audit provenance production (S1b-2).** Production Audit is at migration 0003; 0004 is the M9 prerequisite and Audit's provenance
+  migration (proposed 0005) follows it; the fingerprint change is governed by G-7. A merge builds an Audit image only: deployment,
+  migration execution and image-digest activation each need separate Owner authorization.
 - **Owner approvals.** Stage start; each of S1a to S1e; each S1-R step; the C-4 disposition.
 
 ### 4.2 S2: independent foundations — MANDATORY
@@ -434,6 +442,7 @@ part of an S-stage, a work package or S-INT.
 | Catalog | Premium catalog products, plan durations and prices | S3g and any catalog configuration |
 | Simulation adapter | whether the simulation adapter is new beside the existing `test` provider or replaces it; both are refused in production (FC-10) | S4f |
 | G-7 | G6 baseline: new Auth, Organization or Audit migrations change the fingerprints G6 matched; no such image reaches production before M3, or the Owner authorizes the G6 baseline refresh first | any Auth, Organization or Audit production deployment of S-stage code |
+| AP-R | **OPEN.** Audit provenance retention (S0-C1, P-A2): Audit provenance is not deployed into an environment that has any `audit_retention_policy` row, and enabling a retention rule after provenance is deployed must not bypass this, until provenance retention, erasure and legal-hold behaviour compatible with the Audit purge is approved and implemented. This record states the gate; it does not enforce it, and the enforcement mechanism is itself open | any production deployment of Audit provenance; any `audit_retention_policy` row where Audit provenance is deployed |
 | G6 / F7 | production hierarchy authority unchanged; G7, F6, F7 locked, each behind its own authorization | S8 RED items; every 🔴 item |
 | C-3, C-6, DG-3 | commercial IN_APP; administrator tenure during suspension; pilot channels | S7 |
 | C-5 | operator Organization creation | S8 operator step-up work |
