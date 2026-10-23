@@ -914,7 +914,7 @@ test('A14: each image build has provenance mode=max, a pinned SBOM generator and
       ['plain sbom', SBOM_LINE, '          sbom: true\n', /attests: type=sbom/],
       ['provenance removed', '          provenance: mode=max\n', '', /provenance: mode=max/],
       ['provenance weakened', '          provenance: mode=max\n', '          provenance: mode=min\n', /provenance: mode=max/],
-      ['attestation removed', '        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0\n', '        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2\n', /attest-build-provenance step must attest/],
+      ['attestation removed', '        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2\n', '        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2\n', /attest-build-provenance step must attest/],
       ['subject name with a tag', '          subject-name: ${{ env.IMAGE_NAME }}\n', '          subject-name: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}\n', /subject-name must be exactly/],
       ['subject digest changed', '          subject-digest: ${{ steps.build.outputs.digest }}\n', '          subject-digest: ${{ inputs.digest }}\n', /subject-digest must be exactly/],
       ['not pushed to the registry', '          push-to-registry: true\n', '          push-to-registry: false\n', /pushed to the registry/],
