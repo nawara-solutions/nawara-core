@@ -26,6 +26,11 @@
 > the consequences in §13.3, §13.4 and §13.8. Every other consumer, S0-C1 and the rest of §13 are unchanged. Nothing is implemented,
 > and this is not an acceptance: this ADR's status stays `Proposed`.
 
+> **Core V2 S0-C3 clarification (2026-10-23, owner-approved).** The rollout of §13.4: S1c computes the replay classification in
+> observe-only mode and S1e enforces it per consumer ("S0-C3" in §13.4), with the Notification evidence classification it needs (§13.2,
+> S0-C2), the open re-emission decision (§13.7) and the key dependency (§13.8). The §13.4 requirement itself is unchanged. Nothing is
+> implemented, and this is not an acceptance: this ADR's status stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -307,7 +312,11 @@ and purge in Notification (and its keyed hash in Auth) exist to prevent. Therefo
   with an operational signal) until it is restored; a key that was deliberately retired (§13.8) is not an outage: its rows are
   unverifiable, and the delivery's observation, committed under the active key, is appended to the conflict evidence against the stored
   row (never as a duplicate, never as verified authority), and is otherwise treated like any other conflict in the consumer's current
-  mode (observe-only in S1b-3). Telling the two apart
+  mode (observe-only in S1b-3). Such evidence records why it was kept (S0-C3, owner-approved 2026-10-23; implemented with S1c by an
+  additive Notification migration, without rewriting earlier rows): `differs` when the body was compared under the stored row's own key
+  and found different, `unverifiable` when that key was retired so no comparison was possible. A retired key is never evidence that the
+  content changed, and a temporarily unavailable key or an unknown commitment version produces no evidence at all (it is a failed
+  commit, above). Telling the two apart
   from configuration (for example a recorded list of retired key ids) is an implementation detail of S1b-3, reviewed with it; neither
   case loses data or loops unobserved.
 - **Confidentiality.** This protects Notification's retained provenance against offline code guessing by an attacker who can read
@@ -320,11 +329,43 @@ sent to `Q.retry`. For Notification (S0-C2), a commitment that cannot be compute
 such a failure.
 
 13.4 A delivery through the default exchange (a retry, a replay, an injection) is processed only if a stored row matches
-(`source`, `eventId`), `name` and `bodySha256`; downstream code uses the stored tuple, never the delivery's metadata. Otherwise it
+(`source`, `eventId`), `name` and `bodySha256`; downstream code uses the stored tuple, never the delivery's metadata (for its staged
+rollout, observe-only in S1c and enforced from S1e, see S0-C3 below). Otherwise it
 is a permanent `unverified_provenance` failure, which a replay cannot turn into a verified event. An Audit delivery refused at
 admission (§13.2) never has a stored row, so a later default-exchange delivery of it is never a verified replay. For Notification
 (S0-C2) the body element of the match is the keyed commitment, recomputed under the stored row's version and key id; a row whose key is
 retired or cannot be resolved never matches, so it can never establish a verified replay.
+
+**S0-C3 — rollout of §13.4 (S0 clarification, owner-approved 2026-10-23).** The rule above is the mandatory end state and is not
+weakened: a default-exchange delivery is eligible for processing as a verified replay only when it matches an eligible stored original
+observation under the applicable consumer policy. It is reached in two separately authorized stages:
+- **S1c, observe-only.** For every default-exchange delivery of a provenance-enabled consumer, the consumer computes the replay
+  classification below from its stored provenance and reports it as a bounded operational signal. It introduces no refusal: the
+  consumer's existing acceptance and refusal behaviour (including Audit's admission, §13.2) is unchanged, and a delivery that continues
+  to be processed is not thereby verified. The S1b guarantees for original deliveries (commit before the handler, §13.3; Audit admission;
+  Notification's key readiness) are unchanged.
+- **S1e, enforcement.** Only an approved per-consumer enforcement policy acts on the classification; its refusal semantics (which outcome
+  is refused, permanently or after holding) are decided with S1e and are not defined here. Financial consumers follow §13.5 and §13.10
+  and must enforce before their production activation; observe-only mode is never a basis for enabling a financial consumer in
+  production.
+
+The classification (closed set; implementation-facing names, proposed with S1c):
+
+| Classification | Meaning |
+|---|---|
+| `replay_matched_verified` | the delivery matches the stored **verified** original observation (`source`, `eventId`, `name` and the body element) |
+| `replay_matched_unverified` | it matches only a stored **unverified** original observation; it stays unverified |
+| `replay_no_provenance` | no stored original observation exists for it (for example an Audit delivery refused at admission, or a historical event) |
+| `replay_mismatch` | a stored original observation exists, but the delivered name or body does not match it |
+| `replay_unverifiable` | Notification only: the stored commitment's key was legitimately retired (§13.8), so no comparison is possible |
+| `replay_lookup_failure` | the verification could not be completed: the database, a temporarily unavailable key or an unknown commitment version |
+
+The delivery's `source` header and message id are lookup keys only, never identity: trust comes from the stored original observation,
+whose `verified` was established from the broker `user_id` on the original delivery. A delivery matching an unverified original inherits
+**unverified**; a delivery matching only conflict evidence, rather than the stored original observation, is never verified; a verified
+original observation keeps its validity when a different, conflicting observation is recorded later. `replay_unverifiable` and
+`replay_lookup_failure` are never a successful verification, and the operational signal keeps a failure to verify apart from a verified
+mismatch. No classification is a new processing permission.
 
 13.5 Financial consumers (billing-service for `payment.*` and `refund.*`) never process an unverified event. Other consumers may
 accept one only during an explicitly configured compatibility phase, and must record it as unverified.
@@ -333,7 +374,8 @@ accept one only during an explicitly configured compatibility phase, and must re
 
 13.7 A producer whose event ids are deterministic may re-emit one named outbox row, under owner authorization and with an audit
 record, through its own broker connection; consumers de-duplicate it. Producers with random ids (auth-service) can re-emit only while
-their published rows are retained.
+their published rows are retained. The mechanism (route or command), its caller and its audit record are an open decision (OD-15 of the
+[contract register](../architecture/core-v2-d-a2-contract-register.md)); nothing re-emits until it is decided (S0-C3).
 
 13.8 Provenance is retained at least as long as dead-letter retention plus the retry window. This is a minimum, not a requirement
 of permanent retention. For Audit (S0 clarification, 2026-10-23), a provenance row or digest must not outlive, and so undermine, the
@@ -342,7 +384,9 @@ and the production gate of the [execution roadmap](../architecture/core-v2-s-exe
 For Notification (S0-C2), each provenance key stays available at least as long as this minimum for the rows it committed; that is a
 minimum, not a destruction date. A key may be retired only once no still-eligible replay, retained observation that must still be
 compared, recovery obligation or retention or hold requirement depends on it, under a separately reviewed operational procedure; its
-rows then remain, unverifiable, and can never establish a verified replay. Destroying a key does not erase the rows' metadata. No
+rows then remain, unverifiable, and can never establish a verified replay. In particular (S0-C3), a key is not retired while a retained
+dead letter of an event committed under it may still be replayed; a rotation alone never creates a conflict, and a missing, a
+temporarily unavailable and a retired key are never treated alike. Destroying a key does not erase the rows' metadata. No
 duration is set here; Notification history retention is an open product / legal decision, and any future erasure policy must be
 reconciled with the surviving keyed commitments, key retention and metadata (production gate NP-K of the execution roadmap §7).
 

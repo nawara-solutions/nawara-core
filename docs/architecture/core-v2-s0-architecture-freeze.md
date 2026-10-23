@@ -99,6 +99,16 @@ status change still needs its own explicit owner authorization.
   is kept at least for the §13.8 minimum. Billing, Audit (S0-C1), every other consumer, the event contracts and safeguard S-8 are
   unchanged. This revises the frozen wording for one consumer; it is not an implementation authorization, a key or secret provisioning,
   or an ADR status change.
+- **S0-C3 Replay verification rollout (2026-10-23, owner-approved clarification).** [ADR-0057](../adr/0057-messaging-conventions.md)
+  §13.4 ("S0-C3"), with notes in §13.2 (S0-C2), §13.7 and §13.8. The §13.4 rule stays the mandatory end state. S1c computes a closed-set
+  replay classification (`replay_matched_verified`, `replay_matched_unverified`, `replay_no_provenance`, `replay_mismatch`,
+  `replay_unverifiable`, `replay_lookup_failure`) in observe-only mode, with no new refusal and no change to any consumer's acceptance;
+  S1e alone enforces it, per consumer, under a separately approved policy, and financial consumers enforce before their production
+  activation (§13.5, §13.10). The `source` header and message id are lookup keys, never identity; a match with an unverified original
+  stays unverified; conflict evidence never verifies a replay; a later conflicting observation does not invalidate a verified original;
+  a verification failure is never a verification. Notification conflict evidence records `differs` or `unverifiable` (a retired key is
+  never evidence of changed content), through an additive migration with S1c. Re-emission (§13.7) waits for OD-15. Safeguard S-8, S0-C1,
+  S0-C2's commitment and every financial invariant are unchanged. This is not an implementation authorization or an ADR status change.
 
 ## 2. ADR disposition
 
@@ -114,7 +124,7 @@ immutable; a later decision is a new ADR). Reciprocal notes on Accepted ADRs nee
 | [0045](../adr/0045-commercial-entitlementkind-compatibility-fields.md) `entitlementKind` | Proposed | Revision 1: wording aligned; no field change |
 | [0046](../adr/0046-notification-service-architecture.md) notification | Accepted | none; commercial IN_APP stays excluded (§5) |
 | [0049](../adr/0049-audit-trail-architecture.md) audit trail | Accepted | not edited; amended by 0069 when 0069 is Accepted; reciprocal note pending approval |
-| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5); S0-C2 Notification keyed body commitment, a normative revision of §13.2 (2026-10-23, §1.5) |
+| [0057](../adr/0057-messaging-conventions.md) messaging | Proposed | S0 revision: §13 and [S0] items in §7 and §8; S0-C1 Audit admission clarification of §13.2 (2026-10-23, §1.5); S0-C2 Notification keyed body commitment, a normative revision of §13.2 (2026-10-23, §1.5); S0-C3 replay verification rollout, a clarification of §13.4 (2026-10-23, §1.5) |
 | [0060](../adr/0060-company-platform-organization-lifecycle.md) lifecycle | Accepted | not edited; decision note DN-1 recorded here (§3.6) |
 | [0067](../adr/0067-auth-authorization-receipts-for-owner-approved-refunds.md) refund receipts | Proposed (new) | new |
 | [0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md) no Nawara cash settlement | Proposed (new) | new; partly supersedes 0007 |
