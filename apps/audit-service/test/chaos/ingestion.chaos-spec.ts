@@ -104,14 +104,17 @@ describeWithEnv(
       await a.app.close();
     }, 300_000);
 
-    it('POSTGRESQL STOPPED AND STARTED (the real container): nothing acknowledged while it is down; the kit retry carries the event over the outage; exactly one row', async () => {
+    // Core V2 S1b-2 (ADR-0057 §13.3): the outage now stops the delivery at its provenance record, before ingestion: it is held and requeued
+    // (never `.retry`, never dead-lettered) until PostgreSQL is back.
+    it('POSTGRESQL STOPPED AND STARTED (the real container): nothing acknowledged while it is down; the delivery is held and requeued over the outage; exactly one row', async () => {
       const a = await start();
       const deadBefore = await depthOf(DEAD_QUEUE);
       docker('stop', '-t', '1', env.TEST_POSTGRES_CONTAINER);
       try {
         const e = auditEnvelope('subscription.renewed');
         await publish([e]);
-        await until(async () => a.logs.some((l) => String(l.msg).startsWith(`audit_ingest_transient_failure eventId=${e.id}`)), 30_000);
+        await until(async () => a.logs.some((l) => String(l.msg).startsWith(`event_provenance_deferred queue=${AUDIT_QUEUE} event=${e.id}`)), 30_000);
+        expect(a.logs.some((l) => String(l.msg).startsWith(`audit_ingest_transient_failure eventId=${e.id}`))).toBe(false); // ingestion never ran
         await until(async () => (await readyState(a)) === 503);
         docker('start', env.TEST_POSTGRES_CONTAINER);
         await until(async () => {

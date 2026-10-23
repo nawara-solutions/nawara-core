@@ -1,5 +1,5 @@
 import { mayRetainRefusedAuditBody } from '@nawara/audit-contract/consumer';
-import type { DeadLetterDecision, DeadLetterInput, EventEnvelope } from '@nawara/service-kit';
+import { isCanonicalJsonBody, type DeadLetterDecision, type DeadLetterInput, type EventEnvelope } from '@nawara/service-kit';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SERVICE = /^[a-z][a-z0-9-]{1,62}$/;
@@ -31,7 +31,11 @@ function safeHeaders(event: EventEnvelope | undefined): Record<string, string | 
  *   `{"redacted":true,"failure":…,"reason":…,"bodyBytes":n}` document; the safe headers still say which claimed source, event id and
  *   correlation failed, when, and why (the kit annotations). No digest of the body is kept: an unkeyed hash of a short body (a phone
  *   number alone) could be reversed by trying the candidates.
+ * - Core V2 S1b-2: `original` also needs the raw bytes to be canonical JSON (`isCanonicalJsonBody`), since the screen judges the PARSED
+ *   value and a non-canonical body can carry bytes that value never shows (a duplicate key's dropped value, an invalid UTF-8 sequence).
+ *   Without the bytes (a caller that does not pass them) the copy is redacted.
  */
-export function auditDeadLetterPolicy({ event }: DeadLetterInput): DeadLetterDecision {
-  return { body: mayRetainRefusedAuditBody(event) ? 'original' : 'redacted', headers: safeHeaders(event) };
+export function auditDeadLetterPolicy({ event, body }: DeadLetterInput): DeadLetterDecision {
+  const keep = body !== undefined && isCanonicalJsonBody(body) && mayRetainRefusedAuditBody(event);
+  return { body: keep ? 'original' : 'redacted', headers: safeHeaders(event) };
 }

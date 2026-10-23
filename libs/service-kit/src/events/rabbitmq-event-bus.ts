@@ -141,13 +141,30 @@ interface DeadLetterCopy {
 }
 
 /**
+ * Core V2 S1b-2: runs a subscription's `admission` check. Anything but an explicit `{ admitted: true }` (a refusal, an exception, a
+ * promise, a malformed answer) throws a `PermanentEventFailure`, so the caller dead-letters it at once: never a retry, never provenance,
+ * never the handler. The check is given its own copy of the bytes.
+ */
+function admit(sub: EventSubscription, event: EventEnvelope, body: Buffer): void {
+  let decision: unknown;
+  try {
+    decision = sub.admission!(event, Buffer.from(body));
+  } catch {
+    throw new PermanentEventFailure('admission_error');
+  }
+  const d = decision as { admitted?: unknown; reason?: unknown } | null | undefined;
+  if (d?.admitted === true) return;
+  throw new PermanentEventFailure(d?.admitted === false && typeof d.reason === 'string' ? d.reason : 'admission_error');
+}
+
+/**
  * Stage 18.8: the dead-letter copy a subscription's `deadLetterPolicy` allows. Only the headers it returns (string / finite number values)
  * survive; a redacted body is a kit document carrying nothing of the original but its size; a policy that throws redacts (fail closed).
  */
 function deadLetterCopy(sub: EventSubscription, msg: ConsumeMessage, event: EventEnvelope | undefined, failure: FailureClass, reason: string | undefined): DeadLetterCopy {
   let decision: DeadLetterDecision;
   try {
-    decision = sub.deadLetterPolicy!({ event, failure, ...(reason ? { reason } : {}) });
+    decision = sub.deadLetterPolicy!({ event, failure, ...(reason ? { reason } : {}), body: msg.content });
   } catch {
     decision = { body: 'redacted', headers: {} };
   }
@@ -558,6 +575,8 @@ export class RabbitMqEventBus implements EventBus {
           ...(replayCount > 0 ? { replayCount } : {}),
         },
       };
+      // Core V2 S1b-2 (ADR-0057 §13.2 "Audit admission"): a refused delivery (on any exchange) never reaches provenance or the handler.
+      if (sub.admission) admit(sub, event, msg.content);
       // Core V2 S1b (ADR-0057 §13.2, §13.3): the handler runs only once the delivery's provenance is committed.
       if (sub.provenance && !(await this.provenanceCommitted(ch, msg, sub, stopping))) {
         this.observe({ type: 'consume', queue: sub.queue, outcome: 'provenance_deferred', redelivered });

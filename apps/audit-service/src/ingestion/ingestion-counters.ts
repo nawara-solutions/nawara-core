@@ -1,4 +1,5 @@
 import { AUDIT_REFUSALS } from '@nawara/audit-contract';
+import { ADMISSION_REFUSALS } from './admission.js';
 import { LogBudget } from './log-budget.js';
 
 /**
@@ -7,7 +8,8 @@ import { LogBudget } from './log-budget.js';
  * ingestion. No event, organization, actor, resource or correlation id, no action and no source service can ever become a label.
  */
 // (`transaction_required` is the producer writer's and never occurs here; it stays in the set only because the type is the contract's.)
-export const INGESTION_REFUSALS = [...AUDIT_REFUSALS, 'event_id_conflict', 'invalid_record'] as const;
+// Core V2 S1b-2: plus the admission refusals that are not contract codes (`noncanonical_body`, `confidentiality_screen`, `admission_error`).
+export const INGESTION_REFUSALS = [...AUDIT_REFUSALS, 'event_id_conflict', 'invalid_record', ...ADMISSION_REFUSALS] as const;
 export type IngestionRefusal = (typeof INGESTION_REFUSALS)[number];
 
 const OUTCOMES = ['received', 'persisted', 'duplicate', 'refused', 'transient_failure', 'clock_skew_future'] as const;

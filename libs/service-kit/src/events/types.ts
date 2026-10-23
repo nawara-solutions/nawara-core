@@ -56,13 +56,27 @@ export interface EventSubscription {
    * secret (a code-bearing event, ADR-0052 decision 5). `npm run check:repo` allows it only for reviewed services (`EVENT_PROVENANCE_APPROVED_SERVICES`).
    */
   provenance?: ProvenanceOptions;
+  /**
+   * Core V2 S1b-2 (optional; RabbitMQ implementation; ADR-0057 §13.2 "Audit admission"): a deterministic, side-effect-free check of every
+   * delivery (through the event exchange or the default exchange alike) that runs after the kit's envelope checks and BEFORE provenance
+   * and the handler, given the parsed envelope and the raw delivered bytes. Anything but `{ admitted: true }` (a refusal, an exception, a
+   * promise) is a permanent failure with no handler, no retry and no provenance: the delivery is dead-lettered at once (under
+   * `deadLetterPolicy`, if any) with the refusal's reason, or `admission_error`. It must never read a message field as authenticated
+   * identity. Without it the bus behaves exactly as before. The in-memory bus has no raw bytes and ignores it.
+   */
+  admission?(event: EventEnvelope, body: Buffer): EventAdmission;
 }
+
+/** What an `admission` check answers: admitted, or refused with a short stable reason code (never payload data). */
+export type EventAdmission = { admitted: true } | { admitted: false; reason: string };
 
 /** What a dead-letter policy is told: the parsed envelope (absent when the message was not an event at all) and why it failed. */
 export interface DeadLetterInput {
   event: EventEnvelope | undefined;
   failure: 'malformed' | 'permanent' | 'retries_exhausted';
   reason?: string;
+  /** Core V2 S1b-2: the raw delivered bytes (the RabbitMQ bus always passes them), so a policy can judge what it would keep. */
+  body?: Buffer;
 }
 
 export interface DeadLetterDecision {
