@@ -51,6 +51,8 @@ export class InMemoryEventBus implements EventBus {
   }
 
   async subscribe(sub: EventSubscription) {
+    // Core V2 S1e-1: no broker metadata here, so no trust decision: an enforced subscription is refused, never run unprotected
+    if (sub.enforcement !== undefined) throw new Error(`enforcement for ${sub.queue}: needs the RabbitMQ bus (the in-memory bus has no broker identity)`);
     this.subs.add(sub);
     return { close: async () => void this.subs.delete(sub) };
   }

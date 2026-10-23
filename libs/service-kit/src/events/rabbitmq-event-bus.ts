@@ -1,6 +1,7 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
 import { bodySha256, evaluateProvenanceFacts, replayCandidate, type ReplayClassification, type ReplayOriginal, type ReplayClassificationOutcome } from './provenance.js';
+import { assertEnforceable, decideOriginal, decideReplayTrust, refusalReason, type HandlerTrust, type TrustDecision } from './trust.js';
 import { consumeIssuedReemissionPlan, type ReemissionPlan, type ReemissionPublishOutcome, type ReemissionPublisher } from './reemission.js';
 import { eventMessage } from './serialization.js';
 import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
@@ -217,6 +218,7 @@ export type ConsumeOutcome =
 export type ProvenanceOutcome = 'recorded_verified' | 'recorded_unverified' | 'duplicate' | 'conflict' | 'unverifiable' | 'not_original' | 'failed';
 export type EventBusObservation =
   | { type: 'publish'; outcome: 'confirmed' | 'failed' | 'confirm_timeout'; durationMs: number }
+  | { type: 'trust'; queue: string; decision: TrustDecision['decision']; basis: TrustDecision['basis'] }
   | { type: 'consume'; queue: string; outcome: ConsumeOutcome; handlerMs?: number; redelivered: boolean }
   | { type: 'provenance'; queue: string; outcome: ProvenanceOutcome }
   /** Core V2 S1c-1 (S0-C3, observe-only): a default-exchange delivery classified against the stored originals; never a processing decision. */
@@ -463,6 +465,7 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
   }
 
   async subscribe(sub: EventSubscription) {
+    assertEnforceable(sub); // Core V2 S1e-1: an enforced subscription that could not be enforced as declared never starts
     const handle: ConsumerHandle = { sub, state: 'reconnecting', attempts: 0, closed: false, inFlight: new Set(), stopping: new AbortController() };
     this.consumers.add(handle);
     try {
@@ -637,13 +640,33 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
       };
       // Core V2 S1b-2 (ADR-0057 §13.2 "Audit admission"): a refused delivery (on any exchange) never reaches provenance or the handler.
       if (sub.admission) admit(sub, event, msg.content);
-      // Core V2 S1b (ADR-0057 §13.2, §13.3): the handler runs only once the delivery's provenance is committed.
-      if (sub.provenance && !(await this.provenanceCommitted(ch, msg, sub, stopping))) {
+      let trust: HandlerTrust | undefined;
+      if (sub.enforcement) {
+        // Core V2 S1e-1 (ADR-0057 §13.4, §13.5, S0-C6): the trust decision is durable BEFORE the handler; only an accepted one reaches it
+        const decision = await this.trustDecision(msg, sub);
+        this.observe({ type: 'trust', queue: sub.queue, decision: decision.decision, basis: decision.basis });
+        const who = `queue=${sub.queue} event=${messageIdOf(msg.properties.messageId)}`;
+        if (decision.decision === 'hold') {
+          const delayMs = this.opts.retry?.delayMs ?? 5000;
+          this.notice(`event_trust_held ${who} basis=${decision.basis} delayMs=${delayMs} — the trust decision could not be established, so the handler did not run; requeued after the delay`, 'error');
+          await holdUnless(delayMs, stopping);
+          this.settle(() => ch.nack(msg, false, true), sub);
+          this.observe({ type: 'consume', queue: sub.queue, outcome: 'provenance_deferred', redelivered });
+          return;
+        }
+        if (decision.decision === 'refuse') {
+          this.notice(`event_trust_refused ${who} basis=${decision.basis} — refused before the handler (permanent)`, 'error');
+          throw new PermanentEventFailure(refusalReason(decision.basis));
+        }
+        if (decision.decision === 'compatibility') this.notice(`event_trust_compatibility ${who} basis=${decision.basis} — accepted UNVERIFIED (compatibility phase)`, 'info');
+        trust = decision;
+      } else if (sub.provenance && !(await this.provenanceCommitted(ch, msg, sub, stopping))) {
+        // Core V2 S1b (ADR-0057 §13.2, §13.3): the handler runs only once the delivery's provenance is committed.
         this.observe({ type: 'consume', queue: sub.queue, outcome: 'provenance_deferred', redelivered });
         return;
       }
       handlerStarted = performance.now();
-      await sub.handler(event);
+      await sub.handler(event, trust);
       handlerMs = performance.now() - handlerStarted;
     } catch (e) {
       if (handlerStarted !== undefined) handlerMs = performance.now() - handlerStarted;
@@ -706,12 +729,12 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
    * `replay_lookup_failure`, never a verification. Reports a bounded observation, and a notice (ids and closed codes only) for every outcome
    * but a verified match.
    */
-  private async classifyReplay(msg: ConsumeMessage, sub: EventSubscription, who: string): Promise<void> {
+  private async classifyReplay(msg: ConsumeMessage, sub: EventSubscription, who: string): Promise<ReplayClassification | undefined> {
     const p = sub.provenance!;
     const candidate = replayCandidate({ messageId: msg.properties.messageId, type: msg.properties.type, headers: msg.properties.headers ?? {} });
     let result: ReplayClassification;
     let errorName = '';
-    if (!('classifyReplay' in (p.keyedStore ?? p.store))) return; // a store without replay classification: unchanged
+    if (!('classifyReplay' in (p.keyedStore ?? p.store))) return undefined; // a store without replay classification: unchanged
     try {
       const lookup = p.keyedStore
         ? p.keyedStore.classifyReplay!(sub.queue, { ...candidate, body: Buffer.from(msg.content) })
@@ -738,6 +761,44 @@ export class RabbitMqEventBus implements EventBus, ReemissionPublisher {
         result.outcome === 'replay_matched_unverified' ? 'info' : 'warn',
       );
     }
+    return result;
+  }
+
+  /**
+   * Core V2 S1e-1 (ADR-0057 §13.4, §13.5, S0-C4, S0-C6): the trust decision of one delivery for an ENFORCED subscription. An original delivery
+   * through the event exchange is recorded exactly as the observe-only path records it, in its own transaction, and judged against the
+   * stored VERIFIED observation (`assess`); a default-exchange delivery is judged by its replay classification. Any other path is refused.
+   * A store, key or lookup failure is a hold, never a decision. Never throws.
+   */
+  private async trustDecision(msg: ConsumeMessage, sub: EventSubscription): Promise<TrustDecision> {
+    const p = sub.provenance!;
+    const policy = sub.enforcement!;
+    const who = `queue=${sub.queue} event=${messageIdOf(msg.properties.messageId)}`;
+    const headers = msg.properties.headers ?? {};
+    const evaluation = evaluateProvenanceFacts(
+      { exchange: msg.fields.exchange, routingKey: msg.fields.routingKey, userId: msg.properties.userId, messageId: msg.properties.messageId, type: msg.properties.type, headers },
+      this.exchange,
+      (name) => p.ownerOf(name),
+    );
+    if (evaluation.origin === 'original') {
+      const o = evaluation.facts;
+      let assessment;
+      try {
+        // the keyed store commits the raw bytes itself (S0-C2): no unkeyed digest on that path
+        assessment = p.keyedStore
+          ? await p.keyedStore.assess!(sub.queue, { ...o, body: Buffer.from(msg.content) })
+          : await p.store.assess!(sub.queue, { ...o, bodySha256: bodySha256(msg.content) });
+      } catch {
+        this.observe({ type: 'provenance', queue: sub.queue, outcome: 'failed' });
+        return { decision: 'hold', basis: 'provenance_unavailable' };
+      }
+      const result = assessment.result;
+      this.observe({ type: 'provenance', queue: sub.queue, outcome: result === 'recorded' ? (o.verified ? 'recorded_verified' : 'recorded_unverified') : result });
+      return decideOriginal(o, assessment, policy, headers);
+    }
+    this.observe({ type: 'provenance', queue: sub.queue, outcome: 'not_original' });
+    if (msg.fields.exchange !== '') return { decision: 'refuse', basis: 'unknown_path' };
+    return decideReplayTrust(await this.classifyReplay(msg, sub, who), policy);
   }
 
   /**

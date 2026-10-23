@@ -3677,3 +3677,18 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     assert.throws(() => tp.renderProvisionTopicGrants(out), /cannot be quoted safely/);
   });
 }
+
+test('Core V2 S1e-1: only audit-service may use the compatibility phase; a consumer of code-bearing events never keeps a refused body', async () => {
+  const { checkEnforcementPolicies } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const contracts = Object.fromEntries(['auth-service', 'billing-service', 'notification-service', 'payment-service'].map((a) => [a, read(`apps/${a}/contracts/events.json`)]));
+  assert.deepEqual(checkEnforcementPolicies(contracts, {}), []);
+  const src = (app, text) => ({ [app]: { [`apps/${app}/src/x.ts`]: text } });
+  assert.deepEqual(checkEnforcementPolicies(contracts, src('audit-service', 'enforcement: auditCompatibilityEnforcement()')), []);
+  for (const app of ['billing-service', 'notification-service', 'payment-service']) {
+    assert.match(checkEnforcementPolicies(contracts, src(app, 'enforcement: auditCompatibilityEnforcement()')).join(), /only audit-service may use the compatibility phase/, app);
+  }
+  assert.match(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'original_reviewed' })")).join(), /consumes a code-bearing event/);
+  assert.deepEqual(checkEnforcementPolicies(contracts, src('notification-service', "strictEnforcement({ refusedBody: 'dead_letter_policy' })")), []);
+  assert.deepEqual(checkEnforcementPolicies(contracts, src('billing-service', "strictEnforcement({ refusedBody: 'original_reviewed' })")), []); // Payment events carry no code
+});

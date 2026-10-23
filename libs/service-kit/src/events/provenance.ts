@@ -55,6 +55,8 @@ export interface ProvenanceStore {
   record(consumer: string, observation: ProvenanceObservation): Promise<ProvenanceRecordResult>;
   /** Core V2 S1c-1 (S0-C3, observe-only): classifies a default-exchange delivery against the stored ORIGINAL observations; read-only. */
   classifyReplay?(consumer: string, replay: ReplayCandidate & { bodySha256: string }): Promise<ReplayClassification>;
+  /** Core V2 S1e-1: `record`, plus what the delivery is against the stored VERIFIED observation (see `ProvenanceAssessment`). */
+  assess?(consumer: string, observation: ProvenanceObservation): Promise<ProvenanceAssessment>;
 }
 
 /** Core V2 S1b-3: a keyed store, given the verified facts and the raw body bytes (it commits the body itself, under its own key). */
@@ -63,6 +65,8 @@ export interface KeyedProvenanceStore {
   record(consumer: string, observation: KeyedProvenanceObservation): Promise<ProvenanceRecordResult>;
   /** Core V2 S1c-1 (S0-C3, observe-only): as `ProvenanceStore.classifyReplay`, comparing under each stored row's own key; read-only. */
   classifyReplay?(consumer: string, replay: ReplayCandidate & { body: Buffer }): Promise<ReplayClassification>;
+  /** Core V2 S1e-1: as `ProvenanceStore.assess`, comparing under the stored verified row's own key. */
+  assess?(consumer: string, observation: KeyedProvenanceObservation): Promise<ProvenanceAssessment>;
 }
 
 /** The facts of one original delivery plus its raw body bytes, for a keyed store only (never logged, never stored as such). */
@@ -76,6 +80,22 @@ export interface KeyedProvenanceObservation extends ProvenanceFacts {
  * was kept as evidence of that, never as a proven difference.
  */
 export type ProvenanceRecordResult = 'recorded' | 'duplicate' | 'conflict' | 'unverifiable';
+
+/**
+ * Core V2 S1e-1 (ADR-0057 S0-C4, S0-C6): what one recorded original delivery is against the stored VERIFIED observation of its (consumer,
+ * source, event id), decided in the same transaction as the record. `result` is exactly `record`'s aggregate answer (observe-only signal);
+ * `verified` is the decision enforcement uses, because the aggregate `conflict` cannot tell a contradiction of the verified record from a
+ * difference with an unverified one:
+ * - `first`: this verified delivery IS the stored verified observation (none existed; an earlier unverified one changes nothing);
+ * - `matches`: a verified observation was stored and this verified delivery has the same facts and body;
+ * - `contradicts`: a verified observation was stored and this verified delivery differs from it (never reconciled);
+ * - `unverifiable`: the stored verified observation's key was retired, so it cannot be compared (keyed stores);
+ * - `not_applicable`: this delivery is not verified (it never becomes the verified record).
+ */
+export interface ProvenanceAssessment {
+  result: ProvenanceRecordResult;
+  verified: 'first' | 'matches' | 'contradicts' | 'unverifiable' | 'not_applicable';
+}
 
 /**
  * Core V2 S1c-1 (ADR-0057 §13.4 with S0-C3; observe-only): what a default-exchange delivery (a retry, an operator replay, an injection)
@@ -98,6 +118,8 @@ export type ReplayOriginal = (typeof REPLAY_ORIGINALS)[number];
 export interface ReplayClassification {
   outcome: ReplayClassificationOutcome;
   original: ReplayOriginal;
+  /** Core V2 S1e-1: the stored original a `replay_matched_*` outcome matched (its stored facts; never the delivery's headers). */
+  matched?: { source: string; eventId: string; name: string; routingKey: string; producerUserId: string | null };
 }
 /**
  * The lookup candidate of a default-exchange delivery: its `source` header, message id and type, as validated tokens. They are only WHERE to
@@ -170,10 +192,11 @@ export function replayCandidate(d: Pick<ProvenanceDelivery, 'messageId' | 'type'
  * delivery's body is the row's (`same` / `different`, or `unverifiable` under a retired key; it throws when it cannot decide). A name that
  * differs is a definitive difference without looking at the body.
  */
-function decideReplay<R extends { name: string; verified: boolean }>(
+function decideReplay<R extends { name: string; verified: boolean; routingKey: string; producerUserId: string | null }>(
   rows: R[],
   name: string,
   body: (row: R) => 'same' | 'different' | 'unverifiable',
+  key: { source: string; eventId: string },
 ): ReplayClassification {
   if (rows.length === 0) return { outcome: 'replay_no_provenance', original: 'none' };
   const ordered = [...rows].sort((a, b) => Number(b.verified) - Number(a.verified));
@@ -181,7 +204,13 @@ function decideReplay<R extends { name: string; verified: boolean }>(
   for (const r of ordered) {
     if (r.name !== name) continue;
     const b = body(r);
-    if (b === 'same') return { outcome: r.verified ? 'replay_matched_verified' : 'replay_matched_unverified', original: r.verified ? 'verified' : 'unverified' };
+    if (b === 'same') {
+      return {
+        outcome: r.verified ? 'replay_matched_verified' : 'replay_matched_unverified',
+        original: r.verified ? 'verified' : 'unverified',
+        matched: { source: key.source, eventId: key.eventId, name: r.name, routingKey: r.routingKey, producerUserId: r.producerUserId },
+      };
+    }
     if (b === 'unverifiable') unverifiable ??= r;
   }
   if (unverifiable) return { outcome: 'replay_unverifiable', original: unverifiable.verified ? 'verified' : 'unverified' };
@@ -250,6 +279,11 @@ export class PgProvenanceStore implements ProvenanceStore {
   constructor(private readonly db: { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> }) {}
 
   record(consumer: string, o: ProvenanceObservation): Promise<ProvenanceRecordResult> {
+    return this.assess(consumer, o).then((a) => a.result);
+  }
+
+  /** Core V2 S1e-1: `record` (unchanged writes), plus the delivery against the stored VERIFIED observation (`ProvenanceAssessment`). */
+  assess(consumer: string, o: ProvenanceObservation): Promise<ProvenanceAssessment> {
     return this.db.tx(async (q) => {
       await q.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`event_provenance:${consumer}:${o.source}:${o.eventId}`]);
       const inserted = await q.query<{ id: string }>(
@@ -274,7 +308,9 @@ export class PgProvenanceStore implements ProvenanceStore {
           [r.id, consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, o.bodySha256, o.producerUserId, o.verified, o.reason],
         );
       }
-      return conflict ? 'conflict' : own ? 'recorded' : 'duplicate';
+      const storedVerified = stored.rows.find((r) => r.verified && r.id !== own);
+      const verified: ProvenanceAssessment['verified'] = !o.verified ? 'not_applicable' : own ? 'first' : !storedVerified || differs(storedVerified, o) ? 'contradicts' : 'matches';
+      return { result: conflict ? 'conflict' : own ? 'recorded' : 'duplicate', verified };
     });
   }
 
@@ -285,7 +321,7 @@ export class PgProvenanceStore implements ProvenanceStore {
         `SELECT id, name, "routingKey", "bodySha256", "producerUserId", verified FROM event_provenance WHERE consumer = $1 AND source = $2 AND "eventId" = $3`,
         [consumer, c.source, c.eventId],
       );
-      return decideReplay(stored.rows, c.name, (r) => (r.bodySha256 === c.bodySha256 ? 'same' : 'different'));
+      return decideReplay(stored.rows, c.name, (r) => (r.bodySha256 === c.bodySha256 ? 'same' : 'different'), c);
     });
   }
 }
@@ -403,6 +439,11 @@ export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
   }
 
   record(consumer: string, o: KeyedProvenanceObservation): Promise<ProvenanceRecordResult> {
+    return this.assess(consumer, o).then((a) => a.result);
+  }
+
+  /** Core V2 S1e-1: `record` (unchanged writes), plus the delivery against the stored VERIFIED observation, under that row's own key. */
+  assess(consumer: string, o: KeyedProvenanceObservation): Promise<ProvenanceAssessment> {
     const { macUnder, bodyOf } = this.comparer(o.body);
     const sameFacts = (r: KeyedRow): boolean =>
       r.name === o.name && r.routingKey === o.routingKey && r.producerUserId === o.producerUserId && r.verified === o.verified;
@@ -447,7 +488,14 @@ export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
           [r.id, consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, BODY_COMMITMENT_VERSION, activeKeyId, mac, o.producerUserId, o.verified, o.reason, comparison],
         );
       }
-      return differs ? 'conflict' : unverifiable ? 'unverifiable' : own ? 'recorded' : 'duplicate';
+      const storedVerified = stored.rows.find((r) => r.verified && r.id !== own);
+      let verified: ProvenanceAssessment['verified'] = 'not_applicable';
+      if (o.verified) {
+        if (own) verified = 'first';
+        else if (!storedVerified || !sameFacts(storedVerified)) verified = 'contradicts';
+        else verified = ({ same: 'matches', different: 'contradicts', unverifiable: 'unverifiable' } as const)[bodyOf(storedVerified)];
+      }
+      return { result: differs ? 'conflict' : unverifiable ? 'unverifiable' : own ? 'recorded' : 'duplicate', verified };
     });
   }
 
@@ -464,7 +512,7 @@ export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
           WHERE consumer = $1 AND source = $2 AND "eventId" = $3`,
         [consumer, c.source, c.eventId],
       );
-      return decideReplay(stored.rows, c.name, bodyOf);
+      return decideReplay(stored.rows, c.name, bodyOf, c);
     });
   }
 }

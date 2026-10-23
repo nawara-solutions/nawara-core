@@ -49,17 +49,17 @@ describe('PgProvenanceStore.classifyReplay (unkeyed: Billing, Audit)', () => {
     return r;
   };
   it('matches the verified original; an unverified one stays unverified; none, a changed name or body are told apart', async () => {
-    expect(await classify([plain(true)])).toEqual({ outcome: 'replay_matched_verified', original: 'verified' });
-    expect(await classify([plain(false)])).toEqual({ outcome: 'replay_matched_unverified', original: 'unverified' });
-    expect(await classify([])).toEqual({ outcome: 'replay_no_provenance', original: 'none' });
-    expect(await classify([plain(true)], CHANGED)).toEqual({ outcome: 'replay_mismatch', original: 'verified' });
-    expect(await classify([plain(false)], CHANGED)).toEqual({ outcome: 'replay_mismatch', original: 'unverified' });
-    expect(await classify([plain(true)], BODY, 'member.other_event')).toEqual({ outcome: 'replay_mismatch', original: 'verified' });
+    expect(await classify([plain(true)])).toMatchObject({ outcome: 'replay_matched_verified', original: 'verified' });
+    expect(await classify([plain(false)])).toMatchObject({ outcome: 'replay_matched_unverified', original: 'unverified' });
+    expect(await classify([])).toMatchObject({ outcome: 'replay_no_provenance', original: 'none' });
+    expect(await classify([plain(true)], CHANGED)).toMatchObject({ outcome: 'replay_mismatch', original: 'verified' });
+    expect(await classify([plain(false)], CHANGED)).toMatchObject({ outcome: 'replay_mismatch', original: 'unverified' });
+    expect(await classify([plain(true)], BODY, 'member.other_event')).toMatchObject({ outcome: 'replay_mismatch', original: 'verified' });
   });
   it('a verified original stays valid beside a different (forged) unverified one; matching only the forged content is never verified', async () => {
     const rows = [plain(false, CHANGED), plain(true)];
-    expect(await classify(rows)).toEqual({ outcome: 'replay_matched_verified', original: 'verified' });
-    expect(await classify(rows, CHANGED)).toEqual({ outcome: 'replay_matched_unverified', original: 'unverified' });
+    expect(await classify(rows)).toMatchObject({ outcome: 'replay_matched_verified', original: 'verified' });
+    expect(await classify(rows, CHANGED)).toMatchObject({ outcome: 'replay_matched_unverified', original: 'unverified' });
   });
 });
 
@@ -69,16 +69,16 @@ describe('PgKeyedProvenanceStore.classifyReplay (Notification, under each stored
     return new PgKeyedProvenanceStore(db, r).classifyReplay('q', { ...candidate, body });
   };
   it('matches under the original key, also after a rotation; a changed code is a mismatch; an unverified original stays unverified', async () => {
-    expect(await classify([keyed(true, 'p1', K1)], ring())).toEqual({ outcome: 'replay_matched_verified', original: 'verified' });
+    expect(await classify([keyed(true, 'p1', K1)], ring())).toMatchObject({ outcome: 'replay_matched_verified', original: 'verified' });
     const rotated = ring({ activeKeyId: 'p2', keys: new Map([['p1', K1], ['p2', K2]]) });
-    expect(await classify([keyed(true, 'p1', K1)], rotated)).toEqual({ outcome: 'replay_matched_verified', original: 'verified' });
-    expect(await classify([keyed(true, 'p1', K1)], rotated, CHANGED)).toEqual({ outcome: 'replay_mismatch', original: 'verified' });
-    expect(await classify([keyed(false, 'p1', K1)], ring())).toEqual({ outcome: 'replay_matched_unverified', original: 'unverified' });
+    expect(await classify([keyed(true, 'p1', K1)], rotated)).toMatchObject({ outcome: 'replay_matched_verified', original: 'verified' });
+    expect(await classify([keyed(true, 'p1', K1)], rotated, CHANGED)).toMatchObject({ outcome: 'replay_mismatch', original: 'verified' });
+    expect(await classify([keyed(false, 'p1', K1)], ring())).toMatchObject({ outcome: 'replay_matched_unverified', original: 'unverified' });
   });
   it('a RETIRED key is unverifiable (never a match, never a mismatch); an UNAVAILABLE key or an unknown version rejects (lookup failure)', async () => {
     const retired = ring({ activeKeyId: 'p2', keys: new Map([['p2', K2]]), retiredKeyIds: new Set(['p1']) });
-    expect(await classify([keyed(true, 'p1', undefined)], retired)).toEqual({ outcome: 'replay_unverifiable', original: 'verified' });
-    expect(await classify([keyed(true, 'p1', undefined, BODY, { name: 'other.event' })], retired)).toEqual({ outcome: 'replay_mismatch', original: 'verified' }); // a different name is definitive
+    expect(await classify([keyed(true, 'p1', undefined)], retired)).toMatchObject({ outcome: 'replay_unverifiable', original: 'verified' });
+    expect(await classify([keyed(true, 'p1', undefined, BODY, { name: 'other.event' })], retired)).toMatchObject({ outcome: 'replay_mismatch', original: 'verified' }); // a different name is definitive
     const unavailable = ring({ activeKeyId: 'p3', keys: new Map([['p3', K2]]) });
     await expect(classify([keyed(true, 'p1', undefined)], unavailable)).rejects.toBeInstanceOf(ProvenanceKeyUnavailableError);
     await expect(classify([keyed(true, 'p1', K1, BODY, { bodyCommitmentVersion: 2 })], ring())).rejects.toBeInstanceOf(ProvenanceCommitmentVersionError);

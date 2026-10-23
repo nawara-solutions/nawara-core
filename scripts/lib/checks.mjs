@@ -3044,6 +3044,36 @@ export function checkEventReemission(contracts, files, sources = {}) {
   return problems;
 }
 
+// ─────────────────────────────────────────────────────────────── Core V2 S1e-1: consumer enforcement policies
+
+/**
+ * Core V2 S1e-1 (ADR-0057 "S0-C6"): the two enforcement-policy rules a source scan can hold, beside the kit's own runtime checks:
+ * - only audit-service may name `auditCompatibilityEnforcement` (the compatibility phase is Audit's alone; the kit also refuses it on any
+ *   other queue at subscribe, so a financial consumer can never run in it);
+ * - a service that consumes an event its producer's contract marks `codeBearing` never declares `refusedBody: 'original_reviewed'`: a
+ *   refused delivery of such an event must go through a redacting dead-letter policy, never keep its code.
+ * `contracts`: application -> contracts/events.json text; `sources`: application -> { relPath: text } of its non-test source.
+ */
+export const ENFORCEMENT_COMPATIBILITY_SERVICES = Object.freeze(['audit-service']);
+export function checkEnforcementPolicies(contracts, sources) {
+  const problems = [];
+  const why = 'consumer enforcement follows ADR-0057 S0-C6';
+  const parsed = new Map();
+  for (const [app, text] of Object.entries(contracts)) {
+    try { parsed.set(app, JSON.parse(text)); } catch { /* reported by checkEventContracts */ }
+  }
+  const codeBearing = new Set();
+  for (const [app, c] of parsed) for (const e of Array.isArray(c?.produces) ? c.produces : []) if (e?.codeBearing === true) codeBearing.add(`${app}|${e.name}`);
+  for (const [app, files] of Object.entries(sources)) {
+    const consumesCode = (parsed.get(app)?.consumes ?? []).some((e) => codeBearing.has(`${e?.source}|${e?.name}`));
+    for (const [relPath, text] of Object.entries(files)) {
+      if (!ENFORCEMENT_COMPATIBILITY_SERVICES.includes(app) && /\bauditCompatibilityEnforcement\b/.test(text)) problems.push(`${relPath}: only audit-service may use the compatibility phase (auditCompatibilityEnforcement); ${why}`);
+      if (consumesCode && /refusedBody\s*:\s*['"]original_reviewed['"]/.test(text)) problems.push(`${relPath}: ${app} consumes a code-bearing event, so a refusal must use its redacting dead-letter policy (refusedBody 'dead_letter_policy'), never keep the original body; ${why}`);
+    }
+  }
+  return problems;
+}
+
 // ─────────────────────────────────────────────────────────────── V2 A5.4-T1: the Auth → Organization Service dependency boundary
 
 /**
