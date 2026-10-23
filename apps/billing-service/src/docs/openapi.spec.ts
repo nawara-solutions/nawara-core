@@ -25,7 +25,8 @@ describe('OpenAPI document (Stage 3 + Stage 4)', () => {
       PAYMENT_SERVICE_TOKEN: 'test-only-payment-service-token-not-a-real-secret-000',
     });
     const moduleRef = await Test.createTestingModule({
-      imports: [AppModule.register(config, { authClient: noopAuthClient, bus: new InMemoryEventBus() })],
+      // a document-only bus: Core V2 S1e-2 makes Billing's payment-event subscription strict, which the in-memory bus refuses
+      imports: [AppModule.register(config, { authClient: noopAuthClient, bus: new (class extends InMemoryEventBus { override async subscribe() { return { close: async () => undefined }; } })() })],
     }).compile();
     const app = moduleRef.createNestApplication<NestExpressApplication>({ logger: false });
     await app.init();

@@ -9,9 +9,13 @@ import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testi
 import { describeWithEnv } from './support/env.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
 import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
 const refStub = await startReferenceStub();
+/** Core V2 S1e-2: the authenticated `payment-service` broker identity for this file, and its capture of Payment's own messages. */
+let paymentIdentity: PaymentIdentity | undefined;
+let tap: Awaited<ReturnType<typeof tapPaymentEvents>> | undefined;
 afterAll(() => refStub.close());
 
 /**
@@ -35,12 +39,11 @@ const BILLING_PORT = 13113;
 const PAYMENT_PORT = 13114;
 const BILLING_URL = `http://127.0.0.1:${BILLING_PORT}`;
 const PAYMENT_URL = `http://127.0.0.1:${PAYMENT_PORT}`;
-const EXCHANGE = 'nawara.events';
 const QUEUE = 'billing.payment-events';
 const RETRY_QUEUE = `${QUEUE}.retry`;
 const DEAD_QUEUE = `${QUEUE}.dead`;
 
-describeWithEnv('DLQ retry and operator replay of Payment events, over a real broker and two live processes', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL'], (env) => {
+describeWithEnv('DLQ retry and operator replay of Payment events, over a real broker and two live processes', ['TEST_DATABASE_ADMIN_URL', 'TEST_RABBITMQ_URL', 'TEST_RABBITMQ_MGMT_URL'], (env) => {
   let billingDb: TestDatabase;
   let paymentDb: TestDatabase;
   let billing: LiveService;
@@ -82,10 +85,12 @@ describeWithEnv('DLQ retry and operator replay of Payment events, over a real br
     await runMigrations(paymentDb.url, [kitMigrationsDir, `${PAYMENT_DIR}/db/migrations/`]);
     billingAdmin = new pg.Pool({ connectionString: billingDb.url });
     amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL);
+    paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });
+    tap = await tapPaymentEvents(amqpConn);
     await purgeAll();
 
     payment = spawnService('payment', PAYMENT_DIR, {
-      NODE_ENV: 'test', PORT: String(PAYMENT_PORT), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: env.TEST_RABBITMQ_URL,
+      NODE_ENV: 'test', PORT: String(PAYMENT_PORT), DATABASE_URL: paymentDb.url, AUTH_SERVICE_URL: 'http://127.0.0.1:9', RABBITMQ_URL: paymentIdentity!.url(env.TEST_RABBITMQ_URL), // Core V2 S1e-2: Payment's own identity
       PAYMENT_SUPPORTED_CURRENCIES: 'TND', SERVICE_TOKENS: `billing-service:${billingToPaymentToken.digest}`, ...paymentPolicy('billing-service'), ...refStub.env,
     });
     billing = spawnService('billing', BILLING_DIR, {
@@ -104,6 +109,8 @@ describeWithEnv('DLQ retry and operator replay of Payment events, over a real br
   afterAll(async () => {
     await billing?.stop();
     await payment?.stop();
+    await tap?.close();
+    await paymentIdentity?.remove();
     if (amqpConn) {
       await purgeAll();
       await amqpConn.close().catch(() => undefined);
@@ -229,13 +236,11 @@ describeWithEnv('DLQ retry and operator replay of Payment events, over a real br
       payer: { type: 'user', id: 'payer-x' }, seller: { type: 'organization', id: randomUUID() }, organizationId: null, currency: 'TND', revision: 0, amount: 1000,
     };
     const started = Date.now();
-    await withChannel(async (ch) => {
-      ch.publish(EXCHANGE, 'payment.cancelled', Buffer.from(JSON.stringify(payload)), {
-        messageId: eventId, type: 'payment.cancelled', persistent: true, contentType: 'application/json',
-        headers: { eventId, occurredAt: new Date().toISOString(), correlationId: corr, source: 'payment-service', version: 1 },
-      });
-      await ch.checkQueue(QUEUE);
-    }, undefined);
+    // published by an authenticated Payment (Core V2 S1e-2), so it reaches Billing's own identifier check
+    await paymentIdentity!.publish('payment.cancelled', Buffer.from(JSON.stringify(payload)), {
+      messageId: eventId, type: 'payment.cancelled', persistent: true, contentType: 'application/json',
+      headers: { eventId, occurredAt: new Date().toISOString(), correlationId: corr, source: 'payment-service', version: 1 },
+    });
     await waitFor(async () => (await depth(DEAD_QUEUE)) === 1, 20_000, 'the permanently failing event to be dead-lettered');
     expect(Date.now() - started).toBeLessThan(4_500); // no retry delay (a retry would take 5 s or more)
     expect(await depth(RETRY_QUEUE)).toBe(0);

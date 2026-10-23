@@ -386,7 +386,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     const facts = eventFor(open, request, paymentId);
     const { name, source, ...payload } = facts;
     const envelope: EventEnvelope = { id: crypto.randomUUID(), name, payload: payload as Record<string, unknown>, headers: { eventId: crypto.randomUUID(), occurredAt: settledAt.toISOString(), source, version: 1 } };
-    await t.bus.publish(envelope);
+    await t.bus.deliver(envelope);
 
     const row = await subs.getByOrganization(organizationId);
     expect(row).toMatchObject({ status: 'active', currentPeriodStart: settledAt, currentPeriodEnd: anchorOccurrence(settledAt, 1) });

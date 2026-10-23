@@ -3,6 +3,7 @@ import { InvoicesModule } from '../invoices/invoices.module.js';
 import { PaymentClientModule } from './payment-client.module.js';
 import { PaymentDispatcher, PaymentDispatcherService } from './payment-dispatcher.js';
 import { PaymentEventConsumer } from './payment-event-consumer.js';
+import { PaymentEventOriginRepository } from './payment-event-origin.js';
 import { PaymentReconciler, PaymentReconcilerService } from './payment-reconciler.js';
 
 /**
@@ -16,7 +17,7 @@ import { PaymentReconciler, PaymentReconcilerService } from './payment-reconcile
  */
 @Module({
   imports: [InvoicesModule, PaymentClientModule],
-  providers: [PaymentDispatcher, PaymentDispatcherService, PaymentReconciler, PaymentReconcilerService, PaymentEventConsumer],
+  providers: [PaymentDispatcher, PaymentDispatcherService, PaymentReconciler, PaymentReconcilerService, PaymentEventConsumer, PaymentEventOriginRepository],
   exports: [PaymentClientModule, PaymentDispatcher, PaymentReconciler],
 })
 export class PaymentIntegrationModule {}

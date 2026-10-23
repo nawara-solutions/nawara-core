@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import amqp, { type ChannelModel } from 'amqplib';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   DbService, PgProvenanceStore, RabbitMqEventBus, generateServiceToken, kitMigrationsDir, runMigrations, type EventBus, type EventBusObservation, type EventEnvelope,
   type EventSubscription, type ProvenanceObservation,
@@ -17,6 +17,7 @@ import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
 import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
 import type { CancelPaymentOutcome, CreatePaymentOutcome, PaymentClient, PaymentSnapshot } from '../src/payment-integration/payment-client.js';
 import { PaymentDispatcher } from '../src/payment-integration/payment-dispatcher.js';
+import { PaymentEventOriginRepository } from '../src/payment-integration/payment-event-origin.js';
 import { PaymentEventConsumer } from '../src/payment-integration/payment-event-consumer.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
@@ -191,12 +192,11 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
     const bus: EventBus = {
       publish: (e) => rabbit.publish(e),
       close: () => rabbit.close(),
-      subscribe: (s: EventSubscription) => {
-        const real = (e: EventEnvelope) => s.handler(e);
-        return rabbit.subscribe({ ...s, queue, handler: around ? (e) => around(e, real, rabbit) : real });
-      },
+      subscribe: (s: EventSubscription) =>
+        // the trust the kit decided travels with the delivery: `around` only wraps it (Core V2 S1e-2)
+        rabbit.subscribe({ ...s, queue, handler: (e, trust) => (around ? around(e, (x) => s.handler(x, trust), rabbit) : s.handler(e, trust)) }),
     };
-    const consumer = new PaymentEventConsumer(requests, bus, t.app.get(DbService));
+    const consumer = new PaymentEventConsumer(requests, bus, t.app.get(DbService), new PaymentEventOriginRepository(t.app.get(DbService)));
     await consumer.onApplicationBootstrap();
     return { notices, observations, rabbit, outcomes: () => observations.flatMap((o) => (o.type === 'provenance' ? [o.outcome] : [])) };
   }
@@ -246,11 +246,12 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
       expect(await applied(s.id)).toBe(1);
     });
 
-    it('an UNVERIFIED first arrival (forged source header) cannot establish authority: the genuine event creates the verified row and applies', async () => {
+    it('an UNVERIFIED first arrival (forged source header) is refused before the handler and cannot establish authority: the genuine event applies', async () => {
       const s = await setup();
       const forged = envelope(s.facts({ amount: 1 }), s.id); // claims payment-service, published by the intruder, forged facts
       await intruder.publish(forged);
-      await until(async () => (await provenance(s.id)).length === 1 && seenAtHandler.has(s.id));
+      await until(async () => (await provenance(s.id)).length === 1 && c.notices.some((m) => m.startsWith('event_trust_refused') && m.includes(`event=${s.id}`) && m.includes('basis=unverified_original')));
+      expect(seenAtHandler.has(s.id)).toBe(false); // S1e-2: the forged delivery never reached Billing's handler
       const [first] = await provenance(s.id);
       expect(first).toMatchObject({ source: OWNER, producerUserId: INTRUDER, verified: false, reason: 'source_mismatch' });
       expect(await applied(s.id)).toBe(0); // the forged facts never applied (A3M G11, unchanged)
@@ -278,7 +279,8 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
       const [conflict] = await conflicts(s.id);
       expect(conflict).toMatchObject({ provenanceId: genuine.id, producerUserId: OWNER, verified: true });
       expect(conflict.bodySha256).not.toBe(genuine.bodySha256);
-      expect(c.notices.some((m) => m.startsWith('event_provenance_conflict') && m.includes(`event=${s.id}`))).toBe(true);
+      // S1e-2: a verified delivery contradicting the stored verified one is refused before the handler (never reconciled)
+      await until(() => c.notices.some((m) => m.startsWith('event_trust_refused') && m.includes(`event=${s.id}`) && m.includes('basis=verified_conflict')));
       expect(await applied(s.id)).toBe(1);
       expect(await status(s.request.id)).toBe('paid');
     });
@@ -296,7 +298,7 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
     const s = await setup();
     try {
       await owner.publish(envelope(s.facts(), s.id));
-      await until(() => c.notices.filter((m) => m.startsWith('event_provenance_deferred')).length >= 2); // held, requeued, held again
+      await until(() => c.notices.filter((m) => m.startsWith('event_trust_held')).length >= 2); // S1e-2: no trust decision → held, requeued, held again
       expect(handled).toEqual([]);
       expect(await applied(s.id)).toBe(0);
       expect(await status(s.request.id)).not.toBe('paid');
@@ -315,58 +317,163 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
     await c.rabbit.close();
   });
 
-  describe('replay classification (S1c-1, OBSERVE-ONLY): financial behaviour unchanged', () => {
+  describe('S1e-2 enforcement: replays, injections and the trusted envelope (real RabbitMQ and PostgreSQL)', () => {
+    // every consumer here binds the same names on one exchange: each test's consumer is closed after it, so no other one shares its deliveries
+    const open: RabbitMqEventBus[] = [];
+    const startOwn: typeof startConsumer = async (q, around) => {
+      const c = await startConsumer(q, around);
+      open.push(c.rabbit);
+      return c;
+    };
+    afterEach(async () => {
+      for (const b of open.splice(0)) await b.close().catch(() => undefined);
+    });
     const replaysOf = (c: { observations: EventBusObservation[] }) => c.observations.flatMap((o) => (o.type === 'replay' ? [`${o.outcome}/${o.original}`] : []));
-    /** A default-exchange injection straight into `queue` (any credential holder can do this until S1d narrows permissions). */
+    const refusals = (c: { notices: string[] }, id: string) => c.notices.filter((m) => m.startsWith('event_trust_refused') && m.includes(`event=${id}`)).map((m) => m.match(/basis=(\w+)/)![1]);
+    /** A default-exchange injection straight into `queue`: any consumer identity can do this (S1d-3, OD-BRK); only S1e stops it. */
     const inject = async (queue: string, e: EventEnvelope) => {
       const ch = await broker.createConfirmChannel();
       ch.sendToQueue(queue, Buffer.from(JSON.stringify(e.payload)), { persistent: true, messageId: e.id, type: e.name, headers: e.headers });
       await ch.waitForConfirms();
       await ch.close();
     };
+    /** Makes Billing's NEXT receipt insert fail once (a transient database failure INSIDE applyPaymentEvent, after the origin was recorded). */
+    const failNextReceiptOnce = async () => {
+      await admin.query(`CREATE SEQUENCE IF NOT EXISTS s1e2_fail_once`);
+      await admin.query(`SELECT setval('s1e2_fail_once', 1, false)`);
+      await admin.query(`CREATE OR REPLACE FUNCTION s1e2_fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('s1e2_fail_once') = 1 THEN RAISE EXCEPTION 'injected transient failure'; END IF; RETURN NEW; END $$`);
+      await admin.query(`DROP TRIGGER IF EXISTS payment_event_receipt_00_s1e2 ON payment_event_receipt`);
+      await admin.query(`CREATE TRIGGER payment_event_receipt_00_s1e2 BEFORE INSERT ON payment_event_receipt FOR EACH ROW EXECUTE FUNCTION s1e2_fail_receipt()`);
+    };
+    const restoreReceipts = () => admin.query(`DROP TRIGGER IF EXISTS payment_event_receipt_00_s1e2 ON payment_event_receipt`);
+    const origin = async (id: string) => (await admin.query(`SELECT "eventId", source, "eventName", "eventVersion", "occurredAt", "correlationId" FROM payment_event_origin WHERE "eventId" = $1`, [id])).rows;
+    const transitionCorrelation = async (requestId: string) =>
+      (await admin.query(`SELECT "correlationId" FROM billing_transition WHERE "entityType" = 'payment_request' AND "entityId" = $1 AND "toStatus" = 'paid'`, [requestId])).rows.map((r) => r.correlationId);
 
-    it('a consumer retry of payment.succeeded matches the verified original; applied once, as before', async () => {
+    it('a consumer retry after a transient failure inside the financial transaction matches the verified original and applies ONCE, from the recorded values', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      const c = await startOwn(queue);
+      await failNextReceiptOnce();
+      try {
+        await owner.publish(envelope(s.facts(), s.id));
+        await until(async () => (await status(s.request.id)) === 'paid');
+      } finally {
+        await restoreReceipts();
+      }
+      expect(replaysOf(c)).toEqual(['replay_matched_verified/verified']);
+      expect(await applied(s.id)).toBe(1);
+      expect(await origin(s.id)).toEqual([{ eventId: s.id, source: 'payment-service', eventName: 'payment.succeeded', eventVersion: 1, occurredAt, correlationId: 'corr-s1b' }]);
+      expect(await provenanceOf(s.id, queue)).toHaveLength(1); // the retry recorded no new observation
+    });
+
+    it('a header-TAMPERED replay of the authentic bytes is processed with the RECORDED original values, never its own headers', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      const c = await startOwn(queue);
+      await failNextReceiptOnce(); // the original records its values, then fails before applying: a replay will be what applies
+      try {
+        await owner.publish(envelope(s.facts(), s.id));
+        await until(async () => (await origin(s.id)).length === 1);
+        const tampered = envelope(s.facts(), s.id);
+        await inject(queue, { ...tampered, headers: { ...tampered.headers, occurredAt: '2031-01-01T00:00:00.000Z', correlationId: 'corr-tampered', version: 1 } });
+        await until(async () => (await status(s.request.id)) === 'paid');
+      } finally {
+        await restoreReceipts();
+      }
+      expect(await applied(s.id)).toBe(1);
+      expect(await transitionCorrelation(s.request.id)).toEqual(['corr-s1b']); // the recorded original's, not 'corr-tampered'
+      expect(await origin(s.id)).toEqual([expect.objectContaining({ occurredAt, correlationId: 'corr-s1b' })]); // never overwritten
+      expect(c.notices.join('\n')).not.toContain('corr-tampered');
+    });
+
+    it('a retry whose original never recorded its values is REFUSED (fail closed, nothing invented): no receipt, the request stays for the reconciler', async () => {
       const queue = newQueue();
       const s = await setup();
       let calls = 0;
-      const c = await startConsumer(queue, async (e, real) => {
-        if (++calls === 1) throw new Error('transient'); // the first attempt fails: the kit republishes a retry copy
+      const c = await startOwn(queue, async (e, real) => {
+        if (++calls === 1) throw new Error('transient before anything ran'); // fails BEFORE Billing recorded the original's values
         return real(e);
       });
       await owner.publish(envelope(s.facts(), s.id));
-      await until(async () => (await status(s.request.id)) === 'paid');
-      expect(replaysOf(c)).toEqual(['replay_matched_verified/verified']);
-      expect(await applied(s.id)).toBe(1);
-      expect(await provenanceOf(s.id, queue)).toHaveLength(1); // the retry recorded nothing
+      await until(async () => (await depth(`${queue}.dead`)) === 1);
+      expect(await applied(s.id)).toBe(0);
+      expect(await status(s.request.id)).not.toBe('paid');
+      expect(await origin(s.id)).toEqual([]);
+      expect(c.notices.some((m) => m.startsWith('event_dead_lettered') && m.includes('reason=untrusted_origin_unavailable'))).toBe(true);
     });
 
-    it('a forged injection that changes the facts under the same event id is a mismatch; it is handled as before and changes nothing financial', async () => {
+    it('a forged injection that changes the facts under the same event id is REFUSED (replay_mismatch): nothing financial changes', async () => {
       const queue = newQueue();
       const s = await setup();
-      const c = await startConsumer(queue);
+      const c = await startOwn(queue);
       await owner.publish(envelope(s.facts(), s.id));
       await until(async () => (await status(s.request.id)) === 'paid');
-      const n = c.observations.filter((o) => o.type === 'consume').length;
       await inject(queue, envelope(s.facts({ revision: 7, amount: 1 }), s.id));
-      await until(() => c.observations.filter((o) => o.type === 'consume').length > n);
+      await until(() => refusals(c, s.id).length === 1);
+      expect(refusals(c, s.id)).toEqual(['replay_mismatch']);
       expect(replaysOf(c)).toEqual(['replay_mismatch/verified']);
-      expect(await applied(s.id)).toBe(1); // the receipt de-duplication is unchanged: no second effect
+      expect(await applied(s.id)).toBe(1);
       expect(await status(s.request.id)).toBe('paid');
-      expect(c.notices.some((m) => m.startsWith('event_replay_classified') && m.includes('outcome=replay_mismatch original=verified'))).toBe(true);
     });
 
-    it('an injection of every payment.* name without an original is no_provenance and is handled exactly as before (no provenance invented)', async () => {
+    it('S1d-3\'s attack: a forged payment.* with GENUINE facts and no original, injected through the default exchange, is REFUSED: no receipt, no state change', async () => {
       const queue = newQueue();
-      const c = await startConsumer(queue);
+      const c = await startOwn(queue);
       for (const name of ['payment.succeeded', 'payment.failed', 'payment.cancelled', 'payment.expired'] as const) {
         const s = await setup();
         const id = deterministicEventId(s.paymentId, name);
-        const before = c.observations.filter((o) => o.type === 'consume').length;
         await inject(queue, envelope(s.facts({ name, ...(name === 'payment.failed' ? { failureCode: null } : {}), ...(name === 'payment.expired' ? { expiresAt: new Date().toISOString() } : {}) } as never), id));
-        await until(() => c.observations.filter((o) => o.type === 'consume').length > before);
+        await until(() => refusals(c, id).length === 1);
+        expect(refusals(c, id)).toEqual(['replay_no_provenance']);
         expect(await provenanceOf(id, queue)).toEqual([]);
+        expect(await applied(id)).toBe(0);
+        expect((await admin.query(`SELECT count(*)::int n FROM payment_event_receipt WHERE "eventId" = $1`, [id])).rows[0].n).toBe(0);
+        expect(await status(s.request.id)).toBe('requested');
       }
       expect(replaysOf(c)).toEqual(Array(4).fill('replay_no_provenance/none'));
+    });
+
+    it('an original WITHOUT user_id (the broker accepts it) is refused before the handler; the evidence stays unverified', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      const c = await startOwn(queue);
+      const e = envelope(s.facts(), s.id);
+      const conn = await amqp.connect(urlFor(OWNER));
+      const ch = await conn.createConfirmChannel();
+      ch.publish(exchange, e.name, Buffer.from(JSON.stringify(e.payload)), { persistent: true, messageId: e.id, type: e.name, headers: e.headers }); // no userId
+      await ch.waitForConfirms();
+      await conn.close();
+      await until(() => refusals(c, s.id).length === 1);
+      expect(refusals(c, s.id)).toEqual(['unverified_original']);
+      expect(await provenanceOf(s.id, queue)).toEqual([expect.objectContaining({ verified: false, reason: 'missing_user_id' })]);
+      expect(await applied(s.id)).toBe(0);
+      expect(await origin(s.id)).toEqual([]);
+    });
+
+    it('a verified re-publication of the same body with DIFFERENT envelope values is refused (origin conflict): the recorded values never change', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      const c = await startOwn(queue);
+      const e = envelope(s.facts(), s.id);
+      await owner.publish(e);
+      await until(async () => (await status(s.request.id)) === 'paid');
+      await owner.publish({ ...e, headers: { ...e.headers, occurredAt: '2031-01-01T00:00:00.000Z' } });
+      await until(() => c.notices.some((m) => m.startsWith('event_dead_lettered') && m.includes(`event=${s.id}`) && m.includes('reason=untrusted_origin_conflict')));
+      expect(await origin(s.id)).toEqual([expect.objectContaining({ occurredAt })]);
+      expect(await applied(s.id)).toBe(1);
+    });
+
+    it('concurrent verified deliveries of one event: one origin row, one applied receipt', async () => {
+      const queue = newQueue();
+      const s = await setup();
+      await startOwn(queue);
+      const e = envelope(s.facts(), s.id);
+      await Promise.all([owner.publish(e), owner.publish(e), owner.publish(e), owner.publish(e)]);
+      await until(async () => (await status(s.request.id)) === 'paid');
+      await sleep(500);
+      expect(await origin(s.id)).toHaveLength(1);
+      expect(await applied(s.id)).toBe(1);
     });
   });
 
@@ -435,6 +542,18 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
       expect(rows.map((r) => r.verified).sort((a, b) => Number(a) - Number(b))).toEqual([false, true]); // one verified, one unverified: never two of either
       const evidence = new Set([...rows.map((r) => r.bodySha256), ...(await conflictsOf(id2, 'q.concurrency')).map((r) => r.bodySha256)]);
       expect(evidence).toEqual(new Set(['a'.repeat(64), ...bodies])); // no observation's digest was lost
+    });
+
+    it('S1e-2: payment_event_origin is append-only (UPDATE, DELETE, TRUNCATE refused even for the owner) and refuses an untrusted shape', async () => {
+      const id = crypto.randomUUID();
+      await admin.query(`INSERT INTO payment_event_origin ("eventId", source, "eventName", "eventVersion", "occurredAt", "correlationId") VALUES ($1, 'payment-service', 'payment.succeeded', 1, '2026-01-01T00:00:00.000Z', 'c')`, [id]);
+      await expect(admin.query(`UPDATE payment_event_origin SET "occurredAt" = '2030-01-01T00:00:00.000Z' WHERE "eventId" = $1`, [id])).rejects.toThrow(/append-only/);
+      await expect(admin.query(`DELETE FROM payment_event_origin WHERE "eventId" = $1`, [id])).rejects.toThrow(/append-only/);
+      await expect(admin.query(`TRUNCATE payment_event_origin`)).rejects.toThrow(/append-only/);
+      for (const [col, value] of [['source', 'billing-service'], ['eventName', 'payment.created'], ['occurredAt', 'yesterday'], ['eventVersion', 0]] as const) {
+        const row = { source: 'payment-service', eventName: 'payment.succeeded', eventVersion: 1, occurredAt: '2026-01-01T00:00:00.000Z', [col]: value };
+        await expect(admin.query(`INSERT INTO payment_event_origin ("eventId", source, "eventName", "eventVersion", "occurredAt") VALUES ($1, $2, $3, $4, $5)`, [crypto.randomUUID(), row.source, row.eventName, row.eventVersion, row.occurredAt])).rejects.toThrow(/payment_event_origin_/);
+      }
     });
 
     it('both tables are append-only: UPDATE, DELETE and TRUNCATE are refused, even for the owner', async () => {

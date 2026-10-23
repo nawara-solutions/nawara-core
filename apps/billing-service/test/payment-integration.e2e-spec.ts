@@ -413,7 +413,7 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
   describe('PaymentEventConsumer (SDD 21.3, 21.4): transport only, reuses the SAME decision procedure — no business rule lives here', () => {
     it('a well-formed payment.succeeded event settles the request and invoice, exactly like a direct applyPaymentEvent call', async () => {
       const { open, request, paymentId } = await requestedRow();
-      await t.bus.publish(envelopeFor(factsFor(open, request, paymentId)));
+      await t.bus.deliver(envelopeFor(factsFor(open, request, paymentId)));
       expect((await requestRow(request.id)).status).toBe('paid');
       expect((await invoices.findForCaller(open.id, producer)).status).toBe('paid');
     });
@@ -423,7 +423,7 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       const bad = envelopeFor(factsFor(open, request, paymentId));
       delete (bad.payload as Record<string, unknown>).producer; // required field missing
       const before = t.bus.deadLettered.length;
-      await t.bus.publish(bad);
+      await t.bus.deliver(bad);
       expect(t.bus.deadLettered.length).toBe(before + 1);
       expect((await requestRow(request.id)).status).toBe('requested'); // untouched
     });
@@ -432,8 +432,8 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
       const { open, request, paymentId } = await requestedRow();
       const id = crypto.randomUUID();
       const before = (await invoices.findForCaller(open.id, producer)).revision;
-      await t.bus.publish(envelopeFor(factsFor(open, request, paymentId), id));
-      await t.bus.publish(envelopeFor(factsFor(open, request, paymentId), id));
+      await t.bus.deliver(envelopeFor(factsFor(open, request, paymentId), id));
+      await t.bus.deliver(envelopeFor(factsFor(open, request, paymentId), id));
       const receipts = await rows(`SELECT count(*)::int AS n FROM payment_event_receipt WHERE "eventId" = $1`, [id]);
       expect(receipts[0].n).toBe(1);
       expect((await invoices.findForCaller(open.id, producer)).revision).toBe(before + 1); // one paid transition, not two
@@ -441,7 +441,7 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
 
     it('a producer mismatch is a recorded conflict; the request and invoice are left exactly as they were', async () => {
       const { open, request, paymentId } = await requestedRow();
-      await t.bus.publish(envelopeFor(factsFor(open, request, paymentId, 'payment.succeeded', { producer: 'someone-else' })));
+      await t.bus.deliver(envelopeFor(factsFor(open, request, paymentId, 'payment.succeeded', { producer: 'someone-else' })));
       expect((await requestRow(request.id)).status).toBe('requested');
       expect((await invoices.findForCaller(open.id, producer)).status).toBe('open');
     });
@@ -449,7 +449,7 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
     it('payment.created is never bound (SDD 21.3): publishing it has no subscriber here and changes nothing', async () => {
       const { request, paymentId } = await requestedRow();
       const before = t.bus.deadLettered.length;
-      await t.bus.publish({
+      await t.bus.deliver({
         id: crypto.randomUUID(), name: 'payment.created',
         payload: { paymentId, producer: 'billing-service', paymentRequestId: request.id },
         headers: { eventId: crypto.randomUUID(), occurredAt: new Date().toISOString(), source: 'payment-service', version: 1 },

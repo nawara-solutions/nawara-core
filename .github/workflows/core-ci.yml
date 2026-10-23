@@ -210,15 +210,19 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+      # Core V2 S1e-2: the management plugin lets the suites create a disposable, least-privilege `payment-service` broker user
+      # (Payment's generated topic grant) for this job's own broker: Billing trusts a Payment event only from that identity.
       rabbitmq:
-        image: rabbitmq:3.13-alpine
+        image: rabbitmq:3.13-management-alpine
         ports:
           - 5672:5672
+          - 15672:15672
         options: >-
           --health-cmd "su-exec rabbitmq rabbitmq-diagnostics -q ping" --health-interval 10s --health-timeout 5s --health-retries 10
     env:
       TEST_DATABASE_ADMIN_URL: postgres://postgres:pw@localhost:5432/postgres
       TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      TEST_RABBITMQ_MGMT_URL: http://guest:guest@localhost:15672
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

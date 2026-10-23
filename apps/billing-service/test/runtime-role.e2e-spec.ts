@@ -78,6 +78,24 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     }
   });
 
+  it('Core V2 S1e-2: the runtime role holds only INSERT and SELECT on payment_event_origin; UPDATE and DELETE are refused by privilege', async () => {
+    const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await owner.connect();
+    await app.connect();
+    try {
+      const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = 'payment_event_origin' ORDER BY 1`, [appRole]);
+      expect(grants.rows.map((r) => r.privilege_type)).toEqual(['INSERT', 'SELECT']);
+      const id = crypto.randomUUID();
+      await app.query(`INSERT INTO payment_event_origin ("eventId", source, "eventName", "eventVersion", "occurredAt") VALUES ($1, 'payment-service', 'payment.succeeded', 1, '2026-01-01T00:00:00.000Z')`, [id]);
+      await expect(app.query(`UPDATE payment_event_origin SET "eventVersion" = 2 WHERE "eventId" = $1`, [id])).rejects.toThrow(/permission denied/);
+      await expect(app.query(`DELETE FROM payment_event_origin WHERE "eventId" = $1`, [id])).rejects.toThrow(/permission denied/);
+    } finally {
+      await owner.end();
+      await app.end();
+    }
+  });
+
   it('is ready as the runtime role: connect, and see every applied migration', async () => {
     await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
   });
