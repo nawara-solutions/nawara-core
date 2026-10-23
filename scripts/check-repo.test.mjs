@@ -3219,3 +3219,32 @@ test('T7: no committed .host or .port file can choose a production SSH destinati
   for (const path of ['.host', '.port', 'infra/.host', 'apps/auth-service/.port']) assert.match(checkDroneSshFiles([path]).join(), /drone-ssh \(the production SSH client\) can read its destination/, path);
   assert.match(checkDroneSshFiles(undefined).join(), /cannot run/);
 });
+
+test('S1b: event provenance (an unkeyed body digest) is allowed only in reviewed services that consume no code-bearing event', async () => {
+  const { EVENT_PROVENANCE_APPROVED_SERVICES, checkEventProvenanceOptIn } = await import('./lib/checks.mjs');
+  assert.deepEqual(EVENT_PROVENANCE_APPROVED_SERVICES, ['billing-service']);
+  const contract = (service, produces, consumes) => JSON.stringify({ service, produces, consumes });
+  const contracts = {
+    'auth-service': contract('auth-service', [{ name: 'member.contact_verification_requested', version: 1, codeBearing: true, payload: {} }, { name: 'user.registered', version: 1, payload: {} }], []),
+    'payment-service': contract('payment-service', [{ name: 'payment.succeeded', version: 1, payload: {} }], []),
+    'billing-service': contract('billing-service', [], [{ source: 'payment-service', name: 'payment.succeeded', version: 1, requires: {} }]),
+  };
+  const optIn = "await bus.subscribe({ queue, bindings, handler, provenance: { ownerOf, store: new PgProvenanceStore(db) } });";
+  const billing = { 'apps/billing-service/src/c.ts': optIn };
+  assert.deepEqual(checkEventProvenanceOptIn(contracts, { 'billing-service': billing, 'notification-service': { 'apps/notification-service/src/c.ts': 'bus.subscribe({ queue, handler })' } }), []);
+  // any other service naming the store or passing `provenance:` is refused (Notification, Audit, ...)
+  for (const text of [optIn, 'subscribe({ queue, handler, provenance: p })', "import { PgProvenanceStore } from '@nawara/service-kit';", 'class S implements ProvenanceStore {}']) {
+    for (const app of ['notification-service', 'audit-service']) {
+      assert.match(checkEventProvenanceOptIn(contracts, { 'billing-service': billing, [app]: { [`apps/${app}/src/c.ts`]: text } }).join(), /is not on EVENT_PROVENANCE_APPROVED_SERVICES/, `${app}: ${text}`);
+    }
+  }
+  // an approved service that consumes a code-bearing event, or has no contract, is refused
+  const consumesCode = { ...contracts, 'billing-service': contract('billing-service', [], [{ source: 'auth-service', name: 'member.contact_verification_requested', version: 1, requires: {} }]) };
+  assert.match(checkEventProvenanceOptIn(consumesCode, { 'billing-service': billing }).join(), /consumes the code-bearing auth-service member\.contact_verification_requested/);
+  const noContract = { ...contracts };
+  delete noContract['billing-service'];
+  assert.match(checkEventProvenanceOptIn(noContract, { 'billing-service': billing }).join(), /must declare what it consumes/);
+  // a non-code-bearing event of the same producer is fine
+  const consumesPlain = { ...contracts, 'billing-service': contract('billing-service', [], [{ source: 'auth-service', name: 'user.registered', version: 1, requires: {} }]) };
+  assert.deepEqual(checkEventProvenanceOptIn(consumesPlain, { 'billing-service': billing }), []);
+});

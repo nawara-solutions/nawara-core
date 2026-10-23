@@ -1,5 +1,6 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
+import { evaluateProvenance } from './provenance.js';
 import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
@@ -181,10 +182,19 @@ export type ConsumeOutcome =
   | 'dead_lettered_retries_exhausted'
   | 'dead_letter_deferred'
   /** No longer produced since V2 A3M.4 (G7: an unconfirmed copy is deferred, never broker-dead-lettered); kept so the metric label set, dashboards and alert rules stay unchanged. */
-  | 'dead_letter_unannotated';
+  | 'dead_letter_unannotated'
+  /** Core V2 S1b: the delivery's provenance could not be recorded, so its handler did not run; held for the retry delay and requeued. */
+  | 'provenance_deferred';
+/**
+ * Core V2 S1b (observe-only): what became of a delivery's provenance. `recorded_verified` / `recorded_unverified`: a new stored observation;
+ * `duplicate`: identical to one stored; `conflict`: it differs from one stored (appended as conflict evidence); `not_original`: not
+ * delivered through the event exchange (a retry, a replay, an injection), so nothing is recorded; `failed`: it could not be recorded.
+ */
+export type ProvenanceOutcome = 'recorded_verified' | 'recorded_unverified' | 'duplicate' | 'conflict' | 'not_original' | 'failed';
 export type EventBusObservation =
   | { type: 'publish'; outcome: 'confirmed' | 'failed' | 'confirm_timeout'; durationMs: number }
   | { type: 'consume'; queue: string; outcome: ConsumeOutcome; handlerMs?: number; redelivered: boolean }
+  | { type: 'provenance'; queue: string; outcome: ProvenanceOutcome }
   | { type: 'consumer'; queue: string; state: 'consuming' | 'lost' | 'recovered' | 'closed' }
   | { type: 'settle_failed'; queue: string };
 export type EventBusObserver = (observation: EventBusObservation) => void;
@@ -548,6 +558,11 @@ export class RabbitMqEventBus implements EventBus {
           ...(replayCount > 0 ? { replayCount } : {}),
         },
       };
+      // Core V2 S1b (ADR-0057 §13.2, §13.3): the handler runs only once the delivery's provenance is committed.
+      if (sub.provenance && !(await this.provenanceCommitted(ch, msg, sub, stopping))) {
+        this.observe({ type: 'consume', queue: sub.queue, outcome: 'provenance_deferred', redelivered });
+        return;
+      }
       handlerStarted = performance.now();
       await sub.handler(event);
       handlerMs = performance.now() - handlerStarted;
@@ -559,6 +574,44 @@ export class RabbitMqEventBus implements EventBus {
     }
     this.settle(() => ch.ack(msg), sub);
     this.observe({ type: 'consume', queue: sub.queue, outcome: 'processed', handlerMs, redelivered });
+  }
+
+  /**
+   * Core V2 S1b (ADR-0057 §13.2, §13.3; observe-only). A delivery through the event exchange is evaluated from what the BROKER delivered
+   * (exchange, routing key, `user_id`, message id and type, the raw body) and committed to the consumer's provenance store; true once it is.
+   * Anything else (a retry or an operator replay through the default exchange) is not an original publication: nothing is recorded and
+   * nothing is invented for it. Verified or not, conflicting or not, the handler then runs exactly as before (observe-only).
+   * If the record cannot be committed, false: the handler does not run, and the ORIGINAL delivery is held for the retry delay and requeued
+   * (so it keeps its exchange, routing key and `user_id`), never copied to `<queue>.retry` or dead-lettered: at most `prefetch` requeues per
+   * delay while the store is down, and a stopping consumer ends the hold at once.
+   */
+  private async provenanceCommitted(ch: Channel, msg: ConsumeMessage, sub: EventSubscription, stopping?: AbortSignal): Promise<boolean> {
+    const p = sub.provenance!;
+    const who = `queue=${sub.queue} event=${messageIdOf(msg.properties.messageId)}`;
+    try {
+      const evaluation = evaluateProvenance(
+        { exchange: msg.fields.exchange, routingKey: msg.fields.routingKey, userId: msg.properties.userId, messageId: msg.properties.messageId, type: msg.properties.type, headers: msg.properties.headers ?? {}, body: msg.content },
+        this.exchange,
+        (name) => p.ownerOf(name),
+      );
+      if (evaluation.origin === 'not_original') {
+        this.observe({ type: 'provenance', queue: sub.queue, outcome: 'not_original' });
+        return true;
+      }
+      const o = evaluation.observation;
+      const result = await p.store.record(sub.queue, o);
+      if (result === 'conflict') this.notice(`event_provenance_conflict ${who} verified=${o.verified} reason=${o.reason} — differs from the provenance already recorded for this event id; recorded as conflict evidence (observe-only)`);
+      this.observe({ type: 'provenance', queue: sub.queue, outcome: result === 'recorded' ? (o.verified ? 'recorded_verified' : 'recorded_unverified') : result });
+      return true;
+    } catch (e) {
+      const delayMs = this.opts.retry?.delayMs ?? 5000;
+      const errorName = safeToken(e instanceof Error ? e.name : undefined, ERROR_NAME, 'Error');
+      this.notice(`event_provenance_deferred ${who} delayMs=${delayMs} error=${errorName} — provenance could not be recorded, so the handler did not run; requeued after the delay`, 'error');
+      this.observe({ type: 'provenance', queue: sub.queue, outcome: 'failed' });
+      await holdUnless(delayMs, stopping);
+      this.settle(() => ch.nack(msg, false, true), sub);
+      return false;
+    }
   }
 
   /**

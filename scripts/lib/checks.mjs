@@ -2719,6 +2719,47 @@ export function checkOutboxRetentionEligibility(kit, serviceSources) {
   return problems;
 }
 
+/**
+ * Core V2 S1b (ADR-0057 §13.2): a consumer that opts into the kit's event provenance keeps an UNKEYED SHA-256 of every delivered body,
+ * permanently. Over a body holding a low-entropy secret (a one-time code, ADR-0052 decision 5) that digest is an offline oracle for the
+ * secret, which the producer purges and the consumer seals for exactly this reason. So the opt-in is an allowlist:
+ * - only a service on `EVENT_PROVENANCE_APPROVED_SERVICES` may name the provenance store or pass `provenance:` in its (non-test) source;
+ *   adding one is a reviewed change here;
+ * - an approved service must have an event contract, and must consume no event its producer's contract marks `codeBearing`.
+ * Notification (which consumes Auth's code-bearing events) is deliberately absent: its provenance waits for a separate security design.
+ * Limits: a presence scan of source text; the contract is what binds a consumer to the events it receives (`checkEventContracts`).
+ */
+export const EVENT_PROVENANCE_APPROVED_SERVICES = ['billing-service'];
+const PROVENANCE_OPT_IN = /ProvenanceStore\b|\bprovenance\s*:/;
+
+/**
+ * `contracts`: application directory -> the text of its contracts/events.json. `sources`: application directory -> { relPath: text } of
+ * its non-test source.
+ */
+export function checkEventProvenanceOptIn(contracts, sources) {
+  const problems = [];
+  for (const [app, files] of Object.entries(sources)) {
+    if (EVENT_PROVENANCE_APPROVED_SERVICES.includes(app)) continue;
+    for (const [relPath, text] of Object.entries(files)) {
+      if (PROVENANCE_OPT_IN.test(text)) problems.push(`${relPath}: opts into event provenance, but ${app} is not on EVENT_PROVENANCE_APPROVED_SERVICES: the unkeyed body digest needs a review that the service never receives a low-entropy secret (ADR-0057 §13.2, ADR-0052 decision 5)`);
+    }
+  }
+  const parsed = new Map();
+  for (const [app, text] of Object.entries(contracts)) {
+    try { parsed.set(app, JSON.parse(text)); } catch { /* reported by checkEventContracts */ }
+  }
+  const codeBearing = new Set();
+  for (const [app, c] of parsed) for (const e of Array.isArray(c?.produces) ? c.produces : []) if (e?.codeBearing === true) codeBearing.add(`${app}|${e.name}`);
+  for (const app of EVENT_PROVENANCE_APPROVED_SERVICES) {
+    const c = parsed.get(app);
+    if (c === undefined) { problems.push(`apps/${app}/contracts/events.json is missing or invalid: an event-provenance service must declare what it consumes`); continue; }
+    for (const e of Array.isArray(c.consumes) ? c.consumes : []) {
+      if (codeBearing.has(`${e?.source}|${e?.name}`)) problems.push(`apps/${app}/contracts/events.json: consumes the code-bearing ${e.source} ${e.name}, so ${app} cannot keep event provenance: its unkeyed body digest would expose the code (ADR-0052 decision 5)`);
+    }
+  }
+  return problems;
+}
+
 // ─────────────────────────────────────────────────────────────── V2 A5.4-T1: the Auth → Organization Service dependency boundary
 
 /**
