@@ -2732,10 +2732,16 @@ export function checkOutboxRetentionEligibility(kit, serviceSources) {
  *   passes `provenance:` also passes `admission:` and `auditDeadLetterPolicy`; the admission calls `isCanonicalJsonBody`, then
  *   `mayRetainRefusedAuditBody`, then `validateAuditEvent` (canonical bytes, the Stage 18.8 screen, the full contract) and the consumer's
  *   hook goes through it; the dead-letter policy judges the raw bytes too; and the kit bus runs `admission` BEFORE provenance.
- * Notification (which consumes Auth's code-bearing events) is deliberately absent: its provenance waits for a separate security design.
+ * - `keyed-commitment` (notification-service, Core V2 S1b-3, ADR-0057 §13.2 "S0-C2"): Notification consumes Auth's code-bearing events, so
+ *   its basis is the KEYED body commitment, checked in its fixed files (`keyedCommitmentProblems`): the intake subscription passes
+ *   `keyedStore: new PgKeyedProvenanceStore(` and no unkeyed `store:`; the intake refuses to start without the provenance key ring; the
+ *   configuration reads the dedicated ring and keeps it distinct from every other key; no Notification source or migration names an
+ *   unkeyed body digest; and the kit's keyed store and keyed bus path never compute one.
+ * - `contract` and `audit-admission` stay on the UNKEYED store (`store: new PgProvenanceStore(`, never `keyedStore`): a change of their mode
+ *   is a reviewed change here.
  * Limits: a presence and order scan of source text, not a proof of every data flow; the real-broker suites prove the behaviour.
  */
-export const EVENT_PROVENANCE_APPROVED = Object.freeze({ 'billing-service': 'contract', 'audit-service': 'audit-admission' });
+export const EVENT_PROVENANCE_APPROVED = Object.freeze({ 'billing-service': 'contract', 'audit-service': 'audit-admission', 'notification-service': 'keyed-commitment' });
 export const EVENT_PROVENANCE_APPROVED_SERVICES = Object.keys(EVENT_PROVENANCE_APPROVED);
 const PROVENANCE_OPT_IN = /ProvenanceStore\b|\bprovenance\s*:/;
 export const AUDIT_ADMISSION_FILES = Object.freeze({
@@ -2745,6 +2751,13 @@ export const AUDIT_ADMISSION_FILES = Object.freeze({
   deadLetterPolicy: 'apps/audit-service/src/ingestion/dead-letter-policy.ts',
 });
 export const KIT_EVENT_BUS = 'libs/service-kit/src/events/rabbitmq-event-bus.ts';
+export const KIT_PROVENANCE = 'libs/service-kit/src/events/provenance.ts';
+export const NOTIFICATION_KEYED_FILES = Object.freeze({
+  consumer: 'apps/notification-service/src/intake/event-consumer.ts',
+  config: 'apps/notification-service/src/config/notification-config.ts',
+  migration: 'apps/notification-service/db/migrations/0003_event_provenance.sql',
+});
+const UNKEYED_DIGEST = /\bbodySha256\b|\bPgProvenanceStore\b|\bevaluateProvenance\(/;
 
 /** The text of the function `name` in `text` (from its declaration to the next top-level declaration), or undefined. */
 function functionBody(text, name) {
@@ -2799,8 +2812,47 @@ export function auditAdmissionProblems(files) {
 }
 
 /**
+ * Core V2 S1b-3: Notification's keyed body commitment in its fixed files (see above). `files`: relPath -> text (undefined when absent);
+ * `sources`: Notification's non-test source, relPath -> text.
+ */
+export function keyedCommitmentProblems(files, sources = {}) {
+  const problems = [];
+  const why = 'Notification keeps event provenance only as a KEYED body commitment, never an unkeyed digest (ADR-0057 §13.2 "S0-C2")';
+  const consumer = files[NOTIFICATION_KEYED_FILES.consumer] ?? '';
+  const at = consumer.indexOf('.subscribe({');
+  const subscribe = at < 0 ? '' : consumer.slice(at, consumer.indexOf('});', at));
+  if (!/\bprovenance\s*:\s*\{\s*ownerOf:\s*intakeEventOwner,\s*keyedStore:\s*new PgKeyedProvenanceStore\(this\.db, keys\)\s*\}/.test(subscribe) || /\bstore\s*:/.test(subscribe)) {
+    problems.push(`${NOTIFICATION_KEYED_FILES.consumer}: the intake subscription must pass \`provenance: { ownerOf: intakeEventOwner, keyedStore: new PgKeyedProvenanceStore(this.db, keys) }\` and no unkeyed \`store:\`; ${why}`);
+  }
+  if (!consumer.includes("if (!this.config.provenanceKeys) return 'intake:provenance_keys_missing';") || !consumer.includes("if (!keys) throw new Error('intake:provenance_keys_missing');")) {
+    problems.push(`${NOTIFICATION_KEYED_FILES.consumer}: the intake must refuse to start without the provenance key ring (\`intake:provenance_keys_missing\`); ${why}`);
+  }
+  const config = files[NOTIFICATION_KEYED_FILES.config] ?? '';
+  if (!config.includes("readOptionalKeyEntries(reader, 'NOTIFICATION_PROVENANCE_KEYS'") || !config.includes("['NOTIFICATION_PROVENANCE_KEYS', k] as const")) {
+    problems.push(`${NOTIFICATION_KEYED_FILES.config}: must read the dedicated NOTIFICATION_PROVENANCE_KEYS ring and keep it distinct from every other key (assertDistinctKeys); ${why}`);
+  }
+  for (const [relPath, text] of Object.entries(sources)) {
+    if (UNKEYED_DIGEST.test(text)) problems.push(`${relPath}: names an unkeyed body digest (\`bodySha256\`, \`PgProvenanceStore\` or \`evaluateProvenance(\`); ${why}`);
+  }
+  const migration = files[NOTIFICATION_KEYED_FILES.migration];
+  if (migration === undefined || /bodySha256/i.test(migration) || !['"bodyCommitmentVersion"', '"bodyMacKeyId"', '"bodyMac"'].every((c) => migration.includes(c))) {
+    problems.push(`${NOTIFICATION_KEYED_FILES.migration}: must store \`bodyCommitmentVersion\`, \`bodyMacKeyId\` and \`bodyMac\` and no unkeyed body digest; ${why}`);
+  }
+  const kit = files[KIT_PROVENANCE] ?? '';
+  const keyedStore = kit.indexOf('export class PgKeyedProvenanceStore');
+  if (keyedStore < 0 || /bodySha256|createHash\(/.test(kit.slice(keyedStore))) problems.push(`${KIT_PROVENANCE}: \`PgKeyedProvenanceStore\` must exist and never compute an unkeyed digest; ${why}`);
+  const bus = files[KIT_EVENT_BUS] ?? '';
+  const committed = bus.slice(bus.indexOf('private async provenanceCommitted('), bus.indexOf('private async onFailure('));
+  if (!committed.includes('evaluateProvenanceFacts(') || !/p\.keyedStore\s*\n?\s*\?\s*await p\.keyedStore\.record\(sub\.queue, \{ \.\.\.o, body: Buffer\.from\(msg\.content\) \}\)/.test(committed)) {
+    problems.push(`${KIT_EVENT_BUS}: \`provenanceCommitted\` must give a keyed store the facts and the raw bytes only (\`evaluateProvenanceFacts\`, no unkeyed digest on that path); ${why}`);
+  }
+  return problems;
+}
+
+/**
  * `contracts`: application directory -> the text of its contracts/events.json. `sources`: application directory -> { relPath: text } of
- * its non-test source. `files`: the fixed files of the Audit admission boundary (`AUDIT_ADMISSION_FILES`, `KIT_EVENT_BUS`) -> text.
+ * its non-test source. `files`: the fixed files of the Audit admission boundary and of Notification's keyed commitment (`AUDIT_ADMISSION_FILES`,
+ * `NOTIFICATION_KEYED_FILES`, `KIT_EVENT_BUS`, `KIT_PROVENANCE`) -> text.
  */
 export function checkEventProvenanceOptIn(contracts, sources, files = {}) {
   const problems = [];
@@ -2817,8 +2869,17 @@ export function checkEventProvenanceOptIn(contracts, sources, files = {}) {
   const codeBearing = new Set();
   for (const [app, c] of parsed) for (const e of Array.isArray(c?.produces) ? c.produces : []) if (e?.codeBearing === true) codeBearing.add(`${app}|${e.name}`);
   for (const [app, basis] of Object.entries(EVENT_PROVENANCE_APPROVED)) {
+    const appSources = sources[app] ?? {};
+    const optedIn = Object.values(appSources).some((text) => PROVENANCE_OPT_IN.test(text));
+    if (basis === 'keyed-commitment') {
+      if (optedIn) problems.push(...keyedCommitmentProblems(files, appSources));
+      continue;
+    }
+    // the unkeyed bases stay unkeyed: a store of their own kind, never the keyed one (a mode change is a reviewed change here)
+    if (optedIn && (!Object.values(appSources).some((t) => /\bstore:\s*new PgProvenanceStore\(/.test(t)) || Object.values(appSources).some((t) => /\bkeyedStore\b/.test(t)))) {
+      problems.push(`apps/${app}: its event provenance must stay on the unkeyed store (\`store: new PgProvenanceStore(\`, no \`keyedStore\`) as reviewed for the ${basis} basis; a change of mode is a reviewed change to EVENT_PROVENANCE_APPROVED`);
+    }
     if (basis === 'audit-admission') {
-      const optedIn = Object.values(sources[app] ?? {}).some((text) => PROVENANCE_OPT_IN.test(text));
       if (optedIn) problems.push(...auditAdmissionProblems(files));
       continue;
     }

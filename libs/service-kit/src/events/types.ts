@@ -1,4 +1,4 @@
-import type { ProvenanceOptions } from './provenance.js';
+import type { KeyedProvenanceOptions, ProvenanceOptions } from './provenance.js';
 
 /** Metadata carried in message HEADERS so the payload keeps the flat shape each service documents. */
 export interface EventHeaders {
@@ -54,8 +54,10 @@ export interface EventSubscription {
    * whether it runs. Without it the bus behaves exactly as before. The in-memory bus has no broker metadata and ignores it.
    * The record keeps an UNKEYED SHA-256 of every delivered body, permanently: never opt in for a queue that can receive a low-entropy
    * secret (a code-bearing event, ADR-0052 decision 5). `npm run check:repo` allows it only for reviewed services (`EVENT_PROVENANCE_APPROVED_SERVICES`).
+   * Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2"): such a consumer gives `KeyedProvenanceOptions` instead (a `keyedStore`, never a `store`): its
+   * bodies are committed with a keyed MAC and no unkeyed digest of them is ever computed.
    */
-  provenance?: ProvenanceOptions;
+  provenance?: ProvenanceOptions | KeyedProvenanceOptions;
   /**
    * Core V2 S1b-2 (optional; RabbitMQ implementation; ADR-0057 §13.2 "Audit admission"): a deterministic, side-effect-free check of every
    * delivery (through the event exchange or the default exchange alike) that runs after the kit's envelope checks and BEFORE provenance

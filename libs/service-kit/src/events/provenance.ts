@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { Queryable } from '../db/db.service.js';
 import { EVENT_NAME } from './types.js';
 
@@ -36,11 +36,34 @@ export interface ProvenanceOptions {
    */
   ownerOf(name: string): string | undefined;
   store: ProvenanceStore;
+  keyedStore?: never;
+}
+
+/**
+ * Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2"): what a consumer whose bodies may carry a low-entropy secret opts into instead: the body is
+ * committed with a KEYED MAC by its `keyedStore`, which alone sees the raw bytes; no unkeyed digest of the body is ever computed on this
+ * path. `store` cannot be given beside it, so a consumer cannot fall back to (or mix in) the unkeyed digest.
+ */
+export interface KeyedProvenanceOptions {
+  ownerOf(name: string): string | undefined;
+  keyedStore: KeyedProvenanceStore;
+  store?: never;
 }
 
 export interface ProvenanceStore {
   /** Commits `observation` (and any conflict it reveals) before resolving; rejects if it could not be committed. */
   record(consumer: string, observation: ProvenanceObservation): Promise<ProvenanceRecordResult>;
+}
+
+/** Core V2 S1b-3: a keyed store, given the verified facts and the raw body bytes (it commits the body itself, under its own key). */
+export interface KeyedProvenanceStore {
+  /** Commits the observation (and any conflict it reveals) before resolving; rejects if it could not be committed (or compared). */
+  record(consumer: string, observation: KeyedProvenanceObservation): Promise<ProvenanceRecordResult>;
+}
+
+/** The facts of one original delivery plus its raw body bytes, for a keyed store only (never logged, never stored as such). */
+export interface KeyedProvenanceObservation extends ProvenanceFacts {
+  body: Buffer;
 }
 
 /** `recorded`: a new observation; `duplicate`: identical to what was stored; `conflict`: it differs from a stored observation of the same id. */
@@ -57,19 +80,26 @@ export interface ProvenanceDelivery {
   body: Buffer;
 }
 
-/** One original delivery, as stored. Every string is a validated token (or empty), so a hostile value can neither break nor reach a log. */
-export interface ProvenanceObservation {
+/**
+ * What §13.2 verifies of one original delivery, before any body commitment. Every string is a validated token (or empty), so a hostile
+ * value can neither break nor reach a log.
+ */
+export interface ProvenanceFacts {
   source: string;
   eventId: string;
   name: string;
   routingKey: string;
   exchange: string;
-  /** SHA-256 of the raw delivered body bytes, lowercase hex. */
-  bodySha256: string;
   /** The AMQP `user_id` the broker delivered (validated by the broker against the publishing connection); null when absent. */
   producerUserId: string | null;
   verified: boolean;
   reason: ProvenanceReason;
+}
+
+/** One original delivery, as an UNKEYED store records it. */
+export interface ProvenanceObservation extends ProvenanceFacts {
+  /** SHA-256 of the raw delivered body bytes, lowercase hex. */
+  bodySha256: string;
 }
 
 /**
@@ -78,6 +108,8 @@ export interface ProvenanceObservation {
  * recorded, so no provenance is ever manufactured for it (§13.4, §13.6).
  */
 export type ProvenanceEvaluation = { origin: 'original'; observation: ProvenanceObservation } | { origin: 'not_original' };
+/** The same classification without any body commitment (the keyed path commits the body in its store). */
+export type ProvenanceFactsEvaluation = { origin: 'original'; facts: ProvenanceFacts } | { origin: 'not_original' };
 
 // The forms an event id takes in Core: the outbox row id, a canonical lowercase uuid (random v4, or a producer's deterministic v5).
 const EVENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -97,6 +129,12 @@ export const bodySha256 = (body: Buffer): string => createHash('sha256').update(
  * to compare, never identity on their own.
  */
 export function evaluateProvenance(d: ProvenanceDelivery, exchange: string, ownerOf: (name: string) => string | undefined): ProvenanceEvaluation {
+  const e = evaluateProvenanceFacts(d, exchange, ownerOf);
+  return e.origin === 'original' ? { origin: 'original', observation: { ...e.facts, bodySha256: bodySha256(d.body) } } : e;
+}
+
+/** `evaluateProvenance` without the unkeyed body digest: the §13.2 classification only (Core V2 S1b-3, the keyed path). */
+export function evaluateProvenanceFacts(d: Omit<ProvenanceDelivery, 'body'>, exchange: string, ownerOf: (name: string) => string | undefined): ProvenanceFactsEvaluation {
   if (d.exchange !== exchange) return { origin: 'not_original' };
   const name = eventName(d.type);
   const producerUserId = token(d.userId, BROKER_USER) || null;
@@ -116,10 +154,7 @@ export function evaluateProvenance(d: ProvenanceDelivery, exchange: string, owne
   else if (owner !== producerUserId) reason = 'not_family_owner';
   else if (name === '' || routingKey !== name) reason = 'routing_key_mismatch';
   else if (!EVENT_ID.test(eventId) || d.headers.eventId !== eventId) reason = 'invalid_event_id';
-  return {
-    origin: 'original',
-    observation: { source, eventId, name, routingKey, exchange: d.exchange, bodySha256: bodySha256(d.body), producerUserId, verified: reason === 'verified', reason },
-  };
+  return { origin: 'original', facts: { source, eventId, name, routingKey, exchange: d.exchange, producerUserId, verified: reason === 'verified', reason } };
 }
 
 interface StoredRow {
@@ -169,6 +204,153 @@ export class PgProvenanceStore implements ProvenanceStore {
           `INSERT INTO event_provenance_conflict ("provenanceId", consumer, source, "eventId", name, "routingKey", exchange, "bodySha256", "producerUserId", verified, reason)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT DO NOTHING`,
           [r.id, consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, o.bodySha256, o.producerUserId, o.verified, o.reason],
+        );
+      }
+      return conflict ? 'conflict' : own ? 'recorded' : 'duplicate';
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────── Core V2 S1b-3: the keyed body commitment (ADR-0057 §13.2 "S0-C2")
+
+/** The body-commitment construction this kit writes: version 1 = HMAC-SHA-256 of the raw delivered body bytes, lowercase hex. */
+export const BODY_COMMITMENT_VERSION = 1;
+const KEY_ID = /^[A-Za-z0-9_-]{1,32}$/;
+const MAC_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * A consumer's provenance key ring: its keys by non-secret id, the id new commitments use, and the ids deliberately RETIRED (their key
+ * material removed under a reviewed procedure: their rows are unverifiable). A stored key id that is in neither is UNAVAILABLE (a
+ * configuration fault): comparing under it fails closed until it is restored. Keys come from the service's configuration, never from the
+ * database, and are never generated here.
+ */
+export interface ProvenanceKeyRing {
+  readonly activeKeyId: string;
+  readonly keys: ReadonlyMap<string, Buffer>;
+  readonly retiredKeyIds: ReadonlySet<string>;
+}
+
+/** HMAC-SHA-256 of the complete raw body bytes under `key` (version 1), lowercase hex. */
+export function bodyMac(key: Buffer, body: Buffer): string {
+  return createHmac('sha256', key).update(body).digest('hex');
+}
+
+/** A stored commitment could not be compared because its key is not in the ring and was not retired: the observation is not committed. */
+export class ProvenanceKeyUnavailableError extends Error {
+  constructor() {
+    super('provenance_key_unavailable');
+    this.name = 'ProvenanceKeyUnavailableError';
+  }
+}
+
+/** A stored commitment of a version this kit does not know: never compared, never assumed equal. */
+export class ProvenanceCommitmentVersionError extends Error {
+  constructor() {
+    super('provenance_commitment_version_unknown');
+    this.name = 'ProvenanceCommitmentVersionError';
+  }
+}
+
+/** Checks a ring's shape (ids, a present active key, keys of at least 32 bytes, retired ids that are no longer in the ring). Never echoes key material. */
+export function assertProvenanceKeyRing(ring: ProvenanceKeyRing): void {
+  if (!KEY_ID.test(ring.activeKeyId) || !ring.keys.has(ring.activeKeyId)) throw new Error('the active provenance key is not in the key ring');
+  for (const [id, key] of ring.keys) {
+    if (!KEY_ID.test(id)) throw new Error('a provenance key id is not 1 to 32 letters, digits, _ or -');
+    if (!Buffer.isBuffer(key) || key.length < 32) throw new Error('a provenance key is shorter than 32 bytes');
+    if (ring.retiredKeyIds.has(id)) throw new Error('a provenance key id is both in the ring and retired');
+  }
+  for (const id of ring.retiredKeyIds) if (!KEY_ID.test(id)) throw new Error('a retired provenance key id is not 1 to 32 letters, digits, _ or -');
+}
+
+interface KeyedRow {
+  id: string;
+  name: string;
+  routingKey: string;
+  exchange?: string;
+  bodyCommitmentVersion: number;
+  bodyMacKeyId: string;
+  bodyMac: string;
+  producerUserId: string | null;
+  verified: boolean;
+  reason?: string;
+}
+
+/**
+ * The PostgreSQL store of a KEYED consumer (Core V2 S1b-3, ADR-0057 §13.2 "S0-C2"): the same tables' roles, uniqueness, advisory lock,
+ * unverified-first rule and append-only conflict evidence as `PgProvenanceStore`, but the body is recorded only as `bodyMac`, an
+ * HMAC-SHA-256 of the raw bytes under the ring's ACTIVE key, with `bodyMacKeyId` and `bodyCommitmentVersion`. No unkeyed digest of a body is
+ * computed or stored here.
+ *
+ * Comparisons (duplicate, conflict, conflict-evidence de-duplication) recompute the delivery's MAC under the STORED row's key and compare in
+ * constant time: two MACs made under different keys are never compared, so a rotation never creates a false conflict. A stored row whose
+ * key was retired is UNVERIFIABLE: never a duplicate, so the delivery is appended as conflict evidence (observe-only). A stored row whose key
+ * is merely unavailable, or whose commitment version is unknown, makes the commit fail (the bus holds and requeues the delivery, §13.3):
+ * nothing is decided, nothing is assumed equal, nothing is changed.
+ */
+export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
+  constructor(
+    private readonly db: { tx<T>(fn: (q: Queryable) => Promise<T>): Promise<T> },
+    private readonly ring: ProvenanceKeyRing,
+  ) {
+    assertProvenanceKeyRing(ring);
+  }
+
+  record(consumer: string, o: KeyedProvenanceObservation): Promise<ProvenanceRecordResult> {
+    const macs = new Map<string, string>(); // the delivery's MAC per key id, computed at most once
+    const macUnder = (keyId: string): string | undefined => {
+      const key = this.ring.keys.get(keyId);
+      if (!key) return undefined;
+      let mac = macs.get(keyId);
+      if (mac === undefined) macs.set(keyId, (mac = bodyMac(key, o.body)));
+      return mac;
+    };
+    /** 'same' / 'different' under the stored row's own key, 'unverifiable' for a retired key; throws when it cannot be decided. */
+    const bodyOf = (r: KeyedRow): 'same' | 'different' | 'unverifiable' => {
+      if (r.bodyCommitmentVersion !== BODY_COMMITMENT_VERSION) throw new ProvenanceCommitmentVersionError();
+      const mine = macUnder(r.bodyMacKeyId);
+      if (mine === undefined) {
+        if (this.ring.retiredKeyIds.has(r.bodyMacKeyId)) return 'unverifiable';
+        throw new ProvenanceKeyUnavailableError();
+      }
+      if (!MAC_HEX.test(r.bodyMac)) return 'different';
+      return timingSafeEqual(Buffer.from(mine, 'hex'), Buffer.from(r.bodyMac, 'hex')) ? 'same' : 'different';
+    };
+    const sameFacts = (r: KeyedRow): boolean =>
+      r.name === o.name && r.routingKey === o.routingKey && r.producerUserId === o.producerUserId && r.verified === o.verified;
+    const activeKeyId = this.ring.activeKeyId;
+    const mac = macUnder(activeKeyId)!;
+
+    return this.db.tx(async (q) => {
+      await q.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`event_provenance:${consumer}:${o.source}:${o.eventId}`]);
+      const inserted = await q.query<{ id: string }>(
+        `INSERT INTO event_provenance (consumer, source, "eventId", name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified, reason)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (consumer, source, "eventId", verified) DO NOTHING RETURNING id`,
+        [consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, BODY_COMMITMENT_VERSION, activeKeyId, mac, o.producerUserId, o.verified, o.reason],
+      );
+      const own = inserted.rows[0]?.id;
+      const stored = await q.query<KeyedRow>(
+        `SELECT id, name, "routingKey", "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified FROM event_provenance
+          WHERE consumer = $1 AND source = $2 AND "eventId" = $3 ORDER BY "firstSeenAt", id`,
+        [consumer, o.source, o.eventId],
+      );
+      let conflict = false;
+      for (const r of stored.rows) {
+        if (r.id === own || (sameFacts(r) && bodyOf(r) === 'same')) continue;
+        conflict = true;
+        // the same differing evidence against this row is kept once: compared under each evidence row's own key, like the row itself
+        const evidence = await q.query<KeyedRow>(
+          `SELECT id, name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified, reason
+             FROM event_provenance_conflict WHERE "provenanceId" = $1`,
+          [r.id],
+        );
+        const known = evidence.rows.some((e) => sameFacts(e) && e.exchange === o.exchange && e.reason === o.reason && bodyOf(e) === 'same');
+        if (known) continue;
+        await q.query(
+          `INSERT INTO event_provenance_conflict ("provenanceId", consumer, source, "eventId", name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac",
+             "producerUserId", verified, reason)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT DO NOTHING`,
+          [r.id, consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, BODY_COMMITMENT_VERSION, activeKeyId, mac, o.producerUserId, o.verified, o.reason],
         );
       }
       return conflict ? 'conflict' : own ? 'recorded' : 'duplicate';

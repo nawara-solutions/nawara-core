@@ -3,7 +3,7 @@ import {
   Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import { DbService, DB_OPTIONS, ReadinessRegistry, pendingMigrations, runWithEventContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
+import { DbService, DB_OPTIONS, PgKeyedProvenanceStore, ReadinessRegistry, pendingMigrations, runWithEventContext, type DbOptions, type EventBus, type EventEnvelope } from '@nawara/service-kit';
 import { NOTIFICATION_CONFIG } from '../config/notification-config.token.js';
 import type { NotificationConfig } from '../config/notification-config.js';
 import { EVENT_MAP, INTAKE_BINDINGS, INTAKE_QUEUE } from './event-map.js';
@@ -12,6 +12,13 @@ import { IntakeService } from './intake.service.js';
 export const INTAKE_EVENT_BUS = Symbol('INTAKE_EVENT_BUS');
 /** A bus that can report whether its consumers are attached (the kit's `RabbitMqEventBus`; tests may inject the in-memory bus). */
 type IntakeBus = EventBus & { consumerStatus?: () => Array<{ state: string }> };
+
+/**
+ * Core V2 S1b-3 (ADR-0057 §13.2): the owner of each intake event name, from `EVENT_MAP` (the trusted, server-side mapping, never a message).
+ * A name mapped under more than one source has no single owner, so no delivery of it can be verified (fail closed).
+ */
+const OWNERS: ReadonlyMap<string, string | undefined> = EVENT_MAP.reduce((owners, m) => owners.set(m.name, owners.has(m.name) && owners.get(m.name) !== m.source ? undefined : m.source), new Map<string, string | undefined>());
+export const intakeEventOwner = (name: string): string | undefined => OWNERS.get(name);
 
 /** Bounds of the start loop: waits for the database, the migrations and the default-locale coverage, and for the broker. */
 const START_RETRY = { baseMs: 250, maxMs: 5_000 };
@@ -72,7 +79,16 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     try {
       const blocker = await this.startBlocker();
       if (blocker) throw new Error(blocker);
-      const sub = await this.bus.subscribe({ queue: INTAKE_QUEUE, bindings: [...INTAKE_BINDINGS], handler: (e) => this.handle(e) });
+      const keys = this.config.provenanceKeys;
+      if (!keys) throw new Error('intake:provenance_keys_missing');
+      // Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2", observe-only): each delivery's provenance is committed in Notification's database before
+      // `handle` runs, its body only as a KEYED commitment (HMAC-SHA-256 under the provenance ring): three of these events carry a
+      // one-time code that an unkeyed digest would expose. The intake's mapping, de-duplication, sealing, delivery and privacy behaviour
+      // are unchanged. Enforcement is S1c/S1e (separately gated).
+      const sub = await this.bus.subscribe({
+        queue: INTAKE_QUEUE, bindings: [...INTAKE_BINDINGS], handler: (e) => this.handle(e),
+        provenance: { ownerOf: intakeEventOwner, keyedStore: new PgKeyedProvenanceStore(this.db, keys) },
+      });
       if (this.stopped) {
         await sub.close();
         return;
@@ -92,6 +108,8 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
 
   /** Why the intake must not consume yet, or undefined. Never includes a value from the environment or the database. */
   private async startBlocker(): Promise<string | undefined> {
+    // Core V2 S1b-3 (S0-C2): no provenance key ring, no consumption (never an unkeyed fallback); a malformed ring already failed at boot.
+    if (!this.config.provenanceKeys) return 'intake:provenance_keys_missing';
     let rows: Array<{ key: string; channel: string }>;
     try {
       await this.db.ping();

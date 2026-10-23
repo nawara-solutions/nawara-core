@@ -174,19 +174,30 @@ describeWithEnv('event intake over a real RabbitMQ', ['TEST_DATABASE_ADMIN_URL',
     expect(t.logs.some((l) => String(l.msg).startsWith('event_retry_scheduled'))).toBe(true);
   }, 40_000);
 
-  it('the database lost while consuming: nothing is acknowledged or written; the kit retries; when it returns, exactly one intent', async () => {
+  // Core V2 S1b-3 (ADR-0057 §13.3): the database is lost BEFORE the intake can run, at the provenance record, so the delivery is held and
+  // requeued with its original broker metadata: never copied to `.retry` (as it was before S1b-3) and never dead-lettered, however long
+  // the outage lasts.
+  it('the database lost while consuming: nothing is acknowledged or written; the delivery is held and requeued (never .retry); when it returns, exactly one intent', async () => {
     const t = await start();
     await ready(t);
     await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${dbName()}" WITH ALLOW_CONNECTIONS false`);
     await sql(env.TEST_DATABASE_ADMIN_URL, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND application_name = 'notification-service'`, [dbName()]);
     const e = event();
-    await publisher.publish(e);
-    await until(async () => t.logs.some((l) => String(l.msg).startsWith('event_retry_scheduled')), 15_000);
-    await request(t.app.getHttpServer()).get('/ready').expect(503);
-    await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${dbName()}" WITH ALLOW_CONNECTIONS true`);
+    try {
+      await publisher.publish(e);
+      await until(async () => t.logs.some((l) => String(l.msg).startsWith('event_provenance_deferred')), 15_000);
+      await request(t.app.getHttpServer()).get('/ready').expect(503);
+      expect(t.logs.some((l) => String(l.msg).startsWith('event_retry_scheduled'))).toBe(false);
+      expect(await depth(`${INTAKE_QUEUE}.retry`)).toBe(0);
+      expect(await depth(DEAD)).toBe(0);
+    } finally {
+      await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${dbName()}" WITH ALLOW_CONNECTIONS true`);
+    }
     await until(async () => (await count('"sourceEventId" = $1', [e.id])) === 1, 25_000);
     await until(async () => (await depth(INTAKE_QUEUE)) === 0 && (await depth(`${INTAKE_QUEUE}.retry`)) === 0);
     expect(await depth(DEAD)).toBe(0);
+    const [p] = await sql<{ n: number }>(db.url, `SELECT count(*)::int AS n FROM event_provenance WHERE "eventId" = $1`, [e.id]);
+    expect(p!.n).toBe(1); // recorded once, by the delivery that finally committed it
     await ready(t);
   }, 60_000);
 

@@ -1,6 +1,6 @@
 import amqp, { type Channel, type ChannelModel, type ConfirmChannel, type ConsumeMessage } from 'amqplib';
 import { ERROR_NAME, HEADER, REASON_CODE, counter, deadQueueName, retryQueueName, safeToken, withoutBrokerHistory, type FailureClass } from './dead-letter.js';
-import { evaluateProvenance } from './provenance.js';
+import { bodySha256, evaluateProvenanceFacts } from './provenance.js';
 import { EVENT_NAME, PermanentEventFailure, type DeadLetterDecision, type EventBus, type EventEnvelope, type EventSubscription } from './types.js';
 
 export interface RabbitMqOptions {
@@ -608,8 +608,8 @@ export class RabbitMqEventBus implements EventBus {
     const p = sub.provenance!;
     const who = `queue=${sub.queue} event=${messageIdOf(msg.properties.messageId)}`;
     try {
-      const evaluation = evaluateProvenance(
-        { exchange: msg.fields.exchange, routingKey: msg.fields.routingKey, userId: msg.properties.userId, messageId: msg.properties.messageId, type: msg.properties.type, headers: msg.properties.headers ?? {}, body: msg.content },
+      const evaluation = evaluateProvenanceFacts(
+        { exchange: msg.fields.exchange, routingKey: msg.fields.routingKey, userId: msg.properties.userId, messageId: msg.properties.messageId, type: msg.properties.type, headers: msg.properties.headers ?? {} },
         this.exchange,
         (name) => p.ownerOf(name),
       );
@@ -617,8 +617,11 @@ export class RabbitMqEventBus implements EventBus {
         this.observe({ type: 'provenance', queue: sub.queue, outcome: 'not_original' });
         return true;
       }
-      const o = evaluation.observation;
-      const result = await p.store.record(sub.queue, o);
+      const o = evaluation.facts;
+      // Core V2 S1b-3 (ADR-0057 §13.2 "S0-C2"): a keyed store commits the raw bytes itself; no unkeyed digest is computed on that path.
+      const result = p.keyedStore
+        ? await p.keyedStore.record(sub.queue, { ...o, body: Buffer.from(msg.content) })
+        : await p.store.record(sub.queue, { ...o, bodySha256: bodySha256(msg.content) });
       if (result === 'conflict') this.notice(`event_provenance_conflict ${who} verified=${o.verified} reason=${o.reason} — differs from the provenance already recorded for this event id; recorded as conflict evidence (observe-only)`);
       this.observe({ type: 'provenance', queue: sub.queue, outcome: result === 'recorded' ? (o.verified ? 'recorded_verified' : 'recorded_unverified') : result });
       return true;

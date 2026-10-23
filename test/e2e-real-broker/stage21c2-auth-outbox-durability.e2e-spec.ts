@@ -111,7 +111,7 @@ describeWithEnv('Stage 21.C.2: Auth outbox durability across a crash, live proce
     await deleteQueues();
     notification = spawnService('notification', NOTIFICATION_DIR, {
       NODE_ENV: 'test', PORT: String(NOTIFICATION_PORT), DATABASE_URL: notificationDb.url, RABBITMQ_URL: env.TEST_RABBITMQ_URL,
-      NOTIFICATION_SECRET_KEYS: `k1:${rand()}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: rand(),
+      NOTIFICATION_SECRET_KEYS: `k1:${rand()}`, NOTIFICATION_SECRET_ACTIVE_KEY_ID: 'k1', NOTIFICATION_PROVENANCE_KEYS: `p1:${rand()}`, NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p1', NOTIFICATION_DEFAULT_LOCALE: 'en', NOTIFICATION_REQUEST_HASH_KEY: rand(),
     });
     await waitFor(async () => (await fetch(`${NOTIFICATION_URL}/ready`).catch(() => undefined))?.status === 200, 30_000, 'notification-service ready');
     // Auth reaches the broker only through a proxy the test can cut (Notification talks to the broker directly).
