@@ -2037,7 +2037,7 @@ test('V2 A15.1: a migrated operator CLI hands process.env to EnvReader and reads
 
   // The inventory is the six A15.1 CLIs, A3M.5's retention CLI and (V2 A4.3) Auth's migration CLI; Auth's main.ts and the Organization
   // ownership CLI (A5 / F6 / F7) are not in it, and the path boundary of A2.5 still admits every CLI directory (nothing was removed).
-  assert.equal(ENV_READER_CLIS.length, 8); // V2 A3M.5 added nawara-outbox-retention; V2 A4.3 added Auth's migrate.ts
+  assert.equal(ENV_READER_CLIS.length, 9); // V2 A3M.5 added nawara-outbox-retention; V2 A4.3 added Auth's migrate.ts; S1c-3 R2a Payment's read-only re-emission dry run
   assert.deepEqual(ENV_READER_CLIS.filter((rel) => /auth-service|organization-service/.test(rel)), ['apps/auth-service/src/cli/migrate.ts']);
   // V2 A4.3: the forms Auth's migration CLI had before (and would drift back to) are refused for it.
   for (const text of [
@@ -3386,7 +3386,43 @@ test('Core V2 S1c-3 R1: producer re-emission stays the restricted S0-C4 foundati
   auth.produces.push({ name: 'member.recovery_code_issued', version: 1, codeBearing: true, payload: {} });
   assert.match(checkEventReemission({ ...contracts, 'auth-service': JSON.stringify(auth) }, files).join(), /CODE_BEARING_EVENTS must name the code-bearing member\.recovery_code_issued/);
   // no application (and no kit CLI) uses the foundation before its integration is reviewed
-  for (const [owner, rel] of [['payment-service', 'apps/payment-service/src/recovery.ts'], ['libs/service-kit/src/cli', 'libs/service-kit/src/cli/reemit.ts']]) {
+  for (const [owner, rel] of [['billing-service', 'apps/billing-service/src/recovery.ts'], ['auth-service', 'apps/auth-service/src/recovery.ts'], ['libs/service-kit/src/cli', 'libs/service-kit/src/cli/reemit.ts']]) {
     assert.match(checkEventReemission(contracts, files, { [owner]: { [rel]: 'new ProducerReemission({ policy })' } }).join(), /is not on REEMISSION_INTEGRATED_SERVICES/);
   }
+});
+
+test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspection; no publishing, authorizing or recording machinery)', async () => {
+  const { checkEventReemission, KIT_REEMISSION, KIT_SERIALIZATION, KIT_EVENT_BUS, KIT_OUTBOX_RELAY, KIT_PACKAGE, REEMISSION_INTEGRATED_SERVICES, REEMISSION_ELIGIBILITY_ONLY_SERVICES } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const contracts = {};
+  for (const app of ['payment-service', 'auth-service', 'notification-service', 'billing-service']) contracts[app] = read(`apps/${app}/contracts/events.json`);
+  const files = Object.fromEntries([KIT_REEMISSION, KIT_SERIALIZATION, KIT_EVENT_BUS, KIT_OUTBOX_RELAY, KIT_PACKAGE].map((rel) => [rel, read(rel)]));
+  const eligibility = 'apps/payment-service/src/reemission/reemission-eligibility.ts';
+  const cli = 'apps/payment-service/src/cli/reemission-dry-run.ts';
+  const payment = { [eligibility]: read(eligibility), [cli]: read(cli) };
+  assert.deepEqual(REEMISSION_INTEGRATED_SERVICES, []);
+  assert.deepEqual(REEMISSION_ELIGIBILITY_ONLY_SERVICES, ['payment-service']);
+  assert.deepEqual(checkEventReemission(contracts, files, { 'payment-service': payment }), []); // the read-only parts are allowed
+  const mutate = (rel, from, to) => {
+    assert.ok(payment[rel].includes(from), `fixture drifted: ${from}`);
+    return { ...payment, [rel]: payment[rel].replace(from, to) };
+  };
+  const added = (text) => ({ ...payment, 'apps/payment-service/src/reemission/recover.ts': text });
+  const cases = [
+    ['constructing the publisher', added("import { ProducerReemission } from '@nawara/service-kit';\nnew ProducerReemission(opts);"), /names the re-emission publishing/],
+    ['calling publishReemission', added('await bus.publishReemission(plan);'), /names the re-emission publishing/],
+    ['an always-denying authorizer around the publisher', added('const authorizer: ReemissionAuthorizer = { verify: async () => { throw new Error(); } };'), /names the re-emission publishing/],
+    ['an attempt writer', added('await attempts.commitIntent(intent);'), /names the re-emission publishing/],
+    ['a claimed audit intent', added('return { attemptId, intentCommitted: true, auditIntentRecorded: true };'), /names the re-emission publishing/],
+    ['an uncataloged audit action', added("await writer.write(q, { action: 'payment.event_reemitted' });"), /names the re-emission publishing/],
+    ['a broker connection in the dry run', mutate(cli, "import { ConfigError, DbService, EnvReader } from '@nawara/service-kit';", "import { ConfigError, DbService, EnvReader, RabbitMqEventBus } from '@nawara/service-kit';"), /imports no broker, outbox or audit writer and writes no SQL/],
+    ['a write in the dry run', mutate(eligibility, 'return { mode:', "await q.query('INSERT INTO payment_reemission_attempt VALUES (1)');\n  return { mode:"), /imports no broker, outbox or audit writer and writes no SQL/],
+    ['an unapproved event in the policy', mutate(eligibility, "{ name: 'payment.expired', version: 1 },", "{ name: 'payment.expired', version: 1 },\n  { name: 'payment.created', version: 1 },"), /re-emission policy must list only its S0-C4 approvals/],
+    ['a wildcard policy', mutate(eligibility, "{ name: 'payment.expired', version: 1 },", "{ name: 'payment.*', version: 1 },"), /re-emission policy must list only its S0-C4 approvals/],
+    ['another version', mutate(eligibility, "{ name: 'payment.failed', version: 1 },", "{ name: 'payment.failed', version: 2 },"), /re-emission policy must list only its S0-C4 approvals/],
+  ];
+  for (const [title, sources, expected] of cases) assert.match(checkEventReemission(contracts, files, { 'payment-service': sources }).join('\n'), expected, title);
+  // the read-only inspection stays forbidden for every other service, and code-bearing Auth recovery stays impossible
+  assert.match(checkEventReemission(contracts, files, { 'auth-service': { 'apps/auth-service/src/r.ts': "inspectReemissionEligibility(opts, { eventId, eventName: 'admin.operator_code_issued' })" } }).join(), /auth-service is not on REEMISSION_INTEGRATED_SERVICES/);
+  assert.match(checkEventReemission(contracts, files, { 'billing-service': { 'apps/billing-service/src/r.ts': 'migrationOwnership(files)' } }).join(), /billing-service is not on REEMISSION_INTEGRATED_SERVICES/);
 });

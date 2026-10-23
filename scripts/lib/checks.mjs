@@ -2417,6 +2417,7 @@ export const ENV_READER_CLIS = [
   'libs/service-kit/src/cli/outbox-retention.ts',
   'apps/notification-service/src/cli/secret-keys.ts',
   'apps/audit-service/src/cli/retention.ts',
+  'apps/payment-service/src/cli/reemission-dry-run.ts',
   'apps/auth-service/src/cli/migrate.ts',
 ];
 /** The kit CLIs' shared resolvers: they take a reader and never reach the process environment themselves. */
@@ -2920,18 +2921,26 @@ export function checkEventProvenanceOptIn(contracts, sources, files = {}) {
  * - `ProducerReemission.reemit` runs its checks in order: request, code-bearing, authorization, the row, the durable intent, the
  *   `publishing` state, and only then the publish;
  * - no kit CLI or bin re-emits, and no application uses the foundation until its integration is reviewed and listed in
- *   `REEMISSION_INTEGRATED_SERVICES` (empty in R1: R2 adds payment-service).
+ *   `REEMISSION_INTEGRATED_SERVICES` (empty: nothing can publish a re-emission);
+ * - Core V2 S1c-3 R2a: a service on `REEMISSION_ELIGIBILITY_ONLY_SERVICES` (payment-service) may use the READ-ONLY parts (its policy,
+ *   ownership evidence, `inspectReemissionEligibility`), but none of its source may name the publishing, authorizing or recording
+ *   machinery (`ProducerReemission`, `publishReemission`, the publisher / authorizer / attempt-store interfaces, `commitIntent`,
+ *   `auditIntentRecorded`, an `event_reemitted` audit action); a file that uses the read-only parts imports no broker, outbox or audit
+ *   writer and writes no SQL; and its policy names only S0-C4 approvals of that service, with no pattern.
  * Limits: a presence and order scan of source text; `test/reemission.spec.ts` and `test/reemission.int-spec.ts` prove the behaviour.
  */
 export const S0C4_REEMISSION_APPROVALS = Object.freeze({
   'payment-service': Object.freeze(['payment.succeeded@1', 'payment.failed@1', 'payment.cancelled@1', 'payment.expired@1']),
 });
 export const REEMISSION_INTEGRATED_SERVICES = Object.freeze([]);
+export const REEMISSION_ELIGIBILITY_ONLY_SERVICES = Object.freeze(['payment-service']);
+const REEMISSION_PUBLISHING = /\b(ProducerReemission|publishReemission|ReemissionPublisher|ReemissionAuthorizer|ReemissionAttemptStore|ProducerReemissionOptions|consumeIssuedReemissionPlan|commitIntent|appendTransition|auditIntentRecorded|DurableIntentReceipt)\b|event_reemitted/;
+const REEMISSION_READ_ONLY_FILE_FORBIDS = /from '(amqplib|@nawara\/audit-contract)'|\b(RabbitMqEventBus|EventsModule|OutboxService|OutboxRelay|AuditEventWriter)\b|\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|TRUNCATE)\b/i;
 export const KIT_REEMISSION = 'libs/service-kit/src/events/reemission.ts';
 export const KIT_SERIALIZATION = 'libs/service-kit/src/events/serialization.ts';
 export const KIT_OUTBOX_RELAY = 'libs/service-kit/src/events/outbox-relay.ts';
 export const KIT_PACKAGE = 'libs/service-kit/package.json';
-const REEMISSION_USE = /\b(ProducerReemission|publishReemission|reemissionPolicy|REEMISSION_APPROVALS)\b/;
+const REEMISSION_USE = /\b(ProducerReemission|publishReemission|reemissionPolicy|REEMISSION_APPROVALS|inspectReemissionEligibility|migrationOwnership)\b/;
 
 /** The text between `start` and the first `end` after it, or '' when `start` is absent. */
 function between(text, start, end) {
@@ -3007,8 +3016,27 @@ export function checkEventReemission(contracts, files, sources = {}) {
   }
   // no CLI, no bin, no application until its integration is reviewed
   if (/reemi/i.test(between(files[KIT_PACKAGE] ?? '', '"bin"', '}'))) problems.push(`${KIT_PACKAGE}: no kit command re-emits events; ${why}`);
+  for (const owner of REEMISSION_ELIGIBILITY_ONLY_SERVICES) {
+    if (REEMISSION_INTEGRATED_SERVICES.includes(owner)) problems.push(`${owner} is both eligibility-only and integrated; ${why}`);
+    const approved = S0C4_REEMISSION_APPROVALS[owner] ?? [];
+    for (const [relPath, text] of Object.entries(sources[owner] ?? {})) {
+      if (REEMISSION_PUBLISHING.test(text)) {
+        problems.push(`${relPath}: names the re-emission publishing, authorizing or recording machinery, but ${owner} is eligibility-only (read-only inspection; publication is separately authorized); ${why}`);
+      }
+      // a file that uses the read-only parts, directly or through the service's own re-emission module
+      if (!REEMISSION_USE.test(text) && !/reemission/i.test(relPath) && !/\/reemission\/[\w-]+\.js'/.test(text)) continue;
+      if (REEMISSION_READ_ONLY_FILE_FORBIDS.test(text)) problems.push(`${relPath}: uses the read-only re-emission inspection, so it imports no broker, outbox or audit writer and writes no SQL; ${why}`);
+      const policy = between(text, 'reemissionPolicy(', ']);');
+      if (policy !== '') {
+        const entries = [...policy.matchAll(/\{ name: '([^']+)', version: (\d+) \}/g)].map((m) => `${m[1]}@${m[2]}`);
+        if (entries.length === 0 || entries.some((e) => !approved.includes(e)) || /[*#]/.test(policy)) {
+          problems.push(`${relPath}: the ${owner} re-emission policy must list only its S0-C4 approvals (${approved.join(', ')}), with no pattern; ${why}`);
+        }
+      }
+    }
+  }
   for (const [owner, appFiles] of Object.entries(sources)) {
-    if (REEMISSION_INTEGRATED_SERVICES.includes(owner)) continue;
+    if (REEMISSION_INTEGRATED_SERVICES.includes(owner) || REEMISSION_ELIGIBILITY_ONLY_SERVICES.includes(owner)) continue;
     for (const [relPath, text] of Object.entries(appFiles)) {
       if (REEMISSION_USE.test(text)) problems.push(`${relPath}: uses the re-emission foundation, but ${owner} is not on REEMISSION_INTEGRATED_SERVICES: a producer integration is a separately authorized, reviewed change; ${why}`);
     }
