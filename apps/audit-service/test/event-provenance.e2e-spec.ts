@@ -4,7 +4,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { SAMPLE_IDS } from '@nawara/audit-contract/testing';
 import {
-  DbService, PgProvenanceStore, RabbitMqEventBus, kitMigrationsDir, runMigrations, type EventBus, type EventEnvelope, type ProvenanceObservation,
+  DbService, PgProvenanceStore, RabbitMqEventBus, kitMigrationsDir, replayDeadLetter, runMigrations, type EventBus, type EventEnvelope, type ProvenanceObservation,
 } from '@nawara/service-kit';
 import { auditMigrationsDir } from '../src/app.module.js';
 import { auditEventOwner } from '../src/ingestion/admission.js';
@@ -50,6 +50,8 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
     return u.toString();
   };
   const created: string[] = [];
+  /** The kit notices of the application's bus (S1c-1: the observe-only replay classification). */
+  const busNotices: string[] = [];
   const closers: Array<() => Promise<unknown>> = [];
   let d: ProvisionedDatabase;
   let conn: ChannelModel;
@@ -108,7 +110,7 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
     await deleteAuditQueues(ch);
     owner = new RabbitMqEventBus({ url: urlFor(OWNER), exchange: AUDIT_EXCHANGE });
     intruder = new RabbitMqEventBus({ url: urlFor(INTRUDER), exchange: AUDIT_EXCHANGE });
-    const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange: AUDIT_EXCHANGE, prefetch: 5, retry: { maxRetries: 1, delayMs: 300 } });
+    const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange: AUDIT_EXCHANGE, prefetch: 5, retry: { maxRetries: 1, delayMs: 300 }, onNotice: (m) => void busNotices.push(m) });
     t = await createTestApp({ databaseUrl: d.appUrl, rabbitmqUrl: env.TEST_RABBITMQ_URL, bus });
     await vi.waitFor(async () => expect((await request(t.app.getHttpServer()).get('/ready')).body).toEqual({ status: 'ready' }), { timeout: 20_000, interval: 100 });
   });
@@ -234,6 +236,41 @@ describeWithEnv('S1b-2 Audit event provenance (real RabbitMQ, real PostgreSQL 16
       await inject(Buffer.from(JSON.stringify(e.payload)), e);
       await until(async () => (await records(e.id)) === 1);
       expect(await provenance(e.id)).toEqual([]);
+      // S1c-1: classified `replay_no_provenance` (observe-only: ingested exactly as before, A50-compatible)
+      await until(() => busNotices.some((m) => m.startsWith(`event_replay_classified queue=${AUDIT_QUEUE} event=${e.id} outcome=replay_no_provenance original=none`)));
+    });
+
+    it('S1c-1: a forged injection that changes an admitted original is a mismatch against it; the stored record and the original are untouched', async () => {
+      const e = auditEnvelope('payment.succeeded');
+      await owner.publish(e);
+      await until(async () => (await records(e.id)) === 1);
+      const before = await sql(d.adminUrl, `SELECT * FROM audit_record WHERE "eventId" = $1`, [e.id]);
+      const changed = auditEnvelope('payment.succeeded', { id: e.id, variant: 'minimal' }); // still admitted: a valid, different body
+      await inject(Buffer.from(JSON.stringify(changed.payload)), changed);
+      await until(() => busNotices.some((m) => m.startsWith(`event_replay_classified queue=${AUDIT_QUEUE} event=${e.id} outcome=replay_mismatch original=verified`)));
+      expect(await deadCopy(e.id)).toMatchObject({ failure: 'permanent', reason: 'event_id_conflict' }); // ingestion as before
+      expect(await sql(d.adminUrl, `SELECT * FROM audit_record WHERE "eventId" = $1`, [e.id])).toEqual(before);
+      expect(await provenance(e.id)).toHaveLength(1);
+    });
+
+    it('S1c-1: an admission-refused original, replayed from the dead letters, is refused AGAIN at admission before any classification; nothing is stored or digested', async () => {
+      const e = auditEnvelope('payment.succeeded');
+      e.payload = { ...e.payload, action: 'payment.teleported' }; // an unknown action: kept original (catalog lag), replayable
+      e.name = 'audit.payment.teleported';
+      const body = Buffer.from(JSON.stringify(e.payload));
+      await publishRaw(body, e.id, e.name);
+      const copy = await deadCopy(e.id);
+      expect(copy).toMatchObject({ reason: 'unknown_action', redacted: false });
+      const c = await conn.createConfirmChannel();
+      c.sendToQueue(`${AUDIT_QUEUE}.dead`, copy.content, { persistent: true, messageId: e.id, type: e.name, headers: { ...e.headers, 'x-nawara-failure': 'permanent', 'x-nawara-failure-reason': 'unknown_action' } });
+      await c.waitForConfirms();
+      await c.close();
+      expect((await replayDeadLetter(conn, `${AUDIT_QUEUE}.dead`, e.id, { waitMs: 5_000 })).outcome).toBe('rejected_again');
+      expect(busNotices.some((m) => m.includes(`event=${e.id} outcome=`))).toBe(false); // never classified (admission first)
+      expect(await provenance(e.id)).toEqual([]);
+      expect(await digestStored(sha(body))).toBe(false);
+      expect(await records(e.id)).toBe(0);
+      expect(await deadCopy(e.id)).toMatchObject({ reason: 'unknown_action' }); // refused again: back in the dead letters (removed here)
     });
   });
 

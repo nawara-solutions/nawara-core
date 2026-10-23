@@ -57,7 +57,8 @@ export {
   type ProvenanceOptions, type ProvenanceReason, type ProvenanceRecordResult, type ProvenanceStore,
   BODY_COMMITMENT_VERSION, PgKeyedProvenanceStore, ProvenanceCommitmentVersionError, ProvenanceKeyUnavailableError, assertProvenanceKeyRing, bodyMac,
   evaluateProvenanceFacts, type KeyedProvenanceObservation, type KeyedProvenanceOptions, type KeyedProvenanceStore, type ProvenanceFacts,
-  type ProvenanceFactsEvaluation, type ProvenanceKeyRing,
+  type ProvenanceFactsEvaluation, type ProvenanceKeyRing, REPLAY_ORIGINALS, REPLAY_OUTCOMES, replayCandidate, type ReplayCandidate, type ReplayClassification,
+  type ReplayOriginal, type ReplayClassificationOutcome,
 } from './events/provenance.js';
 export { EVENT_BUS, EVENT_NAME, PermanentEventFailure, type EventAdmission, type EventBus, type EventEnvelope, type EventHeaders, type EventSubscription, type DeadLetterInput, type DeadLetterDecision } from './events/types.js';
 export { isCanonicalJsonBody } from './events/canonical-body.js';

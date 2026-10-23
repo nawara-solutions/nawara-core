@@ -3310,7 +3310,7 @@ test('S1b-3: Notification keeps event provenance only as a KEYED commitment; Bil
     [NOTIFICATION_KEYED_FILES.config, "readOptionalKeyEntries(reader, 'NOTIFICATION_PROVENANCE_KEYS'", "readOptionalKeyEntries(reader, 'NOTIFICATION_SECRET_KEYS'", /must read the dedicated NOTIFICATION_PROVENANCE_KEYS ring/],
     [NOTIFICATION_KEYED_FILES.config, "['NOTIFICATION_PROVENANCE_KEYS', k] as const", "['NOTIFICATION_OTHER', k] as const", /keep it distinct from every other key/],
     [NOTIFICATION_KEYED_FILES.migration, '"bodyMac"               text NOT NULL,', '"bodyMac"               text NOT NULL,\n  "bodySha256" text,', /no unkeyed body digest/],
-    [KIT_PROVENANCE, 'if (mac === undefined) macs.set(keyId, (mac = bodyMac(key, o.body)));', "if (mac === undefined) macs.set(keyId, (mac = createHash('sha256').update(o.body).digest('hex')));", /`PgKeyedProvenanceStore` must exist and never compute an unkeyed digest/],
+    [KIT_PROVENANCE, 'if (mac === undefined) macs.set(keyId, (mac = bodyMac(key, body)));', "if (mac === undefined) macs.set(keyId, (mac = createHash('sha256').update(body).digest('hex')));", /`PgKeyedProvenanceStore` must exist and never compute an unkeyed digest/],
     [KIT_EVENT_BUS, 'await p.keyedStore.record(sub.queue, { ...o, body: Buffer.from(msg.content) })', 'await p.keyedStore.record(sub.queue, { ...o, bodySha256: bodySha256(msg.content), body: Buffer.from(msg.content) })', /must give a keyed store the facts and the raw bytes only/],
   ];
   for (const [rel, from, to, expected] of keyedMutations) {
@@ -3328,4 +3328,25 @@ test('S1b-3: Notification keeps event provenance only as a KEYED commitment; Bil
     const changedFiles = rel in files ? { ...files, [rel]: switched } : files;
     assert.match(checkEventProvenanceOptIn(contracts, { ...sources, [app]: { [rel]: switched } }, changedFiles).join('\n'), new RegExp(`apps/${app}: its event provenance must stay on the unkeyed store`));
   }
+});
+
+test('S1c-1: the replay classification stays OBSERVE-ONLY and keyed for Notification; the evidence comparison is recorded; every regression is refused', async () => {
+  const { AUDIT_ADMISSION_FILES, KIT_EVENT_BUS, KIT_PROVENANCE, NOTIFICATION_KEYED_FILES, keyedCommitmentProblems } = await import('./lib/checks.mjs');
+  const root = new URL('..', import.meta.url).pathname;
+  const files = Object.fromEntries([...Object.values(AUDIT_ADMISSION_FILES), ...Object.values(NOTIFICATION_KEYED_FILES), KIT_EVENT_BUS, KIT_PROVENANCE].map((rel) => [rel, readFileSync(join(root, rel), 'utf8')]));
+  const sources = { [NOTIFICATION_KEYED_FILES.consumer]: files[NOTIFICATION_KEYED_FILES.consumer], [NOTIFICATION_KEYED_FILES.config]: files[NOTIFICATION_KEYED_FILES.config] };
+  assert.deepEqual(keyedCommitmentProblems(files, sources), []);
+  const mutate = (rel, from, to) => {
+    assert.ok(files[rel].includes(from), `${rel} no longer contains ${from}`);
+    return { ...files, [rel]: files[rel].replace(from, to) };
+  };
+  const mutations = [
+    [KIT_EVENT_BUS, "if (msg.fields.exchange === '') await this.classifyReplay(msg, sub, who);\n        return true;", "if (msg.fields.exchange === '') await this.classifyReplay(msg, sub, who);\n        return false;", /must stay observe-only/],
+    [KIT_EVENT_BUS, "    this.observe({ type: 'replay', queue: sub.queue, outcome: result.outcome, original: result.original });", "    this.observe({ type: 'replay', queue: sub.queue, outcome: result.outcome, original: result.original });\n    if (result.outcome === 'replay_mismatch') this.settle(() => ch.nack(msg, false, false), sub);", /must stay observe-only/],
+    [KIT_EVENT_BUS, "    this.observe({ type: 'replay', queue: sub.queue, outcome: result.outcome, original: result.original });", "    this.observe({ type: 'replay', queue: sub.queue, outcome: result.outcome, original: result.original });\n    if (result.outcome === 'replay_no_provenance') throw new Error('refused');", /must stay observe-only/],
+    [KIT_EVENT_BUS, 'p.keyedStore.classifyReplay!(sub.queue, { ...candidate, body: Buffer.from(msg.content) })', 'p.keyedStore.classifyReplay!(sub.queue, { ...candidate, bodySha256: bodySha256(msg.content), body: Buffer.from(msg.content) })', /give a keyed store the raw bytes only/],
+    [NOTIFICATION_KEYED_FILES.comparisonMigration, "comparison IN ('differs', 'unverifiable')", "comparison IN ('differs', 'unverifiable', 'equal')", /must record the evidence `comparison`/],
+    [NOTIFICATION_KEYED_FILES.comparisonMigration, 'ALTER TABLE event_provenance_conflict ADD COLUMN comparison text;', 'ALTER TABLE event_provenance_conflict ADD COLUMN comparison text;\nALTER TABLE event_provenance_conflict ADD COLUMN "bodySha256" text;', /no unkeyed body digest/],
+  ];
+  for (const [rel, from, to, expected] of mutations) assert.match(keyedCommitmentProblems(mutate(rel, from, to), sources).join('\n'), expected, `${rel}: ${from}`);
 });

@@ -3,7 +3,8 @@ import amqp, { type Channel, type ChannelModel } from 'amqplib';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
-  DbService, PgKeyedProvenanceStore, RabbitMqEventBus, bodyMac, kitMigrationsDir, runMigrations, type EventBus, type EventEnvelope, type KeyedProvenanceObservation,
+  DbService, PermanentEventFailure, PgKeyedProvenanceStore, RabbitMqEventBus, bodyMac, kitMigrationsDir, replayDeadLetter, runMigrations, type EventBus, type EventEnvelope,
+  type KeyedProvenanceObservation, type ProvenanceKeyRing,
 } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { notificationMigrationsDir } from '../src/app.module.js';
@@ -97,7 +98,7 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
     sql<Record<string, unknown>>(db.url, `SELECT consumer, source, name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified, reason
       FROM event_provenance WHERE "eventId" = $1 AND consumer = $2 ORDER BY "firstSeenAt"`, [id, consumer]);
   const conflicts = (id: string) =>
-    sql<Record<string, unknown>>(db.url, `SELECT "producerUserId", verified, reason, "bodyMacKeyId", "bodyMac" FROM event_provenance_conflict WHERE "eventId" = $1 ORDER BY "observedAt"`, [id]);
+    sql<Record<string, unknown>>(db.url, `SELECT "producerUserId", verified, reason, "bodyMacKeyId", "bodyMac", comparison FROM event_provenance_conflict WHERE "eventId" = $1 ORDER BY "observedAt"`, [id]);
   /** (Re)starts the application with the given provenance ring (default: the test app's p1). */
   const startApp = async (over: NodeJS.ProcessEnv = {}) => {
     if (t) await t.app.close();
@@ -215,7 +216,7 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       await until(async () => (await provenance(e.id)).length === 2);
       expect((await provenance(e.id))[1]).toMatchObject({ producerUserId: OWNER, verified: true });
       expect(await intents(e.id)).toBe(1);
-      expect(await conflicts(e.id)).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodyMacKeyId: 'p1', bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(e)) }]);
+      expect(await conflicts(e.id)).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodyMacKeyId: 'p1', bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(e)), comparison: 'differs' }]);
     });
 
     it('the same delivery again is a duplicate (one row, no evidence); a CHANGED CODE under the same id is a conflict, the first row untouched', async () => {
@@ -230,7 +231,7 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       await owner.publish(changed);
       await until(async () => (await conflicts(e.id)).length === 1);
       expect((await provenance(e.id))[0]).toMatchObject({ bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(e)) });
-      expect((await conflicts(e.id))[0]).toMatchObject({ verified: true, bodyMacKeyId: 'p1', bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(changed)) });
+      expect((await conflicts(e.id))[0]).toMatchObject({ verified: true, bodyMacKeyId: 'p1', bodyMac: bodyMac(TEST_PROVENANCE_KEY, bytes(changed)), comparison: 'differs' });
       expect(await intents(e.id)).toBe(1); // the intake de-duplicates exactly as before
     });
   });
@@ -252,7 +253,7 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       const changed = envelope(genuine.name, { ...genuine.payload, code: '000002' }, genuine.id);
       await owner.publish(changed);
       await until(async () => (await conflicts(genuine.id)).length === 1);
-      expect((await conflicts(genuine.id))[0]).toMatchObject({ bodyMacKeyId: 'p2', bodyMac: bodyMac(P2, bytes(changed)) });
+      expect((await conflicts(genuine.id))[0]).toMatchObject({ bodyMacKeyId: 'p2', bodyMac: bodyMac(P2, bytes(changed)), comparison: 'differs' }); // compared under p1
       const fresh = envelope('membership.revoked');
       await owner.publish(fresh);
       await until(async () => (await intents(fresh.id)) === 1);
@@ -276,12 +277,14 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       expect((await conflicts(other.id)).length).toBe(evidenceBefore);
     });
 
-    it('a stored key that was deliberately RETIRED makes its row unverifiable: never a duplicate, appended once as evidence (observe-only)', async () => {
+    it('a stored key that was deliberately RETIRED makes its row unverifiable: never a duplicate, appended once as `unverifiable` evidence, never `differs` (S1c-1)', async () => {
       await startApp({ NOTIFICATION_PROVENANCE_KEYS: ring([['p2', P2]]), NOTIFICATION_PROVENANCE_ACTIVE_KEY_ID: 'p2', NOTIFICATION_PROVENANCE_RETIRED_KEY_IDS: 'p1' });
       await owner.publish(other); // identical to its p1 row, which can no longer be verified
       await until(async () => (await conflicts(other.id)).some((c) => c.bodyMacKeyId === 'p2'));
       const evidence = (await conflicts(other.id)).filter((c) => c.bodyMacKeyId === 'p2');
-      expect(evidence).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodyMacKeyId: 'p2', bodyMac: bodyMac(P2, bytes(other)) }]);
+      expect(evidence).toEqual([{ producerUserId: OWNER, verified: true, reason: 'verified', bodyMacKeyId: 'p2', bodyMac: bodyMac(P2, bytes(other)), comparison: 'unverifiable' }]);
+      expect(logged('event_provenance_unverifiable')).toBe(true);
+      expect(logged('event_provenance_conflict')).toBe(false); // a retired key is never reported as a proven difference
       await owner.publish(other); // again: the same evidence, compared under its own key (p2), is not appended twice
       await until(() => t!.logs.filter((l) => String(l.msg).startsWith('notification_duplicate')).length >= 2);
       expect((await conflicts(other.id)).filter((c) => c.bodyMacKeyId === 'p2')).toHaveLength(1);
@@ -391,6 +394,198 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
     });
   });
 
+  describe('replay classification (S1c-1, OBSERVE-ONLY): default-exchange deliveries against the stored originals', () => {
+    const RX = `${prefix}.replay`;
+    let rxOwner: RabbitMqEventBus;
+    let rxIntruder: RabbitMqEventBus;
+    const queues: string[] = [];
+    const keyRing = (entries: Array<[string, Buffer]>, activeKeyId: string, retired: string[] = []): ProvenanceKeyRing => ({ activeKeyId, keys: new Map(entries), retiredKeyIds: new Set(retired) });
+    const P1 = keyRing([['p1', TEST_PROVENANCE_KEY]], 'p1');
+    /** A consumer wired exactly like `EventConsumer` (keyed provenance, the real intake) on its own exchange, observing replay outcomes. */
+    const replayConsumer = async (queue: string, keys: ProvenanceKeyRing, before?: (e: EventEnvelope, intake: () => Promise<void>, bus: EventBus) => Promise<void>) => {
+      if (!queues.includes(queue)) queues.push(queue);
+      const intake = t!.app.get(IntakeService);
+      const bus = new RabbitMqEventBus({ url: env.TEST_RABBITMQ_URL, exchange: RX, drainTimeoutMs: 200, retry: { maxRetries: 2, delayMs: 150 }, replayLookupTimeoutMs: 1500 });
+      const replays: string[] = [];
+      const provenanceOutcomes: string[] = [];
+      bus.setObserver((o) => {
+        if (o.type === 'replay') replays.push(`${o.outcome}/${o.original}`);
+        if (o.type === 'provenance') provenanceOutcomes.push(o.outcome);
+      });
+      closers.push(() => bus.close());
+      const run = (e: EventEnvelope) => async () => void (await intake.handle(e));
+      const sub = await bus.subscribe({
+        queue, bindings: EVENT_MAP.map((m) => m.name),
+        handler: (e) => (before ? before(e, run(e), bus) : run(e)()),
+        provenance: { ownerOf: intakeEventOwner, keyedStore: new PgKeyedProvenanceStore(t!.app.get(DbService), keys) },
+      });
+      return { replays, provenanceOutcomes, close: () => sub.close(), bus };
+    };
+    /** A default-exchange injection straight into `queue`, published by the intruder (its own `user_id`). */
+    const inject = async (queue: string, e: EventEnvelope, body = bytes(e)) => {
+      const c = await amqp.connect(urlFor(INTRUDER));
+      const cc = await c.createConfirmChannel();
+      cc.sendToQueue(queue, body, { persistent: true, messageId: e.id, type: e.name, userId: INTRUDER, headers: e.headers });
+      await cc.waitForConfirms();
+      await c.close();
+    };
+    const duplicates = () => t!.logs.filter((l) => String(l.msg).startsWith('notification_duplicate')).length;
+    beforeAll(async () => {
+      rxOwner = new RabbitMqEventBus({ url: urlFor(OWNER), exchange: RX });
+      rxIntruder = new RabbitMqEventBus({ url: urlFor(INTRUDER), exchange: RX });
+      closers.push(() => rxOwner.close(), () => rxIntruder.close());
+    });
+    afterAll(async () => {
+      for (const q of queues) for (const sfx of ['', '.retry', '.dead']) await ch.deleteQueue(`${q}${sfx}`).catch(() => undefined);
+      await ch.deleteExchange(RX).catch(() => undefined);
+    });
+
+    it('a consumer RETRY (default exchange, the consumer\'s own user_id) matches the verified original; handled exactly as before', async () => {
+      let calls = 0;
+      const c = await replayConsumer(`${prefix}.rq-retry`, P1, async (_e, intake) => {
+        if (++calls === 1) throw new Error('transient'); // the first attempt fails: the kit republishes a retry copy
+        return intake();
+      });
+      const e = envelope('membership.approved');
+      await rxOwner.publish(e);
+      await until(async () => (await intents(e.id)) === 1);
+      expect(c.provenanceOutcomes).toEqual(['recorded_verified', 'not_original']);
+      expect(c.replays).toEqual(['replay_matched_verified/verified']);
+      expect(await provenance(e.id, `${prefix}.rq-retry`)).toHaveLength(1); // the retry recorded nothing
+      await c.close();
+    });
+
+    it('a BROKER REDELIVERY (requeued unacknowledged delivery) keeps its original exchange: an original, never classified as a replay', async () => {
+      const queue = `${prefix}.rq-redeliver`;
+      let first = true;
+      await replayConsumer(queue, P1, async (_e, intake, bus) => {
+        if (!first) return intake();
+        first = false;
+        void bus.close(); // dies before acknowledging: the broker redelivers to the next consumer
+        await sleep(600);
+      });
+      const e = envelope('membership.revoked');
+      await rxOwner.publish(e);
+      await until(() => !first);
+      await sleep(900);
+      const second = await replayConsumer(queue, P1);
+      await until(async () => (await intents(e.id)) === 1 && second.provenanceOutcomes.length >= 1);
+      expect(second.provenanceOutcomes).toEqual(['duplicate']); // the original delivery again, through the event exchange
+      expect(second.replays).toEqual([]);
+      await second.close();
+    });
+
+    it('an OPERATOR REPLAY of a dead letter matches the verified original; handled as before', async () => {
+      const queue = `${prefix}.rq-dlq`;
+      let refuse = true;
+      const c = await replayConsumer(queue, P1, async (_e, intake) => {
+        if (refuse) throw new PermanentEventFailure('refused_for_test');
+        return intake();
+      });
+      const e = envelope('admin.owner_recovery_completed');
+      await rxOwner.publish(e);
+      await until(async () => (await depth(`${queue}.dead`)) === 1);
+      refuse = false;
+      expect((await replayDeadLetter(conn, `${queue}.dead`, e.id, { waitMs: 10_000 })).outcome).toBe('consumed');
+      await until(async () => (await intents(e.id)) === 1);
+      expect(c.replays).toEqual(['replay_matched_verified/verified']);
+      await c.close();
+    });
+
+    it('a FORGED INJECTION with a changed code is a mismatch against the verified original; one with no original is no_provenance; both handled as before', async () => {
+      const queue = `${prefix}.rq-forged`;
+      const c = await replayConsumer(queue, P1);
+      const e = envelope('member.contact_verification_requested');
+      await rxOwner.publish(e);
+      await until(async () => (await intents(e.id)) === 1);
+      const changed = envelope(e.name, { ...e.payload, code: '000003' }, e.id);
+      const dupBefore = duplicates();
+      await inject(queue, changed);
+      await until(() => c.replays.length === 1);
+      expect(c.replays).toEqual(['replay_mismatch/verified']);
+      await until(() => duplicates() > dupBefore); // the intake de-duplicates exactly as before
+      expect(await intents(e.id)).toBe(1);
+      const unknown = envelope('membership.rejected');
+      await inject(queue, unknown);
+      await until(() => c.replays.length === 2);
+      expect(c.replays[1]).toBe('replay_no_provenance/none');
+      await until(async () => (await intents(unknown.id)) === 1); // observe-only: no new refusal
+      expect(await provenance(unknown.id, queue)).toEqual([]); // nothing invented for it
+      expect(t!.logs.map((l) => JSON.stringify(l)).join('\n')).not.toMatch(/000003|730591|member@example/);
+      await c.close();
+    });
+
+    it('a replay of an UNVERIFIED original stays unverified', async () => {
+      const queue = `${prefix}.rq-unverified`;
+      const c = await replayConsumer(queue, P1);
+      const e = envelope('membership.approved');
+      await rxIntruder.publish(e); // the header claims auth-service; the broker says the intruder
+      await until(async () => (await provenance(e.id, queue)).length === 1);
+      await inject(queue, e);
+      await until(() => c.replays.length === 1);
+      expect(c.replays).toEqual(['replay_matched_unverified/unverified']);
+      await c.close();
+    });
+
+    it('historical keys: after a ROTATION it matches under the stored key; RETIRED is unverifiable; UNAVAILABLE is a lookup failure; all handled as before', async () => {
+      const queue = `${prefix}.rq-keys`;
+      const a = await replayConsumer(queue, P1);
+      const e = envelope('admin.operator_code_issued');
+      await rxOwner.publish(e);
+      await until(async () => (await intents(e.id)) === 1);
+      await a.close();
+      const cases: Array<[ProvenanceKeyRing, string]> = [
+        [keyRing([['p1', TEST_PROVENANCE_KEY], ['p2', P2]], 'p2'), 'replay_matched_verified/verified'],
+        [keyRing([['p2', P2]], 'p2', ['p1']), 'replay_unverifiable/verified'],
+        [keyRing([['p3', P3]], 'p3'), 'replay_lookup_failure/none'],
+      ];
+      for (const [keys, expected] of cases) {
+        const c = await replayConsumer(queue, keys);
+        const dupBefore = duplicates();
+        await inject(queue, e);
+        await until(() => c.replays.length === 1);
+        expect(c.replays, expected).toEqual([expected]);
+        await until(() => duplicates() > dupBefore); // handled as before (the intake de-duplicates it), whatever the classification
+        await c.close();
+      }
+      expect(await intents(e.id)).toBe(1);
+      expect(await provenance(e.id, queue)).toHaveLength(1);
+      expect(await sql(db.url, `SELECT 1 FROM event_provenance_conflict WHERE "eventId" = $1 AND consumer = $2`, [e.id, queue])).toEqual([]); // a lookup writes nothing
+    });
+
+    it('the database lost during the lookup: lookup failure, then the ordinary retry path as before; recovered, it matches', async () => {
+      const queue = `${prefix}.rq-outage`;
+      const c = await replayConsumer(queue, P1);
+      const e = envelope('membership.revoked');
+      await rxOwner.publish(e);
+      await until(async () => (await intents(e.id)) === 1);
+      const name = new URL(db.url).pathname.slice(1);
+      await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${name}" WITH ALLOW_CONNECTIONS false`);
+      await sql(env.TEST_DATABASE_ADMIN_URL, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, [name]);
+      try {
+        await inject(queue, e);
+        await until(() => c.replays.includes('replay_lookup_failure/none'));
+      } finally {
+        await sql(env.TEST_DATABASE_ADMIN_URL, `ALTER DATABASE "${name}" WITH ALLOW_CONNECTIONS true`);
+      }
+      await until(() => c.replays.includes('replay_matched_verified/verified'), 30_000); // a later retry of the same injection
+      expect(c.replays.some((r) => r.startsWith('replay_matched') && c.replays.indexOf(r) < c.replays.indexOf('replay_lookup_failure/none'))).toBe(false);
+      expect(await intents(e.id)).toBe(1);
+      await c.close();
+    }, 60_000);
+
+    it('a CONCURRENT original and identical replay: one provenance row, one intent; the replay is never classified as a match without a stored original', async () => {
+      const queue = `${prefix}.rq-concurrent`;
+      const c = await replayConsumer(queue, P1);
+      const e = envelope('membership.approved');
+      await Promise.all([rxOwner.publish(e), inject(queue, e)]);
+      await until(async () => (await intents(e.id)) === 1 && c.replays.length === 1);
+      expect(['replay_no_provenance/none', 'replay_matched_verified/verified']).toContain(c.replays[0]);
+      expect(await provenance(e.id, queue)).toHaveLength(1);
+      await c.close();
+    });
+  });
+
   describe('the store and the schema (PostgreSQL, migration 0003)', () => {
     const observation = (eventId: string, body = Buffer.from(`{"code":"${CODE}"}`)): KeyedProvenanceObservation => ({
       source: OWNER, eventId, name: 'member.contact_verification_requested', routingKey: 'member.contact_verification_requested', exchange: EXCHANGE,
@@ -419,6 +614,20 @@ describeWithEnv('S1b-3 keyed event provenance in Notification (real RabbitMQ, re
       for (const bad of [{ version: 2 }, { keyId: 'not a key id!' }, { mac: 'z'.repeat(64) }, { mac: 'a'.repeat(63) }, { producer: null }, { producer: INTRUDER }, { routingKey: 'membership.rejected' }, { eventId: 'nope' }]) {
         expect((await insert(bad)).code, JSON.stringify(bad)).toBe('23514');
       }
+    });
+
+    it('S1c-1 (migration 0004): conflict evidence records `differs` or `unverifiable` only; earlier rows keep NULL (never rewritten)', async () => {
+      const store = new PgKeyedProvenanceStore(t!.app.get(DbService), { activeKeyId: 'p1', keys: new Map([['p1', TEST_PROVENANCE_KEY]]), retiredKeyIds: new Set() });
+      const id = randomUUID();
+      await store.record('q.comparison', observation(id));
+      await store.record('q.comparison', observation(id, Buffer.from('{"code":"000009"}')));
+      const [evidence] = await sql<{ id: string; provenanceId: string; comparison: string }>(db.url, `SELECT id, "provenanceId", comparison FROM event_provenance_conflict WHERE "eventId" = $1`, [id]);
+      expect(evidence!.comparison).toBe('differs');
+      const insert = (comparison: string | null) => failure(db.url, `INSERT INTO event_provenance_conflict ("provenanceId", consumer, source, "eventId", name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified, reason, comparison)
+        SELECT "provenanceId", consumer, source, "eventId", name, "routingKey", exchange, 1, 'p1', $2, "producerUserId", verified, reason, $3 FROM event_provenance_conflict WHERE id = $1`, [evidence!.id, 'b'.repeat(64), comparison]);
+      expect((await insert('proven_equal')).code).toBe('23514');
+      expect((await insert('')).code).toBe('23514');
+      expect((await failure(db.url, `UPDATE event_provenance_conflict SET comparison = 'unverifiable' WHERE id = $1`, [evidence!.id])).code).toBe('23514'); // append-only
     });
 
     it('both tables are append-only, even for the owner', async () => {

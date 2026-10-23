@@ -53,12 +53,16 @@ export interface KeyedProvenanceOptions {
 export interface ProvenanceStore {
   /** Commits `observation` (and any conflict it reveals) before resolving; rejects if it could not be committed. */
   record(consumer: string, observation: ProvenanceObservation): Promise<ProvenanceRecordResult>;
+  /** Core V2 S1c-1 (S0-C3, observe-only): classifies a default-exchange delivery against the stored ORIGINAL observations; read-only. */
+  classifyReplay?(consumer: string, replay: ReplayCandidate & { bodySha256: string }): Promise<ReplayClassification>;
 }
 
 /** Core V2 S1b-3: a keyed store, given the verified facts and the raw body bytes (it commits the body itself, under its own key). */
 export interface KeyedProvenanceStore {
   /** Commits the observation (and any conflict it reveals) before resolving; rejects if it could not be committed (or compared). */
   record(consumer: string, observation: KeyedProvenanceObservation): Promise<ProvenanceRecordResult>;
+  /** Core V2 S1c-1 (S0-C3, observe-only): as `ProvenanceStore.classifyReplay`, comparing under each stored row's own key; read-only. */
+  classifyReplay?(consumer: string, replay: ReplayCandidate & { body: Buffer }): Promise<ReplayClassification>;
 }
 
 /** The facts of one original delivery plus its raw body bytes, for a keyed store only (never logged, never stored as such). */
@@ -66,8 +70,44 @@ export interface KeyedProvenanceObservation extends ProvenanceFacts {
   body: Buffer;
 }
 
-/** `recorded`: a new observation; `duplicate`: identical to what was stored; `conflict`: it differs from a stored observation of the same id. */
-export type ProvenanceRecordResult = 'recorded' | 'duplicate' | 'conflict';
+/**
+ * `recorded`: a new observation; `duplicate`: identical to what was stored; `conflict`: it differs from a stored observation of the same id;
+ * `unverifiable` (keyed stores only, Core V2 S1c-1 / S0-C3): it could not be compared with a stored observation whose key was retired, and
+ * was kept as evidence of that, never as a proven difference.
+ */
+export type ProvenanceRecordResult = 'recorded' | 'duplicate' | 'conflict' | 'unverifiable';
+
+/**
+ * Core V2 S1c-1 (ADR-0057 §13.4 with S0-C3; observe-only): what a default-exchange delivery (a retry, an operator replay, an injection)
+ * matches among the consumer's stored ORIGINAL observations. Conflict evidence is never consulted, and nothing is written.
+ * - `replay_matched_verified` / `replay_matched_unverified`: name and body equal the stored verified / unverified original (the latter stays
+ *   unverified);
+ * - `replay_no_provenance`: no original is stored for (consumer, source, event id);
+ * - `replay_mismatch`: an original is stored, but the name or the body differs;
+ * - `replay_unverifiable`: the only possible match is under a key that was deliberately retired (keyed stores);
+ * - `replay_lookup_failure`: the classification could not be completed (assigned by the bus when the lookup fails).
+ * None of these is a processing decision: enforcement is S1e.
+ */
+export const REPLAY_OUTCOMES = [
+  'replay_matched_verified', 'replay_matched_unverified', 'replay_no_provenance', 'replay_mismatch', 'replay_unverifiable', 'replay_lookup_failure',
+] as const;
+export type ReplayClassificationOutcome = (typeof REPLAY_OUTCOMES)[number];
+/** Which stored original the outcome refers to: the verified one, the unverified one, or none (closed set, a bounded metric label). */
+export const REPLAY_ORIGINALS = ['verified', 'unverified', 'none'] as const;
+export type ReplayOriginal = (typeof REPLAY_ORIGINALS)[number];
+export interface ReplayClassification {
+  outcome: ReplayClassificationOutcome;
+  original: ReplayOriginal;
+}
+/**
+ * The lookup candidate of a default-exchange delivery: its `source` header, message id and type, as validated tokens. They are only WHERE to
+ * look: trust comes from the stored original, whose `verified` was established from the broker `user_id` of the original delivery.
+ */
+export interface ReplayCandidate {
+  source: string;
+  eventId: string;
+  name: string;
+}
 
 /** The broker-delivered facts provenance is computed from: AMQP fields and properties as RabbitMQ delivered them, and the raw body. */
 export interface ProvenanceDelivery {
@@ -119,6 +159,34 @@ const BROKER_USER = /^[A-Za-z0-9._-]{1,64}$/;
 const ID_TOKEN = /^[A-Za-z0-9._:-]{1,128}$/;
 const token = (value: unknown, pattern: RegExp): string => (typeof value === 'string' && pattern.test(value) ? value : '');
 const eventName = (value: unknown): string => (typeof value === 'string' && value.length <= 255 && EVENT_NAME.test(value) ? value : '');
+
+/** Core V2 S1c-1: the lookup candidate of a default-exchange delivery, from the same validated tokens provenance stores. */
+export function replayCandidate(d: Pick<ProvenanceDelivery, 'messageId' | 'type' | 'headers'>): ReplayCandidate {
+  return { source: token(d.headers.source, SERVICE), eventId: token(d.messageId, ID_TOKEN), name: eventName(d.type) };
+}
+
+/**
+ * The S0-C3 decision over the stored originals of one (consumer, source, event id), the verified one first. `body(row)` answers whether the
+ * delivery's body is the row's (`same` / `different`, or `unverifiable` under a retired key; it throws when it cannot decide). A name that
+ * differs is a definitive difference without looking at the body.
+ */
+function decideReplay<R extends { name: string; verified: boolean }>(
+  rows: R[],
+  name: string,
+  body: (row: R) => 'same' | 'different' | 'unverifiable',
+): ReplayClassification {
+  if (rows.length === 0) return { outcome: 'replay_no_provenance', original: 'none' };
+  const ordered = [...rows].sort((a, b) => Number(b.verified) - Number(a.verified));
+  let unverifiable: R | undefined;
+  for (const r of ordered) {
+    if (r.name !== name) continue;
+    const b = body(r);
+    if (b === 'same') return { outcome: r.verified ? 'replay_matched_verified' : 'replay_matched_unverified', original: r.verified ? 'verified' : 'unverified' };
+    if (b === 'unverifiable') unverifiable ??= r;
+  }
+  if (unverifiable) return { outcome: 'replay_unverifiable', original: unverifiable.verified ? 'verified' : 'unverified' };
+  return { outcome: 'replay_mismatch', original: ordered[0]!.verified ? 'verified' : 'unverified' };
+}
 
 export const bodySha256 = (body: Buffer): string => createHash('sha256').update(body).digest('hex');
 
@@ -209,6 +277,17 @@ export class PgProvenanceStore implements ProvenanceStore {
       return conflict ? 'conflict' : own ? 'recorded' : 'duplicate';
     });
   }
+
+  /** Core V2 S1c-1 (S0-C3, observe-only): see `ReplayClassification`. Reads the stored originals only; writes nothing. */
+  classifyReplay(consumer: string, c: ReplayCandidate & { bodySha256: string }): Promise<ReplayClassification> {
+    return this.db.tx(async (q) => {
+      const stored = await q.query<StoredRow>(
+        `SELECT id, name, "routingKey", "bodySha256", "producerUserId", verified FROM event_provenance WHERE consumer = $1 AND source = $2 AND "eventId" = $3`,
+        [consumer, c.source, c.eventId],
+      );
+      return decideReplay(stored.rows, c.name, (r) => (r.bodySha256 === c.bodySha256 ? 'same' : 'different'));
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────── Core V2 S1b-3: the keyed body commitment (ADR-0057 §13.2 "S0-C2")
@@ -283,9 +362,10 @@ interface KeyedRow {
  *
  * Comparisons (duplicate, conflict, conflict-evidence de-duplication) recompute the delivery's MAC under the STORED row's key and compare in
  * constant time: two MACs made under different keys are never compared, so a rotation never creates a false conflict. A stored row whose
- * key was retired is UNVERIFIABLE: never a duplicate, so the delivery is appended as conflict evidence (observe-only). A stored row whose key
- * is merely unavailable, or whose commitment version is unknown, makes the commit fail (the bus holds and requeues the delivery, §13.3):
- * nothing is decided, nothing is assumed equal, nothing is changed.
+ * key was retired is UNVERIFIABLE: never a duplicate, so the delivery is appended as evidence (observe-only), recorded with `comparison` =
+ * `unverifiable` (Core V2 S1c-1, S0-C3), never as a proven difference (`differs`). A stored row whose key is merely unavailable, or whose
+ * commitment version is unknown, makes the commit fail (the bus holds and requeues the delivery, §13.3): nothing is decided, nothing is
+ * assumed equal, nothing is changed.
  */
 export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
   constructor(
@@ -295,16 +375,20 @@ export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
     assertProvenanceKeyRing(ring);
   }
 
-  record(consumer: string, o: KeyedProvenanceObservation): Promise<ProvenanceRecordResult> {
-    const macs = new Map<string, string>(); // the delivery's MAC per key id, computed at most once
+  /**
+   * The body comparison of `body` against a stored commitment, under that commitment's OWN key (the delivery's MAC per key id is computed at
+   * most once): `same` / `different`, `unverifiable` for a retired key; throws when it cannot be decided (an unavailable key, an unknown
+   * version). Never an unkeyed digest.
+   */
+  private comparer(body: Buffer): { macUnder: (keyId: string) => string | undefined; bodyOf: (r: KeyedRow) => 'same' | 'different' | 'unverifiable' } {
+    const macs = new Map<string, string>();
     const macUnder = (keyId: string): string | undefined => {
       const key = this.ring.keys.get(keyId);
       if (!key) return undefined;
       let mac = macs.get(keyId);
-      if (mac === undefined) macs.set(keyId, (mac = bodyMac(key, o.body)));
+      if (mac === undefined) macs.set(keyId, (mac = bodyMac(key, body)));
       return mac;
     };
-    /** 'same' / 'different' under the stored row's own key, 'unverifiable' for a retired key; throws when it cannot be decided. */
     const bodyOf = (r: KeyedRow): 'same' | 'different' | 'unverifiable' => {
       if (r.bodyCommitmentVersion !== BODY_COMMITMENT_VERSION) throw new ProvenanceCommitmentVersionError();
       const mine = macUnder(r.bodyMacKeyId);
@@ -315,6 +399,11 @@ export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
       if (!MAC_HEX.test(r.bodyMac)) return 'different';
       return timingSafeEqual(Buffer.from(mine, 'hex'), Buffer.from(r.bodyMac, 'hex')) ? 'same' : 'different';
     };
+    return { macUnder, bodyOf };
+  }
+
+  record(consumer: string, o: KeyedProvenanceObservation): Promise<ProvenanceRecordResult> {
+    const { macUnder, bodyOf } = this.comparer(o.body);
     const sameFacts = (r: KeyedRow): boolean =>
       r.name === o.name && r.routingKey === o.routingKey && r.producerUserId === o.producerUserId && r.verified === o.verified;
     const activeKeyId = this.ring.activeKeyId;
@@ -334,26 +423,48 @@ export class PgKeyedProvenanceStore implements KeyedProvenanceStore {
           WHERE consumer = $1 AND source = $2 AND "eventId" = $3 ORDER BY "firstSeenAt", id`,
         [consumer, o.source, o.eventId],
       );
-      let conflict = false;
+      let differs = false;
+      let unverifiable = false;
       for (const r of stored.rows) {
-        if (r.id === own || (sameFacts(r) && bodyOf(r) === 'same')) continue;
-        conflict = true;
-        // the same differing evidence against this row is kept once: compared under each evidence row's own key, like the row itself
-        const evidence = await q.query<KeyedRow>(
-          `SELECT id, name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified, reason
+        if (r.id === own) continue;
+        // a difference in the verified facts is definitive whatever the body; otherwise the body decides, under the row's own key
+        const comparison = !sameFacts(r) ? 'differs' : ({ same: undefined, different: 'differs', unverifiable: 'unverifiable' } as const)[bodyOf(r)];
+        if (comparison === undefined) continue;
+        if (comparison === 'differs') differs = true;
+        else unverifiable = true;
+        // the same evidence against this row is kept once: compared under each evidence row's own key, like the row itself
+        const evidence = await q.query<KeyedRow & { comparison: string | null }>(
+          `SELECT id, name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified, reason, comparison
              FROM event_provenance_conflict WHERE "provenanceId" = $1`,
           [r.id],
         );
-        const known = evidence.rows.some((e) => sameFacts(e) && e.exchange === o.exchange && e.reason === o.reason && bodyOf(e) === 'same');
+        const known = evidence.rows.some((e) => sameFacts(e) && e.exchange === o.exchange && e.reason === o.reason && e.comparison === comparison && bodyOf(e) === 'same');
         if (known) continue;
         await q.query(
           `INSERT INTO event_provenance_conflict ("provenanceId", consumer, source, "eventId", name, "routingKey", exchange, "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac",
-             "producerUserId", verified, reason)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT DO NOTHING`,
-          [r.id, consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, BODY_COMMITMENT_VERSION, activeKeyId, mac, o.producerUserId, o.verified, o.reason],
+             "producerUserId", verified, reason, comparison)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) ON CONFLICT DO NOTHING`,
+          [r.id, consumer, o.source, o.eventId, o.name, o.routingKey, o.exchange, BODY_COMMITMENT_VERSION, activeKeyId, mac, o.producerUserId, o.verified, o.reason, comparison],
         );
       }
-      return conflict ? 'conflict' : own ? 'recorded' : 'duplicate';
+      return differs ? 'conflict' : unverifiable ? 'unverifiable' : own ? 'recorded' : 'duplicate';
+    });
+  }
+
+  /**
+   * Core V2 S1c-1 (S0-C3, observe-only): see `ReplayClassification`. Each stored ORIGINAL is compared under its own key; a retired key gives
+   * `replay_unverifiable`, never a match or a proven mismatch; an unavailable key or an unknown version rejects (the bus reports
+   * `replay_lookup_failure`). Reads only; writes nothing; never an unkeyed digest.
+   */
+  classifyReplay(consumer: string, c: ReplayCandidate & { body: Buffer }): Promise<ReplayClassification> {
+    const { bodyOf } = this.comparer(c.body);
+    return this.db.tx(async (q) => {
+      const stored = await q.query<KeyedRow>(
+        `SELECT id, name, "routingKey", "bodyCommitmentVersion", "bodyMacKeyId", "bodyMac", "producerUserId", verified FROM event_provenance
+          WHERE consumer = $1 AND source = $2 AND "eventId" = $3`,
+        [consumer, c.source, c.eventId],
+      );
+      return decideReplay(stored.rows, c.name, bodyOf);
     });
   }
 }
