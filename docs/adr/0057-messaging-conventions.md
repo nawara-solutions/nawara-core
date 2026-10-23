@@ -21,6 +21,11 @@
 > consumer (S1b-2): admission checks before provenance (§13.2, "Audit admission"), with cross-references in §13.4 and §13.8. It changes
 > no other consumer, the provenance tuple or §13.3, and it is not an acceptance: this ADR's status stays `Proposed`.
 
+> **Core V2 S0-C2 normative revision (2026-10-23, owner-approved).** For the Notification consumer only, the body element of the §13.2
+> tuple is a keyed commitment (HMAC-SHA-256 under a Notification provenance key) instead of an unkeyed SHA-256 (§13.2, "S0-C2"), with
+> the consequences in §13.3, §13.4 and §13.8. Every other consumer, S0-C1 and the rest of §13 are unchanged. Nothing is implemented,
+> and this is not an acceptance: this ADR's status stays `Proposed`.
+
 ## Context
 
 Core services exchange events over RabbitMQ through the service-kit: a transactional outbox and relay on the producer side, the
@@ -247,7 +252,8 @@ producer's own `audit.*` actions only. Consumers read exact names (Notification)
 
 13.2 On a first delivery through `nawara.events`, a consumer verifies broker `user_id` = `headers.source` = the family owner of the
 event name, routing key = message type = envelope name, and a well-formed `eventId`. It then commits
-`event_provenance(source, eventId, name, routingKey, bodySha256, producerUserId, verified, firstSeenAt)` in its own database, in a
+`event_provenance(source, eventId, name, routingKey, bodySha256, producerUserId, verified, firstSeenAt)` (for Notification, the keyed
+body commitment of S0-C2 below replaces `bodySha256`) in its own database, in a
 transaction of its own, **before** the handler runs. A stored row that differs from the delivery is a permanent
 `provenance_conflict`.
 
@@ -268,13 +274,57 @@ of catalog knowledge needs a separately designed and authorized mechanism consis
 observe-only, the existing replay of such a dead letter after a catalog upgrade (Stage 18.1 A50) is unchanged. This paragraph applies to
 Audit only; it changes no other consumer.
 
+**S0-C2 — Notification keyed body commitment (S0 normative revision, owner-approved 2026-10-23).** Three Auth events consumed by
+Notification carry a six-digit one-time code, and Notification already holds every other field of their bodies. An unkeyed SHA-256 of
+such a body lets anyone who can read Notification's database recover the code by trying the 10⁶ candidates, which the code's sealing
+and purge in Notification (and its keyed hash in Auth) exist to prevent. Therefore:
+- **Scope.** For the Notification consumer (`notification.events`), and for every event it consumes (today the nine Auth events
+  `member.contact_verification_requested`, `admin.operator_code_issued`, `admin.operator_confirmation_code_issued`,
+  `admin.owner_recovery_requested`, `admin.owner_recovery_completed`, `admin.owner_login_from_new_device`, `membership.approved`,
+  `membership.rejected` and `membership.revoked`), the body element of the tuple is the keyed commitment below instead of `bodySha256`.
+  Every other consumer keeps `bodySha256` unless separately revised; S0-C1 is unchanged. No event, version, payload, producer or
+  transport contract changes.
+- **Commitment.** `bodyMac` = HMAC-SHA-256, under the Notification provenance key identified by `bodyMacKeyId`, of the complete raw
+  body bytes exactly as delivered (no parsing, canonicalization, redaction or field selection: the code and every other byte are
+  covered, so any changed byte gives a different commitment except with negligible probability). `bodyCommitmentVersion` names the
+  construction (version 1: HMAC-SHA-256 over the raw body bytes with a dedicated key of at least 256 bits from a CSPRNG). Notification's
+  tuple is `event_provenance(source, eventId, name, routingKey, bodyCommitmentVersion, bodyMacKeyId, bodyMac, producerUserId, verified,
+  firstSeenAt)`: the keyed value is never stored, named or described as a SHA-256 digest, and Notification never computes or stores an
+  unkeyed digest of a body as an alternative, a diagnostic or a fallback.
+- **Keys.** The provenance keys form a dedicated Notification key ring, separate from the code-sealing ring (`NOTIFICATION_SECRET_KEYS`)
+  in purpose and custody, with one explicit active key id. Key material is held outside the application database and is never
+  committed, logged, published, put in a metric, an event, a pull-request description or a test report; a key id is a non-secret label.
+  A new commitment uses the active key and records its id.
+- **Comparison.** A delivery is compared with a stored observation (a duplicate, a conflict, conflict-evidence de-duplication and the
+  §13.4 match) by recomputing its commitment under the stored row's `bodyCommitmentVersion` and `bodyMacKeyId` and comparing in constant
+  time; two commitments made under different keys are never compared directly, so a rotation can never create a false conflict, and a
+  changed body can never pass as identical. The uniqueness, unverified-first, append-only and conflict rules above apply unchanged.
+- **Fail closed.** A missing, malformed or unusable active key keeps the consumer from becoming ready. A commitment that cannot be
+  computed during a delivery is a failed provenance commit (§13.3): no intake, no acknowledgement as handled, no unkeyed fallback, and
+  never the body or a key in a log. When a stored row's key cannot be resolved, the comparison has no result: the delivery is never a
+  duplicate, a match or a verified replay, the stored row is never changed, and no unkeyed comparison replaces it. A key that is
+  temporarily unavailable (a configuration or key-service fault, recoverable) is handled like a failed commit (§13.3, held and requeued,
+  with an operational signal) until it is restored; a key that was deliberately retired (§13.8) is not an outage: its rows are
+  unverifiable, and the delivery's observation, committed under the active key, is appended to the conflict evidence against the stored
+  row (never as a duplicate, never as verified authority), and is otherwise treated like any other conflict in the consumer's current
+  mode (observe-only in S1b-3). Telling the two apart
+  from configuration (for example a recorded list of retired key ids) is an implementation detail of S1b-3, reviewed with it; neither
+  case loses data or loops unobserved.
+- **Confidentiality.** This protects Notification's retained provenance against offline code guessing by an attacker who can read
+  Notification's database but not its provenance keys. It does not address other exposures: Notification's dead-letter queue may still
+  hold plaintext code-bearing bodies (the accepted SRE residual of the Notification SDD §13.1, unchanged), and broker access policies,
+  Auth's payloads and code delivery are unchanged; any hardening of those is separate work.
+
 13.3 If that commit fails, the handler does not run: the delivery is held and requeued, so it keeps its original identity. It is never
-sent to `Q.retry`.
+sent to `Q.retry`. For Notification (S0-C2), a commitment that cannot be computed, or a stored key that is temporarily unavailable, is
+such a failure.
 
 13.4 A delivery through the default exchange (a retry, a replay, an injection) is processed only if a stored row matches
 (`source`, `eventId`), `name` and `bodySha256`; downstream code uses the stored tuple, never the delivery's metadata. Otherwise it
 is a permanent `unverified_provenance` failure, which a replay cannot turn into a verified event. An Audit delivery refused at
-admission (§13.2) never has a stored row, so a later default-exchange delivery of it is never a verified replay.
+admission (§13.2) never has a stored row, so a later default-exchange delivery of it is never a verified replay. For Notification
+(S0-C2) the body element of the match is the keyed commitment, recomputed under the stored row's version and key id; a row whose key is
+retired or cannot be resolved never matches, so it can never establish a verified replay.
 
 13.5 Financial consumers (billing-service for `payment.*` and `refund.*`) never process an unverified event. Other consumers may
 accept one only during an explicitly configured compatibility phase, and must record it as unverified.
@@ -289,6 +339,12 @@ their published rows are retained.
 of permanent retention. For Audit (S0 clarification, 2026-10-23), a provenance row or digest must not outlive, and so undermine, the
 lawful purge of its Audit record: authorized expiry, erasure and legal holds of Audit provenance need an explicit policy (P-A2 is open),
 and the production gate of the [execution roadmap](../architecture/core-v2-s-execution-roadmap.md) (§7, AP-R) applies until then.
+For Notification (S0-C2), each provenance key stays available at least as long as this minimum for the rows it committed; that is a
+minimum, not a destruction date. A key may be retired only once no still-eligible replay, retained observation that must still be
+compared, recovery obligation or retention or hold requirement depends on it, under a separately reviewed operational procedure; its
+rows then remain, unverifiable, and can never establish a verified replay. Destroying a key does not erase the rows' metadata. No
+duration is set here; Notification history retention is an open product / legal decision, and any future erasure policy must be
+reconciled with the surviving keyed commitments, key retention and metadata (production gate NP-K of the execution roadmap §7).
 
 13.9 In production, financial and notification consumers refuse an event whose `liveMode` is missing or false.
 

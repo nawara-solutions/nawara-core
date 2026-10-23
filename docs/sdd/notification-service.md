@@ -763,6 +763,25 @@ Option **B**: store the pinned template version + non-secret data + the sealed s
   - C (a separate rendering snapshot): the same personal data, with no benefit given immutable versions.
 - A legal requirement to keep sent content would reopen this (D18).
 
+### 12.4 Event provenance: keyed body commitment (Core V2 S0-C2; not implemented)
+
+> Owner-approved normative revision of 2026-10-23 ([ADR-0057](../adr/0057-messaging-conventions.md) §13.2 "S0-C2", §13.3, §13.4,
+> §13.8; [S0 record](../architecture/core-v2-s0-architecture-freeze.md) §1.5). Implementation is the separately authorized S1b-3
+> ([execution roadmap](../architecture/core-v2-s-execution-roadmap.md) §4.1); nothing here is built.
+
+- **Why keyed:** every field of a code-bearing event except the code is already in this service's tables (§12.2), so an unkeyed
+  SHA-256 of its body would give a database reader the six-digit code in 10⁶ tries, undoing the sealing and purge of §12.1.
+- **Commitment:** the provenance of every event this service consumes (the nine Auth events of §7.1) records `bodyMac`, an
+  HMAC-SHA-256 of the complete raw body bytes as delivered, with `bodyMacKeyId` and `bodyCommitmentVersion`. No unkeyed digest of a
+  body is ever computed or stored, as a value, a diagnostic or a fallback.
+- **Keys:** a dedicated provenance key ring, separate from `NOTIFICATION_SECRET_KEYS` in purpose and custody, with one active key id;
+  never in the database, never logged. Its configuration names and format are proposed with S1b-3 (for example
+  `NOTIFICATION_PROVENANCE_KEYS`). Unlike a sealing key, a provenance key is not retired when codes are purged: it is kept at least for
+  the ADR-0057 §13.8 minimum and retired only under a separately reviewed procedure, after which its rows are unverifiable.
+- **Failure:** a missing or unusable active key keeps the event consumer not ready; a commitment that cannot be computed holds and
+  requeues the delivery (ADR-0057 §13.3), with no intake and no fallback.
+- **Unchanged:** the event contracts, the intake (§7.1), the sealing and purge (§12.1), the frozen DLQ residual (§13.1).
+
 ## 13. Failure and recovery
 
 | Failure | Resulting state | Retry | DLQ | Operator | Duplicate risk | Data kept |
@@ -902,6 +921,8 @@ are unchanged. Removing `@golevelup/nestjs-rabbitmq` from Auth is part of 16.2 i
 | API idempotency identity (on `notification`) | technical | follows the notification row; a retry horizon (the Payment D1 analogue) is a later decision |
 | Template versions | configuration | kept (explains past deliveries) |
 | Code-bearing DLQ messages | secret in transit | SRE runbook; never purged unseen; an expired replay is never sent |
+| Event provenance and conflict evidence (S0-C2, §12.4; not implemented) | technical (keyed commitments, ids, metadata) | at least the ADR-0057 §13.8 minimum; no automated purge in S1b-3; to be reconciled with any erasure of the intents and deliveries above (PRODUCT / LEGAL) |
+| Provenance keys (S0-C2, §12.4; not implemented) | secret (configuration, never in the database) | each kept at least for the §13.8 minimum for its rows; retired only under a separately reviewed procedure; retiring a key does not erase its rows' metadata |
 | `kit_rate_limit` rows | technical | the Phase C rule (expired windows are safe to delete): **implemented in 16.9** (`RetentionWorker`, bounded batches, own buckets only) |
 
 ## 18. Migrations, image, CI
