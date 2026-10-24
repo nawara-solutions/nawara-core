@@ -1,6 +1,7 @@
 // Core V2 OD-BRK-2b-1 (ADR-0057 §8 "OD-BRK-0" D2): real-infrastructure certification of Notification's topology monitor and emergency
 // containment, against a LOCAL Docker daemon, a task-owned sshd and unprivileged user namespaces only:
-//   npm run test:deploy:real-broker            (needs Docker on Linux, user namespaces, sshd, script(1) and the built service-kit)
+//   npm run test:deploy:real-broker            (needs Docker on Linux, user namespaces, sshd, ssh-keygen and the built service-kit)
+// OD-BRK-2b-R: recovery is SIGNED and incident-bound; the signing key is a DISPOSABLE test key created in the run's own directory.
 //
 // One isolated broker provisioned by the AUTHENTIC infra/rabbitmq/provision.sh through its real OD-BRK-2a gate, and the topology monitor
 // installed by its AUTHENTIC installer, both as root of a user namespace (`unshare -r`: the files they create are root-owned as the
@@ -18,7 +19,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { bounded, cleanupAll, exited, stopChild } from './lib/owned-process.mjs';
 import { variant } from './lib/topology-monitor-world.mjs';
 
@@ -38,8 +39,10 @@ const run = `rbcontain-${process.pid}`;
 const work = realpathSync(mkdtempSync(join(tmpdir(), `${run}-`)));
 const D = {
   brokerDir: join(work, 'broker'), src: join(work, 'src'), install: join(work, 'libexec'), state: join(work, 'state'), latchDir: join(work, 'latch'),
-  units: join(work, 'units'), shim: join(work, 'shim'), ctl: join(work, 'ctl'),
+  units: join(work, 'units'), shim: join(work, 'shim'), ctl: join(work, 'ctl'), keys: join(work, 'keys'), trust: join(work, 'trust'),
 };
+D.incidentFile = join(D.latchDir, 'notification-service.incident');
+D.trusted = join(D.trust, 'recovery-allowed-signers');
 D.latch = join(D.latchDir, 'notification-service.containment');
 const env = {
   BROKER_DIR: D.brokerDir, CORE_NETWORK: `${run}-internal`, RABBITMQ_CONTAINER: `${run}-rabbitmq`, RABBITMQ_VOLUME: `${run}-data`, NOTIFICATION_CONTAINMENT_STATE: D.latch,
@@ -83,12 +86,12 @@ const grants = () => ({
 const auditGrants = () => `${ctl('list_user_permissions', 'audit-service', '--no-table-headers')}|${ctl('list_user_topic_permissions', 'audit-service', '--no-table-headers')}`;
 const queueCounts = () => Object.fromEntries(ctl('list_queues', '-p', 'nawara-core', 'name', 'messages_ready', 'messages_unacknowledged', '--no-table-headers').split('\n').filter(Boolean).map((l) => l.split('\t')).map(([n, r, u]) => [n, { ready: Number(r), unacked: Number(u) }]));
 const stateOf = () => {
-  const m = /\ncontained=([01])\nunknown_streak=(\d+)\nlast_result=(\w+)\n/.exec(readFileSync(join(D.state, 'state'), 'utf8'));
-  return { contained: Number(m[1]), streak: Number(m[2]), last: m[3] };
+  const m = /\ncontained=([01])\nincident=(none|[0-9a-f]{32})\nunknown_streak=(\d+)\nlast_result=(\w+)\n/.exec(readFileSync(join(D.state, 'state'), 'utf8'));
+  return { contained: Number(m[1]), incident: m[2], streak: Number(m[3]), last: m[4] };
 };
 const records = (n) => (existsSync(join(D.state, n)) ? readFileSync(join(D.state, n), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const latchText = () => readFileSync(D.latch, 'utf8');
-const writeState = (o) => nsWrite(join(D.state, 'state'), `nawara-core-topology-monitor-state v1\nservice=notification-service\ncontained=${o.contained ?? 0}\nunknown_streak=${o.streak ?? 0}\nlast_result=${o.last ?? 'PASS'}\nlast_run=${Math.floor(Date.now() / 1000)}\n`);
+const writeState = (o) => nsWrite(join(D.state, 'state'), `nawara-core-topology-monitor-state v2\nservice=notification-service\ncontained=0\nincident=none\nunknown_streak=${o.streak ?? 0}\nlast_result=${o.last ?? 'PASS'}\nlast_run=${Math.floor(Date.now() / 1000)}\n`);
 const until = async (cond, ms = 20_000, what = 'condition') => {
   const end = Date.now() + ms;
   while (Date.now() < end) { try { if (await bounded(cond(), 10_000, what)) return; } catch { /* not yet */ } await sleep(200); }
@@ -116,13 +119,32 @@ const publishSynthetic = async (n) => {
   await admin.close();
   return ids;
 };
-/** The Owner-authorized recovery (typed on a pseudo-terminal), then protected provisioning grants again through its gates. */
+/**
+ * An Owner authorization for `incident`, signed OFF the host with the DISPOSABLE test key (work/keys, never under the installation),
+ * placed root-owned (0600) in the root-only inbox. The canonical text of recover-notification-topology.sh.
+ */
+const authorize = (incident, reason) => {
+  const issued = Math.floor(Date.now() / 1000) - 5;
+  const text = `nawara-core-topology-recovery-authorization v1\noperation=notification.topology_recovery\nservice=notification-service\nvhost=nawara-core\nincident=${incident}\nnonce=${randomBytes(16).toString('hex')}\nissued_at=${issued}\nnot_after=${issued + 900}\nreason=${reason}\n`;
+  const draft = join(D.keys, 'authorization');
+  rmSync(draft, { force: true });
+  rmSync(`${draft}.sig`, { force: true });
+  writeFileSync(draft, text, { mode: 0o600 });
+  assert.equal(spawnSync('ssh-keygen', ['-Y', 'sign', '-q', '-f', join(D.keys, 'owner'), '-n', 'nawara-core-topology-recovery', draft], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
+  nsWrite(join(D.state, 'recovery', 'authorization'), text);
+  nsWrite(join(D.state, 'recovery', 'authorization.sig'), readFileSync(`${draft}.sig`, 'utf8'));
+};
+const recover = () => ns([join(D.install, 'recover-notification-topology.sh')]);
+/** The signed recovery of the CURRENT incident, then protected provisioning grants again through its own gates. */
 const recoverAndRegrant = async (ref) => {
-  const r = ns(['script', '-qec', `${join(D.install, 'recover-notification-topology.sh')} ${ref}`, '/dev/null'], { input: `RECOVER ${SERVICE} ${ref}\n`, extra: { TERM: 'dumb' } });
+  const { incident } = stateOf();
+  assert.match(incident, /^[0-9a-f]{32}$/);
+  authorize(incident, ref);
+  const r = recover();
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /holds NO grant/);
   assert.equal(latchText(), LATCH_INACTIVE);
-  assert.equal(grants().perms, '', 'recovery granted nothing');
+  assert.deepEqual(grants(), { perms: '', topic: '', connections: 0 }, 'recovery granted nothing and reopened nothing');
   const p = provision(SERVICE);
   assert.equal(p.code, 0, p.out);
   assert.match(p.out, /topology pre-grant notification-service: \{[^\n]*"result":"PASS"/);
@@ -156,11 +178,16 @@ before(async () => {
   mkdirSync(tm, { recursive: true });
   for (const f of readdirSync(SRC)) cpSync(join(SRC, f), join(tm, f));
   cpSync(join(root, 'infra/rabbitmq/verify-topology.sh'), join(D.src, 'infra/rabbitmq/verify-topology.sh'));
-  const pins = { INSTALL_DIR: D.install, STATE_DIR: D.state, LATCH: D.latch, BROKER, SAFE_PATH: `${D.shim}:${SYS_PATH}`, SYSTEMCTL: join(D.shim, 'systemctl'), UNIT_DIR: D.units };
+  const pins = { INSTALL_DIR: D.install, STATE_DIR: D.state, LATCH: D.latch, INCIDENT_FILE: D.incidentFile, TRUSTED_SIGNERS: D.trusted, BROKER, SAFE_PATH: `${D.shim}:${SYS_PATH}`, SYSTEMCTL: join(D.shim, 'systemctl'), UNIT_DIR: D.units };
   for (const f of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh']) {
     const text = readFileSync(join(tm, f), 'utf8');
     writeFileSync(join(tm, f), variant(text, Object.fromEntries(Object.entries(pins).filter(([k]) => new RegExp(`^readonly ${k}=`, 'm').test(text)))), { mode: 0o755 });
   }
+  // the DISPOSABLE test signing key (never a real Owner key); only its public half is trusted, root-owned, as a key-lifecycle step would
+  mkdirSync(D.keys, { mode: 0o700 });
+  assert.equal(spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'odbrk2b-r-disposable-owner', '-f', join(D.keys, 'owner')], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
+  assert.equal(ns(['mkdir', '-m', '755', D.trust]).code, 0);
+  nsWrite(D.trusted, `nawara-core-owner namespaces="nawara-core-topology-recovery" ${readFileSync(join(D.keys, 'owner.pub'), 'utf8').trim().split(' ').slice(0, 2).join(' ')}\n`, '644');
   // 1. the installation (2b-2's order: install the control, its inactive latch, then provision)
   const inst = ns([join(tm, 'install-topology-monitor.sh')]);
   assert.equal(inst.code, 0, inst.out);
@@ -277,12 +304,18 @@ t('17, 18: a PASS after containment restores nothing, and ordinary provisioning 
 t('recovery: the guard clears the latch ONLY after a fresh verification; protected provisioning grants again through its gates', async () => {
   // refused while the topology is unsafe (a regular policy applies)
   ctl('set_policy', '-p', 'nawara-core', 'odbrk2b1-probe', '^notification\\.events$', '{"message-ttl":60000}', '--apply-to', 'queues');
-  const refused = ns(['script', '-qec', `${join(D.install, 'recover-notification-topology.sh')} OD-RECOVERY-0`, '/dev/null'], { input: `RECOVER ${SERVICE} OD-RECOVERY-0\n`, extra: { TERM: 'dumb' } });
+  authorize(stateOf().incident, 'OD-RECOVERY-0');
+  const refused = recover();
   ctl('clear_policy', '-p', 'nawara-core', 'odbrk2b1-probe');
-  assert.notEqual(refused.code, 0, refused.out);
+  assert.equal(refused.code, 1, refused.out);
+  assert.match(refused.out, /REFUSED \(topology_unsafe\)/);
   assert.equal(latchText(), LATCH_CONTAINED);
+  assert.ok(!existsSync(join(D.state, 'recovery-consumed')), 'a refused recovery consumes nothing');
+  const { incident } = stateOf();
   await recoverAndRegrant('OD-RECOVERY-1');
-  assert.equal(records('evidence.jsonl').filter((e) => e.kind === 'recovered').at(-1).authorization, 'OD-RECOVERY-1');
+  const done = records('evidence.jsonl').filter((e) => e.kind === 'recovered').at(-1);
+  assert.deepEqual([done.incident, done.reason], [incident, 'OD-RECOVERY-1']);
+  assert.match(done.signer, /^SHA256:/);
   assert.equal(monitor().code, 0, 'the monitor resumes: PASS on the regranted live topology');
 });
 
@@ -297,6 +330,14 @@ t('3, 7: a definitive FAIL (a regular policy re-opening a dead-letter route) con
   } finally {
     ctl('clear_policy', '-p', 'nawara-core', 'odbrk2b1-drift');
   }
+  // a NEW incident: an authorization for the previous (recovered) incident is refused, and the latch stays contained
+  const previous = records('evidence.jsonl').filter((e) => e.kind === 'recovered').at(-1).incident;
+  assert.notEqual(stateOf().incident, previous);
+  authorize(previous, 'OD-RECOVERY-STALE');
+  const stale = recover();
+  assert.equal(stale.code, 1, stale.out);
+  assert.match(stale.out, /REFUSED \(authorization_incident\)/);
+  assert.equal(latchText(), LATCH_CONTAINED);
   await recoverAndRegrant('OD-RECOVERY-2');
 });
 
@@ -387,10 +428,11 @@ t('22: the read-only installation verification passes on the authentic installat
   for (const f of readdirSync(SRC)) cpSync(join(SRC, f), join(tm, f));
   cpSync(join(root, 'infra/rabbitmq/verify-topology.sh'), join(A.src, 'infra/rabbitmq/verify-topology.sh'));
   const installer = join(tm, 'install-topology-monitor.sh');
-  writeFileSync(installer, variant(readFileSync(installer, 'utf8'), { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, UNIT_DIR: A.units }));
+  A.incidentFile = join(A.latchDir, 'notification-service.incident');
+  writeFileSync(installer, variant(readFileSync(installer, 'utf8'), { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, INCIDENT_FILE: A.incidentFile, UNIT_DIR: A.units }));
   assert.equal(ns(['bash', installer]).code, 0);
   const checker = join(work, 'verify-install.sh');
-  writeFileSync(checker, variant(readFileSync(join(SRC, 'verify-topology-monitor-install.sh'), 'utf8'), { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, UNIT_DIR: A.units, TRUST_ROOT: work }), { mode: 0o755 });
+  writeFileSync(checker, variant(readFileSync(join(SRC, 'verify-topology-monitor-install.sh'), 'utf8'), { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, INCIDENT_FILE: A.incidentFile, TRUSTED_SIGNERS: D.trusted, UNIT_DIR: A.units, TRUST_ROOT: work }), { mode: 0o755 });
   const check = () => ns(['bash', checker]);
   let r = check();
   assert.equal(r.code, 0, r.out);

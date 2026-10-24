@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LATCH_CONTAINED, LATCH_INACTIVE, ROLE, ROOT, SRC, variant, world } from './lib/topology-monitor-world.mjs';
+import { LATCH_CONTAINED, LATCH_INACTIVE, ROLE, ROOT, SRC, authorizationText, hex, variant, world } from './lib/topology-monitor-world.mjs';
 
 const SERVICE = 'notification-service';
 const monitor = (w, args = [SERVICE], env = {}) => spawnSync(join(w.install, 'verify-and-contain.sh'), args, { env: { PATH: '/usr/bin:/bin', ...env }, encoding: 'utf8', timeout: 60_000 });
@@ -402,74 +402,270 @@ test('trigger: refuses any client command or argument (64), runs exactly one sta
   }
 });
 
-// ------------------------------------------------------------------------------------------------ recovery (contract and guard)
+// ------------------------------------------------------------------------------------------------ incidents (OD-BRK-2b-R)
 
-const hasScript = spawnSync('script', ['--version']).status === 0;
-/** Runs the recovery guard on a pseudo-terminal (it refuses a pipe), typing `typed`. */
-const recover = (w, ref, typed) => {
-  const cmd = `${join(w.install, 'recover-notification-topology.sh')} ${ref}`;
-  return spawnSync('script', ['-qec', cmd, '/dev/null'], { input: `${typed}\n`, env: { PATH: '/usr/bin:/bin', TERM: 'dumb' }, encoding: 'utf8', timeout: 60_000 });
-};
+const HEX = /^[0-9a-f]{32}$/;
+test('a new containment gets a fresh incident, persisted with the state BEFORE the binding, the latch and any broker change', withWorld({}, (w) => {
+  w.setVerifier('FAIL', 1);
+  assert.equal(monitor(w).status, 20);
+  const { incident } = w.stateOf();
+  assert.match(incident, HEX);
+  assert.equal(w.boundIncident(), incident, 'the incident is bound next to the latch');
+  assert.deepEqual(w.records('incidents.jsonl').map((r) => r.incident), [incident]);
+  assert.equal(w.records('evidence.jsonl').at(-1).incident, incident);
+  assert.equal(w.records('alerts.jsonl').find((a) => a.kind === 'contained').incident, incident);
+  const changes = brokerChanges(w);
+  assert.ok(changes.length > 0 && changes.every((c) => c.latch === LATCH_CONTAINED));
+}));
+
+test('the incident is kept across maintained runs and unconfirmed retries, never overwritten', withWorld({ broker: { silentRevoke: true } }, (w) => {
+  w.setVerifier('FAIL', 1);
+  assert.equal(monitor(w).status, 21);
+  const { incident } = w.stateOf();
+  assert.equal(monitor(w).status, 21);
+  w.patchBroker((b) => { b.silentRevoke = false; });
+  assert.equal(monitor(w).status, 20);
+  assert.equal(monitor(w).status, 20);
+  assert.equal(w.stateOf().incident, incident);
+  assert.equal(w.records('incidents.jsonl').length, 1, 'one incident, however many runs');
+  // a binding altered next to the latch is put back from the state (and alerted), never adopted
+  w.writeIncident(hex());
+  assert.equal(monitor(w).status, 20);
+  assert.equal(w.boundIncident(), incident);
+  assert.ok(kinds(w).includes('incident_binding_restored'));
+}));
+
+test('legacy (v1) state: not contained upgrades to v2 without an incident; contained gets a FRESH incident and stays contained', () => {
+  const w = world({ state: null });
+  try {
+    w.writeState({ v1: true, contained: 0, last: 'PASS' });
+    assert.equal(monitor(w).status, 0);
+    assert.deepEqual([w.stateOf().contained, w.stateOf().incident], [0, 'none']);
+    w.writeState({ v1: true, contained: 1, last: 'FAIL' });
+    writeFileSync(w.latch, LATCH_CONTAINED);
+    assert.equal(monitor(w).status, 20);
+    assert.match(w.stateOf().incident, HEX);
+    assert.equal(w.records('evidence.jsonl').at(-1).reason, 'legacy_containment_new_incident');
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('an inconsistent state (contained without an incident, or an incident while not contained) is corrupt: contained', () => {
+  for (const [contained, incident] of [[1, 'none'], [0, hex()]]) {
+    const w = world({ state: { contained, incident } });
+    try {
+      assert.equal(monitor(w).status, 20);
+      assert.equal(w.records('evidence.jsonl').at(-1).reason, 'state_corrupt');
+      assert.match(w.stateOf().incident, HEX);
+    } finally {
+      w.cleanup();
+    }
+  }
+});
+
+test('a corrupt state with a valid bound incident and a contained latch keeps that incident (never a silent new one)', withWorld({}, (w) => {
+  w.setVerifier('FAIL', 1);
+  assert.equal(monitor(w).status, 20);
+  const { incident } = w.stateOf();
+  writeFileSync(join(w.state, 'state'), 'garbage');
+  assert.equal(monitor(w).status, 20);
+  assert.equal(w.stateOf().incident, incident);
+}));
+
+// ------------------------------------------------------------------------------------------------ signed recovery (OD-BRK-2b-R)
+
+const recover = (w, env = {}) => spawnSync(join(w.install, 'recover-notification-topology.sh'), [], { env: { PATH: '/usr/bin:/bin', ...env }, encoding: 'utf8', timeout: 60_000 });
+/** Contained by a FAIL, with the trusted key installed and the verifier answering as a contained-but-safe topology. */
 const containedWorld = () => {
   const w = world({ scripts: ['verify-and-contain.sh', 'recover-notification-topology.sh'] });
   w.setVerifier('FAIL', 1);
   assert.equal(monitor(w).status, 20);
+  w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained'], ['Q1', 'PASS', 'queue_as_declared_no_policy']]);
+  w.setVerifierWhenInactive('PASS', 0);
+  w.trust('owner');
+  w.incident = w.stateOf().incident;
   return w;
 };
-
-test('recovery: refused without a terminal, without a valid reference, or through a forced command; nothing changes', () => {
+const withContained = (fn) => () => {
   const w = containedWorld();
+  let r;
   try {
-    const entry = join(w.install, 'recover-notification-topology.sh');
-    assert.equal(spawnSync(entry, ['OD-RECOVERY-1'], { input: 'x\n', encoding: 'utf8' }).status, 2, 'no terminal');
-    assert.equal(spawnSync(entry, [], { encoding: 'utf8' }).status, 2);
-    assert.equal(spawnSync(entry, ['bad ref'], { encoding: 'utf8' }).status, 2);
-    assert.equal(spawnSync(entry, ['OD-RECOVERY-1'], { env: { SSH_ORIGINAL_COMMAND: 'x' }, encoding: 'utf8' }).status, 2);
-    assert.equal(w.latchText(), LATCH_CONTAINED);
-  } finally {
+    r = fn(w);
+  } catch (e) {
     w.cleanup();
+    throw e;
   }
-});
+  if (r && typeof r.then === 'function') return r.finally(() => w.cleanup());
+  w.cleanup();
+  return r;
+};
+const assertStillContained = (w, incident = w.incident) => {
+  assert.equal(w.latchText(), LATCH_CONTAINED);
+  assert.deepEqual([w.stateOf().contained, w.stateOf().incident], [1, incident]);
+  assert.equal(w.boundIncident(), incident);
+  assert.ok(!w.broker().calls.some((c) => /^set_/.test(c.sub)), 'nothing was granted');
+};
 
-test('recovery: a wrong confirmation, a containment that does not hold or another failing check refuses; the latch stays contained', { skip: !hasScript && 'util-linux script(1) is not available' }, () => {
-  const w = containedWorld();
-  try {
-    w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained']]);
-    assert.equal(recover(w, 'OD-RECOVERY-1', 'RECOVER notification-service OD-RECOVERY-2').status, 1, 'the wrong reference typed');
-    w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained'], ['P1', 'FAIL', 'regular_policy_applies']]);
-    assert.equal(recover(w, 'OD-RECOVERY-1', 'RECOVER notification-service OD-RECOVERY-1').status, 1, 'the topology is still unsafe');
-    w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained']]);
-    w.patchBroker((b) => { b.connections.push(SERVICE); });
-    assert.equal(recover(w, 'OD-RECOVERY-1', 'RECOVER notification-service OD-RECOVERY-1').status, 1, 'a connection exists');
-    w.patchBroker((b) => { b.connections = b.connections.filter((u) => u !== SERVICE); });
-    w.setVerifierWhenInactive('FAIL', 1, [['L1', 'PASS', 'latch_inactive'], ['B1', 'FAIL', 'unexpected_binding']]);
-    assert.equal(recover(w, 'OD-RECOVERY-1', 'RECOVER notification-service OD-RECOVERY-1').status, 1, 'the verification with the latch cleared does not pass');
-    assert.equal(w.latchText(), LATCH_CONTAINED, 'put back to contained');
-    assert.equal(w.stateOf().contained, 1);
-  } finally {
-    w.cleanup();
+test('signed recovery: a valid, incident-bound, unexpired, unused authorization clears the latch ONLY; nothing is granted', withContained((w) => {
+  const grants = JSON.stringify(w.broker().perms);
+  const auth = w.authorize({ incident: w.incident, reason: 'OD-RECOVERY-7' });
+  const r = recover(w);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /holds NO grant/);
+  assert.equal(w.latchText(), LATCH_INACTIVE);
+  assert.deepEqual([w.stateOf().contained, w.stateOf().incident], [0, 'none']);
+  assert.equal(w.boundIncident(), 'none');
+  assert.equal(JSON.stringify(w.broker().perms), grants, 'no permission changed');
+  assert.ok(!w.broker().calls.some((c) => /^set_/.test(c.sub)), 'no set_permissions or set_topic_permissions, ever');
+  const nonce = /nonce=([0-9a-f]{32})/.exec(auth)[1];
+  assert.match(readFileSync(join(w.state, 'recovery-consumed'), 'utf8'), new RegExp(`^v1 nonce=${nonce} incident=${w.incident} at=\\d+$`, 'm'));
+  const ev = w.records('evidence.jsonl').filter((e) => e.kind?.startsWith('recover'));
+  assert.deepEqual(ev.map((e) => e.kind), ['recovery_authorized', 'recovered']);
+  for (const e of ev) {
+    assert.deepEqual([e.incident, e.nonce, e.reason], [w.incident, nonce, 'OD-RECOVERY-7'], e.kind);
+    assert.match(e.signer, /^SHA256:[A-Za-z0-9+/]{43}$/, `${e.kind}: the signing key's fingerprint is recorded`);
   }
-});
+  assert.ok(!existsSync(join(w.inbox, 'authorization')), 'the inbox is emptied');
+  assert.equal(monitor(w).status, 0, 'the monitor resumes');
+  // a new containment is a NEW incident: the previous authorization (and any for the previous incident) no longer applies
+  rmSync(join(w.ctl, 'verifier-inactive'));
+  w.setVerifier('FAIL', 1);
+  assert.equal(monitor(w).status, 20);
+  assert.notEqual(w.stateOf().incident, w.incident);
+  assert.match(w.stateOf().incident, HEX);
+  w.authorize({ incident: w.incident });
+  w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained']]);
+  assert.match(recover(w).stderr, /REFUSED \(authorization_incident\)/);
+  assertStillContained(w, w.stateOf().incident);
+}));
 
-test('recovery: with every condition met it clears the latch ONLY (no grant), resets the state, records the reference; the monitor resumes', { skip: !hasScript && 'util-linux script(1) is not available' }, () => {
-  const w = containedWorld();
-  try {
-    w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained'], ['Q1', 'PASS', 'queue_as_declared_no_policy']]);
-    w.setVerifierWhenInactive('PASS', 0);
-    const grantsBefore = JSON.stringify(w.broker().perms);
-    const r = recover(w, 'OD-RECOVERY-1', 'RECOVER notification-service OD-RECOVERY-1');
-    assert.equal(r.status, 0, r.stdout);
-    assert.equal(w.latchText(), LATCH_INACTIVE);
-    assert.deepEqual([w.stateOf().contained, w.stateOf().streak], [0, 0]);
-    assert.equal(JSON.stringify(w.broker().perms), grantsBefore, 'it granted nothing');
-    assert.ok(!w.broker().calls.some((c) => /^set_/.test(c.sub)), 'no set_permissions or set_topic_permissions');
-    assert.equal(w.records('evidence.jsonl').at(-1).authorization, 'OD-RECOVERY-1');
-    assert.match(r.stdout, /holds NO grant/);
-    assert.equal(monitor(w).status, 0, 'the monitor resumes on the cleared latch (pre-grant: no grant)');
-  } finally {
-    w.cleanup();
-  }
-});
+const later = Math.floor(Date.now() / 1000);
+for (const [what, prepare, code] of [
+  ['an altered signed text (tampered after signing)', (w) => { w.authorize({ incident: w.incident }); const a = join(w.inbox, 'authorization'); writeFileSync(a, readFileSync(a, 'utf8').replace('reason=OD-RECOVERY-1', 'reason=OD-RECOVERY-2')); }, /signature_invalid/],
+  ['a signature by another key', (w) => w.authorize({ incident: w.incident, key: 'intruder' }), /signature_invalid/],
+  ['a signature in another namespace', (w) => w.authorize({ incident: w.incident, namespace: 'nawara-core-other' }), /signature_invalid/],
+  ['no signature at all', (w) => w.authorize({ incident: w.incident, sign: false }), /authorization_file/],
+  ['a garbage signature', (w) => { w.authorize({ incident: w.incident }); writeFileSync(join(w.inbox, 'authorization.sig'), 'not a signature\n'); }, /signature_format/],
+  ['another operation', (w) => w.authorize({ incident: w.incident, operation: 'notification.topology_grant' }), /authorization_operation/],
+  ['another service', (w) => w.authorize({ incident: w.incident, service: 'billing-service' }), /authorization_target/],
+  ['another vhost', (w) => w.authorize({ incident: w.incident, vhost: 'other-vhost' }), /authorization_target/],
+  ['another incident', (w) => w.authorize({ incident: hex() }), /authorization_incident/],
+  ['an expired authorization', (w) => w.authorize({ incident: w.incident, issued: later - 4000, notAfter: later - 1000 }), /authorization_expired/],
+  ['an authorization issued in the future', (w) => w.authorize({ incident: w.incident, issued: later + 1000, notAfter: later + 1600 }), /authorization_window/],
+  ['a validity window longer than an hour', (w) => w.authorize({ incident: w.incident, issued: later - 10, notAfter: later + 3600 }), /authorization_window/],
+  ['an empty validity window', (w) => w.authorize({ incident: w.incident, issued: later, notAfter: later }), /authorization_window/],
+  ['an unsupported version', (w) => w.authorize({ incident: w.incident, version: 'v2' }), /authorization_version/],
+  ['a duplicate field', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).replace('vhost=nawara-core\n', 'vhost=nawara-core\nvhost=nawara-core\n') }), /authorization_format/],
+  ['an unknown field', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).replace('reason=', 'grant=yes\nreason=') }), /authorization_format/],
+  ['CRLF line ends', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).replace(/\n/g, '\r\n') }), /authorization_format/],
+  ['a trailing space', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).replace('service=notification-service', 'service=notification-service ') }), /authorization_format/],
+  ['no final newline', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).trimEnd() }), /authorization_format/],
+  ['reordered fields', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).replace(/^(.*\n)(operation=.*\n)(service=.*\n)/, '$1$3$2') }), /authorization_format/],
+  ['an uppercase incident', (w) => w.authorize({ text: authorizationText({ incident: w.incident.toUpperCase() }) }), /authorization_format/],
+  ['a NUL byte', (w) => w.authorize({ text: authorizationText({ incident: w.incident }).replace('reason=OD', 'reason=O\0D') }), /authorization_format/],
+  ['a weakly permissioned authorization file', (w) => { w.authorize({ incident: w.incident }); chmodSync(join(w.inbox, 'authorization'), 0o666); }, /authorization_file/],
+  ['an authorization that is a symbolic link', (w) => { w.authorize({ incident: w.incident }); const a = join(w.inbox, 'authorization'); renameSync(a, join(w.base, 'elsewhere')); symlinkSync(join(w.base, 'elsewhere'), a); }, /authorization_file/],
+]) {
+  test(`signed recovery refuses ${what}; containment unchanged`, withContained((w) => {
+    prepare(w);
+    const r = recover(w);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, code);
+    assertStillContained(w);
+    assert.ok(!existsSync(join(w.state, 'recovery-consumed')), 'nothing was consumed');
+  }));
+}
+
+for (const [what, prepare] of [
+  ['no trusted key', (w) => rmSync(w.trusted)],
+  ['a trusted key for a wildcard principal (ssh-keygen would accept it)', (w) => w.trust('owner', { raw: readFileSync(w.trusted, 'utf8').replace('nawara-core-owner ', 'nawara-core-* ') })],
+  ['a trusted key for another principal', (w) => w.trust('owner', { raw: readFileSync(w.trusted, 'utf8').replace('nawara-core-owner ', 'someone ') })],
+  ['a trusted key without the namespace restriction', (w) => w.trust('owner', { raw: readFileSync(w.trusted, 'utf8').replace(' namespaces="nawara-core-topology-recovery"', '') })],
+  ['a trusted key with an extra option', (w) => w.trust('owner', { raw: readFileSync(w.trusted, 'utf8').replace('namespaces=', 'valid-before="29991231",namespaces=') })],
+  ['two trusted keys', (w) => { const one = readFileSync(w.trusted, 'utf8'); w.trust('intruder'); writeFileSync(w.trusted, one + readFileSync(w.trusted, 'utf8')); }],
+  ['a group-writable trusted key', (w) => chmodSync(w.trusted, 0o664)],
+  ['a trusted key that is a symbolic link', (w) => { renameSync(w.trusted, `${w.trusted}.real`); symlinkSync(`${w.trusted}.real`, w.trusted); }],
+]) {
+  test(`signed recovery refuses ${what} (65), even with an otherwise valid authorization`, withContained((w) => {
+    w.authorize({ incident: w.incident });
+    prepare(w);
+    const r = recover(w);
+    assert.equal(r.status, 65, r.stderr);
+    assertStillContained(w);
+  }));
+}
+
+test('signed recovery: no argument and no forced command; a containment that does not hold or an unsafe topology refuses', withContained((w) => {
+  w.authorize({ incident: w.incident });
+  assert.equal(spawnSync(join(w.install, 'recover-notification-topology.sh'), ['OD-RECOVERY-1'], { encoding: 'utf8' }).status, 2, 'no argument selects anything');
+  assert.equal(recover(w, { SSH_ORIGINAL_COMMAND: 'x' }).status, 2);
+  w.patchBroker((b) => { b.connections.push(SERVICE); });
+  assert.match(recover(w).stderr, /containment_not_holding/);
+  w.patchBroker((b) => { b.connections = b.connections.filter((u) => u !== SERVICE); });
+  w.setVerifier('FAIL', 1, [['L1', 'FAIL', 'latch_contained'], ['P1', 'FAIL', 'regular_policy_applies']]);
+  assert.match(recover(w).stderr, /topology_unsafe/);
+  w.writeIncident(hex());
+  assert.match(recover(w).stderr, /incident_binding/);
+  w.writeIncident(w.incident);
+  assertStillContained(w);
+  assert.ok(!existsSync(join(w.state, 'recovery-consumed')));
+}));
+
+test('single use: a replay of a consumed authorization is refused, including after a crash that kept the incident contained', withContained((w) => {
+  w.authorize({ incident: w.incident });
+  const auth = readFileSync(join(w.inbox, 'authorization'));
+  const sig = readFileSync(join(w.inbox, 'authorization.sig'));
+  // a crash right after the consumption was flushed: still contained, the nonce spent
+  w.crashAt('sync', 'recovery-consumed', 'after');
+  assert.notEqual(recover(w).status, 0);
+  assertStillContained(w);
+  assert.match(readFileSync(join(w.state, 'recovery-consumed'), 'utf8'), /nonce=/);
+  const r = recover(w);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /authorization_replay/);
+  assertStillContained(w);
+  // a fresh authorization (new nonce) for the same incident then succeeds once, and its replay finds nothing to recover
+  w.authorize({ incident: w.incident });
+  assert.equal(recover(w).status, 0);
+  writeFileSync(join(w.inbox, 'authorization'), auth, { mode: 0o600 });
+  writeFileSync(join(w.inbox, 'authorization.sig'), sig, { mode: 0o600 });
+  assert.match(recover(w).stderr, /not_contained/);
+}));
+
+test('crash safety: before the consumption nothing changes; while clearing, the service stays contained or is re-contained as a NEW incident', withContained((w) => {
+  // before the consumption (while the authorization is being copied): containment preserved, nothing consumed
+  w.authorize({ incident: w.incident });
+  w.crashAt('cp', 'authorization.sig', 'before');
+  assert.notEqual(recover(w).status, 0);
+  assertStillContained(w);
+  assert.ok(!existsSync(join(w.state, 'recovery-consumed')), 'nothing was consumed');
+  // during the latch clearing (the state already says not contained, the latch still contained): no grant, and the monitor re-contains
+  w.crashAt('mv', 'notification-service.containment', 'before');
+  assert.notEqual(recover(w).status, 0);
+  assert.equal(w.latchText(), LATCH_CONTAINED);
+  assert.deepEqual([w.stateOf().contained, w.stateOf().incident], [0, 'none']);
+  assert.ok(!w.broker().calls.some((c) => /^set_/.test(c.sub)));
+  w.setVerifier('PASS', 0);
+  assert.equal(monitor(w).status, 20, 'a contained latch alone contains');
+  const next = w.stateOf().incident;
+  assert.match(next, HEX);
+  assert.notEqual(next, w.incident, 'a new incident: the consumed authorization of the old one can never apply');
+  assert.equal(w.records('evidence.jsonl').at(-1).reason, 'latch_contained');
+}));
+
+test('concurrency: two recoveries with the same authorization at once: exactly one succeeds', withContained(async (w) => {
+  w.authorize({ incident: w.incident });
+  // the rendezvous inside the section the lock serializes (after the replay check, before the consumption): without the lock BOTH
+  // guards reach it; with the lock the second one waits at flock, then finds nothing contained and never reaches it
+  writeFileSync(join(w.ctl, 'barrier'), '');
+  const go = () => new Promise((res) => { const c = spawn(join(w.install, 'recover-notification-topology.sh'), [], { env: { PATH: '/usr/bin:/bin' } }); c.on('close', res); });
+  const codes = await Promise.all([go(), go()]);
+  assert.equal(readdirSync(w.ctl).filter((f) => f.startsWith('arrived.')).length, 1, 'only one guard was ever inside the serialized section');
+  assert.deepEqual(codes.sort(), [0, 1]);
+  assert.equal(readFileSync(join(w.state, 'recovery-consumed'), 'utf8').trim().split('\n').length, 1, 'consumed once');
+  assert.equal(w.latchText(), LATCH_INACTIVE);
+}));
 
 // ------------------------------------------------------------------------------------------------ installation and its verification
 
@@ -486,9 +682,9 @@ const installWorld = () => {
   const uid = process.getuid();
   const gid = process.getgid();
   const installer = join(src, 'topology-monitor', 'install-topology-monitor.sh');
-  writeFileSync(installer, variant(readFileSync(installer, 'utf8'), { INSTALL_DIR: w.install, STATE_DIR: w.state, LATCH: w.latch, UNIT_DIR: units, RUN_AS_UID: uid, OWNER: `${uid}:${gid}` }));
+  writeFileSync(installer, variant(readFileSync(installer, 'utf8'), { INSTALL_DIR: w.install, STATE_DIR: w.state, LATCH: w.latch, INCIDENT_FILE: w.incidentFile, UNIT_DIR: units, RUN_AS_UID: uid, OWNER: `${uid}:${gid}` }));
   const checker = join(w.base, 'verify-topology-monitor-install.sh');
-  writeFileSync(checker, variant(readFileSync(join(SRC, 'verify-topology-monitor-install.sh'), 'utf8'), { INSTALL_DIR: w.install, STATE_DIR: w.state, LATCH: w.latch, UNIT_DIR: units, OWNER_UID: uid, OWNER_GID: gid, RUN_AS_UID: uid, TRUST_ROOT: w.base }), { mode: 0o755 });
+  writeFileSync(checker, variant(readFileSync(join(SRC, 'verify-topology-monitor-install.sh'), 'utf8'), { INSTALL_DIR: w.install, STATE_DIR: w.state, LATCH: w.latch, INCIDENT_FILE: w.incidentFile, TRUSTED_SIGNERS: w.trusted, UNIT_DIR: units, OWNER_UID: uid, OWNER_GID: gid, RUN_AS_UID: uid, TRUST_ROOT: w.base }), { mode: 0o755 });
   chmodSync(installer, 0o755);
   w.units = units;
   w.installer = () => spawnSync(installer, [], { encoding: 'utf8' });

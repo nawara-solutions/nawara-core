@@ -15,6 +15,10 @@
 #       UNKNOWN  #1 recorded and alerted, #2 escalated, #3 containment.
 #   - a state file that is missing, corrupt, a symbolic link or weakly permissioned AFTER installation is never trusted or re-initialized:
 #     it is set aside and the service is contained (fail closed).
+# Incidents (OD-BRK-2b-R): a NEW containment gets a fresh, unpredictable incident id (128 bits from /dev/urandom, never one recorded in
+# STATE_DIR/incidents.jsonl), persisted in the state before anything else and bound next to the latch (INCIDENT_FILE); every later run
+# and attempt keeps it. Only a signed, incident-bound Owner authorization (recover-notification-topology.sh) ends an incident; a later
+# containment always gets a new id. A legacy (v1) contained state has no incident: it gets a fresh one and stays contained.
 # Containment: (1) the intent is persisted (state contained=1, then the latch `state=contained`) BEFORE any broker change; (2) the
 # service's resource and topic permissions are cleared in every vhost that lists them; (3) all its connections are closed (unacked
 # deliveries return to their queues; nothing is purged, deleted or re-created); (4) two read-backs, CONFIRM_INTERVAL apart, must both
@@ -39,6 +43,7 @@ readonly VHOST='nawara-core'
 readonly INSTALL_DIR='/usr/local/libexec/nawara-core-topology'
 readonly STATE_DIR='/var/lib/nawara-core-topology-monitor'
 readonly LATCH='/var/lib/nawara-core-topology/notification-service.containment'
+readonly INCIDENT_FILE='/var/lib/nawara-core-topology/notification-service.incident'
 readonly BROKER='nawara-core-rabbitmq'
 readonly SAFE_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 readonly OWNER_UID=0
@@ -58,7 +63,9 @@ readonly REMINDER_SECONDS=3600
 readonly RECORD_MAX_LINES=2000
 readonly LATCH_INACTIVE=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=inactive'
 readonly LATCH_CONTAINED=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=contained'
-readonly STATE_RE=$'^nawara-core-topology-monitor-state v1\nservice=notification-service\ncontained=([01])\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
+readonly STATE_RE=$'^nawara-core-topology-monitor-state v2\nservice=notification-service\ncontained=([01])\nincident=(none|[0-9a-f]{32})\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
+readonly STATE_V1_RE=$'^nawara-core-topology-monitor-state v1\nservice=notification-service\ncontained=([01])\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
+readonly INCIDENT_RE=$'^nawara-core-topology-incident v1\nservice=notification-service\nincident=(none|[0-9a-f]{32})$'
 readonly MARKER_RE='^nawara-core-topology-monitor installed v1 at=[0-9]{1,12}$'
 PATH=$SAFE_PATH
 export PATH
@@ -70,7 +77,7 @@ refuse() { local code=$1; shift; printf '[topology-monitor] REFUSED: %s\n' "$*" 
 [ -z "${SSH_ORIGINAL_COMMAND:-}" ] || refuse 64 "a client command was sent; it is never run (only the systemd unit starts this script)"
 [ "$#" -eq 1 ] && [ "$1" = "$SERVICE" ] || refuse 64 "usage: verify-and-contain.sh $SERVICE (the only supported target); nothing was done"
 [ "$EUID" -eq "$RUN_AS_UID" ] || refuse 65 "runs as root only (the broker's administration and the root-owned latch); nothing was done"
-for c in bash docker flock timeout sha256sum stat readlink dirname mktemp mv sync date head tail grep awk sed sort paste cut tr wc sleep; do
+for c in bash docker flock timeout sha256sum stat readlink dirname mktemp mv sync date head tail grep awk sed sort paste cut tr wc sleep od; do
   command -v "$c" >/dev/null 2>&1 || refuse 69 "$c is required; nothing was done"
 done
 
@@ -118,7 +125,7 @@ ctl() { timeout "$CTL_TIMEOUT" docker exec -u rabbitmq "$BROKER" rabbitmqctl -q 
 blank() { [ -z "$(tr -d '[:space:]' <<<"$1")" ]; }
 
 # ---------------------------------------------------------------- 4. the durable state (never initialized here: the installer writes it)
-ST_CONTAINED=0; ST_STREAK=0; ST_LAST=NONE; STATE_PROBLEM=''
+ST_CONTAINED=0; ST_INCIDENT=none; ST_STREAK=0; ST_LAST=NONE; STATE_PROBLEM=''; STATE_LEGACY=0
 STATE="$STATE_DIR/state"
 read_state() {
   local text
@@ -128,12 +135,36 @@ read_state() {
   [ -e "$STATE" ] || { STATE_PROBLEM=state_missing; return 1; }
   safe_node "$STATE" f 077 || { STATE_PROBLEM=state_unsafe; return 1; }
   text=$(head -c 4096 -- "$STATE") || { STATE_PROBLEM=state_unreadable; return 1; }
-  [[ $text =~ $STATE_RE ]] || { STATE_PROBLEM=state_corrupt; return 1; }
-  ST_CONTAINED=${BASH_REMATCH[1]}; ST_STREAK=$((10#${BASH_REMATCH[2]})); ST_LAST=${BASH_REMATCH[3]}
+  if [[ $text =~ $STATE_RE ]]; then
+    ST_CONTAINED=${BASH_REMATCH[1]}; ST_INCIDENT=${BASH_REMATCH[2]}; ST_STREAK=$((10#${BASH_REMATCH[3]})); ST_LAST=${BASH_REMATCH[4]}
+    # contained <=> an incident: anything else is not a state this control writes
+    if { [ "$ST_CONTAINED" = 1 ] && [ "$ST_INCIDENT" = none ]; } || { [ "$ST_CONTAINED" = 0 ] && [ "$ST_INCIDENT" != none ]; }; then STATE_PROBLEM=state_corrupt; return 1; fi
+  elif [[ $text =~ $STATE_V1_RE ]]; then
+    # the OD-BRK-2b-1 schema: not contained -> no incident; contained -> NO incident is assumed (a fresh one is created, never approved)
+    ST_CONTAINED=${BASH_REMATCH[1]}; ST_INCIDENT=none; ST_STREAK=$((10#${BASH_REMATCH[2]})); ST_LAST=${BASH_REMATCH[3]}; STATE_LEGACY=1
+  else
+    STATE_PROBLEM=state_corrupt; return 1
+  fi
 }
 save_state() {
-  write_atomic "$STATE" "$(printf 'nawara-core-topology-monitor-state v1\nservice=%s\ncontained=%s\nunknown_streak=%s\nlast_result=%s\nlast_run=%s\n' \
-    "$SERVICE" "$ST_CONTAINED" "$ST_STREAK" "$1" "$(now)")" 600
+  write_atomic "$STATE" "$(printf 'nawara-core-topology-monitor-state v2\nservice=%s\ncontained=%s\nincident=%s\nunknown_streak=%s\nlast_result=%s\nlast_run=%s\n' \
+    "$SERVICE" "$ST_CONTAINED" "$ST_INCIDENT" "$ST_STREAK" "$1" "$(now)")" 600
+}
+incident_bound() { # the incident recorded next to the latch: its id, or "invalid"
+  local text
+  if [ -L "$INCIDENT_FILE" ] || [ ! -f "$INCIDENT_FILE" ] || ! safe_node "$INCIDENT_FILE" f 022; then echo invalid; return; fi
+  text=$(head -c 256 -- "$INCIDENT_FILE" 2>/dev/null) || { echo invalid; return; }
+  [[ $text =~ $INCIDENT_RE ]] && echo "${BASH_REMATCH[1]}" || echo invalid
+}
+new_incident() { # a fresh, unpredictable id that no earlier incident used
+  local id i
+  for i in 1 2 3; do
+    id=$(head -c 16 /dev/urandom | od -An -vtx1 | tr -d ' \n')
+    [[ $id =~ ^[0-9a-f]{32}$ ]] || continue
+    grep -qF "\"incident\":\"$id\"" -- "$STATE_DIR/incidents.jsonl" 2>/dev/null && continue
+    echo "$id"; return 0
+  done
+  return 1
 }
 
 # ---------------------------------------------------------------- 5. the containment latch (the OD-BRK-2a contract, read by provisioning)
@@ -147,6 +178,15 @@ latch_status() {
     "$LATCH_CONTAINED") echo contained ;;
     *) echo malformed ;;
   esac
+}
+persist_incident() { # the current incident, next to the latch (written before it)
+  local dir; dir=$(dirname -- "$INCIDENT_FILE")
+  [ ! -L "$dir" ] || return 1
+  [ -d "$dir" ] || mkdir -m 755 -- "$dir" || return 1
+  safe_node "$dir" d 022 || return 1
+  [ ! -L "$INCIDENT_FILE" ] || rm -f -- "$INCIDENT_FILE"
+  write_atomic "$INCIDENT_FILE" "$(printf 'nawara-core-topology-incident v1\nservice=%s\nincident=%s' "$SERVICE" "$ST_INCIDENT")" 644 || return 1
+  [ "$(incident_bound)" = "$ST_INCIDENT" ]
 }
 persist_latch() {
   local dir; dir=$(dirname -- "$LATCH")
@@ -171,7 +211,7 @@ append() { # append <file> <json line>
   bound "$f"
 }
 alert() { # alert <severity> <kind>: queued for the (pending) carrier; a spool failure is logged and never blocks anything
-  append alerts.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$1\",\"kind\":\"$2\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\"}" \
+  append alerts.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$1\",\"kind\":\"$2\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"incident\":\"$ST_INCIDENT\"}" \
     || log "alert spool unavailable (kind=$2); containment never depends on it"
   log "ALERT severity=$1 kind=$2"
 }
@@ -243,12 +283,22 @@ confirm() { # one read-back: no grant, no topic grant, no connection of the serv
   fi
   conns=$(ctl list_connections user --no-table-headers) || return 1
   ! grep -qxF -- "$SERVICE" <<<"$conns" || return 1
-  [ "$(latch_status)" = contained ]
+  [ "$ST_INCIDENT" != none ] && [ "$(latch_status)" = contained ] && [ "$(incident_bound)" = "$ST_INCIDENT" ]
 }
 contain() { # contain <reason>
   local attempt=0
   ST_CONTAINED=1
+  # a NEW containment gets a fresh incident; a retried or maintained one keeps its own (never overwritten)
+  if [ "$ST_INCIDENT" = none ]; then
+    ST_INCIDENT=$(new_incident) || { ST_INCIDENT=none; log "no incident id could be generated (containment proceeds; recovery is impossible until one exists)"; }
+    if [ "$ST_INCIDENT" != none ]; then
+      NEW_INCIDENT=1
+      append incidents.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"incident\":\"$ST_INCIDENT\",\"reason\":\"$1\"}" \
+        || log "the incident history could not be written"
+    fi
+  fi
   save_state "${LAST_RESULT:-NONE}" || log "the containment intent could not be written to the state file (the latch still records it)"
+  persist_incident || log "the incident binding could not be persisted (containment cannot be confirmed)"
   persist_latch || log "the containment latch could not be persisted (containment cannot be confirmed)"
   CONTAINMENT=unconfirmed
   while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
@@ -266,11 +316,13 @@ contain() { # contain <reason>
 }
 
 # ---------------------------------------------------------------- 9. the run
-LAST_RESULT=NONE; REASON=''; ATTEMPTS=0; MODE=monitor; NEW_CONTAINMENT=0
+LAST_RESULT=NONE; REASON=''; ATTEMPTS=0; MODE=monitor; NEW_CONTAINMENT=0; NEW_INCIDENT=0; INCIDENT_REBOUND=0
 if ! read_state; then
   # Installed (STATE_DIR exists) but the state cannot be trusted: never re-initialized, set aside for the record, and contained.
   if [ -e "$STATE" ] || [ -L "$STATE" ]; then mv -f -- "$STATE" "$STATE_DIR/state.rejected" 2>/dev/null || rm -f -- "$STATE"; fi
   ST_CONTAINED=0; ST_STREAK=0; MODE=integrity; NEW_CONTAINMENT=1
+  bound=$(incident_bound)
+  if [ "$(latch_status)" = contained ] && [ "$bound" != invalid ] && [ "$bound" != none ]; then ST_INCIDENT=$bound; else ST_INCIDENT=none; fi
   contain "$STATE_PROBLEM"
 else
   LATCH_NOW=$(latch_status)
@@ -280,6 +332,8 @@ else
     reason=containment_maintained
     if [ "$ST_CONTAINED" = 1 ] && [ "$LATCH_NOW" != contained ]; then reason=latch_not_contained; fi
     if [ "$ST_CONTAINED" = 0 ]; then reason=latch_contained; fi
+    if [ "$STATE_LEGACY" = 1 ] && [ "$ST_CONTAINED" = 1 ]; then reason=legacy_containment_new_incident; fi
+    if [ "$ST_CONTAINED" = 1 ] && [ "$(incident_bound)" != "$ST_INCIDENT" ]; then INCIDENT_REBOUND=1; fi
     contain "$reason"
   else
     verify
@@ -312,6 +366,7 @@ if [ "$ST_CONTAINED" = 1 ]; then
   if [ "$CONTAINMENT" = confirmed ]; then
     if [ "$NEW_CONTAINMENT" = 1 ]; then alert critical contained; fi
     if [ "$REASON" = latch_not_contained ]; then alert critical latch_restored_by_monitor; fi
+    if [ "$INCIDENT_REBOUND" = 1 ]; then alert critical incident_binding_restored; fi
   else
     alert critical containment_unconfirmed
   fi
@@ -319,9 +374,9 @@ fi
 WD=$(watchdog_status)
 if [ "$WD" != ok ] && [ "$(last_alert_age watchdog_quiet)" -gt "$REMINDER_SECONDS" ]; then alert warning watchdog_quiet; fi
 
-append evidence.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"mode\":\"$MODE\",\"phase\":\"$V_PHASE\",\"result\":\"$LAST_RESULT\",\"reason\":\"$REASON\",\"checks\":\"$V_IDS\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"attempts\":$ATTEMPTS,\"watchdog\":\"$WD\"}" \
+append evidence.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"mode\":\"$MODE\",\"phase\":\"$V_PHASE\",\"result\":\"$LAST_RESULT\",\"reason\":\"$REASON\",\"checks\":\"$V_IDS\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"attempts\":$ATTEMPTS,\"watchdog\":\"$WD\",\"incident\":\"$ST_INCIDENT\",\"new_incident\":$NEW_INCIDENT}" \
   || log "evidence record unavailable"
-log "service=$SERVICE mode=$MODE phase=$V_PHASE result=$LAST_RESULT reason=$REASON checks=${V_IDS:-none} unknown_streak=$ST_STREAK containment=$CONTAINMENT attempts=$ATTEMPTS watchdog=$WD"
+log "service=$SERVICE mode=$MODE phase=$V_PHASE result=$LAST_RESULT reason=$REASON checks=${V_IDS:-none} unknown_streak=$ST_STREAK containment=$CONTAINMENT attempts=$ATTEMPTS watchdog=$WD incident=$ST_INCIDENT"
 
 if [ "$ST_CONTAINED" = 1 ]; then
   if [ "$CONTAINMENT" = confirmed ]; then log "CONTAINED"; exit 20; fi

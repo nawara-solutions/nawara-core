@@ -10,7 +10,9 @@
 #                        the pinned copy of infra/rabbitmq/verify-topology.sh (0444; its SHA-256 must equal verify-and-contain.sh's pin)
 #   STATE_DIR    (0700)  the installation marker and the INITIAL state (not contained, no UNKNOWN), both 0600: this is the only place
 #                        a state is ever initialized (the monitor treats a missing state after installation as corruption)
-#   the latch directory (0755) and the latch `state=inactive` (0644): the OD-BRK-2a contract that lets protected provisioning run
+#   the latch directory (0755), the latch `state=inactive` and the incident binding `incident=none` (0644): the OD-BRK-2a contract that
+#                        lets protected provisioning run; STATE_DIR/recovery (0700), the empty recovery inbox. The trusted recovery key is
+#                        NOT installed here (a separately authorized key-lifecycle operation, runbook §5)
 #   UNIT_DIR     (0644)  the monitor and watchdog services and timers: copied, NOT enabled, NOT started (no daemon-reload either)
 # It refuses (and changes nothing) when any of these already exists: it never overwrites a state, a unit or a latch, so it can never
 # clear a containment. The trigger key, its authorized_keys line and its sudoers rule are not installed here.
@@ -27,6 +29,7 @@ export PATH
 readonly INSTALL_DIR='/usr/local/libexec/nawara-core-topology'
 readonly STATE_DIR='/var/lib/nawara-core-topology-monitor'
 readonly LATCH='/var/lib/nawara-core-topology/notification-service.containment'
+readonly INCIDENT_FILE='/var/lib/nawara-core-topology/notification-service.incident'
 readonly UNIT_DIR='/etc/systemd/system'
 readonly RUN_AS_UID=0
 readonly OWNER='0:0'
@@ -48,7 +51,7 @@ got=$(sha256sum -- "$VERIFIER_SRC"); got=${got%% *}
 [ -n "$pin" ] && [ "$got" = "$pin" ] || refuse "verify-topology.sh ($got) does not match verify-and-contain.sh's pin (${pin:-none})"
 
 # Fresh only: nothing may exist yet.
-for p in "$INSTALL_DIR" "$STATE_DIR" "$LATCH" $(for u in $UNITS; do echo "$UNIT_DIR/$u"; done); do
+for p in "$INSTALL_DIR" "$STATE_DIR" "$LATCH" "$INCIDENT_FILE" $(for u in $UNITS; do echo "$UNIT_DIR/$u"; done); do
   [ ! -e "$p" ] && [ ! -L "$p" ] || refuse "$p already exists (a fresh installation only; never over an existing state, unit or latch)"
 done
 [ -d "$UNIT_DIR" ] || refuse "$UNIT_DIR does not exist"
@@ -58,7 +61,8 @@ for f in $SCRIPTS; do install -o "${OWNER%%:*}" -g "${OWNER##*:}" -m 0555 -- "$S
 install -o "${OWNER%%:*}" -g "${OWNER##*:}" -m 0444 -- "$VERIFIER_SRC" "$INSTALL_DIR/verify-topology.sh"
 
 install -d -o "${OWNER%%:*}" -g "${OWNER##*:}" -m 0700 -- "$STATE_DIR"
-printf 'nawara-core-topology-monitor-state v1\nservice=notification-service\ncontained=0\nunknown_streak=0\nlast_result=NONE\nlast_run=0\n' >"$STATE_DIR/state"
+printf 'nawara-core-topology-monitor-state v2\nservice=notification-service\ncontained=0\nincident=none\nunknown_streak=0\nlast_result=NONE\nlast_run=0\n' >"$STATE_DIR/state"
+install -d -o "${OWNER%%:*}" -g "${OWNER##*:}" -m 0700 -- "$STATE_DIR/recovery"
 printf 'nawara-core-topology-monitor installed v1 at=%s\n' "$(date +%s)" >"$STATE_DIR/installed"
 chmod 0600 -- "$STATE_DIR/state" "$STATE_DIR/installed"
 sync -- "$STATE_DIR/state" "$STATE_DIR/installed"
@@ -66,8 +70,9 @@ sync -- "$STATE_DIR/state" "$STATE_DIR/installed"
 LATCH_DIR=$(dirname -- "$LATCH")
 [ -d "$LATCH_DIR" ] || install -d -o "${OWNER%%:*}" -g "${OWNER##*:}" -m 0755 -- "$LATCH_DIR"
 printf '%s' "$LATCH_INACTIVE" >"$LATCH"
-chmod 0644 -- "$LATCH"
-sync -- "$LATCH"
+printf 'nawara-core-topology-incident v1\nservice=notification-service\nincident=none' >"$INCIDENT_FILE"
+chmod 0644 -- "$LATCH" "$INCIDENT_FILE"
+sync -- "$LATCH" "$INCIDENT_FILE"
 
 for u in $UNITS; do install -o "${OWNER%%:*}" -g "${OWNER##*:}" -m 0644 -- "$SRC/$u" "$UNIT_DIR/$u"; done
 

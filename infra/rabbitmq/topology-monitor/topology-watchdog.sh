@@ -39,7 +39,7 @@ readonly MAX_AGE=900
 readonly STALL_SECONDS=300
 readonly REMINDER_SECONDS=3600
 readonly RECORD_MAX_LINES=2000
-readonly STATE_RE=$'^nawara-core-topology-monitor-state v1\nservice=notification-service\ncontained=([01])\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
+readonly STATE_RE=$'^nawara-core-topology-monitor-state (v1\nservice=notification-service\ncontained=([01])|v2\nservice=notification-service\ncontained=([01])\nincident=(none|[0-9a-f]{32}))\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
 readonly MARKER_RE='^nawara-core-topology-monitor installed v1 at=([0-9]{1,12})$'
 PATH=$SAFE_PATH
 export PATH
@@ -106,7 +106,7 @@ else
 fi
 LAST_RUN=''; CONTAINED=0
 if [ -f "$STATE_DIR/state" ] && safe_node "$STATE_DIR/state" f 077 && [[ $(head -c 4096 -- "$STATE_DIR/state") =~ $STATE_RE ]]; then
-  CONTAINED=${BASH_REMATCH[1]}; LAST_RUN=${BASH_REMATCH[4]}
+  CONTAINED=${BASH_REMATCH[2]}${BASH_REMATCH[3]}; LAST_RUN=${BASH_REMATCH[7]}
 else
   problem state_invalid
 fi

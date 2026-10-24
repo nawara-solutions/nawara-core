@@ -3203,6 +3203,9 @@ const TOPOLOGY_MONITOR_LOCATIONS = {
   INSTALL_DIR: '/usr/local/libexec/nawara-core-topology', STATE_DIR: '/var/lib/nawara-core-topology-monitor',
   LATCH: '/var/lib/nawara-core-topology/notification-service.containment', BROKER: 'nawara-core-rabbitmq', SERVICE: 'notification-service', VHOST: 'nawara-core',
   OWNER_UID: '0', RUN_AS_UID: '0', UNIT_DIR: '/etc/systemd/system', SAFE_PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  // OD-BRK-2b-R: the incident binding next to the latch, and the signed recovery's trust anchor and binding
+  INCIDENT_FILE: '/var/lib/nawara-core-topology/notification-service.incident', TRUSTED_SIGNERS: '/etc/nawara-core-topology/recovery-allowed-signers',
+  PRINCIPAL: 'nawara-core-owner', NAMESPACE: 'nawara-core-topology-recovery', OPERATION: 'notification.topology_recovery',
 };
 const TOPOLOGY_MONITOR_INSTALL_PINS = {
   SHA_VERIFY_AND_CONTAIN: 'verify-and-contain.sh', SHA_TOPOLOGY_WATCHDOG: 'topology-watchdog.sh', SHA_TOPOLOGY_TRIGGER: 'topology-trigger.sh',
@@ -3259,8 +3262,24 @@ export function checkTopologyMonitor({ files = {}, verifier, provision, workflow
   // the containment sequence and the state machine
   const m = files['verify-and-contain.sh'];
   const contain = m.slice(m.indexOf('contain() { # contain <reason>'), m.indexOf('\n}\n', m.indexOf('contain() { # contain <reason>')));
-  const order = ['save_state ', 'persist_latch ', 'revoke', 'close_all_user_connections', 'if confirm; then', 'if confirm; then CONTAINMENT=confirmed'].map((s) => contain.indexOf(s));
-  if (order.some((i) => i < 0) || order.some((i, k) => k > 0 && i <= order[k - 1])) problems.push(`${at('verify-and-contain.sh')}: containment must persist the intent (state, then latch) before revoking, then close connections, then confirm twice; ${why}`);
+  const order = ['if [ "$ST_INCIDENT" = none ]; then', 'save_state ', 'persist_incident ', 'persist_latch ', 'revoke', 'close_all_user_connections', 'if confirm; then', 'if confirm; then CONTAINMENT=confirmed'].map((s) => contain.indexOf(s));
+  if (order.some((i) => i < 0) || order.some((i, k) => k > 0 && i <= order[k - 1])) problems.push(`${at('verify-and-contain.sh')}: containment must create an incident only when there is none, persist the intent (state, incident binding, then latch) before revoking, then close connections, then confirm twice; ${why}`);
+  if (!/^new_incident\(\) \{[\s\S]*?head -c 16 \/dev\/urandom[\s\S]*?^\}/m.test(m)) problems.push(`${at('verify-and-contain.sh')}: an incident id comes from /dev/urandom (OD-BRK-2b-R); ${why}`);
+  // OD-BRK-2b-R: the signed, incident-bound, single-use recovery
+  const rec = files['recover-notification-topology.sh'];
+  const recCode = rec.replace(/^\s*#.*$/gm, '');
+  const recIdx = (needle) => recCode.indexOf(needle);
+  if (!rec.includes('[ "$#" -eq 0 ] || usage ')) problems.push(`${at('recover-notification-topology.sh')}: recovery takes no argument (nothing a caller passes selects a file, a service or a vhost); ${why}`);
+  if (/\bread -r\b|RECOVER \$SERVICE/.test(recCode)) problems.push(`${at('recover-notification-topology.sh')}: no typed-reference authorization (the signature is the only authorization); ${why}`);
+  if (!recCode.includes('ssh-keygen -Y verify -f "$TRUSTED_SIGNERS" -I "$PRINCIPAL" -n "$NAMESPACE" -s "$WORK/authorization.sig" <"$WORK/authorization"')) problems.push(`${at('recover-notification-topology.sh')}: the authorization is verified with ssh-keygen -Y verify against the pinned trusted key, principal and namespace, on its private copy; ${why}`);
+  if (pinOf(rec, 'SIGNER_RE') !== '^nawara-core-owner namespaces="nawara-core-topology-recovery" (ssh-ed25519|sk-ssh-ed25519@openssh\\.com) [A-Za-z0-9+/]{40,400}={0,2}$') problems.push(`${at('recover-notification-topology.sh')}: the trusted key must be exactly one line for the exact principal, restricted to the namespace (ssh-keygen accepts wildcard principals); ${why}`);
+  if (!/^readonly MAX_VALIDITY=([1-9][0-9]{0,3})$/m.test(rec) || Number(pinOf(rec, 'MAX_VALIDITY')) > 3600) problems.push(`${at('recover-notification-topology.sh')}: MAX_VALIDITY must be at most 3600 seconds; ${why}`);
+  if (!recCode.includes('[ "$A_INCIDENT" = "$INCIDENT" ] || stop authorization_incident') || !recCode.includes('[ "$NOW" -le "$A_NOT_AFTER" ] || stop authorization_expired')) problems.push(`${at('recover-notification-topology.sh')}: the authorization must name the current incident and be unexpired; ${why}`);
+  const consume = recIdx('>>"$CONSUMED" && chmod 600 -- "$CONSUMED" && sync -- "$CONSUMED"');
+  const replay = recIdx('! grep -qF " nonce=$A_NONCE " -- "$CONSUMED" || stop authorization_replay');
+  const clearState = recIdx('contained=0\\nincident=none');
+  const clearLatch = recIdx('write_atomic "$LATCH" "$LATCH_INACTIVE" 644');
+  if (replay < 0 || consume < 0 || !(replay < consume && consume < clearState && clearState < clearLatch)) problems.push(`${at('recover-notification-topology.sh')}: a consumed nonce is refused, and the nonce is durably consumed before the state and then the latch are cleared; ${why}`);
   if (!/^readonly MAX_ATTEMPTS=[1-5]$/m.test(m)) problems.push(`${at('verify-and-contain.sh')}: MAX_ATTEMPTS must be a small bound (1 to 5); ${why}`);
   if (!m.includes('if [ "$ST_STREAK" -ge 3 ]; then') || !/FAIL\)\n\s*NEW_CONTAINMENT=1\n\s*contain verifier_fail ;;/.test(m)) problems.push(`${at('verify-and-contain.sh')}: a FAIL contains at once and the third consecutive UNKNOWN contains; ${why}`);
   if (/set_permissions|set_topic_permissions|delete_queue|purge_queue|delete_user/.test(m.replace(/^\s*#.*$/gm, '')) || /set_permissions|set_topic_permissions|delete_queue|purge_queue|delete_user/.test(files['recover-notification-topology.sh'].replace(/^\s*#.*$/gm, ''))) {
