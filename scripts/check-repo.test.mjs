@@ -3812,7 +3812,8 @@ test('Core V2 OD-BRK-2b-1: the topology monitor pins the verifier, the grant and
   assert.match(mutate('recover-notification-topology.sh', "readonly ROLE_CONF='^(nawara\\.events|", "readonly ROLE_CONF='^(nawara\\.events\\.dlx|nawara\\.events|"), /ROLE_CONF must be the approved isolated role/);
   assert.match(mutate('topology-watchdog.sh', "readonly STATE_DIR='/var/lib/nawara-core-topology-monitor'", "readonly STATE_DIR='/tmp/x'"), /STATE_DIR must be/);
   assert.match(mutate('verify-and-contain.sh', "readonly OWNER_UID=0", 'readonly OWNER_UID=1000'), /OWNER_UID must be 0/);
-  assert.match(mutate('topology-watchdog.sh', 'readonly MAX_AGE=900', 'readonly MAX_AGE=901'), /SHA_TOPOLOGY_WATCHDOG must equal/, 'an installed file changes: its pin must follow');
+  // OD-BRK-2b-I: an installed file's authority is the Owner-signed manifest, so no hash may be pinned on the server
+  assert.match(mutate('verify-topology-monitor-install.sh', "readonly TRUST_ROOT='/'", `readonly TRUST_ROOT='/'\nreadonly SHA_VERIFY_AND_CONTAIN='${'0'.repeat(64)}'`), /no hash pinned on the server/);
   assert.match(mutate('nawara-core-topology-monitor.timer', 'OnUnitActiveSec=5min', 'OnUnitActiveSec=1h'), /both timers run every 5 minutes/);
   // client commands, sourcing, the trigger and its templates
   assert.match(mutate('topology-trigger.sh', 'env -i PATH="$PATH" "$SUDO" -n /usr/bin/systemctl start "$MONITOR_SERVICE" || rc=$?', '"$SUDO" -n /usr/bin/systemctl start "$MONITOR_SERVICE" || rc=$?'), /through sudo -n, with an empty environment/);
@@ -3855,4 +3856,39 @@ test('Core V2 OD-BRK-2b-R: the recovery is signed, incident-bound, unexpired and
   assert.match(mutate(M, '  persist_incident || log', '  : || log'), /state, incident binding, then latch/);
   assert.match(mutate(M, 'head -c 16 /dev/urandom', 'date +%s%N | head -c 16'), /from \/dev\/urandom/);
   assert.match(mutate(M, "readonly INCIDENT_FILE='/var/lib/nawara-core-topology/notification-service.incident'", "readonly INCIDENT_FILE='/tmp/incident'"), /INCIDENT_FILE must be/);
+});
+
+test('Core V2 OD-BRK-2b-I: the installation is authenticated by an Owner-signed manifest; upgrades are monotonic; protected state is never replaced', async () => {
+  const { checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, TOPOLOGY_MONITOR_ARTIFACTS, PROVISION_SCRIPT, TOPOLOGY_VERIFIER } = await import('./lib/checks.mjs');
+  const { MANIFEST_ARTIFACTS } = await import('./topology-monitor-manifest.mjs');
+  assert.deepEqual(MANIFEST_ARTIFACTS.map(([n]) => n), TOPOLOGY_MONITOR_ARTIFACTS, 'the generator lists the installer\'s artifacts, in its order');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const files = Object.fromEntries(TOPOLOGY_MONITOR_FILES.map((n) => [n, read(`${TOPOLOGY_MONITOR_DIR}/${n}`)]));
+  const base = { files, verifier: read(TOPOLOGY_VERIFIER), provision: read(PROVISION_SCRIPT), workflows: {} };
+  assert.deepEqual(checkTopologyMonitor(base), []);
+  const mutate = (file, from, to) => {
+    assert.ok(files[file].includes(from), `fixture drifted: ${file}: ${from}`);
+    return checkTopologyMonitor({ ...base, files: { ...files, [file]: files[file].replace(from, to) } }).join('\n');
+  };
+  const I = 'install-topology-monitor.sh';
+  const V = 'verify-topology-monitor-install.sh';
+  assert.match(mutate(I, 'verdict=$(env -i PATH="$SAFE_PATH" timeout 10 ssh-keygen -Y verify -f "$INSTALL_TRUST" -I "$PRINCIPAL" -n "$INSTALL_NAMESPACE"', 'verdict=$(env -i PATH="$SAFE_PATH" timeout 10 echo'), /verified with ssh-keygen -Y verify against the installation trust key/);
+  assert.match(mutate(V, 'ssh-keygen -Y verify -f "$INSTALL_TRUST" -I "$PRINCIPAL" -n "$INSTALL_NAMESPACE" -s "$INSTALL_STATE/installed/manifest.sig"', 'true -s "$INSTALL_STATE/installed/manifest.sig"'), /verified with ssh-keygen -Y verify/);
+  assert.match(mutate(I, `readonly SIGNER_RE='^nawara-core-owner namespaces=`, `readonly SIGNER_RE='^[a-z*-]+ namespaces=`), /exactly one line for the exact principal, restricted to the installation namespace/);
+  assert.match(mutate(I, "readonly INSTALL_NAMESPACE='nawara-core-topology-install'", "readonly INSTALL_NAMESPACE='nawara-core-topology-recovery'"), /INSTALL_NAMESPACE must be/);
+  assert.match(mutate(I, '[ "$M_VERSION" -gt "$CUR_VERSION" ] || refuse downgrade', '[ "$M_VERSION" -ge 1 ] || refuse downgrade'), /strictly higher, signed version/);
+  assert.match(mutate(I, 'if absent "$LATCH"; then', 'if true; then'), /created only when absent/);
+  assert.match(mutate(I, 'if absent "$STATE_DIR/state"; then', 'if true; then'), /created only when absent/);
+  assert.match(mutate(I, 'log "$TXN_KIND complete', 'rm -f "$STATE_DIR/recovery-consumed"; log "$TXN_KIND complete'), /never touches the nonce ledger/);
+  assert.match(mutate(I, 'log "$TXN_KIND complete', 'systemctl enable --now nawara-core-topology-monitor.timer; log "$TXN_KIND complete'), /never enables, starts or reloads a unit/);
+  assert.match(mutate(V, 'printf \'RESULT: PASS', 'rm -f /tmp/x; printf \'RESULT: PASS'), /must stay read-only/);
+  assert.match(mutate(V, 'st=$("$SYSTEMCTL" is-enabled "$u" 2>/dev/null || true)', 'st=$("$SYSTEMCTL" enable "$u" 2>/dev/null || true)'), /may only read units' enablement/);
+  assert.match(mutate(I, "readonly SCRIPTS='verify-and-contain.sh topology-watchdog.sh", "readonly SCRIPTS='topology-watchdog.sh verify-and-contain.sh"), /the manifest's artifacts are exactly/);
+  // the transaction is recorded before any artifact changes
+  assert.match(mutate(I, `mv -- "$TMPM/staging" "$TXN/staging"
+txn_phase staged
+txn_phase applying`, `mv -- "$TMPM/staging" "$TXN/staging"
+apply_artifacts
+txn_phase staged
+txn_phase applying`), /recorded before any artifact is applied/);
 });

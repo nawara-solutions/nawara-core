@@ -19,9 +19,10 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { bounded, cleanupAll, exited, stopChild } from './lib/owned-process.mjs';
 import { variant } from './lib/topology-monitor-world.mjs';
+import { MANIFEST_ARTIFACTS, manifestText } from '../topology-monitor-manifest.mjs';
 
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, '../..');
@@ -43,6 +44,27 @@ const D = {
 };
 D.incidentFile = join(D.latchDir, 'notification-service.incident');
 D.trusted = join(D.trust, 'recovery-allowed-signers');
+D.installTrust = join(D.trust, 'install-allowed-signers');
+D.installState = join(work, 'install-state');
+/**
+ * The AUTHENTICATED installation (OD-BRK-2b-I): a manifest over the source tree's exact bytes (the real generator), signed OFF the
+ * namespace with the DISPOSABLE test key in the installation namespace, placed root-owned in the root-only inbox, then `install`.
+ */
+const authenticatedInstall = (srcRoot, installState) => {
+  const tm = join(srcRoot, 'infra/rabbitmq/topology-monitor');
+  const of = (n) => (n === 'verify-topology.sh' ? join(srcRoot, 'infra/rabbitmq/verify-topology.sh') : join(tm, n));
+  const hashes = Object.fromEntries(MANIFEST_ARTIFACTS.map(([n]) => [n, createHash('sha256').update(readFileSync(of(n))).digest('hex')]));
+  const text = manifestText({ commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), version: 1, hashes });
+  const draft = join(D.keys, 'manifest');
+  rmSync(draft, { force: true });
+  rmSync(`${draft}.sig`, { force: true });
+  writeFileSync(draft, text);
+  assert.equal(spawnSync('ssh-keygen', ['-Y', 'sign', '-q', '-f', join(D.keys, 'owner'), '-n', 'nawara-core-topology-install', draft], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
+  assert.equal(ns(['sh', '-c', 'mkdir -m 700 "$0" && mkdir -m 700 "$0/incoming"', installState]).code, 0);
+  nsWrite(join(installState, 'incoming', 'manifest'), text);
+  nsWrite(join(installState, 'incoming', 'manifest.sig'), readFileSync(`${draft}.sig`, 'utf8'));
+  return ns([join(tm, 'install-topology-monitor.sh'), 'install']);
+};
 D.latch = join(D.latchDir, 'notification-service.containment');
 const env = {
   BROKER_DIR: D.brokerDir, CORE_NETWORK: `${run}-internal`, RABBITMQ_CONTAINER: `${run}-rabbitmq`, RABBITMQ_VOLUME: `${run}-data`, NOTIFICATION_CONTAINMENT_STATE: D.latch,
@@ -158,6 +180,7 @@ before(async () => {
   }
   assert.equal(spawnSync('unshare', ['-r', 'true']).status, 0, 'unprivileged user namespaces are required');
   for (const d of [D.src, D.units, D.shim, D.ctl]) mkdirSync(d, { recursive: true });
+  chmodSync(D.units, 0o755); // a trusted parent: never group- or other-writable (the installer checks every ancestor)
   // the pass-through docker (transparent unless ctl/fault names one fault), recording the latch at every revocation
   writeFileSync(join(D.shim, 'docker'), [
     '#!/usr/bin/env bash',
@@ -171,14 +194,15 @@ before(async () => {
     `exec ${JSON.stringify(hostDocker)} "$@"`,
     '',
   ].join('\n'), { mode: 0o755 });
-  writeFileSync(join(D.shim, 'systemctl'), `#!/usr/bin/env bash\ncase "$1" in is-active) exit 0 ;; is-failed) exit 1 ;; *) exit 9 ;; esac\n`, { mode: 0o755 });
+  writeFileSync(join(D.shim, 'systemctl'), `#!/usr/bin/env bash\ncase "$1" in is-active) exit 0 ;; is-failed) exit 1 ;; is-enabled) echo disabled; exit 1 ;; *) exit 9 ;; esac\n`, { mode: 0o755 });
   fault('none');
   // the source tree the AUTHENTIC installer installs from: the reviewed scripts with only their locations and broker name re-pinned
   const tm = join(D.src, 'infra/rabbitmq/topology-monitor');
   mkdirSync(tm, { recursive: true });
   for (const f of readdirSync(SRC)) cpSync(join(SRC, f), join(tm, f));
   cpSync(join(root, 'infra/rabbitmq/verify-topology.sh'), join(D.src, 'infra/rabbitmq/verify-topology.sh'));
-  const pins = { INSTALL_DIR: D.install, STATE_DIR: D.state, LATCH: D.latch, INCIDENT_FILE: D.incidentFile, TRUSTED_SIGNERS: D.trusted, BROKER, SAFE_PATH: `${D.shim}:${SYS_PATH}`, SYSTEMCTL: join(D.shim, 'systemctl'), UNIT_DIR: D.units };
+  const pins = { INSTALL_DIR: D.install, STATE_DIR: D.state, LATCH: D.latch, INCIDENT_FILE: D.incidentFile, TRUSTED_SIGNERS: D.trusted, BROKER, SAFE_PATH: `${D.shim}:${SYS_PATH}`, SYSTEMCTL: join(D.shim, 'systemctl'), UNIT_DIR: D.units,
+    INSTALL_STATE: D.installState, INSTALL_TRUST: D.installTrust, TRUST_ROOT: work };
   for (const f of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh']) {
     const text = readFileSync(join(tm, f), 'utf8');
     writeFileSync(join(tm, f), variant(text, Object.fromEntries(Object.entries(pins).filter(([k]) => new RegExp(`^readonly ${k}=`, 'm').test(text)))), { mode: 0o755 });
@@ -188,8 +212,9 @@ before(async () => {
   assert.equal(spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'odbrk2b-r-disposable-owner', '-f', join(D.keys, 'owner')], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
   assert.equal(ns(['mkdir', '-m', '755', D.trust]).code, 0);
   nsWrite(D.trusted, `nawara-core-owner namespaces="nawara-core-topology-recovery" ${readFileSync(join(D.keys, 'owner.pub'), 'utf8').trim().split(' ').slice(0, 2).join(' ')}\n`, '644');
-  // 1. the installation (2b-2's order: install the control, its inactive latch, then provision)
-  const inst = ns([join(tm, 'install-topology-monitor.sh')]);
+  nsWrite(D.installTrust, `nawara-core-owner namespaces="nawara-core-topology-install" ${readFileSync(join(D.keys, 'owner.pub'), 'utf8').trim().split(' ').slice(0, 2).join(' ')}\n`, '644');
+  // 1. the AUTHENTICATED installation (2b-2's order: install the control, its inactive latch, then provision)
+  const inst = authenticatedInstall(D.src, D.installState);
   assert.equal(inst.code, 0, inst.out);
   assert.match(inst.out, /NOT enabled, NOT started/);
   // 2. the broker and the identities, through provision.sh's real gate for notification-service
@@ -418,21 +443,27 @@ t('23: the watchdog on the real installation: ok while the monitor runs, overdue
 
 // ------------------------------------------------------------------------------------------------ installation verification, forced command
 
-t('22: the read-only installation verification passes on the authentic installation, and fails an altered hash or a foreign owner', () => {
-  // a second, UNMODIFIED installation (the reviewed files byte for byte), checked by the real verification script
+t('22: the read-only installation verification passes on the authenticated installation, and fails an altered hash or a foreign owner', () => {
+  // a second installation of the reviewed files (only the installer's and the verifier's locations re-pinned), authenticated by a signed
+  // manifest, checked by the real verification script against that signed record
   const A = { install: join(work, 'A-libexec'), state: join(work, 'A-state'), latchDir: join(work, 'A-latch'), units: join(work, 'A-units'), src: join(work, 'A-src') };
   A.latch = join(A.latchDir, 'notification-service.containment');
   mkdirSync(A.units);
+  chmodSync(A.units, 0o755);
   const tm = join(A.src, 'infra/rabbitmq/topology-monitor');
   mkdirSync(tm, { recursive: true });
   for (const f of readdirSync(SRC)) cpSync(join(SRC, f), join(tm, f));
   cpSync(join(root, 'infra/rabbitmq/verify-topology.sh'), join(A.src, 'infra/rabbitmq/verify-topology.sh'));
   const installer = join(tm, 'install-topology-monitor.sh');
   A.incidentFile = join(A.latchDir, 'notification-service.incident');
-  writeFileSync(installer, variant(readFileSync(installer, 'utf8'), { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, INCIDENT_FILE: A.incidentFile, UNIT_DIR: A.units }));
-  assert.equal(ns(['bash', installer]).code, 0);
-  const checker = join(work, 'verify-install.sh');
-  writeFileSync(checker, variant(readFileSync(join(SRC, 'verify-topology-monitor-install.sh'), 'utf8'), { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, INCIDENT_FILE: A.incidentFile, TRUSTED_SIGNERS: D.trusted, UNIT_DIR: A.units, TRUST_ROOT: work }), { mode: 0o755 });
+  A.installState = join(work, 'A-install-state');
+  const common = { INSTALL_DIR: A.install, STATE_DIR: A.state, LATCH: A.latch, INCIDENT_FILE: A.incidentFile, UNIT_DIR: A.units, INSTALL_STATE: A.installState, INSTALL_TRUST: D.installTrust, TRUST_ROOT: work };
+  writeFileSync(installer, variant(readFileSync(installer, 'utf8'), common), { mode: 0o755 });
+  const checker = join(tm, 'verify-topology-monitor-install.sh');
+  writeFileSync(checker, variant(readFileSync(checker, 'utf8'), { ...common, TRUSTED_SIGNERS: D.trusted, SYSTEMCTL: join(D.shim, 'systemctl'), SUDOERS: join(work, 'A-sudoers'), SUDOERS_DIR: join(work, 'A-sudoers.d'),
+    TRIGGER_SUDOERS: join(work, 'A-sudoers.d', 'nawara-core-topology-trigger'), UNIT_SEARCH: A.units }), { mode: 0o755 });
+  const inst = authenticatedInstall(A.src, A.installState);
+  assert.equal(inst.code, 0, inst.out);
   const check = () => ns(['bash', checker]);
   let r = check();
   assert.equal(r.code, 0, r.out);
@@ -442,13 +473,13 @@ t('22: the read-only installation verification passes on the authentic installat
   assert.equal(ns(['sh', '-c', `chmod 755 "$0" && printf '\\n# altered\\n' >> "$0" && chmod 555 "$0"`, entry]).code, 0);
   r = check();
   assert.equal(r.code, 1);
-  assert.match(r.out, /FAIL {2}sha256: .*verify-and-contain\.sh/);
+  assert.match(r.out, /FAIL +artifact verify-and-contain\.sh \(hash_mismatch\)/);
   // a file owned by another user (the host's real root is not root inside the namespace: it shows as the overflow uid)
   assert.equal(ns(['rm', '-f', join(A.install, 'topology-trigger.sh')]).code, 0);
   docker('run', '--rm', '-v', `${A.install}:/w`, '--entrypoint', 'sh', IMAGE, '-c', 'printf x > /w/topology-trigger.sh && chmod 555 /w/topology-trigger.sh');
   r = check();
   assert.equal(r.code, 1);
-  assert.match(r.out, /FAIL {2}mode: .*topology-trigger\.sh must be a file \(no symbolic link\) owned by 0:0/);
+  assert.match(r.out, /FAIL +artifact topology-trigger\.sh \(mode_or_owner\): .* owned by 0:0/);
 });
 
 const freePort = () => new Promise((res) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
