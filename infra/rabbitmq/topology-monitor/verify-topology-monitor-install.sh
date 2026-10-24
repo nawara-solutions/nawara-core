@@ -20,15 +20,17 @@ export PATH
 readonly INSTALL_DIR='/usr/local/libexec/nawara-core-topology'
 readonly STATE_DIR='/var/lib/nawara-core-topology-monitor'
 readonly LATCH='/var/lib/nawara-core-topology/notification-service.containment'
+readonly INCIDENT_FILE='/var/lib/nawara-core-topology/notification-service.incident'
+readonly TRUSTED_SIGNERS='/etc/nawara-core-topology/recovery-allowed-signers'
 readonly UNIT_DIR='/etc/systemd/system'
 readonly OWNER_UID=0
 readonly OWNER_GID=0
 readonly RUN_AS_UID=0
 readonly TRUST_ROOT='/'
-readonly SHA_VERIFY_AND_CONTAIN='e08dfd7cd00f4bd4e3aefead3c3340fe6446703de60d1214b8c59b70b0f59fd5'
-readonly SHA_TOPOLOGY_WATCHDOG='0a463da60b95f5f53f55b574ce96357d3b8e5518543c334c480553bef7518f59'
+readonly SHA_VERIFY_AND_CONTAIN='169d6015d6a387ab1b6ac9b219ec47f4d1f847b5d7600b13fc7233eb4d190a4a'
+readonly SHA_TOPOLOGY_WATCHDOG='341c8a88be3bcd9fa177fde762b2de2b935f2bb1aaa430e47d026e0867911daf'
 readonly SHA_TOPOLOGY_TRIGGER='a7ea87198477cbe072e06f6a2f021de358ae67ff5596a0eac339ffa310c7617f'
-readonly SHA_RECOVER_NOTIFICATION_TOPOLOGY='8b87793fee10e6f5bea0e3c7ed9000aa6d561d49aa18d7c69a473c34b5fbf491'
+readonly SHA_RECOVER_NOTIFICATION_TOPOLOGY='c304a01dea6e28d6bf9242acefc39538b286311768445adc13bad2ee727123d2'
 readonly SHA_VERIFY_TOPOLOGY='b3bcc7f2f69f9bcf7ef2ee5a8877714169dcdc364d42c893b85f6f1e49548c9f'
 readonly SHA_MONITOR_SERVICE='858e8f5d171fd641ee06d96c98d8adccfbc5043bd35e469f496160c050c6b8ad'
 readonly SHA_MONITOR_TIMER='9d6deb45a6255bd62cb79c7d45aee97822898f2eb252e5a7b830d942b2bc4978'
@@ -36,13 +38,15 @@ readonly SHA_WATCHDOG_SERVICE='00f558d1583266254a25eabbdf45a9f0144eed885b35e297c
 readonly SHA_WATCHDOG_TIMER='1e5f9b4e26f5c535aa02698c2347274c06e2b7d299a8aaf0479e49b3b3970a4e'
 readonly LATCH_INACTIVE=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=inactive'
 readonly LATCH_CONTAINED=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=contained'
-readonly STATE_RE=$'^nawara-core-topology-monitor-state v1\nservice=notification-service\ncontained=([01])\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
+readonly STATE_RE=$'^nawara-core-topology-monitor-state v2\nservice=notification-service\ncontained=([01])\nincident=(none|[0-9a-f]{32})\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
+readonly INCIDENT_RE=$'^nawara-core-topology-incident v1\nservice=notification-service\nincident=(none|[0-9a-f]{32})$'
+readonly SIGNER_RE='^nawara-core-owner namespaces="nawara-core-topology-recovery" (ssh-ed25519|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/]{40,400}={0,2}$'
 readonly MARKER_RE='^nawara-core-topology-monitor installed v1 at=[0-9]{1,12}$'
 
 usage() { printf '[verify-topology-monitor] REFUSED: %s\nusage: verify-topology-monitor-install.sh\n' "$*" >&2; exit 2; }
 [ "$#" -eq 0 ] || usage "takes no argument"
 [ "$EUID" -eq "$RUN_AS_UID" ] || usage "run as root at the console (it reads the root-only state)"
-for c in stat sha256sum readlink find sort head dirname tr; do command -v "$c" >/dev/null 2>&1 || usage "$c is required; nothing was checked"; done
+for c in stat sha256sum readlink find sort head dirname tr grep cut; do command -v "$c" >/dev/null 2>&1 || usage "$c is required; nothing was checked"; done
 
 FAILED=0
 CHECKS=0
@@ -111,7 +115,7 @@ else
   fail "state: the installation marker is missing or invalid"
 fi
 if [ -f "$STATE_DIR/state" ] && [ ! -L "$STATE_DIR/state" ] && [[ $(head -c 4096 -- "$STATE_DIR/state") =~ $STATE_RE ]]; then
-  ok "state: valid (contained=${BASH_REMATCH[1]}, unknown_streak=${BASH_REMATCH[2]}, last_result=${BASH_REMATCH[3]})"
+  ok "state: valid (contained=${BASH_REMATCH[1]}, incident=${BASH_REMATCH[2]}, unknown_streak=${BASH_REMATCH[3]}, last_result=${BASH_REMATCH[4]})"
 else
   fail "state: missing or invalid"
 fi
@@ -126,6 +130,26 @@ if [ -f "$LATCH" ] && [ ! -L "$LATCH" ]; then
     "$LATCH_CONTAINED") ok "latch: valid, state=contained"; info "Notification is CONTAINED: only the Owner-authorized recovery clears it (runbook §5)" ;;
     *) fail "latch: malformed (it would refuse every grant)" ;;
   esac
+fi
+
+exact "$INCIDENT_FILE" f 644
+if [ -f "$INCIDENT_FILE" ] && [ ! -L "$INCIDENT_FILE" ] && [[ $(head -c 256 -- "$INCIDENT_FILE") =~ $INCIDENT_RE ]]; then ok "incident binding: valid (incident=${BASH_REMATCH[1]})"
+else fail "incident binding: missing or invalid"; fi
+exact "$STATE_DIR/recovery" d 700
+
+# 3b. The trusted recovery key: installed by a separate key-lifecycle operation; when present it must be exactly one restricted line.
+if [ -e "$TRUSTED_SIGNERS" ] || [ -L "$TRUSTED_SIGNERS" ]; then
+  ancestors "$(dirname -- "$TRUSTED_SIGNERS")"
+  exact "$TRUSTED_SIGNERS" f 644
+  keyline=$(grep -vE '^[[:space:]]*(#|$)' -- "$TRUSTED_SIGNERS" 2>/dev/null || true)
+  if [ "$(printf '%s\n' "$keyline" | grep -c '')" -eq 1 ] && [[ $keyline =~ $SIGNER_RE ]]; then
+    ok "trusted key: exactly one line for nawara-core-owner, restricted to nawara-core-topology-recovery"
+    info "trusted key fingerprint: $(printf '%s\n' "$keyline" | cut -d' ' -f3- | ssh-keygen -l -f - 2>/dev/null | cut -d' ' -f2 || echo unknown) (compare it off the server with the Owner's key)"
+  else
+    fail "trusted key: must be exactly one line 'nawara-core-owner namespaces=\"nawara-core-topology-recovery\" <ssh-ed25519 key>'"
+  fi
+else
+  info "trusted key: not installed (recovery is impossible until the separately authorized key-lifecycle operation)"
 fi
 
 # 4. The units: present, root-owned 0644, the reviewed content (enabling them is a separate, authorized step).

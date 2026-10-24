@@ -3828,3 +3828,31 @@ test('Core V2 OD-BRK-2b-1: the topology monitor pins the verifier, the grant and
   const { [TOPOLOGY_MONITOR_FILES[0]]: _gone, ...fewer } = files;
   assert.match(checkTopologyMonitor({ ...base, files: fewer }).join(), /verify-and-contain\.sh: missing/);
 });
+
+test('Core V2 OD-BRK-2b-R: the recovery is signed, incident-bound, unexpired and single-use; incidents come first and from /dev/urandom', async () => {
+  const { checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, PROVISION_SCRIPT, TOPOLOGY_VERIFIER } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const files = Object.fromEntries(TOPOLOGY_MONITOR_FILES.map((n) => [n, read(`${TOPOLOGY_MONITOR_DIR}/${n}`)]));
+  const base = { files, verifier: read(TOPOLOGY_VERIFIER), provision: read(PROVISION_SCRIPT), workflows: {} };
+  assert.deepEqual(checkTopologyMonitor(base), []);
+  const mutate = (file, from, to) => {
+    assert.ok(files[file].includes(from), `fixture drifted: ${file}: ${from}`);
+    return checkTopologyMonitor({ ...base, files: { ...files, [file]: files[file].replace(from, to) } }).join('\n');
+  };
+  const R = 'recover-notification-topology.sh';
+  assert.match(mutate(R, 'verdict=$(env -i PATH="$SAFE_PATH" timeout 10 ssh-keygen -Y verify -f "$TRUSTED_SIGNERS" -I "$PRINCIPAL" -n "$NAMESPACE" -s "$WORK/authorization.sig" <"$WORK/authorization" 2>/dev/null)', 'verdict=$(echo Good)'), /verified with ssh-keygen -Y verify/);
+  assert.match(mutate(R, `readonly SIGNER_RE='^nawara-core-owner namespaces=`, `readonly SIGNER_RE='^[a-z*-]+ namespaces=`), /exactly one line for the exact principal/);
+  assert.match(mutate(R, "readonly PRINCIPAL='nawara-core-owner'", "readonly PRINCIPAL='*'"), /PRINCIPAL must be nawara-core-owner/);
+  assert.match(mutate(R, "readonly NAMESPACE='nawara-core-topology-recovery'", "readonly NAMESPACE='file'"), /NAMESPACE must be/);
+  assert.match(mutate(R, 'readonly MAX_VALIDITY=3600', 'readonly MAX_VALIDITY=86400'), /MAX_VALIDITY must be at most 3600/);
+  assert.match(mutate(R, '[ "$A_INCIDENT" = "$INCIDENT" ] || stop authorization_incident', ': || stop authorization_incident'), /name the current incident/);
+  assert.match(mutate(R, '[ "$NOW" -le "$A_NOT_AFTER" ] || stop authorization_expired', ': || stop authorization_expired'), /unexpired/);
+  assert.match(mutate(R, '! grep -qF " nonce=$A_NONCE " -- "$CONSUMED" || stop authorization_replay', ': || stop authorization_replay'), /consumed nonce is refused/);
+  assert.match(mutate(R, '[ "$#" -eq 0 ] || usage ', '[ "$#" -le 1 ] || usage '), /takes no argument/);
+  assert.match(mutate(R, 'log() {', 'IFS= read -r typed; log() {'), /no typed-reference authorization/);
+  const M = 'verify-and-contain.sh';
+  assert.match(mutate(M, '  if [ "$ST_INCIDENT" = none ]; then\n    ST_INCIDENT=$(new_incident)', '  if true; then\n    ST_INCIDENT=$(new_incident)'), /incident only when there is none/);
+  assert.match(mutate(M, '  persist_incident || log', '  : || log'), /state, incident binding, then latch/);
+  assert.match(mutate(M, 'head -c 16 /dev/urandom', 'date +%s%N | head -c 16'), /from \/dev\/urandom/);
+  assert.match(mutate(M, "readonly INCIDENT_FILE='/var/lib/nawara-core-topology/notification-service.incident'", "readonly INCIDENT_FILE='/tmp/incident'"), /INCIDENT_FILE must be/);
+});

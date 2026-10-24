@@ -22,8 +22,10 @@ Files (all root-owned, from `infra/rabbitmq/topology-monitor/`):
 | Path | Mode | Content |
 |---|---|---|
 | `/usr/local/libexec/nawara-core-topology/` | 0755 | the four scripts (0555) and the pinned `verify-topology.sh` (0444) |
-| `/var/lib/nawara-core-topology-monitor/` | 0700 | `installed`, `state`, `lock`, `evidence.jsonl`, `alerts.jsonl`, `watchdog`, `watchdog.jsonl` |
+| `/var/lib/nawara-core-topology-monitor/` | 0700 | `installed`, `state` (v2: with the incident), `lock`, `evidence.jsonl`, `alerts.jsonl`, `incidents.jsonl`, `recovery-consumed`, `watchdog`, `watchdog.jsonl`, the `recovery/` inbox (0700) |
 | `/var/lib/nawara-core-topology/notification-service.containment` | 0644 (dir 0755) | the OD-BRK-2a latch, read by provisioning |
+| `/var/lib/nawara-core-topology/notification-service.incident` | 0644 | the current incident, bound next to the latch (OD-BRK-2b-R) |
+| `/etc/nawara-core-topology/recovery-allowed-signers` | 0644 (dir 0755) | the Owner's public key: installed by a separate key-lifecycle operation (§5) |
 | `/etc/systemd/system/nawara-core-topology-{monitor,watchdog}.{service,timer}` | 0644 | the units |
 
 The monitor runs as root because it administers the broker through `docker exec … rabbitmqctl` (the same protected broker-local path as
@@ -90,18 +92,108 @@ Response policy: evidence and alerts only. It never contains, grants or restarts
 monitor, so a dead host or a stopped systemd silences both. Covering that needs an **external heartbeat** (a dead-man's switch, as the
 A5-R3 carrier uses for Auth): a pending dependency. Whether a silent monitor should cause autonomous containment is an Owner decision.
 
-## 5. Recovery (the contract; Owner-authorized, never automatic)
+## 5. Recovery (Owner-signed, incident-bound, single use; never automatic)
 
-`recover-notification-topology.sh <authorization-reference>`, as root at an interactive terminal, under the monitor's lock. It clears
-the latch, and only the latch, when: the installation and the verifier pin are intact; the state says contained and the latch is
-contained; two read-backs show no grant and no connection; a fresh verification finds exactly one non-passing check (L1
-`latch_contained`); and the operator types `RECOVER notification-service <reference>`. It then verifies again with the latch cleared
-(or puts it back), resets the state and records the reference. **It never grants**: Notification is granted again only by protected
-provisioning, whose pre-grant and post-grant gates run again. No replay, no queue deletion, no data change.
+**OD-BRK-2b-R.** Recovery needs **proof** of the Owner's approval, not a reference: an OpenSSH signature (`ssh-keygen -Y sign`) by the
+Owner's key over a canonical authorization that names the current incident. The host holds only the public key, so the approval can be
+checked independently by anyone with that key. A reference alone (the `reason` field) proves nothing.
 
-Restarting a container, a PASS or an ordinary provisioning run never recovers (provisioning refuses while the latch is contained).
-**Open decision:** how the Owner's recovery authorization is issued and verified (the reference is recorded, not cryptographically
-checked).
+### Incidents
+
+A new containment creates an incident id: 128 bits from `/dev/urandom`, never one already recorded in `incidents.jsonl`. It is written
+to the state (`incident=`) before anything else, and bound next to the latch
+(`/var/lib/nawara-core-topology/notification-service.incident`), then the latch and the broker change follow. Every later run and every
+retry keeps the same id. A binding altered by hand is put back from the state (and alerted). Only a signed recovery ends an incident. A
+later containment always gets a **new** id, so no authorization ever applies to two incidents. A legacy (v1, OD-BRK-2b-1) contained state
+has no incident: the monitor gives it a fresh one and keeps it contained. Nothing earlier is ever taken as approved.
+
+### The authorization
+
+The canonical text, exactly these nine lines in this order, LF line ends and one final LF, at most 1024 bytes:
+
+```
+nawara-core-topology-recovery-authorization v1
+operation=notification.topology_recovery
+service=notification-service
+vhost=nawara-core
+incident=<the current incident: 32 lowercase hex>
+nonce=<32 lowercase hex, fresh for every authorization>
+issued_at=<unix seconds>
+not_after=<unix seconds, at most 3600 after issued_at>
+reason=<an operational reference, [A-Za-z0-9][A-Za-z0-9._-]{0,63}>
+```
+
+It is signed **off the host** by the Owner:
+`ssh-keygen -Y sign -f <owner key> -n nawara-core-topology-recovery authorization`.
+
+The Owner (or an operator acting on the Owner's signed file) places both files root-owned (0600) in
+`/var/lib/nawara-core-topology-monitor/recovery/` (`authorization` and `authorization.sig`). Then they run
+`recover-notification-topology.sh`, as root. It takes no argument.
+
+### What the guard verifies (every failure leaves the containment in place; no fallback)
+
+1. Under the monitor's own lock:
+   - the installation and the verifier pin are intact;
+   - the v2 state says contained, with an incident;
+   - the latch is contained, and its incident binding equals the state's;
+   - the containment holds: two read-backs show no grant, no topic grant and no connection.
+2. The trusted key is exactly one line, `nawara-core-owner namespaces="nawara-core-topology-recovery" <ssh-ed25519 key>`, root-owned, not
+   writable by group or others, and no symbolic link. A wildcard or another principal, another namespace, an option or a second key is
+   refused. `ssh-keygen -Y verify` itself accepts a wildcard principal, so the guard checks the file's structure first.
+3. Private, root-owned copies of both files are checked, so there is no substitution after the check:
+   - the text is exactly canonical: a duplicate, unknown, reordered or re-encoded field, CRLF, a trailing space, a NUL byte, or a missing
+     final newline is refused;
+   - an unsupported version is refused;
+   - the signature is one armored OpenSSH signature;
+   - `ssh-keygen -Y verify -f <trusted key> -I nawara-core-owner -n nawara-core-topology-recovery` answers `Good`.
+4. Its binding:
+   - this operation, service and vhost;
+   - the **current** incident;
+   - `issued_at` no later than 120 s from now, not expired, and a validity window of at most 3600 s;
+   - a nonce never consumed.
+5. A fresh verification (the OD-BRK-2a verifier, pre-grant) whose only non-passing check is L1 `latch_contained`.
+
+### Single use and crash safety
+
+The nonce is appended to `recovery-consumed` and flushed **before** anything changes. A consumed nonce is refused for ever.
+
+The guard then:
+1. records the decision;
+2. clears the state, then the latch, then the binding;
+3. verifies again;
+4. on any doubt, contains the **same** incident again. The authorization stays consumed: a new one is needed.
+
+What a crash leaves:
+
+| Crash point | What it leaves |
+|---|---|
+| Before the consumption | Nothing changed. The same authorization can be used. |
+| After the consumption | Still contained. The authorization can never be reused, so a new one is needed. |
+| Between clearing the state and the latch | A contained latch. The next monitor run contains again as a **new** incident. |
+
+Two simultaneous recoveries are serialized by the lock: exactly one succeeds.
+
+The guard **never grants**. Notification is granted again only by protected provisioning, whose pre-grant and post-grant gates run
+again. No replay, no queue deletion and no data change happen. Restarting a container, a PASS or an ordinary provisioning run never
+recovers: provisioning refuses while the latch is contained.
+
+### Signing-key lifecycle (each step a separately authorized operation; none is performed by this repository)
+
+- **The private key** stays with the Owner, off the host: on a hardware token (`sk-ssh-ed25519@openssh.com`, preferred) or an encrypted
+  key on an Owner device. It is **never** placed in Git, CI, an image, the production host or any configuration. The test keys of the
+  certification are disposable and exist only in a test run's own directory.
+- **Installing the public key:** `/etc/nawara-core-topology/recovery-allowed-signers` (root:root 0644, directory 0755), exactly one line
+  as above. It is installed at the console. Its SHA-256 fingerprint (printed by `verify-topology-monitor-install.sh`) is compared off
+  the host with the Owner's key.
+- **Rotation:** sign nothing with the old key; replace the one line under a separate authorization, then verify the new fingerprint.
+  Authorizations by the old key stop verifying at once.
+- **Revocation or compromise:** remove the line (recovery is then impossible) or replace it with a new key. A compromised key also needs
+  the incident review, because every authorization it signed is bound to one incident, expires within an hour, and is single use.
+- **Lost key:** recovery is impossible until a new public key is installed by a separately authorized key-lifecycle operation. There is
+  no fallback.
+- **Expired authorizations** are refused. Sign a new one with a fresh nonce.
+- **Pinning and substitution:** the guard's paths, principal and namespace are pinned, and checked by `check:repo`. The trusted key, the
+  inbox and its files must be regular, root-owned, not group- or other-writable, and no symbolic links.
 
 ## 6. Evidence and alerts
 
