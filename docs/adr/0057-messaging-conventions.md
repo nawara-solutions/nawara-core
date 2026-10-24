@@ -311,6 +311,9 @@ requeue (above). The route exists only for broker-driven dead-lettering.
       **OD-BRK-2b-R** (Owner-approved Option B, 2026-10-24) makes recovery require proof of approval: every containment gets an
       unpredictable incident id, and recovery needs an OpenSSH signature by the Owner's key over a canonical authorization bound to that
       incident, the service, the vhost and the operation, valid for at most an hour and consumed once. It never grants.
+      **OD-BRK-2b-I** authenticates the installation: an Owner-signed manifest (generated off the server from the approved commit)
+      is the only authority for the installed artifacts; upgrades are monotonic, transactional, repairable and never touch the
+      containment state, the nonce ledger, the latch or the trust keys.
     - *Runtime rules (Owner-approved for OD-BRK-2b, 2026-10-24; operational source: the runbook):* a server-side check every
       5 minutes, plus after authorized topology changes; FAIL contains immediately; UNKNOWN alerts on the first, escalates on the
       second and contains on the third consecutive result; containment revokes Notification's permissions and closes its

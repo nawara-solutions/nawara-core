@@ -3206,13 +3206,16 @@ const TOPOLOGY_MONITOR_LOCATIONS = {
   // OD-BRK-2b-R: the incident binding next to the latch, and the signed recovery's trust anchor and binding
   INCIDENT_FILE: '/var/lib/nawara-core-topology/notification-service.incident', TRUSTED_SIGNERS: '/etc/nawara-core-topology/recovery-allowed-signers',
   PRINCIPAL: 'nawara-core-owner', NAMESPACE: 'nawara-core-topology-recovery', OPERATION: 'notification.topology_recovery',
+  // OD-BRK-2b-I: the authenticated installation (its own state, its own trust key and namespace)
+  INSTALL_STATE: '/var/lib/nawara-core-topology-install', INSTALL_TRUST: '/etc/nawara-core-topology/install-allowed-signers', INSTALL_NAMESPACE: 'nawara-core-topology-install',
+  STATE_SCHEMA: '2',
 };
-const TOPOLOGY_MONITOR_INSTALL_PINS = {
-  SHA_VERIFY_AND_CONTAIN: 'verify-and-contain.sh', SHA_TOPOLOGY_WATCHDOG: 'topology-watchdog.sh', SHA_TOPOLOGY_TRIGGER: 'topology-trigger.sh',
-  SHA_RECOVER_NOTIFICATION_TOPOLOGY: 'recover-notification-topology.sh', SHA_VERIFY_TOPOLOGY: '../verify-topology.sh',
-  SHA_MONITOR_SERVICE: 'nawara-core-topology-monitor.service', SHA_MONITOR_TIMER: 'nawara-core-topology-monitor.timer',
-  SHA_WATCHDOG_SERVICE: 'nawara-core-topology-watchdog.service', SHA_WATCHDOG_TIMER: 'nawara-core-topology-watchdog.timer',
-};
+/** OD-BRK-2b-I: the artifacts a signed manifest lists, in its fixed order (the installer, the verifier and the generator agree). */
+export const TOPOLOGY_MONITOR_ARTIFACTS = [
+  'verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh',
+  'verify-topology-monitor-install.sh', 'verify-topology.sh', 'nawara-core-topology-monitor.service', 'nawara-core-topology-monitor.timer',
+  'nawara-core-topology-watchdog.service', 'nawara-core-topology-watchdog.timer',
+];
 const pinOf = (text, name) => text?.match(new RegExp(`^readonly ${name}=(?:'([^']*)'|(\\S+))$`, 'm'))?.slice(1).find((v) => v !== undefined);
 
 /**
@@ -3254,11 +3257,35 @@ export function checkTopologyMonitor({ files = {}, verifier, provision, workflow
     if (!grant || pinOf(files[n], 'TOPIC_WRITE') !== grant[1] || pinOf(files[n], 'TOPIC_READ') !== grant[2]) problems.push(`${at(n)}: TOPIC_WRITE / TOPIC_READ must equal notification-service's generated grant in ${PROVISION_SCRIPT}; ${why}`);
   }
   if (!/^\s*notification-service\) isolated_consumer notification\.events ;;$/m.test(provision)) problems.push(`${PROVISION_SCRIPT}: notification-service must keep the isolated_consumer role the monitor pins; ${why}`);
-  // the installation verifier pins every installed file
-  for (const [name, file] of Object.entries(TOPOLOGY_MONITOR_INSTALL_PINS)) {
-    const want = file === '../verify-topology.sh' ? verifierSha : sha(files[file]);
-    if (pinOf(files['verify-topology-monitor-install.sh'], name) !== want) problems.push(`${at('verify-topology-monitor-install.sh')}: ${name} must equal the SHA-256 of ${file === '../verify-topology.sh' ? TOPOLOGY_VERIFIER : at(file)} (${want}); ${why}`);
+  // OD-BRK-2b-I: the installation is authenticated by an Owner-signed manifest, never by hashes kept on the server
+  const inst = files['install-topology-monitor.sh'];
+  const instCode = inst.replace(/^\s*#.*$/gm, '');
+  const ver = files['verify-topology-monitor-install.sh'];
+  const verCode = ver.replace(/(^|\s)#(\s.*)?$/gm, ''); // full-line and inline comments
+  const artifactOrder = `${pinOf(inst, 'SCRIPTS')} verify-topology.sh ${pinOf(inst, 'UNITS')}`.split(' ');
+  if (artifactOrder.join(' ') !== TOPOLOGY_MONITOR_ARTIFACTS.join(' ') || !inst.includes('ARTIFACTS="$SCRIPTS verify-topology.sh $UNITS"')) problems.push(`${at('install-topology-monitor.sh')}: the manifest's artifacts are exactly ${TOPOLOGY_MONITOR_ARTIFACTS.join(', ')}, in this order; ${why}`);
+  if (pinOf(ver, 'SCRIPTS') !== pinOf(inst, 'SCRIPTS') || pinOf(ver, 'UNITS') !== pinOf(inst, 'UNITS')) problems.push(`${at('verify-topology-monitor-install.sh')}: SCRIPTS and UNITS must equal the installer's; ${why}`);
+  if (/^readonly SHA_[A-Z_]+=/m.test(ver)) problems.push(`${at('verify-topology-monitor-install.sh')}: no hash pinned on the server: the installed record signed by the Owner is the only authority; ${why}`);
+  // the MANIFEST itself (not only some other document) is verified against the installation trust key, principal and namespace
+  for (const [n, code, cmd] of [
+    ['install-topology-monitor.sh', instCode, 'ssh-keygen -Y verify -f "$INSTALL_TRUST" -I "$PRINCIPAL" -n "$INSTALL_NAMESPACE" -s "$dir/manifest.sig" <"$dir/manifest"'],
+    ['verify-topology-monitor-install.sh', verCode, 'ssh-keygen -Y verify -f "$INSTALL_TRUST" -I "$PRINCIPAL" -n "$INSTALL_NAMESPACE" -s "$INSTALL_STATE/installed/manifest.sig" <"$INSTALL_STATE/installed/manifest"'],
+  ]) {
+    if (!code.includes(cmd)) problems.push(`${at(n)}: the manifest is verified with ssh-keygen -Y verify against the installation trust key, principal and namespace; ${why}`);
   }
+  if (pinOf(inst, 'SIGNER_RE') !== '^nawara-core-owner namespaces="nawara-core-topology-install" (ssh-ed25519|sk-ssh-ed25519@openssh\\.com) [A-Za-z0-9+/]{40,400}={0,2}$') problems.push(`${at('install-topology-monitor.sh')}: the installation trust key must be exactly one line for the exact principal, restricted to the installation namespace; ${why}`);
+  if (!instCode.includes('[ "$M_VERSION" -gt "$CUR_VERSION" ] || refuse downgrade')) problems.push(`${at('install-topology-monitor.sh')}: an upgrade needs a strictly higher, signed version (no silent downgrade); ${why}`);
+  const mk = instCode.lastIndexOf('mkdir -m 700 -- "$TXN"'); const staged = instCode.indexOf('txn_phase staged', mk); const applyAt = instCode.indexOf('apply_artifacts', staged);
+  if (mk < 0 || !(mk < staged && staged < applyAt) || /apply_artifacts|install -o|fresh_operational_state/.test(instCode.slice(instCode.lastIndexOf('stage "$TMPM"'), staged))) problems.push(`${at('install-topology-monitor.sh')}: the transaction is recorded before any artifact is applied; ${why}`);
+  for (const needle of ['if absent "$STATE_DIR/state"; then', 'if absent "$LATCH"; then', 'if absent "$INCIDENT_FILE"; then']) {
+    if (!instCode.includes(needle)) problems.push(`${at('install-topology-monitor.sh')}: protected state is created only when absent, never replaced (${needle}); ${why}`);
+  }
+  if (/recovery-consumed|incidents\.jsonl|TRUSTED_SIGNERS|recovery-allowed-signers/.test(instCode)) problems.push(`${at('install-topology-monitor.sh')}: the installer never touches the nonce ledger, the incident history or the recovery trust key; ${why}`);
+  if (/\bsystemctl\b/.test(instCode)) problems.push(`${at('install-topology-monitor.sh')}: the installer never enables, starts or reloads a unit; ${why}`);
+  const verForbidden = /(^|[;&|(\s])(rm|mv|cp|ln|mkdir|rmdir|touch|chmod|chown|chgrp|install|tee|truncate|dd|sed\s+-i|docker|service|curl|wget|nc|scp|sftp|rsync|eval|source|sudo|su|crontab)(?=\s|$)/m.exec(verCode);
+  if (verForbidden) problems.push(`${at('verify-topology-monitor-install.sh')}: must stay read-only (found "${verForbidden[2]}"); ${why}`);
+  if (/(^|[^0-9&])>{1,2}[ \t]*[^ \t\n&(/]/.test(verCode.replace(/[0-9]?>\s*\/dev\/null|[0-9]?>&[0-9]/g, '').replace(/'[^'\n]*'|"[^"\n]*"/g, 'S'))) problems.push(`${at('verify-topology-monitor-install.sh')}: must write no file; ${why}`);
+  if (!/"\$SYSTEMCTL" is-enabled/.test(verCode) || /"\$SYSTEMCTL" (enable|start|stop|disable|daemon-reload|restart|mask|unmask)/.test(verCode)) problems.push(`${at('verify-topology-monitor-install.sh')}: may only read units' enablement (never change it); ${why}`);
   // the containment sequence and the state machine
   const m = files['verify-and-contain.sh'];
   const contain = m.slice(m.indexOf('contain() { # contain <reason>'), m.indexOf('\n}\n', m.indexOf('contain() { # contain <reason>')));

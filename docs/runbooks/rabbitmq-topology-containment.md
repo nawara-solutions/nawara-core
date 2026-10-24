@@ -21,7 +21,9 @@ Files (all root-owned, from `infra/rabbitmq/topology-monitor/`):
 
 | Path | Mode | Content |
 |---|---|---|
-| `/usr/local/libexec/nawara-core-topology/` | 0755 | the four scripts (0555) and the pinned `verify-topology.sh` (0444) |
+| `/usr/local/libexec/nawara-core-topology/` | 0755 | the six scripts (0555) and the pinned `verify-topology.sh` (0444) |
+| `/var/lib/nawara-core-topology-install/` | 0700 | `incoming/`, the signed `installed/` record, `history.jsonl`, an open `transaction/` (OD-BRK-2b-I) |
+| `/etc/nawara-core-topology/install-allowed-signers` | 0644 | the Owner's installation key (separate from the recovery key) |
 | `/var/lib/nawara-core-topology-monitor/` | 0700 | `installed`, `state` (v2: with the incident), `lock`, `evidence.jsonl`, `alerts.jsonl`, `incidents.jsonl`, `recovery-consumed`, `watchdog`, `watchdog.jsonl`, the `recovery/` inbox (0700) |
 | `/var/lib/nawara-core-topology/notification-service.containment` | 0644 (dir 0755) | the OD-BRK-2a latch, read by provisioning |
 | `/var/lib/nawara-core-topology/notification-service.incident` | 0644 | the current incident, bound next to the latch (OD-BRK-2b-R) |
@@ -61,16 +63,99 @@ Only then is the result **CONTAINED** (exit 20). Otherwise, after at most 3 boun
 unit fails, a critical alert is queued every run, and the next run retries). A command's exit status is never taken as proof. While
 contained, each run re-applies and re-confirms the containment and consults no verification: a PASS restores nothing.
 
-## 2. Installation (OD-BRK-2b-2; not authorized here)
+## 2. Installation, upgrade, rollback and repair (OD-BRK-2b-I; executing any of it is OD-BRK-2b-2, not authorized here)
 
-As root at the console, from a checkout of the reviewed revision:
+### Trust model
 
-1. `infra/rabbitmq/topology-monitor/install-topology-monitor.sh`: fresh only (it refuses if any target exists, so it never overwrites a
-   state or a latch); it installs the files above, the initial state and the latch `state=inactive`, and copies the units **without**
-   enabling or starting them.
-2. `infra/rabbitmq/topology-monitor/verify-topology-monitor-install.sh`: read-only; every hash against its pin, owners, modes, the
-   state and the latch. **STOP** on any FAIL.
-3. The separately authorized enablement: `systemctl daemon-reload`, then the two timers.
+The authority for what may be installed is an **Owner-signed manifest**, never the server's checkout. A hash alone does not prove who
+approved anything; the signature does.
+
+- **The manifest** is generated **off the server**, on a trusted machine at the approved commit, from that commit's Git objects:
+  `node scripts/topology-monitor-manifest.mjs --commit <40-hex commit> --version <n>`. It lists exactly, in a fixed order:
+  - the schema `v1`;
+  - `core_commit`;
+  - a monotonic package `version`;
+  - the `state_schema`, which is the contract version (2: incident-bound state);
+  - the SHA-256 of all 11 artifacts.
+
+  It holds no secret.
+- **Signing:** the Owner reviews the manifest and signs it off the server:
+  `ssh-keygen -Y sign -f <owner key> -n nawara-core-topology-install manifest`.
+- **The installation trust anchor:** `/etc/nawara-core-topology/install-allowed-signers` (root 0644, directory 0755), exactly one line,
+  `nawara-core-owner namespaces="nawara-core-topology-install" <ssh-ed25519 key>`. The Owner installs it at the console from an
+  authenticated channel, and compares its fingerprint off the server. It is separate from the recovery key (§5): a recovery signature
+  can never install anything, and an installation signature can never recover.
+- **The checkout is only a source of bytes.** Every artifact must equal its signed hash. Each is copied into a private staging area
+  first, and nothing is read from the checkout after that.
+- **The installer's own integrity:** before running the installer, the Owner checks with system tools that the installer itself is the
+  approved one:
+  1. `ssh-keygen -Y verify -f /etc/nawara-core-topology/install-allowed-signers -I nawara-core-owner -n nawara-core-topology-install -s manifest.sig < manifest`;
+  2. `sha256sum` of `install-topology-monitor.sh` against its `file=` line.
+
+### Commands
+
+As root at the console, with the signed `manifest` and `manifest.sig` placed root-owned (0600) in
+`/var/lib/nawara-core-topology-install/incoming/` (0700):
+
+| Command | Does |
+|---|---|
+| `install-topology-monitor.sh install` | **fresh only**; see below |
+| `install-topology-monitor.sh upgrade` | an approved upgrade or rollback; see below |
+| `install-topology-monitor.sh repair` | completes an interrupted transaction (below) |
+| `install-topology-monitor.sh status` | read-only |
+
+**`install`** refuses when any target, an installation record or a transaction already exists. It never overwrites a state, a latch, an
+incident binding or a unit. It installs:
+- the 7 files in `/usr/local/libexec/nawara-core-topology` (the six scripts 0555, the pinned OD-BRK-2a verifier 0444);
+- the 4 units (0644, **not** enabled, started or reloaded);
+- the **initial** state, the inactive latch and an empty incident binding.
+
+**`upgrade`**:
+- requires the current installation to verify against its own signed record;
+- requires a strictly **higher** version and the same state schema;
+- takes the monitor's lock, so no monitor, watchdog or recovery run happens in between;
+- replaces **only** the immutable artifacts.
+
+The state, the current incident, the nonce ledger (`recovery-consumed`), the incident history, the evidence, the latch and both trust
+keys are never touched. A **rollback** is a newly signed manifest with a higher version that names the older artifacts. There is no
+unsigned "go back", and no copy of an older state or nonce ledger is ever restored. A state schema change is never done by an upgrade:
+it needs a separate, explicit, versioned migration procedure.
+
+**Every change is one durable transaction** (`/var/lib/nawara-core-topology-install/transaction`). The marker moves through
+`staged` → `applying` → `applied` → `verified` → recorded (`installed/manifest`, `installed/manifest.sig`, `history.jsonl`), and
+only then is it removed. The locks are always taken in this order: the installation lock, then the monitor's lock.
+
+If an installation step is interrupted at any point:
+- the open transaction makes `verify-topology-monitor-install.sh` FAIL (`incomplete_transaction`);
+- an ordinary `install` or `upgrade` refuses (exit 70).
+
+`repair` completes the recorded transaction from its staged copies, after re-verifying the recorded manifest's signature. It creates
+only what is missing, and never deletes or replaces protected state. Deleting the installation is never a recovery.
+
+### Verification and enablement
+
+`verify-topology-monitor-install.sh` (read-only) authenticates the installed record with the installation key. It checks:
+- every artifact (hash, owner, exact mode, one link, no symbolic link, nothing extra) and every ancestor directory;
+- the units' hardening, and that no drop-in or same-named unit exists in any systemd unit directory;
+- the protected state;
+- the recovery key, if present;
+- the optional trigger, if configured: its exact sudoers rule, no other rule reaching its user, sshd's effective settings, and the
+  restricted forced-command key, which must not be the scheduled-backup key.
+
+Results:
+
+| Exit | Result |
+|---|---|
+| 0 | PASS |
+| 1 | FAIL |
+| 3 | UNKNOWN (never PASS) |
+
+**STOP** on anything but PASS.
+
+Enabling the timers is a separately authorized step. The verifier FAILs any enabled timer unless
+`/var/lib/nawara-core-topology-install/activation` (root 0600) and its signature authorize it. That file holds
+`nawara-core-topology-monitor-activation v1`, `core_commit=`, `version=` (the installed ones) and
+`timers=nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer`, signed by the Owner in the installation namespace.
 
 ## 3. The trigger (OD-BRK-2b-2; not authorized here)
 
