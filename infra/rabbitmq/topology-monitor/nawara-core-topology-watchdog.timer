@@ -1,0 +1,13 @@
+# Core V2 OD-BRK-2b-1: the watchdog on its OWN timer, offset from the monitor's, every 5 minutes: a check inside the monitor could never
+# notice that the monitor stopped running. Never installed or enabled by repository tooling.
+[Unit]
+Description=Nawara Core: Notification topology monitor watchdog (OD-BRK-2b), every 5 minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=nawara-core-topology-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -293,7 +293,7 @@ requeue (above). The route exists only for broker-driven dead-lettering.
   - A rollback is never "deploy an older image": an image whose declaration differs from the live queue cannot attach. Every rollback
     is a planned topology transition with its own security review, and returning to a broker dead-letter route for Notification
     re-opens the exposure D1 closes.
-- **Implementation slices (each separately authorized; none is authorized here, none is complete):**
+- **Implementation slices (each separately authorized; none is authorized by this ADR; status per slice below):**
   - **OD-BRK-0** this clarification (documentation).
   - **OD-BRK-1** the shared-kit opt-in topology capability:
     - a subscription option with no broker dead-letter exchange, and no shared-fanout binding of its `.dead` queue;
@@ -304,6 +304,18 @@ requeue (above). The route exists only for broker-driven dead-lettering.
     - the option is activated, and Notification's broker permissions narrowed (D1);
     - the application-redacted dead letters are preserved;
     - policy-drift prevention is verified, and the absence of any plaintext code retention proven.
+    - *Status (2026-10-24):* **OD-BRK-2a** (the adoption, the isolated role, the effective-topology verifier and the fail-closed
+      first-activation gate) is merged (#345). **OD-BRK-2b-1** implements the scheduled verification and the emergency containment
+      (`infra/rabbitmq/topology-monitor/`, [runbook](../runbooks/rabbitmq-topology-containment.md)), certified on disposable
+      infrastructure only; nothing is installed. Its installation and enablement are **OD-BRK-2b-2**, separately authorized.
+    - *Runtime rules (Owner-approved for OD-BRK-2b, 2026-10-24; operational source: the runbook):* a server-side check every
+      5 minutes, plus after authorized topology changes; FAIL contains immediately; UNKNOWN alerts on the first, escalates on the
+      second and contains on the third consecutive result; containment revokes Notification's permissions and closes its
+      connections, and is confirmed by read-back, never by a command's exit status; nothing restores automatically, and recovery
+      needs explicit Owner authorization plus a fresh verification. The residual detection window between checks stays recorded.
+    - *Completion:* OD-BRK-2 is complete only when OD-BRK-2b-2 has installed and enabled the control in production. Its host-level
+      privileged choices (the root timer's Docker access, the trigger key and its sudoers rule, the alert carrier and the external
+      heartbeat) are part of the OD-BRK-2b-2 decision. Until then, OD-BRK stays open.
   - **OD-BRK-3** Billing adoption, before its first deployment: the financial retry and refusal behaviour, and its financial provenance
     enforcement, are unchanged.
   - **OD-BRK-4** Audit migration: a separate, protected production migration plan that preserves durable evidence and the historical

@@ -1,0 +1,49 @@
+# Core V2 OD-BRK-2b-1: ONE run of Notification's topology monitor and emergency containment (docs/runbooks/rabbitmq-topology-
+# containment.md). Started by nawara-core-topology-monitor.timer every 5 minutes, or by the protected trigger (topology-trigger.sh,
+# through one exact sudoers rule). Never installed, enabled or started by repository tooling (OD-BRK-2b-2 installs it).
+#
+# Trust boundary: the monitor administers the broker through `docker exec ... rabbitmqctl` (the same protected broker-local path as
+# infra/rabbitmq/provision.sh), and access to the Docker socket is root-equivalent. It therefore runs as root, without any capability,
+# on a read-only file system except its state directory and the containment latch's directory, and Notification never sees either.
+[Unit]
+Description=Nawara Core: Notification topology monitor and containment (OD-BRK-2b), one run
+Documentation=file:///opt/nawara-core/docs/runbooks/rabbitmq-topology-containment.md
+# Ordering only: the monitor never starts Docker or the broker (an unreachable broker is UNKNOWN, contained on the third).
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/nawara-core-topology/verify-and-contain.sh notification-service
+# 10 = UNKNOWN recorded, 20 = CONTAINED: the control worked as designed. 21 (CONTAINMENT_UNCONFIRMED) and every refusal fail the unit,
+# which the watchdog reports.
+SuccessExitStatus=10 20
+# Bounded: the verifier at most 150 s, each rabbitmqctl call 30 s, at most 3 containment attempts; a run still alive at 280 s (inside the
+# 5-minute period) is killed. A killed run loses nothing: the containment intent is persisted first, and the next run re-applies it.
+TimeoutStartSec=280
+# No environment: the script uses only its own pinned values.
+UnsetEnvironment=SSH_ORIGINAL_COMMAND
+# The only writable paths (created by the installer; a missing one makes the unit fail, never an empty state).
+ReadWritePaths=/var/lib/nawara-core-topology-monitor /var/lib/nawara-core-topology
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The journal receives closed codes, counters and check ids only.
+StandardOutput=journal
+StandardError=journal

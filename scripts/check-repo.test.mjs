@@ -3787,3 +3787,44 @@ test('Core V2 S1e-2: Billing\'s payment-event subscription is strict and its han
   assert.match(checkEnforcementPolicies({}, mutate(files.consumer, 'const correlationId = t.correlationId ??', 'const correlationId = event.headers.correlationId ??')).join(), /reads a delivery header/);
   assert.match(checkEnforcementPolicies({}, { 'billing-service': {} }).join(), /the financial consumer was not found/);
 });
+
+test('Core V2 OD-BRK-2b-1: the topology monitor pins the verifier, the grant and every installed hash; contains in order; is inert in the repository', async () => {
+  const { checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, PROVISION_SCRIPT, TOPOLOGY_VERIFIER } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const files = Object.fromEntries(TOPOLOGY_MONITOR_FILES.map((n) => [n, read(`${TOPOLOGY_MONITOR_DIR}/${n}`)]));
+  const base = { files, verifier: read(TOPOLOGY_VERIFIER), provision: read(PROVISION_SCRIPT), workflows: { 'core-ci.yml': read('.github/workflows/core-ci.yml') } };
+  assert.deepEqual(checkTopologyMonitor(base), []);
+  const mutate = (file, from, to) => {
+    assert.ok(files[file].includes(from), `fixture drifted: ${file}: ${from}`);
+    return checkTopologyMonitor({ ...base, files: { ...files, [file]: files[file].replace(from, to) } }).join('\n');
+  };
+  // the containment order, the bounds and the state machine
+  assert.match(mutate('verify-and-contain.sh', '  persist_latch || log', '  : || log'), /persist the intent/);
+  assert.match(mutate('verify-and-contain.sh', '    if confirm; then\n      sleep "$CONFIRM_INTERVAL"\n      if confirm; then CONTAINMENT=confirmed; break; fi\n    fi', '    CONTAINMENT=confirmed; break'), /confirm twice/);
+  assert.match(mutate('verify-and-contain.sh', 'readonly MAX_ATTEMPTS=3', 'readonly MAX_ATTEMPTS=1000'), /small bound/);
+  assert.match(mutate('verify-and-contain.sh', 'if [ "$ST_STREAK" -ge 3 ]; then', 'if [ "$ST_STREAK" -ge 30 ]; then'), /third consecutive UNKNOWN/);
+  assert.match(mutate('verify-and-contain.sh', '        NEW_CONTAINMENT=1\n        contain verifier_fail ;;', '        save_state FAIL ;;'), /a FAIL contains at once/);
+  assert.match(mutate('verify-and-contain.sh', '    revoke\n', '    revoke\n    ctl set_permissions -p "$VHOST" "$SERVICE" x x x\n'), /never grant/);
+  assert.match(mutate('recover-notification-topology.sh', 'write_atomic "$LATCH" "$LATCH_INACTIVE" 644', 'ctl set_permissions -p nawara-core notification-service x x x; write_atomic "$LATCH" "$LATCH_INACTIVE" 644'), /never grant/);
+  // pins: the verifier, the grant, the locations, the installation hashes
+  assert.match(checkTopologyMonitor({ ...base, verifier: `${base.verifier}# drift\n` }).join(), /VERIFIER_SHA256 must equal/);
+  assert.match(mutate('verify-and-contain.sh', "readonly TOPIC_READ='^(admin\\.operator_code_issued|", "readonly TOPIC_READ='^(audit\\.#|admin\\.operator_code_issued|"), /TOPIC_WRITE \/ TOPIC_READ must equal/);
+  assert.match(mutate('recover-notification-topology.sh', "readonly ROLE_CONF='^(nawara\\.events|", "readonly ROLE_CONF='^(nawara\\.events\\.dlx|nawara\\.events|"), /ROLE_CONF must be the approved isolated role/);
+  assert.match(mutate('topology-watchdog.sh', "readonly STATE_DIR='/var/lib/nawara-core-topology-monitor'", "readonly STATE_DIR='/tmp/x'"), /STATE_DIR must be/);
+  assert.match(mutate('verify-and-contain.sh', "readonly OWNER_UID=0", 'readonly OWNER_UID=1000'), /OWNER_UID must be 0/);
+  assert.match(mutate('topology-watchdog.sh', 'readonly MAX_AGE=900', 'readonly MAX_AGE=901'), /SHA_TOPOLOGY_WATCHDOG must equal/, 'an installed file changes: its pin must follow');
+  assert.match(mutate('nawara-core-topology-monitor.timer', 'OnUnitActiveSec=5min', 'OnUnitActiveSec=1h'), /both timers run every 5 minutes/);
+  // client commands, sourcing, the trigger and its templates
+  assert.match(mutate('topology-trigger.sh', 'env -i PATH="$PATH" "$SUDO" -n /usr/bin/systemctl start "$MONITOR_SERVICE" || rc=$?', '"$SUDO" -n /usr/bin/systemctl start "$MONITOR_SERVICE" || rc=$?'), /through sudo -n, with an empty environment/);
+  assert.match(mutate('topology-trigger.sh', '[ "$EUID" -ne 0 ] || refuse 65 ', ': || refuse 65 '), /refuse to run as root/);
+  assert.match(mutate('verify-and-contain.sh', 'log() {', 'bash -c "$SSH_ORIGINAL_COMMAND"\nlog() {'), /SSH_ORIGINAL_COMMAND is only ever tested/);
+  assert.match(mutate('topology-watchdog.sh', 'log() {', '. /etc/nawara/override\nlog() {'), /no eval and no sourcing/);
+  assert.match(mutate('topology-trigger.sudoers.template', 'NOPASSWD: /usr/bin/systemctl start nawara-core-topology-monitor.service', 'NOPASSWD: /usr/bin/systemctl *'), /exactly the one rule/);
+  assert.match(mutate('topology-trigger.authorized_keys.template', 'restrict,command=', 'command='), /exactly one line/);
+  assert.match(mutate('nawara-core-topology-monitor.service', 'SuccessExitStatus=10 20', 'SuccessExitStatus=10 20 21'), /count only 10 and 20 as success/);
+  assert.match(mutate('nawara-core-topology-monitor.service', 'UMask=0077', 'UMask=0077\nStateDirectory=nawara-core-topology-monitor'), /never create its state/);
+  // inert: no workflow may install or start it; a missing file is reported
+  assert.match(checkTopologyMonitor({ ...base, workflows: { 'x.yml': 'run: sudo install-topology-monitor.sh && systemctl enable nawara-core-topology-monitor.timer' } }).join(), /must not install, enable or start the topology monitor/);
+  const { [TOPOLOGY_MONITOR_FILES[0]]: _gone, ...fewer } = files;
+  assert.match(checkTopologyMonitor({ ...base, files: fewer }).join(), /verify-and-contain\.sh: missing/);
+});
