@@ -35,6 +35,7 @@ const CODE = '481203';
 const EMAIL = 's1e4-member@example.test';
 const PHONE = '+21620004812';
 const hex = (n: number) => randomBytes(n).toString('hex');
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const future = (s: number) => new Date(Date.now() + s * 1000).toISOString();
 const bytes = (e: EventEnvelope) => Buffer.from(JSON.stringify(e.payload)); // exactly what the kit publisher writes
 
@@ -343,35 +344,68 @@ describeWithEnv('S1e-4 Notification strict provenance enforcement (real RabbitMQ
     }, 90_000);
   });
 
-  describe('broker-driven dead-lettering (paths no application redactor sees)', () => {
-    it('the shared DLX: an injected copy lands in Notification\'s dead letters as the injector sent it, and replaying it is refused before the intake', async () => {
+  describe('broker-driven dead-lettering (Core V2 OD-BRK-2a: no broker route, so nothing is ever copied raw)', () => {
+    /** Live depth of every queue in the vhost (names from the management API, counts from a passive declaration: never read). */
+    const vhostTotal = async () => {
+      let n = 0;
+      for (const { name } of (await (await api('GET', '/queues/%2F')).json()) as Array<{ name: string }>) {
+        const c = await conn.createChannel();
+        c.on('error', () => undefined);
+        n += await c.checkQueue(name).then((x) => x.messageCount, () => 0);
+        await c.close().catch(() => undefined);
+      }
+      return n;
+    };
+    const stopApp = async () => {
+      allLogs.push(...t!.logs);
+      await t!.app.close();
+      t = undefined;
+    };
+
+    it('the work queue has NO broker dead-letter exchange, its `.dead` queue no fanout binding; the retry queue keeps its return routing', async () => {
+      const q = (await (await api('GET', `/queues/%2F/${encodeURIComponent(INTAKE_QUEUE)}`)).json()) as { arguments: Record<string, unknown>; policy?: unknown };
+      expect(q.arguments).toEqual({});
+      expect(q.policy ?? null).toBeNull();
+      const retry = (await (await api('GET', `/queues/%2F/${encodeURIComponent(`${INTAKE_QUEUE}.retry`)}`)).json()) as { arguments: Record<string, unknown> };
+      expect(retry.arguments).toEqual({ 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': INTAKE_QUEUE });
+      const bindings = (await (await api('GET', `/queues/%2F/${encodeURIComponent(DEAD)}/bindings`)).json()) as Array<{ source: string }>;
+      expect(bindings.map((b) => b.source)).toEqual(['']); // the default exchange only: never `nawara.events.dlx`
+    });
+
+    it('the shared DLX: an injection never reaches Notification\'s dead letters (no binding), and creates no intent', async () => {
       const e = envelope('admin.operator_code_issued', payloadFor('admin.operator_code_issued', { code: '000771' }));
+      // Notification no longer declares the shared fanout at all; in production the other consumers (Audit) still do: stand in for them
+      await ch.assertExchange(DLX, 'fanout', { durable: true });
       const c = await amqp.connect(intruderUrl());
       const cc = await c.createConfirmChannel();
       cc.publish(DLX, '', bytes(e), { persistent: true, contentType: 'application/json', messageId: e.id, type: e.name, userId: INTRUDER, headers: e.headers });
       await cc.waitForConfirms();
       await c.close();
-      await until(async () => (await depth(DEAD)) >= 1);
-      // What the fanout delivers is only what its publisher sent (here a forger's own synthetic code): never annotated, never a copy the
-      // consumer wrote. Producer identities (Auth's included) cannot write the DLX; consumer identities can (provision.sh, register
-      // OD-BRK), but none of them can read Notification's queue, so none can place a GENUINE code here.
-      const raw = await ch.get(DEAD, { noAck: false });
-      expect(raw && raw.properties.messageId).toBe(e.id);
-      expect(raw && raw.properties.headers?.['x-nawara-failure']).toBeUndefined();
-      ch.nack(raw as amqp.GetMessage, false, true);
-      expect((await replayDeadLetter(conn, DEAD, e.id, { waitMs: 5_000 })).outcome).toBe('rejected_again');
-      const refused = await takeDead(e.id);
-      expect(refused.reason).toBe('untrusted_replay_no_provenance');
-      expectSanitized(refused, bytes(e)); // the consumer's own copy is redacted
+      await sleep(800);
+      expect(await depth(DEAD)).toBe(0);
       expect(await intents(e.id)).toBe(0);
     });
 
-    it('per-message expiry: only a message that CARRIES an expiry can be broker-dead-lettered; a genuine Auth publication carries none, onto a queue without TTL', async () => {
-      // the work queue has the kit's dead-letter exchange and nothing that expires or overflows it
-      const q = (await (await api('GET', `/queues/%2F/${encodeURIComponent(INTAKE_QUEUE)}`)).json()) as { arguments: Record<string, unknown>; policy?: unknown };
-      expect(q.arguments).toEqual({ 'x-dead-letter-exchange': DLX });
-      expect(q.policy ?? null).toBeNull();
-      // a genuine Auth publication (the kit publisher): captured from the broker, no `expiration`
+    it('a broker reject WITHOUT requeue of a GENUINE code event discards it: no copy in any queue (raw bytes nowhere), no intent', async () => {
+      await stopApp(); // nothing consumes the work queue for a moment: the broker alone decides
+      try {
+        const e = envelope('admin.operator_code_issued', payloadFor('admin.operator_code_issued', { code: '000773' }));
+        await owner.publish(e); // authenticated Auth (synthetic code)
+        let m: amqp.GetMessage | false = false;
+        await until(async () => !!(m = await ch.get(INTAKE_QUEUE, { noAck: false })));
+        expect((m as unknown as amqp.GetMessage).properties.messageId).toBe(e.id);
+        const before = await vhostTotal(); // the message is unacknowledged here: not counted
+        ch.reject(m as unknown as amqp.GetMessage, false);
+        await sleep(800);
+        expect(await vhostTotal()).toBe(before); // discarded: it is in no queue at all
+        expect(await depth(DEAD)).toBe(0);
+        expect(await intents(e.id)).toBe(0);
+      } finally {
+        await startApp();
+      }
+    });
+
+    it('a publisher-set expiry discards a code event too (no copy anywhere); a genuine Auth publication carries no expiry at all', async () => {
       const tapQ = (await ch.assertQueue('', { exclusive: true, autoDelete: true })).queue;
       await ch.bindQueue(tapQ, EXCHANGE, 'member.#');
       const genuine = envelope('member.contact_verification_requested');
@@ -381,19 +415,17 @@ describeWithEnv('S1e-4 Notification strict provenance enforcement (real RabbitMQ
       expect(tapped && tapped.properties.messageId).toBe(genuine.id);
       expect(tapped && tapped.properties.expiration).toBeUndefined();
       await ch.deleteQueue(tapQ);
-      // the broker path itself, demonstrated with a message that carries an expiry while nothing consumes: it reaches the dead letters
-      // UNREDACTED (the injector's own synthetic content), which is why no genuine code may ever carry one
-      allLogs.push(...t!.logs);
-      await t!.app.close();
-      t = undefined;
-      const e = envelope('admin.operator_code_issued', payloadFor('admin.operator_code_issued', { code: '000772' }));
-      await publishAnonymous(e, { expiration: '50' });
-      await until(async () => (await depth(DEAD)) >= 1);
-      const raw = await ch.get(DEAD, { noAck: true });
-      expect(raw && raw.properties.messageId).toBe(e.id);
-      expect(raw && raw.properties.headers?.['x-first-death-reason']).toBe('expired');
-      await startApp();
-      expect(await intents(e.id)).toBe(0);
+      await stopApp();
+      try {
+        const e = envelope('admin.operator_code_issued', payloadFor('admin.operator_code_issued', { code: '000772' }));
+        const before = await vhostTotal();
+        await publishAnonymous(e, { expiration: '50' });
+        await sleep(800);
+        expect(await vhostTotal()).toBe(before);
+        expect(await depth(DEAD)).toBe(0);
+      } finally {
+        await startApp();
+      }
     });
   });
 

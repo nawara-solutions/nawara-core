@@ -54,9 +54,21 @@ service decides *how* and *where*. Design: [ADR-0046](../../docs/adr/0046-notifi
   covers refusals, intake refusals, malformed messages and exhausted retries. A code-bearing event's body is always replaced by
   `{"redacted":true,"failure":…,"reason":…,"bodyBytes":n}` (never replayable). So is anything that could hide a code: non-canonical
   bytes, an unmapped name or source, or a `code` member anywhere. A code-free event keeps its body. Only the validated headers survive.
-  Broker-driven dead-lettering bypasses any application policy, so no genuine Auth message may ever reach it: the kit never rejects
-  without requeue, Auth publishes with no expiry, and `notification.events` has no TTL or length policy. The shared `nawara.events.dlx`
-  carries only what its own publisher sent (register OD-BRK).
+- **No broker dead-lettering** (Core V2 OD-BRK-2a, ADR-0057 §8 "OD-BRK-0").
+  - The subscription opts out with `noBrokerDeadLettering`: `notification.events` has no dead-letter exchange, and
+    `notification.events.dead` is never bound to the shared `nawara.events.dlx`.
+  - A broker reject without requeue, or an expiry, discards the message (D3). That is never a delivery and never an intake record,
+    and no raw copy is made anywhere.
+  - The redacted copies above, retries (`.retry` returns to the work queue) and holds are unchanged.
+  - **Its broker identity** holds the isolated role: its three queues, the event exchange and `amq.default`, never the shared fanout.
+- **What the kit can't see, and the gate that does.** The kit can't see broker policies, so the effective topology is verified by
+  `infra/rabbitmq/verify-topology.sh` (read-only `rabbitmqctl`: queue arguments, regular and operator policies, bindings, permissions,
+  consumers, plugins, parameters; PASS, FAIL or UNKNOWN, where UNKNOWN never counts as PASS).
+  - `provision.sh` grants `notification-service` only when the containment latch (owned by OD-BRK-2b) is inactive and the verifier
+    passes **before and after** the grant. A failed post-grant check withdraws the grant.
+  - A missing latch refuses, so Notification's production provisioning stays disabled until OD-BRK-2b is installed.
+  - A grant made before the queues exist is **not** a live-topology certification. First consumption needs a post-declaration
+    verification (OD-BRK-2b and S1-R).
 - **Invalid destination** (SMS must be E.164; no country is ever guessed): a durable `FAILED invalid_destination` delivery.
 - **Codes:** sealed with AES-256-GCM (`NOTIFICATION_SECRET_KEYS`), never in `data` or a log.
 - **Start order:** the consumer starts only after the database, the migrations and the default-locale coverage are verified.

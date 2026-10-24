@@ -1,5 +1,6 @@
 // infra/rabbitmq/provision.sh against the fake docker CLI (ADR-0053). The real-broker proof is scripts/deploy-tests/real-broker.mjs.
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,6 +22,14 @@ const topicOf = (svc) => ({ exchange: 'nawara.events', write: GENERATED[svc].wri
 const ALL = ['audit-service', 'auth-service', 'billing-service', 'file-service', 'notification-service', 'organization-service', 'payment-service', 'release-service'];
 
 const BROKER = 'nawara-core-rabbitmq';
+const GATED_FREE = ALL.filter((s) => s !== 'notification-service');
+
+/** A role function of the script, evaluated by bash itself on a queue name: what `permissions_for` would apply. */
+const roleOf = (fn, queue) => {
+  const out = execFileSync('bash', ['-c', `EXCHANGE=nawara.events; eval "$(sed -n '/^${fn}() {/,/^}/p' ${JSON.stringify(SCRIPTS.broker)})"; ${fn} ${queue}; printf '%s\\n%s\\n%s' "$PERM_CONF" "$PERM_WRITE" "$PERM_READ"`], { encoding: 'utf8' });
+  const [conf, write, read] = out.split('\n');
+  return { conf, write, read };
+};
 
 test('a fresh run creates ONE private broker: internal network, no published port, named volume, fixed hostname, real health check', () => {
   const w = world();
@@ -121,11 +130,12 @@ test('S1d-2: the default selection is unchanged; Billing and Payment are defined
 
 test('S1d-2: every identity, when selected, gets exactly its generated topic grants and its role\'s resource permissions', () => {
   const w = world();
-  const r = w.run(SCRIPTS.broker, { RABBITMQ_SERVICES: ALL.join(' ') });
+  // Core V2 OD-BRK-2a: notification-service is granted only behind its topology gate (its own tests below), so it is not selected here
+  const r = w.run(SCRIPTS.broker, { RABBITMQ_SERVICES: GATED_FREE.join(' ') });
   assert.equal(r.code, 0, r.out);
   const b = w.state().broker;
-  assert.deepEqual(Object.keys(b.users).sort(), ALL);
-  for (const svc of ALL) assert.deepEqual(b.topic[svc], topicOf(svc), `${svc}: generated topic grants`);
+  assert.deepEqual(Object.keys(b.users).sort(), GATED_FREE);
+  for (const svc of GATED_FREE) assert.deepEqual(b.topic[svc], topicOf(svc), `${svc}: generated topic grants`);
   const counts = Object.fromEntries(ALL.map((s) => [s, [GENERATED[s].write.keys.length, GENERATED[s].read.keys.length]]));
   assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [28, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
   // RabbitMQ evaluates a topic grant as a regex over the routing key (write) or binding key (read)
@@ -139,8 +149,9 @@ test('S1d-2: every identity, when selected, gets exactly its generated topic gra
   assert.ok(!bind('billing-service', 'payment.created') && !bind('billing-service', 'payment.#') && !bind('billing-service', 'audit.#'));
   assert.ok(!pub('auth-service', 'membership.approved') && !pub('auth-service', 'audit.payment.created') && !pub('organization-service', 'audit.owner.factor_enrolled'));
   assert.ok(!pub('audit-service', 'audit.platform_query.executed'), 'Audit records its own action locally: no grant');
-  assert.ok(bind('notification-service', 'member.contact_verification_requested') && !bind('notification-service', 'audit.#'));
-  for (const svc of ALL) for (const k of ['', '#', 'audit.#.x', 'x']) assert.ok(!pub(svc, k), `${svc} may publish ${JSON.stringify(k)}`);
+  const notif = new RegExp(GENERATED['notification-service'].read.regex);
+  assert.ok(notif.test('member.contact_verification_requested') && !notif.test('audit.#'));
+  for (const svc of GATED_FREE) for (const k of ['', '#', 'audit.#.x', 'x']) assert.ok(!pub(svc, k), `${svc} may publish ${JSON.stringify(k)}`);
   // resource permissions: unchanged roles; Billing is the union of a producer and a consumer of billing.payment-events
   const may = (svc, kind, resource) => new RegExp(b.perms[svc][kind === 'configure' ? 'conf' : kind]).test(resource);
   assert.deepEqual(b.perms['payment-service'], b.perms['auth-service'], 'Payment: the producer role');
@@ -151,6 +162,31 @@ test('S1d-2: every identity, when selected, gets exactly its generated topic gra
   }
   assert.ok(!may('payment-service', 'write', 'amq.default') && !may('payment-service', 'read', 'billing.payment-events'));
   assert.ok(r.out.includes("topic nawara.events write ^(?!)$ read ^(audit\\.#)$"), 'the applied grants are logged (names and patterns only)');
+});
+
+test('OD-BRK-2a: notification-service is never granted without a passing topology gate: no latch / no verifiable broker -> refused, no grant', () => {
+  const w = world();
+  const r = w.run(SCRIPTS.broker, { RABBITMQ_SERVICES: 'audit-service notification-service' });
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /notification-service NOT provisioned: the pre-grant topology verification did not pass/);
+  assert.match(r.out, /"result":"(UNKNOWN|FAIL)"/);
+  assert.doesNotMatch(r.out, /"result":"PASS"/);
+  const b = w.state().broker;
+  assert.ok(b.users['audit-service'], 'the other identity of the run is still converged');
+  assert.equal(b.users['notification-service'], undefined, 'no notification-service user');
+  assert.equal(b.perms['notification-service'], undefined, 'no grant');
+  assert.equal(b.topic['notification-service'], undefined, 'no topic grant');
+});
+
+test('OD-BRK-2a: the isolated consumer role is the consumer role minus the shared dead-letter exchange (read from the script itself)', () => {
+  const iso = roleOf('isolated_consumer', 'notification.events');
+  const legacy = roleOf('consumer', 'notification.events');
+  for (const k of ['conf', 'write', 'read']) {
+    assert.doesNotMatch(iso[k], /dlx/, k);
+    assert.equal(iso[k], legacy[k].replace('|nawara\\.events\\.dlx', ''), k);
+  }
+  assert.equal(iso.conf, '^(nawara\\.events|notification\\.events|notification\\.events\\.retry|notification\\.events\\.dead)$');
+  assert.equal(iso.write, '^(amq\\.default|notification\\.events|notification\\.events\\.retry|notification\\.events\\.dead)$');
 });
 
 test('an existing network that is not --internal is refused (the broker is never placed on a routable network)', () => {

@@ -4,7 +4,7 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import {
-  DbService, DB_OPTIONS, PgKeyedProvenanceStore, ReadinessRegistry, assertEnforceable, pendingMigrations, runWithEventContext, strictEnforcement, type DbOptions,
+  DbService, DB_OPTIONS, PgKeyedProvenanceStore, ReadinessRegistry, assertEnforceable, noBrokerDeadLettering, pendingMigrations, runWithEventContext, strictEnforcement, type DbOptions,
   type EnforcementPolicy, type EventBus, type EventEnvelope, type HandlerTrust,
 } from '@nawara/service-kit';
 import { NOTIFICATION_CONFIG } from '../config/notification-config.token.js';
@@ -113,6 +113,12 @@ export class EventConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
         // ADR-0052 decision 5: every dead-letter copy (a refusal, an intake refusal, a malformed message, an exhausted retry) goes through
         // this policy: a code-bearing event's body is always redacted.
         deadLetterPolicy: notificationDeadLetterPolicy,
+        // Core V2 OD-BRK-2a (ADR-0057 §8 "OD-BRK-0" D1, D3): no BROKER dead-lettering at all. The work queue has no dead-letter exchange
+        // and `.dead` is never bound to the shared fanout, so a broker reject or expiry discards a message instead of copying a code raw
+        // into every consumer's dead letters; the kit's own redacted copy above, its retries and holds are unchanged. The kit cannot see
+        // broker policies: the effective topology is verified by the protected broker administration (infra/rabbitmq/verify-topology.sh),
+        // whose pass is a precondition of the grant that lets this consumer connect at all.
+        brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: 'external' }),
       });
       if (this.stopped) {
         await sub.close();
