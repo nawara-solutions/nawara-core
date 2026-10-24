@@ -3191,6 +3191,111 @@ export function checkNotificationTopologyGate(provision, verifier) {
   return problems;
 }
 
+// ─────────────────────────────────────────────────────────────── Core V2 OD-BRK-2b-1: Notification's topology monitor and containment
+
+export const TOPOLOGY_MONITOR_DIR = 'infra/rabbitmq/topology-monitor';
+export const TOPOLOGY_MONITOR_FILES = [
+  'verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh',
+  'verify-topology-monitor-install.sh', 'nawara-core-topology-monitor.service', 'nawara-core-topology-monitor.timer',
+  'nawara-core-topology-watchdog.service', 'nawara-core-topology-watchdog.timer', 'topology-trigger.authorized_keys.template', 'topology-trigger.sudoers.template',
+];
+const TOPOLOGY_MONITOR_LOCATIONS = {
+  INSTALL_DIR: '/usr/local/libexec/nawara-core-topology', STATE_DIR: '/var/lib/nawara-core-topology-monitor',
+  LATCH: '/var/lib/nawara-core-topology/notification-service.containment', BROKER: 'nawara-core-rabbitmq', SERVICE: 'notification-service', VHOST: 'nawara-core',
+  OWNER_UID: '0', RUN_AS_UID: '0', UNIT_DIR: '/etc/systemd/system', SAFE_PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+};
+const TOPOLOGY_MONITOR_INSTALL_PINS = {
+  SHA_VERIFY_AND_CONTAIN: 'verify-and-contain.sh', SHA_TOPOLOGY_WATCHDOG: 'topology-watchdog.sh', SHA_TOPOLOGY_TRIGGER: 'topology-trigger.sh',
+  SHA_RECOVER_NOTIFICATION_TOPOLOGY: 'recover-notification-topology.sh', SHA_VERIFY_TOPOLOGY: '../verify-topology.sh',
+  SHA_MONITOR_SERVICE: 'nawara-core-topology-monitor.service', SHA_MONITOR_TIMER: 'nawara-core-topology-monitor.timer',
+  SHA_WATCHDOG_SERVICE: 'nawara-core-topology-watchdog.service', SHA_WATCHDOG_TIMER: 'nawara-core-topology-watchdog.timer',
+};
+const pinOf = (text, name) => text?.match(new RegExp(`^readonly ${name}=(?:'([^']*)'|(\\S+))$`, 'm'))?.slice(1).find((v) => v !== undefined);
+
+/**
+ * Core V2 OD-BRK-2b-1 (ADR-0057 §8 "OD-BRK-0" D2): the scheduled monitor and emergency containment of Notification's effective topology,
+ * kept consistent with OD-BRK-2a and inert in the repository:
+ * - every script pins the same locations, the monitor and the recovery guard pin the SHA-256 of infra/rabbitmq/verify-topology.sh and
+ *   the approved role and topic grant of infra/rabbitmq/provision.sh, and the installation verifier pins every installed file's SHA-256;
+ * - the containment persists its intent (state, then latch) before revoking, closes connections, and confirms twice; a client command is
+ *   only ever refused; no eval, no sourcing;
+ * - the trigger can only start the monitor unit through the exact sudoers rule; the key template holds no key;
+ * - no workflow installs, enables or starts any of it (a merge never activates a production control).
+ * `files`: name -> text of TOPOLOGY_MONITOR_DIR; `verifier`, `provision`: the OD-BRK-2a files; `workflows`: name -> text.
+ */
+export function checkTopologyMonitor({ files = {}, verifier, provision, workflows = {} }) {
+  const problems = [];
+  const why = 'the topology monitor and containment follow OD-BRK-2b-1 (ADR-0057 §8 "OD-BRK-0" D2)';
+  const at = (n) => `${TOPOLOGY_MONITOR_DIR}/${n}`;
+  for (const n of TOPOLOGY_MONITOR_FILES) if (files[n] === undefined) problems.push(`${at(n)}: missing; ${why}`);
+  if (problems.length > 0 || verifier === undefined || provision === undefined) return problems.length ? problems : [`${TOPOLOGY_VERIFIER} / ${PROVISION_SCRIPT}: not found; ${why}`];
+  const sha = (t) => createHash('sha256').update(t).digest('hex');
+  const scripts = ['verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh', 'verify-topology-monitor-install.sh'];
+  // locations: one value everywhere a script pins it
+  for (const n of scripts) {
+    for (const [name, value] of Object.entries(TOPOLOGY_MONITOR_LOCATIONS)) {
+      const got = pinOf(files[n], name);
+      if (got !== undefined && got !== value) problems.push(`${at(n)}: ${name} must be ${value} (found ${got}); ${why}`);
+    }
+    const code = files[n].replace(/^\s*#.*$/gm, '');
+    if (/(^\s*|[;&|(]\s*|\b(?:then|do|else)\s+)(eval|source|\.)\s/m.test(code)) problems.push(`${at(n)}: no eval and no sourcing; ${why}`);
+    if (/PRIVATE KEY/.test(files[n])) problems.push(`${at(n)}: must not contain a private-key marker; ${why}`);
+  }
+  // the verifier pin and the approved grant (OD-BRK-2a)
+  const verifierSha = sha(verifier);
+  for (const n of ['verify-and-contain.sh', 'recover-notification-topology.sh']) {
+    if (pinOf(files[n], 'VERIFIER_SHA256') !== verifierSha) problems.push(`${at(n)}: VERIFIER_SHA256 must equal the SHA-256 of ${TOPOLOGY_VERIFIER} (${verifierSha}); ${why}`);
+    if (pinOf(files[n], 'ROLE_CONF') !== '^(nawara\\.events|notification\\.events|notification\\.events\\.retry|notification\\.events\\.dead)$') problems.push(`${at(n)}: ROLE_CONF must be the approved isolated role (OD-BRK-2a); ${why}`);
+    if (pinOf(files[n], 'ROLE_WRITE') !== '^(amq\\.default|notification\\.events|notification\\.events\\.retry|notification\\.events\\.dead)$') problems.push(`${at(n)}: ROLE_WRITE must be the approved isolated role (OD-BRK-2a); ${why}`);
+    const grant = provision.match(/^\s*notification-service\)\n\s*TOPIC_WRITE='([^']*)'\n\s*TOPIC_READ='([^']*)' ;;$/m);
+    if (!grant || pinOf(files[n], 'TOPIC_WRITE') !== grant[1] || pinOf(files[n], 'TOPIC_READ') !== grant[2]) problems.push(`${at(n)}: TOPIC_WRITE / TOPIC_READ must equal notification-service's generated grant in ${PROVISION_SCRIPT}; ${why}`);
+  }
+  if (!/^\s*notification-service\) isolated_consumer notification\.events ;;$/m.test(provision)) problems.push(`${PROVISION_SCRIPT}: notification-service must keep the isolated_consumer role the monitor pins; ${why}`);
+  // the installation verifier pins every installed file
+  for (const [name, file] of Object.entries(TOPOLOGY_MONITOR_INSTALL_PINS)) {
+    const want = file === '../verify-topology.sh' ? verifierSha : sha(files[file]);
+    if (pinOf(files['verify-topology-monitor-install.sh'], name) !== want) problems.push(`${at('verify-topology-monitor-install.sh')}: ${name} must equal the SHA-256 of ${file === '../verify-topology.sh' ? TOPOLOGY_VERIFIER : at(file)} (${want}); ${why}`);
+  }
+  // the containment sequence and the state machine
+  const m = files['verify-and-contain.sh'];
+  const contain = m.slice(m.indexOf('contain() { # contain <reason>'), m.indexOf('\n}\n', m.indexOf('contain() { # contain <reason>')));
+  const order = ['save_state ', 'persist_latch ', 'revoke', 'close_all_user_connections', 'if confirm; then', 'if confirm; then CONTAINMENT=confirmed'].map((s) => contain.indexOf(s));
+  if (order.some((i) => i < 0) || order.some((i, k) => k > 0 && i <= order[k - 1])) problems.push(`${at('verify-and-contain.sh')}: containment must persist the intent (state, then latch) before revoking, then close connections, then confirm twice; ${why}`);
+  if (!/^readonly MAX_ATTEMPTS=[1-5]$/m.test(m)) problems.push(`${at('verify-and-contain.sh')}: MAX_ATTEMPTS must be a small bound (1 to 5); ${why}`);
+  if (!m.includes('if [ "$ST_STREAK" -ge 3 ]; then') || !/FAIL\)\n\s*NEW_CONTAINMENT=1\n\s*contain verifier_fail ;;/.test(m)) problems.push(`${at('verify-and-contain.sh')}: a FAIL contains at once and the third consecutive UNKNOWN contains; ${why}`);
+  if (/set_permissions|set_topic_permissions|delete_queue|purge_queue|delete_user/.test(m.replace(/^\s*#.*$/gm, '')) || /set_permissions|set_topic_permissions|delete_queue|purge_queue|delete_user/.test(files['recover-notification-topology.sh'].replace(/^\s*#.*$/gm, ''))) {
+    problems.push(`${TOPOLOGY_MONITOR_DIR}: the monitor and the recovery guard never grant, purge or delete; ${why}`);
+  }
+  for (const n of ['verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh']) {
+    const uses = (files[n].replace(/^\s*#.*$/gm, '').match(/SSH_ORIGINAL_COMMAND/g) ?? []).length;
+    if (uses !== 1 || !/\[ -z "\$\{SSH_ORIGINAL_COMMAND:-\}" \]/.test(files[n])) problems.push(`${at(n)}: SSH_ORIGINAL_COMMAND is only ever tested for emptiness, then refused; ${why}`);
+  }
+  // the trigger and its templates
+  const t = files['topology-trigger.sh'];
+  if (pinOf(t, 'SUDO') !== '/usr/bin/sudo' || pinOf(t, 'MONITOR_SERVICE') !== 'nawara-core-topology-monitor.service' || !/^env -i PATH="\$PATH" "\$SUDO" -n \/usr\/bin\/systemctl start "\$MONITOR_SERVICE" \|\| rc=\$\?$/m.test(t)) {
+    problems.push(`${at('topology-trigger.sh')}: the trigger can only start ${'nawara-core-topology-monitor.service'} through sudo -n, with an empty environment; ${why}`);
+  }
+  if (!t.includes('[ "$EUID" -ne 0 ] || refuse 65 ')) problems.push(`${at('topology-trigger.sh')}: the trigger must refuse to run as root; ${why}`);
+  const lines = (n) => files[n].split('\n').filter((l) => l.trim() !== '' && !l.trim().startsWith('#'));
+  const key = 'restrict,command="/usr/local/libexec/nawara-core-topology/topology-trigger.sh" ssh-ed25519 REPLACE_WITH_THE_TOPOLOGY_TRIGGER_PUBLIC_KEY nawara-core-topology-trigger';
+  if (lines('topology-trigger.authorized_keys.template').join('\n') !== key || /AAAA[0-9A-Za-z+/]{20,}/.test(files['topology-trigger.authorized_keys.template'])) problems.push(`${at('topology-trigger.authorized_keys.template')}: must hold exactly one line, ${key}; ${why}`);
+  const rule = 'REPLACE_WITH_THE_RUNTIME_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start nawara-core-topology-monitor.service';
+  if (lines('topology-trigger.sudoers.template').join('\n') !== `Defaults!/usr/bin/systemctl env_reset\n${rule}`) problems.push(`${at('topology-trigger.sudoers.template')}: must hold exactly the one rule, ${rule}; ${why}`);
+  // the units
+  const unit = (n) => files[n];
+  if (!/^ExecStart=\/usr\/local\/libexec\/nawara-core-topology\/verify-and-contain\.sh notification-service$/m.test(unit('nawara-core-topology-monitor.service'))
+    || !/^SuccessExitStatus=10 20$/m.test(unit('nawara-core-topology-monitor.service')) || /^StateDirectory=/m.test(unit('nawara-core-topology-monitor.service'))) {
+    problems.push(`${at('nawara-core-topology-monitor.service')}: must run the pinned entry for notification-service, count only 10 and 20 as success, and never create its state (no StateDirectory=); ${why}`);
+  }
+  if (!/^ExecStart=\/usr\/local\/libexec\/nawara-core-topology\/topology-watchdog\.sh$/m.test(unit('nawara-core-topology-watchdog.service'))) problems.push(`${at('nawara-core-topology-watchdog.service')}: must run the pinned watchdog; ${why}`);
+  if (!/^OnUnitActiveSec=5min$/m.test(unit('nawara-core-topology-monitor.timer')) || !/^OnUnitActiveSec=5min$/m.test(unit('nawara-core-topology-watchdog.timer'))) problems.push(`${TOPOLOGY_MONITOR_DIR}: both timers run every 5 minutes; ${why}`);
+  // inert in the repository: no workflow installs, enables or starts it
+  for (const [name, text] of Object.entries(workflows)) {
+    if (/topology-monitor|nawara-core-topology|verify-and-contain|recover-notification-topology/.test(text)) problems.push(`.github/workflows/${name}: must not install, enable or start the topology monitor (OD-BRK-2b-2 is a separately authorized installation); ${why}`);
+  }
+  return problems;
+}
+
 // ─────────────────────────────────────────────────────────────── V2 A5.4-T1: the Auth → Organization Service dependency boundary
 
 /**

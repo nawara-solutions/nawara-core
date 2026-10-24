@@ -1,0 +1,15 @@
+# Core V2 OD-BRK-2b-1: Notification's topology monitor every 5 minutes (the authoritative schedule: a server-side timer, never GitHub
+# Actions). A oneshot service is never started again while a run is still running, and the script also holds a lock. Monotonic timers
+# start after boot without a catch-up burst. Never installed or enabled by repository tooling.
+[Unit]
+Description=Nawara Core: Notification topology monitor (OD-BRK-2b), every 5 minutes
+Documentation=file:///opt/nawara-core/docs/runbooks/rabbitmq-topology-containment.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=nawara-core-topology-monitor.service
+
+[Install]
+WantedBy=timers.target

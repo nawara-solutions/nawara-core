@@ -1,0 +1,6 @@
+# Core V2 OD-BRK-2b-1: the ONE sudoers rule of the topology trigger (docs/runbooks/rabbitmq-topology-containment.md §3). TEMPLATE ONLY:
+# installed (OD-BRK-2b-2) as /etc/sudoers.d/nawara-core-topology-trigger (root:root 0440, checked with `visudo -cf`), with the
+# placeholder replaced by the runtime user. It allows exactly one command with exactly these arguments (sudo matches the arguments
+# literally): starting the root-owned monitor unit. Nothing else, no wildcard, no environment kept.
+Defaults!/usr/bin/systemctl env_reset
+REPLACE_WITH_THE_RUNTIME_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start nawara-core-topology-monitor.service

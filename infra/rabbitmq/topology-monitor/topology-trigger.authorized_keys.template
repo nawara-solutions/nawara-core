@@ -1,0 +1,5 @@
+# Core V2 OD-BRK-2b-1: the ONE authorized_keys line of the topology trigger key (docs/runbooks/rabbitmq-topology-containment.md §3).
+# TEMPLATE ONLY: it holds no key. At the separately authorized installation (OD-BRK-2b-2), the owner replaces the placeholder with the
+# PUBLIC half of a dedicated trigger key (generated off the server, never the deploy or scheduled-backup key) and adds the line to the
+# runtime user's authorized_keys. No other option, no second line, never this key without `restrict`.
+restrict,command="/usr/local/libexec/nawara-core-topology/topology-trigger.sh" ssh-ed25519 REPLACE_WITH_THE_TOPOLOGY_TRIGGER_PUBLIC_KEY nawara-core-topology-trigger

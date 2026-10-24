@@ -1,0 +1,35 @@
+# Core V2 OD-BRK-2b-1: ONE check of the topology monitor by its independent watchdog (docs/runbooks/rabbitmq-topology-containment.md §4):
+# missed or stalled runs, a killed run, an invalid state, an inactive timer or a failed monitor unit. Read-only towards the broker, the
+# latch and the monitor's state; it writes only its own check-in and records. Never installed, enabled or started by repository tooling.
+[Unit]
+Description=Nawara Core: Notification topology monitor watchdog (OD-BRK-2b), one check
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/nawara-core-topology/topology-watchdog.sh
+TimeoutStartSec=60
+UnsetEnvironment=SSH_ORIGINAL_COMMAND
+ReadWritePaths=/var/lib/nawara-core-topology-monitor
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+StandardOutput=journal
+StandardError=journal
