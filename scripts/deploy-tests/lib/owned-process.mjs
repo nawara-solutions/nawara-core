@@ -4,12 +4,14 @@
 /** A child that already exited, normally (`exitCode`) or by a signal (`signalCode`: e.g. NestJS re-raises SIGTERM after its hooks). */
 export const exited = (child) => child.exitCode !== null || child.signalCode !== null;
 
-/** `p`, or a rejection naming `what` after `ms`: no wait in a driver is unbounded. The timer never keeps the process alive. */
+/**
+ * `p`, or a rejection naming `what` after `ms`: no wait in a driver is unbounded. The pending deadline keeps the process alive until it
+ * fires (so a wait on nothing still ends in that rejection), and it is cleared as soon as `p` settles.
+ */
 export const bounded = (p, ms, what) => {
   let timer;
   const late = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${what}: no result within ${ms} ms`)), ms);
-    timer.unref?.();
   });
   return Promise.race([Promise.resolve(p), late]).finally(() => clearTimeout(timer));
 };
