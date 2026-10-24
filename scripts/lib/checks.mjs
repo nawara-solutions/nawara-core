@@ -3137,7 +3137,7 @@ export function checkEnforcementPolicies(contracts, sources) {
  *   both only skipped for an opted-in subscription.
  * `sources`: application -> { relPath: text } of its non-test source; `bus`: the kit bus's text.
  */
-export const BROKER_DEAD_LETTERING_ADOPTERS = Object.freeze([]);
+export const BROKER_DEAD_LETTERING_ADOPTERS = Object.freeze(['notification-service']); // OD-BRK-2a; Billing is OD-BRK-3, Audit OD-BRK-4
 export function checkBrokerDeadLettering(sources, bus) {
   const problems = [];
   const why = 'broker dead-lettering topology follows ADR-0057 §8 "OD-BRK-0" (adoption is a separately authorized slice)';
@@ -3155,6 +3155,39 @@ export function checkBrokerDeadLettering(sources, bus) {
     || !/if \(!sub\.brokerDeadLettering\) await ch\.bindQueue\(deadQueueName\(sub\.queue\), `\$\{this\.exchange\}\.dlx`, ''\)/.test(bus ?? '')) {
     problems.push(`${'libs/service-kit/src/events/rabbitmq-event-bus.ts'}: the default topology (work queue -> \`<exchange>.dlx\`, \`.dead\` bound to it) must stay unchanged and be skipped ONLY for an opted-in subscription; ${why}`);
   }
+  return problems;
+}
+
+// ─────────────────────────────────────────────────────────────── Core V2 OD-BRK-2a: Notification's isolated topology and its gate
+
+/**
+ * Core V2 OD-BRK-2a (ADR-0057 §8 "OD-BRK-0"): the protected workflow streams infra/rabbitmq/provision.sh ALONE to the server, so the
+ * effective-topology verifier is embedded in it verbatim; and notification-service's grant stays behind the fail-closed gate:
+ * - the embedded block equals infra/rabbitmq/verify-topology.sh byte for byte;
+ * - notification-service has the isolated consumer role (never `<exchange>.dlx`);
+ * - its grant is preceded by the pre-grant verification and followed by the post-grant one, which withdraws a grant this run made.
+ */
+export const TOPOLOGY_VERIFIER = 'infra/rabbitmq/verify-topology.sh';
+export const PROVISION_SCRIPT = 'infra/rabbitmq/provision.sh';
+export function checkNotificationTopologyGate(provision, verifier) {
+  const problems = [];
+  const why = 'Notification is granted only behind the effective-topology gate (ADR-0057 §8 "OD-BRK-0", OD-BRK-2a)';
+  if (provision === undefined || verifier === undefined) return [`${PROVISION_SCRIPT} / ${TOPOLOGY_VERIFIER}: not found; ${why}`];
+  const begin = "verify_topology() {\n  bash -s -- \"$@\" <<'NAWARA_TOPOLOGY_VERIFIER'\n";
+  const at = provision.indexOf(begin);
+  const end = at < 0 ? -1 : provision.indexOf('\nNAWARA_TOPOLOGY_VERIFIER\n}', at);
+  if (at < 0 || end < 0 || provision.slice(at + begin.length, end + 1) !== verifier) problems.push(`${PROVISION_SCRIPT}: the embedded topology verifier must equal ${TOPOLOGY_VERIFIER} byte for byte; ${why}`);
+  if (/^NAWARA_TOPOLOGY_VERIFIER$/m.test(verifier)) problems.push(`${TOPOLOGY_VERIFIER}: must not contain the heredoc terminator line; ${why}`);
+  if (!/^\s*notification-service\) isolated_consumer notification\.events ;;$/m.test(provision)) problems.push(`${PROVISION_SCRIPT}: notification-service must have the isolated_consumer role; ${why}`);
+  const role = provision.slice(provision.indexOf('isolated_consumer() {'), provision.indexOf('\n}', provision.indexOf('isolated_consumer() {')));
+  if (!role.startsWith('isolated_consumer() {') || /dlx/.test(role)) problems.push(`${PROVISION_SCRIPT}: the isolated_consumer role must never name the dead-letter exchange; ${why}`);
+  const loop = provision.slice(provision.indexOf('for s in $SERVICES; do\n  permissions_for "$s"'));
+  const pre = loop.indexOf('notification_verify pre-grant || die');
+  const grant = loop.indexOf('ctl set_permissions -p "$VHOST" "$s"');
+  const post = loop.indexOf('if ! notification_verify post-grant; then');
+  const withdraw = loop.indexOf('ctl clear_permissions -p "$VHOST" "$s"');
+  if (!(pre >= 0 && grant > pre && post > grant && withdraw > post)) problems.push(`${PROVISION_SCRIPT}: notification-service must be verified before its grant (pre-grant) and after it (post-grant, withdrawing a new grant on failure); ${why}`);
+  if (!/case \$result in PASS\) exit 0 ;; FAIL\) exit 1 ;; \*\) exit 3 ;; esac\s*$/.test(verifier)) problems.push(`${TOPOLOGY_VERIFIER}: only PASS may exit 0 (UNKNOWN is never PASS); ${why}`);
   return problems;
 }
 

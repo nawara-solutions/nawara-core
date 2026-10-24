@@ -9,6 +9,8 @@
 // message was never routed. Two TEST-ONLY variants of the script (Auth domain events active; a Payment grant without one event) are the
 // real script with only its generated block re-rendered by the real renderer: the production activation file is never changed.
 // Payloads are synthetic (`{ synthetic: true }`): no code, credential or personal data. Secrets are never printed.
+// Core V2 OD-BRK-2a: Notification is provisioned only through its real topology gate (a TEST-ONLY, root-owned, inactive latch in the run's
+// own directory, lib/test-latch.mjs), holds the ISOLATED consumer role (no `nawara.events.dlx`) and subscribes with its isolated topology.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -18,11 +20,12 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ACTIVATION_FILE, DENY_ALL, generateTopicPermissions, generatedBlockOf, renderProvisionTopicGrants } from '../lib/topic-permissions.mjs';
+import { LATCH_STATE, latchPath, removeTestLatch, writeTestLatch } from './lib/test-latch.mjs';
 
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, '../..');
 const kit = require(join(root, 'libs/service-kit/dist/index.js'));
-const { RabbitMqEventBus, ProducerReemission, reemissionPolicy, replayDeadLetter } = kit;
+const { RabbitMqEventBus, ProducerReemission, reemissionPolicy, replayDeadLetter, noBrokerDeadLettering } = kit;
 const amqp = require('amqplib');
 
 // ------------------------------------------------------------------------------------------------ the policy (generated, never restated)
@@ -42,12 +45,14 @@ const BILLING_BINDINGS = contractOf('billing-service').consumes.map((e) => e.nam
 // ------------------------------------------------------------------------------------------------ the disposable broker
 const run = `rbtopic-${process.pid}`;
 const variants = mkdtempSync(join(tmpdir(), `${run}-variants-`)); // test-only scripts (no secret)
+const latchDir = mkdtempSync(join(tmpdir(), `${run}-latch-`)); // holds only the root-owned test latch
 const env = {
   ...process.env,
   BROKER_DIR: mkdtempSync(join(tmpdir(), `${run}-state-`)),
   CORE_NETWORK: `${run}-internal`,
   RABBITMQ_CONTAINER: `${run}-rabbitmq`,
   RABBITMQ_VOLUME: `${run}-data`,
+  NOTIFICATION_CONTAINMENT_STATE: latchPath(latchDir),
 };
 delete env.RABBITMQ_SERVICES; // the default selection is the script's own
 const BROKER = env.RABBITMQ_CONTAINER;
@@ -137,6 +142,7 @@ before(async () => {
   for (const [kind, name] of [['container', BROKER], ['network', env.CORE_NETWORK], ['volume', env.RABBITMQ_VOLUME]]) {
     assert.ok(spawnSync('docker', [kind, 'inspect', name]).status !== 0, `${kind} ${name} already exists: refusing to use it`);
   }
+  writeTestLatch(latchDir, LATCH_STATE.inactive);
 });
 after(async () => {
   for (const x of open.reverse()) await x.close().catch(() => {});
@@ -146,6 +152,8 @@ after(async () => {
   spawnSync('docker', ['network', 'rm', env.CORE_NETWORK]);
   rmSync(env.BROKER_DIR, { recursive: true, force: true });
   rmSync(variants, { recursive: true, force: true });
+  removeTestLatch(latchDir);
+  rmSync(latchDir, { recursive: true, force: true });
 });
 
 // ------------------------------------------------------------------------------------------------ provisioning
@@ -172,10 +180,15 @@ const ROLE_PERMS = {
     const e = q.replaceAll('.', '\\.');
     return { conf: `^(nawara\\.events|nawara\\.events\\.dlx|${e}|${e}\\.retry|${e}\\.dead)$`, write: `^(amq\\.default|nawara\\.events\\.dlx|${e}|${e}\\.retry|${e}\\.dead)$`, read: `^(nawara\\.events|nawara\\.events\\.dlx|${e}|${e}\\.retry|${e}\\.dead)$` };
   },
+  // OD-BRK-2a: the consumer role WITHOUT the shared dead-letter exchange (no configure, write or read on `nawara.events.dlx`)
+  isolated: (q) => {
+    const e = q.replaceAll('.', '\\.');
+    return { conf: `^(nawara\\.events|${e}|${e}\\.retry|${e}\\.dead)$`, write: `^(amq\\.default|${e}|${e}\\.retry|${e}\\.dead)$`, read: `^(nawara\\.events|${e}|${e}\\.retry|${e}\\.dead)$` };
+  },
 };
 const expectedResource = (svc) => {
   if (svc === 'audit-service') return ROLE_PERMS.consumer('audit-service.audit');
-  if (svc === 'notification-service') return ROLE_PERMS.consumer('notification.events');
+  if (svc === 'notification-service') return ROLE_PERMS.isolated('notification.events');
   if (svc === 'billing-service') {
     const c = ROLE_PERMS.consumer('billing.payment-events');
     return { ...c, write: c.write.replace('^(amq\\.default|', '^(amq\\.default|nawara\\.events|') };
@@ -248,12 +261,16 @@ test('consumers: Audit binds `audit.#`, Billing its four Payment events and Noti
       received.billing.set(e.id, e.name);
     },
   });
-  await bus('notification-service').subscribe({ queue: 'notification.events', bindings: NOTIFICATION_BINDINGS, handler: async (e) => { received.notification.set(e.id, e.name); } });
+  await bus('notification-service').subscribe({ queue: 'notification.events', bindings: NOTIFICATION_BINDINGS, handler: async (e) => { received.notification.set(e.id, e.name); }, brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: 'external' }) });
   const bindings = ctl('list_bindings', '-p', 'nawara-core', 'source_name', 'destination_name', 'routing_key', '--no-table-headers');
   assert.match(bindings, /^nawara\.events\taudit-service\.audit\taudit\.#$/m);
   for (const k of BILLING_BINDINGS) assert.match(bindings, new RegExp(`^nawara\\.events\\tbilling\\.payment-events\\t${k.replaceAll('.', '\\.')}$`, 'm'));
   for (const k of NOTIFICATION_BINDINGS) assert.match(bindings, new RegExp(`^nawara\\.events\\tnotification\\.events\\t${k.replaceAll('.', '\\.')}$`, 'm'));
   assert.equal(NOTIFICATION_BINDINGS.length, 9);
+  // OD-BRK-2a: Notification's private dead queue is never bound to the shared fanout (Audit's and Billing's still are: unchanged)
+  assert.doesNotMatch(bindings, /^nawara\.events\.dlx\tnotification\.events\.dead\t/m);
+  assert.match(bindings, /^nawara\.events\.dlx\taudit-service\.audit\.dead\t$/m);
+  assert.match(bindings, /^nawara\.events\.dlx\tbilling\.payment-events\.dead\t$/m);
 });
 
 test('producers: each of the six publishes EVERY key of its generated grant (63 keys), carried with its own user_id', async () => {
@@ -386,7 +403,7 @@ test('Billing\'s retry, dead-letter and replay work under its combined identity;
   assert.equal(depth(dead), before);
 });
 
-test('RESIDUAL (OD-BRK, characterized, not fixed by S1d): a consumer identity can inject through the default exchange and the shared DLX', async () => {
+test('RESIDUAL (OD-BRK, characterized): a consumer identity can inject through the default exchange; the shared DLX no longer reaches Notification (OD-BRK-2a)', async () => {
   // default exchange: Notification (a consumer, no topic write at all) addresses Billing's work queue by name
   const injected = randomUUID();
   const viaDefault = await brokerAnswer('notification-service', async (ch) => {
@@ -395,18 +412,29 @@ test('RESIDUAL (OD-BRK, characterized, not fixed by S1d): a consumer identity ca
   assert.equal(viaDefault, undefined, 'accepted: amq.default write reaches any queue by name');
   assert.ok(await until(() => received.billing.has(injected)), 'and delivered to the Billing handler: only consumer enforcement (S1e) can refuse it');
   assert.equal(tapped.has(injected), false, 'never through nawara.events, so topic permissions never saw it');
-  // shared fanout DLX: one publish lands in EVERY consumer's dead-letter queue
-  const dlx = randomUUID();
-  const viaDlx = await brokerAnswer('notification-service', async (ch) => {
-    ch.publish('nawara.events.dlx', '', Buffer.from('{"synthetic":true}'), { messageId: dlx, userId: 'notification-service' });
-  });
-  assert.equal(viaDlx, undefined);
+  // shared fanout DLX, OD-BRK-2a: Notification's identity has NO permission on it, so the BROKER refuses its publish (403: an
+  // authorization denial, before any routing; distinct from a consumer's provenance refusal, which happens after delivery)
   const deadIds = async (q) => {
     const c = track(await amqp.connect(adminUrl()));
     const i = await kit.inspectDeadLetters(c, q, { limit: 50 });
     return i.messages.map((m) => m.eventId);
   };
-  for (const q of ['audit-service.audit.dead', 'billing.payment-events.dead', 'notification.events.dead']) assert.ok((await deadIds(q)).includes(dlx), `${q} received the DLX injection`);
+  const fromNotification = randomUUID();
+  const viaDlx = await brokerAnswer('notification-service', async (ch) => {
+    ch.publish('nawara.events.dlx', '', Buffer.from('{"synthetic":true}'), { messageId: fromNotification, userId: 'notification-service' });
+  });
+  assert.equal(viaDlx?.code, 403, `notification-service may not publish to nawara.events.dlx, got ${viaDlx?.code} ${viaDlx?.message ?? 'accepted'}`);
+  assert.match(String(viaDlx.message), /ACCESS_REFUSED/);
+  // the residual for the legacy consumers is unchanged (Billing still holds the fanout): one publish lands in Audit's and Billing's
+  // dead-letter queues, but never in Notification's, which is not bound to the fanout
+  const fromBilling = randomUUID();
+  assert.equal(await brokerAnswer('billing-service', async (ch) => {
+    ch.publish('nawara.events.dlx', '', Buffer.from('{"synthetic":true}'), { messageId: fromBilling, userId: 'billing-service' });
+  }), undefined);
+  for (const q of ['audit-service.audit.dead', 'billing.payment-events.dead']) assert.ok((await until(async () => (await deadIds(q)).includes(fromBilling))), `${q} received the legacy DLX injection`);
+  const notificationDead = await deadIds('notification.events.dead');
+  assert.ok(!notificationDead.includes(fromBilling) && !notificationDead.includes(fromNotification), 'nothing from the shared fanout reaches notification.events.dead');
+  for (const q of ['audit-service.audit.dead', 'billing.payment-events.dead']) assert.ok(!(await deadIds(q)).includes(fromNotification), `${q}: the refused publish was never routed`);
 });
 
 // ------------------------------------------------------------------------------------------------ R1 producer re-emission compatibility

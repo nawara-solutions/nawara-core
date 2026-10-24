@@ -3721,12 +3721,13 @@ test('Core V2 S1e-4: Notification\'s intake is strict, redacts every code-bearin
   assert.match(checkEnforcementPolicies(contracts, { 'notification-service': {} }).join(), /the Notification intake consumer was not found/);
 });
 
-test('Core V2 OD-BRK-1: no service adopts the no-broker-dead-lettering option yet, and the kit\'s default topology is unchanged', async () => {
+test('Core V2 OD-BRK-1/2a: only Notification adopts the no-broker-dead-lettering option, and the kit\'s default topology is unchanged', async () => {
   const { checkBrokerDeadLettering, BROKER_DEAD_LETTERING_ADOPTERS, KIT_EVENT_BUS } = await import('./lib/checks.mjs');
   const bus = readFileSync(new URL(`../${KIT_EVENT_BUS}`, import.meta.url), 'utf8');
-  assert.deepEqual(BROKER_DEAD_LETTERING_ADOPTERS, []);
+  assert.deepEqual(BROKER_DEAD_LETTERING_ADOPTERS, ['notification-service']); // OD-BRK-2a; Billing (OD-BRK-3) and Audit (OD-BRK-4) not yet
   assert.deepEqual(checkBrokerDeadLettering({}, bus), []);
-  for (const [app, text] of [['notification-service', 'brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: \'external\' })'], ['billing-service', 'import { noBrokerDeadLettering } from \'@nawara/service-kit\';'], ['audit-service', 'brokerDeadLettering: opt,']]) {
+  assert.deepEqual(checkBrokerDeadLettering({ 'notification-service': { 'apps/notification-service/src/x.ts': 'brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: \'external\' })' } }, bus), []);
+  for (const [app, text] of [['billing-service', 'import { noBrokerDeadLettering } from \'@nawara/service-kit\';'], ['audit-service', 'brokerDeadLettering: opt,'], ['payment-service', 'brokerDeadLettering: noBrokerDeadLettering(x)']]) {
     assert.match(checkBrokerDeadLettering({ [app]: { [`apps/${app}/src/x.ts`]: text } }, bus).join(), /may not opt out of broker dead-lettering yet/, app);
   }
   const mutations = [
@@ -3741,6 +3742,32 @@ test('Core V2 OD-BRK-1: no service adopts the no-broker-dead-lettering option ye
     assert.match(checkBrokerDeadLettering({}, bus.replace(from, to)).join(), /default topology .* must stay unchanged/, from);
   }
   assert.match(checkBrokerDeadLettering({}, undefined).join(), /default topology/);
+});
+
+test('Core V2 OD-BRK-2a: the embedded verifier equals its file; Notification is isolated and granted only behind the pre/post-grant gate', async () => {
+  const { checkNotificationTopologyGate, PROVISION_SCRIPT, TOPOLOGY_VERIFIER } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const provision = read(PROVISION_SCRIPT);
+  const verifier = read(TOPOLOGY_VERIFIER);
+  assert.deepEqual(checkNotificationTopologyGate(provision, verifier), []);
+  const mutate = (from, to, text = provision) => {
+    assert.ok(text.includes(from), `fixture drifted: ${from}`);
+    return text.replace(from, to);
+  };
+  const cases = [
+    [mutate('add L1 PASS latch_inactive', 'add L1 PASS latch_ok'), verifier, /embedded topology verifier must equal/],
+    [provision, mutate('add L1 PASS latch_inactive', 'add L1 PASS latch_ok', verifier), /embedded topology verifier must equal/],
+    [mutate('  notification-service) isolated_consumer notification.events ;;', '  notification-service) consumer notification.events ;;'), verifier, /isolated_consumer role/],
+    [mutate('PERM_WRITE="^(amq\\\\.default|${q}|', 'PERM_WRITE="^(amq\\\\.default|${x}\\\\.dlx|${q}|'), verifier, /never name the dead-letter exchange/],
+    [mutate('    notification_verify pre-grant || die', '    true || die'), verifier, /verified before its grant/],
+    [mutate('    if ! notification_verify post-grant; then', '    if false; then'), verifier, /verified before its grant/],
+    [mutate('        ctl clear_permissions -p "$VHOST" "$s" >/dev/null || true\n', ''), verifier, /verified before its grant/],
+  ];
+  for (const [p, v, expected] of cases) assert.match(checkNotificationTopologyGate(p, v).join('\n'), expected);
+  // UNKNOWN treated as PASS (in both copies, so the embedding still matches)
+  const unknownPasses = (t) => t.replace('case $result in PASS) exit 0 ;; FAIL) exit 1 ;; *) exit 3 ;; esac', 'case $result in PASS | UNKNOWN) exit 0 ;; *) exit 1 ;; esac');
+  assert.match(checkNotificationTopologyGate(unknownPasses(provision), unknownPasses(verifier)).join(), /only PASS may exit 0/);
+  assert.match(checkNotificationTopologyGate(undefined, verifier).join(), /not found/);
 });
 
 test('Core V2 S1e-2: Billing\'s payment-event subscription is strict and its handler never reads the trusted values from delivery headers', async () => {

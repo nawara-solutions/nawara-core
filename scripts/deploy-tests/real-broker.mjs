@@ -4,21 +4,25 @@
 // Provisions an isolated broker with infra/rabbitmq/provision.sh (container, network, volume and state dir all prefixed `rbreal-`),
 // then drives it with the REAL service-kit bus under each service identity, so the permission regexes are proven against exactly the
 // AMQP operations the services perform, and nothing more. Everything it creates is removed at the end.
+// Core V2 OD-BRK-2a: Notification is provisioned only through its real topology gate, so the run supplies a TEST-ONLY, root-owned latch
+// (inactive) in its own directory (lib/test-latch.mjs), and Notification subscribes with its approved isolated topology.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { LATCH_STATE, latchPath, removeTestLatch, writeTestLatch } from './lib/test-latch.mjs';
 
 const require = createRequire(import.meta.url);
 const root = resolve(import.meta.dirname, '../..');
-const { RabbitMqEventBus } = require(join(root, 'libs/service-kit/dist/index.js'));
+const { RabbitMqEventBus, noBrokerDeadLettering } = require(join(root, 'libs/service-kit/dist/index.js'));
 const amqp = require('amqplib');
 
 const run = `rbreal-${process.pid}`;
+const latchDir = mkdtempSync(join(tmpdir(), `${run}-latch-`)); // holds only the root-owned test latch
 const env = {
   ...process.env,
   BROKER_DIR: mkdtempSync(join(tmpdir(), 'rbreal-')),
@@ -26,6 +30,7 @@ const env = {
   RABBITMQ_CONTAINER: `${run}-rabbitmq`,
   RABBITMQ_VOLUME: `${run}-data`,
   RABBITMQ_SERVICES: 'audit-service auth-service notification-service organization-service',
+  NOTIFICATION_CONTAINMENT_STATE: latchPath(latchDir),
 };
 const BROKER = env.RABBITMQ_CONTAINER;
 const AUDIT_QUEUE = 'audit-service.audit'; // apps/audit-service/src/ingestion/ingestion.constants.ts
@@ -68,13 +73,21 @@ async function until(predicate, ms = 8000) {
 const open = [];
 const track = (b) => (open.push(b), b);
 
-before(() => { provision(); });
+before(() => {
+  writeTestLatch(latchDir, LATCH_STATE.inactive);
+  const out = provision();
+  // Notification was granted only after its real pre-grant gate PASSED (and its post-grant check after the grant)
+  assert.match(out, /topology pre-grant notification-service: \{[^\n]*"result":"PASS"/);
+  assert.match(out, /topology post-grant notification-service: \{[^\n]*"result":"PASS"/);
+});
 after(async () => {
   for (const b of open) await b.close().catch(() => {});
   docker('rm', '-f', BROKER);
   docker('volume', 'rm', env.RABBITMQ_VOLUME);
   docker('network', 'rm', env.CORE_NETWORK);
   rmSync(env.BROKER_DIR, { recursive: true, force: true });
+  removeTestLatch(latchDir);
+  rmSync(latchDir, { recursive: true, force: true });
 });
 
 test('guest does not exist: the default credentials are refused', async () => {
@@ -149,10 +162,39 @@ test('an audit-only producer (organization-service) publishes its own audit acti
 
 test('notification-service declares its intake queue for its own bindings and cannot bind to audit.*', async () => {
   const notification = track(bus('notification-service'));
-  const sub = await notification.subscribe({ queue: 'notification.events', bindings: NOTIFICATION_BINDINGS, handler: async () => {} });
+  // its approved isolated topology (OD-BRK-2a): the subscription Notification itself makes
+  const sub = await notification.subscribe({ queue: 'notification.events', bindings: NOTIFICATION_BINDINGS, handler: async () => {}, brokerDeadLettering: noBrokerDeadLettering({ effectiveTopologyVerification: 'external' }) });
   await sub.close();
   const refusal = await brokerRefusal(urlOf('notification-service'), (ch) => ch.bindQueue('notification.events', 'nawara.events', 'audit.#'));
   assert.match(String(refusal?.message), /ACCESS_REFUSED/);
+});
+
+test('OD-BRK-2a: a missing, contained or untrusted latch refuses Notification at its pre-grant gate and changes nothing; the valid one passes again', () => {
+  const perms = () => ctl('list_permissions', '-p', 'nawara-core', '--no-table-headers').split('\n').find((l) => l.startsWith('notification-service\t'));
+  const before = perms();
+  assert.ok(before, 'Notification holds its grant');
+  const untrusted = mkdtempSync(join(tmpdir(), `${run}-untrusted-`)); // the invoking (non-root) user's own file: never trusted
+  try {
+    mkdirSync(join(untrusted, 'latch'), { mode: 0o755 });
+    writeFileSync(join(untrusted, 'latch', 'notification-service.containment'), LATCH_STATE.inactive, { mode: 0o644 });
+    for (const [what, state, prepare] of [
+      ['missing', join(latchDir, 'absent', 'notification-service.containment'), () => {}],
+      ['not root-owned', join(untrusted, 'latch', 'notification-service.containment'), () => {}],
+      ['contained', latchPath(latchDir), () => writeTestLatch(latchDir, LATCH_STATE.contained)],
+      ['malformed', latchPath(latchDir), () => writeTestLatch(latchDir, 'state=inactive')],
+    ]) {
+      prepare();
+      const r = spawnSync('bash', [join(root, 'infra/rabbitmq/provision.sh')], { env: { ...env, RABBITMQ_SERVICES: 'notification-service', NOTIFICATION_CONTAINMENT_STATE: state }, encoding: 'utf8', timeout: 240_000 });
+      const out = `${r.stdout}${r.stderr}`;
+      assert.notEqual(r.status, 0, `${what}: ${out}`);
+      assert.match(out, /notification-service NOT provisioned: the pre-grant topology verification did not pass/, what);
+      assert.doesNotMatch(out, /"result":"PASS"/, what);
+      assert.equal(perms(), before, `${what}: the existing grant is unchanged`);
+    }
+  } finally {
+    rmSync(untrusted, { recursive: true, force: true });
+    writeTestLatch(latchDir, LATCH_STATE.inactive);
+  }
 });
 
 test('queued evidence survives recreating the broker container (fixed hostname + volume) and provisioning is idempotent', async () => {
