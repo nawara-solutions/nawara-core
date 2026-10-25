@@ -30,6 +30,9 @@ describe('RELEASE_MESSAGES', () => {
       policyConflict: 'The policy changed since you read it; read it again.',
       authorityUnverified: 'Authority could not be verified; nothing was changed.',
       ownerOnly: 'Only the owner of the operating Company may administer releases.',
+      // Core V2 S2-Release.1: new messages
+      invalidQuery: 'The query is invalid.',
+      invalidCursor: 'The cursor is not valid for this query.',
       componentKindConflict: 'The component exists with another kind.',
       releaseIdentityConflict: 'This version is registered with a different identity.',
       cannotPublishInStatus: 'A {status} release cannot be published.',

@@ -44,7 +44,8 @@ export class OwnerGuard implements CanActivate {
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest<OwnerRequest>();
-    const operation = String(ctx.getHandler().name) === 'withdraw' ? 'withdraw' : 'policy_change';
+    const handler = String(ctx.getHandler().name);
+    const operation = handler === 'withdraw' ? 'withdraw' : handler === 'changePolicy' ? 'policy_change' : 'read'; // S2-Release.1: the reads
     const refuse = (outcome: AdminOutcome, reason: string, error: HttpException): never => {
       this.counters.admin.count(operation, outcome);
       this.log.warn(`release_admin_denied operation=${operation} outcome=${outcome} reason=${reason}`);

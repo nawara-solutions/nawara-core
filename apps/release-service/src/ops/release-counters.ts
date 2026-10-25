@@ -5,7 +5,8 @@
  */
 export const AUTOMATION_OPERATIONS = ['register', 'publish'] as const;
 export const AUTOMATION_OUTCOMES = ['changed', 'unchanged', 'denied', 'invalid', 'not_found', 'conflict', 'failed'] as const;
-export const ADMIN_OPERATIONS = ['withdraw', 'policy_change'] as const;
+// Core V2 S2-Release.1: plus the owner reads (REL-01 to REL-03), counted with the same outcomes (a refusal of the guard included)
+export const ADMIN_OPERATIONS = ['withdraw', 'policy_change', 'read'] as const;
 export const ADMIN_OUTCOMES = [
   'changed', 'unchanged', 'unauthenticated', 'authority_denied', 'step_up_denied', 'invalid', 'not_found', 'conflict', 'auth_timeout', 'auth_unavailable', 'failed',
 ] as const;

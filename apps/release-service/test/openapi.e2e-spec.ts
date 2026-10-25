@@ -37,10 +37,13 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
     }
   });
 
-  it('documents exactly the two automation, two owner and one public operation besides the kit probes (no list, deployment or artifact route)', () => {
+  it('documents exactly the two automation, two owner writes, three owner reads (S2-Release.1) and one public operation besides the kit probes (no CI or public list, no deployment or artifact route)', () => {
     const ops = Object.entries(doc.paths as Record<string, Record<string, unknown>>).flatMap(([p, methods]) => Object.keys(methods).map((m) => `${m.toUpperCase()} ${p}`));
     expect(ops.filter((o) => !['GET /health', 'GET /ready'].includes(o)).sort()).toEqual([
       'GET /release/products/{product}/components/{component}/compatibility',
+      'GET /release/admin/products',
+      'GET /release/admin/products/{product}/components/{component}/releases',
+      'GET /release/admin/products/{product}/components/{component}/compatibility-policy/history',
       'POST /release/admin/products/{product}/components/{component}/compatibility-policy',
       'POST /release/admin/products/{product}/components/{component}/releases/{version}/withdraw',
       'POST /release/products/{product}/components/{component}/releases',
@@ -49,6 +52,9 @@ describeWithEnv('release-service OpenAPI (Stage 20.3)', [], () => {
     const automation = Object.keys(doc.paths).filter((p) => p.startsWith('/release/products') && !p.endsWith('/compatibility'));
     expect(automation.join(' ')).not.toMatch(/withdraw|minimum|policy|compatib|deploy|channel|artifact|latest/i); // CI can do none of that
     expect(Object.keys(doc.paths).join(' ')).not.toMatch(/deploy|channel|artifact|latest|download|install|store/i);
+    // the only list routes are the owner's (REL-01 to REL-03): CI and the public compatibility read list nothing
+    expect(ops.filter((o) => o.startsWith('GET ') && !o.startsWith('GET /release/admin/') && !['GET /health', 'GET /ready'].includes(o)))
+      .toEqual(['GET /release/products/{product}/components/{component}/compatibility']);
   });
 
   it('declares bearer (service token) security and the statuses the runtime returns', () => {

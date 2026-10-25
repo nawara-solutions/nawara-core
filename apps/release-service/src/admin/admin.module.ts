@@ -5,6 +5,8 @@ import { AdminController } from './admin.controller.js';
 import { AdminService } from './admin.service.js';
 import { HttpOwnerAuthority, OWNER_AUTHORITY } from './owner-authority.client.js';
 import { OwnerGuard } from './owner.guard.js';
+import { ReadController } from './read.controller.js';
+import { ReadService } from './read.service.js';
 
 /**
  * Stage 20.4: owner administration. Mounted ONLY when `AUTH_SERVICE_URL` and `RELEASE_OPERATING_COMPANY_ID` are configured; otherwise the
@@ -17,8 +19,9 @@ export class AdminModule {
     return {
       module: AdminModule,
       imports: [PersistenceModule],
-      controllers: [AdminController],
-      providers: [AdminService, OwnerGuard, { provide: OWNER_AUTHORITY, useValue: new HttpOwnerAuthority({ baseUrl: config.ownerAdmin.authServiceUrl }) }],
+      // Core V2 S2-Release.1: the owner's reads (REL-01 to REL-03), behind the same guard
+      controllers: [AdminController, ReadController],
+      providers: [AdminService, ReadService, OwnerGuard, { provide: OWNER_AUTHORITY, useValue: new HttpOwnerAuthority({ baseUrl: config.ownerAdmin.authServiceUrl }) }],
     };
   }
 }
