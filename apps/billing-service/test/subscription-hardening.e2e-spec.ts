@@ -15,6 +15,11 @@ import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { anchorOccurrence } from './support/billing-calendar.js';
 
+// Core V2 S3a: a subscription product names its Platform; the issuing caller and the invoice's Organization belong to it (the controller
+// resolves both before the issuing transaction; these tests call the repository directly and pass what the controller would).
+const PLATFORM = '99999999-9999-4999-8999-999999999999';
+const VERIFIED = { callerPlatforms: new Set([PLATFORM]), organizationPlatformId: PLATFORM };
+
 /**
  * Stage 12.6: lifecycle/concurrency/idempotency HARDENING of the already-built Payment -> Subscription -> Entitlement
  * chain (Stages 12.2-12.5). This file adds exactly the coverage that file (`payment-subscription-integration.e2e-spec.ts`)
@@ -60,7 +65,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
   async function seedRecurringPrice(o: { organizationId?: string; unit?: number } = {}): Promise<{ productId: string; priceId: string }> {
     seq += 1;
     const product = await admin.query(
-      `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status) VALUES ('test-producer', 'organization', $1, $2, $3, 'active') RETURNING id`,
+      `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ('test-producer', 'organization', $1, $2, $3, 'active', 'organization', '99999999-9999-4999-8999-999999999999') RETURNING id`,
       [o.organizationId ?? ORG, `sub-prod-${seq}-${Math.random().toString(36).slice(2, 8)}`, `Subscription product ${seq}`],
     );
     const price = await admin.query(
@@ -86,7 +91,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
   const create = (input: NormalisedCreateInvoiceInput) => invoices.createDraft(PRODUCER, input, ['TND'], ctx);
   const openInvoice = async (o: Parameters<typeof draftInput>[0] = {}) => {
     const { invoice } = await create(await draftInput(o));
-    return (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, ctx)).invoice;
+    return (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, ctx, VERIFIED)).invoice;
   };
   async function dispatch(requestId: string, paymentId = crypto.randomUUID()): Promise<string> {
     await dbs.tx(async (q) => {

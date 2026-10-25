@@ -24,7 +24,11 @@ export interface PaymentRequestResult {
 /** Stage 12.4: what a successfully-applied `payment.succeeded` did to the Organization's Subscription, if anything.
  * `null` whenever there is nothing to report — the event was not applied at all, the invoice has no organization, or
  * its lines do not identify exactly one recurring (Subscription) obligation (never guessed from more than one). */
-export type SubscriptionSettlementOutcome = 'settled' | 'conflict' | null;
+/**
+ * `unrouted` (Core V2 S3a): a paid invoice with a subscription-looking line but no routing record (issued before S3a), or whose record
+ * does not name that Organization subscription: no Subscription effect, logged for review (ADR-0044 B9).
+ */
+export type SubscriptionSettlementOutcome = 'settled' | 'conflict' | 'unrouted' | null;
 
 export interface EventApplication {
   outcome: Decision['outcome'];
@@ -383,9 +387,19 @@ export class PaymentRequestRepository {
     );
     const recurring = lines.filter((l) => l.interval === 'recurring');
     if (recurring.length !== 1) return null;
+    // Core V2 S3a (ADR-0044 B2, B9; the Owner-approved cross-beneficiary guard): only an invoice whose immutable routing record says
+    // `organization_subscription` for THIS Organization and THIS product may touch that Organization's Subscription. A personal or
+    // ordinary invoice never does; an invoice without a record (issued before S3a) is never routed after the fact (no backfill, never
+    // from `entitlementKind`). The broader settlement-based activation is S3b.
+    const { rows: routed } = await q.query<{ purpose: string; organizationId: string | null; productId: string | null }>(
+      `SELECT purpose, "organizationId", "productId" FROM invoice_entitlement WHERE "invoiceId" = $1`, [invoice.id]);
+    const routing = routed[0];
+    if (!routing) return 'unrouted';
+    if (routing.purpose !== 'organization_subscription') return null;
     const { productId, priceId } = recurring[0]!;
+    if (routing.organizationId !== invoice.organizationId || routing.productId !== productId) return 'unrouted';
     try {
-      await this.subscriptions.applySuccessfulPayment(q, { organizationId: invoice.organizationId, productId, priceId, settledAt }, ctx);
+      await this.subscriptions.applySuccessfulPayment(q, { organizationId: routing.organizationId, productId, priceId, settledAt }, ctx);
       return 'settled';
     } catch (e) {
       const response = e instanceof HttpException ? e.getResponse() : null;

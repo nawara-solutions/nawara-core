@@ -70,6 +70,12 @@ describe('BILLING_MESSAGES', () => {
       [en('subscriptionCannotExpire', { status: 'pending' }), 'A subscription that is pending cannot expire.'],
       [en('subscriptionCannotChangeCancellation', { status: 'expired' }), 'A subscription that is expired cannot change its cancellation.'],
       [en('subscriptionCannotBeTerminated', { status: 'pending' }), 'A subscription that is pending cannot be terminated.'],
+      [en('subscriptionTargetValues'), 'subscriptionTarget must be none, organization or personal'],
+      [en('platformIdUuid'), 'platformId must be a uuid'],
+      [en('subscriptionProductNeedsPlatform'), 'a subscription product (organization or personal) requires platformId'],
+      [en('platformNotPermitted'), 'This Platform is not permitted for the caller.'],
+      [en('subscriptionPriceNotRecurring'), 'A subscription product has recurring prices only.'],
+      [en('invoiceRoutingInvalid', { reason: 'organization_payer' }), 'The invoice cannot be routed (organization_payer).'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

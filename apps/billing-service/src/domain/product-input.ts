@@ -9,6 +9,8 @@ export interface RawCreateProductInput {
   name: unknown;
   description?: unknown;
   entitlementKind?: unknown;
+  subscriptionTarget?: unknown;
+  platformId?: unknown;
 }
 
 export interface NormalisedCreateProductInput {
@@ -17,13 +19,20 @@ export interface NormalisedCreateProductInput {
   name: string;
   description: string | null;
   entitlementKind: string;
+  /** Core V2 S3a (ADR-0044 B1): `none` (ordinary), `organization` or `personal` (a subscription product). Never derived from `entitlementKind`. */
+  subscriptionTarget: SubscriptionTarget;
+  /** The Platform a subscription product belongs to (required for `organization` / `personal`); optional for an ordinary product. */
+  platformId: string | null;
 }
+
+export const SUBSCRIPTION_TARGETS = ['none', 'organization', 'personal'] as const;
+export type SubscriptionTarget = (typeof SUBSCRIPTION_TARGETS)[number];
 
 const PARTY_TYPES = ['user', 'organization', 'company'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE = /^[a-z][a-z0-9_-]{1,62}$/;
 const ENTITLEMENT_KINDS = ['none', 'organization_license', 'user_subscription'];
-const ALLOWED_TOP = new Set(['seller', 'code', 'name', 'description', 'entitlementKind']);
+const ALLOWED_TOP = new Set(['seller', 'code', 'name', 'description', 'entitlementKind', 'subscriptionTarget', 'platformId']);
 
 const bad = (message: string | MessageTexts, params?: MessageParams) => billingError(400, 'invalid_product_request', message, params);
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -64,5 +73,17 @@ export function normaliseCreateProductInput(raw: unknown): NormalisedCreateProdu
     entitlementKind = raw.entitlementKind;
   }
 
-  return { seller: { type: raw.seller.type, id: sellerId }, code: raw.code, name: raw.name, description, entitlementKind };
+  let subscriptionTarget: SubscriptionTarget = 'none';
+  if (raw.subscriptionTarget !== undefined && raw.subscriptionTarget !== null) {
+    if (typeof raw.subscriptionTarget !== 'string' || !(SUBSCRIPTION_TARGETS as readonly string[]).includes(raw.subscriptionTarget)) throw bad(BILLING_MESSAGES.subscriptionTargetValues);
+    subscriptionTarget = raw.subscriptionTarget as SubscriptionTarget;
+  }
+  let platformId: string | null = null;
+  if (raw.platformId !== undefined && raw.platformId !== null) {
+    if (typeof raw.platformId !== 'string' || !UUID.test(raw.platformId)) throw bad(BILLING_MESSAGES.platformIdUuid);
+    platformId = raw.platformId.toLowerCase();
+  }
+  // a subscription product belongs to exactly one Platform (B1); an ordinary product may name one
+  if (subscriptionTarget !== 'none' && platformId === null) throw bad(BILLING_MESSAGES.subscriptionProductNeedsPlatform);
+  return { seller: { type: raw.seller.type, id: sellerId }, code: raw.code, name: raw.name, description, entitlementKind, subscriptionTarget, platformId };
 }

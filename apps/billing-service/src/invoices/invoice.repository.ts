@@ -11,8 +11,9 @@ import { ACTIVE_PAYMENT_REQUEST_STATUSES } from '../domain/state-machines.js';
 import { computeTotals } from '../domain/totals.js';
 import type { NormalisedCreateInvoiceInput } from '../domain/invoice-input.js';
 import { invoiceCreatedEvent } from './billing-events.js';
+import { decideRouting, type RoutingDecision, type RoutingInput, type RoutingLine } from '../domain/invoice-routing.js';
 import {
-  INVOICE_COLUMNS, type InvoiceLineRow, type InvoiceListFilters, type InvoiceListRow, type InvoiceRecord, type InvoiceRow, type PriceForInvoice,
+  INVOICE_COLUMNS, type InvoiceLineRow, type InvoiceRoutingRow, type InvoiceListFilters, type InvoiceListRow, type InvoiceRecord, type InvoiceRow, type PriceForInvoice,
 } from './invoice.types.js';
 import { recordTransition } from '../domain/transitions.js';
 import { BILLING_MESSAGES } from '../messages.js';
@@ -97,12 +98,43 @@ export class InvoiceRepository {
     });
   }
 
-  /** `draft -> open`: locks the invoice, assigns the number (DB trigger, counter lock), sets the presentation snapshot, enqueues `invoice.created`. */
-  async issue(invoiceId: string, caller: Caller, presentation: { template: string; locale: string }, ctx: TransitionContext): Promise<WriteResult> {
+  /**
+   * Core V2 S3a: the routing an issue of this draft would record, read WITHOUT a lock, so that the caller can verify what needs an
+   * authority (an Organization's Platform) OUTSIDE the transaction. `null` when the invoice is no longer a draft (the issue answers it).
+   * `issue` decides again, under the lock, from the same immutable facts.
+   */
+  async planIssue(invoiceId: string, caller: Caller): Promise<RoutingDecision | null> {
+    const row = (await this.db.query<InvoiceRow>(`SELECT ${INVOICE_COLUMNS} FROM invoice WHERE id = $1`, [invoiceId])).rows[0];
+    if (!row || relationTo(row, caller) === null) throw notFound();
+    if (row.status !== 'draft') return null;
+    return decideRouting(await this.routingInput(this.db, row));
+  }
+
+  /**
+   * `draft -> open`: locks the invoice, assigns the number (DB trigger, counter lock), sets the presentation snapshot, enqueues `invoice.created`.
+   * Core V2 S3a (B2, DB-2, DB-7): in the same transaction, records the invoice's immutable routing, decided by the server from its own
+   * rows (`decideRouting`); a malformed or unavailable routing is `422 invoice_routing_invalid` and nothing changes. A subscription
+   * product's Platform must be one of the issuing caller's Platforms, and an Organization subscription's Organization must belong to it
+   * (`verified.organizationPlatformId`, resolved by the caller through Billing's Organization authority before this transaction).
+   */
+  async issue(
+    invoiceId: string, caller: Caller, presentation: { template: string; locale: string }, ctx: TransitionContext,
+    verified: { callerPlatforms: ReadonlySet<string>; organizationPlatformId: string | null } = { callerPlatforms: new Set(), organizationPlatformId: null },
+  ): Promise<WriteResult> {
     return this.db.tx(async (q) => {
       const row = await this.lockForCaller(q, invoiceId, caller);
       if (row.status === 'open') return { invoice: (await this.load(q, invoiceId))!, changed: false }; // state-idempotent (SDD 17.2)
       if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', BILLING_MESSAGES.invoiceCannotBeIssued, { status: row.status });
+      const decision = decideRouting(await this.routingInput(q, row));
+      if ('refused' in decision) throw routingInvalid(decision.refused);
+      const routing = decision.routed;
+      if (routing.platformId !== null && !verified.callerPlatforms.has(routing.platformId)) throw routingInvalid('platform_out_of_scope');
+      if (routing.purpose === 'organization_subscription' && verified.organizationPlatformId !== routing.platformId) throw routingInvalid('organization_platform_mismatch');
+      await q.query(
+        `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId],
+      );
       let snapshot;
       try {
         snapshot = buildPresentationSnapshot(presentation);
@@ -205,7 +237,19 @@ export class InvoiceRepository {
 
   private async withLines(q: Queryable, row: InvoiceRow): Promise<InvoiceRecord> {
     const { rows } = await q.query<InvoiceLineRow>(`SELECT * FROM invoice_line WHERE "invoiceId" = $1 ORDER BY "lineNumber"`, [row.id]);
-    return { ...row, lines: rows };
+    const routing = await q.query<InvoiceRoutingRow>(
+      `SELECT purpose, target, "beneficiaryUserId", "organizationId", "productId" FROM invoice_entitlement WHERE "invoiceId" = $1`, [row.id]);
+    return { ...row, lines: rows, routing: routing.rows[0] ?? null };
+  }
+
+  /** The facts routing is decided from: the invoice's payer and Organization, each line's product target and Platform (immutable). */
+  private async routingInput(q: Queryable, row: InvoiceRow): Promise<RoutingInput> {
+    const { rows } = await q.query<RoutingLine>(
+      `SELECT l."productId", p."subscriptionTarget", p."platformId" FROM invoice_line l JOIN product p ON p.id = l."productId"
+        WHERE l."invoiceId" = $1 ORDER BY l."lineNumber"`,
+      [row.id],
+    );
+    return { payerType: row.payerType, payerId: row.payerId, organizationId: row.organizationId, lines: rows };
   }
 
   private async lockForCaller(q: Queryable, invoiceId: string, caller: Caller): Promise<InvoiceRow> {
@@ -228,4 +272,9 @@ export class InvoiceRepository {
     );
     return new Map(rows.map((r) => [r.priceId, r]));
   }
+}
+
+/** `422 invoice_routing_invalid` (register BIL-08) with a reason CODE (never client data). */
+function routingInvalid(reason: string) {
+  return billingError(422, 'invoice_routing_invalid', BILLING_MESSAGES.invoiceRoutingInvalid, { reason });
 }

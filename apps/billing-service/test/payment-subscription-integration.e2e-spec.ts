@@ -15,6 +15,11 @@ import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { anchorOccurrence } from './support/billing-calendar.js';
 
+// Core V2 S3a: a subscription product names its Platform; the issuing caller and the invoice's Organization belong to it (the controller
+// resolves both before the issuing transaction; these tests call the repository directly and pass what the controller would).
+const PLATFORM = '99999999-9999-4999-8999-999999999999';
+const VERIFIED = { callerPlatforms: new Set([PLATFORM]), organizationPlatformId: PLATFORM };
+
 const ORG = '00000000-0000-4000-8000-0000000000c1';
 const PRODUCER = 'test-producer';
 const producer: Caller = { kind: 'service', service: PRODUCER };
@@ -61,8 +66,8 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
   async function seedRecurringPrice(o: { organizationId?: string; unit?: number; currency?: string; intervalUnit?: string; intervalCount?: number } = {}): Promise<{ productId: string; priceId: string }> {
     seq += 1;
     const product = await admin.query(
-      `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status) VALUES ('test-producer', 'organization', $1, $2, $3, 'active') RETURNING id`,
-      [o.organizationId ?? ORG, `sub-prod-${seq}-${Math.random().toString(36).slice(2, 8)}`, `Subscription product ${seq}`],
+      `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ('test-producer', 'organization', $1, $2, $3, 'active', 'organization', $4) RETURNING id`,
+      [o.organizationId ?? ORG, `sub-prod-${seq}-${Math.random().toString(36).slice(2, 8)}`, `Subscription product ${seq}`, PLATFORM],
     );
     const price = await admin.query(
       `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
@@ -103,7 +108,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
   const create = (input: NormalisedCreateInvoiceInput) => invoices.createDraft(PRODUCER, input, ['TND'], ctx);
   const openInvoice = async (o: Parameters<typeof draftInput>[0] = {}) => {
     const { invoice } = await create(await draftInput(o));
-    return (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, ctx)).invoice;
+    return (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, ctx, VERIFIED)).invoice;
   };
 
   /** What Stage 4's dispatcher does, so a test can start from a `requested` request (mirrors invoices.e2e-spec.ts). */
@@ -284,7 +289,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
       lines: [{ priceId: price.rows[0].id, quantity: 1 }],
     });
     const { invoice } = await create(input);
-    const open = (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, ctx)).invoice;
+    const open = (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, ctx, VERIFIED)).invoice;
     expect(open.organizationId).toBeNull();
     const { request } = await requests.createForInvoice(open.id, producer, ctx);
     const paymentId = await dispatch(request.id);

@@ -26,7 +26,9 @@ export type BillingErrorCode =
   | 'subscription_conflict'
   | 'invalid_subscription_transition'
   | 'invalid_subscription_period'
-  | 'subscription_grace_unavailable';
+  | 'subscription_grace_unavailable'
+  | 'subscription_price_not_recurring' // Core V2 S3a
+  | 'invoice_routing_invalid'; // Core V2 S3a (register BIL-08)
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived
