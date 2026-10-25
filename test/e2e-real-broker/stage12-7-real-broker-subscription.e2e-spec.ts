@@ -110,6 +110,9 @@ describeWithEnv(
       await runMigrations(paymentDb.url, [kitMigrationsDir, `${PAYMENT_DIR}/db/migrations/`]);
       billingAdmin = new pg.Pool({ connectionString: billingDb.url });
       paymentAdmin = new pg.Pool({ connectionString: paymentDb.url });
+      // Core V2 S3d (BIL-01): a new subscription product needs its Platform's billing configuration; configured directly here, as the Owner
+      // route would after Auth's live checks (a fixture Company, never a request value)
+      await billingAdmin.query(`INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, gen_random_uuid(), 'TND', gen_random_uuid())`, [TEST_PLATFORM]);
 
       amqpConn = await amqp.connect(env.TEST_RABBITMQ_URL); // the suite's own admin connection: NEVER routed through the proxy
       paymentIdentity = await createPaymentIdentity(env as { TEST_RABBITMQ_URL: string; TEST_RABBITMQ_MGMT_URL: string });

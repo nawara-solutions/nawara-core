@@ -30,7 +30,7 @@ export class PricesController {
   @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold price.create' })
   @ApiResponse({ status: 404, description: 'the product does not exist, or was not created by this producer' })
   @ApiResponse({ status: 409, description: 'price_conflict: same (productId, clientReference), different content' })
-  @ApiResponse({ status: 422, description: 'unsupported_currency' })
+  @ApiResponse({ status: 422, description: 'unsupported_currency: not a supported currency, or (a subscription product) not its configured Platform\'s currency (Core V2 S3d) | subscription_price_not_recurring' })
   async create(@CallerService() producer: string, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const input = normaliseCreatePriceInput(body);
     const caller: Caller = { kind: 'service', service: producer };

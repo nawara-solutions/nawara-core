@@ -11,6 +11,7 @@ import type { PaymentClient } from '../../src/payment-integration/payment-client
 import { ProbeModule } from './probe.js';
 import { BILLING_OPERATIONS } from '../../src/admission/caller-admission.policy.js';
 import { TrustedDeliveryBus } from './trusted-delivery-bus.js';
+import { AuthDependencyError, type OwnerAuthority } from '../../src/platforms/owner-authority.client.js';
 
 export interface TestApp {
   app: NestExpressApplication;
@@ -21,6 +22,11 @@ export interface TestApp {
   /** Typed as the concrete in-memory bus (tests only ever run against it) so a test can inspect `.published`/`.deadLettered`. */
   bus: TrustedDeliveryBus;
 }
+
+/** No network in tests: an Owner check that is not replaced fails closed, as an unreachable Auth would. */
+const unreachableOwnerAuthority: OwnerAuthority = {
+  verifyPlatformOwner: async () => { throw new AuthDependencyError('auth_unavailable'); },
+};
 
 const noopAuthClient: AuthClient = {
   getIdentity: async () => null,
@@ -58,6 +64,8 @@ export async function createTestApp(opts: {
   migrationsDirs?: string[];
   /** Replaces the Organization reference source (default: `anyOrganizationReference`). */
   organizationReference?: OrganizationReferenceResolver;
+  /** Core V2 S3d: the Owner check of the Platform configuration (default: an Auth that answers nothing, so every Owner call is a 503). */
+  ownerAuthority?: OwnerAuthority;
 }): Promise<TestApp> {
   const logs: Record<string, unknown>[] = [];
   const config = loadBillingConfig({
@@ -89,6 +97,7 @@ export async function createTestApp(opts: {
         bus,
         migrationsDirs: opts.migrationsDirs ?? [kitMigrationsDir, billingMigrationsDir],
         organizationReference: opts.organizationReference ?? anyOrganizationReference,
+        ownerAuthority: opts.ownerAuthority ?? unreachableOwnerAuthority,
       }),
       ProbeModule,
     ],

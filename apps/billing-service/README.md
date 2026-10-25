@@ -58,12 +58,23 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   allows one reversal per purchase (written by S6's refund / chargeback flows). B6:
   `GET /billing/users/:userId/platforms/:platformId/products/:productId/entitlement` (service token, `entitlement.read`, the Platform
   in the caller's `allowedPlatforms`, the product a personal product of it, else `404`) answers `{ valid, expiresAt }`, no grace.
+- **Platform commercial configuration (Core V2 S3d; register BIL-01, AUTH-07; `db/migrations/0023`, `src/platforms/`):**
+  `billing_platform` holds, per Platform, its Company and its ONE currency; it is append-only (never changed or deleted). Only an Owner
+  writes it, with their OWN bearer, verified live through Auth's existing routes (`GET /auth/grants`: an Owner, and their Company;
+  `GET /auth/platform-access/:platformId`: the Platform is in that Company), never a service token (`401`, not forwarded). `companyId`
+  comes from Auth, never from the request. `POST /billing/admin/platforms/:platformId` `{currency}` answers `201`, an identical repeat
+  `200` (`Idempotent-Replayed`), another currency `409 billing_platform_exists`; `GET` reads it. A member or an operator is `403`; an
+  unknown or another Company's Platform is the same `404` (never confirmed); Auth unavailable is `503 auth_timeout | auth_unavailable`
+  and nothing is written. No step-up (the Owner's Q11 decision for S3d). A NEW subscription product (`organization` / `personal`)
+  requires its Platform's row (`409 platform_not_configured`, also a database guard), and a subscription product's prices use that
+  currency (`422 unsupported_currency`, also a database guard). Nothing existing is backfilled or rewritten. `platform_currency` (0009)
+  is superseded for Core V2 (OD-02): left as it is, with its data, and nothing new reads or writes it.
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).
 - **Numbering foundation**: a concurrency-safe counter per seller at issue; a rolled-back issue returns its number; gaplessness is
   **not** assumed (scope and format are B-004).
-- **Currency in three layers**: the global `currency` reference, Platform-enabled currencies (`platform_currency`, with a permission question nothing calls yet) and the immutable historical invoice currency. No Platform currency HTTP API; how an invoice gets its Platform is undecided (B-036).
+- **Currency in three layers**: the global `currency` reference, Platform-enabled currencies (`platform_currency`, with a permission question nothing calls yet) and the immutable historical invoice currency. No Platform currency HTTP API; how an invoice gets its Platform is undecided (B-036). Core V2 S3d (OD-02): the Platform's one currency is `billing_platform`'s; `platform_currency` is superseded for Core V2 and kept untouched.
 - **Payment-request mapping** as a pure function of two immutable rows, and **payment-event handling**: a pure decision function plus
   a durable receipt (duplicates, out-of-order, unknown, early events; a `paymentId` is never bound from an event). Billing keeps its
   own `payment_event_receipt` for this rather than the kit's generic `InboxService` — Payment-event deduplication carries Billing

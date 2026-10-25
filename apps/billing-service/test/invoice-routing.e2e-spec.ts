@@ -11,6 +11,7 @@ import { PaymentRequestRepository } from '../src/invoices/payment-request.reposi
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
+import { configurePlatform } from './support/settlement.js';
 
 const P1 = '11111111-0000-4000-8000-0000000000a1';
 const P2 = '22222222-0000-4000-8000-0000000000a2';
@@ -60,6 +61,7 @@ describeWithEnv('invoice target routing (real PostgreSQL)', ['TEST_DATABASE_ADMI
     });
     admin = new pg.Client({ connectionString: db.url });
     await admin.connect();
+    for (const p of [P1, P2, P3]) await configurePlatform(admin, p); // Core V2 S3d: a subscription product's Platform is configured
   });
   afterAll(async () => {
     await admin?.end();

@@ -14,6 +14,7 @@ import { InvoiceRepository } from '../src/invoices/invoice.repository.js';
 import { PaymentRequestRepository } from '../src/invoices/payment-request.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
+import { configurePlatform } from './support/settlement.js';
 
 // Core V2 S3a: a subscription product names its Platform; the issuing caller and the invoice's Organization belong to it (the controller
 // resolves both before the issuing transaction; these tests call the repository directly and pass what the controller would).
@@ -61,6 +62,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
   async function seedPrice(o: { seller?: { type: string; id: string }; recurring?: boolean } = {}) {
     seq += 1;
     const seller = o.seller ?? { type: 'organization', id: ORG };
+    if (o.recurring) await configurePlatform(admin, PLATFORM); // Core V2 S3d: a subscription product's Platform is configured
     const product = await rows(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ($1, $2, $3, $4, 'Secret Product Name', 'active', $5, $6) RETURNING id`, [PRODUCER, seller.type, seller.id, `p-${seq}-${Math.random().toString(36).slice(2, 7)}`, o.recurring ? 'organization' : 'none', o.recurring ? PLATFORM : null]);
     const price = await rows(
       `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, $2, 'TND', 9876, $3, $4, $5) RETURNING id`,

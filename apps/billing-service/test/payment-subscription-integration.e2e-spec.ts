@@ -14,6 +14,7 @@ import { SubscriptionRepository } from '../src/subscriptions/subscription.reposi
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { anchorOccurrence } from './support/billing-calendar.js';
+import { configurePlatform } from './support/settlement.js';
 
 // Core V2 S3a: a subscription product names its Platform; the issuing caller and the invoice's Organization belong to it (the controller
 // resolves both before the issuing transaction; these tests call the repository directly and pass what the controller would).
@@ -65,6 +66,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
   let seq = 0;
   async function seedRecurringPrice(o: { organizationId?: string; unit?: number; currency?: string; intervalUnit?: string; intervalCount?: number } = {}): Promise<{ productId: string; priceId: string }> {
     seq += 1;
+    await configurePlatform(admin, PLATFORM); // Core V2 S3d: a subscription product's Platform is configured
     const product = await admin.query(
       `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ('test-producer', 'organization', $1, $2, $3, 'active', 'organization', $4) RETURNING id`,
       [o.organizationId ?? ORG, `sub-prod-${seq}-${Math.random().toString(36).slice(2, 8)}`, `Subscription product ${seq}`, PLATFORM],

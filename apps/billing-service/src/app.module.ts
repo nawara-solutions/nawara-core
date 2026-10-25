@@ -14,6 +14,8 @@ import { BillingConfigModule } from './config/billing-config.module.js';
 import { CurrenciesModule } from './currencies/currencies.module.js';
 import { InvoicesModule } from './invoices/invoices.module.js';
 import { PaymentIntegrationModule } from './payment-integration/payment-integration.module.js';
+import { PlatformsModule } from './platforms/platforms.module.js';
+import type { OwnerAuthority } from './platforms/owner-authority.client.js';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module.js';
 
 /** The service's own migrations, applied by the explicit `npm run migrate` step and never at startup. */
@@ -35,6 +37,8 @@ export interface AppModuleOverrides {
   migrationsDirs?: string[];
   /** Tests replace the Organization reference source (production: `buildOrganizationReference` from the configuration). */
   organizationReference?: OrganizationReferenceResolver;
+  /** Core V2 S3d: tests replace the Owner check of the Platform configuration (production: `HttpOwnerAuthority` against `AUTH_SERVICE_URL`). */
+  ownerAuthority?: OwnerAuthority;
 }
 
 /**
@@ -82,6 +86,7 @@ export class AppModule {
         CurrenciesModule,
         PaymentIntegrationModule,
         SubscriptionsModule,
+        PlatformsModule.register(config, overrides.ownerAuthority), // Core V2 S3d (register BIL-01)
       ],
     };
   }

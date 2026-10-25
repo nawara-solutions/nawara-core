@@ -677,6 +677,51 @@ SELECT pg_temp.expect_error('S3b', 'a settlement without verified evidence (no a
 SELECT pg_temp.expect_error('S3b', 'a settlement record is append-only', format($$UPDATE subscription_settlement SET "settledAt" = now() WHERE "invoiceId" = %L$$, :'s3b_inv'), '23514');
 SELECT pg_temp.expect_error('S3b', 'a settlement record is never deleted', format($$DELETE FROM subscription_settlement WHERE "invoiceId" = %L$$, :'s3b_inv'), '23514');
 
+-- ------------------------------------------------------------------------------------------------------------- S3d billing_platform (BIL-01)
+-- A second currency exists in THIS scratch database only, so a mismatch can be expressed (the reference table is insert-only data).
+INSERT INTO currency (code, exponent) VALUES ('EUR', 2) ON CONFLICT DO NOTHING;
+\set s3d_p '00000000-0000-4000-8000-00000000d3d1'
+\set s3d_free '00000000-0000-4000-8000-00000000d3d2'
+\set s3d_legacy '00000000-0000-4000-8000-00000000d3d3'
+INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy", "createdAt")
+  VALUES (:'s3d_p', '00000000-0000-4000-8000-00000000c3d1', 'TND', '00000000-0000-4000-8000-00000000a3d1', '2000-01-01');
+SELECT pg_temp.assert_eq('S3d', 'createdAt is the database clock, never a supplied value',
+  (SELECT ("createdAt" > '2020-01-01')::text FROM billing_platform WHERE "platformId" = :'s3d_p'), 'true');
+SELECT pg_temp.expect_error('S3d', 'one configuration per Platform', format($$INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy")
+  VALUES (%L, gen_random_uuid(), 'TND', gen_random_uuid())$$, :'s3d_p'), '23505');
+SELECT pg_temp.expect_error('S3d', 'the Company of a Platform is immutable', format($$UPDATE billing_platform SET "companyId" = gen_random_uuid() WHERE "platformId" = %L$$, :'s3d_p'), '23514');
+SELECT pg_temp.expect_error('S3d', 'the currency of a Platform is immutable', format($$UPDATE billing_platform SET currency = 'EUR' WHERE "platformId" = %L$$, :'s3d_p'), '23514');
+SELECT pg_temp.expect_error('S3d', 'a Platform configuration is never deleted', format($$DELETE FROM billing_platform WHERE "platformId" = %L$$, :'s3d_p'), '23514');
+SELECT pg_temp.expect_error('S3d', 'a Platform configuration is never truncated', $$TRUNCATE billing_platform CASCADE$$, '23514');
+SELECT pg_temp.expect_error('S3d', 'an unknown currency cannot be configured', format($$INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy")
+  VALUES (%L, gen_random_uuid(), 'XXX', gen_random_uuid())$$, :'s3d_free'), '23503');
+SELECT pg_temp.expect_error('S3d', 'a new organization subscription product needs its Platform configured', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-test', 'company', 'acme', 's3d-org', 'X', 'organization', %L)$$, :'s3d_free'), '23514', 'product_platform_configured');
+SELECT pg_temp.expect_error('S3d', 'a new personal subscription product needs its Platform configured', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-test', 'company', 'acme', 's3d-pers', 'X', 'personal', %L)$$, :'s3d_free'), '23514', 'product_platform_configured');
+SELECT pg_temp.expect_ok('S3d', 'an ordinary product needs no Platform configuration',
+  $$INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('billing-test', 'company', 'acme', 's3d-none', 'X')$$);
+INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-test', 'company', 'acme', 's3d-ok', 'X', 'personal', :'s3d_p') RETURNING id AS s3d_prod \gset
+SELECT pg_temp.expect_error('S3d', 'a subscription price in another currency than its Platform''s is refused', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 's3d-eur', 'EUR', 100, 'recurring', 'month', 1)$$, :'s3d_prod'), '23514', 'price_platform_currency');
+SELECT pg_temp.expect_ok('S3d', 'a subscription price in its Platform''s currency is accepted', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 's3d-tnd', 'TND', 100, 'recurring', 'month', 1)$$, :'s3d_prod'));
+SELECT pg_temp.expect_ok('S3d', 'an ordinary product''s price is not bound to a Platform currency', $$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval")
+  SELECT id, 's3d-none-eur', 'EUR', 100, 'one_time' FROM product WHERE code = 's3d-none'$$);
+-- A subscription product created BEFORE S3d on a Platform that was never configured (simulated: the guard does not fire in replica mode)
+-- keeps working as before, and is bound to the currency once its Platform is configured. Nothing is backfilled or rewritten.
+SET session_replication_role = replica;
+INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-test', 'company', 'acme', 's3d-legacy', 'X', 'personal', :'s3d_legacy') RETURNING id AS s3d_legacy_prod \gset
+SET session_replication_role = DEFAULT;
+SELECT pg_temp.expect_ok('S3d', 'a pre-S3d subscription product on an unconfigured Platform keeps its price behaviour', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 's3d-legacy-eur', 'EUR', 100, 'recurring', 'month', 1)$$, :'s3d_legacy_prod'));
+INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES (:'s3d_legacy', gen_random_uuid(), 'TND', gen_random_uuid());
+SELECT pg_temp.expect_error('S3d', 'once its Platform is configured, a pre-S3d subscription product''s new prices use that currency', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 's3d-legacy-eur-2', 'EUR', 100, 'recurring', 'month', 1)$$, :'s3d_legacy_prod'), '23514', 'price_platform_currency');
+SELECT pg_temp.assert_eq('S3d', 'a configured Platform rewrites no existing price', (SELECT count(*)::text FROM price WHERE "productId" = :'s3d_legacy_prod' AND currency = 'EUR'), '1');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail
