@@ -53,6 +53,10 @@ export const STEP_UP_METHODS = {
   // repair route, through consumeForReferenceRepair (A5.4-A3). The generic POST /auth/step-up/verify refuses it without consuming it
   // (ADR-0065 §4, S1: verifyForService), so a calling service can never burn a repair proof.
   'hierarchy.reference.repair': ['totp', 'webauthn'],
+  // Owner-approved refunds (ADR-0067 decision 1, S2-Auth.1): a fresh, factor-only step-up, never the bare key. Consumed only by
+  // the issuance of an authorization receipt; like the repair, it is Auth-local: the generic
+  // POST /auth/step-up/verify refuses it without consuming it, so no calling service can verify or burn a refund proof.
+  'refund.authorize': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 
@@ -60,6 +64,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** The purpose of the hierarchy reference repair (ADR-0061 §3). The literal stays in this file (A5.4-A3 O10). */
 const REFERENCE_REPAIR_PURPOSE = 'hierarchy.reference.repair' satisfies StepUpPurpose;
+
+/** The purpose of an Owner's refund authorization (ADR-0067 decision 1). Only receipt issuance consumes it. */
+export const REFUND_AUTHORIZE_PURPOSE = 'refund.authorize' satisfies StepUpPurpose;
+
+/** Purposes no calling service may verify or consume through POST /auth/step-up/verify: each has its one Auth-local consumer. */
+const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPOSE, REFUND_AUTHORIZE_PURPOSE]);
 
 /**
  * What `consumeForReferenceRepair` knows after its one statement (ADR-0065 §5; A5.4-A3 O8):
@@ -189,12 +199,12 @@ export class StepUpService {
 
   /**
    * The generic, service-facing verification (POST /auth/step-up/verify; ADR-0042 Amendment 1 A.1, as clarified by ADR-0065 §4, S1).
-   * A reference-repair proof is Auth-local: it is refused here BEFORE any consuming statement, with the endpoint's existing answer
-   * (`403 step_up_required`) and the same local denial record `consume` writes for its own refusals, so it stays usable by the repair
-   * route. Every other purpose goes through `consume`, unchanged.
+   * A reference-repair proof and a refund-authorization proof (ADR-0067) are Auth-local: each is refused here BEFORE any consuming
+   * statement, with the endpoint's existing answer (`403 step_up_required`) and the same local denial record `consume` writes for its own
+   * refusals, so it stays usable by its one Auth-local consumer. Every other purpose goes through `consume`, unchanged.
    */
   async verifyForService(q: Queryable, a: { ownerId: string; sid: string; purpose: string; token: string | undefined }): Promise<void> {
-    if (a.purpose === REFERENCE_REPAIR_PURPOSE) {
+    if (AUTH_LOCAL_PURPOSES.has(a.purpose)) {
       await this.audit.tryRecord({ type: 'owner.step_up.consume', outcome: 'denied', actorId: a.ownerId, sessionFamilyId: a.sid, metadata: { purpose: a.purpose } });
       throw authError(403, 'step_up_required', AUTH_MESSAGES.stepUpRequired);
     }
