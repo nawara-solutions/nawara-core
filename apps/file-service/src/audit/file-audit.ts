@@ -3,6 +3,7 @@ import { Global, Inject, Injectable, Logger, Module, type DynamicModule } from '
 import { AuditEventWriter } from '@nawara/audit-contract';
 import { ConfigError, DbService, EventsModule, InMemoryEventBus, OutboxService, RabbitMqEventBus, type EventBus, type Queryable } from '@nawara/service-kit';
 import { SERVICE_NAME, type FileConfig } from '../config/file-config.js';
+import type { EvidenceGrantee, EvidencePurpose } from '../grants/evidence-purposes.js';
 
 /** The integrity faults the catalog names (`file.integrity_incident` reason). */
 export type IntegrityReason = 'digest_mismatch' | 'size_mismatch' | 'object_missing';
@@ -13,6 +14,18 @@ export type IntegrityDetector = 'file_download_integrity_check' | 'file_reconcil
 export interface AuditedFile {
   id: string;
   organizationId: string | null;
+}
+
+/** The persisted facts of an evidence grant (S2-File.1): its own row, never a request value. */
+export interface AuditedGrant {
+  id: string;
+  fileId: string;
+  grantorService: string;
+  granteeService: EvidenceGrantee;
+  purpose: EvidencePurpose;
+  caseRef: string;
+  organizationId: string | null;
+  expiresAt: Date;
 }
 
 // Arbitrary, fixed namespace for File's deterministically derived audit event ids (RFC 4122 §4.3).
@@ -28,7 +41,8 @@ export function deterministicEventId(...parts: string[]): string {
 }
 
 /**
- * Central audit intent of File's two catalog actions (Stage 18.7.4), through `AuditEventWriter` into the kit outbox:
+ * Central audit intent of File's catalog actions (Stage 18.7.4; the grant actions S2-File.1), through `AuditEventWriter` into the kit
+ * outbox:
  * - `file.deleted`: ON THE DELETION REQUEST'S TRANSACTION (the `AVAILABLE` → `DELETING` transition that makes the loss irreversible:
  *   tickets revoked, access gone at commit). Written only on that transition: a repeated request (already DELETING / DELETED) writes
  *   nothing. The actor is the authenticated owner service; the organization is the file row's.
@@ -48,6 +62,24 @@ export class FileAudit {
     await this.writer.write(q, {
       action: 'file.deleted', actor: { type: 'service', id: ownerService }, organizationId: file.organizationId, resource: { type: 'file', id: file.id }, outcome: 'succeeded',
     }, { eventId: deterministicEventId(file.id, 'audit.file.deleted') });
+  }
+
+  /** S2-File.1: written in the issuing transaction, only when the grant row is created (an idempotent replay writes nothing). */
+  async grantIssued(q: Queryable, grant: AuditedGrant): Promise<void> {
+    await this.writer.write(q, {
+      action: 'file.grant_issued', actor: { type: 'service', id: grant.grantorService }, organizationId: grant.organizationId,
+      resource: { type: 'file_evidence_grant', id: grant.id }, outcome: 'succeeded',
+      changes: { file_id: grant.fileId, purpose: grant.purpose, case_ref: grant.caseRef, expires_at: grant.expiresAt.toISOString() },
+    }, { eventId: deterministicEventId(grant.id, 'audit.file.grant_issued') });
+  }
+
+  /** S2-File.1: written in the revoking transaction, only on the active → revoked transition (a repeated revocation writes nothing). */
+  async grantRevoked(q: Queryable, grant: AuditedGrant): Promise<void> {
+    await this.writer.write(q, {
+      action: 'file.grant_revoked', actor: { type: 'service', id: grant.grantorService }, organizationId: grant.organizationId,
+      resource: { type: 'file_evidence_grant', id: grant.id }, outcome: 'succeeded',
+      changes: { file_id: grant.fileId, purpose: grant.purpose },
+    }, { eventId: deterministicEventId(grant.id, 'audit.file.grant_revoked') });
   }
 
   async integrityIncident(q: Queryable, file: AuditedFile, detector: IntegrityDetector, reason: IntegrityReason): Promise<void> {

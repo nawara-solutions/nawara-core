@@ -3457,7 +3457,7 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
       activation: manifest({ 'payment-service': 'active', 'billing-service': 'active', 'auth-service': 'inactive' }) });
     assert.equal(JSON.stringify(reordered), JSON.stringify(a));
     const shuffled = CATALOG.replace("  'file.deleted': {", "  'zz.reordered_marker': { producer: 'file-service' },\n  'file.deleted': {");
-    assert.deepEqual(gen({ auditCatalog: shuffled }).identities['file-service'].write.keys, ['audit.file.deleted', 'audit.file.integrity_incident', 'audit.zz.reordered_marker']);
+    assert.deepEqual(gen({ auditCatalog: shuffled }).identities['file-service'].write.keys, ['audit.file.deleted', 'audit.file.grant_issued', 'audit.file.grant_revoked', 'audit.file.integrity_incident', 'audit.zz.reordered_marker']);
     for (const id of Object.values(a.identities)) for (const g of [id.write, id.read]) assert.deepEqual(g.keys, [...g.keys].sort());
   });
 
@@ -3473,8 +3473,8 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     }
     // the investigation's counts
     const counts = Object.fromEntries(Object.entries(out.identities).map(([s, id]) => [s, [id.write.keys.length, id.read.keys.length]]));
-    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1)
-    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1)
+    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [4, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
   });
 
   test('S1d-1 Payment: its five ordinary events and five audit actions; not the re-emission allow-list; no unregistered action', () => {

@@ -65,8 +65,9 @@ describe('file-service foundation', () => {
     try {
       await request(app.app.getHttpServer()).get('/file/docs-json').expect(401);
       const doc = await request(app.app.getHttpServer()).get('/file/docs-json').auth('docs', password).expect(200);
-      expect(Object.keys(doc.body.paths as object).sort()).toEqual(['/file/files', '/file/files/{id}', '/file/files/{id}/attach', '/file/files/{id}/content',
-        '/file/files/{id}/tickets', '/file/t/{token}', '/file/tickets/{ticketId}', '/file/uploads/tickets', '/health', '/ready']); // DELETE shares /file/files/{id} (17.7)
+      expect(Object.keys(doc.body.paths as object).sort()).toEqual(['/file/evidence-grants/{grantId}/revoke', '/file/files', '/file/files/{id}', '/file/files/{id}/attach',
+        '/file/files/{id}/content', '/file/files/{id}/evidence-grants', '/file/files/{id}/tickets', '/file/t/{token}', '/file/tickets/{ticketId}', '/file/uploads/tickets',
+        '/health', '/ready']); // DELETE shares /file/files/{id} (17.7); the two evidence-grant routes are S2-File.1
       const redeem = (doc.body.paths as Record<string, Record<string, { security?: unknown[] }>>)['/file/t/{token}'];
       expect(redeem.get?.security ?? []).toEqual([]); // the ticket route declares no bearer / JWT scheme: the ticket is the authority
       expect(redeem.put?.security ?? []).toEqual([]);

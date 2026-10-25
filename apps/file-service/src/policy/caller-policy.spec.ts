@@ -12,7 +12,7 @@ describe('FILE_SERVICE_POLICY', () => {
   it('parses an explicit policy per caller: operations, organization mode, media types and a size ceiling', () => {
     const p = parse({ 'core-drive': uploader, 'core-notification': reader });
     expect(p.of('core-drive')).toEqual({
-      operations: new Set(FILE_OPERATIONS), organizations: 'request', mediaTypes: new Set(['application/pdf', 'image/jpeg']), maxBytes: 10_485_760,
+      operations: new Set(['upload', 'read', 'attach', 'delete', 'issue_ticket']), organizations: 'request', mediaTypes: new Set(['application/pdf', 'image/jpeg']), maxBytes: 10_485_760,
     });
     expect(p.of('core-notification')).toEqual({ operations: new Set(['read']), organizations: 'none', mediaTypes: undefined, maxBytes: undefined });
   });
@@ -54,12 +54,38 @@ describe('FILE_SERVICE_POLICY', () => {
     ['maxBytes not an integer', JSON.stringify({ callers: { a: { operations: ['upload'], organizations: 'none', mediaTypes: ['image/png'], maxBytes: '10' } } })],
     ['media types on a read-only caller', JSON.stringify({ callers: { a: { operations: ['read'], organizations: 'none', mediaTypes: ['image/png'] } } })],
     ['maxBytes on a read-only caller', JSON.stringify({ callers: { a: { operations: ['read'], organizations: 'none', maxBytes: 10 } } })],
+    ['a grantor without grantPurposes', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none' } } })],
+    ['a grantor with empty grantPurposes', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none', grantPurposes: [] } } })],
+    ['an unknown grant purpose', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none', grantPurposes: ['legal_evidence'] } } })],
+    ['a wildcard grant purpose', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none', grantPurposes: ['*'] } } })],
+    ['a repeated grant purpose', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none', grantPurposes: ['dispute_evidence', 'dispute_evidence'] } } })],
+    ['grantPurposes without grant', JSON.stringify({ callers: { a: { operations: ['read'], organizations: 'none', grantPurposes: ['dispute_evidence'] } } })],
   ])('refuses %s at startup', (_label, raw) => {
     expect(() => FileCallerPolicy.parse(raw, ['a'], CEILING)).toThrow(ConfigError);
   });
 
+  it('the operation vocabulary is closed (S2-File.1 adds grant)', () => {
+    expect([...FILE_OPERATIONS]).toEqual(['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant']);
+  });
+
   it('the V1 allow-list is exactly the frozen one (ADR-0048 F13)', () => {
     expect([...FILE_MEDIA_TYPES]).toEqual(['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']);
+  });
+});
+
+describe('Core V2 S2-File.1: the grant dimension (OD-FILE F8)', () => {
+  it('a grantor names the evidence purposes it may grant; nothing else may grant', () => {
+    const p = parse({
+      'core-drive': { operations: ['read', 'grant'], organizations: 'request', grantPurposes: ['dispute_evidence', 'settlement_evidence'] },
+      'core-notification': reader,
+    });
+    expect(p.of('core-drive')).toEqual({
+      operations: new Set(['read', 'grant']), organizations: 'request', mediaTypes: undefined, maxBytes: undefined,
+      grantPurposes: new Set(['dispute_evidence', 'settlement_evidence']),
+    });
+    expect(p.allows('core-drive', 'grant')).toBe(true);
+    expect(p.allows('core-notification', 'grant')).toBe(false);
+    expect(p.of('core-notification')?.grantPurposes).toBeUndefined();
   });
 });
 

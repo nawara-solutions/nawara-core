@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { fileMigrationsDir } from '../src/app.module.js';
 import { FileRepository } from '../src/persistence/file.repository.js';
+import { GrantRepository } from '../src/persistence/grant.repository.js';
 import { ticketDigest } from '../src/persistence/ticket-digest.js';
 import { TicketRepository } from '../src/persistence/ticket.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
@@ -93,7 +94,7 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
 
   it('Stage 17.3: the file schema belongs to the migrator; the runtime role uses it through the repositories (DML only)', async () => {
     const owners = await sql<{ t: string; o: string }>(adminTo(dbName), `SELECT tablename AS t, tableowner AS o FROM pg_tables WHERE tablename LIKE 'file%' ORDER BY 1`);
-    expect(owners).toEqual([{ t: 'file', o: migrator }, { t: 'file_access_ticket', o: migrator }]);
+    expect(owners).toEqual([{ t: 'file', o: migrator }, { t: 'file_access_ticket', o: migrator }, { t: 'file_evidence_grant', o: migrator }]);
     const f = await t.app.get(FileRepository).createUploading({
       scope: { ownerService: 'core-drive', organizationId: null }, storage: { provider: 'filesystem', keyPrefix: 'files' }, uploadLeaseSeconds: 600, attachment: { deadlineSeconds: 3_600 },
     });
@@ -102,15 +103,27 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
     const d = ticketDigest(randomBytes(32).toString('base64url'))!;
     await t.app.get(TicketRepository).recordDownload({ scope: { ownerService: 'core-drive', organizationId: null }, fileId: f.id, tokenDigest: d, lifetimeSeconds: 60, singleUse: true, disposition: 'attachment' });
     expect(await t.app.get(TicketRepository).claimUse(d, 'download')).toBeDefined();
+    // Core V2 S2-File.1: an evidence grant is issued and revoked by the runtime role (an attached file), DML only.
+    await sql(APP(), `UPDATE file SET "attachedAt" = now() WHERE id = $1`, [f.id]);
+    const grants = t.app.get(GrantRepository);
+    const issued = await grants.issue({ scope: { ownerService: 'core-drive', organizationId: null }, fileId: f.id, purpose: 'dispute_evidence', granteeService: 'payment-service',
+      caseRef: randomUUID(), lifetimeSeconds: 3_600, idempotencyKey: 'runtime-role-grant', requestHash: 'b'.repeat(64) }, async () => {});
+    expect(issued.kind).toBe('created');
+    if (issued.kind !== 'created') return;
+    expect((await grants.revoke({ ownerService: 'core-drive', organizationId: null }, issued.grant.id, async () => {}))?.revoked).toBe(true);
   });
 
   it('Stage 17.3: the runtime role cannot change the file schema, bypass its triggers, truncate it, or hard-delete a file', async () => {
     for (const ddl of ['ALTER TABLE file ADD COLUMN body bytea', 'ALTER TABLE file DISABLE TRIGGER file_no_delete', 'ALTER TABLE file_access_ticket DISABLE TRIGGER ALL',
       'DROP TRIGGER file_set_once ON file', 'ALTER TABLE file DROP CONSTRAINT file_sha256_shape', 'DROP INDEX file_idempotency_unique', 'TRUNCATE file_access_ticket',
-      'CREATE OR REPLACE FUNCTION file_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN OLD; END $$', 'SET session_replication_role = replica']) {
+      'CREATE OR REPLACE FUNCTION file_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN OLD; END $$', 'SET session_replication_role = replica',
+      // Core V2 S2-File.1: nor the evidence-grant table's
+      'TRUNCATE file_evidence_grant', 'ALTER TABLE file_evidence_grant DISABLE TRIGGER ALL', 'DROP TRIGGER file_evidence_grant_immutable ON file_evidence_grant',
+      'ALTER TABLE file_evidence_grant DROP CONSTRAINT file_evidence_grant_lifetime_bounded']) {
       expect((await failure(APP(), ddl)).code, ddl).toBe('42501');
     }
     const [row] = await sql<{ id: string }>(APP(), 'SELECT id FROM file LIMIT 1');
     expect((await failure(APP(), 'DELETE FROM file WHERE id = $1', [row!.id])).message).toMatch(/never deleted/);
+    expect((await failure(APP(), 'DELETE FROM file_evidence_grant')).message).toMatch(/never deleted/);
   });
 });

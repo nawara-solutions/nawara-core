@@ -454,6 +454,30 @@ const SPEC = {
     changes: { reason: { type: 'code', shape: 'value', required: true, values: ['digest_mismatch', 'size_mismatch', 'object_missing'] } },
     purpose: 'Stored content no longer matches its record (altered, truncated or missing): possible tampering or loss.',
   },
+  // Core V2 S2-File.1 (OD-FILE decided by the Owner, F1 / F2 / F6): a file's owner service grants ONE other Core service (fixed by the
+  // purpose) the time-bounded use of one file as evidence of one case, or revokes that grant. Written in the grant's own transaction; the
+  // grant is the resource; the file and the case are uuids; the purpose names the grantee (F2: one per purpose, so it is not repeated);
+  // nothing of the file's content, name or bytes travels.
+  'file.grant_issued': {
+    producer: 'file-service', category: 'security', since: 1, actors: { service: true }, organization: 'optional',
+    resource: ['file_evidence_grant'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      file_id: { type: 'uuid', shape: 'value', required: true },
+      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
+      case_ref: { type: 'uuid', shape: 'value', required: true },
+      expires_at: { type: 'timestamp', shape: 'value', required: true },
+    },
+    purpose: 'A file\'s owner service granted another Core service the time-bounded use of that file as evidence of one case.',
+  },
+  'file.grant_revoked': {
+    producer: 'file-service', category: 'security', since: 1, actors: { service: true }, organization: 'optional',
+    resource: ['file_evidence_grant'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      file_id: { type: 'uuid', shape: 'value', required: true },
+      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
+    },
+    purpose: 'A file\'s owner service revoked an evidence grant: the grantee can no longer use the file for that case.',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- release-service
   // Stage 20.3 (ADR-0051 §9): CI automation registers and publishes releases with a narrow per-product service credential; the actor is
