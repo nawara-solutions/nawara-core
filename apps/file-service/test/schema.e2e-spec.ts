@@ -259,7 +259,11 @@ describeWithEnv('file schema: constraints and triggers (real PostgreSQL)', ['TES
     const fks = await s.query<{ conname: string; src: string; target: string; ondelete: string }>(
       `SELECT conname, conrelid::regclass::text AS src, confrelid::regclass::text AS target, confdeltype AS ondelete FROM pg_constraint
        WHERE contype = 'f' AND conrelid::regclass::text IN ('file', 'file_access_ticket')`);
-    expect(fks).toEqual([{ conname: 'file_access_ticket_file_fk', src: 'file_access_ticket', target: 'file', ondelete: 'a' }]); // NO ACTION
+    // NO ACTION; S2-File.2: a grant ticket also names its evidence grant (File's own table)
+    expect(fks.sort((a, b) => a.conname.localeCompare(b.conname))).toEqual([
+      { conname: 'file_access_ticket_file_fk', src: 'file_access_ticket', target: 'file', ondelete: 'a' },
+      { conname: 'file_access_ticket_grant_fk', src: 'file_access_ticket', target: 'file_evidence_grant', ondelete: 'a' },
+    ]);
     const cascades = await s.query(`SELECT conname FROM pg_constraint WHERE contype = 'f' AND (confdeltype = 'c' OR confupdtype = 'c')`);
     expect(cascades).toEqual([]);
     const shaUnique = await s.query(`SELECT indexname FROM pg_indexes WHERE tablename = 'file' AND indexdef ~* 'UNIQUE.*sha256'`);

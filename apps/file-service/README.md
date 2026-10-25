@@ -73,7 +73,18 @@ publishes to RabbitMQ (`RABBITMQ_URL`, required in production); nothing is consu
 takes the file's organization; the file must be `AVAILABLE` and attached; 24 hours by default, at most 7 days, never extended.
 `file_evidence_grant` (migration `0004`) re-checks every binding and keeps the row immutable except its one revocation; rows are never
 deleted. `file.grant_issued` / `file.grant_revoked` are written in the same transaction. A grant is a record, not a credential, and it
-opens no existing route to the grantee: granted reads are S2-File.2 (`GrantRepository.findUsable` is their validation foundation).
+opens no existing route to the grantee.
+
+**Granted reads (Core V2 S2-File.2; `src/grants/granted-read.*`):** `GET /file/evidence-grants/{grantId}/files/{fileId}`, `GET …/content`
+and `POST …/tickets` (`{ operation: 'download', disposition?, singleUse? }`), for the grantee only (`read_granted`, the grant's purpose in
+its `readPurposes`). Each request re-checks, in one transaction holding the grant and the file `FOR SHARE`: the caller is the grant's
+grantee, the grant names that file, it is neither revoked nor expired, the file is still `AVAILABLE` and the grantor's in the grant's
+organization, and the grantor still holds `grant` for the purpose; anything else is the same `404 file_not_found`. No organization comes
+from the request. A grant ticket (migration `0005`: `file_access_ticket."grantId"`) is issued by the grantee, expires no later than its
+grant (`409 grant_expiring` within 60 s of the grant's end), and redemption re-checks the grant and both policies in the claim; revoking
+the grant revokes its tickets. Every access writes `file.granted_read` (`access`: `metadata`, `content_authorized`, `ticket_issued`,
+`ticket_redemption_authorized`) in the authorizing transaction, before anything is returned: an authorization, never a delivery
+confirmation. A revocation cannot recall a stream already authorized. HEAD is refused on the two GET routes.
 
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no File
 domain events (the broker carries only the audit intent); no user JWT; no malware scanner (decision B); no public or presigned URL,
@@ -116,10 +127,11 @@ Range, multipart or versions.
     "core-notification": { "operations": ["read"], "organizations": "none" } } }
 ```
 
-Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`, `grant`. `mediaTypes` (a subset of `application/pdf`, `image/jpeg`,
+Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`, `grant`, `read_granted`. `mediaTypes` (a subset of `application/pdf`, `image/jpeg`,
 `image/png`, `image/webp`, `image/heic`, `image/heif`) and `maxBytes` are required exactly when the caller may `upload` or
 `issue_ticket`. S2-File.1: `grant` (issue and revoke evidence grants on the caller's own files) requires a non-empty `grantPurposes`
-(a subset of `dispute_evidence`, `surplus_evidence`, `settlement_evidence`), allowed only with `grant`. Unknown properties, operations,
+(a subset of `dispute_evidence`, `surplus_evidence`, `settlement_evidence`), allowed only with `grant`. S2-File.2: `read_granted` (read,
+and issue tickets for, files granted TO the caller) requires a non-empty `readPurposes` from the same vocabulary, allowed only with it. Unknown properties, operations,
 types or purposes, a wildcard, or a `maxBytes` above `FILE_MAX_BYTES` stop the process.
 
 ## Run

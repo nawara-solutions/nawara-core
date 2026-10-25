@@ -478,6 +478,20 @@ const SPEC = {
     },
     purpose: 'A file\'s owner service revoked an evidence grant: the grantee can no longer use the file for that case.',
   },
+  // Core V2 S2-File.2 (OD-FILE F6): every access to a file THROUGH an evidence grant, recorded in the transaction that authorizes it,
+  // before any byte or metadata leaves. `access` says what was authorized; `content_authorized` and `ticket_redemption_authorized` are
+  // NOT proof of delivery (a stream can still fail or be cut after authorization). The grantee service is the actor; a ticket redemption
+  // has no authenticated caller, so its actor is File's redemption process. No ticket, token, secret, file name or byte travels.
+  'file.granted_read': {
+    producer: 'file-service', category: 'security', since: 1, actors: { service: true, system: ['file_granted_ticket_redemption'] },
+    organization: 'optional', resource: ['file_evidence_grant'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      file_id: { type: 'uuid', shape: 'value', required: true },
+      purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
+      access: { type: 'code', shape: 'value', required: true, values: ['metadata', 'content_authorized', 'ticket_issued', 'ticket_redemption_authorized'] },
+    },
+    purpose: 'A Core service was authorized, through an active evidence grant, to read a file\'s metadata or content or to issue or redeem a download ticket for it (authorization, not proof of delivery).',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- release-service
   // Stage 20.3 (ADR-0051 §9): CI automation registers and publishes releases with a narrow per-product service credential; the actor is

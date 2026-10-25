@@ -17,7 +17,7 @@ function noStore(_req: Request, res: Response, next: NextFunction): void {
  * HEAD is NOT supported on byte routes (Stage 17.6 decision). Express would silently answer HEAD with the GET handler, which would run
  * a redemption (and consume a single-use ticket) just to send headers: refused explicitly instead.
  */
-function refuseHead(_req: Request, res: Response): void {
+export function refuseHead(_req: Request, res: Response): void {
   res.setHeader('Allow', 'GET');
   res.setHeader('Cache-Control', 'private, no-store');
   res.status(405).end();
@@ -28,6 +28,7 @@ function refuseHead(_req: Request, res: Response): void {
   imports: [PersistenceModule, RedemptionModule, UsageLimitsModule],
   controllers: [DownloadController],
   providers: [DownloadService],
+  exports: [DownloadService], // S2-File.2: granted content reads stream through the same boundary
 })
 export class DownloadModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {

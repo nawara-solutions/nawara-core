@@ -77,6 +77,16 @@ export interface NewUpload {
   attachment: { attached: true } | { deadlineSeconds: number };
 }
 
+/** A `file` row read as JSON (`to_jsonb(f.*)`): its timestamps and bigint back to the `FileRow` types. */
+export function reviveFileRow(raw: Record<string, unknown>): FileRow {
+  const f = raw as unknown as FileRow & Record<string, unknown>;
+  for (const k of ['uploadExpiresAt', 'attachDeadline', 'attachedAt', 'createdAt', 'availableAt', 'deletionRequestedAt', 'deletedAt', 'updatedAt', 'deleteNextAttemptAt', 'deleteLeaseUntil'] as const) {
+    if (f[k] !== null) (f as Record<string, unknown>)[k] = new Date(f[k] as unknown as string);
+  }
+  if (f.sizeBytes !== null) f.sizeBytes = String(f.sizeBytes);
+  return f;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The verified content of an accepted upload (Stage 17.5): detected type, counted size, computed SHA-256. */
