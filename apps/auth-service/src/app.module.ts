@@ -44,6 +44,7 @@ import { OwnerController } from './owner/owner.controller.js';
 import { RecoveryService } from './owner/recovery.service.js';
 import { SecretKeyService } from './owner/secret-key.service.js';
 import { StepUpService } from './owner/step-up.service.js';
+import { AuthorizationReceiptService } from './receipts/authorization-receipt.service.js';
 import { WebAuthnService } from './owner/webauthn.service.js';
 import { AssignmentService } from './platform/assignment.service.js';
 import { PlatformAccessService } from './platform/platform-access.service.js';
@@ -76,6 +77,8 @@ import { UsersService } from './users/users.service.js';
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
+    // S2-Auth.1: internal only; no controller uses it until S2-Auth.2 adds the authenticated routes.
+    AuthorizationReceiptService,
     OwnerAuthService, EnrollmentService, RecoveryService,
     OperatorAvailabilityService, OperatorCodeService, OperatorAdminService, MemberSecurityService, MemberSecurityCounters,
     PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, GrantsService, AuthGuard,

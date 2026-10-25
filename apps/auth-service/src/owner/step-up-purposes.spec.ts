@@ -29,6 +29,8 @@ const BEFORE_A1 = {
   'compatibility_policy.change': ['totp', 'webauthn'],
 };
 const PURPOSE = 'hierarchy.reference.repair';
+/** S2-Auth.1: the refund authorization purpose; only the receipt issuance consumes it, through the exported constant. */
+const REFUND = 'refund.authorize';
 
 describe('step-up purposes (A5.4-A1)', () => {
   it('the 19 earlier purposes keep exactly their methods', () => {
@@ -36,12 +38,16 @@ describe('step-up purposes (A5.4-A1)', () => {
     for (const [purpose, methods] of Object.entries(BEFORE_A1)) expect([...(current[purpose] ?? [])], purpose).toEqual(methods);
   });
 
-  it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key)', () => {
-    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE]);
+  it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key); S2-Auth.1 then adds refund.authorize', () => {
+    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND]);
     expect([...STEP_UP_METHODS[PURPOSE]]).toEqual(['totp', 'webauthn']);
   });
 
-  it('no application source outside the allow-list names the purpose: no route, consumer or producer exists for it', () => {
+  it('S2-Auth.1 (ADR-0067 decision 1): refund.authorize is factor-only, never the secret key', () => {
+    expect([...STEP_UP_METHODS[REFUND]]).toEqual(['totp', 'webauthn']);
+  });
+
+  it('no application source outside the allow-list names either purpose literally (each has one Auth-local consumer)', () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const apps = resolve(here, '../../..');
     const allowList = join(here, 'step-up.service.ts');
@@ -52,7 +58,7 @@ describe('step-up purposes (A5.4-A1)', () => {
         const path = join(dir, name);
         if (statSync(path).isDirectory()) walk(path);
         else if (/\.(ts|tsx|mts|cts|js|mjs|cjs)$/.test(name) && !/\.spec\.ts$/.test(name) && path !== allowList
-          && readFileSync(path, 'utf8').includes(PURPOSE)) hits.push(path);
+          && /hierarchy\.reference\.repair|refund\.authorize/.test(readFileSync(path, 'utf8'))) hits.push(path);
       }
     };
     walk(apps);

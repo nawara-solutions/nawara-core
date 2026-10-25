@@ -205,3 +205,21 @@ psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0011_code_event_purge_index.do
 [ "$(digest)" = "$before" ] || fail "M13: rollback must not change any outbox row"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0011_code_event_purge_index.sql" || fail "M13: re-apply after rollback"
 echo "PASS: M13 0011 is expand-only: one partial index, no outbox row changed, and rollback returns exactly the 0010 indexes"
+
+echo "== M14: migration 0012 (Core V2 S2-Auth.1) adds the authorization receipt table to a populated 0011 database; no data changes; rollback drops only it =="
+db="$(newdb mig12)"
+for f in "$mig"/000[1-9]_*.sql "$mig"/001[01]_*.sql; do psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$f"; done
+psql -q -v ON_ERROR_STOP=1 -d "$db" -c "INSERT INTO company(id,name) VALUES ('00000000-0000-0000-0000-0000000000c1','Nawara')"
+schema() { psql -Atq -d "$db" -c "SELECT md5(string_agg(table_name || '.' || column_name || ':' || data_type, ',' ORDER BY table_name, column_name)) FROM information_schema.columns WHERE table_schema = 'public' AND table_name <> 'authorization_receipt'"; }
+rows() { psql -Atq -d "$db" -c "SELECT md5(string_agg(id::text || name, ',' ORDER BY id)) FROM company"; }
+tables() { psql -Atq -d "$db" -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'"; }
+s0="$(schema)"; r0="$(rows)"; t0="$(tables)"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0012_authorization_receipt.sql" || fail "M14: 0012 must apply on a populated 0011 database"
+[ "$(tables)" = "$((t0 + 1))" ] || fail "M14: 0012 adds exactly one table"
+[ "$(schema)" = "$s0" ] && [ "$(rows)" = "$r0" ] || fail "M14: 0012 must not change any other table or row"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/down/0012_authorization_receipt.down.sql" || fail "M14: rollback of 0012"
+[ "$(tables)" = "$t0" ] || fail "M14: rollback drops only the receipt table"
+[ "$(psql -Atq -d "$db" -c "SELECT count(*) FROM pg_proc WHERE proname = 'authorization_receipt_guard'")" = "0" ] || fail "M14: rollback drops the guard function"
+[ "$(schema)" = "$s0" ] && [ "$(rows)" = "$r0" ] || fail "M14: rollback must not change any other table or row"
+psql -q -v ON_ERROR_STOP=1 -d "$db" -f "$mig/0012_authorization_receipt.sql" || fail "M14: re-apply after rollback"
+echo "PASS: M14 0012 is expand-only: one table, nothing else changed, and rollback then re-apply round-trips"

@@ -121,6 +121,8 @@ export interface AppConfig {
     throttlePepper: Buffer;
     /** HMAC key for organization join codes (purpose-separated from every other secret). */
     joinCodePepper: Buffer;
+    /** S2-Auth.1: HMAC key for authorization receipt secrets and bindings; undefined when unset (receipts then fail closed). */
+    authorizationReceiptPepper?: Buffer;
   };
   totp: { issuer: string; epochToleranceSec: number };
   webauthn: { rpId: string; rpName: string; origins: string[] };
@@ -222,6 +224,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
   const secretKeyPepper = readKey(reader, 'SECRET_KEY_PEPPER', { isProduction });
   const throttlePepper = readKey(reader, 'THROTTLE_KEY_PEPPER', { isProduction });
   const joinCodePepper = readKey(reader, 'JOIN_CODE_PEPPER', { isProduction });
+  // S2-Auth.1 (ADR-0067): the authorization receipts' own pepper. OPTIONAL: without it Auth runs as before and every receipt operation
+  // fails closed (`receipt_unavailable`); there is no default and no fallback to another pepper.
+  const authorizationReceiptPepper = readOptionalKey(reader, 'AUTHORIZATION_RECEIPT_PEPPER', { isProduction });
 
   // Domain separation: one compromised/leaked secret must not unlock another purpose (errors name the variables, never the material).
   assertDistinctKeys([
@@ -231,6 +236,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
     ['SECRET_KEY_PEPPER', secretKeyPepper],
     ['THROTTLE_KEY_PEPPER', throttlePepper],
     ['JOIN_CODE_PEPPER', joinCodePepper],
+    ...(authorizationReceiptPepper ? [['AUTHORIZATION_RECEIPT_PEPPER', authorizationReceiptPepper] as const] : []),
     ...[...totp.keys.values()].map((k) => ['TOTP_ENCRYPTION_KEYS', k] as const),
   ]);
 
@@ -324,7 +330,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
     },
     refreshTtlSec: reader.int('REFRESH_TOKEN_TTL_SEC', { default: 14 * 86_400, min: 60, max: 90 * 86_400 }),
     bcryptCost: reader.int('BCRYPT_COST', { default: 12, min: 4, max: 15 }),
-    secrets: { totpKeys: totp.keys, totpActiveKeyId: totp.activeKeyId, operatorCodePepper, secretKeyPepper, throttlePepper, joinCodePepper },
+    secrets: {
+      totpKeys: totp.keys, totpActiveKeyId: totp.activeKeyId, operatorCodePepper, secretKeyPepper, throttlePepper, joinCodePepper,
+      ...(authorizationReceiptPepper ? { authorizationReceiptPepper } : {}),
+    },
     totp: {
       issuer: reader.optional('TOTP_ISSUER', 'Nawara') as string,
       epochToleranceSec: reader.int('TOTP_EPOCH_TOLERANCE_SEC', { default: 30, min: 0, max: 60 }),
