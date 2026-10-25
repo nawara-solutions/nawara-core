@@ -1,7 +1,9 @@
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import { HealthModule as KitHealthModule, type EventBus } from '@nawara/service-kit';
+import {
+  HealthModule as KitHealthModule, SERVICE_OPERATION_POLICY, ServiceAuthModule, ServiceOperationGuard, operationsPolicy, type EventBus,
+} from '@nawara/service-kit';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuditService } from './audit/audit.service.js';
@@ -44,6 +46,7 @@ import { OwnerController } from './owner/owner.controller.js';
 import { RecoveryService } from './owner/recovery.service.js';
 import { SecretKeyService } from './owner/secret-key.service.js';
 import { StepUpService } from './owner/step-up.service.js';
+import { AuthorizationReceiptController, ServiceAuthorizationReceiptController } from './receipts/authorization-receipt.controller.js';
 import { AuthorizationReceiptService } from './receipts/authorization-receipt.service.js';
 import { WebAuthnService } from './owner/webauthn.service.js';
 import { AssignmentService } from './platform/assignment.service.js';
@@ -59,7 +62,9 @@ import { UsersService } from './users/users.service.js';
  * suites all go through `AppModule.register(cfg)`, so no module reads `process.env` on its own.
  */
 @Module({
-  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController, MemberSecurityController, ReferenceRepairController],
+  controllers: [AppController, HealthController, AuthController, OnboardingController, OrganizationController, OwnerController, OperatorController, PlatformController, MemberSecurityController, ReferenceRepairController,
+    // Core V2 S2-Auth.2: AUTH-01 (Owner bearer) and AUTH-02/AUTH-03 (service token + AUTH_SERVICE_POLICY).
+    AuthorizationReceiptController, ServiceAuthorizationReceiptController],
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -77,8 +82,9 @@ import { UsersService } from './users/users.service.js';
     { provide: TotpSecretCipher, useFactory: (c: AppConfig) => new TotpSecretCipher(c.secrets.totpKeys, c.secrets.totpActiveKeyId), inject: [APP_CONFIG] },
     AuditService, ThrottleService, UsersService, TokenService, RefreshTokenService, SessionService,
     ChallengeService, WebAuthnService, FactorService, SecretKeyService, AdminDeviceService, StepUpService,
-    // S2-Auth.1: internal only; no controller uses it until S2-Auth.2 adds the authenticated routes.
+    // S2-Auth.1 domain; reached only through the S2-Auth.2 receipt controllers.
     AuthorizationReceiptService,
+    ServiceOperationGuard,
     OwnerAuthService, EnrollmentService, RecoveryService,
     OperatorAvailabilityService, OperatorCodeService, OperatorAdminService, MemberSecurityService, MemberSecurityCounters,
     PlatformAccessService, AssignmentService, OnboardingService, ContactVerificationService, InvitationService, MembershipService, AuthService, GrantsService, AuthGuard,
@@ -102,10 +108,17 @@ export class AppModule {
         KitHealthModule.forRoot({ checkTimeoutMs: 1500, httpDrainTimeoutMs: cfg.httpDrainTimeoutMs }), // Stage 15.5: bounded HTTP drain
         // Stage 18.7.5: Auth's pool (DbService) and the durable central audit path (the kit outbox + relay), independent of AUTH_EVENTS.
         AuditRelayModule.forRoot(cfg, auditBus, { relay: opts.auditRelay }),
+        // S2-Auth.2: inbound service tokens (digests only; empty unless SERVICE_TOKENS is set, then the guard admits no one).
+        ServiceAuthModule.forRoot(cfg.serviceTokens),
       ],
       // Stage 19.5: the member-security snapshot line runs in the service, never in the operator CLI (auditRelay: false).
       // Stage 21.C.2: the code-row purge runs in the service only, like the relay (never in the operator CLI).
-      providers: [{ provide: APP_CONFIG, useValue: cfg }, ...(opts.auditRelay === false ? [] : [MemberSecurityReporter, CodeEventPurge])],
+      providers: [
+        { provide: APP_CONFIG, useValue: cfg },
+        // S2-Auth.2: which operation each authenticated service holds (AUTH_SERVICE_POLICY; deny by default).
+        { provide: SERVICE_OPERATION_POLICY, useValue: operationsPolicy(cfg.servicePolicy) },
+        ...(opts.auditRelay === false ? [] : [MemberSecurityReporter, CodeEventPurge]),
+      ],
     };
   }
 }

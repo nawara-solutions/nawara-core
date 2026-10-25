@@ -1,11 +1,15 @@
 /**
  * The authorization receipts' typed INTERNAL errors (S2-Auth.1; ADR-0067; D-A2 receipt contract §15). Codes are stable and follow the
- * register's names; S2-Auth.2 maps them to HTTP when it adds the routes. Until then nothing reaches a client: no route calls the
- * service. A message never carries a secret, a step-up proof, a binding or a digest.
+ * register's names; `receipt-http.ts` (S2-Auth.2) maps each to its HTTP status and localized message. A message never carries a secret,
+ * a step-up proof, a binding or a digest.
  */
 export type ReceiptErrorCode =
-  /** The receipt pepper is not configured: every receipt operation fails closed (Auth itself keeps working). */
+  /** The receipt pepper is not configured (every receipt operation fails closed; Auth itself keeps working), or the database PROVED that
+   *  nothing was committed. Nothing changed: retrying is safe. */
   | 'receipt_unavailable'
+  /** The database could not say whether the issue or consumption committed (S2-Auth.2). Never an invented success or failure: replay the
+   *  same idempotency key (issue), or retry the same consumeRef or look it up (consumption). */
+  | 'receipt_outcome_unknown'
   /** A malformed request field (idempotency key, consumption reference, caller). */
   | 'validation_error'
   /** The binding is malformed, is not for this caller, or names a Company the Owner does not own (F-2). */

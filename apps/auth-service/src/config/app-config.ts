@@ -2,7 +2,9 @@ import {
   ConfigError, DB_QUERY_TIMEOUT_BOUNDS, DB_QUERY_TIMEOUT_MARGIN_MS, DEFAULT_HTTP_DRAIN_TIMEOUT_MS, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader,
   HTTP_DRAIN_TIMEOUT_BOUNDS, LOG_LEVELS, NODE_ENVS, RABBITMQ_HEARTBEAT_BOUNDS, assertDistinctKeys, assertRuntimeDatabaseRole, loadMetricsConfig,
   loadTrustProxyHops, parseCorsOrigins, readDocsCredentials, readKey, readKeyRing, readOptionalKey, readOptionalKeyEntries, type FileReader, type LogLevel, type MetricsConfig,
+  assertNoPublishedServiceTokens, parseServiceTokens, registeredCallers, type CallerPolicyMap, type ServiceTokenEntry,
 } from '@nawara/service-kit';
+import { parseAuthServicePolicy, type AuthCallerPolicy } from '../receipts/service-policy.js';
 
 /**
  * All configuration and ALL secrets enter the service through this file, once, at startup.
@@ -124,6 +126,12 @@ export interface AppConfig {
     /** S2-Auth.1: HMAC key for authorization receipt secrets and bindings; undefined when unset (receipts then fail closed). */
     authorizationReceiptPepper?: Buffer;
   };
+  /**
+   * S2-Auth.2 (ADR-0067 decision 3; D-A2 §11.2): the services that may call Auth with a service token (`SERVICE_TOKENS`, digests only)
+   * and what each may do (`AUTH_SERVICE_POLICY`). Both empty unless configured: then no service-token route admits anyone.
+   */
+  serviceTokens: ServiceTokenEntry[];
+  servicePolicy: CallerPolicyMap<AuthCallerPolicy>;
   totp: { issuer: string; epochToleranceSec: number };
   webauthn: { rpId: string; rpName: string; origins: string[] };
   challengeTtlSec: number;
@@ -240,6 +248,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
     ...[...totp.keys.values()].map((k) => ['TOTP_ENCRYPTION_KEYS', k] as const),
   ]);
 
+  // S2-Auth.2: inbound service callers (deny by default). A policy that admits a caller needs the receipt pepper: Auth refuses to boot
+  // rather than answer every admitted call with `receipt_unavailable`. Without a policy nothing changes for Auth's existing routes.
+  const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
+  assertNoPublishedServiceTokens(serviceTokens, { isProduction });
+  const servicePolicy = parseAuthServicePolicy(reader.get('AUTH_SERVICE_POLICY'), registeredCallers(serviceTokens));
+  if (servicePolicy.size > 0 && !authorizationReceiptPepper) {
+    throw new ConfigError('AUTHORIZATION_RECEIPT_PEPPER is required when AUTH_SERVICE_POLICY admits a caller');
+  }
+
   const stepUpTtl = reader.int('STEP_UP_TTL_SEC', { default: 300, min: 30, max: MAX_STEP_UP_SEC });
   const origins = (reader.optional('WEBAUTHN_ORIGINS') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const rpId = reader.optional('WEBAUTHN_RP_ID') ?? '';
@@ -334,6 +351,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, readFile?: File
       totpKeys: totp.keys, totpActiveKeyId: totp.activeKeyId, operatorCodePepper, secretKeyPepper, throttlePepper, joinCodePepper,
       ...(authorizationReceiptPepper ? { authorizationReceiptPepper } : {}),
     },
+    serviceTokens,
+    servicePolicy,
     totp: {
       issuer: reader.optional('TOTP_ISSUER', 'Nawara') as string,
       epochToleranceSec: reader.int('TOTP_EPOCH_TOLERANCE_SEC', { default: 30, min: 0, max: 60 }),

@@ -39,7 +39,19 @@ export type AuthErrorCode =
   | 'assignment_conflict'
   | 'recovery_failed'
   | 'recovery_not_available'
-  | 'hierarchy_unavailable';
+  | 'hierarchy_unavailable'
+  // Core V2 S2-Auth.2: authorization receipts (D-A2 receipt contract §15)
+  | 'receipt_unavailable'
+  | 'receipt_outcome_unknown'
+  | 'receipt_binding_invalid'
+  | 'idempotency_key_required'
+  | 'idempotency_key_reused'
+  | 'receipt_issued_response_lost'
+  | 'receipt_already_consumed'
+  | 'receipt_invalid'
+  | 'receipt_expired'
+  | 'authority_revoked'
+  | 'consume_ref_conflict';
 
 /**
  * An Auth API error: `{ message, code }`. `message` is an `AUTH_MESSAGES` entry (rendered in en / fr / ar by the filter, English by

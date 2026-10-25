@@ -1540,7 +1540,7 @@ export class ReleaseCallerPolicy {
 `;
 const REL = 'apps/release-service/src/policy/caller-policy.ts';
 
-test('V2 A1.4: the caller-policy inventory is exactly the seven A1.3 consumers, each bound to its variable (Auth is not one)', () => {
+test('V2 A1.4: the caller-policy inventory is exactly the seven A1.3 consumers plus Auth (S2-Auth.2), each bound to its variable', () => {
   assert.deepEqual(CALLER_POLICY_MODULES, {
     'apps/billing-service/src/admission/caller-admission.policy.ts': 'BILLING_SERVICE_POLICY',
     'apps/payment-service/src/authorization/caller-admission.policy.ts': 'PAYMENT_SERVICE_POLICY',
@@ -1549,6 +1549,7 @@ test('V2 A1.4: the caller-policy inventory is exactly the seven A1.3 consumers, 
     'apps/file-service/src/policy/caller-policy.ts': 'FILE_SERVICE_POLICY',
     'apps/audit-service/src/policy/caller-policy.ts': 'AUDIT_SERVICE_POLICY',
     'apps/release-service/src/policy/caller-policy.ts': 'RELEASE_SERVICE_POLICY',
+    'apps/auth-service/src/receipts/service-policy.ts': 'AUTH_SERVICE_POLICY',
   });
   // The real modules pass: every one delegates its document to the kit parser.
   assert.deepEqual(checkCallerPolicyInventory(Object.fromEntries(Object.keys(CALLER_POLICY_MODULES).map((rel) => [rel, repoFile(rel)]))), []);
@@ -1606,12 +1607,13 @@ test('V2 A1.4: a caller-policy consumer outside the inventory fails (completenes
   ungoverned("export const raw = reader.required('SERVICE_POLICY');\n", 'apps/booking-service/src/config/booking-config.ts');
   ungoverned('export const raw = process.env.BOOKING_SERVICE_POLICY;\n', 'apps/booking-service/src/main.ts');
   ungoverned("export const raw = process.env['BOOKING_SERVICE_POLICY'];\n", 'apps/booking-service/src/main.ts');
-  // An existing service that is not governed (Auth) gains a policy read: refused too.
-  ungoverned("export const raw = reader.get('AUTH_SERVICE_POLICY');\n", 'apps/auth-service/src/config/auth-config.ts');
+  // A Core service that is not governed gains a policy read: refused too. (Auth was the example until S2-Auth.2 governed it.)
+  ungoverned("export const raw = reader.get('SEARCH_SERVICE_POLICY');\n", 'apps/search-service/src/config/search-config.ts');
 
   const allowed = {
     'apps/billing-service/src/config/billing-config.ts': "const p = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(t));", // governed
     'apps/organization-service/src/config/organization-config.ts': "servicePolicyRaw: reader.get('SERVICE_POLICY'),", // governed
+    'apps/auth-service/src/config/app-config.ts': "const p = parseAuthServicePolicy(reader.get('AUTH_SERVICE_POLICY'), registeredCallers(t));", // governed (S2-Auth.2)
     'apps/booking-service/src/x.ts': "// parseCallerPolicy is the kit's; reader.get('BOOKING_SERVICE_POLICY') comes later\nconst s = 'BOOKING_SERVICE_POLICY';",
     'apps/booking-service/src/tokens.ts': "export const SERVICE_POLICY = Symbol('SERVICE_POLICY'); const t = reader.get('SERVICE_TOKENS');",
     'apps/booking-service/test/p.e2e-spec.ts': "import { parseCallerPolicy } from '@nawara/service-kit';", // tests are not consumers

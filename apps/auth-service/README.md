@@ -86,7 +86,9 @@ Reading rules (the kit's, since A4.2):
 | `JWT_ACTIVE_KEY_ID` | no (set together with `JWT_SIGNING_KEYS`) | `legacy` | no (public id) | the key that signs: a ring id (header `{"alg":"HS256","kid":"<id>"}`) or `legacy` (`JWT_SECRET`, header `{"alg":"HS256"}`). Each rotation step is an owner-authorized change; an image without the ring cannot verify ring-signed tokens (ADR-0058 rule 8) |
 | `JWT_ISSUER`, `JWT_AUDIENCE`, `ACCESS_TOKEN_TTL_SEC`, `REFRESH_TOKEN_TTL_SEC` | no | `nawara-auth`, `nawara`, 900, 14 days | no | token claims and lifetimes (access 30 to 3600 s) |
 | `OPERATOR_CODE_PEPPER`, `SECRET_KEY_PEPPER`, `THROTTLE_KEY_PEPPER`, `JOIN_CODE_PEPPER` | yes | none | **yes, file** | HMAC peppers, canonical base64 of at least 32 bytes, all distinct. **Not rotatable transparently** (see the rotation runbook) |
-| `AUTHORIZATION_RECEIPT_PEPPER` | no | none | **yes, file** | HMAC pepper of the authorization receipts (Core V2 S2-Auth.1, ADR-0067), canonical base64 of at least 32 bytes, distinct from every other key. Unset: Auth runs as before and every receipt operation fails closed (`receipt_unavailable`); no default, no fallback to another pepper. Receipts are internal only until S2-Auth.2 adds their routes |
+| `AUTHORIZATION_RECEIPT_PEPPER` | no; **yes when `AUTH_SERVICE_POLICY` admits a caller** | none | **yes, file** | HMAC pepper of the authorization receipts (Core V2 S2-Auth.1, ADR-0067), canonical base64 of at least 32 bytes, distinct from every other key. Unset: Auth runs as before and every receipt route answers `503 receipt_unavailable`; no default, no fallback to another pepper |
+| `SERVICE_TOKENS` | no | none | **yes, file** (digests only) | S2-Auth.2: the services that may call Auth's service-token routes, `<caller>:<sha256-hex>[,…]` (at most two per caller, for rotation); never a raw token. Unset: no service-token route admits anyone. Production refuses a published development token |
+| `AUTH_SERVICE_POLICY` | required when `SERVICE_TOKENS` is set | none | no | S2-Auth.2, deny by default (the kit's caller policy): `{"callers":{"payment-service":{"operations":["authorization_receipt.consume","authorization_receipt.lookup"]}}}`. Only `payment-service` can be granted an operation (F-7); any other caller, an unknown or repeated key or operation refuses to boot |
 | `TOTP_ENCRYPTION_KEYS`, `TOTP_ENCRYPTION_ACTIVE_KEY_ID` | yes | none | **yes, file** | key ring `id:base64(32 bytes)[,…]` and the id used for new secrets; no repeated id or key |
 | `TOTP_ISSUER`, `TOTP_EPOCH_TOLERANCE_SEC`, `BCRYPT_COST` | no | `Nawara`, 30, 12 | no | factor and password parameters |
 | `WEBAUTHN_RP_ID`, `WEBAUTHN_ORIGINS`, `WEBAUTHN_RP_NAME` | **in production** | `localhost`, `http://localhost:3000`, `Nawara` | no | passkeys: https origins under the RP id |
@@ -99,6 +101,21 @@ Reading rules (the kit's, since A4.2):
 | `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes, file** (URL password) | the outbox relay's broker (audit evidence, independent of `AUTH_EVENTS`); `RABBITMQ_URL_FILE` is accepted |
 | `AUTH_HIERARCHY_SOURCE`, `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_SERVICE_TOKEN`, `ORGANIZATION_SERVICE_TIMEOUT_MS` | no | `local`, none, none, 2000 | token: **yes, file** | Auth's Organization Service client; URL and token are set together |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes, file** | API docs; mounted only with a password of at least 16 characters (the kit's `readDocsCredentials`) |
+
+## Authorization receipts (Core V2 S2-Auth.2, ADR-0067)
+
+An Owner approves one exact refund with a fresh, factor-only `refund.authorize` step-up (TOTP or passkey, never the secret key) and
+gets a single-use receipt, valid 10 minutes by the database clock; payment-service consumes it once. Contract:
+`docs/architecture/core-v2-d-a2-auth-authorization-receipts.md`.
+
+| Route | Caller | Purpose |
+|---|---|---|
+| `POST /auth/admin/authorization-receipts` (AUTH-01) | the Owner's own bearer; `Idempotency-Key` header required | issue; `201 {receiptId, secret, expiresAt}`, the secret once only, `Cache-Control: no-store` |
+| `POST /auth/service/authorization-receipts/consume` (AUTH-02) | service token holding `authorization_receipt.consume` | consume once; the same `consumeRef` repeated returns the same consumption |
+| `POST /auth/service/authorization-receipts/consumptions/lookup` (AUTH-03) | service token holding `authorization_receipt.lookup` | read-only recovery of a consumption by `consumeRef`, for the same caller and binding |
+
+Only HMAC digests of the secret and of the canonical binding are stored. Nothing is logged or audited beyond the receipt id, the
+Company, the calling service and `approvedBy`.
 
 ## Organization onboarding (join codes)
 
