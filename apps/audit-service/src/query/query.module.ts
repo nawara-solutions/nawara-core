@@ -4,6 +4,8 @@ import type { AuditConfig } from '../config/audit-config.js';
 import { HttpOwnerAuthority, OWNER_AUTHORITY, type OwnerAuthority } from '../owner/owner-authority.client.js';
 import { OwnerAuditQueryController } from '../owner/owner-query.controller.js';
 import { ScopedAuditQueryController } from '../owner/scoped-query.controller.js';
+import { LegalHoldController } from '../legal-hold/legal-hold.controller.js';
+import { LegalHoldService } from '../legal-hold/legal-hold.service.js';
 import { PersistenceModule } from '../persistence/persistence.module.js';
 import { QueryCounters } from './query-counters.js';
 import { AuditQueryController } from './query.controller.js';
@@ -27,8 +29,10 @@ export class QueryModule {
       module: QueryModule,
       imports: [PersistenceModule, RateLimitModule],
       // Core V2 S2-Audit.3: the scoped reads only when the cursor key ring is configured too (and then Auth is required by the config)
-      controllers: [AuditQueryController, ...(access ? [OwnerAuditQueryController] : []), ...(access && config.scopedAccess ? [ScopedAuditQueryController] : [])],
-      providers: [{ provide: QueryCounters, useValue: new QueryCounters() }, AuditQueryService, QueryReporter, RateLimitJanitor, ...owner],
+      controllers: [AuditQueryController, ...(access ? [OwnerAuditQueryController] : []), ...(access && config.scopedAccess ? [ScopedAuditQueryController] : []),
+        // Core V2 S2-Audit.4: the Owner's legal holds, with the owner read (Auth is required: authority and the step-up are Auth's)
+        ...(access ? [LegalHoldController] : [])],
+      providers: [{ provide: QueryCounters, useValue: new QueryCounters() }, AuditQueryService, QueryReporter, RateLimitJanitor, LegalHoldService, ...owner],
       exports: [AuditQueryService, QueryCounters],
     };
   }

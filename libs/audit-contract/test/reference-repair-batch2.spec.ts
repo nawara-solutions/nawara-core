@@ -63,7 +63,8 @@ describe('A5.4-AC1 batch 2: additive only', () => {
 
   it('the catalog grows from 56 to 58 with exactly the two batch 2 actions', () => {
     // Core V2 S2-Audit.2 later added the three authorization receipt actions (D1); batch 2 added exactly its two
-    const S2_AUDIT_2 = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided'];
+    // + the two legal-hold actions of Core V2 S2-Audit.4
+    const S2_AUDIT_2 = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided', 'audit_legal_hold.placed', 'audit_legal_hold.released'];
     expect(AUDIT_ACTIONS).toHaveLength(58 + S2_AUDIT_2.length);
     expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE) && !S2_AUDIT_2.includes(a)).sort()).toEqual([MISMATCH, UNRESOLVED]);
   });

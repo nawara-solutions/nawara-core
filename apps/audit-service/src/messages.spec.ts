@@ -18,6 +18,9 @@ describe('AUDIT_MESSAGES', () => {
       // Core V2 S2-Audit.3: new messages (no pre-R6.1 text existed)
       operatorOnly: 'Only an operator may read a Platform\'s audit evidence here.',
       platformIdInvalid: 'platformId is not valid',
+      // Core V2 S2-Audit.4: new messages
+      stepUpRequired: 'A valid step-up verification is required for this action.',
+      legalHoldInvalid: 'The legal hold request is not valid.',
       categoryNotAllowed: 'This caller may not read that category.',
       sourceNotAllowed: 'This caller may not read that source service.',
       unexpectedBody: 'A read takes no request body.',

@@ -94,10 +94,12 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `file.deleted` | business | service | as recorded (UUID or null) | file | — | succeeded | — | A stored document is deleted at its owner service's request (irreversible loss of content). |
 | `file.integrity_incident` | security | system (`file_download_integrity_check`, `file_reconciliation`) | as recorded (UUID or null) | file | — | succeeded | `reason`: digest_mismatch \| size_mismatch \| object_missing | Stored content no longer matches its record (altered, truncated or missing): possible tampering or loss. |
 
-## audit-service (1)
+## audit-service (3)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
+| `audit_legal_hold.placed` | security | user (owner) | none (platform) | audit_legal_hold | — | succeeded | `company_id`: uuid<br>`reason_code`: token<br>`window_from`?: timestamp<br>`window_to`?: timestamp | A Company owner, after a fresh factor-only step-up, placed a legal hold on their Company's trusted audit evidence: retention can no longer purge it. |
+| `audit_legal_hold.released` | security | user (owner) | none (platform) | audit_legal_hold | — | succeeded | `company_id`: uuid<br>`reason_code`: token | A Company owner, after a fresh factor-only step-up, released one legal hold of their Company: retention may purge that evidence again under its policy. |
 | `platform_query.executed` | security | user (owner, operator); service | none (platform) | platform_query | — | succeeded | `target`: all \| organization \| platform \| company \| operator_platform<br>`window_days`: integer 1–31<br>`result_count`: integer 0–100<br>`page`: first \| next<br>`filtered`: boolean<br>`organization_id`?: uuid<br>`company_id`?: uuid<br>`platform_id`?: uuid | Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), by a Company owner (one organization of their Company, or their Company's trusted timeline), or by an operator (an assigned Platform's trusted records). Who, when, which scope, how broadly. |
 
 ## release-service (4)
@@ -114,4 +116,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 61 actions.**
+**Total: 63 actions.**

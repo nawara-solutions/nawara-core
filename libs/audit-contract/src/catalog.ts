@@ -19,16 +19,18 @@ import type { AuditCategory, AuditOutcome, UserKind } from './contract.js';
 export const CORE_PRODUCERS = ['auth-service', 'organization-service', 'billing-service', 'payment-service', 'file-service', 'audit-service', 'release-service'] as const;
 export type CoreProducer = (typeof CORE_PRODUCERS)[number];
 
-export type ChangeType = 'code' | 'uuid' | 'boolean' | 'integer' | 'timestamp';
+export type ChangeType = 'code' | 'uuid' | 'boolean' | 'integer' | 'timestamp' | 'token';
 
 /**
  * One allowed change fact. `value`: a scalar. `transition`: exactly `{ from, to }` of scalars, which must differ.
- * `code` values are always a closed enumeration (`values`): no free text can reach a change.
+ * `code` values are always a closed enumeration (`values`): no free text can reach a change. Core V2 S2-Audit.4: `token` is a bounded,
+ * grammar-validated code (`^[a-z][a-z0-9_]{0,63}$`: lowercase, digits, underscore) for a value whose vocabulary is the recording
+ * service's (the legal-hold reason code, Owner decision H6, validated like the receipt `reason`): never free text, never a space.
  */
 export type ChangeSpec =
   | { type: 'code'; shape: 'value' | 'transition'; required: boolean; values: readonly string[] }
   | { type: 'integer'; shape: 'value' | 'transition'; required: boolean; min: number; max: number }
-  | { type: 'uuid' | 'boolean' | 'timestamp'; shape: 'value' | 'transition'; required: boolean };
+  | { type: 'uuid' | 'boolean' | 'timestamp' | 'token'; shape: 'value' | 'transition'; required: boolean };
 
 /**
  * Where `organizationId` comes from (A11), always resolved by the producer from its own rows:
@@ -513,6 +515,29 @@ const SPEC = {
   // namespace that its event type adds). Written by audit-service itself, in the same transaction as the read it records.
   // Stage 19.3 (ADR-0050 decision 6, Audit-X): also a verified Company OWNER's read of one organization of their Company, the owner as the
   // actor (never the audit service); `organization_id` names that organization (the record itself stays platform-level). Additive (A50).
+  // Core V2 S2-Audit.4 (ADR-0069 decision 6; OD-13 resolved, Owner decisions H1 to H7): an Owner places / releases a legal hold on their
+  // Company's TRUSTED audit evidence (records with a trusted Company scope row), optionally within an occurrence window. Written by
+  // audit-service itself, in the same transaction as the hold event, never over the bus. No factor proof, token or evidence travels.
+  'audit_legal_hold.placed': {
+    producer: 'audit-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['audit_legal_hold'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      company_id: { type: 'uuid', shape: 'value', required: true },
+      reason_code: { type: 'token', shape: 'value', required: true },
+      window_from: { type: 'timestamp', shape: 'value', required: false },
+      window_to: { type: 'timestamp', shape: 'value', required: false },
+    },
+    purpose: 'A Company owner, after a fresh factor-only step-up, placed a legal hold on their Company\'s trusted audit evidence: retention can no longer purge it.',
+  },
+  'audit_legal_hold.released': {
+    producer: 'audit-service', category: 'security', since: 1, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['audit_legal_hold'], subject: NO_SUBJECT, outcomes: OK,
+    changes: {
+      company_id: { type: 'uuid', shape: 'value', required: true },
+      reason_code: { type: 'token', shape: 'value', required: true },
+    },
+    purpose: 'A Company owner, after a fresh factor-only step-up, released one legal hold of their Company: retention may purge that evidence again under its policy.',
+  },
   // Core V2 S2-Audit.3 (ADR-0069 decision 5: every human read is recorded): additively, an operator may be the actor, and two targets record
   // the scoped human reads, `company` (AUD-03, the Owner's Company timeline, with `company_id`) and `operator_platform` (AUD-04, an
   // operator's assigned Platform, with `platform_id`). Written by audit-service itself only, never over the bus; nothing else changes.

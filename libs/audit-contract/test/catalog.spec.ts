@@ -46,7 +46,9 @@ describe('catalog completeness (every action fully defined)', () => {
     expect(Object.keys(e.changes).length).toBeLessThanOrEqual(8);
     for (const [k, s] of Object.entries(e.changes)) {
       expect(k).toMatch(CHANGE_KEY);
-      expect(['code', 'uuid', 'boolean', 'integer', 'timestamp']).toContain(s.type);
+      expect(['code', 'uuid', 'boolean', 'integer', 'timestamp', 'token']).toContain(s.type);
+      // S2-Audit.4: `token` (a bounded code, never free text) only for the legal-hold reason code
+      if (s.type === 'token') expect([action, k]).toEqual([action.startsWith('audit_legal_hold.') ? action : 'none', 'reason_code']);
       expect(['value', 'transition']).toContain(s.shape);
       expect(typeof s.required).toBe('boolean');
       if (s.type === 'code') {
@@ -93,9 +95,9 @@ describe('producer ownership (one canonical producer per action)', () => {
     expect(new Set(owned).size).toBe(owned.length);
   });
 
-  it('notification-service owns nothing (no privileged capability exists); audit-service owns only its platform-read record (18.6)', () => {
+  it('notification-service owns nothing (no privileged capability exists); audit-service owns its platform-read record (18.6) and the legal-hold records (S2-Audit.4)', () => {
     expect(actionsOwnedBy('notification-service')).toEqual([]);
-    expect(actionsOwnedBy('audit-service')).toEqual(['platform_query.executed']);
+    expect(actionsOwnedBy('audit-service').sort()).toEqual(['audit_legal_hold.placed', 'audit_legal_hold.released', 'platform_query.executed']);
   });
 
   it('release-service owns its two automation actions (Stage 20.3): platform-level, a service actor only, never a user', () => {

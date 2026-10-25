@@ -105,7 +105,7 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 
 describe('nothing else was broadened', () => {
   it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the four of A5.4-AC1 (batches 1 and 2), and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(61); // + the three authorization receipt actions of Core V2 S2-Audit.2 (Owner decision D1)
+    expect(AUDIT_ACTIONS).toHaveLength(63); // + the three authorization receipt actions of Core V2 S2-Audit.2 (D1) and the two legal-hold actions of S2-Audit.4
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
@@ -164,6 +164,7 @@ describe('Stage 19.3: platform_query.executed accepts a verified Company owner (
   });
 
   it('no other audit-service action gains an owner actor', () => {
-    for (const a of AUDIT_ACTIONS.filter((x) => producer(x) === 'audit-service' && x !== 'platform_query.executed')) expect(ok(a, { actor: owner }), a).toThrow('invalid_actor');
+    // S2-Audit.4: the legal-hold records are an owner's by design (H1); no other audit-service action gains one
+    for (const a of AUDIT_ACTIONS.filter((x) => producer(x) === 'audit-service' && x !== 'platform_query.executed' && !x.startsWith('audit_legal_hold.'))) expect(ok(a, { actor: owner }), a).toThrow('invalid_actor');
   });
 });

@@ -26,6 +26,13 @@ export interface OwnerAuthority {
    * 401 when Auth refuses the bearer; 503 when Auth cannot say or answers in an unexpected shape.
    */
   grants(userBearer: string, deadline?: AbortSignal): Promise<LiveGrants>;
+  /**
+   * Core V2 S2-Audit.4 (Owner decision H3): Auth verifies AND CONSUMES the caller's step-up proof for exactly `purpose`
+   * (`POST /auth/step-up/verify`, the owner's own bearer): bound to that owner, session and purpose, unexpired, single use, factor methods
+   * only for the legal-hold purposes. Resolves when consumed; `403 step_up_required` when Auth refuses it (missing, used, expired, another
+   * purpose, session or owner); 401 when Auth refuses the bearer; 503 when Auth cannot say. Never retried: a proof is spent at most once.
+   */
+  verifyStepUp(userBearer: string, purpose: 'audit.legal_hold.place' | 'audit.legal_hold.release', stepUpToken: string, deadline?: AbortSignal): Promise<void>;
 }
 
 export interface LiveGrants {
@@ -133,6 +140,27 @@ export class HttpOwnerAuthority implements OwnerAuthority {
     if (!Array.isArray(assignments) || assignments.length > MAX_ASSIGNMENTS || !assignments.every((x) => typeof x === 'string' && UUID.test(x))) throw new AuthDependencyError('auth_unavailable');
     if (kind !== 'operator' && assignments.length > 0) throw new AuthDependencyError('auth_unavailable');
     return { userId: b.userId.toLowerCase(), kind, companyId, platformAssignments: (assignments as string[]).map((x) => x.toLowerCase()) };
+  }
+
+  async verifyStepUp(userBearer: string, purpose: 'audit.legal_hold.place' | 'audit.legal_hold.release', stepUpToken: string, deadline?: AbortSignal): Promise<void> {
+    const signal = deadline ?? AbortSignal.timeout(this.opts.timeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(`${this.opts.baseUrl.replace(/\/+$/, '')}/auth/step-up/verify`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${userBearer}`, 'content-type': 'application/json', ...correlationHeaders() },
+        body: JSON.stringify({ purpose, stepUpToken }),
+        redirect: 'manual',
+        signal,
+      });
+    } catch {
+      throw this.failure(signal); // the outcome is unknown: fail CLOSED (the caller needs a fresh proof to try again)
+    }
+    await this.release(res);
+    if (res.status === 204) return;
+    if (res.status === 401) throw new UnauthorizedException();
+    if (res.status === 403 || res.status === 400) throw httpError(403, 'step_up_required', AUDIT_MESSAGES.stepUpRequired);
+    throw new AuthDependencyError('auth_unavailable');
   }
 
   async ownsOrganization(userBearer: string, organizationId: string, deadline?: AbortSignal): Promise<boolean> {

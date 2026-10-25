@@ -2,7 +2,7 @@ import { catalogEntry, type CatalogEntry, type ChangeSpec } from './catalog.js';
 import { AUDIT_CONTRACT_V2, AUDIT_OUTCOMES, USER_KINDS, type UserActor, type AuditActor, type AuditPayload, type AuditReference, type ChangeScalar, type ChangeValue } from './contract.js';
 import { refuse } from './errors.js';
 import {
-  CHANGE_KEY, CODE_VALUE, EVENT_NAME, MAX_ACTION_LENGTH, MAX_CHANGE_INTEGER, MAX_CHANGE_KEYS, MAX_CHANGES_JSONB_BYTES, MAX_PAYLOAD_BYTES,
+  CHANGE_KEY, CODE_VALUE, TOKEN_VALUE, EVENT_NAME, MAX_ACTION_LENGTH, MAX_CHANGE_INTEGER, MAX_CHANGE_KEYS, MAX_CHANGES_JSONB_BYTES, MAX_PAYLOAD_BYTES,
   SERVICE_NAME, TIMESTAMP, TYPE_CODE, UUID, isExactUtcTimestamp,
 } from './grammar.js';
 import { isSecretShaped, isSensitiveKey } from './sensitive.js';
@@ -203,6 +203,9 @@ function scalarOf(v: unknown, spec: ChangeSpec): ChangeScalar {
       return v;
     case 'timestamp':
       if (typeof v !== 'string' || !isExactUtcTimestamp(v, TIMESTAMP)) refuse('invalid_changes');
+      return v;
+    case 'token':
+      if (typeof v !== 'string' || !TOKEN_VALUE.test(v)) refuse('invalid_changes');
       return v;
   }
 }

@@ -82,6 +82,29 @@ value, contact data, free text, an unknown field, malformed or binary input) is 
 `not_replayable`, exit 5). Either way only the validated kit headers (`eventId`, `source`, `occurredAt`, `version`, `correlationId`) and
 the kit annotations survive; any other header a publisher attached is dropped.
 
+## Legal holds (Core V2 S2-Audit.4, AUD-05)
+
+An active **Company owner** places or releases a legal hold on **their own Company's** audit evidence, with their own Auth bearer and a
+fresh, factor-only step-up (TOTP or passkey, never the secret key) of purpose `audit.legal_hold.place` / `audit.legal_hold.release`, which
+Auth verifies and consumes (single use, bound to the owner, session and purpose). The Company is always Auth's live answer, never a request
+value. Operators, members, services and other owners have no hold authority. Mounted with the owner read (`AUTH_SERVICE_URL`).
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /audit/owner/company/legal-holds` | `{stepUpToken, reasonCode, from?, to?}` (`reasonCode` `^[a-z][a-z0-9_]{0,63}$`; the window both bounds or none, `from < to`) | `201 {holdId, companyId, reasonCode, from, to, placedAt}` |
+| `POST /audit/owner/company/legal-holds/{holdId}/release` | `{stepUpToken, reasonCode}` | `200 {holdId, releasedAt}`; an unknown, another Company's or an already-released hold is the same `404` (checked before the proof is spent) |
+
+**Coverage (decision H7), read this:** a hold covers ONLY records with a **trusted Company scope row** for that Company (written for
+broker-verified producers that may assert a Company: today the `authorization_receipt.*` actions), within the optional `[from, to)` on
+occurrence time. **Unverified, unscoped and historical records without trusted Company scope are NOT covered** and stay under the retention
+policy; ownership is never inferred and no global retention suspension exists. A hold has **no expiry**: it lasts until released.
+
+A held record is skipped by the retention job and refused by the `audit_record` delete trigger for every role. Placing or releasing a hold
+takes the Company's advisory lock exclusively; the delete path takes it shared before checking, so a hold committed before a deletion is
+always seen and a failed release changes nothing. Each placement and release is recorded as `audit_legal_hold.placed` / `.released` (actor,
+Company, hold id, reason code; never the proof) in the same transaction. If Audit cannot commit after Auth consumed the proof, the request
+fails closed (`503`) with nothing changed, and a fresh step-up is needed.
+
 ## Retention (18.8)
 
 The mechanism of ADR-0049 A41, with **no duration**: `audit_retention_policy` ships empty, so **nothing is ever purged** until the owner

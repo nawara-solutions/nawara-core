@@ -37,6 +37,8 @@ function scalar(s: ChangeSpec, second: boolean): ChangeScalar {
       return second ? s.max : s.min;
     case 'timestamp':
       return second ? T2 : T1;
+    case 'token':
+      return second ? 'sample_token_b' : 'sample_token_a';
   }
 }
 
