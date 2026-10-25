@@ -6,7 +6,7 @@ import type { AuditRecordRow, InsertOutcome, NewAuditRecord, PagedAuditRow } fro
 
 const COLUMNS = `id, "eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId",
   "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt",
-  "companyId", "platformId", "liveMode", "producerIdentityVerified", replayed`;
+  "companyId", "platformId", "liveMode", "producerIdentityVerified", replayed, "approvedByUserId", "approvedByUserKind"`;
 
 /** SQLSTATEs of a record the schema refuses: check / not-null violation, malformed uuid / timestamp / json, out-of-range number. */
 const REFUSED = new Set(['23514', '23502', '22P02', '22007', '22008', '22003', '22023', '22P05', '2201X', '22021']);
@@ -45,8 +45,8 @@ export class AuditRecordRepository {
         `WITH ins AS (
            INSERT INTO audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind",
              "organizationId", "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt",
-             "companyId", "platformId", "liveMode", "producerIdentityVerified", replayed)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21, $22, $23)
+             "companyId", "platformId", "liveMode", "producerIdentityVerified", replayed, "approvedByUserId", "approvedByUserKind")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21, $22, $23, $25, $26)
            ON CONFLICT ("sourceService", "eventId") DO NOTHING
            RETURNING ${COLUMNS}
          ), scope AS (
@@ -61,6 +61,7 @@ export class AuditRecordRepository {
           r.correlationId ?? null, r.causationId ?? null, occurredAt,
           companyId, platformId, r.liveMode ?? null, r.delivery ? r.delivery.producerIdentityVerified : null, r.delivery ? r.delivery.replayed : null,
           trustedScope,
+          r.approvedBy?.id ?? null, r.approvedBy?.userKind ?? null,
         ],
       ));
     } catch (e) {
@@ -151,7 +152,10 @@ export function sameEvidence(stored: AuditRecordRow, candidate: NewAuditRecord):
     // same fact, and the stored assessment is never upgraded.
     && stored.companyId === (candidate.companyId ?? null)
     && stored.platformId === (candidate.platformId ?? null)
-    && stored.liveMode === (candidate.liveMode ?? null);
+    && stored.liveMode === (candidate.liveMode ?? null)
+    // Core V2 S2-Audit.2: the approver is evidence too (a duplicate naming another approver is a conflict)
+    && stored.approvedByUserId === (candidate.approvedBy?.id ?? null)
+    && stored.approvedByUserKind === (candidate.approvedBy?.userKind ?? null);
 }
 
 function refused(e: unknown): Error {

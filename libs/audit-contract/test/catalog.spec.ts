@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { EVENT_NAME as KIT_EVENT_NAME } from '@nawara/service-kit';
-import {
+import { SUPPORTED_AUDIT_VERSIONS,
   ACTOR_TYPES, AUDIT_ACTIONS, AUDIT_CATALOG, AUDIT_CATEGORIES, AUDIT_CONTRACT_VERSION, AUDIT_OUTCOMES, CORE_PRODUCERS, USER_KINDS,
   actionsOwnedBy, validateAuditPayload,
 } from '../src/index.js';
@@ -14,11 +14,14 @@ const entries = [...AUDIT_CATALOG];
 
 describe('catalog completeness (every action fully defined)', () => {
   it.each(entries)('%s has producer, category, version, actors, organization, resource, subject, outcomes, changes and purpose', (action, e) => {
-    expect(Object.keys(e).sort()).toEqual(['actors', 'category', 'changes', 'organization', 'outcomes', 'producer', 'purpose', 'resource', 'since', 'subject']);
+    // Core V2 S2-Audit.2: `scope` and `approval` are optional rules, present only on the authorization receipt actions (version 2)
+    const optional = ['approval', 'scope'].filter((k) => k in e);
+    expect(Object.keys(e).sort()).toEqual(['actors', 'category', 'changes', 'organization', 'outcomes', 'producer', 'purpose', 'resource', 'since', 'subject', ...optional].sort());
     expect(CORE_PRODUCERS).toContain(e.producer);
     expect(AUDIT_CATEGORIES).toContain(e.category);
-    expect(e.since).toBe(1);
-    expect(e.since).toBeLessThanOrEqual(AUDIT_CONTRACT_VERSION);
+    expect(e.since).toBe(action.startsWith('authorization_receipt.') ? 2 : 1);
+    expect(SUPPORTED_AUDIT_VERSIONS).toContain(e.since);
+    if (e.since === 1) expect(e.since).toBeLessThanOrEqual(AUDIT_CONTRACT_VERSION);
     const actorKinds = Object.keys(e.actors);
     expect(actorKinds.length).toBeGreaterThan(0);
     for (const k of actorKinds) expect(ACTOR_TYPES).toContain(k);

@@ -42,8 +42,10 @@ describe('A5.4-AC1 batch 2: additive only', () => {
   });
 
   it('the catalog grows from 56 to 58 with exactly the two batch 2 actions', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(58);
-    expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE)).sort()).toEqual([MISMATCH, UNRESOLVED]);
+    // Core V2 S2-Audit.2 later added the three authorization receipt actions (D1); batch 2 added exactly its two
+    const S2_AUDIT_2 = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided'];
+    expect(AUDIT_ACTIONS).toHaveLength(58 + S2_AUDIT_2.length);
+    expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE) && !S2_AUDIT_2.includes(a)).sort()).toEqual([MISMATCH, UNRESOLVED]);
   });
 
   it('no contract constant changes: version, supported versions, user kinds, outcomes, actor types, categories, producers', () => {

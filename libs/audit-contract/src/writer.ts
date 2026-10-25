@@ -1,5 +1,5 @@
-import { actionsOwnedBy, type AuditAction, type AuditChangesOf, type AuditOutcomeOf, type AuditResourceTypeOf, type AuditSubjectOf } from './catalog.js';
-import { AUDIT_CONTRACT_VERSION, type AuditActor } from './contract.js';
+import { actionsOwnedBy, catalogEntry, type AuditAction, type AuditChangesOf, type AuditOutcomeOf, type AuditResourceTypeOf, type AuditSubjectOf } from './catalog.js';
+import { AUDIT_CONTRACT_VERSION, type AuditActor, type UserActor } from './contract.js';
 import { AuditContractError, refuse } from './errors.js';
 import { CORRELATION_ID, EVENT_TYPE_PREFIX, SERVICE_NAME, UUID } from './grammar.js';
 import { validateAuditPayload } from './validate.js';
@@ -34,6 +34,11 @@ export type AuditEventInput<A extends AuditAction = AuditAction> = A extends Aud
       outcome: AuditOutcomeOf<A>;
       changes?: AuditChangesOf<A>;
       causationId?: string;
+      // version-2 facts (Core V2 S2-Audit): accepted only for an action introduced in version 2 whose catalog entry allows them
+      companyId?: string;
+      platformId?: string;
+      liveMode?: boolean;
+      approvedBy?: UserActor;
     }
   : never;
 
@@ -86,7 +91,10 @@ export class AuditEventWriter<Q extends AuditQueryable> {
   }
 
   async write<A extends AuditAction>(tx: Q, event: AuditEventInput<A>, options: AuditWriteOptions = {}): Promise<AuditWriteResult> {
-    const payload = validateAuditPayload(event, this.sourceService);
+    // Core V2 S2-Audit.2: the envelope version is the action's own (`since`): version 1 for every earlier action (unchanged), version 2
+    // for an action introduced in version 2. Never the caller's choice.
+    const version = Math.max(AUDIT_CONTRACT_VERSION, catalogEntry(String((event as { action?: unknown }).action))?.since ?? AUDIT_CONTRACT_VERSION);
+    const payload = validateAuditPayload(event, this.sourceService, version);
     const { eventId, correlationId } = options;
     if (eventId !== undefined && (typeof eventId !== 'string' || !UUID.test(eventId))) refuse('invalid_envelope');
     if (eventId !== undefined && payload.causationId === eventId) refuse('invalid_causation');
@@ -97,7 +105,7 @@ export class AuditEventWriter<Q extends AuditQueryable> {
     const id = await this.outbox.enqueue(tx, {
       name: eventType,
       payload: { ...payload },
-      version: AUDIT_CONTRACT_VERSION,
+      version,
       ...(eventId !== undefined ? { id: eventId } : {}),
       ...(correlationId !== undefined ? { correlationId } : {}),
     });

@@ -1,5 +1,5 @@
 import { catalogEntry, type CatalogEntry, type ChangeSpec } from './catalog.js';
-import { AUDIT_CONTRACT_V2, AUDIT_OUTCOMES, USER_KINDS, type AuditActor, type AuditPayload, type AuditReference, type ChangeScalar, type ChangeValue } from './contract.js';
+import { AUDIT_CONTRACT_V2, AUDIT_OUTCOMES, USER_KINDS, type UserActor, type AuditActor, type AuditPayload, type AuditReference, type ChangeScalar, type ChangeValue } from './contract.js';
 import { refuse } from './errors.js';
 import {
   CHANGE_KEY, CODE_VALUE, EVENT_NAME, MAX_ACTION_LENGTH, MAX_CHANGE_INTEGER, MAX_CHANGE_KEYS, MAX_CHANGES_JSONB_BYTES, MAX_PAYLOAD_BYTES,
@@ -12,10 +12,10 @@ type Rec = Record<string, unknown>;
 export const TOP_LEVEL = new Set(['action', 'actor', 'organizationId', 'resource', 'subject', 'outcome', 'changes', 'causationId']);
 /**
  * Core V2 S2-Audit.1 (ADR-0069 decision 2): the version-2 fields this slice implements, accepted only in a version-2 event (in a version-1
- * event they are `unknown_field`, as before). The other frozen version-2 names (`requestedBy`, `approvedBy`, `verifiedBy`, `via`) have no
- * approved encoding or per-action rule yet: they stay `unknown_field` in every version until that decision is made (never guessed).
+ * event they are `unknown_field`, as before). S2-Audit.2 adds `approvedBy` (Owner decision D5). The other frozen version-2 names
+ * (`requestedBy`, `verifiedBy`, `via`) have no approved encoding yet (D6, D7): they stay `unknown_field` in every version.
  */
-export const V2_FIELDS: ReadonlySet<string> = new Set(['companyId', 'platformId', 'liveMode']);
+export const V2_FIELDS: ReadonlySet<string> = new Set(['companyId', 'platformId', 'liveMode', 'approvedBy']);
 const TOP_LEVEL_V2: ReadonlySet<string> = new Set([...TOP_LEVEL, ...V2_FIELDS]);
 /**
  * No level of a valid payload has more than 8 keys. The layer-2 scan inspects up to twice that (so a credential-named key added to a
@@ -169,6 +169,24 @@ function scopeOf(o: Rec, entry: Readonly<CatalogEntry>, resource: AuditReference
   return out;
 }
 
+/**
+ * Core V2 S2-Audit.2 (ADR-0069 decision 3; Owner decision D5): `approvedBy` is exactly `{type:'user', id, userKind}` of an allowed kind,
+ * only for an action with an `approval` rule, and present when the rule requires it. Its truth is the recording service's duty.
+ */
+function approvalOf(o: Rec, entry: Readonly<CatalogEntry>): UserActor | undefined {
+  const rule = entry.approval;
+  if (!has(o, 'approvedBy')) {
+    if (rule?.required) refuse('invalid_approval');
+    return undefined;
+  }
+  const a = plainRecord(o.approvedBy);
+  if (!rule || !a) refuse('invalid_approval');
+  for (const k of Object.keys(a)) if (!['type', 'id', 'userKind'].includes(k)) refuse('invalid_approval');
+  if (a.type !== 'user' || typeof a.id !== 'string' || !UUID.test(a.id)) refuse('invalid_approval');
+  if (typeof a.userKind !== 'string' || !(rule.userKinds as readonly string[]).includes(a.userKind)) refuse('invalid_approval');
+  return { type: 'user', id: a.id, userKind: a.userKind as UserActor['userKind'] };
+}
+
 function scalarOf(v: unknown, spec: ChangeSpec): ChangeScalar {
   switch (spec.type) {
     case 'code':
@@ -311,6 +329,7 @@ export function validateAuditPayloadWith(
 
   // version 2 only (a version-1 payload cannot hold these keys: refused above)
   const scope = scopeOf(o, entry, resource, organizationId);
+  const approvedBy = approvalOf(o, entry);
   let liveMode: boolean | undefined;
   if (has(o, 'liveMode')) {
     if (typeof o.liveMode !== 'boolean') refuse('invalid_live_mode');
@@ -329,6 +348,7 @@ export function validateAuditPayloadWith(
     ...(scope.companyId ? { companyId: scope.companyId } : {}),
     ...(scope.platformId ? { platformId: scope.platformId } : {}),
     ...(liveMode !== undefined ? { liveMode } : {}),
+    ...(approvedBy ? { approvedBy } : {}),
   };
   // Every string in the canonical payload is ASCII (the grammars above), so its JSON length is its byte length.
   if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) refuse('payload_too_large');

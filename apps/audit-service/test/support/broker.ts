@@ -26,7 +26,7 @@ export function auditEnvelope(
       occurredAt: new Date().toISOString(),
       correlationId: `corr-${id.slice(0, 8)}`,
       source: AUDIT_CATALOG.get(action)!.producer,
-      version: 1,
+      version: AUDIT_CATALOG.get(action)!.since, // Core V2 S2-Audit.2: the action's own version (2 for the authorization receipts)
       ...over.headers,
     } as EventEnvelope['headers'],
   };

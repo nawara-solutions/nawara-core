@@ -12,7 +12,16 @@ export const SAMPLE_IDS = Object.freeze({
   uuidA: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c55',
   uuidB: 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d66',
   causation: 'c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e77',
+  // Core V2 S2-Audit.2: the version-2 facts of an action whose catalog entry allows them
+  company: 'd4e5f6a7-b8c9-4d0e-9f1a-3b4c5d6e7f88',
+  platform: 'e5f6a7b8-c9d0-4e1f-8a2b-4c5d6e7f8a99',
+  approver: 'f6a7b8c9-d0e1-4f2a-9b3c-5d6e7f8a9baa',
 });
+
+/** Core V2 S2-Audit.2: the envelope version an action's events carry (its `since`; version 1 for every earlier action). */
+export function sampleVersion(action: AuditAction): number {
+  return Math.max(1, catalogEntry(action)!.since);
+}
 const T1 = '2026-09-25T10:00:00.000Z';
 const T2 = '2026-10-25T10:00:00.000Z';
 
@@ -41,7 +50,8 @@ export function sampleActor(action: AuditAction): AuditActor {
 
 /**
  * A valid payload: `minimal` carries only what the action requires (optional subject, optional changes and causation omitted;
- * an optional organization is null); `complete` carries every optional part too.
+ * an optional organization is null); `complete` carries every optional part too. Version-2 facts (a Company / Platform the catalog
+ * allows, `approvedBy`) follow the same rule, so the payload is valid in an envelope of `sampleVersion(action)`.
  */
 export function sampleAuditPayload(action: AuditAction, variant: 'minimal' | 'complete' = 'minimal'): AuditPayload {
   const e = catalogEntry(action)!;
@@ -78,6 +88,10 @@ export function sampleAuditPayload(action: AuditAction, variant: 'minimal' | 'co
     outcome: e.outcomes[0]!,
     ...(Object.keys(changes).length > 0 ? { changes } : {}),
     ...(variant === 'complete' ? { causationId: SAMPLE_IDS.causation } : {}),
+    ...(e.scope?.company === 'required' || (e.scope?.company && variant === 'complete') ? { companyId: SAMPLE_IDS.company } : {}),
+    ...(e.scope?.platform === 'required' || (e.scope?.platform && variant === 'complete') ? { platformId: SAMPLE_IDS.platform } : {}),
+    ...(e.approval && (e.approval.required || variant === 'complete')
+      ? { approvedBy: { type: 'user' as const, id: SAMPLE_IDS.approver, userKind: e.approval.userKinds[0]! } } : {}),
   };
 }
 

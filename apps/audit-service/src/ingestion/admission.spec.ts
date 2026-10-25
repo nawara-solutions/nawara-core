@@ -16,7 +16,7 @@ const envelope = (action: AuditAction, over: { payload?: Record<string, unknown>
     id,
     name: over.name ?? `audit.${action}`,
     payload: over.payload ?? JSON.parse(JSON.stringify(sampleAuditPayload(action, 'complete'))),
-    headers: { eventId: id, occurredAt: new Date().toISOString(), correlationId: `corr-${id.slice(0, 8)}`, source: over.source ?? AUDIT_CATALOG.get(action)!.producer, version: 1 },
+    headers: { eventId: id, occurredAt: new Date().toISOString(), correlationId: `corr-${id.slice(0, 8)}`, source: over.source ?? AUDIT_CATALOG.get(action)!.producer, version: AUDIT_CATALOG.get(action)!.since }, // S2-Audit.2: its own version
   };
 };
 /** The bytes the kit publisher writes for an envelope's payload (canonical by construction). */

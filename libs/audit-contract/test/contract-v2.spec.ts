@@ -59,26 +59,37 @@ describe('audit contract version 2 (S2-Audit.1)', () => {
     }
   });
 
-  it('the frozen fields without an approved encoding or rule (requestedBy, approvedBy, verifiedBy, via) are refused in every version', () => {
+  it('the fields without an approved encoding (requestedBy, verifiedBy, via; D6, D7) are refused in every version; approvedBy outside its action too', () => {
     const extras = [
-      { requestedBy: { type: 'user', id: SAMPLE_IDS.uuidA, userKind: 'owner' } }, { approvedBy: { type: 'user', id: SAMPLE_IDS.uuidA, userKind: 'owner' } },
+      { requestedBy: { type: 'user', id: SAMPLE_IDS.uuidA, userKind: 'owner' } },
       { verifiedBy: { service: 'auth-service', mechanism: 'authorization_receipt', ref: SAMPLE_IDS.uuidB } }, { via: 'billing-service' },
     ];
     for (const version of [1, 2]) for (const extra of extras) {
       expect(code(() => validateAuditEvent(envelope('membership.revoked', { ...base('membership.revoked'), ...extra }, { version }))), `${version} ${Object.keys(extra)[0]}`).toBe('unknown_field');
     }
+    const approver = { approvedBy: { type: 'user', id: SAMPLE_IDS.uuidA, userKind: 'owner' } };
+    expect(code(() => validateAuditEvent(envelope('membership.revoked', { ...base('membership.revoked'), ...approver }, { version: 1 })))).toBe('unknown_field');
+    expect(code(() => validateAuditEvent(envelope('membership.revoked', { ...base('membership.revoked'), ...approver })))).toBe('invalid_approval');
   });
 
-  it('no production catalog entry allows scope yet: a forged companyId or platformId is refused for EVERY action', () => {
-    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.scope !== undefined)).toEqual([]);
-    for (const a of AUDIT_ACTIONS) {
+  it('scope is granted ONLY to the three authorization receipt actions, Company only (D3): a forged companyId or platformId is refused for every other action', () => {
+    const RECEIPTS = ['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided'];
+    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.scope !== undefined).sort()).toEqual(RECEIPTS);
+    for (const a of RECEIPTS) expect(AUDIT_CATALOG.get(a as AuditAction)!.scope).toEqual({ company: 'required' });
+    for (const a of AUDIT_ACTIONS.filter((x) => !RECEIPTS.includes(x))) {
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), companyId: COMPANY }))), a).toBe('invalid_scope');
       expect(code(() => validateAuditEvent(envelope(a, { ...base(a), platformId: PLATFORM }))), a).toBe('invalid_scope');
     }
   });
 
-  it('no action is a version-2 action yet (a version-1 event for one would be refused by `since`)', () => {
-    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.since !== 1)).toEqual([]);
+  it('exactly the three authorization receipt actions are version-2 actions; a version-1 event of one is refused', () => {
+    expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.since !== 1).sort()).toEqual(['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided']);
+    for (const a of ['authorization_receipt.issued', 'authorization_receipt.consumed', 'authorization_receipt.voided'] as const) {
+      // refused for its version (`since` = 2) before its payload is judged, with or without the version-2 fields
+      expect(code(() => validateAuditEvent(envelope(a, base(a), { version: 1 }))), a).toBe('unsupported_version');
+      const { companyId: _c, approvedBy: _a, ...v1shaped } = base(a);
+      expect(code(() => validateAuditEvent(envelope(a, v1shaped, { version: 1 }))), a).toBe('unsupported_version');
+    }
   });
 });
 

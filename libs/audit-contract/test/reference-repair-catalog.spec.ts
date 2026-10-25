@@ -39,7 +39,7 @@ describe('A5.4-AC1: additive only', () => {
   });
 
   it('batch 1 added exactly the two reference-repair actions to the 54 (batch 2 adds two more: reference-repair-batch2.spec.ts)', () => {
-    const BATCH2 = ['hierarchy.reference_anchor_mismatch_detected', 'hierarchy.reference_repair_unresolved'];
+    const BATCH2 = ['hierarchy.reference_anchor_mismatch_detected', 'hierarchy.reference_repair_unresolved', ...['authorization_receipt.consumed', 'authorization_receipt.issued', 'authorization_receipt.voided']]; // + S2-Audit.2's three
     expect(AUDIT_ACTIONS.filter((a) => !(a in BEFORE) && !BATCH2.includes(a)).sort()).toEqual([DENIED, REPAIRED]);
   });
 

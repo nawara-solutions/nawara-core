@@ -9,7 +9,7 @@ const envelopeOf = (action: (typeof AUDIT_ACTIONS)[number], variant: 'minimal' |
   id: EVENT_ID,
   name: `audit.${action}`,
   payload: JSON.parse(JSON.stringify(sampleAuditPayload(action, variant))),
-  headers: { eventId: EVENT_ID, occurredAt: '2026-09-25T10:00:00.123Z', correlationId: 'corr-0001-abcd', source: AUDIT_CATALOG.get(action)!.producer, version: 1 },
+  headers: { eventId: EVENT_ID, occurredAt: '2026-09-25T10:00:00.123Z', correlationId: 'corr-0001-abcd', source: AUDIT_CATALOG.get(action)!.producer, version: AUDIT_CATALOG.get(action)!.since },
 });
 
 describe('toNewAuditRecord (contract → persistence, the one mapping)', () => {
@@ -22,7 +22,7 @@ describe('toNewAuditRecord (contract → persistence, the one mapping)', () => {
       sourceService: AUDIT_CATALOG.get(action)!.producer,
       action,
       category: AUDIT_CATALOG.get(action)!.category,
-      schemaVersion: 1,
+      schemaVersion: AUDIT_CATALOG.get(action)!.since, // S2-Audit.2: 2 for the authorization receipts
       actor: p.actor,
       organizationId: p.organizationId,
       resource: p.resource,
@@ -32,8 +32,9 @@ describe('toNewAuditRecord (contract → persistence, the one mapping)', () => {
       correlationId: 'corr-0001-abcd',
       causationId: p.causationId ?? null,
       occurredAt: '2026-09-25T10:00:00.123Z',
-      // Core V2 S2-Audit.1: a version-1 event carries no version-2 fact and, with no trust decision, no delivery assessment
-      companyId: null, platformId: null, liveMode: null, delivery: null,
+      // Core V2 S2-Audit.1/.2: the version-2 facts exactly as validated (none for a version-1 action); no trust decision, no assessment
+      companyId: p.companyId ?? null, platformId: p.platformId ?? null, liveMode: null, delivery: null,
+      approvedBy: p.approvedBy ? { id: p.approvedBy.id, userKind: p.approvedBy.userKind } : null,
     });
     expect(Object.keys(r)).not.toContain('recordedAt');
   });

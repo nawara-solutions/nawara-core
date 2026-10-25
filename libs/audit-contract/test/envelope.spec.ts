@@ -16,7 +16,7 @@ function envelope(action: AuditAction, overrides: { name?: unknown; payload?: un
       occurredAt: '2026-09-25T10:00:00.123Z',
       correlationId: 'corr-0001-abcd',
       source: AUDIT_CATALOG.get(action)!.producer,
-      version: 1,
+      version: AUDIT_CATALOG.get(action)!.since, // S2-Audit.2: the action's own version (1, or 2 for the authorization receipts)
       ...overrides.headers,
     },
   };
@@ -31,7 +31,7 @@ describe('validateAuditEvent (consumer side, the input of 18.5)', () => {
       eventType: `audit.${action}`,
       sourceService: e.producer,
       category: e.category,
-      schemaVersion: 1,
+      schemaVersion: e.since, // S2-Audit.2: the action's own version
       occurredAt: '2026-09-25T10:00:00.123Z',
       correlationId: 'corr-0001-abcd',
       payload: sampleAuditPayload(action, 'complete'),

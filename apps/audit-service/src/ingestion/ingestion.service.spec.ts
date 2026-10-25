@@ -39,6 +39,7 @@ class MemoryRepo {
       causationId: r.causationId ?? null, occurredAt: new Date(r.occurredAt), recordedAt: new Date('2026-09-25T10:00:01.000Z'),
       companyId: r.companyId ?? null, platformId: r.platformId ?? null, liveMode: r.liveMode ?? null,
       producerIdentityVerified: r.delivery ? r.delivery.producerIdentityVerified : null, replayed: r.delivery ? r.delivery.replayed : null,
+      approvedByUserId: r.approvedBy?.id ?? null, approvedByUserKind: r.approvedBy?.userKind ?? null,
     };
     this.rows.set(key, row);
     return { kind: 'inserted', record: row };

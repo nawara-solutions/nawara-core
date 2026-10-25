@@ -28,6 +28,7 @@ export function toNewAuditRecord(event: ValidatedAuditEvent, delivery?: Delivery
     companyId: p.companyId ?? null,
     platformId: p.platformId ?? null,
     liveMode: p.liveMode ?? null,
+    approvedBy: p.approvedBy ? { id: p.approvedBy.id, userKind: p.approvedBy.userKind } : null,
     delivery: delivery ? { producerIdentityVerified: delivery.producerIdentityVerified, replayed: delivery.replayed } : null,
   };
 }

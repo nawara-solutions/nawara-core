@@ -1,5 +1,5 @@
 import { AUDIT_CATALOG, AUDIT_ACTIONS, USER_KINDS, validateAuditPayload, type AuditAction } from '../src/index.js';
-import { SAMPLE_IDS, sampleAuditPayload } from '../src/testing.js';
+import { SAMPLE_IDS, sampleAuditPayload, sampleVersion } from '../src/testing.js';
 
 /**
  * The contract matrix (Stage 18.4 §39), table-driven over EVERY cataloged action: each row starts from a valid sample and breaks one
@@ -9,7 +9,8 @@ import { SAMPLE_IDS, sampleAuditPayload } from '../src/testing.js';
 type Mutable = Record<string, any>;
 const clone = (v: unknown): Mutable => JSON.parse(JSON.stringify(v));
 const producerOf = (a: AuditAction) => AUDIT_CATALOG.get(a)!.producer;
-const check = (a: AuditAction, p: unknown) => () => validateAuditPayload(p, producerOf(a));
+// Core V2 S2-Audit.2: each action is validated at its own envelope version (2 for the authorization receipts, 1 for every other)
+const check = (a: AuditAction, p: unknown) => () => validateAuditPayload(p, producerOf(a), sampleVersion(a));
 const entries = [...AUDIT_CATALOG];
 
 describe.each(entries)('%s', (action, e) => {
@@ -18,7 +19,7 @@ describe.each(entries)('%s', (action, e) => {
 
   it('accepts the minimal and the complete payload, returning an equal canonical copy', () => {
     for (const p of [minimal(), complete()]) {
-      const out = validateAuditPayload(p, e.producer);
+      const out = validateAuditPayload(p, e.producer, sampleVersion(action));
       expect(out).toEqual(p);
       expect(out).not.toBe(p);
       expect(Object.isFrozen(out)).toBe(true);
@@ -27,7 +28,7 @@ describe.each(entries)('%s', (action, e) => {
 
   it('refuses every other producer', () => {
     expect(check(action, minimal())).not.toThrow();
-    expect(() => validateAuditPayload(minimal(), e.producer === 'file-service' ? 'payment-service' : 'file-service')).toThrow('producer_not_admitted');
+    expect(() => validateAuditPayload(minimal(), e.producer === 'file-service' ? 'payment-service' : 'file-service', sampleVersion(action))).toThrow('producer_not_admitted');
   });
 
   it('refuses a category in the payload (the catalog owns it)', () => {

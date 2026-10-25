@@ -97,5 +97,6 @@ function payloadIsTokens(payload: unknown): boolean {
   if ('companyId' in o && !isUuid(o.companyId)) return false;
   if ('platformId' in o && !isUuid(o.platformId)) return false;
   if ('liveMode' in o && typeof o.liveMode !== 'boolean') return false;
+  if ('approvedBy' in o && !actor(o.approvedBy)) return false; // S2-Audit.2: a user reference, tokens only
   return JSON.stringify(o).length <= MAX_PAYLOAD_BYTES;
 }

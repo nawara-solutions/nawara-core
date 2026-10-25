@@ -39,7 +39,7 @@ describeWithEnv('audit contract → audit_record compatibility (real PostgreSQL)
       id,
       name: `audit.${action}`,
       payload: JSON.parse(JSON.stringify(sampleAuditPayload(action, variant))),
-      headers: { eventId: id, occurredAt, correlationId: variant === 'complete' ? `corr-${id.slice(0, 8)}` : undefined, source: AUDIT_CATALOG.get(action)!.producer, version: 1 },
+      headers: { eventId: id, occurredAt, correlationId: variant === 'complete' ? `corr-${id.slice(0, 8)}` : undefined, source: AUDIT_CATALOG.get(action)!.producer, version: AUDIT_CATALOG.get(action)!.since } // S2-Audit.2: its own version,
     };
   };
 
@@ -58,7 +58,10 @@ describeWithEnv('audit contract → audit_record compatibility (real PostgreSQL)
     expect(row.sourceService).toBe(v.sourceService);
     expect(row.action).toBe(action);
     expect(row.category).toBe(AUDIT_CATALOG.get(action)!.category);
-    expect(row.schemaVersion).toBe(1);
+    expect(row.schemaVersion).toBe(AUDIT_CATALOG.get(action)!.since); // S2-Audit.2: 2 for the authorization receipts
+    // version-2 facts round-trip unchanged (none for a version-1 action)
+    expect([row.companyId, row.platformId, row.approvedByUserId, row.approvedByUserKind])
+      .toEqual([p.companyId ?? null, p.platformId ?? null, p.approvedBy?.id ?? null, p.approvedBy?.userKind ?? null]);
     expect(row.actorType).toBe(p.actor.type);
     expect(row.actorId).toBe(p.actor.id);
     expect(row.userKind).toBe(p.actor.type === 'user' ? p.actor.userKind : null);

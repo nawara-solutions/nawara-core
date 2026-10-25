@@ -13,7 +13,7 @@ Columns: **actors** allowed (user kinds; `service` = the calling service's name;
 rule, **resource** type, **subject** (at most one), **outcomes**, allowed **changes** (`?` = optional; `code` values are closed
 enumerations). Every resource and subject id is a lowercase UUID. No change carries a name, contact, amount, credential or free text.
 
-## auth-service (28)
+## auth-service (31)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -45,6 +45,9 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `hierarchy.reference_repair_denied` | security | user (member, owner, operator) | none (platform) | company \| platform \| organization | — | denied | `reason`: no_authority \| step_up_required | A verified user was refused a hierarchy reference repair (no authority, or no valid fresh step-up). |
 | `hierarchy.reference_repair_unresolved` | security | user (owner) | none (platform) | company \| platform \| organization | — | denied | `reason`: unresolved | The active Company owner's hierarchy reference repair did not resolve: the requested id is unknown, outside Auth's scope or in another Company, and the record does not say which. |
 | `hierarchy.reference_anchor_mismatch_detected` | security | system (`hierarchy_anchor_detection`) | none (platform) | platform \| organization | — | denied | `operation`: reference_repair \| join_code_creation \| invitation_creation \| platform_assignment_grant | A cached hierarchy parent link disagreed with the authority (a reused id or tampered data): the operation failed closed and nothing was overwritten. |
+| `authorization_receipt.issued` | security | user (owner) | none (platform) | authorization_receipt | — | succeeded | — | An Owner, after a fresh factor-only step-up, issued a single-use authorization receipt approving one exact refund of their Company. |
+| `authorization_receipt.consumed` | security | service | none (platform) | authorization_receipt | — | succeeded | — | The bound service consumed an authorization receipt: the commit point of the Owner's refund approval (approvedBy: the issuing Owner, verified by Auth). |
+| `authorization_receipt.voided` | security | system (`authorization_receipt_replay`) | none (platform) | authorization_receipt | — | succeeded | — | A replayed issue request (its response possibly lost) voided an unconsumed receipt automatically, so a secret that may have leaked can never be used. |
 
 ## organization-service (7)
 
@@ -111,4 +114,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 58 actions.**
+**Total: 61 actions.**
