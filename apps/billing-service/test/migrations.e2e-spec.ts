@@ -33,11 +33,12 @@ const BILLING_MIGRATIONS = [
   '0019_product_subscription_target.sql', // Core V2 S3a: product.subscriptionTarget / platformId (catalog configuration, B1)
   '0020_invoice_entitlement_routing.sql', // Core V2 S3a: the append-only invoice_entitlement routing record (B2)
   '0021_subscription_settlement.sql', // Core V2 S3b: the append-only subscription_settlement and the DB-11 period guard (B3)
+  '0022_personal_subscription.sql', // Core V2 S3c: personal_subscription, the subscription_purchase ledger and its reversals (B4, B5)
 ];
-/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) and S3b's subscription_settlement (0021). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
+/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
   'billing_transition', 'currency', 'event_provenance', 'event_provenance_conflict', 'inbox', 'invoice', 'invoice_entitlement', 'invoice_line', 'invoice_number_sequence', 'kit_rate_limit', 'outbox',
-  'payment_event_origin', 'payment_event_receipt', 'payment_request', 'platform_currency', 'price', 'product', 'schema_migrations', 'subscription', 'subscription_settlement',
+  'payment_event_origin', 'payment_event_receipt', 'payment_request', 'personal_subscription', 'platform_currency', 'price', 'product', 'schema_migrations', 'subscription', 'subscription_purchase', 'subscription_purchase_reversal', 'subscription_settlement',
 ];
 
 /** Migration infrastructure and the Stage 2 schema (SDD section 28), against a real PostgreSQL. */
@@ -217,7 +218,7 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
       expect(before.map((r) => `${r.status}/${r.unit}`)).toEqual(['active/month', 'grace/month', 'expired/year', 'pending/month', 'active/week', 'active/day']);
 
       const result = await runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir]);
-      expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql', '0016_payment_event_receipt_applied_claim.sql', '0017_event_provenance.sql', '0018_payment_event_origin.sql', '0019_product_subscription_target.sql', '0020_invoice_entitlement_routing.sql', '0021_subscription_settlement.sql']); // V2 A3M.3: 0016 (indexes only), S1b's 0017, S1e-2's 0018, S3a's 0019 / 0020 and S3b's 0021 follow
+      expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql', '0016_payment_event_receipt_applied_claim.sql', '0017_event_provenance.sql', '0018_payment_event_origin.sql', '0019_product_subscription_target.sql', '0020_invoice_entitlement_routing.sql', '0021_subscription_settlement.sql', '0022_personal_subscription.sql']); // V2 A3M.3: 0016 (indexes only), S1b's 0017, S1e-2's 0018, S3a's 0019 / 0020, S3b's 0021 and S3c's 0022 follow
 
       expect((await c.query(SNAPSHOT)).rows).toEqual(before); // revision, updatedAt, graceUntil, period and history count: all unchanged
       const anchors = (await c.query(`SELECT "billingAnchorAt" FROM subscription ORDER BY "organizationId"`)).rows.map((r) => r.billingAnchorAt);

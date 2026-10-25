@@ -44,8 +44,20 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   role). The database checks the evidence (the applied receipt, the request and the invoice `paid`), that the settlement names the
   routing record's own Organization and product (DB-9), one settlement per invoice and per receipt (DB-10), and, at commit, that no
   period started or extended without a settlement in the same transaction (DB-11). The direct `activate()` / `renew()` operations are
-  retired; grace, expiry, cancellation and termination are unchanged. Personal purchases (S3c) and recovery payments (S6) settle into
-  their own tables when those slices exist.
+  retired; grace, expiry, cancellation and termination are unchanged. Recovery payments (S6) settle into their own table when that slice
+  exists.
+- **Personal Subscriptions (Core V2 S3c; ADR-0044 B4, B5, B6; K-3 Option D; DB-9, DB-10, DB-12; `db/migrations/0022`):** a routed
+  `direct_purchase`, settled through the same verified evidence as S3b (the applied `payment.succeeded` receipt, request and invoice
+  `paid`), appends one `subscription_purchase` to its BENEFICIARY's `personal_subscription` (one per user + product; the product is a
+  `personal` product of exactly one Platform, so several coexist per user and Platform; no universal plan). The ledger is append-only
+  (INSERT / SELECT only for the runtime role): purpose `direct_purchase` only and a composite FK to the routing record's beneficiary and
+  product (DB-9), one purchase per invoice and per receipt (DB-10), one per assistance request (DB-12; the column stays empty until S5a).
+  Validity is ONE fold in the database, `billing_personal_spans` (K-3 Option D): purchases in ledger order, reversed ones removed; each
+  starts at the later of its settlement and the end of the previous kept period and lasts its price's full interval (a continuing
+  month / year period keeps the chain's billing anchor); laying and re-laying are the same computation. `subscription_purchase_reversal`
+  allows one reversal per purchase (written by S6's refund / chargeback flows). B6:
+  `GET /billing/users/:userId/platforms/:platformId/products/:productId/entitlement` (service token, `entitlement.read`, the Platform
+  in the caller's `allowedPlatforms`, the product a personal product of it, else `404`) answers `{ valid, expiresAt }`, no grace.
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).

@@ -369,7 +369,8 @@ describeWithEnv('invoice target routing (real PostgreSQL)', ['TEST_DATABASE_ADMI
       const personal = await priceFor({ target: 'personal' });
       const id = await draft({ priceIds: [personal.priceId], organizationId: org });
       expect((await issue(id)).body.routing.purpose).toBe('direct_purchase');
-      expect(await settle(id)).toMatchObject({ outcome: 'applied', subscription: null });
+      // S3c: a direct purchase goes to its BUYER's Personal Subscription ledger, never to the Organization on the invoice
+      expect(await settle(id)).toMatchObject({ outcome: 'applied', subscription: 'purchased' });
       const ordinary = await priceFor({ recurring: true }); // a recurring product with target none (formerly: "organization + one recurring line")
       const id2 = await draft({ priceIds: [ordinary.priceId], organizationId: org });
       expect((await issue(id2)).body.routing.purpose).toBe('non_entitlement');
