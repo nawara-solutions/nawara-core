@@ -25,6 +25,13 @@ export const AUDIT_REFUSALS = [
   'invalid_actor',
   /** `organizationId` missing, malformed, or against the action's organization rule. */
   'invalid_organization',
+  /**
+   * Core V2 S2-Audit.1: `companyId` / `platformId` malformed, asserted for an action whose catalog entry does not allow it, missing when
+   * required, or contradicting another scope fact (the resource itself, or another level's id).
+   */
+  'invalid_scope',
+  /** Core V2 S2-Audit.1: `liveMode` that is not a boolean. */
+  'invalid_live_mode',
   /** Resource missing, malformed, or of a type the action does not use. */
   'invalid_resource',
   /** Subject supplied when forbidden, missing when required, malformed, or of the wrong type. */

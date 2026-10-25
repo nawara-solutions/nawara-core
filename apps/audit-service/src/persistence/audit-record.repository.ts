@@ -5,7 +5,8 @@ import type { AuthorizedAuditQuery } from '../query/query-model.js';
 import type { AuditRecordRow, InsertOutcome, NewAuditRecord, PagedAuditRow } from './audit-record.types.js';
 
 const COLUMNS = `id, "eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId",
-  "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt"`;
+  "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt",
+  "companyId", "platformId", "liveMode", "producerIdentityVerified", replayed`;
 
 /** SQLSTATEs of a record the schema refuses: check / not-null violation, malformed uuid / timestamp / json, out-of-range number. */
 const REFUSED = new Set(['23514', '23502', '22P02', '22007', '22008', '22003', '22023', '22P05', '2201X', '22021']);
@@ -32,19 +33,34 @@ export class AuditRecordRepository {
     // A Date, never a string handed to PostgreSQL: its timestamp input also accepts 'now', 'today', 'yesterday', 'epoch', 'infinity'.
     const occurredAt = new Date(r.occurredAt);
     if (Number.isNaN(occurredAt.getTime())) throw new AuditPersistenceError('invalid_record');
+    // Core V2 S2-Audit.1 (ADR-0069 decision 4): a TRUSTED scope row exists only for a producer-verified record that asserted a Company or
+    // Platform (the contract admitted the assertion under the action's catalog rule). It is written by the SAME statement as the record,
+    // so both or neither exist; a duplicate inserts neither. The 0006 trigger refuses any other scope row, for every role.
+    const companyId = r.companyId ?? null;
+    const platformId = r.platformId ?? null;
+    const trustedScope = r.delivery?.producerIdentityVerified === true && (companyId !== null || platformId !== null);
     let rows: AuditRecordRow[];
     try {
       ({ rows } = await q.query<AuditRecordRow>(
-        `INSERT INTO audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind",
-           "organizationId", "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18)
-         ON CONFLICT ("sourceService", "eventId") DO NOTHING
-         RETURNING ${COLUMNS}`,
+        `WITH ins AS (
+           INSERT INTO audit_record ("eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind",
+             "organizationId", "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt",
+             "companyId", "platformId", "liveMode", "producerIdentityVerified", replayed)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16, $17, $18, $19, $20, $21, $22, $23)
+           ON CONFLICT ("sourceService", "eventId") DO NOTHING
+           RETURNING ${COLUMNS}
+         ), scope AS (
+           INSERT INTO audit_record_scope ("recordId", basis, "companyId", "platformId")
+           SELECT id, 'verified_producer', "companyId", "platformId" FROM ins WHERE $24::boolean
+         )
+         SELECT * FROM ins`,
         [
           r.eventId, r.sourceService, r.action, r.category, r.schemaVersion, r.actor.type, r.actor.id,
           r.actor.type === 'user' ? r.actor.userKind : null, r.organizationId, r.resource.type, r.resource.id,
           r.subject?.type ?? null, r.subject?.id ?? null, r.outcome, r.changes == null ? null : JSON.stringify(r.changes),
           r.correlationId ?? null, r.causationId ?? null, occurredAt,
+          companyId, platformId, r.liveMode ?? null, r.delivery ? r.delivery.producerIdentityVerified : null, r.delivery ? r.delivery.replayed : null,
+          trustedScope,
         ],
       ));
     } catch (e) {
@@ -129,7 +145,13 @@ export function sameEvidence(stored: AuditRecordRow, candidate: NewAuditRecord):
     && canonicalJson(stored.changes ?? null) === canonicalJson(candidate.changes ?? null)
     && stored.correlationId === (candidate.correlationId ?? null)
     && stored.causationId === (candidate.causationId ?? null)
-    && stored.occurredAt.getTime() === new Date(candidate.occurredAt).getTime();
+    && stored.occurredAt.getTime() === new Date(candidate.occurredAt).getTime()
+    // Core V2 S2-Audit.1: the version-2 EVIDENCE fields (a duplicate asserting another Company, Platform or mode is a conflict). The
+    // delivery facts (`producerIdentityVerified`, `replayed`) are not evidence: a verified redelivery of an unverified first arrival is the
+    // same fact, and the stored assessment is never upgraded.
+    && stored.companyId === (candidate.companyId ?? null)
+    && stored.platformId === (candidate.platformId ?? null)
+    && stored.liveMode === (candidate.liveMode ?? null);
 }
 
 function refused(e: unknown): Error {

@@ -151,7 +151,7 @@ export class AuditConsumer implements OnModuleInit, OnApplicationBootstrap, OnMo
     const header = event.headers?.correlationId;
     const correlationId = typeof header === 'string' && CORRELATION.test(header) ? header : `event:${id}`;
     return runWithRequestContext({ requestId: `event:${id}`, correlationId }, async () => {
-      await this.ingestion.ingest(event);
+      await this.ingestion.ingest(event, trust); // S2-Audit.1: the decision is stored as the record's delivery facts
     });
   }
 

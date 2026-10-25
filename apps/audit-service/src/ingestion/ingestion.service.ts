@@ -1,17 +1,32 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AuditContractError } from '@nawara/audit-contract';
 import { validateAuditEvent } from '@nawara/audit-contract/consumer';
-import { PermanentEventFailure, type EventAdmission, type EventEnvelope } from '@nawara/service-kit';
+import { PermanentEventFailure, type EventAdmission, type EventEnvelope, type HandlerTrust } from '@nawara/service-kit';
+import { AUDIT_CONFIG } from '../config/audit-config.token.js';
+import type { AuditConfig } from '../config/audit-config.js';
 import { SERVICE_NAME } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
 import { AuditRecordRepository, sameEvidence } from '../persistence/audit-record.repository.js';
 import { AuditPersistenceError } from '../persistence/persistence-error.js';
+import type { DeliveryAssessment } from '../persistence/audit-record.types.js';
 import { auditAdmission } from './admission.js';
 import { CLOCK_SKEW_TOLERANCE_MS } from './ingestion.constants.js';
 import { IngestionCounters, type IngestionRefusal } from './ingestion-counters.js';
 import type { TrustRefusal } from './trust-policy.js';
 
 export type IngestOutcome = 'persisted' | 'duplicate';
+
+const REPLAY_BASES: ReadonlySet<string> = new Set(['verified_replay', 'unverified_replay', 'replay_no_provenance']);
+
+/**
+ * Core V2 S2-Audit.1 (ADR-0069 decisions 1 and 2): the two delivery facts Audit stores, from the kit's trust decision ONLY (never from a
+ * header or the payload). `accept` means the broker verified the producer: broker user = `source` = the action's catalog owner (ADR-0057
+ * §13.2; the owner comes from the catalog, `auditEventOwner`). A compatibility decision is an unverified delivery. No decision: not assessed.
+ */
+export function deliveryAssessment(trust: HandlerTrust | undefined): DeliveryAssessment | undefined {
+  if (!trust) return undefined;
+  return { producerIdentityVerified: trust.decision === 'accept', replayed: REPLAY_BASES.has(trust.basis) };
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** An id reaches a log line only when it is a canonical UUID (anything else is attacker-shaped input). */
@@ -44,6 +59,7 @@ export class IngestionService {
   constructor(
     @Inject(AuditRecordRepository) private readonly records: AuditRecordRepository,
     @Inject(IngestionCounters) private readonly counters: IngestionCounters,
+    @Inject(AUDIT_CONFIG) private readonly config: Pick<AuditConfig, 'isProduction'>,
   ) {}
 
   /**
@@ -74,17 +90,18 @@ export class IngestionService {
     return this.refuse(reason, `eventId=${safeId(event?.id)}`);
   }
 
-  async ingest(event: EventEnvelope): Promise<IngestOutcome> {
+  /** `trust`: the kit's decision for this delivery (S1e-3), from which the stored delivery facts come (S2-Audit.1). */
+  async ingest(event: EventEnvelope, trust?: HandlerTrust): Promise<IngestOutcome> {
     const release = this.counters.enter();
     this.counters.bump('received');
     try {
-      return await this.run(event);
+      return await this.run(event, deliveryAssessment(trust));
     } finally {
       release();
     }
   }
 
-  private async run(event: EventEnvelope): Promise<IngestOutcome> {
+  private async run(event: EventEnvelope, delivery: DeliveryAssessment | undefined): Promise<IngestOutcome> {
     let validated;
     try {
       validated = validateAuditEvent(event);
@@ -95,8 +112,10 @@ export class IngestionService {
     // Stage 18.6: audit-service's own action (`platform_query.executed`) is written by audit-service itself, directly, never over the bus.
     // A delivered event claiming audit-service as its source is therefore a spoof (the broker credentials are shared, P-A1): refused.
     if (validated.sourceService === SERVICE_NAME) throw this.refuse('producer_not_admitted', `eventId=${validated.eventId}`);
-    const record = toNewAuditRecord(validated);
     const who = `eventId=${validated.eventId} action=${validated.payload.action} source=${validated.sourceService}`;
+    // Core V2 S2-Audit.1 (ADR-0069 decision 7): production Audit refuses a non-live record. Permanent: nothing is stored.
+    if (this.config.isProduction && validated.payload.liveMode === false) throw this.refuse('non_live_record', who);
+    const record = toNewAuditRecord(validated, delivery);
 
     let outcome;
     try {
@@ -127,7 +146,7 @@ export class IngestionService {
       this.counters.bump('clock_skew_future');
       this.log.warn(`audit_clock_skew ${who} aheadSeconds=${Math.round(-lagMs / 1000)} — occurredAt is later than Audit's clock; stored as sent`);
     }
-    this.log.log(`audit_event_persisted ${who} lagMs=${lagMs}`);
+    this.log.log(`audit_event_persisted ${who} lagMs=${lagMs} verified=${delivery ? delivery.producerIdentityVerified : '-'}`);
     return 'persisted';
   }
 

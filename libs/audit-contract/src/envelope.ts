@@ -59,7 +59,7 @@ export function validateAuditEvent(event: AuditEnvelopeInput): ValidatedAuditEve
 
   const name = event.name;
   if (typeof name !== 'string' || !name.startsWith(EVENT_TYPE_PREFIX)) refuse('event_type_mismatch');
-  const payload = validateAuditPayload(event.payload, source);
+  const payload = validateAuditPayload(event.payload, source, version); // version-2 fields only in a version-2 event
   if (name !== `${EVENT_TYPE_PREFIX}${payload.action}`) refuse('event_type_mismatch');
   if (payload.causationId === id) refuse('invalid_causation');
 

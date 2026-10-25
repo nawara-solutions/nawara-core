@@ -37,16 +37,18 @@ class MemoryRepo {
       organizationId: r.organizationId, resourceType: r.resource.type, resourceId: r.resource.id, subjectType: r.subject?.type ?? null,
       subjectId: r.subject?.id ?? null, outcome: r.outcome, changes: r.changes ?? null, correlationId: r.correlationId ?? null,
       causationId: r.causationId ?? null, occurredAt: new Date(r.occurredAt), recordedAt: new Date('2026-09-25T10:00:01.000Z'),
+      companyId: r.companyId ?? null, platformId: r.platformId ?? null, liveMode: r.liveMode ?? null,
+      producerIdentityVerified: r.delivery ? r.delivery.producerIdentityVerified : null, replayed: r.delivery ? r.delivery.replayed : null,
     };
     this.rows.set(key, row);
     return { kind: 'inserted', record: row };
   }
 }
 
-const make = () => {
+const make = (isProduction = false) => {
   const repo = new MemoryRepo();
   const counters = new IngestionCounters();
-  return { repo, counters, svc: new IngestionService(repo as unknown as AuditRecordRepository, counters) };
+  return { repo, counters, svc: new IngestionService(repo as unknown as AuditRecordRepository, counters, { isProduction }) };
 };
 const reasonOf = async (p: Promise<unknown>) => {
   try {
@@ -82,7 +84,7 @@ describe('IngestionService (the pipeline and its classification)', () => {
   it.each([
     ['unknown action', { name: 'audit.membership.promoted', payload: { ...envelope().payload, action: 'membership.promoted' } }, 'unknown_action'],
     ['producer not admitted', { headers: { source: 'billing-service' } }, 'producer_not_admitted'],
-    ['unsupported version', { headers: { version: 2 } }, 'unsupported_version'],
+    ['unsupported version', { headers: { version: 3 } }, 'unsupported_version'], // 2 is supported since S2-Audit.1
     ['event type mismatch', { name: 'audit.membership.approved' }, 'event_type_mismatch'],
     ['category on the wire', { payload: { ...envelope().payload, category: 'commercial' } }, 'unknown_field'],
     ['recordedAt on the wire', { payload: { ...envelope().payload, recordedAt: '2020-01-01T00:00:00.000Z' } }, 'unknown_field'],
@@ -132,5 +134,66 @@ describe('IngestionService (the pipeline and its classification)', () => {
     await svc.ingest(envelope());
     await reasonOf(svc.ingest(envelope({ headers: { version: 9 } })));
     expect(counters.inFlight).toBe(0);
+  });
+});
+
+describe('IngestionService: audit contract version 2 (Core V2 S2-Audit.1)', () => {
+  const v2 = (payload: Record<string, unknown> = {}) =>
+    envelope({ headers: { version: 2 }, payload: { ...JSON.parse(JSON.stringify(sampleAuditPayload('membership.revoked', 'complete'))), ...payload } });
+  const origin = { from: 'verified_delivery', source: 'auth-service', eventId: ID, name: 'audit.membership.revoked', routingKey: 'audit.membership.revoked', producerUserId: 'auth-service' } as never;
+
+  it('stores the delivery facts from the trust decision only: verified original, verified replay, unverified (compatibility), none', async () => {
+    const cases = [
+      [{ decision: 'accept', basis: 'verified_original', origin }, true, false],
+      [{ decision: 'accept', basis: 'verified_replay', origin }, true, true],
+      [{ decision: 'compatibility', basis: 'unverified_original', verified: false }, false, false],
+      [{ decision: 'compatibility', basis: 'replay_no_provenance', verified: false }, false, true],
+    ] as const;
+    for (const [trust, verified, replayed] of cases) {
+      const { repo, svc } = make();
+      await svc.ingest(v2(), trust as never);
+      expect([...repo.rows.values()][0]).toMatchObject({ producerIdentityVerified: verified, replayed, schemaVersion: 2 });
+    }
+    const { repo, svc } = make();
+    await svc.ingest(v2({ liveMode: true }));
+    expect([...repo.rows.values()][0]).toMatchObject({ producerIdentityVerified: null, replayed: null, liveMode: true });
+  });
+
+  it('a forged header cannot make a delivery verified: only the decision counts', async () => {
+    const { repo, svc } = make();
+    await svc.ingest(envelope({ headers: { version: 2, producerIdentityVerified: true, userId: 'auth-service' } }), { decision: 'compatibility', basis: 'unverified_original', verified: false } as never);
+    expect([...repo.rows.values()][0]!.producerIdentityVerified).toBe(false);
+  });
+
+  it('production refuses liveMode = false permanently (non_live_record); outside production it is stored as sent', async () => {
+    const prod = make(true);
+    expect(await reasonOf(prod.svc.ingest(v2({ liveMode: false })))).toBe('permanent:non_live_record');
+    expect(prod.repo.rows.size).toBe(0);
+    expect(await prod.svc.ingest(v2({ liveMode: true }))).toBe('persisted');
+    const dev = make(false);
+    expect(await dev.svc.ingest(v2({ liveMode: false }))).toBe('persisted');
+    expect([...dev.repo.rows.values()][0]!.liveMode).toBe(false);
+  });
+
+  it('a duplicate whose version-2 evidence differs is a conflict; one differing only in its delivery assessment is the same fact', async () => {
+    const { svc, repo } = make();
+    await svc.ingest(v2({ liveMode: true }), { decision: 'compatibility', basis: 'unverified_original', verified: false } as never);
+    expect(await reasonOf(svc.ingest(v2({ liveMode: false })))).toBe('permanent:event_id_conflict');
+    expect(await svc.ingest(v2({ liveMode: true }), { decision: 'accept', basis: 'verified_duplicate', origin } as never)).toBe('duplicate');
+    expect([...repo.rows.values()][0]!.producerIdentityVerified).toBe(false); // never upgraded
+  });
+
+  it('forged scope is refused before anything is stored: no production action allows companyId or platformId', async () => {
+    const { svc, repo } = make();
+    expect(await reasonOf(svc.ingest(v2({ companyId: SAMPLE_IDS.uuidA })))).toBe('permanent:invalid_scope');
+    expect(await reasonOf(svc.ingest(v2({ platformId: SAMPLE_IDS.uuidB })))).toBe('permanent:invalid_scope');
+    expect(await reasonOf(svc.ingest(envelope({ payload: { ...JSON.parse(JSON.stringify(sampleAuditPayload('membership.revoked', 'complete'))), liveMode: true } })))).toBe('permanent:unknown_field');
+    expect(repo.rows.size).toBe(0);
+  });
+
+  it('non_live_record is a counted refusal label (closed set)', () => {
+    expect(INGESTION_REFUSALS).toContain('non_live_record');
+    expect(INGESTION_REFUSALS).toContain('invalid_scope');
+    expect(INGESTION_REFUSALS).toContain('invalid_live_mode');
   });
 });

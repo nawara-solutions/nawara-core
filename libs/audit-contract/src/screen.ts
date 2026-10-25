@@ -4,7 +4,7 @@ import {
   CHANGE_KEY, CODE_VALUE, CORRELATION_ID, EVENT_NAME, EVENT_TYPE_PREFIX, MAX_ACTION_LENGTH, MAX_CHANGE_INTEGER, MAX_CHANGE_KEYS,
   MAX_PAYLOAD_BYTES, OCCURRED_AT, SERVICE_NAME, TIMESTAMP, TYPE_CODE, UUID,
 } from './grammar.js';
-import { TOP_LEVEL, plainRecord, scan } from './validate.js';
+import { TOP_LEVEL, V2_FIELDS, plainRecord, scan } from './validate.js';
 
 type Rec = Record<string, unknown>;
 
@@ -85,7 +85,7 @@ function payloadIsTokens(payload: unknown): boolean {
   const o = plainRecord(payload);
   if (!o) return false;
   scan(o, 0); // the validator's own sensitive-key / secret-shape / bound checks: a refusal throws, caught above as "not retained"
-  if (!onlyKeys(o, [...TOP_LEVEL])) return false;
+  if (!onlyKeys(o, [...TOP_LEVEL, ...V2_FIELDS])) return false; // Core V2 S2-Audit.1: the version-2 tokens (UUIDs, a boolean) too
   if (typeof o.action !== 'string' || o.action.length > MAX_ACTION_LENGTH || !EVENT_NAME.test(o.action)) return false;
   if ('actor' in o && !actor(o.actor)) return false;
   if ('organizationId' in o && o.organizationId !== null && !isUuid(o.organizationId)) return false;
@@ -94,5 +94,8 @@ function payloadIsTokens(payload: unknown): boolean {
   if ('outcome' in o && !(typeof o.outcome === 'string' && (AUDIT_OUTCOMES as readonly string[]).includes(o.outcome))) return false;
   if ('changes' in o && !changes(o.changes)) return false;
   if ('causationId' in o && !isUuid(o.causationId)) return false;
+  if ('companyId' in o && !isUuid(o.companyId)) return false;
+  if ('platformId' in o && !isUuid(o.platformId)) return false;
+  if ('liveMode' in o && typeof o.liveMode !== 'boolean') return false;
   return JSON.stringify(o).length <= MAX_PAYLOAD_BYTES;
 }

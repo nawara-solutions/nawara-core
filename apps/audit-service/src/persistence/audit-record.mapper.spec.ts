@@ -32,8 +32,18 @@ describe('toNewAuditRecord (contract → persistence, the one mapping)', () => {
       correlationId: 'corr-0001-abcd',
       causationId: p.causationId ?? null,
       occurredAt: '2026-09-25T10:00:00.123Z',
+      // Core V2 S2-Audit.1: a version-1 event carries no version-2 fact and, with no trust decision, no delivery assessment
+      companyId: null, platformId: null, liveMode: null, delivery: null,
     });
     expect(Object.keys(r)).not.toContain('recordedAt');
+  });
+
+  it('S2-Audit.1: a version-2 event maps liveMode as sent, and the delivery assessment exactly as given (never derived here)', () => {
+    const e = envelopeOf('membership.revoked', 'complete');
+    const v = validateAuditEvent({ ...e, headers: { ...(e.headers as object), version: 2 }, payload: { ...(e.payload as object), liveMode: false } });
+    expect(toNewAuditRecord(v, { producerIdentityVerified: true, replayed: true })).toMatchObject({
+      schemaVersion: 2, liveMode: false, companyId: null, platformId: null, delivery: { producerIdentityVerified: true, replayed: true },
+    });
   });
 
   it('keeps a user actor\'s kind and never invents one for a service or system actor', () => {

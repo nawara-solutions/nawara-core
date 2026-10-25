@@ -45,7 +45,7 @@ describe('A5.4-AC1: additive only', () => {
 
   it('no contract constant changes: version, supported versions, user kinds, outcomes, actor types, categories, producers', () => {
     expect(AUDIT_CONTRACT_VERSION).toBe(1);
-    expect(SUPPORTED_AUDIT_VERSIONS).toEqual([1]);
+    expect(SUPPORTED_AUDIT_VERSIONS).toEqual([1, 2]); // Core V2 S2-Audit.1 (ADR-0069 decision 2) added version 2; producers still emit 1
     expect(USER_KINDS).toEqual(['member', 'owner', 'operator']);
     expect(AUDIT_OUTCOMES).toEqual(['succeeded', 'denied']);
     expect(ACTOR_TYPES).toEqual(['user', 'service', 'system']);

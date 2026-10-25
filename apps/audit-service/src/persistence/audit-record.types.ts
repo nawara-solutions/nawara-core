@@ -31,6 +31,23 @@ export interface NewAuditRecord {
   causationId?: string | null;
   /** The producer's time (ISO 8601 or a Date); stored as given, never compared with recordedAt here. */
   occurredAt: Date | string;
+  /** Core V2 S2-Audit.1: the version-2 facts as the producer asserted them (absent / null in every version-1 record). */
+  companyId?: string | null;
+  platformId?: string | null;
+  liveMode?: boolean | null;
+  /**
+   * Core V2 S2-Audit.1: how the delivery that creates the record was assessed (ADR-0069 decision 2). Absent = not assessed (Audit's own
+   * records; never delivered over the bus). A DELIVERY fact, not evidence: it is not compared between duplicates and never changes later.
+   */
+  delivery?: DeliveryAssessment | null;
+}
+
+/** The consumer's trust decision for one delivery, reduced to the two facts Audit stores. */
+export interface DeliveryAssessment {
+  /** The broker verified the producer: broker user = `sourceService` = the action's catalog owner (ADR-0057 §13, ADR-0069 decision 1). */
+  producerIdentityVerified: boolean;
+  /** The delivery was a replay of an earlier publication (never the original). */
+  replayed: boolean;
 }
 
 /** A stored record (every column; `id` is internal and never an external identity). */
@@ -55,6 +72,11 @@ export interface AuditRecordRow {
   causationId: string | null;
   occurredAt: Date;
   recordedAt: Date;
+  companyId: string | null;
+  platformId: string | null;
+  liveMode: boolean | null;
+  producerIdentityVerified: boolean | null;
+  replayed: boolean | null;
 }
 
 /** A row of a query page (Stage 18.6): the stored record plus its keyset position (`occurredAt` in epoch microseconds). */

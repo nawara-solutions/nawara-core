@@ -70,7 +70,7 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
       const foundation = await runMigrations(up.migratorUrl, [kitMigrationsDir]); // the 18.2 state: the kit baseline, no audit migration
       expect(foundation.applied.every((n) => n.startsWith('kit_'))).toBe(true);
       const upgrade = await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
-      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql', '0005_event_provenance.sql']);
+      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql', '0005_event_provenance.sql', '0006_audit_contract_v2.sql']);
       expect((await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]);
       const grants = await sql<{ p: string }>(up.adminUrl, `SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'audit_record' AND grantee = $1 ORDER BY 1`, [up.app]);
       expect(grants.map((g) => g.p)).toEqual(['INSERT', 'SELECT']);
@@ -83,17 +83,20 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
     const cols = await sql<{ c: string; t: string; n: string }>(d.adminUrl,
       `SELECT column_name AS c, data_type AS t, is_nullable AS n FROM information_schema.columns WHERE table_name = 'audit_record' ORDER BY ordinal_position`);
     expect(cols.map((c) => c.c)).toEqual(['id', 'eventId', 'sourceService', 'action', 'category', 'schemaVersion', 'actorType', 'actorId', 'userKind',
-      'organizationId', 'resourceType', 'resourceId', 'subjectType', 'subjectId', 'outcome', 'changes', 'correlationId', 'causationId', 'occurredAt', 'recordedAt']);
+      'organizationId', 'resourceType', 'resourceId', 'subjectType', 'subjectId', 'outcome', 'changes', 'correlationId', 'causationId', 'occurredAt', 'recordedAt',
+      // Core V2 S2-Audit.1 (0006): identifiers and booleans only, all nullable (history never rewritten)
+      'companyId', 'platformId', 'liveMode', 'producerIdentityVerified', 'replayed']);
     expect(Object.fromEntries(cols.map((c) => [c.c, c.n])) as Record<string, string>).toMatchObject({
       eventId: 'NO', sourceService: 'NO', action: 'NO', category: 'NO', actorType: 'NO', actorId: 'NO', resourceType: 'NO', resourceId: 'NO', occurredAt: 'NO', recordedAt: 'NO',
       organizationId: 'YES', userKind: 'YES', subjectType: 'YES', changes: 'YES', correlationId: 'YES', causationId: 'YES',
+      companyId: 'YES', platformId: 'YES', liveMode: 'YES', producerIdentityVerified: 'YES', replayed: 'YES',
     });
     for (const c of cols) expect(c.c).not.toMatch(/email|phone|name|ip|agent|password|token|secret|payload|snapshot|metadata|updated/i);
     expect(await sql(d.adminUrl, `SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'audit_record'::regclass`)).toEqual([]);
     const tables = await sql<{ t: string }>(d.adminUrl, `SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('outbox', 'inbox', 'kit_rate_limit', 'schema_migrations')`);
     // Stage 18.8: plus the retention policy and its ledger (owner-only / retention-only: never the runtime's); Core V2 S1b-2: plus the
     // append-only event provenance and its conflict evidence (0005; no payload column: the tuple of ADR-0057 §13.2 only).
-    expect(tables.map((r) => r.t).sort()).toEqual(['audit_record', 'audit_retention_policy', 'audit_retention_run', 'event_provenance', 'event_provenance_conflict']);
+    expect(tables.map((r) => r.t).sort()).toEqual(['audit_record', 'audit_record_scope', 'audit_retention_policy', 'audit_retention_run', 'event_provenance', 'event_provenance_conflict']); // + S2-Audit.1's insert-only scope rows
     const [owner] = await sql<{ o: string }>(d.adminUrl, `SELECT tableowner AS o FROM pg_tables WHERE tablename = 'audit_record'`);
     expect(owner!.o).toBe(d.migrator);
   });

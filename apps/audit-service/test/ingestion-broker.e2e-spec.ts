@@ -215,9 +215,9 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
     })());
     rawCase('event type not audit.<action> (sent straight to the queue)', 'event_type_mismatch', 'permanent', { ...rawOf(base()), toQueue: true, type: 'membership.revoked' });
     envelopeCase('event type of another action', 'event_type_mismatch', { ...base(), name: 'audit.membership.approved' });
-    envelopeCase('unsupported version 2', 'unsupported_version', (() => {
+    envelopeCase('unsupported version 3', 'unsupported_version', (() => {
       const e = base();
-      e.headers.version = 2;
+      e.headers.version = 3; // 2 is supported since S2-Audit.1
       return e;
     })());
     rawCase('missing source service', 'invalid_envelope', 'permanent', (() => {

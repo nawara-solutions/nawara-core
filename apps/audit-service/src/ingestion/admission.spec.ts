@@ -90,7 +90,7 @@ describe('auditAdmission (canonical bytes → Stage 18.8 screen → full contrac
 describe('IngestionService.admit (counted; fails closed)', () => {
   const service = () => {
     const counters = new IngestionCounters();
-    return { counters, ingestion: new IngestionService({} as never, counters) };
+    return { counters, ingestion: new IngestionService({} as never, counters, { isProduction: false }) };
   };
 
   it('counts a refusal like an ingestion refusal (received + refused, by reason) and an admission not at all', () => {

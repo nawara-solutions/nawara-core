@@ -27,7 +27,7 @@ describe('mayRetainRefusedAuditBody (Stage 18.8 dead-letter screen)', () => {
     const unknown = { ...base(), action: 'membership.future_thing' };
     const cases = [
       envelope('membership.revoked', unknown),
-      envelope('membership.revoked', base(), { version: 2 }),
+      envelope('membership.revoked', base(), { version: 3 }), // 2 is supported since S2-Audit.1
       envelope('membership.revoked', { ...base(), actor: { type: 'system', id: 'some_future_process' } }),
       envelope('membership.revoked', { ...base(), organizationId: null }),
       envelope('membership.revoked', base(), { source: 'billing-service' }),
