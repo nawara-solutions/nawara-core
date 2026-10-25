@@ -452,6 +452,7 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
 
   it('every default, including all 31 rate buckets', () => {
     const c = loadConfig(good());
+    expect(c.servicePolicy.size).toBe(0);
     expect({ ...c, jwt: undefined, secrets: undefined, databaseUrl: undefined, metrics: undefined }).toEqual({
       env: 'test', logLevel: 'info', port: 3000, databaseUrl: undefined,
       db: { poolMax: 10, connectionTimeoutMs: 5000, statementTimeoutMs: 30000, idleInTransactionTimeoutMs: 60000, queryTimeoutMs: 35000 },
@@ -460,6 +461,7 @@ describe('V2 A4.2: configuration characterization (unchanged by the EnvReader co
       audit: { rabbitmqUrl: undefined, confirmTimeoutMs: 5000, heartbeatS: c.audit.heartbeatS },
       trustProxyHops: 0, corsOrigins: [], metrics: undefined, baselineRateLimitPerMinute: 100,
       jwt: undefined, refreshTtlSec: 1_209_600, bcryptCost: 12, secrets: undefined,
+      serviceTokens: [], servicePolicy: c.servicePolicy, // S2-Auth.2: no inbound service caller unless configured (size asserted below)
       totp: { issuer: 'Nawara', epochToleranceSec: 30 },
       webauthn: { rpId: 'localhost', rpName: 'Nawara', origins: ['http://localhost:3000'] },
       challengeTtlSec: 600, stepUp: { ttlSec: 300 },

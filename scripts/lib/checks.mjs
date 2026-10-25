@@ -1971,6 +1971,7 @@ export const CALLER_POLICY_MODULES = {
   'apps/file-service/src/policy/caller-policy.ts': 'FILE_SERVICE_POLICY',
   'apps/audit-service/src/policy/caller-policy.ts': 'AUDIT_SERVICE_POLICY',
   'apps/release-service/src/policy/caller-policy.ts': 'RELEASE_SERVICE_POLICY',
+  'apps/auth-service/src/receipts/service-policy.ts': 'AUTH_SERVICE_POLICY',
 };
 const CALLER_POLICY_APPS = new Set(Object.keys(CALLER_POLICY_MODULES).map((p) => p.split('/')[1]));
 const KIT = '@nawara/service-kit';

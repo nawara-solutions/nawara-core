@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config/app-config.js';
 import { StepUpService } from '../src/owner/step-up.service.js';
 import { AuthorizationReceiptService, RECEIPT_LIFETIME_MS } from '../src/receipts/authorization-receipt.service.js';
-import { canonicalBinding, parseBinding } from '../src/receipts/receipt-binding.js';
+import { bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest } from '../src/receipts/receipt-binding.js';
 import { ReceiptError } from '../src/receipts/receipt-errors.js';
 import { claims, createTestApp, type TestCtx, type Tokens } from './helpers/app.js';
 
@@ -55,6 +55,25 @@ describe('authorization receipts (S2-Auth.1)', () => {
     return { ...r, binding: b, key: k, stepUpToken };
   };
   const row = async (id: string) => (await t.db.query(`SELECT * FROM authorization_receipt WHERE id=$1`, [id])).rows[0];
+  /**
+   * S2-Auth.2: the database clock decides expiry, so an "old" receipt is made by inserting one whose issuedAt is `ageMs` before the
+   * DATABASE's now, with the exact digests issuance would have written (the test knows the pepper). Returns what a caller would hold.
+   */
+  const backdated = async (o: Ready, ageMs: number) => {
+    const pepper = Buffer.from(PEPPER, 'base64');
+    const b = binding(o.companyId);
+    const canonical = canonicalBinding(parseBinding(b));
+    const secret = randomBytes(32).toString('base64url');
+    const k = key();
+    const id = randomUUID();
+    const stepUp = await t.stepUpToken(o.tokens as Tokens, PURPOSE, o.totpSecret);
+    await t.db.query(
+      `INSERT INTO authorization_receipt (id,"issuerUserId","sessionFamilyId","stepUpId","idempotencyKey","requestHash","secretDigest","bindingDigest","issuedAt","expiresAt")
+       SELECT $1,$2,$3,$4,$5,$6,$7,$8, c.t, c.t + interval '10 minutes' FROM (SELECT clock_timestamp() - make_interval(secs => $9::double precision / 1000) AS t) c`,
+      [id, o.id, o.owner.sid, stepUp, k, requestHash(pepper, canonical), secretDigest(pepper, secret), bindingDigest(pepper, canonical), ageMs],
+    );
+    return { receiptId: id, secret, binding: b, key: k };
+  };
   const stepUpConsumed = async (id: string) =>
     (await t.db.query(`SELECT "consumedAt" FROM owner_step_up WHERE id=$1`, [id])).rows[0].consumedAt !== null;
 
@@ -64,8 +83,12 @@ describe('authorization receipts (S2-Auth.1)', () => {
       const r = await issue(o);
       expect(r.secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(Buffer.from(r.secret, 'base64url')).toHaveLength(32);
-      expect(r.expiresAt.getTime() - t.clock.now().getTime()).toBe(RECEIPT_LIFETIME_MS);
       const db = await row(r.receiptId);
+      // S2-Auth.2: both instants come from ONE reading of the database clock, and the response carries the stored expiry
+      expect(db.expiresAt.getTime() - db.issuedAt.getTime()).toBe(RECEIPT_LIFETIME_MS);
+      expect(r.expiresAt.getTime()).toBe(db.expiresAt.getTime());
+      const dbNow = (await t.db.query(`SELECT clock_timestamp() AS n`)).rows[0].n as Date;
+      expect(Math.abs(dbNow.getTime() - db.issuedAt.getTime())).toBeLessThan(60_000);
       expect(db).toMatchObject({ status: 'issued', issuerUserId: o.id, sessionFamilyId: o.owner.sid, stepUpId: r.stepUpToken, consumeRef: null });
       expect(db.secretDigest).toMatch(/^[0-9a-f]{64}$/);
       expect(db.bindingDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -156,13 +179,10 @@ describe('authorization receipts (S2-Auth.1)', () => {
 
     it('a replay after expiry is receipt_expired: deterministic, no secret, nothing restored or changed', async () => {
       const o = await ready();
-      const r = await issue(o);
-      t.clock.advance(RECEIPT_LIFETIME_MS);
-      try {
-        expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: r.key, binding: r.binding }))).toBe('receipt_expired');
-        expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: r.key, binding: r.binding }))).toBe('receipt_expired');
-        expect((await row(r.receiptId)).status).toBe('issued');
-      } finally { t.clock.advance(-RECEIPT_LIFETIME_MS); }
+      const r = await backdated(o, RECEIPT_LIFETIME_MS + 1000);
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: r.key, binding: r.binding }))).toBe('receipt_expired');
+      expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: r.key, binding: r.binding }))).toBe('receipt_expired');
+      expect((await row(r.receiptId)).status).toBe('issued');
     });
 
     it('two concurrent issues with one key: at most one receipt exists and no secret is handed out twice', async () => {
@@ -184,7 +204,6 @@ describe('authorization receipts (S2-Auth.1)', () => {
       const o = await ready();
       const r = await issue(o);
       const ref = randomUUID();
-      t.clock.advance(1000);
       const c = await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: ref });
       expect(c).toMatchObject({ receiptId: r.receiptId, consumeRef: ref, approvedBy: { userId: o.id }, companyId: o.companyId });
       expect(await svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: ref })).toEqual(c);
@@ -225,17 +244,39 @@ describe('authorization receipts (S2-Auth.1)', () => {
       expect((await row(r.receiptId)).status).toBe('issued');
     });
 
-    it('expiry: at exactly 10 minutes the receipt is receipt_expired and stays issued; it was consumable just before', async () => {
+    it('expiry by the DATABASE clock: just past 10 minutes is receipt_expired and stays issued; just before, it is consumable', async () => {
       const o = await ready();
-      const r = await issue(o);
-      const r2 = await issue(o);
-      t.clock.advance(RECEIPT_LIFETIME_MS - 1);
-      await svc.consume(CALLER, { secret: r2.secret, binding: r2.binding, consumeRef: randomUUID() });
-      t.clock.advance(1);
+      const old = await backdated(o, RECEIPT_LIFETIME_MS + 50);
+      const young = await backdated(o, RECEIPT_LIFETIME_MS - 30_000);
+      expect(await codeOf(svc.consume(CALLER, { secret: old.secret, binding: old.binding, consumeRef: randomUUID() }))).toBe('receipt_expired');
+      expect((await row(old.receiptId)).status).toBe('issued');
+      const c = await svc.consume(CALLER, { secret: young.secret, binding: young.binding, consumeRef: randomUUID() });
+      expect(c.consumedAt.getTime()).toBeLessThan((await row(young.receiptId)).expiresAt.getTime());
+    });
+
+    it("Auth's application clock cannot extend or shorten validity (skew between instances is irrelevant)", async () => {
+      const o = await ready();
+      const old = await backdated(o, RECEIPT_LIFETIME_MS + 1000);
+      const proof = await t.stepUpToken(o.tokens as Tokens, PURPOSE, o.totpSecret); // made before the skew (proofs and JWTs use the app clock)
+      const live = await issue(o);
+      const DAY = 24 * 3600_000;
+      t.clock.advance(-DAY); // an instance whose clock is a day behind cannot revive an expired receipt
       try {
-        expect(await codeOf(svc.consume(CALLER, { secret: r.secret, binding: r.binding, consumeRef: randomUUID() }))).toBe('receipt_expired');
-        expect((await row(r.receiptId)).status).toBe('issued');
-      } finally { t.clock.advance(-RECEIPT_LIFETIME_MS); }
+        expect(await codeOf(svc.consume(CALLER, { secret: old.secret, binding: old.binding, consumeRef: randomUUID() }))).toBe('receipt_expired');
+        expect(await codeOf(svc.issue(o.owner, { stepUpToken: undefined, idempotencyKey: old.key, binding: old.binding }))).toBe('receipt_expired');
+      } finally { t.clock.advance(DAY); }
+      t.clock.advance(120_000); // issuance under a skewed app clock (2 minutes ahead, within the proof's own lifetime)
+      try {
+        const fresh = await svc.issue(o.owner, { stepUpToken: proof, idempotencyKey: key(), binding: binding(o.companyId) });
+        const db = await row(fresh.receiptId); // exactly 10 minutes from the DATABASE's now, not from the app clock
+        expect(db.expiresAt.getTime() - db.issuedAt.getTime()).toBe(RECEIPT_LIFETIME_MS);
+        expect(Math.abs(Date.now() - db.issuedAt.getTime())).toBeLessThan(30_000);
+        expect(Math.abs(t.clock.now().getTime() - db.issuedAt.getTime())).toBeGreaterThan(90_000);
+      } finally { t.clock.advance(-120_000); }
+      t.clock.advance(DAY); // an instance a day ahead cannot expire a live receipt early
+      try {
+        await svc.consume(CALLER, { secret: live.secret, binding: live.binding, consumeRef: randomUUID() });
+      } finally { t.clock.advance(-DAY); }
     });
 
     it('authority revoked (inactive issuer) refuses WITHOUT consuming; the receipt stays issued (Q7)', async () => {

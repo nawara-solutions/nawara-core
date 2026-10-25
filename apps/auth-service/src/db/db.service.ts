@@ -130,3 +130,17 @@ export const pgCode = (e: unknown): string | undefined => (e as { code?: string 
 export const pgConstraint = (e: unknown): string | undefined => (e as { constraint?: string })?.constraint;
 export const isUniqueViolation = (e: unknown, constraint?: string) =>
   pgCode(e) === '23505' && (!constraint || pgConstraint(e) === constraint);
+
+/**
+ * Whether a failure of a statement (or of its transaction's COMMIT) PROVES that nothing was committed. Deliberately narrow: only an error
+ * report sent by PostgreSQL itself, at severity ERROR (the statement's implicit transaction is aborted and the session lives on), whose
+ * status code does not say that completion is unknown. A status code alone is never enough: a FATAL or PANIC report carries one too and
+ * can follow a commit. A connection failure, a client-side deadline, a lost answer or any other error proves nothing.
+ */
+export function provesNothingCommitted(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const { severity, code } = e as { severity?: unknown; code?: unknown };
+  if (severity !== 'ERROR') return false; // FATAL, PANIC, a localized severity, or not a database report at all
+  if (typeof code !== 'string' || !/^[0-9A-Z]{5}$/.test(code)) return false;
+  return !code.startsWith('08') && code !== '40003'; // connection exceptions; statement_completion_unknown
+}

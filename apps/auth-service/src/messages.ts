@@ -118,4 +118,60 @@ export const AUTH_MESSAGES = defineMessages({
     fr: 'Un compte avec ces informations existe déjà.',
     ar: 'يوجد حساب بهذه البيانات بالفعل.',
   },
+  // Core V2 S2-Auth.2: authorization receipts (ADR-0067; D-A2 receipt contract §15). Never a secret, a binding value or a digest.
+  receiptUnavailable: {
+    en: 'Authorization receipts are not available right now; nothing was changed. Retry later.',
+    fr: 'Les reçus d\'autorisation ne sont pas disponibles pour le moment ; rien n\'a été modifié. Réessayez plus tard.',
+    ar: 'إيصالات التفويض غير متاحة حاليًا؛ لم يتم تغيير أي شيء. أعد المحاولة لاحقًا.',
+  },
+  receiptOutcomeUnknown: {
+    en: 'The outcome of this request is unknown. Retry it with the same idempotency key or consumption reference.',
+    fr: 'Le résultat de cette requête est inconnu. Réessayez avec la même clé d\'idempotence ou la même référence de consommation.',
+    ar: 'نتيجة هذا الطلب غير معروفة. أعد المحاولة باستخدام مفتاح عدم التكرار نفسه أو مرجع الاستهلاك نفسه.',
+  },
+  receiptBindingInvalid: {
+    en: 'The authorization details are not valid.',
+    fr: 'Les détails de l\'autorisation ne sont pas valides.',
+    ar: 'تفاصيل التفويض غير صالحة.',
+  },
+  idempotencyKeyRequired: {
+    en: 'A valid Idempotency-Key header is required.',
+    fr: 'Un en-tête Idempotency-Key valide est requis.',
+    ar: 'يلزم وجود ترويسة Idempotency-Key صالحة.',
+  },
+  idempotencyKeyReused: {
+    en: 'This Idempotency-Key was already used with a different request.',
+    fr: 'Cette Idempotency-Key a déjà été utilisée pour une requête différente.',
+    ar: 'استُخدمت قيمة Idempotency-Key هذه بالفعل مع طلب مختلف.',
+  },
+  receiptIssuedResponseLost: {
+    en: 'This receipt was voided because its response may have been lost. Verify again and request a new receipt.',
+    fr: 'Ce reçu a été annulé car sa réponse a pu être perdue. Vérifiez à nouveau et demandez un nouveau reçu.',
+    ar: 'أُلغي هذا الإيصال لأن استجابته ربما فُقدت. تحقّق مجددًا واطلب إيصالًا جديدًا.',
+  },
+  receiptAlreadyConsumed: {
+    en: 'This receipt has already been used.',
+    fr: 'Ce reçu a déjà été utilisé.',
+    ar: 'تم استخدام هذا الإيصال بالفعل.',
+  },
+  receiptInvalid: {
+    en: 'The authorization receipt is not valid.',
+    fr: 'Le reçu d\'autorisation n\'est pas valide.',
+    ar: 'إيصال التفويض غير صالح.',
+  },
+  receiptExpired: {
+    en: 'The authorization receipt has expired.',
+    fr: 'Le reçu d\'autorisation a expiré.',
+    ar: 'انتهت صلاحية إيصال التفويض.',
+  },
+  authorityRevoked: {
+    en: 'The approving owner no longer holds this authority.',
+    fr: 'Le propriétaire ayant approuvé ne détient plus cette autorité.',
+    ar: 'لم يعد المالك الذي وافق يملك هذه الصلاحية.',
+  },
+  consumeRefConflict: {
+    en: 'This receipt or consumption reference was already used for another consumption.',
+    fr: 'Ce reçu ou cette référence de consommation a déjà été utilisé pour une autre consommation.',
+    ar: 'استُخدم هذا الإيصال أو مرجع الاستهلاك هذا بالفعل في استهلاك آخر.',
+  },
 });

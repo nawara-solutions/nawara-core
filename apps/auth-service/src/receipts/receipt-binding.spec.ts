@@ -1,6 +1,3 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import {
   RECEIPT_DOMAINS, bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest,
@@ -62,23 +59,5 @@ describe('authorization receipt binding (S2-Auth.1)', () => {
     expect(new Set(d).size).toBe(3);
     expect(bindingDigest(randomBytes(32), c)).not.toBe(d[0]);
     expect(Object.values(RECEIPT_DOMAINS).every((v) => v.endsWith('.v1'))).toBe(true);
-  });
-});
-
-describe('authorization receipts stay unreachable until S2-Auth.2', () => {
-  it('no controller, route or module other than the app module references the receipt service or a receipt route', () => {
-    const src = join(dirname(fileURLToPath(import.meta.url)), '..');
-    const hits: string[] = [];
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        const path = join(dir, name);
-        if (statSync(path).isDirectory()) { if (name !== 'receipts') walk(path); continue; }
-        if (!name.endsWith('.ts') || name.endsWith('.spec.ts') || name === 'app.module.ts') continue;
-        const text = readFileSync(path, 'utf8');
-        if (/AuthorizationReceiptService|authorization-receipts|receipts\//.test(text)) hits.push(path.slice(src.length));
-      }
-    };
-    walk(src);
-    expect(hits).toEqual([]);
   });
 });

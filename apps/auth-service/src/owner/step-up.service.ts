@@ -4,7 +4,7 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { AuditService } from '../audit/audit.service.js';
 import { CLOCK, type Clock } from '../common/ports.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
-import { DbService, type Queryable } from '../db/db.service.js';
+import { DbService, provesNothingCommitted, type Queryable } from '../db/db.service.js';
 import { authError } from '../errors.js';
 import { ThrottleService } from '../throttle/throttle.service.js';
 import { ChallengeService } from './challenge.service.js';
@@ -81,20 +81,6 @@ const AUTH_LOCAL_PURPOSES: ReadonlySet<string> = new Set([REFERENCE_REPAIR_PURPO
  *   consumption, and must never report the proof as unused.
  */
 export type RepairProofConsumption = 'consumed' | 'rejected' | 'not_consumed' | 'uncertain';
-
-/**
- * Whether a failure of the single autocommit consume statement PROVES that nothing was committed. Deliberately narrow: only an error
- * report sent by PostgreSQL itself, at severity ERROR (the statement's implicit transaction is aborted and the session lives on), whose
- * status code does not say that completion is unknown. A status code alone is never enough: a FATAL or PANIC report carries one too and
- * can follow a commit. A connection failure, a client-side deadline, a lost answer or any other error proves nothing.
- */
-function provesNothingCommitted(e: unknown): boolean {
-  if (!(e instanceof Error)) return false;
-  const { severity, code } = e as { severity?: unknown; code?: unknown };
-  if (severity !== 'ERROR') return false; // FATAL, PANIC, a localized severity, or not a database report at all
-  if (typeof code !== 'string' || !/^[0-9A-Z]{5}$/.test(code)) return false;
-  return !code.startsWith('08') && code !== '40003'; // connection exceptions; statement_completion_unknown
-}
 
 export interface StepUpRequest {
   ownerId: string;

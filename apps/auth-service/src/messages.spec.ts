@@ -42,6 +42,18 @@ describe('AUTH_MESSAGES', () => {
       assignmentConflict: 'An active assignment already exists.',
       tooManyAttempts: 'Too many attempts. Please try again later.',
       accountExists: 'An account with these details already exists.',
+      // Core V2 S2-Auth.2: new messages (no pre-R5 text existed); listed so the catalog stays exactly what this test names
+      receiptUnavailable: 'Authorization receipts are not available right now; nothing was changed. Retry later.',
+      receiptOutcomeUnknown: 'The outcome of this request is unknown. Retry it with the same idempotency key or consumption reference.',
+      receiptBindingInvalid: 'The authorization details are not valid.',
+      idempotencyKeyRequired: 'A valid Idempotency-Key header is required.',
+      idempotencyKeyReused: 'This Idempotency-Key was already used with a different request.',
+      receiptIssuedResponseLost: 'This receipt was voided because its response may have been lost. Verify again and request a new receipt.',
+      receiptAlreadyConsumed: 'This receipt has already been used.',
+      receiptInvalid: 'The authorization receipt is not valid.',
+      receiptExpired: 'The authorization receipt has expired.',
+      authorityRevoked: 'The approving owner no longer holds this authority.',
+      consumeRefConflict: 'This receipt or consumption reference was already used for another consumption.',
     };
     expect(Object.keys(AUTH_MESSAGES).sort()).toEqual(Object.keys(before).sort());
     for (const [id, en] of Object.entries(before)) expect(AUTH_MESSAGES[id as keyof typeof AUTH_MESSAGES].en).toBe(en);
