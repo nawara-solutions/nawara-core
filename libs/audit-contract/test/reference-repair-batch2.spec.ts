@@ -35,10 +35,30 @@ const mismatch = (over: P = {}): P => ({
 });
 const valid = (p: P) => () => validateAuditPayload(p, 'auth-service');
 
+
+/**
+ * Core V2 S2-Audit.3 changed ONE earlier entry, additively: `platform_query.executed` (audit-service's own read record) admits an operator
+ * actor, the targets `company` / `operator_platform` and the optional `company_id` / `platform_id` facts. Everything it had is kept.
+ */
+function expectEarlierEntry(action: string, entry: any): void {
+  const now = JSON.parse(JSON.stringify(AUDIT_CATALOG.get(action as never)));
+  if (action !== 'platform_query.executed') {
+    expect(now, action).toEqual(entry);
+    return;
+  }
+  expect(now.actors.user).toEqual([...entry.actors.user, 'operator']);
+  expect(now.changes.target.values).toEqual([...entry.changes.target.values, 'company', 'operator_platform']);
+  expect(now.changes.company_id).toEqual({ type: 'uuid', shape: 'value', required: false });
+  expect(now.changes.platform_id).toEqual({ type: 'uuid', shape: 'value', required: false });
+  const strip = (e: any) => ({ ...e, purpose: undefined, actors: { ...e.actors, user: undefined },
+    changes: { ...e.changes, target: { ...e.changes.target, values: undefined }, company_id: undefined, platform_id: undefined } });
+  expect(JSON.parse(JSON.stringify(strip(now)))).toEqual(JSON.parse(JSON.stringify(strip(entry))));
+}
+
 describe('A5.4-AC1 batch 2: additive only', () => {
   it('the 56 earlier entries are exactly as they were (snapshot taken from main before batch 2)', () => {
     expect(Object.keys(BEFORE)).toHaveLength(56);
-    for (const [action, entry] of Object.entries(BEFORE)) expect(JSON.parse(JSON.stringify(AUDIT_CATALOG.get(action as never))), action).toEqual(entry);
+    for (const [action, entry] of Object.entries(BEFORE)) expectEarlierEntry(action, entry); // S2-Audit.3: one additive change, checked exactly
   });
 
   it('the catalog grows from 56 to 58 with exactly the two batch 2 actions', () => {

@@ -50,4 +50,20 @@ export const MAX_LIMIT = 100;
  * A66: an organization-scope window is at most 92 days, a platform-scope window at most 31. Stage 19.3: a Company owner's read (Audit-X)
  * is a privileged, self-audited read like the platform scope, so it keeps the platform bound (the self-audit's `window_days` is 1–31).
  */
-export const MAX_WINDOW_MS = { organization: 92 * 86_400_000, platform: 31 * 86_400_000, owner: 31 * 86_400_000 } as const;
+export const MAX_WINDOW_MS = { organization: 92 * 86_400_000, platform: 31 * 86_400_000, owner: 31 * 86_400_000, scoped: 31 * 86_400_000 } as const; // S2-Audit.3: the scoped reads as the owner read
+
+/**
+ * Core V2 S2-Audit.3 (AUD-03, AUD-04; ADR-0069 decisions 4 and 5): the scope of a scoped human read, built by the server from Auth's LIVE
+ * answer (an owner's Company, an operator's active assignment), never from a request value. Only records with a TRUSTED scope row
+ * (`audit_record_scope`, basis `verified_producer`: written only for a broker-verified delivery) match; a record without one is invisible.
+ */
+export type TrustedScope = { kind: 'company'; companyId: string } | { kind: 'assigned_platform'; platformId: string };
+
+/** The scoped reads' query: the trusted scope, the two approved filters, the window, the page size and the cursor position. */
+export interface ScopedAuditQuery {
+  scope: TrustedScope;
+  filters: Pick<QueryFilters, 'action' | 'correlationId'>;
+  window: { from: Date; to: Date };
+  limit: number;
+  after?: CursorPosition;
+}

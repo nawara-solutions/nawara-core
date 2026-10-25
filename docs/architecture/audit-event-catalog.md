@@ -98,7 +98,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
-| `platform_query.executed` | security | user (owner); service | none (platform) | platform_query | — | succeeded | `target`: all \| organization \| platform<br>`window_days`: integer 1–31<br>`result_count`: integer 0–100<br>`page`: first \| next<br>`filtered`: boolean<br>`organization_id`?: uuid | Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), or by a Company owner (one organization of their Company). Who, when, which organization, how broadly. |
+| `platform_query.executed` | security | user (owner, operator); service | none (platform) | platform_query | — | succeeded | `target`: all \| organization \| platform \| company \| operator_platform<br>`window_days`: integer 1–31<br>`result_count`: integer 0–100<br>`page`: first \| next<br>`filtered`: boolean<br>`organization_id`?: uuid<br>`company_id`?: uuid<br>`platform_id`?: uuid | Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), by a Company owner (one organization of their Company, or their Company's trusted timeline), or by an operator (an assigned Platform's trusted records). Who, when, which scope, how broadly. |
 
 ## release-service (4)
 

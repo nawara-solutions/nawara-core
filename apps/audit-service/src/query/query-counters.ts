@@ -3,7 +3,8 @@
  * Closed labels only: the scope and the outcome. Never an organization, caller, actor, resource, event or correlation id, never a
  * filter value. Recording `platform_query.executed` is not a query and is never counted here.
  */
-export const QUERY_SCOPES = ['organization', 'platform', 'owner'] as const;
+// Core V2 S2-Audit.3: plus the scoped human reads, `company` (AUD-03) and `operator` (AUD-04), which depend on Auth like the owner read
+export const QUERY_SCOPES = ['organization', 'platform', 'owner', 'company', 'operator'] as const;
 export const QUERY_OUTCOMES = ['ok', 'denied', 'invalid', 'rate_limited', 'unavailable', 'error'] as const;
 /**
  * Stage 19.5: the owner read (Audit-X) also depends on Auth, so it separates Auth's failures from its own: `auth_timeout` (the request's
@@ -17,6 +18,8 @@ const OUTCOMES_OF: Record<QueryScopeLabel, readonly QueryOutcome[]> = {
   organization: QUERY_OUTCOMES,
   platform: QUERY_OUTCOMES,
   owner: [...QUERY_OUTCOMES, ...OWNER_ONLY_OUTCOMES],
+  company: [...QUERY_OUTCOMES, ...OWNER_ONLY_OUTCOMES],
+  operator: [...QUERY_OUTCOMES, ...OWNER_ONLY_OUTCOMES],
 };
 
 export interface QuerySnapshot {

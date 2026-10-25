@@ -20,7 +20,25 @@ export interface OwnerAuthority {
   verifyOwner(userBearer: string, deadline?: AbortSignal): Promise<string>;
   /** True only when Auth confirms the organization belongs to the caller's Company (Auth's collapsed 404 otherwise). 503 when Auth cannot say. */
   ownsOrganization(userBearer: string, organizationId: string, deadline?: AbortSignal): Promise<boolean>;
+  /**
+   * Core V2 S2-Audit.3: the caller's LIVE authority facts from Auth's `GET /auth/grants` (ADR-0042 decision 6: server-derived, read from
+   * current database state, never cached, never a token claim): its kind, an owner's Company, an operator's ACTIVE Platform assignments.
+   * 401 when Auth refuses the bearer; 503 when Auth cannot say or answers in an unexpected shape.
+   */
+  grants(userBearer: string, deadline?: AbortSignal): Promise<LiveGrants>;
 }
+
+export interface LiveGrants {
+  userId: string;
+  kind: 'owner' | 'operator' | 'member';
+  /** an owner's Company; null for every other kind */
+  companyId: string | null;
+  /** an operator's currently ACTIVE Platform assignments; empty for every other kind */
+  platformAssignments: readonly string[];
+}
+
+/** An operator is assigned to a bounded number of Platforms; a longer list is not Auth's answer. */
+const MAX_ASSIGNMENTS = 1000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Stage 19.4: Auth's two answers are a few hundred bytes; anything larger is not Auth's answer (and is never buffered whole). */
@@ -97,6 +115,24 @@ export class HttpOwnerAuthority implements OwnerAuthority {
     if (b.kind !== 'owner') throw httpError(403, 'operation_not_allowed', AUDIT_MESSAGES.ownerOnly);
     if (typeof b.companyId !== 'string' || b.companyId === '') throw new AuthDependencyError('auth_unavailable'); // an owner always has a Company
     return b.userId.toLowerCase();
+  }
+
+  async grants(userBearer: string, deadline?: AbortSignal): Promise<LiveGrants> {
+    const res = await this.get('/auth/grants', userBearer, deadline);
+    if (res.status !== 200) {
+      await this.release(res);
+      if (res.status === 401) throw new UnauthorizedException();
+      throw new AuthDependencyError('auth_unavailable');
+    }
+    const b = await this.json(res, deadline);
+    const kind = b.kind;
+    if (typeof b.userId !== 'string' || !UUID.test(b.userId) || (kind !== 'owner' && kind !== 'operator' && kind !== 'member')) throw new AuthDependencyError('auth_unavailable');
+    const companyId = b.companyId === null ? null : typeof b.companyId === 'string' && UUID.test(b.companyId) ? b.companyId.toLowerCase() : undefined;
+    const assignments = b.platformAssignments;
+    if (companyId === undefined || (kind === 'owner') !== (companyId !== null)) throw new AuthDependencyError('auth_unavailable'); // an owner always has one, nobody else
+    if (!Array.isArray(assignments) || assignments.length > MAX_ASSIGNMENTS || !assignments.every((x) => typeof x === 'string' && UUID.test(x))) throw new AuthDependencyError('auth_unavailable');
+    if (kind !== 'operator' && assignments.length > 0) throw new AuthDependencyError('auth_unavailable');
+    return { userId: b.userId.toLowerCase(), kind, companyId, platformAssignments: (assignments as string[]).map((x) => x.toLowerCase()) };
   }
 
   async ownsOrganization(userBearer: string, organizationId: string, deadline?: AbortSignal): Promise<boolean> {

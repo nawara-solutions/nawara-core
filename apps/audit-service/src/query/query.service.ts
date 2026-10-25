@@ -8,11 +8,12 @@ import { SERVICE_NAME, type AuditConfig } from '../config/audit-config.js';
 import { toNewAuditRecord } from '../persistence/audit-record.mapper.js';
 import { AuditRecordRepository } from '../persistence/audit-record.repository.js';
 import type { PagedAuditRow } from '../persistence/audit-record.types.js';
-import { AuthDependencyError, OWNER_AUTHORITY, type OwnerAuthority } from '../owner/owner-authority.client.js';
+import { AuthDependencyError, OWNER_AUTHORITY, type LiveGrants, type OwnerAuthority } from '../owner/owner-authority.client.js';
 import type { CallerPolicy } from '../policy/caller-policy.js';
 import { QueryCounters, type QueryOutcome, type QueryScopeLabel } from './query-counters.js';
-import type { AuthorizedAuditQuery, QueryScope } from './query-model.js';
-import { decodeCursor, encodeCursor, parseOrganizationPath, parseQuery, queryFingerprint, type ParsedQuery } from './query-params.js';
+import type { AuthorizedAuditQuery, QueryScope, ScopedAuditQuery, TrustedScope } from './query-model.js';
+import { decodeCursor, encodeCursor, parseOrganizationPath, parsePlatformPath, parseQuery, queryFingerprint, type ParsedQuery } from './query-params.js';
+import { decodeSignedCursor, encodeSignedCursor, type CursorKeys } from './signed-cursor.js';
 import { AUDIT_MESSAGES } from '../messages.js';
 
 /** One record as a reader receives it: evidence identifiers and codes only (no internal id, no display name, no enrichment). */
@@ -41,7 +42,7 @@ export interface AuditPage {
 
 /** The fixed rate-limit window (A66). */
 export const QUERY_WINDOW_SECONDS = 60;
-export const QUERY_LIMITER_BUCKETS = ['audit_query_org_caller', 'audit_query_org_pair', 'audit_query_platform_caller', 'audit_query_owner'] as const;
+export const QUERY_LIMITER_BUCKETS = ['audit_query_org_caller', 'audit_query_org_pair', 'audit_query_platform_caller', 'audit_query_owner', 'audit_query_operator'] as const;
 const PLATFORM_QUERY_ACTION = 'platform_query.executed';
 const CORRELATION = /^[A-Za-z0-9._:-]{8,128}$/;
 const DAY_MS = 86_400_000;
@@ -50,9 +51,17 @@ const DAY_MS = 86_400_000;
  * decision 6 bounds the owner by the organization, not by category). Built by the server, never from the request.
  */
 const OWNER_POLICY: CallerPolicy = { operations: new Set(), categories: new Set(AUDIT_CATEGORIES) };
-type QueryActor = { type: 'service'; id: string } | { type: 'user'; id: string; userKind: 'owner' };
+type QueryActor = { type: 'service'; id: string } | { type: 'user'; id: string; userKind: 'owner' | 'operator' };
 
 const forbidden = (code: string, message: MessageTexts) => httpError(403, code, message);
+
+/** Core V2 S2-Audit.3: a record of a scoped read: the same view plus its verified approver (version 2; null when none). */
+function scopedView(r: PagedAuditRow): AuditRecordView & { approvedBy: { type: 'user'; id: string; userKind: string } | null } {
+  return {
+    ...view(r),
+    approvedBy: r.approvedByUserId !== null && r.approvedByUserKind !== null ? { type: 'user', id: r.approvedByUserId, userKind: r.approvedByUserKind } : null,
+  };
+}
 
 function view(r: PagedAuditRow): AuditRecordView {
   return {
@@ -171,6 +180,90 @@ export class AuditQueryService {
     });
   }
 
+  /**
+   * Core V2 S2-Audit.3 AUD-03 (ADR-0069 decisions 4 and 5): a Company owner reads their Company's TRUSTED timeline, with their own bearer.
+   * Fixed order: Auth's LIVE grants (an active owner and their Company; never a request value) → rate limit per verified owner → the query
+   * (the approved parameters only) → the signed cursor, bound to this owner, Company, filters and window → the trusted-scope read and its
+   * `platform_query.executed` record in one transaction, or nothing (503). Every page asks Auth again: a revoked owner reads nothing more.
+   */
+  companyTimeline(userBearer: string, rawQuery: unknown): Promise<AuditPage> {
+    return this.measured('company', 'owner', () => this.scoped(userBearer, async (g) => {
+      if (g.kind !== 'owner' || g.companyId === null) throw forbidden('operation_not_allowed', AUDIT_MESSAGES.ownerOnly);
+      await this.limitOwner(g.userId);
+      return { caller: `owner:${g.userId}`, actor: { type: 'user', id: g.userId, userKind: 'owner' }, scope: { kind: 'company', companyId: g.companyId } };
+    }, rawQuery));
+  }
+
+  /**
+   * Core V2 S2-Audit.3 AUD-04: an operator reads the TRUSTED records of ONE Platform they are currently assigned to. The path only SELECTS
+   * the Platform: Auth's live grants decide. Not assigned (never assigned, revoked, another Platform) is the collapsed `404`, so a Platform's
+   * existence is never revealed. No operator has a global view.
+   */
+  operatorPlatform(userBearer: string, platformParam: unknown, rawQuery: unknown): Promise<AuditPage> {
+    return this.measured('operator', 'operator', () => this.scoped(userBearer, async (g) => {
+      if (g.kind !== 'operator') throw forbidden('operation_not_allowed', AUDIT_MESSAGES.operatorOnly);
+      await this.limiterHit('audit_query_operator', g.userId, this.config.scopedAccess!.ratePerOperator);
+      const platformId = parsePlatformPath(platformParam);
+      if (!g.platformAssignments.includes(platformId)) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404);
+      return { caller: `operator:${g.userId}`, actor: { type: 'user', id: g.userId, userKind: 'operator' }, scope: { kind: 'assigned_platform', platformId } };
+    }, rawQuery));
+  }
+
+  /** The common path of AUD-03 / AUD-04 after the route-specific authorization (`authorize`), from Auth's live grants. */
+  private async scoped(
+    userBearer: string,
+    authorize: (g: LiveGrants) => Promise<{ caller: string; actor: QueryActor; scope: TrustedScope }>,
+    rawQuery: unknown,
+  ): Promise<AuditPage> {
+    const authority = this.ownerAuthority;
+    const access = this.config.scopedAccess;
+    if (!authority || !access) throw new HttpException({ message: 'Not Found', code: 'not_found' }, 404); // not configured: no route
+    const deadline = AbortSignal.timeout(this.config.ownerAccess?.authTimeoutMs ?? 3_000);
+    const t0 = performance.now();
+    let grants: LiveGrants;
+    try {
+      grants = await authority.grants(userBearer, deadline);
+    } finally {
+      this.counters.ownerAuth(performance.now() - t0);
+    }
+    const { caller, actor, scope } = await authorize(grants);
+    const parsed = parseQuery(rawQuery, 'scoped');
+    const keys: CursorKeys = { keys: access.cursorKeys, activeKeyId: access.cursorActiveKeyId, ttlSec: access.cursorTtlSec };
+    const filters = {
+      ...(parsed.filters.action !== undefined ? { action: parsed.filters.action } : {}),
+      ...(parsed.filters.correlationId !== undefined ? { correlationId: parsed.filters.correlationId } : {}),
+    };
+    const fingerprint = queryFingerprint(caller, scope, filters, parsed.window);
+    const query: ScopedAuditQuery = {
+      scope, filters, window: parsed.window, limit: parsed.limit,
+      ...(parsed.cursor !== undefined ? { after: decodeSignedCursor(keys, parsed.cursor, fingerprint, Date.now()) } : {}),
+    };
+    const rows = await this.db.tx(async (q) => {
+      const found = await this.records.findScopedPage(query, q);
+      await this.recordScopedRead(q, actor, query, Math.min(found.length, query.limit), parsed.cursor !== undefined);
+      return found;
+    }).catch((e: unknown) => {
+      if (e instanceof HttpException) throw e;
+      this.log.error(`audit_scoped_query_unrecorded scope=${scope.kind} error=${e instanceof Error ? e.name : 'Error'} — no evidence returned (fail closed)`);
+      throw httpError(503, 'accountability_unavailable', AUDIT_MESSAGES.accountabilityUnavailable);
+    });
+    const items = rows.slice(0, query.limit);
+    const last = items[items.length - 1];
+    const nextCursor = rows.length > query.limit && last ? encodeSignedCursor(keys, { occurredAtUs: last.occurredAtUs, id: last.id }, fingerprint, Date.now()) : null;
+    return { items: items.map(scopedView), nextCursor };
+  }
+
+  /** The self-audit of a scoped read: `platform_query.executed` with target `company` / `operator_platform` and the scope's id. */
+  private recordScopedRead(q: Queryable, actor: QueryActor, query: ScopedAuditQuery, count: number, nextPage: boolean): Promise<void> {
+    return this.recordPlatformQuery(q, actor, { filters: query.filters, window: query.window }, count, nextPage, undefined,
+      query.scope.kind === 'company' ? { target: 'company', company_id: query.scope.companyId } : { target: 'operator_platform', platform_id: query.scope.platformId });
+  }
+
+  private async limiterHit(bucket: (typeof QUERY_LIMITER_BUCKETS)[number], userId: string, limit: number): Promise<void> {
+    const r = await this.limiter.hit(bucket, userId, { limit, windowSec: QUERY_WINDOW_SECONDS });
+    if (!r.allowed) throw httpError(429, 'rate_limited', AUDIT_MESSAGES.tooManyRequests);
+  }
+
   /** The owner read proper, after Auth verified the owner and the organization: the read and its self-audit in one transaction. */
   private async ownerRead(ownerId: string, organizationId: string, parsed: ParsedQuery): Promise<AuditPage> {
     const caller = `owner:${ownerId}`;
@@ -247,11 +340,14 @@ export class AuditQueryService {
    * target, how wide the window, how many records, which page, whether filters narrowed it, and (Stage 19.3, an owner's read) which
    * organization — never a filter value or a returned record.
    */
-  private async recordPlatformQuery(q: Queryable, actor: QueryActor, query: AuthorizedAuditQuery, count: number, nextPage: boolean, organizationId?: string): Promise<void> {
+  private async recordPlatformQuery(
+    q: Queryable, actor: QueryActor, query: Pick<AuthorizedAuditQuery, 'filters' | 'window'> & { scope?: QueryScope }, count: number, nextPage: boolean, organizationId?: string,
+    scoped?: { target: 'company'; company_id: string } | { target: 'operator_platform'; platform_id: string },
+  ): Promise<void> {
     const eventId = randomUUID();
     const { rows } = await q.query<{ now: Date }>('SELECT now()');
     const correlation = getRequestContext()?.correlationId;
-    const target = query.scope.kind === 'platform' ? query.scope.target : 'organization';
+    const target = scoped?.target ?? (query.scope?.kind === 'platform' ? query.scope.target : 'organization');
     const filtered = Object.keys(query.filters).length > 0;
     const event = validateAuditEvent({
       id: eventId,
@@ -269,6 +365,8 @@ export class AuditQueryService {
           page: nextPage ? 'next' : 'first',
           filtered,
           ...(organizationId ? { organization_id: organizationId } : {}),
+          ...(scoped?.target === 'company' ? { company_id: scoped.company_id } : {}),
+          ...(scoped?.target === 'operator_platform' ? { platform_id: scoped.platform_id } : {}),
         },
       },
       headers: {

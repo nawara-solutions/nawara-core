@@ -4,7 +4,7 @@ import {
   ACTOR_TYPES, AUDIT_CATEGORIES, AUDIT_OUTCOMES, CORE_PRODUCERS, catalogEntry, type AuditCategory, type AuditOutcome,
 } from '@nawara/audit-contract';
 import { canonicalJson, httpError, type MessageParams, type MessageTexts } from '@nawara/service-kit';
-import { DEFAULT_LIMIT, MAX_LIMIT, MAX_WINDOW_MS, type CursorPosition, type QueryFilters, type QueryScope } from './query-model.js';
+import { DEFAULT_LIMIT, MAX_LIMIT, MAX_WINDOW_MS, type CursorPosition, type QueryFilters, type QueryScope, type TrustedScope } from './query-model.js';
 import { AUDIT_MESSAGES } from '../messages.js';
 
 /** A 400 with a stable code; the message never echoes a request value. */
@@ -24,6 +24,8 @@ const MAX_VALUE_LENGTH = 256;
 const COMMON = ['from', 'to', 'limit', 'cursor', 'action', 'category', 'actorType', 'actorId', 'resourceType', 'resourceId', 'subjectType', 'subjectId',
   'sourceService', 'outcome', 'correlationId'] as const;
 const PLATFORM_ONLY = ['organizationId', 'platform'] as const;
+/** Core V2 S2-Audit.3 (register AUD-03 / AUD-04): the scoped reads accept exactly these parameters. */
+const SCOPED = ['from', 'to', 'limit', 'cursor', 'action', 'correlationId'] as const;
 
 export interface ParsedQuery {
   filters: QueryFilters;
@@ -56,9 +58,9 @@ function pair(raw: Record<string, string>, typeKey: string, idKey: string, typeO
  * array), an empty value or an over-long one is a 400 — nothing is coerced, trimmed, clamped or ignored. `from` and `to` are required
  * (A66): the half-open window `[from, to)` on `occurredAt`, at most 92 days (organization) or 31 days (platform, and the Stage 19.3 owner read).
  */
-export function parseQuery(input: unknown, route: 'organization' | 'platform' | 'owner'): ParsedQuery {
+export function parseQuery(input: unknown, route: 'organization' | 'platform' | 'owner' | 'scoped'): ParsedQuery {
   if (typeof input !== 'object' || input === null) throw badRequest('invalid_query', AUDIT_MESSAGES.invalidQueryString);
-  const allowed = new Set<string>(route === 'platform' ? [...COMMON, ...PLATFORM_ONLY] : COMMON);
+  const allowed = new Set<string>(route === 'platform' ? [...COMMON, ...PLATFORM_ONLY] : route === 'scoped' ? SCOPED : COMMON);
   const raw: Record<string, string> = {};
   for (const [k, v] of Object.entries(input)) {
     if (!allowed.has(k)) throw badRequest('invalid_query', AUDIT_MESSAGES.unknownParameter);
@@ -121,6 +123,12 @@ export function parseQuery(input: unknown, route: 'organization' | 'platform' | 
   return parsed;
 }
 
+/** Core V2 S2-Audit.3: the Platform of an operator read's path, strictly (lowercase UUID). It SELECTS which assignment to read; Auth decides. */
+export function parsePlatformPath(value: unknown): string {
+  if (typeof value !== 'string' || !UUID.test(value)) throw badRequest('invalid_scope', AUDIT_MESSAGES.platformIdInvalid);
+  return value;
+}
+
 /** The organization of an organization-scope path, strictly (lowercase UUID; not a filter: the scope). */
 export function parseOrganizationPath(value: unknown): string {
   if (typeof value !== 'string' || !UUID.test(value)) throw badRequest('invalid_scope', AUDIT_MESSAGES.organizationIdInvalid);
@@ -141,7 +149,7 @@ const FINGERPRINT = /^[0-9a-f]{24}$/;
  * re-applied from the request's authorization on every page, A36), so tampering can at most move the position inside the caller's own
  * authorized result set.
  */
-export function queryFingerprint(caller: string, scope: QueryScope, filters: QueryFilters, window: { from: Date; to: Date }): string {
+export function queryFingerprint(caller: string, scope: QueryScope | TrustedScope, filters: QueryFilters, window: { from: Date; to: Date }): string {
   const shape = canonicalJson({ caller, scope, filters, from: window.from.toISOString(), to: window.to.toISOString() });
   return createHash('sha256').update(shape).digest('hex').slice(0, 24);
 }

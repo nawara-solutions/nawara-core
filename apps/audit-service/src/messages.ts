@@ -101,4 +101,11 @@ export const AUDIT_MESSAGES = defineMessages({
     fr: "cursor n'est pas valide pour cette requête",
     ar: 'cursor غير صالح لهذا الاستعلام',
   },
+  // Core V2 S2-Audit.3: the scoped human reads (AUD-03, AUD-04)
+  operatorOnly: {
+    en: 'Only an operator may read a Platform\'s audit evidence here.',
+    fr: "Seul un opérateur peut consulter ici les preuves d'audit d'une plateforme.",
+    ar: 'لا يمكن قراءة أدلة التدقيق لمنصة هنا إلا للمشغّل.',
+  },
+  platformIdInvalid: { en: 'platformId is not valid', fr: "platformId n'est pas valide", ar: 'platformId غير صالح' },
 });

@@ -513,18 +513,23 @@ const SPEC = {
   // namespace that its event type adds). Written by audit-service itself, in the same transaction as the read it records.
   // Stage 19.3 (ADR-0050 decision 6, Audit-X): also a verified Company OWNER's read of one organization of their Company, the owner as the
   // actor (never the audit service); `organization_id` names that organization (the record itself stays platform-level). Additive (A50).
+  // Core V2 S2-Audit.3 (ADR-0069 decision 5: every human read is recorded): additively, an operator may be the actor, and two targets record
+  // the scoped human reads, `company` (AUD-03, the Owner's Company timeline, with `company_id`) and `operator_platform` (AUD-04, an
+  // operator's assigned Platform, with `platform_id`). Written by audit-service itself only, never over the bus; nothing else changes.
   'platform_query.executed': {
-    producer: 'audit-service', category: 'security', since: 1, actors: { service: true, user: ['owner'] }, organization: 'none',
+    producer: 'audit-service', category: 'security', since: 1, actors: { service: true, user: ['owner', 'operator'] }, organization: 'none',
     resource: ['platform_query'], subject: NO_SUBJECT, outcomes: OK,
     changes: {
-      target: { type: 'code', shape: 'value', required: true, values: ['all', 'organization', 'platform'] },
+      target: { type: 'code', shape: 'value', required: true, values: ['all', 'organization', 'platform', 'company', 'operator_platform'] },
       window_days: { type: 'integer', shape: 'value', required: true, min: 1, max: 31 },
       result_count: { type: 'integer', shape: 'value', required: true, min: 0, max: 100 },
       page: { type: 'code', shape: 'value', required: true, values: ['first', 'next'] },
       filtered: { type: 'boolean', shape: 'value', required: true },
       organization_id: { type: 'uuid', shape: 'value', required: false },
+      company_id: { type: 'uuid', shape: 'value', required: false },
+      platform_id: { type: 'uuid', shape: 'value', required: false },
     },
-    purpose: 'Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), or by a Company owner (one organization of their Company). Who, when, which organization, how broadly.',
+    purpose: 'Audit evidence was read with a privileged scope: by a trusted service (across organizations or platform-level), by a Company owner (one organization of their Company, or their Company\'s trusted timeline), or by an operator (an assigned Platform\'s trusted records). Who, when, which scope, how broadly.',
   },
 } as const satisfies Record<string, CatalogEntry>;
 
