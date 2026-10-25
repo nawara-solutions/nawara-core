@@ -25,6 +25,10 @@
 #   repair   completes the recorded transaction from its staged, re-verified copies; creates what is missing, never deletes, never
 #            replaces a state, a latch or an incident binding.
 #   status   read-only.
+# Contract v2 (OD-BRK-2b-A): the manifest lists fourteen artifacts (the external alert carrier and its two units added). An installation
+# recorded under the OD-BRK-2b-I v1 contract (eleven artifacts) is refused by `upgrade` (installed_contract): no such installation
+# exists in production (OD-BRK-2b-2 has not run); a lab installation is removed and installed fresh. The carrier's credentials and its
+# state directory are never installed here (the Owner places the credentials at the console; systemd creates its state directory).
 # Locks, always in this order: the installation lock, then (upgrade, repair of an upgrade) the monitor's lock.
 # Exit: 0 done; 1 refused (validation: nothing was changed by this invocation); 2 invalid invocation, not root or a tool missing;
 # 65 an unsafe path, link, owner or trust anchor; 70 an incomplete transaction exists (run `repair`); 75 a lock could not be taken.
@@ -48,8 +52,8 @@ readonly OWNER='0:0'
 readonly TRUST_ROOT='/'
 readonly SAFE_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 readonly LOCK_WAIT=60
-readonly SCRIPTS='verify-and-contain.sh topology-watchdog.sh topology-trigger.sh recover-notification-topology.sh install-topology-monitor.sh verify-topology-monitor-install.sh'
-readonly UNITS='nawara-core-topology-monitor.service nawara-core-topology-monitor.timer nawara-core-topology-watchdog.service nawara-core-topology-watchdog.timer'
+readonly SCRIPTS='verify-and-contain.sh topology-watchdog.sh topology-trigger.sh recover-notification-topology.sh install-topology-monitor.sh verify-topology-monitor-install.sh topology-alert-carrier.sh'
+readonly UNITS='nawara-core-topology-monitor.service nawara-core-topology-monitor.timer nawara-core-topology-watchdog.service nawara-core-topology-watchdog.timer nawara-core-topology-alert.service nawara-core-topology-alert.timer'
 readonly LATCH_INACTIVE=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=inactive'
 readonly SIGNER_RE='^nawara-core-owner namespaces="nawara-core-topology-install" (ssh-ed25519|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/]{40,400}={0,2}$'
 readonly SIG_RE=$'^-----BEGIN SSH SIGNATURE-----\n([A-Za-z0-9+/=]{1,76}\n){1,40}-----END SSH SIGNATURE-----\n$'
@@ -131,7 +135,7 @@ trust_anchor() {
 }
 manifest_re() { # the canonical manifest: these lines, in this order, one final newline
   local re a
-  re=$'^nawara-core-topology-monitor-manifest v1\ncore_commit=([0-9a-f]{40})\nversion=([1-9][0-9]{0,5})\nstate_schema=([1-9])\n'
+  re=$'^nawara-core-topology-monitor-manifest v2\ncore_commit=([0-9a-f]{40})\nversion=([1-9][0-9]{0,5})\nstate_schema=([1-9])\n'
   for a in $ARTIFACTS; do re+="file=[0-9a-f]{64} ${a//./\\.}"$'\n'; done
   printf '%s$' "$re"
 }
@@ -297,6 +301,9 @@ if [ "$CMD" = install ]; then
 else
   # upgrade: the current installation must be the authenticated, intact one
   safe_node "$INSTALLED" d 077 || refuse not_installed "no authenticated installation is recorded"
+  if [ "$(head -n 1 -- "$INSTALLED/manifest" 2>/dev/null || true)" = 'nawara-core-topology-monitor-manifest v1' ]; then
+    refuse installed_contract "the installed record is an OD-BRK-2b-I (v1, eleven artifacts) manifest: this installer cannot upgrade it (runbook §2)"
+  fi
   verify_manifest "$INSTALLED"
   CUR_VERSION=$M_VERSION
   verify_installed || refuse installation_not_intact "the installed artifacts do not equal the recorded manifest (tampering or an interrupted change: investigate)"

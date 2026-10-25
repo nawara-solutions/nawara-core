@@ -8,7 +8,9 @@
 # link, no symbolic link, nothing extra), every ancestor directory, the units (content, hardening, no drop-in or same-named override in
 # any unit directory systemd reads, enabled only under a signed activation authorization), the protected state (the marker, a valid
 # state, the incident binding, the inbox, the latch), the recovery trust key if present, and the optional trigger (its sudoers rule and
-# its forced-command key, separate from the scheduled-backup key) if present. Absent optional parts are reported as not configured.
+# its forced-command key, separate from the scheduled-backup key) if present, and the external alert carrier (OD-BRK-2b-A: its unit's
+# isolation from the broker and the Auth carrier, its root-only credentials, two distinct heartbeat checks, its state directory) if
+# configured. Absent optional parts are reported as not configured; a credential value is checked for its form, never printed.
 #
 # Output: one line per check (`ok`, `FAIL`, `UNKNOWN` (could not be determined) or `info`) with a reason code; no secret, no key, no
 # authorized_keys line is printed (only fingerprints, hashes, modes). Exit: 0 PASS (every check passed); 1 FAIL (at least one failed);
@@ -39,8 +41,8 @@ readonly OWNER_GID=0
 readonly RUN_AS_UID=0
 readonly TRUST_ROOT='/'
 readonly SAFE_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-readonly SCRIPTS='verify-and-contain.sh topology-watchdog.sh topology-trigger.sh recover-notification-topology.sh install-topology-monitor.sh verify-topology-monitor-install.sh'
-readonly UNITS='nawara-core-topology-monitor.service nawara-core-topology-monitor.timer nawara-core-topology-watchdog.service nawara-core-topology-watchdog.timer'
+readonly SCRIPTS='verify-and-contain.sh topology-watchdog.sh topology-trigger.sh recover-notification-topology.sh install-topology-monitor.sh verify-topology-monitor-install.sh topology-alert-carrier.sh'
+readonly UNITS='nawara-core-topology-monitor.service nawara-core-topology-monitor.timer nawara-core-topology-watchdog.service nawara-core-topology-watchdog.timer nawara-core-topology-alert.service nawara-core-topology-alert.timer'
 readonly TRIGGER_OPTIONS='restrict,command="/usr/local/libexec/nawara-core-topology/topology-trigger.sh"'
 readonly TRIGGER_COMMENT='nawara-core-topology-trigger'
 readonly BACKUP_COMMENT='nawara-core-scheduled-backup'
@@ -51,7 +53,10 @@ readonly INCIDENT_RE=$'^nawara-core-topology-incident v1\nservice=notification-s
 readonly MARKER_RE='^nawara-core-topology-monitor installed v1 at=[0-9]{1,12}$'
 readonly INSTALL_SIGNER_RE='^nawara-core-owner namespaces="nawara-core-topology-install" (ssh-ed25519|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/]{40,400}={0,2}$'
 readonly RECOVERY_SIGNER_RE='^nawara-core-owner namespaces="nawara-core-topology-recovery" (ssh-ed25519|sk-ssh-ed25519@openssh\.com) [A-Za-z0-9+/]{40,400}={0,2}$'
-readonly ACTIVATION_RE=$'^nawara-core-topology-monitor-activation v1\ncore_commit=([0-9a-f]{40})\nversion=([1-9][0-9]{0,5})\ntimers=nawara-core-topology-monitor\\.timer,nawara-core-topology-watchdog\\.timer\n$'
+readonly ACTIVATION_RE=$'^nawara-core-topology-monitor-activation v1\ncore_commit=([0-9a-f]{40})\nversion=([1-9][0-9]{0,5})\ntimers=(nawara-core-topology-monitor\\.timer,nawara-core-topology-watchdog\\.timer(,nawara-core-topology-alert\\.timer)?)\n$'
+readonly CARRIER_ETC='/etc/nawara-core-topology-alert'
+readonly CARRIER_DIR='/var/lib/nawara-core-topology-alert'
+readonly HC_URL_RE='^https://hc-ping\.com/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{22}/[a-z0-9_-]{1,100})$'
 PATH=$SAFE_PATH
 export PATH
 
@@ -114,10 +119,10 @@ if [ "$TRUST_OK" = 1 ] && node_ok "$INSTALL_STATE/installed/manifest" f 600 && n
     text=$(cat -- "$INSTALL_STATE/installed/manifest")
     M_COMMIT=$(sed -nE 's/^core_commit=([0-9a-f]{40})$/\1/p' <<<"$text"); M_VERSION=$(sed -nE 's/^version=([1-9][0-9]{0,5})$/\1/p' <<<"$text")
     while IFS= read -r line; do if [[ $line =~ ^file=([0-9a-f]{64})\ (.+)$ ]]; then M_SHA[${BASH_REMATCH[2]}]=${BASH_REMATCH[1]}; fi; done <<<"$text"
-    if [ -n "$M_COMMIT" ] && [ -n "$M_VERSION" ] && [ "${#M_SHA[@]}" -eq 11 ]; then
+    if [ -n "$M_COMMIT" ] && [ -n "$M_VERSION" ] && [ "$(head -n 1 <<<"$text")" = 'nawara-core-topology-monitor-manifest v2' ] && [ "${#M_SHA[@]}" -eq "$(wc -w <<<"$SCRIPTS verify-topology.sh $UNITS")" ]; then
       ok "manifest: the installed record is signed by $PRINCIPAL (core $M_COMMIT, version $M_VERSION)"; M_OK=1
     else
-      fail "manifest (manifest_invalid): the installed record is signed but not a complete manifest"
+      fail "manifest (manifest_invalid): the installed record is signed but not a complete v2 manifest (an OD-BRK-2b-I v1 record is not upgradable: runbook §2)"
     fi
   else
     fail "manifest (manifest_signature): the installed record does not verify against the installation key"
@@ -132,7 +137,7 @@ exact install-dir "$INSTALL_DIR" d 755
 if [ -d "$INSTALL_DIR" ]; then
   contents=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')
   expected=$(for a in $SCRIPTS verify-topology.sh; do echo "$a"; done | LC_ALL=C sort | tr '\n' ' ')
-  if [ "$contents" = "$expected" ]; then ok "install-dir: holds exactly the seven signed files"; else fail "install-dir (unexpected_file): it must hold exactly the signed files (found: ${contents:-nothing})"; fi
+  if [ "$contents" = "$expected" ]; then ok "install-dir: holds exactly the signed files"; else fail "install-dir (unexpected_file): it must hold exactly the signed files (found: ${contents:-nothing})"; fi
 fi
 artifact() { # artifact <name> <path> <mode>
   exact "artifact $1" "$2" f "$3"
@@ -154,6 +159,23 @@ for u in nawara-core-topology-monitor.service nawara-core-topology-watchdog.serv
     if [ -z "$missing" ]; then ok "hardening: $u keeps its directives and runs as root"; else fail "hardening (unit_hardening): $u lacks:$missing"; fi
   fi
 done
+# The carrier (OD-BRK-2b-A): no capability, no broker path, no Auth carrier path, no environment, credentials only as systemd credentials,
+# and no write access beyond its own state directory.
+u=nawara-core-topology-alert.service
+if [ -f "$UNIT_DIR/$u" ]; then
+  missing=''
+  for d in 'NoNewPrivileges=yes' 'ProtectSystem=strict' 'ProtectHome=yes' 'CapabilityBoundingSet=' 'Type=oneshot' 'PrivateDevices=yes' \
+    'ExecStart=/usr/local/libexec/nawara-core-topology/topology-alert-carrier.sh' 'StateDirectory=nawara-core-topology-alert' \
+    'InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core' \
+    'InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert' 'InaccessiblePaths=-/var/lib/nawara-core-topology-monitor/recovery'; do
+    grep -qxF -- "$d" "$UNIT_DIR/$u" || missing+=" $d"
+  done
+  for c in pushover.token pushover.user healthchecks-monitor.url healthchecks-watchdog.url; do
+    grep -qxF -- "LoadCredential=$c:/etc/nawara-core-topology-alert/$c" "$UNIT_DIR/$u" || missing+=" LoadCredential=$c"
+  done
+  if grep -qE '^(User|DynamicUser|Group|ReadWritePaths|Environment|EnvironmentFile|PassEnvironment|SupplementaryGroups|AmbientCapabilities=.)' -- "$UNIT_DIR/$u"; then missing+=' (an identity, a writable path, an environment or a capability it must not have)'; fi
+  if [ -z "$missing" ]; then ok "hardening: $u is isolated from the broker and the Auth carrier, with credentials only as systemd credentials"; else fail "hardening (unit_hardening): $u lacks:$missing"; fi
+fi
 overrides=''
 for d in $UNIT_SEARCH; do
   for u in $UNITS; do
@@ -164,8 +186,9 @@ for d in $UNIT_SEARCH; do
   done
 done
 if [ -z "$overrides" ]; then ok "overrides: no drop-in or same-named unit in any systemd unit directory"; else fail "overrides (unit_override): systemd would also read:$overrides"; fi
+listed() { local t; for t in $ENABLED; do [[ $1 == *",$t,"* ]] || return 1; done; }   # every enabled timer is in the signed list
 ENABLED=''
-for u in nawara-core-topology-monitor.timer nawara-core-topology-watchdog.timer; do
+for u in nawara-core-topology-monitor.timer nawara-core-topology-watchdog.timer nawara-core-topology-alert.timer; do
   st=$("$SYSTEMCTL" is-enabled "$u" 2>/dev/null || true)
   case "$st" in
     enabled | enabled-runtime) ENABLED+=" $u" ;;
@@ -180,10 +203,11 @@ else
   A="$INSTALL_STATE/activation"
   if [ "$TRUST_OK" = 1 ] && [ "$M_OK" = 1 ] && node_ok "$A" f 600 && node_ok "$A.sig" f 600 \
     && atext=$(cat -- "$A"; printf x) && atext=${atext%x} && [[ $atext =~ $ACTIVATION_RE ]] && [ "${BASH_REMATCH[1]}" = "$M_COMMIT" ] && [ "${BASH_REMATCH[2]}" = "$M_VERSION" ] \
+    && listed ",${BASH_REMATCH[3]}," \
     && env -i PATH="$SAFE_PATH" timeout 10 ssh-keygen -Y verify -f "$INSTALL_TRUST" -I "$PRINCIPAL" -n "$INSTALL_NAMESPACE" -s "$A.sig" <"$A" >/dev/null 2>&1; then
     ok "enablement:$ENABLED enabled under a signed activation authorization for version $M_VERSION"
   else
-    fail "enablement (unauthorized_activation):$ENABLED enabled without a signed activation authorization for the installed version"
+    fail "enablement (unauthorized_activation):$ENABLED enabled without a signed activation authorization for the installed version that lists it"
   fi
 fi
 
@@ -229,7 +253,33 @@ else
   info "recovery key: not installed (recovery is impossible until the separately authorized key-lifecycle operation)"
 fi
 
-# 6. The optional trigger: its exact sudoers rule and its forced-command key (absent = not configured, never verified).
+# 6. The external alert carrier's configuration (OD-BRK-2b-A; absent = not configured: no external alert, no heartbeat).
+if [ -e "$CARRIER_ETC" ] || [ -L "$CARRIER_ETC" ]; then
+  ancestors "$CARRIER_ETC/x"
+  exact carrier-credentials "$CARRIER_ETC" d 700
+  for c in pushover.token pushover.user healthchecks-monitor.url healthchecks-watchdog.url; do
+    f="$CARRIER_ETC/$c"
+    if [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %h -- "$f")" = 1 ] && [ "$(stat -c %u:%g -- "$f")" = "$OWNER_UID:$OWNER_GID" ] && [[ $(stat -c %a -- "$f") =~ ^[46]00$ ]]; then
+      ok "carrier credential $c: root-only (value not shown)"
+    else
+      fail "carrier credential (credential_unsafe): $f must be a regular root-owned file, mode 0400 or 0600, one link, no symbolic link"
+    fi
+  done
+  tok=$(head -n 1 -- "$CARRIER_ETC/pushover.token" 2>/dev/null || true); usr=$(head -n 1 -- "$CARRIER_ETC/pushover.user" 2>/dev/null || true)
+  hm=$(head -n 1 -- "$CARRIER_ETC/healthchecks-monitor.url" 2>/dev/null || true); hw=$(head -n 1 -- "$CARRIER_ETC/healthchecks-watchdog.url" 2>/dev/null || true)
+  if [[ $tok =~ ^[A-Za-z0-9]{30}$ ]] && [[ $usr =~ ^[A-Za-z0-9]{30}$ ]]; then ok "carrier credential: the Pushover token and user key have the provider's form"; else fail "carrier credential (credential_format): the Pushover token or user key is not 30 characters [A-Za-z0-9] (value not shown)"; fi
+  if [[ $hm =~ $HC_URL_RE ]] && [[ $hw =~ $HC_URL_RE ]]; then
+    if [ "$hm" != "$hw" ]; then ok "carrier heartbeats: two different Healthchecks.io checks (the monitor's and the watchdog's)"; else fail "carrier heartbeats (shared_check): the monitor and the watchdog must use two different checks"; fi
+  else
+    fail "carrier credential (credential_format): a Healthchecks.io ping URL is not an https://hc-ping.com success URL (value not shown)"
+  fi
+  unset tok usr hm hw
+else
+  info "carrier: not configured ($CARRIER_ETC absent: no external alert and no heartbeat leaves the host)"
+fi
+if [ -e "$CARRIER_DIR" ] || [ -L "$CARRIER_DIR" ]; then exact carrier-state "$CARRIER_DIR" d 700; fi
+
+# 7. The optional trigger: its exact sudoers rule and its forced-command key (absent = not configured, never verified).
 if [ -e "$TRIGGER_SUDOERS" ] || [ -L "$TRIGGER_SUDOERS" ]; then
   exact trigger-sudoers "$TRIGGER_SUDOERS" f 440
   rule=$(grep -vE '^[[:space:]]*(#|$)' -- "$TRIGGER_SUDOERS" 2>/dev/null || true)
