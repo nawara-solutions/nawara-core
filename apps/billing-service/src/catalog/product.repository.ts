@@ -1,7 +1,7 @@
 import { BillingAudit, sellerOrganization } from '../audit/billing-audit.js';
 import { actorOf, requestTransitionContext } from '../domain/actors.js';
 import { Injectable } from '@nestjs/common';
-import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
+import { DbService, isUniqueViolation, pgConstraint, type Queryable } from '@nawara/service-kit';
 import type { Caller } from '../domain/actors.js';
 import { billingError, notFound } from '../domain/errors.js';
 import type { NormalisedCreateProductInput } from '../domain/product-input.js';
@@ -44,6 +44,8 @@ export class ProductRepository {
         await this.audit.record(q, 'product.created', { organizationId: sellerOrganization(product), resource: { type: 'product', id: product.id } }, requestTransitionContext({ type: 'service', id: producer }));
         return { product, changed: true };
       } catch (e) {
+        // Core V2 S3d (register BIL-01): a NEW subscription product's Platform must be configured (the 0023 guard; a replay never reaches it)
+        if (pgConstraint(e) === 'product_platform_configured') throw billingError(409, 'platform_not_configured', BILLING_MESSAGES.platformNotConfigured);
         if (!isUniqueViolation(e, 'product_code_unique')) throw e;
         await q.query('ROLLBACK TO SAVEPOINT create_product');
         return this.replayCreate(q, e, input);

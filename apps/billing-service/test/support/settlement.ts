@@ -14,6 +14,25 @@ const PRODUCER = 'test-producer';
 const SELLER = { type: 'company', id: 'nawara-test-seller' };
 const PAYER = { type: 'user', id: 'subscription-payer' };
 
+/** A test Company owning every configured test Platform (a fixture: production takes it from Auth, never from a request). */
+export const TEST_COMPANY = 'cccccccc-0000-4000-8000-00000000c0de';
+const TEST_OWNER = 'cccccccc-0000-4000-8000-0000000000aa';
+
+/**
+ * Core V2 S3d: configures a test Platform (`billing_platform`, BIL-01) directly, as the Owner route would after Auth's checks. A new
+ * subscription product requires it. Idempotent: an already configured Platform is left as it is.
+ */
+export async function configurePlatform(
+  db: { query: (text: string, params?: unknown[]) => Promise<unknown> },
+  platformId: string,
+  currency = 'TND',
+): Promise<void> {
+  await db.query(
+    `INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES ($1, $2, $3, $4) ON CONFLICT ("platformId") DO NOTHING`,
+    [platformId, TEST_COMPANY, currency, TEST_OWNER],
+  );
+}
+
 /**
  * A test subscription product: an Organization subscription (S3a target, on SUBSCRIPTION_PLATFORM), sold by the company test seller,
  * with one recurring price. The only kind of product whose settlement can reach an Organization Subscription (S3a / S3b).
@@ -22,6 +41,7 @@ export async function subscriptionPrice(
   db: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, any>> }> },
   o: { unit?: number; intervalUnit?: string; intervalCount?: number; code?: string } = {},
 ): Promise<{ productId: string; priceId: string }> {
+  await configurePlatform(db, SUBSCRIPTION_PLATFORM);
   const productId = (await db.query(
     `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId")
      VALUES ($1, $2, $3, $4, 'Plan', 'active', 'organization', $5) RETURNING id`,
@@ -42,6 +62,7 @@ export async function personalPrice(
   db: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, any>> }> },
   o: { platformId?: string; intervalUnit?: string; intervalCount?: number; productId?: string } = {},
 ): Promise<{ productId: string; priceId: string }> {
+  if (!o.productId) await configurePlatform(db, o.platformId ?? SUBSCRIPTION_PLATFORM);
   const productId = o.productId ?? (await db.query(
     `INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId")
      VALUES ($1, $2, $3, $4, 'Personal plan', 'active', 'personal', $5) RETURNING id`,

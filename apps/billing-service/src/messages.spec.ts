@@ -76,6 +76,9 @@ describe('BILLING_MESSAGES', () => {
       [en('platformNotPermitted'), 'This Platform is not permitted for the caller.'],
       [en('subscriptionPriceNotRecurring'), 'A subscription product has recurring prices only.'],
       [en('invoiceRoutingInvalid', { reason: 'organization_payer' }), 'The invoice cannot be routed (organization_payer).'],
+      [en('platformNotConfigured'), 'The Platform has no billing configuration.'], // Core V2 S3d
+      [en('billingPlatformExists'), 'This Platform already has a different billing configuration.'],
+      [en('authorityUnverified'), 'The caller could not be verified. Nothing was changed.'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);

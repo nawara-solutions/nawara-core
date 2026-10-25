@@ -282,4 +282,20 @@ export const BILLING_MESSAGES = defineMessages({
     fr: 'La facture ne peut pas être acheminée ({reason}).',
     ar: 'لا يمكن توجيه الفاتورة ({reason}).',
   },
+  // Core V2 S3d: the Platform commercial configuration (register BIL-01)
+  platformNotConfigured: {
+    en: 'The Platform has no billing configuration.',
+    fr: "La plateforme n'a pas de configuration de facturation.",
+    ar: 'لا تملك المنصة إعدادات فوترة.',
+  },
+  billingPlatformExists: {
+    en: 'This Platform already has a different billing configuration.',
+    fr: 'Cette plateforme a déjà une configuration de facturation différente.',
+    ar: 'تملك هذه المنصة بالفعل إعدادات فوترة مختلفة.',
+  },
+  authorityUnverified: {
+    en: 'The caller could not be verified. Nothing was changed.',
+    fr: "L'appelant n'a pas pu être vérifié. Rien n'a été modifié.",
+    ar: 'تعذّر التحقق من الجهة المستدعية. لم يتم تغيير أي شيء.',
+  },
 });

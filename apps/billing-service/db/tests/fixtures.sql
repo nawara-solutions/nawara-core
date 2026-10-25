@@ -2,6 +2,10 @@
 -- races (which need separate connections) can use them. Every fixture writes its history rows, so it commits cleanly through the
 -- deferred totals and history constraint triggers.
 
+-- Core V2 S3d: the Platform of every fixture subscription product is configured (BIL-01), as a new subscription product requires.
+INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy")
+  VALUES ('00000000-0000-4000-8000-00000000f1a7', '00000000-0000-4000-8000-00000000c0de', 'TND', '00000000-0000-4000-8000-0000000000aa');
+
 CREATE FUNCTION t_hist(etype text, eid uuid, from_s text, to_s text, rev int) RETURNS void LANGUAGE sql AS $$
   INSERT INTO billing_transition ("entityType", "entityId", "fromStatus", "toStatus", revision, "actorType", "causeType")
   VALUES (etype, eid, from_s, to_s, rev, 'system', 'request');

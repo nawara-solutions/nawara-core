@@ -28,7 +28,7 @@ export class ProductsController {
   @ApiResponse({ status: 400, description: 'invalid_product_request' })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted / organization_not_permitted (unknown or outside the caller\'s Platform scope: one answer) / platform_not_permitted (platformId outside the caller\'s Platforms)' })
-  @ApiResponse({ status: 409, description: 'product_conflict: same (seller, code), different content (subscriptionTarget and platformId included)' })
+  @ApiResponse({ status: 409, description: 'product_conflict: same (seller, code), different content (subscriptionTarget and platformId included) | platform_not_configured: a new subscription product\'s Platform has no billing configuration (Core V2 S3d)' })
   @ApiResponse({ status: 503, description: 'hierarchy_unavailable: the organization could not be verified; nothing was written' })
   async create(@CallerService() producer: string, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const input = normaliseCreateProductInput(body);

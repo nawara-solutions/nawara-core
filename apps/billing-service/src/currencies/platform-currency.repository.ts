@@ -15,6 +15,9 @@ export interface PlatformCurrencyRow {
 const CURRENCY_CODE = /^[A-Z]{3}$/;
 
 /**
+ * SUPERSEDED for Core V2 (the Owner's S3d decision on OD-02): a Platform's one currency is `billing_platform` (0023, register BIL-01). This
+ * table and its data are kept untouched; nothing new reads or writes them.
+ *
  * The Platform-level currency configuration (foundation only, SDD B-036). It answers ONE question, "may this Platform use this currency for
  * NEW billing work?", and stores which currencies a Platform has enabled. It is not called by any invoice operation yet: how an invoice
  * determines its Platform, who may administer this set, a default currency and an Organization-level restriction are undecided.

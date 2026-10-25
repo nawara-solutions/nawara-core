@@ -1,7 +1,7 @@
 import { BillingAudit, sellerOrganization } from '../audit/billing-audit.js';
 import { actorOf, requestTransitionContext } from '../domain/actors.js';
 import { Injectable } from '@nestjs/common';
-import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
+import { DbService, isUniqueViolation, pgConstraint, type Queryable } from '@nawara/service-kit';
 import type { Caller } from '../domain/actors.js';
 import { billingError, notFound } from '../domain/errors.js';
 import { catalogRelationTo } from '../domain/relations.js';
@@ -52,6 +52,8 @@ export class PriceRepository {
         await this.audit.record(q, 'price.created', { organizationId: sellerOrganization(product), resource: { type: 'price', id: price.id }, changes: { product_id: product.id } }, requestTransitionContext(actorOf(caller))); // Stage 18.7.2 (G4)
         return { price, changed: true };
       } catch (e) {
+        // Core V2 S3d (register BIL-01): a subscription price is in its configured Platform's one currency (the 0023 guard)
+        if (pgConstraint(e) === 'price_platform_currency') throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotEnabledForPlatform);
         if (!isUniqueViolation(e, 'price_reference_unique')) throw e;
         const { rows } = await q.query<PriceRow>(`SELECT * FROM price WHERE "productId" = $1 AND "clientReference" = $2`, [input.productId, input.clientReference]);
         const existing = rows[0];

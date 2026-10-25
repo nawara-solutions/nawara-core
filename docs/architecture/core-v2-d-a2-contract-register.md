@@ -261,6 +261,7 @@ is preserved as evidence even when its commercial processing fails.
 | C. Errors, idempotency | class R; an unavailable Auth gives `503` at the consumer with no mutation |
 | D. Existing | `apps/auth-service/src/auth/auth.controller.ts`, `apps/auth-service/src/platform/platform.controller.ts` |
 | E. Open, gates | OD-07 (which membership facts identify a school actor). Stage S3d, S5. Confidence H |
+| F. S3d (Owner, 2026-10-26) | `billing_platform` written only after the live checks (BIL-01 F). Existing user-token routes keep the live `/auth/me` check per request (regression-tested: no cache; an inactive or revoked user `401`; Auth down `503`). No school membership authority added: **OD-07 deferred to S5** |
 
 #### AUTH-08 Organization-administrator grant facts (R-6a)
 
@@ -309,6 +310,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | PROPOSED `billing_platform_exists` (409); `503` when Auth is unavailable. Class N; guard primary key `platformId`; `companyId` immutable (trigger) |
 | D. Existing | Billing has a Platform currency configuration (`apps/billing-service/db/migrations/0009_platform_currency.sql`) |
 | E. Open, gates | OD-02 (relation to the existing configuration), Q11 (step-up). Stage S3d. Confidence M |
+| F. S3d decisions (Owner, 2026-10-26) | **OD-02 resolved:** `billing_platform` is the authoritative Core V2 Platform currency configuration (the existing `currency` reference list); `platform_currency` (0009) is superseded for Core V2, kept with its data, no new callers, no destructive migration. **Q11 for BIL-01:** no step-up in S3d. **Route:** `POST` and `GET /billing/admin/platforms/:platformId` approved; `{currency}` → `201 {platformId, companyId, currency, createdAt}`; identical repeat `200`; another currency `409 billing_platform_exists`, only ever for the verified Owner's own Platform (an unknown or another Company's Platform is the collapsed `404`). **Authority:** live `/auth/grants` (Owner, their Company) then `/auth/platform-access/:platformId`; no new Auth route, purpose or permission. **Enforcement:** a new `organization` / `personal` product requires its Platform's row (`platform_not_configured`, 409) and its prices that currency; no backfill. Broader catalog rules: S3g. IMPLEMENTED S3d |
 
 #### BIL-02 Owner product catalog
 
@@ -962,7 +964,7 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 | Q11 | Step-up purposes beyond `refund.authorize` and those frozen by S0: which Owner actions require a step-up, and the purpose names | AUTH-04 and every Owner command |
 | Q12 | Effect of Company lifecycle state (ADR-0060) on receipt issue and consumption | AUTH-01, AUTH-02 |
 | OD-01 | Meaning of "eligible member" for direct purchase (FC-12, [OD] D2) | BIL-10 |
-| OD-02 | Relation of `billing_platform` to the existing Platform currency configuration (`0009_platform_currency.sql`) | BIL-01 |
+| OD-02 | Relation of `billing_platform` to the existing Platform currency configuration (`0009_platform_currency.sql`). **Resolved (Owner, S3d, 2026-10-26):** `billing_platform` is authoritative; `platform_currency` superseded for Core V2, kept untouched (BIL-01 F) | BIL-01 |
 | OD-03 | Fee cap, delegation and proposal model: scope (Platform or Organization), units, limits | BIL-04 to BIL-07 |
 | OD-04 | How an assistance request selects and freezes its approved school fee | BIL-13, BIL-19 |
 | OD-05 | Premium catalog products, plan durations and prices (the catalog gate, S0 §6) | BIL-02, BIL-03 configuration |
