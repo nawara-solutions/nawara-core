@@ -4,10 +4,18 @@
  * is repeated here. `category` is not a payload field either: the catalog owns it.
  */
 
-/** The contract version this package implements; it is the kit envelope `version` of every audit event. */
+/**
+ * The contract version producers emit (the kit envelope `version` the writer stamps). Producers stay on version 1 until a producer and
+ * its actions are moved to version 2 by a separately approved catalog change (Core V2 S2-Audit; ADR-0069 decision 2).
+ */
 export const AUDIT_CONTRACT_VERSION = 1;
-/** The envelope versions a consumer accepts. An event with any other version is refused (`unsupported_version`), never reinterpreted. */
-export const SUPPORTED_AUDIT_VERSIONS: readonly number[] = Object.freeze([1]);
+/** Core V2 S2-Audit.1 (ADR-0069 decision 2): the additive version 2 of the envelope. */
+export const AUDIT_CONTRACT_V2 = 2;
+/**
+ * The envelope versions a consumer accepts: 1 and 2 (ADR-0069 decision 2). An event with any other version is refused
+ * (`unsupported_version`), never reinterpreted; a version-1 event for an action introduced in version 2 is refused too (`since`).
+ */
+export const SUPPORTED_AUDIT_VERSIONS: readonly number[] = Object.freeze([1, AUDIT_CONTRACT_V2]);
 
 /** A52: the four frozen categories. */
 export const AUDIT_CATEGORIES = ['security', 'business', 'commercial', 'administrative'] as const;
@@ -62,4 +70,14 @@ export interface AuditPayload {
   changes?: Readonly<Record<string, ChangeValue>>;
   /** The `eventId` of the event that caused this action, when a consumer-driven step records it. */
   causationId?: string;
+  // ---- version 2 only (Core V2 S2-Audit.1; ADR-0069 decision 2; register AUD-01). Each is optional and absent (never null) when unused.
+  /**
+   * The Company the producer recorded on the affected resource. Accepted only for an action whose catalog entry allows a Company
+   * assertion (`scope.company`); stored as asserted. It becomes TRUSTED scope only when the producer's identity is broker-verified.
+   */
+  companyId?: string;
+  /** The Platform the producer recorded on the affected resource; as `companyId`, under `scope.platform`. */
+  platformId?: string;
+  /** Whether the fact happened in live mode (ADR-0069 decision 7; production Audit refuses `false`). */
+  liveMode?: boolean;
 }

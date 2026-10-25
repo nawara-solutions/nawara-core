@@ -53,7 +53,7 @@ describe('validateAuditEvent (consumer side, the input of 18.5)', () => {
   });
 
   it('refuses an unsupported or malformed version (never read as version 1)', () => {
-    for (const version of [0, 2, 1000, 1.5, '1', null, undefined]) {
+    for (const version of [0, 3, 1000, 1.5, '1', '2', null, undefined]) { // 1 and 2 are supported (S2-Audit.1)
       expect(() => validateAuditEvent(envelope('file.deleted', { headers: { version } })), String(version)).toThrow('unsupported_version');
     }
   });

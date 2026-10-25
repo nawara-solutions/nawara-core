@@ -1,5 +1,5 @@
 import { catalogEntry, type CatalogEntry, type ChangeSpec } from './catalog.js';
-import { AUDIT_OUTCOMES, USER_KINDS, type AuditActor, type AuditPayload, type AuditReference, type ChangeScalar, type ChangeValue } from './contract.js';
+import { AUDIT_CONTRACT_V2, AUDIT_OUTCOMES, USER_KINDS, type AuditActor, type AuditPayload, type AuditReference, type ChangeScalar, type ChangeValue } from './contract.js';
 import { refuse } from './errors.js';
 import {
   CHANGE_KEY, CODE_VALUE, EVENT_NAME, MAX_ACTION_LENGTH, MAX_CHANGE_INTEGER, MAX_CHANGE_KEYS, MAX_CHANGES_JSONB_BYTES, MAX_PAYLOAD_BYTES,
@@ -10,6 +10,13 @@ import { isSecretShaped, isSensitiveKey } from './sensitive.js';
 type Rec = Record<string, unknown>;
 
 export const TOP_LEVEL = new Set(['action', 'actor', 'organizationId', 'resource', 'subject', 'outcome', 'changes', 'causationId']);
+/**
+ * Core V2 S2-Audit.1 (ADR-0069 decision 2): the version-2 fields this slice implements, accepted only in a version-2 event (in a version-1
+ * event they are `unknown_field`, as before). The other frozen version-2 names (`requestedBy`, `approvedBy`, `verifiedBy`, `via`) have no
+ * approved encoding or per-action rule yet: they stay `unknown_field` in every version until that decision is made (never guessed).
+ */
+export const V2_FIELDS: ReadonlySet<string> = new Set(['companyId', 'platformId', 'liveMode']);
+const TOP_LEVEL_V2: ReadonlySet<string> = new Set([...TOP_LEVEL, ...V2_FIELDS]);
 /**
  * No level of a valid payload has more than 8 keys. The layer-2 scan inspects up to twice that (so a credential-named key added to a
  * complete payload is still reported as `sensitive_field`); a wider object is refused before any per-key work.
@@ -138,6 +145,30 @@ function organizationOf(o: Rec, entry: Readonly<CatalogEntry>, resource: AuditRe
   return org;
 }
 
+/**
+ * Core V2 S2-Audit.1 (ADR-0069 decisions 2 and 4): the Company and Platform a version-2 event asserts, under the action's catalog
+ * `scope` rule. Refused (`invalid_scope`): a malformed id, an assertion the entry does not allow, a missing required one, and a
+ * contradiction the event itself proves (the resource IS the Company / Platform under another id; one id used for two scope levels).
+ * Nothing is inferred: no Company from a Platform, no Platform or Company from an Organization.
+ */
+function scopeOf(o: Rec, entry: Readonly<CatalogEntry>, resource: AuditReference, organizationId: string | null): { companyId?: string; platformId?: string } {
+  const rule = entry.scope ?? {};
+  const out: { companyId?: string; platformId?: string } = {};
+  for (const [field, level, kind] of [['companyId', rule.company, 'company'], ['platformId', rule.platform, 'platform']] as const) {
+    if (!has(o, field)) {
+      if (level === 'required') refuse('invalid_scope');
+      continue;
+    }
+    const v = o[field];
+    if (level === undefined || typeof v !== 'string' || !UUID.test(v)) refuse('invalid_scope');
+    if (resource.type === kind && resource.id !== v) refuse('invalid_scope');
+    out[field] = v;
+  }
+  const ids = [out.companyId, out.platformId, organizationId].filter((x): x is string => typeof x === 'string');
+  if (new Set(ids).size !== ids.length) refuse('invalid_scope');
+  return out;
+}
+
 function scalarOf(v: unknown, spec: ChangeSpec): ChangeScalar {
   switch (spec.type) {
     case 'code':
@@ -230,15 +261,26 @@ function deepFreeze<T>(v: T): T {
  * What it cannot prove (the producer's responsibility, ADR-0049 T2–T4): that the action really happened, that the actor was really
  * authorized, that `organizationId` really is the one recorded on the resource.
  */
-export function validateAuditPayload(input: unknown, sourceService: string): AuditPayload {
+export function validateAuditPayload(input: unknown, sourceService: string, version: number = 1): AuditPayload {
+  return validateAuditPayloadWith(catalogEntry, input, sourceService, version);
+}
+
+/**
+ * The validator over a given catalog lookup. Production code always uses `validateAuditPayload` (the one Core catalog); this form exists
+ * so the contract's own tests can exercise rules no catalog entry uses yet (a version-2 `scope` rule). Not exported from the package.
+ */
+export function validateAuditPayloadWith(
+  entryOf: (action: string) => Readonly<CatalogEntry> | undefined, input: unknown, sourceService: string, version: number,
+): AuditPayload {
   const o = plainRecord(input);
   if (!o) refuse('invalid_payload');
   scan(o, 0);
-  for (const k of Object.keys(o)) if (!TOP_LEVEL.has(k)) refuse('unknown_field');
+  const allowed = version >= AUDIT_CONTRACT_V2 ? TOP_LEVEL_V2 : TOP_LEVEL;
+  for (const k of Object.keys(o)) if (!allowed.has(k)) refuse('unknown_field');
 
   const action = o.action;
   if (typeof action !== 'string' || action.length > MAX_ACTION_LENGTH || !EVENT_NAME.test(action)) refuse('unknown_action');
-  const entry = catalogEntry(action);
+  const entry = entryOf(action);
   if (!entry) refuse('unknown_action');
   if (typeof sourceService !== 'string' || !SERVICE_NAME.test(sourceService) || entry.producer !== sourceService) refuse('producer_not_admitted');
 
@@ -267,6 +309,14 @@ export function validateAuditPayload(input: unknown, sourceService: string): Aud
     causationId = o.causationId;
   }
 
+  // version 2 only (a version-1 payload cannot hold these keys: refused above)
+  const scope = scopeOf(o, entry, resource, organizationId);
+  let liveMode: boolean | undefined;
+  if (has(o, 'liveMode')) {
+    if (typeof o.liveMode !== 'boolean') refuse('invalid_live_mode');
+    liveMode = o.liveMode;
+  }
+
   const payload: AuditPayload = {
     action,
     actor,
@@ -276,6 +326,9 @@ export function validateAuditPayload(input: unknown, sourceService: string): Aud
     outcome: outcome as AuditPayload['outcome'],
     ...(changes ? { changes } : {}),
     ...(causationId ? { causationId } : {}),
+    ...(scope.companyId ? { companyId: scope.companyId } : {}),
+    ...(scope.platformId ? { platformId: scope.platformId } : {}),
+    ...(liveMode !== undefined ? { liveMode } : {}),
   };
   // Every string in the canonical payload is ASCII (the grammars above), so its JSON length is its byte length.
   if (JSON.stringify(payload).length > MAX_PAYLOAD_BYTES) refuse('payload_too_large');

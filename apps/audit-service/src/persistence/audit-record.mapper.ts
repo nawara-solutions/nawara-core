@@ -1,5 +1,5 @@
 import type { ValidatedAuditEvent } from '@nawara/audit-contract/consumer';
-import type { NewAuditRecord } from './audit-record.types.js';
+import type { DeliveryAssessment, NewAuditRecord } from './audit-record.types.js';
 
 /**
  * THE one mapping from a validated audit event (the shared contract's `validateAuditEvent` output) to the repository's input (Stage 18.4;
@@ -7,7 +7,7 @@ import type { NewAuditRecord } from './audit-record.types.js';
  * derived, defaulted or rewritten here. Envelope facts (identity, source, version, time, correlation) come from the envelope; `category`
  * from the catalog; everything else from the canonical payload. `recordedAt` is not mapped: the database sets it.
  */
-export function toNewAuditRecord(event: ValidatedAuditEvent): NewAuditRecord {
+export function toNewAuditRecord(event: ValidatedAuditEvent, delivery?: DeliveryAssessment): NewAuditRecord {
   const p = event.payload;
   return {
     eventId: event.eventId,
@@ -24,5 +24,10 @@ export function toNewAuditRecord(event: ValidatedAuditEvent): NewAuditRecord {
     correlationId: event.correlationId,
     causationId: p.causationId ?? null,
     occurredAt: event.occurredAt,
+    // Core V2 S2-Audit.1: version-2 facts exactly as validated (absent in a version-1 payload), and the delivery's assessment
+    companyId: p.companyId ?? null,
+    platformId: p.platformId ?? null,
+    liveMode: p.liveMode ?? null,
+    delivery: delivery ? { producerIdentityVerified: delivery.producerIdentityVerified, replayed: delivery.replayed } : null,
   };
 }

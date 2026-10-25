@@ -11,7 +11,8 @@ import { TRUST_REFUSALS } from './trust-policy.js';
 // (`transaction_required` is the producer writer's and never occurs here; it stays in the set only because the type is the contract's.)
 // Core V2 S1b-2: plus the admission refusals that are not contract codes (`noncanonical_body`, `confidentiality_screen`, `admission_error`).
 // Core V2 S1e-3: plus the handler's own trust refusals (the kit's `untrusted_<basis>` refusals are counted as broker signals).
-export const INGESTION_REFUSALS = [...AUDIT_REFUSALS, 'event_id_conflict', 'invalid_record', ...ADMISSION_REFUSALS, ...TRUST_REFUSALS] as const;
+// Core V2 S2-Audit.1: plus `non_live_record` (ADR-0069 decision 7: production refuses `liveMode = false`).
+export const INGESTION_REFUSALS = [...AUDIT_REFUSALS, 'event_id_conflict', 'invalid_record', 'non_live_record', ...ADMISSION_REFUSALS, ...TRUST_REFUSALS] as const;
 export type IngestionRefusal = (typeof INGESTION_REFUSALS)[number];
 
 const OUTCOMES = ['received', 'persisted', 'duplicate', 'refused', 'transient_failure', 'clock_skew_future'] as const;

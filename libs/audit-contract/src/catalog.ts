@@ -42,6 +42,18 @@ export type OrganizationRule = 'required' | 'none' | 'optional' | 'self' | 'reso
 
 export type SubjectRule = { rule: 'forbidden' } | { rule: 'required' | 'optional'; type: string };
 
+/**
+ * Core V2 S2-Audit.1 (ADR-0069 decisions 2 and 4): whether the action's producer may assert a Company and / or a Platform in a version-2
+ * event (`required`: always; `optional`: when recorded on the resource). Absent = the field is refused for the action. Granting it to an
+ * action is a reviewed catalog decision (like adding the action itself); in this slice NO entry grants it, so no production event can
+ * assert scope yet. An assertion becomes trusted scope only when the producer's identity is broker-verified (decision 4); ownership is
+ * never inferred.
+ */
+export interface ScopeRule {
+  company?: 'required' | 'optional';
+  platform?: 'required' | 'optional';
+}
+
 export interface ActorRule {
   /** Allowed user kinds when a verified user acts; absent = a user actor is not allowed. */
   user?: readonly UserKind[];
@@ -64,6 +76,8 @@ export interface CatalogEntry {
   subject: SubjectRule;
   outcomes: readonly AuditOutcome[];
   changes: Readonly<Record<string, ChangeSpec>>;
+  /** Core V2 S2-Audit.1: the scope a version-2 event of this action may assert. Absent in every entry today (see `ScopeRule`). */
+  scope?: Readonly<ScopeRule>;
   /** Why the action has central accountability value (A7); shown in the catalog document. */
   purpose: string;
 }
