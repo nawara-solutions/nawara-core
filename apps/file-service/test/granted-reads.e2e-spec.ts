@@ -6,7 +6,6 @@ import { validateAuditPayload } from '@nawara/audit-contract';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { fileMigrationsDir } from '../src/app.module.js';
-import { TicketRepository } from '../src/persistence/ticket.repository.js';
 import { ALL_LOGS, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { Sql } from './support/fixtures.js';
@@ -353,21 +352,36 @@ describeWithEnv('granted reads and grant tickets (real PostgreSQL)', ['TEST_DATA
   // ─────────────────────────────────────────────────────────────────────────────────────────────── concurrency
 
   describe('concurrency', () => {
-    it('a deletion whose transaction began before a ticket it waited for still revokes it (the stamp never precedes the ticket)', async () => {
+    it('a deletion that waited for the file row still revokes a ticket created while it waited (the stamp never precedes the ticket)', async () => {
       const g = await granted();
-      const early = new pg.Client({ connectionString: db.url });
-      await early.connect();
+      const holder = new pg.Client({ connectionString: db.url });
+      await holder.connect();
       try {
-        await early.query('BEGIN'); // now() is fixed here, before the ticket exists (as for a deletion waiting on the ticket's FOR SHARE)
-        await early.query('SELECT now()');
-        await new Promise((r) => setTimeout(r, 20));
-        const tk = await ticket(g);
+        await holder.query('BEGIN');
+        await holder.query('SELECT 1 FROM file WHERE id = $1 FOR SHARE', [g.fileId]); // a read holding the file, as an authorization does
+        const deletion = request(server()).delete(`/file/files/${g.fileId}`).set(auth(drive)).then((r) => r); // begins, then waits for the row
+        await new Promise((r) => setTimeout(r, 200));
+        const tk = await ticket(g); // a share lock is still granted: created AFTER the deletion's transaction began
         expect(tk.status).toBe(201);
-        expect(await t.app.get(TicketRepository).revokeAllForFile(early, g.fileId)).toBe(1); // was a CHECK violation (revokedAt < createdAt)
-        await early.query('COMMIT');
+        await holder.query('COMMIT');
+        const d = await deletion;
+        expect(d.status).toBe(202); // was 500: revokedAt = now() < the ticket's createdAt failed its CHECK
+        expect((await s.query<{ revokedAt: Date | null }>('SELECT "revokedAt" FROM file_access_ticket WHERE id = $1', [tk.body.ticketId]))[0]!.revokedAt).not.toBeNull();
         expect(bodyCode(await redeem(tk.body.url as string))).toBe('ticket_invalid');
       } finally {
-        await early.end();
+        await holder.end();
+      }
+    });
+
+    it('content reads and ticket requests racing a deletion: the deletion always succeeds; authorized accesses are recorded, later ones refused', async () => {
+      for (let i = 0; i < 5; i++) {
+        const g = await granted();
+        const results = await Promise.all([content(g), ticket(g), request(server()).delete(`/file/files/${g.fileId}`).set(auth(drive)), meta(g), content(g)]);
+        expect(results[2]!.status).toBe(202);
+        const authorized = results.filter((r, j) => j !== 2 && (r.status === 200 || r.status === 201)).length;
+        expect(results.filter((r, j) => j !== 2 && r.status >= 400).every((r) => r.status === 404)).toBe(true);
+        expect(await accesses(g.grantId)).toHaveLength(authorized);
+        expect((await meta(g)).status).toBe(404);
       }
     });
 
@@ -395,15 +409,6 @@ describeWithEnv('granted reads and grant tickets (real PostgreSQL)', ['TEST_DATA
       const results = await Promise.all(Array.from({ length: 6 }, () => redeem(tk.body.url as string)));
       expect(results.filter((r) => r.status === 200)).toHaveLength(1);
       expect((await accesses(g.grantId)).filter((a) => a === 'ticket_redemption_authorized')).toHaveLength(1);
-    });
-
-    it('content reads and ticket requests racing a deletion: authorized ones are recorded, later ones refused', async () => {
-      const g = await granted();
-      const results = await Promise.all([content(g), ticket(g), request(server()).delete(`/file/files/${g.fileId}`).set(auth(drive)), meta(g), content(g)]);
-      const granted2xx = results.filter((r, i) => i !== 2 && (r.status === 200 || r.status === 201)).length;
-      expect(results.filter((r, i) => i !== 2 && r.status >= 400).every((r) => r.status === 404)).toBe(true);
-      expect(await accesses(g.grantId)).toHaveLength(granted2xx);
-      expect((await meta(g)).status).toBe(404);
     });
   });
 

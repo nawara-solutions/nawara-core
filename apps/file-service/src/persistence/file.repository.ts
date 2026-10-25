@@ -204,7 +204,8 @@ export class FileRepository {
         [id, scope.ownerService, scope.organizationId],
       );
       if (rows[0]) {
-        await q.query(`UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = $1 AND "revokedAt" IS NULL`, [id]);
+        // GREATEST: this transaction began (now()) before it got the file row; a ticket created while it waited is younger than now().
+        await q.query(`UPDATE file_access_ticket SET "revokedAt" = GREATEST(now(), "createdAt") WHERE "fileId" = $1 AND "revokedAt" IS NULL`, [id]);
         // Stage 18.7.4: only this transition (never a repeat) runs `within` — the central audit intent — in the same transaction.
         if (within) await within(q, rows[0]);
         return { kind: 'deleting', file: rows[0] };
@@ -281,7 +282,7 @@ export class FileRepository {
         [limit],
       );
       const ids = rows.map((r) => r.id);
-      if (ids.length > 0) await q.query(`UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = ANY($1::uuid[]) AND "revokedAt" IS NULL`, [ids]);
+      if (ids.length > 0) await q.query(`UPDATE file_access_ticket SET "revokedAt" = GREATEST(now(), "createdAt") WHERE "fileId" = ANY($1::uuid[]) AND "revokedAt" IS NULL`, [ids]);
       return ids;
     });
   }
