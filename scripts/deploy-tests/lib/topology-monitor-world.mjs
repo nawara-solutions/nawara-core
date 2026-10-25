@@ -28,7 +28,7 @@ export function variant(text, pins) {
   let out = text;
   for (const [name, value] of Object.entries(pins)) {
     if ((out.match(new RegExp(`^readonly ${name}=`, 'gm')) ?? []).length !== 1) throw new Error(`pin ${name}: not exactly one line`);
-    out = out.replace(new RegExp(`^readonly ${name}=.*$`, 'm'), `readonly ${name}=${typeof value === 'number' ? value : `'${value}'`}`);
+    out = out.replace(new RegExp(`^readonly ${name}=.*$`, 'm'), () => `readonly ${name}=${typeof value === 'number' ? value : `'${value}'`}`); // a function: no $-patterns
   }
   const rest = (t) => t.split('\n').filter((l) => !Object.keys(pins).some((n) => l.startsWith(`readonly ${n}=`))).join('\n');
   if (rest(out) !== rest(text)) throw new Error('variant changed more than its pins');

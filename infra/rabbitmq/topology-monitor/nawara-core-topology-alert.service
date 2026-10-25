@@ -1,0 +1,59 @@
+# Core V2 OD-BRK-2b-A: ONE cycle of the topology monitor's external alert carrier (docs/runbooks/rabbitmq-topology-containment.md §7):
+# the producers' spool to Pushover, the monitor's and the watchdog's completed runs to their two Healthchecks.io checks. Installed
+# DISABLED by the signed installation; never installed, enabled or started by repository tooling, and never on the containment path.
+#
+# Trust boundary: root, because the producers' spool and records are root-only; WITHOUT any capability, on a read-only file system except
+# its own state directory, and with every path that could reach the broker's administration made inaccessible (the Docker and containerd
+# sockets, the Docker data and the Core checkout holding the broker's credentials). It holds no broker credential, and the Auth carrier's
+# configuration and state are inaccessible to it. Its secrets reach it only as systemd credentials (LoadCredential=), never through the
+# environment, a command line or the journal.
+[Unit]
+Description=Nawara Core: topology monitor external alert carrier (OD-BRK-2b-A), one cycle
+Documentation=file:///opt/nawara-core/docs/runbooks/rabbitmq-topology-containment.md
+# Ordering only: the carrier never starts the network, Docker or the monitor.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/nawara-core-topology/topology-alert-carrier.sh
+# No configuration through the environment: the script uses only its own pinned values and its credential files.
+UnsetEnvironment=SSH_ORIGINAL_COMMAND
+# The provider secrets: root-only files on the host (runbook §7), exposed to this unit only, never shared with the Auth carrier's files.
+LoadCredential=pushover.token:/etc/nawara-core-topology-alert/pushover.token
+LoadCredential=pushover.user:/etc/nawara-core-topology-alert/pushover.user
+LoadCredential=healthchecks-monitor.url:/etc/nawara-core-topology-alert/healthchecks-monitor.url
+LoadCredential=healthchecks-watchdog.url:/etc/nawara-core-topology-alert/healthchecks-watchdog.url
+# Durable delivery state, the queue, the cursor and the ledger: its own directory (mode 0700), kept across restarts and reboots.
+StateDirectory=nawara-core-topology-alert
+StateDirectoryMode=0700
+UMask=0077
+# Bounded: no new delivery after 35 s, each delivery at most 10 s, each check-in at most 7 s; a cycle still alive at 55 s is killed.
+# A killed cycle loses nothing: the queue, the cursor and the ledger are on disk (delivery is at-least-once).
+TimeoutStartSec=55
+# Never the broker's administration, never the Auth carrier.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core
+InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert
+InaccessiblePaths=-/var/lib/nawara-core-topology-monitor/recovery
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The journal receives counts, closed codes and HTTP statuses only (the script prints nothing else).
+StandardOutput=journal
+StandardError=journal

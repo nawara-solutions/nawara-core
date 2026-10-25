@@ -78,7 +78,7 @@ PATH=$SAFE_PATH
 export PATH
 
 usage() { printf '[topology-recovery] REFUSED: %s\nusage: recover-notification-topology.sh (no argument)\n' "$*" >&2; exit 2; }
-stop() { printf '[topology-recovery] REFUSED (%s): %s; containment unchanged\n' "$1" "$2" >&2; exit 1; }
+stop() { alert recovery_refused critical "$1"; printf '[topology-recovery] REFUSED (%s): %s; containment unchanged\n' "$1" "$2" >&2; exit 1; }
 unsafe() { printf '[topology-recovery] REFUSED: %s; containment unchanged\n' "$*" >&2; exit 65; }
 log() { printf '[topology-recovery] %s\n' "$*"; }
 
@@ -158,6 +158,12 @@ record() { # record <kind> <extra json>: the evidence (never required for the de
   printf '%s\n' "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"kind\":\"$1\",\"incident\":\"$INCIDENT\"$2}" >>"$STATE_DIR/evidence.jsonl" 2>/dev/null \
     || log "evidence record unavailable"
 }
+alert() { # alert <kind> <severity> [reason]: a local line for the external carrier (OD-BRK-2b-A); never required for the decision
+  local f="$STATE_DIR/alerts.jsonl"
+  [ ! -L "$f" ] && { [ ! -e "$f" ] || [ -f "$f" ]; } || { log "alert spool unavailable"; return 0; }
+  printf '%s\n' "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$2\",\"kind\":\"$1\",\"incident\":\"$INCIDENT\"${3:+,\"reason\":\"$3\"}}" >>"$f" 2>/dev/null \
+    || log "alert spool unavailable"
+}
 contain_again() { # the SAME incident, contained again (state, binding, latch), after a doubt once the latch was touched
   write_atomic "$STATE_DIR/state" "$(printf 'nawara-core-topology-monitor-state v2\nservice=%s\ncontained=1\nincident=%s\nunknown_streak=0\nlast_result=UNKNOWN\nlast_run=%s\n' "$SERVICE" "$INCIDENT" "$(now)")" 600 || true
   write_atomic "$INCIDENT_FILE" "$(printf 'nawara-core-topology-incident v1\nservice=%s\nincident=%s' "$SERVICE" "$INCIDENT")" 644 || true
@@ -229,6 +235,7 @@ printf 'v1 nonce=%s incident=%s at=%s\n' "$A_NONCE" "$INCIDENT" "$NOW" >>"$CONSU
   || stop consumption_failed "the authorization could not be durably consumed"
 grep -qF " nonce=$A_NONCE incident=$INCIDENT " -- "$CONSUMED" || stop consumption_failed "the consumption could not be read back"
 record recovery_authorized ",\"nonce\":\"$A_NONCE\",\"reason\":\"$A_REASON\",\"issued_at\":$A_ISSUED,\"not_after\":$A_NOT_AFTER,\"signer\":\"$FINGERPRINT\""
+alert recovery_authorized critical
 
 # 7. Clear: the state, then the latch, then the binding (a crash in between leaves a contained latch, or a state the monitor re-contains).
 write_atomic "$STATE_DIR/state" "$(printf 'nawara-core-topology-monitor-state v2\nservice=%s\ncontained=0\nincident=none\nunknown_streak=0\nlast_result=PASS\nlast_run=%s\n' "$SERVICE" "$(now)")" 600 \
@@ -241,11 +248,12 @@ rc=0; line=$(verify_pre_grant) || rc=$?
 if [ "$rc" -ne 0 ] || ! latch_is inactive; then
   contain_again
   record recovery_reverted ",\"nonce\":\"$A_NONCE\""
+  alert recovery_reverted critical
   printf '[topology-recovery] REFUSED: the verification with the latch cleared did not pass (exit %s); incident %s is contained again (the authorization is consumed)\n' "$rc" "$INCIDENT" >&2
   exit 1
 fi
 rm -f -- "$INBOX/authorization" "$INBOX/authorization.sig"
 record recovered ",\"nonce\":\"$A_NONCE\",\"reason\":\"$A_REASON\",\"signer\":\"$FINGERPRINT\""
-printf '%s\n' "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"info\",\"kind\":\"recovered\",\"incident\":\"$INCIDENT\"}" >>"$STATE_DIR/alerts.jsonl" 2>/dev/null || log "alert spool unavailable"
+alert recovered info
 log "incident $INCIDENT recovered (signed by $FINGERPRINT, reference $A_REASON). $SERVICE holds NO grant: grant it only through protected provisioning, whose gates run again."
 exit 0

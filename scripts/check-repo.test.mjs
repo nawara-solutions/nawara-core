@@ -3892,3 +3892,53 @@ apply_artifacts
 txn_phase staged
 txn_phase applying`), /recorded before any artifact is applied/);
 });
+
+test('Core V2 OD-BRK-2b-A: the external alert carrier keeps A5-R3\'s endpoints, stays off the containment path and never fakes a heartbeat', async () => {
+  const { checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, PROVISION_SCRIPT, TOPOLOGY_VERIFIER } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const files = Object.fromEntries(TOPOLOGY_MONITOR_FILES.map((n) => [n, read(`${TOPOLOGY_MONITOR_DIR}/${n}`)]));
+  const base = { files, verifier: read(TOPOLOGY_VERIFIER), provision: read(PROVISION_SCRIPT), workflows: {} };
+  assert.deepEqual(checkTopologyMonitor(base), []);
+  const mutate = (file, from, to) => {
+    assert.ok(files[file].includes(from), `fixture drifted: ${file}: ${from}`);
+    return checkTopologyMonitor({ ...base, files: { ...files, [file]: files[file].replace(from, to) } }).join('\n');
+  };
+  const C = 'topology-alert-carrier.sh';
+  const U = 'nawara-core-topology-alert.service';
+  // the fixed providers, HTTPS only, the system trust store
+  assert.match(mutate(C, "readonly PUSHOVER_URL='https://api.pushover.net/1/messages.json'", "readonly PUSHOVER_URL='https://alerts.example.invalid/1/messages.json'"), /A5-R3's fixed HTTPS endpoints/);
+  assert.match(mutate(C, "readonly HC_URL_RE='^https://hc-ping\\.com/", "readonly HC_URL_RE='^https?://[^/]+/"), /A5-R3's fixed HTTPS endpoints/);
+  assert.match(mutate(C, "readonly CA_FILE=''", "readonly CA_FILE='/tmp/ca.pem'"), /system trust store/);
+  assert.match(mutate(C, "--proto '=https' --proto-redir '=https' --max-redirs 0 -o \"$RESP\" -w '%{http_code}' 2>/dev/null) || rc=$?\n  body=$(head -c 2000", "--proto '=https' --max-redirs 3 -o \"$RESP\" -w '%{http_code}' 2>/dev/null) || rc=$?\n  body=$(head -c 2000"), /HTTPS only, certificate verification on, no redirect/);
+  assert.match(mutate(C, 'curl_tls() {', "curl_tls() { echo insecure; }\ncurl_tls2() {"), /HTTPS only, certificate verification on/);
+  assert.match(mutate(C, '| env -i PATH="$SAFE_PATH" timeout -k 2 $((CURL_TIMEOUT + 2)) curl -q --config - --silent', '| env -i PATH="$SAFE_PATH" timeout -k 2 $((CURL_TIMEOUT + 2)) curl -q --data "token=$PO_TOKEN" --config /etc/x --silent'), /curl --config - \(secrets on stdin only\)/);
+  // never the broker, never a unit, never the producers' files, never the Auth carrier
+  assert.match(mutate(C, 'INTEGRITY=$(integrity)', 'docker exec nawara-core-rabbitmq rabbitmqctl list_users >/dev/null\nINTEGRITY=$(integrity)'), /never administers the broker or a unit \(found "docker"\)/);
+  assert.match(mutate(C, 'INTEGRITY=$(integrity)', 'systemctl start nawara-core-topology-monitor.service\nINTEGRITY=$(integrity)'), /found "systemctl"/);
+  assert.match(mutate(C, 'INTEGRITY=$(integrity)', ': > "$SPOOL"\nINTEGRITY=$(integrity)'), /only READS the producers' spool/);
+  assert.match(mutate(C, 'INTEGRITY=$(integrity)', 'rm -f -- "$STATE_DIR/alerts.jsonl"\nINTEGRITY=$(integrity)'), /only READS the producers' spool/);
+  assert.match(mutate(C, 'INTEGRITY=$(integrity)', 'exec 7>>"$STATE_DIR/lock"\nINTEGRITY=$(integrity)'), /never takes the monitor's lock/);
+  assert.match(mutate(C, "readonly CARRIER_DIR='/var/lib/nawara-core-topology-alert'", "readonly CARRIER_DIR='/var/lib/nawara-auth-readiness-alert'"), /CARRIER_DIR must be/);
+  // the minimum event contract and the heartbeat semantics
+  assert.match(mutate(C, '[recovery_refused]=critical', '[recovery_denied]=critical'), /must define recovery_refused/);
+  assert.match(mutate(C, 'none:UNKNOWN) M_STATUS=10 ;;', 'none:UNKNOWN) M_STATUS=0 ;;'), /a success heartbeat \(exit status 0\) is only a monitor PASS/);
+  assert.match(mutate(C, 'ok | contained) W_STATUS=0 ;;', 'ok | contained | monitor_overdue) W_STATUS=0 ;;'), /or a watchdog run that found no problem/);
+  assert.match(mutate(C, 'if [ $((NOW - run)) -gt "$HB_FRESH" ]; then', 'if false; then'), /only for a NEW run that completed within HB_FRESH/);
+  assert.match(mutate(C, 'if [ "$run" -le "${!sent}" ]; then', 'if false; then'), /only for a NEW run/);
+  // containment never waits for an alert; the new local line comes after the persisted intent, before the broker changes
+  assert.match(mutate('verify-and-contain.sh', 'ctl() {', 'notify() { curl -s https://alerts.example.invalid; }\nctl() {'), /never calls the network or the carrier/);
+  assert.match(mutate('topology-watchdog.sh', 'log() {', 'log() { /usr/local/libexec/nawara-core-topology/topology-alert-carrier.sh; }\nlog0() {'), /never calls the network or the carrier/);
+  assert.match(mutate('verify-and-contain.sh', '  if [ "$NEW_CONTAINMENT" = 1 ]; then alert critical containment_started "$1"; fi\n', ''), /a new containment is recorded locally \(containment_started\)/);
+  // the unit: no capability, no broker or Auth carrier path, no environment, exactly its credentials
+  assert.match(mutate(U, 'InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core\n', ''), /no broker or Auth carrier path/);
+  assert.match(mutate(U, 'InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert\n', ''), /no broker or Auth carrier path/);
+  assert.match(mutate(U, 'UMask=0077', 'UMask=0077\nEnvironmentFile=-/etc/nawara-core-topology-alert/carrier.env'), /no environment/);
+  assert.match(mutate(U, 'UMask=0077', 'UMask=0077\nReadWritePaths=/var/lib/nawara-core-topology-monitor'), /no writable path but its own state/);
+  assert.match(mutate(U, 'UMask=0077', 'UMask=0077\nLoadCredential=rabbitmq.admin:/opt/nawara-core/.env'), /exactly its four credentials/);
+  assert.match(mutate(U, 'CapabilityBoundingSet=\n', 'CapabilityBoundingSet=CAP_DAC_OVERRIDE\n'), /no capability/);
+  assert.match(mutate('nawara-core-topology-alert.timer', 'OnUnitActiveSec=60', 'OnUnitActiveSec=1s'), /every 60 s/);
+  // the signed artifact set: the carrier is in it, a credential never is, and every list agrees
+  assert.match(mutate(C, "topology-alert-carrier.sh'\nreadonly UNITS=", "'\nreadonly UNITS="), /SCRIPTS and UNITS \(its integrity sentinel\) must equal the installer's/);
+  assert.match(mutate('install-topology-monitor.sh', 'fresh_operational_state() {', 'carrier_credentials() { install -m 0400 pushover.token /etc/nawara-core-topology-alert/pushover.token; }\nfresh_operational_state() {'), /no carrier credential is ever an artifact or installed by the installer/);
+  assert.match(mutate('install-topology-monitor.sh', ' nawara-core-topology-alert.service nawara-core-topology-alert.timer\'', '\''), /the manifest's artifacts are exactly/);
+});

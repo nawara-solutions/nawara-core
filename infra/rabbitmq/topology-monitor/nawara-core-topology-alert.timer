@@ -1,0 +1,15 @@
+# Core V2 OD-BRK-2b-A: the topology monitor's external alert carrier, one cycle every 60 s, on its OWN timer (independent of the monitor's
+# and the watchdog's). A oneshot service is never started again while a cycle runs, and the script also holds its own lock. Monotonic
+# timers start after boot without a catch-up burst. Installed DISABLED; never installed or enabled by repository tooling.
+[Unit]
+Description=Nawara Core: topology monitor external alert carrier (OD-BRK-2b-A), every 60 s
+Documentation=file:///opt/nawara-core/docs/runbooks/rabbitmq-topology-containment.md
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+AccuracySec=5s
+Unit=nawara-core-topology-alert.service
+
+[Install]
+WantedBy=timers.target

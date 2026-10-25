@@ -3198,6 +3198,7 @@ export const TOPOLOGY_MONITOR_FILES = [
   'verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh',
   'verify-topology-monitor-install.sh', 'nawara-core-topology-monitor.service', 'nawara-core-topology-monitor.timer',
   'nawara-core-topology-watchdog.service', 'nawara-core-topology-watchdog.timer', 'topology-trigger.authorized_keys.template', 'topology-trigger.sudoers.template',
+  'topology-alert-carrier.sh', 'nawara-core-topology-alert.service', 'nawara-core-topology-alert.timer',
 ];
 const TOPOLOGY_MONITOR_LOCATIONS = {
   INSTALL_DIR: '/usr/local/libexec/nawara-core-topology', STATE_DIR: '/var/lib/nawara-core-topology-monitor',
@@ -3209,13 +3210,21 @@ const TOPOLOGY_MONITOR_LOCATIONS = {
   // OD-BRK-2b-I: the authenticated installation (its own state, its own trust key and namespace)
   INSTALL_STATE: '/var/lib/nawara-core-topology-install', INSTALL_TRUST: '/etc/nawara-core-topology/install-allowed-signers', INSTALL_NAMESPACE: 'nawara-core-topology-install',
   STATE_SCHEMA: '2',
+  // OD-BRK-2b-A: the external alert carrier's own state directory and systemd credentials (never the Auth carrier's)
+  CARRIER_DIR: '/var/lib/nawara-core-topology-alert', CRED_DIR: '/run/credentials/nawara-core-topology-alert.service', CARRIER_ETC: '/etc/nawara-core-topology-alert',
 };
 /** OD-BRK-2b-I: the artifacts a signed manifest lists, in its fixed order (the installer, the verifier and the generator agree). */
 export const TOPOLOGY_MONITOR_ARTIFACTS = [
   'verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh',
-  'verify-topology-monitor-install.sh', 'verify-topology.sh', 'nawara-core-topology-monitor.service', 'nawara-core-topology-monitor.timer',
-  'nawara-core-topology-watchdog.service', 'nawara-core-topology-watchdog.timer',
+  'verify-topology-monitor-install.sh', 'topology-alert-carrier.sh', 'verify-topology.sh', 'nawara-core-topology-monitor.service', 'nawara-core-topology-monitor.timer',
+  'nawara-core-topology-watchdog.service', 'nawara-core-topology-watchdog.timer', 'nawara-core-topology-alert.service', 'nawara-core-topology-alert.timer',
 ];
+/** OD-BRK-2b-A: the carrier's fixed provider endpoints (A5-R3's: infra/alerting/auth-readiness-alert.sh) and its minimum event contract. */
+const TOPOLOGY_ALERT_PUSHOVER_URL = 'https://api.pushover.net/1/messages.json';
+const TOPOLOGY_ALERT_HC_URL_RE = '^https://hc-ping\\.com/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{22}/[a-z0-9_-]{1,100})$';
+const TOPOLOGY_ALERT_CODES = ['topology_verification_fail', 'topology_verification_unknown', 'topology_unknown_escalated', 'containment_started',
+  'containment_confirmed', 'containment_unconfirmed', 'monitor_overdue', 'monitor_stalled', 'monitor_killed', 'monitor_timer_inactive',
+  'watchdog_state_invalid', 'recovery_authorized', 'recovery_refused', 'installation_integrity_failed', 'heartbeat_delivery_failed'];
 const pinOf = (text, name) => text?.match(new RegExp(`^readonly ${name}=(?:'([^']*)'|(\\S+))$`, 'm'))?.slice(1).find((v) => v !== undefined);
 
 /**
@@ -3236,7 +3245,7 @@ export function checkTopologyMonitor({ files = {}, verifier, provision, workflow
   for (const n of TOPOLOGY_MONITOR_FILES) if (files[n] === undefined) problems.push(`${at(n)}: missing; ${why}`);
   if (problems.length > 0 || verifier === undefined || provision === undefined) return problems.length ? problems : [`${TOPOLOGY_VERIFIER} / ${PROVISION_SCRIPT}: not found; ${why}`];
   const sha = (t) => createHash('sha256').update(t).digest('hex');
-  const scripts = ['verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh', 'verify-topology-monitor-install.sh'];
+  const scripts = ['verify-and-contain.sh', 'topology-watchdog.sh', 'topology-trigger.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh', 'verify-topology-monitor-install.sh', 'topology-alert-carrier.sh'];
   // locations: one value everywhere a script pins it
   for (const n of scripts) {
     for (const [name, value] of Object.entries(TOPOLOGY_MONITOR_LOCATIONS)) {
@@ -3282,15 +3291,52 @@ export function checkTopologyMonitor({ files = {}, verifier, provision, workflow
   }
   if (/recovery-consumed|incidents\.jsonl|TRUSTED_SIGNERS|recovery-allowed-signers/.test(instCode)) problems.push(`${at('install-topology-monitor.sh')}: the installer never touches the nonce ledger, the incident history or the recovery trust key; ${why}`);
   if (/\bsystemctl\b/.test(instCode)) problems.push(`${at('install-topology-monitor.sh')}: the installer never enables, starts or reloads a unit; ${why}`);
+  if (/nawara-core-topology-alert\/|pushover|healthchecks/i.test(instCode) || TOPOLOGY_MONITOR_ARTIFACTS.some((a) => /pushover|healthchecks|token|credential/i.test(a))) problems.push(`${at('install-topology-monitor.sh')}: no carrier credential is ever an artifact or installed by the installer (OD-BRK-2b-A); ${why}`);
   const verForbidden = /(^|[;&|(\s])(rm|mv|cp|ln|mkdir|rmdir|touch|chmod|chown|chgrp|install|tee|truncate|dd|sed\s+-i|docker|service|curl|wget|nc|scp|sftp|rsync|eval|source|sudo|su|crontab)(?=\s|$)/m.exec(verCode);
   if (verForbidden) problems.push(`${at('verify-topology-monitor-install.sh')}: must stay read-only (found "${verForbidden[2]}"); ${why}`);
   if (/(^|[^0-9&])>{1,2}[ \t]*[^ \t\n&(/]/.test(verCode.replace(/[0-9]?>\s*\/dev\/null|[0-9]?>&[0-9]/g, '').replace(/'[^'\n]*'|"[^"\n]*"/g, 'S'))) problems.push(`${at('verify-topology-monitor-install.sh')}: must write no file; ${why}`);
   if (!/"\$SYSTEMCTL" is-enabled/.test(verCode) || /"\$SYSTEMCTL" (enable|start|stop|disable|daemon-reload|restart|mask|unmask)/.test(verCode)) problems.push(`${at('verify-topology-monitor-install.sh')}: may only read units' enablement (never change it); ${why}`);
+  // OD-BRK-2b-A: the external alert carrier (A5-R3's providers and acceptance rules), isolated and never on the containment path
+  const car = files['topology-alert-carrier.sh'];
+  const carCode = car.replace(/(^|\s)#(\s.*)?$/gm, '');
+  const whyA = 'the external alert carrier follows OD-BRK-2b-A (docs/runbooks/rabbitmq-topology-containment.md §7)';
+  if (pinOf(car, 'PUSHOVER_URL') !== TOPOLOGY_ALERT_PUSHOVER_URL || pinOf(car, 'HC_URL_RE') !== TOPOLOGY_ALERT_HC_URL_RE || pinOf(ver, 'HC_URL_RE') !== TOPOLOGY_ALERT_HC_URL_RE || pinOf(car, 'CA_FILE') !== '') {
+    problems.push(`${at('topology-alert-carrier.sh')}: the provider endpoints are A5-R3's fixed HTTPS endpoints (${TOPOLOGY_ALERT_PUSHOVER_URL}, hc-ping.com) with the system trust store (CA_FILE=''); ${whyA}`);
+  }
+  const carForbidden = /(^|[;&|(\s])(docker|rabbitmqctl|systemctl|sudo|eval|source|wget|nc)(?=\s|$)/m.exec(carCode);
+  if (carForbidden) problems.push(`${at('topology-alert-carrier.sh')}: the carrier never administers the broker or a unit (found "${carForbidden[2]}"); ${whyA}`);
+  const curls = carCode.match(/\bcurl -q[^\n]*(\n[^\n]*){0,1}/g) ?? [];
+  if (curls.length !== 2 || curls.some((c) => !c.includes('--config -') || !c.includes("--proto '=https'") || !c.includes("--proto-redir '=https'") || !c.includes('--max-redirs 0') || /\s(-k|-x)\s/.test(c.slice(c.indexOf('curl')))) || /\binsecure\b|\bproxy\b|--cacert|capath/i.test(carCode)) {
+    problems.push(`${at('topology-alert-carrier.sh')}: every provider call is curl --config - (secrets on stdin only), HTTPS only, certificate verification on, no redirect; ${whyA}`);
+  }
+  if (carCode.split('\n').some((l) => /\$\{?(STATE_DIR|SPOOL)\b/.test(l) && /(^|[\s;&|(])(mv|rm|chmod|chown|touch|truncate|tee|ln|install|mkdir|flock)\s|>>?\s*"?\$\{?(STATE_DIR|SPOOL)/.test(l)) || /STATE_DIR\/lock|nawara-auth-readiness-alert/.test(carCode)) {
+    problems.push(`${at('topology-alert-carrier.sh')}: the carrier only READS the producers' spool and records: it never writes there, never takes the monitor's lock and never touches the Auth carrier; ${whyA}`);
+  }
+  for (const code of TOPOLOGY_ALERT_CODES) if (!new RegExp(`\\[${code}\\]=(critical|warning|info)`).test(car)) problems.push(`${at('topology-alert-carrier.sh')}: the event contract must define ${code}; ${whyA}`);
+  if ((carCode.match(/M_STATUS=0\b/g) ?? []).length !== 1 || !carCode.includes('none:PASS) M_STATUS=0 ;;') || (carCode.match(/W_STATUS=0\b/g) ?? []).length !== 1 || !carCode.includes('ok | contained) W_STATUS=0 ;;')) {
+    problems.push(`${at('topology-alert-carrier.sh')}: a success heartbeat (exit status 0) is only a monitor PASS without containment, or a watchdog run that found no problem; ${whyA}`);
+  }
+  const fresh = carCode.indexOf('if [ $((NOW - run)) -gt "$HB_FRESH" ]; then'); const pinged = carCode.indexOf('if ping_check "$url" "$status"; then');
+  if (fresh < 0 || pinged < 0 || fresh > pinged || !carCode.includes('if [ "$run" -le "${!sent}" ]; then')) problems.push(`${at('topology-alert-carrier.sh')}: a heartbeat is sent only for a NEW run that completed within HB_FRESH (never fabricated, never an old run); ${whyA}`);
+  for (const n of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh']) {
+    if (/\b(curl|wget)\b|topology-alert-carrier|nawara-core-topology-alert|pushover|healthchecks/i.test(files[n].replace(/^\s*#.*$/gm, ''))) problems.push(`${at(n)}: never calls the network or the carrier (containment never waits for an alert); ${whyA}`);
+  }
+  const au = files['nawara-core-topology-alert.service'];
+  const auNeeds = ['ExecStart=/usr/local/libexec/nawara-core-topology/topology-alert-carrier.sh', 'CapabilityBoundingSet=', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'StateDirectory=nawara-core-topology-alert',
+    'InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core', 'InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert',
+    ...['pushover.token', 'pushover.user', 'healthchecks-monitor.url', 'healthchecks-watchdog.url'].map((c) => `LoadCredential=${c}:/etc/nawara-core-topology-alert/${c}`)];
+  if (auNeeds.some((d) => !au.split('\n').includes(d)) || /^(User|DynamicUser|Group|ReadWritePaths|Environment|EnvironmentFile|PassEnvironment|SupplementaryGroups)=/m.test(au) || (au.match(/^LoadCredential=/gm) ?? []).length !== 4) {
+    problems.push(`${at('nawara-core-topology-alert.service')}: no capability, no broker or Auth carrier path, no environment, no writable path but its own state, exactly its four credentials; ${whyA}`);
+  }
+  if (!/^OnUnitActiveSec=60$/m.test(files['nawara-core-topology-alert.timer'])) problems.push(`${at('nawara-core-topology-alert.timer')}: the carrier runs every 60 s; ${whyA}`);
+  if (pinOf(car, 'SCRIPTS') !== pinOf(inst, 'SCRIPTS') || pinOf(car, 'UNITS') !== pinOf(inst, 'UNITS')) problems.push(`${at('topology-alert-carrier.sh')}: SCRIPTS and UNITS (its integrity sentinel) must equal the installer's; ${whyA}`);
   // the containment sequence and the state machine
   const m = files['verify-and-contain.sh'];
   const contain = m.slice(m.indexOf('contain() { # contain <reason>'), m.indexOf('\n}\n', m.indexOf('contain() { # contain <reason>')));
   const order = ['if [ "$ST_INCIDENT" = none ]; then', 'save_state ', 'persist_incident ', 'persist_latch ', 'revoke', 'close_all_user_connections', 'if confirm; then', 'if confirm; then CONTAINMENT=confirmed'].map((s) => contain.indexOf(s));
   if (order.some((i) => i < 0) || order.some((i, k) => k > 0 && i <= order[k - 1])) problems.push(`${at('verify-and-contain.sh')}: containment must create an incident only when there is none, persist the intent (state, incident binding, then latch) before revoking, then close connections, then confirm twice; ${why}`);
+  const started = contain.indexOf('if [ "$NEW_CONTAINMENT" = 1 ]; then alert critical containment_started "$1"; fi');
+  if (started < 0 || started < contain.indexOf('persist_latch ') || started > contain.indexOf('revoke')) problems.push(`${at('verify-and-contain.sh')}: a new containment is recorded locally (containment_started) after its intent is persisted and before the broker changes (OD-BRK-2b-A); ${why}`);
   if (!/^new_incident\(\) \{[\s\S]*?head -c 16 \/dev\/urandom[\s\S]*?^\}/m.test(m)) problems.push(`${at('verify-and-contain.sh')}: an incident id comes from /dev/urandom (OD-BRK-2b-R); ${why}`);
   // OD-BRK-2b-R: the signed, incident-bound, single-use recovery
   const rec = files['recover-notification-topology.sh'];

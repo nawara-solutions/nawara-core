@@ -11,6 +11,8 @@
 // records the latch's content at every revocation. A real AMQP consumer authenticated as notification-service holds unacknowledged
 // messages. Every resource is prefixed `rbcontain-<pid>`, refused if it exists, recorded (RBCONTAIN_MANIFEST) and removed at the end.
 // Payloads are synthetic: no code, credential or personal data is ever published or printed.
+// OD-BRK-2b-A: the installed external alert carrier runs against a LOCAL HTTPS receiver (a run-owned, self-signed test CA and disposable
+// credentials; no real provider is ever called), so containment is certified with the carrier stopped and with it running.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -21,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { bounded, cleanupAll, exited, stopChild } from './lib/owned-process.mjs';
+import { outgoingPrivacyViolations, startAlertReceiver } from './lib/local-alert-receiver.mjs';
 import { variant } from './lib/topology-monitor-world.mjs';
 import { MANIFEST_ARTIFACTS, manifestText } from '../topology-monitor-manifest.mjs';
 
@@ -46,6 +49,8 @@ D.incidentFile = join(D.latchDir, 'notification-service.incident');
 D.trusted = join(D.trust, 'recovery-allowed-signers');
 D.installTrust = join(D.trust, 'install-allowed-signers');
 D.installState = join(work, 'install-state');
+D.carrierDir = join(work, 'carrier'); D.cred = join(work, 'cred'); D.tls = join(work, 'tls');
+const RX = { port: 0, receiver: undefined };
 /**
  * The AUTHENTICATED installation (OD-BRK-2b-I): a manifest over the source tree's exact bytes (the real generator), signed OFF the
  * namespace with the DISPOSABLE test key in the installation namespace, placed root-owned in the root-only inbox, then `install`.
@@ -79,6 +84,7 @@ const hostDocker = execFileSync('bash', ['-c', 'command -v docker'], { encoding:
 const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, killSignal: 'SIGKILL' });
 const ctl = (...args) => docker('exec', '-u', 'rabbitmq', BROKER, 'rabbitmqctl', '-q', ...args);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const freePort = () => new Promise((res) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 /** A command as root of a user namespace, with an empty environment but PATH, HOME and `extra`. */
 const ns = (args, { input, extra = {}, timeout = 300_000 } = {}) => {
   const r = spawnSync('unshare', ['-r', 'env', '-i', `PATH=${SYS_PATH}`, `HOME=${work}`, ...Object.entries(extra).map(([k, v]) => `${k}=${v}`), ...args], { input, encoding: 'utf8', timeout, killSignal: 'SIGKILL' });
@@ -201,9 +207,17 @@ before(async () => {
   mkdirSync(tm, { recursive: true });
   for (const f of readdirSync(SRC)) cpSync(join(SRC, f), join(tm, f));
   cpSync(join(root, 'infra/rabbitmq/verify-topology.sh'), join(D.src, 'infra/rabbitmq/verify-topology.sh'));
+  // OD-BRK-2b-A: the carrier's providers are a local HTTPS receiver on a port fixed now (its pins are part of the signed bytes)
+  mkdirSync(D.tls, { mode: 0o700 });
+  assert.equal(spawnSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-keyout', join(D.tls, 'key.pem'), '-out', join(D.tls, 'cert.pem'),
+    '-days', '2', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
+  chmodSync(join(D.tls, 'cert.pem'), 0o644); chmodSync(D.tls, 0o755);
+  RX.port = await freePort();
   const pins = { INSTALL_DIR: D.install, STATE_DIR: D.state, LATCH: D.latch, INCIDENT_FILE: D.incidentFile, TRUSTED_SIGNERS: D.trusted, BROKER, SAFE_PATH: `${D.shim}:${SYS_PATH}`, SYSTEMCTL: join(D.shim, 'systemctl'), UNIT_DIR: D.units,
-    INSTALL_STATE: D.installState, INSTALL_TRUST: D.installTrust, TRUST_ROOT: work };
-  for (const f of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh']) {
+    INSTALL_STATE: D.installState, INSTALL_TRUST: D.installTrust, TRUST_ROOT: work,
+    CARRIER_DIR: D.carrierDir, CRED_DIR: D.cred, CA_FILE: join(D.tls, 'cert.pem'), PUSHOVER_URL: `https://127.0.0.1:${RX.port}/1/messages.json`,
+    HC_URL_RE: `^https://127\\.0\\.0\\.1:${RX.port}/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{22}/[a-z0-9_-]{1,100})$` };
+  for (const f of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh', 'install-topology-monitor.sh', 'topology-alert-carrier.sh']) {
     const text = readFileSync(join(tm, f), 'utf8');
     writeFileSync(join(tm, f), variant(text, Object.fromEntries(Object.entries(pins).filter(([k]) => new RegExp(`^readonly ${k}=`, 'm').test(text)))), { mode: 0o755 });
   }
@@ -239,6 +253,7 @@ after(async () => {
     if (r.status !== 0) throw new Error(`docker ${args.join(' ')}: ${r.error?.message ?? r.stderr.trim().slice(0, 200)}`);
   };
   await cleanupAll([
+    ...(RX.receiver ? [['stop the local alert receiver', () => RX.receiver.close()]] : []),
     ...(created.sshd ? [['stop the task sshd', async () => { await stopChild(created.sshd, { graceMs: 5000 }); }]] : []),
     ...[...open].reverse().map((x, i) => [`close connection ${i}`, () => x.close().catch((e) => { if (!/closed/i.test(String(e?.message))) throw e; })]),
     ...[...created.containers].reverse().map((id) => [`remove container ${id.slice(0, 12)}`, rm('rm', '-f', id)]),
@@ -482,7 +497,6 @@ t('22: the read-only installation verification passes on the authenticated insta
   assert.match(r.out, /FAIL +artifact topology-trigger\.sh \(mode_or_owner\): .* owned by 0:0/);
 });
 
-const freePort = () => new Promise((res) => { const s = createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 
 t('21: over a real sshd, the trigger key runs only the forced command: a client command, a subsystem and a remote forward are refused', async () => {
   const S = join(work, 'ssh');
@@ -517,6 +531,131 @@ t('21: over a real sshd, the trigger key runs only the forced command: a client 
   assert.notEqual(fwd.status, 0, 'a remote forward is refused (restrict)');
   assert.deepEqual(calls().length, 1, 'no refused session started anything');
   assert.ok(!existsSync('/tmp/odbrk2b1-pwned'));
+});
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-A: the external carrier
+
+/** What the local receiver (lib/local-alert-receiver.mjs: a worker thread, so it answers while this thread blocks in spawnSync) got. */
+const received = () => RX.receiver?.requests() ?? [];
+const messageLines = () => received().filter((q) => q.form).flatMap((q) => q.form.message.split('\n'));
+const carrier = () => ns([join(D.install, 'topology-alert-carrier.sh')], { timeout: 120_000 });
+const carrierFile = (...p) => { try { return readFileSync(join(D.carrierDir, ...p), 'utf8'); } catch { return ''; } };
+const carrierState = () => Object.fromEntries(carrierFile('state').split('\n').map((l) => /^([a-z_]+)=(\d+)$/.exec(l)).filter(Boolean).map((m) => [m[1], Number(m[2])]));
+const queued = () => { try { return readdirSync(join(D.carrierDir, 'queue')).filter((f) => f.endsWith('.json')).map((f) => ({ f, text: carrierFile('queue', f) })); } catch { return []; } };
+const deliveries = () => carrierFile('deliveries.jsonl').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return { outcome: 'unparsable' }; } });
+/** Bounded, sanitized evidence for a failure: closed codes, numbers and positions only (never a message body, a credential or a URL). */
+const carrierDiag = (cycles = []) => {
+  const s = carrierState();
+  const q = queued();
+  const rx = received();
+  return [
+    `now=${Math.floor(Date.now() / 1000)} carrier: ${['cursor_epoch', 'seq', 'backoff_until', 'failures', 'overflow_critical', 'overflow_other'].map((k) => `${k}=${s[k] ?? '?'}`).join(' ')}`,
+    `queue (${q.length}): ${q.slice(0, 40).map(({ f, text }) => `${f.split('-').slice(0, 2).join('-')}:${/"code":"([a-z_]{1,40})"/.exec(text)?.[1] ?? '?'}`).join(' ')}`,
+    `deliveries (last 12): ${deliveries().slice(-12).map((d) => ['outcome', 'events', 'http', 'curl'].filter((k) => k in d).map((k) => `${k}=${String(d[k]).slice(0, 16)}`).join(',')).join(' | ')}`,
+    `receiver: ${rx.filter((r) => r.form).length} message(s), ${rx.filter((r) => !r.form).length} ping(s); last lines: ${messageLines().slice(-20).map((l) => /^([A-Z]{4,8} [a-z_]{1,40})/.exec(l)?.[1] ?? '?').join(' | ')}`,
+    `cycles: ${cycles.slice(-10).join(' || ')}`,
+  ].join('\n').slice(0, 4000);
+};
+/**
+ * Carrier cycles until `done()` holds, bounded by `ms`. A cycle runs only when the carrier is eligible to deliver: while its recorded
+ * backoff is in the future the drain waits for exactly that moment (and fails at once if it lies past the deadline). A cycle that ends
+ * with nothing pending (exit 0) while `done()` is still false is a lost event, never a reason to try again.
+ */
+const drainUntil = async (done, what, ms) => {
+  const end = Date.now() + ms;
+  const cycles = [];
+  while (!done()) {
+    const wait = (carrierState().backoff_until ?? 0) * 1000 + 1000 - Date.now();
+    if (wait > 0) {
+      assert.ok(Date.now() + wait < end, `${what}: the carrier backs off past the ${ms} ms deadline\n${carrierDiag(cycles)}`);
+      await sleep(wait);
+    }
+    assert.ok(Date.now() < end, `${what}: not received within ${ms} ms\n${carrierDiag(cycles)}`);
+    const r = carrier();
+    cycles.push(`exit=${r.code} ${r.out.split('\n').filter((l) => /^\[topology-alert\] (cycle |receiver: )/.test(l)).join(' ; ').slice(0, 400)}`);
+    assert.ok([0, 3, 4].includes(r.code), `${what}: a carrier cycle failed\n${carrierDiag(cycles)}`);
+    assert.ok(!r.out.includes('another cycle is running'), `${what}: a cycle ran while no other may hold the carrier's lock\n${carrierDiag(cycles)}`);
+    assert.ok(r.code !== 0 || done(),`${what}: the carrier's queue is empty but the receiver never got it\n${carrierDiag(cycles)}`);
+  }
+};
+/** What a containment leaves behind: the broker, the latch, the state, and the producers' local alert kinds of this incident. */
+const containmentObserved = () => {
+  const s = stateOf();
+  return { grants: grants(), latch: latchText(), contained: s.contained, incident: /^[0-9a-f]{32}$/.test(s.incident),
+    kinds: records('alerts.jsonl').filter((a) => a.incident === s.incident && ['containment_started', 'verification_fail', 'contained'].includes(a.kind)).map((a) => a.kind) };
+};
+const failAndContain = () => {
+  ctl('set_policy', '-p', 'nawara-core', 'odbrk2ba-drift', '^notification\\.events$', '{"dead-letter-exchange":"nawara.events.dlx"}', '--apply-to', 'queues');
+  try {
+    const t0 = Date.now();
+    const r = monitor();
+    assert.equal(r.code, 20, r.out);
+    return { ms: Date.now() - t0, observed: containmentObserved() };
+  } finally {
+    ctl('clear_policy', '-p', 'nawara-core', 'odbrk2ba-drift');
+  }
+};
+
+t('34-38: a real containment is IDENTICAL with the external carrier stopped and running; the carrier delivers it; recovery and the gate are unchanged', async () => {
+  const granted = { perms: ctl('list_user_permissions', SERVICE, '--no-table-headers'), topic: ctl('list_user_topic_permissions', SERVICE, '--no-table-headers') };
+  // 34: the carrier is not running at all (its directories do not even exist)
+  assert.ok(!existsSync(D.carrierDir) && !existsSync(D.cred));
+  const stopped = failAndContain();
+  await recoverAndRegrant('OD-RECOVERY-2BA-STOPPED');
+  // 35: the carrier runs in a loop, concurrently, against a receiver that answers slowly
+  assert.equal(ns(['sh', '-c', 'mkdir -m 700 "$0" "$1"', D.carrierDir, D.cred]).code, 0);
+  for (const [f, v] of [['pushover.token', 'aT0kenForTestsOnly000000000001'], ['pushover.user', 'uUserKeyForTestsOnly0000000001'],
+    ['healthchecks-monitor.url', `https://127.0.0.1:${RX.port}/11111111-1111-4111-8111-111111111111`], ['healthchecks-watchdog.url', `https://127.0.0.1:${RX.port}/22222222-2222-4222-8222-222222222222`]]) nsWrite(join(D.cred, f), `${v}\n`, '400');
+  RX.receiver = await startAlertReceiver({ key: join(D.tls, 'key.pem'), cert: join(D.tls, 'cert.pem'), port: RX.port, log: join(work, 'receiver.jsonl') });
+  try {
+    RX.receiver.setDelay(1500);
+    const loop = spawn('unshare', ['-r', 'env', '-i', `PATH=${SYS_PATH}`, `HOME=${work}`, 'bash', '-c', 'for i in $(seq 1 200); do "$0" >/dev/null 2>&1; sleep 0.2; done', join(D.install, 'topology-alert-carrier.sh')], { stdio: 'ignore' });
+    let running;
+    try {
+      await until(() => received().length > 0, 60_000, 'the carrier reached the receiver');
+      running = failAndContain();
+    } finally {
+      await stopChild(loop, { graceMs: 2000 });
+      // a cycle already started finishes on its own (bounded by its budgets); none may still hold the carrier's lock afterwards
+      await until(() => spawnSync('pgrep', ['-f', join(D.install, 'topology-alert-carrier.sh')]).status !== 0, 60_000, 'no carrier cycle left');
+    }
+    // 36: the containment is the same, and was not slowed by the carrier
+    assert.deepEqual(running.observed, stopped.observed);
+    assert.deepEqual(running.observed.grants, { perms: '', topic: '', connections: 0 });
+    assert.deepEqual(running.observed.kinds, ['containment_started', 'verification_fail', 'contained']);
+    assert.ok(running.ms < stopped.ms + 20_000, `containment took ${running.ms} ms with the carrier running, ${stopped.ms} ms without`);
+    // the carrier delivers this incident to the receiver, with nothing but closed codes and ids; the backlog of the earlier tests'
+    // alerts goes first (critical, older), so the drain runs cycles, each when the carrier is eligible to deliver, until all three arrived
+    RX.receiver.setDelay(0);
+    const incident = stateOf().incident;
+    const CODES = ['containment_started', 'topology_verification_fail', 'containment_confirmed'];
+    const got = (c) => messageLines().some((l) => l.startsWith(`CRITICAL ${c} `) && l.includes(`incident=${incident}`));
+    await drainUntil(() => CODES.every(got), 'this incident\'s alerts', 90_000);
+    for (const c of CODES) assert.ok(got(c), `${c}\n${carrierDiag()}`);
+    // ACCEPTED, not only sent: the carrier removes an event from its queue only on the receiver's HTTP 200 with "status":1
+    assert.ok(!queued().some(({ text }) => text.includes(`"incident":"${incident}"`) && CODES.some((c) => text.includes(`"code":"${c}"`))), `the incident's events left the queue\n${carrierDiag()}`);
+    assert.ok(deliveries().some((d) => d.outcome === 'accepted') && !deliveries().some((d) => ['rejected', 'backoff', 'oversized', 'unparsable'].includes(d.outcome)), `every answered delivery was accepted\n${carrierDiag()}`);
+    // every outgoing field is scanned (lib/local-alert-receiver.mjs): only the exact approved runbook line is exempt from the patterns
+    const secrets = [
+      readFileSync(join(D.brokerDir, 'rabbitmq.env'), 'utf8').match(/^RABBITMQ_DEFAULT_PASS=(.*)$/m)[1],
+      ...readdirSync(join(D.brokerDir, 'clients')).map((f) => /^RABBITMQ_URL=amqp:\/\/[^:]*:([^@]*)@/m.exec(readFileSync(join(D.brokerDir, 'clients', f), 'utf8'))?.[1]),
+      docker('exec', '-u', 'rabbitmq', BROKER, 'cat', '/var/lib/rabbitmq/.erlang.cookie').trim(),
+    ];
+    assert.ok(secrets.every((s) => typeof s === 'string' && s.length >= 4), 'every broker secret of this run is known to the check');
+    assert.deepEqual(outgoingPrivacyViolations(received(), { secrets, provider: { token: 'aT0kenForTestsOnly000000000001', user: 'uUserKeyForTestsOnly0000000001' } }), [],
+      'no broker credential, address, cookie, authentication material or payload leaves the host');
+    const rx = received();
+    assert.ok(rx.some((q) => /^\/11111111-1111-4111-8111-111111111111\/\d+$/.test(q.url)), 'the monitor\'s heartbeat');
+    assert.ok(!rx.some((q, i) => q.url === '/11111111-1111-4111-8111-111111111111/0' && i > rx.findIndex((x) => x.form?.message?.includes('containment_started'))), 'no healthy ping while contained');
+    // 37, 38: the signed recovery is unchanged; Notification is granted again only through the gate, exactly as before
+    await recoverAndRegrant('OD-RECOVERY-2BA-RUNNING');
+    assert.deepEqual({ perms: ctl('list_user_permissions', SERVICE, '--no-table-headers'), topic: ctl('list_user_topic_permissions', SERVICE, '--no-table-headers') }, granted);
+    const recovered = (c) => messageLines().some((l) => new RegExp(`^(CRITICAL|WARNING) ${c} `).test(l));
+    await drainUntil(() => ['recovery_authorized', 'recovery_completed'].every(recovered), 'the recovery\'s alerts', 60_000);
+    for (const c of ['recovery_authorized', 'recovery_completed']) assert.ok(recovered(c), c);
+  } finally {
+    await RX.receiver.close();
+  }
 });
 
 t('Billing and Audit roles are untouched, and Notification ends granted only through the gate (the run\'s final state)', () => {

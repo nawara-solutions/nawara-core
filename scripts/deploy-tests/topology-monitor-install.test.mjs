@@ -59,7 +59,9 @@ function lab() {
   const common = { INSTALL_DIR: L.install, STATE_DIR: L.state, LATCH: L.latch, INCIDENT_FILE: L.incident, UNIT_DIR: L.units, INSTALL_STATE: L.istate, INSTALL_TRUST: L.trust, TRUST_ROOT: base, RUN_AS_UID: uid, SAFE_PATH: `${L.shim}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` };
   L.installerPins = { ...common, OWNER: `${uid}:${gid}`, LOCK_WAIT: 2 };
   L.verifierPins = { ...common, TRUSTED_SIGNERS: L.recoveryTrust, OWNER_UID: uid, OWNER_GID: gid, SYSTEMCTL: join(L.shim, 'systemctl'), SSHD: join(L.shim, 'sshd'),
-    SUDOERS: p('etc/sudoers'), SUDOERS_DIR: L.sudoersDir, TRIGGER_SUDOERS: join(L.sudoersDir, 'nawara-core-topology-trigger'), UNIT_SEARCH: `${L.units} ${L.runUnits}` };
+    SUDOERS: p('etc/sudoers'), SUDOERS_DIR: L.sudoersDir, TRIGGER_SUDOERS: join(L.sudoersDir, 'nawara-core-topology-trigger'), UNIT_SEARCH: `${L.units} ${L.runUnits}`,
+    CARRIER_ETC: p('etc/nct-alert'), CARRIER_DIR: p('var/lib/nct-alert') };
+  L.carrierEtc = p('etc/nct-alert'); L.carrierDir = p('var/lib/nct-alert');
   const pin = (name, pins) => { const f = join(L.src, name); writeFileSync(f, variant(readFileSync(f, 'utf8'), Object.fromEntries(Object.entries(pins).filter(([k]) => new RegExp(`^readonly ${k}=`, 'm').test(readFileSync(f, 'utf8')))))); chmodSync(f, 0o755); };
   pin('install-topology-monitor.sh', L.installerPins);
   pin('verify-topology-monitor-install.sh', L.verifierPins);
@@ -118,17 +120,25 @@ function containedState(L) {
 
 // ------------------------------------------------------------------------------------------------ the manifest and its authority
 
-test('the generator hashes the artifacts of a COMMIT (its Git objects), canonically; a non-commit or bad version is refused', () => {
-  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
-  const m = manifestOfCommit({ commit: head, version: 7, cwd: ROOT });
-  const lines = m.split('\n');
-  assert.deepEqual(lines.slice(0, 4), ['nawara-core-topology-monitor-manifest v1', `core_commit=${head}`, 'version=7', 'state_schema=2']);
-  for (const [i, [name, path]] of MANIFEST_ARTIFACTS.entries()) {
-    assert.equal(lines[4 + i], `file=${sha(execFileSync('git', ['cat-file', 'blob', `${head}:${path}`], { cwd: ROOT }))} ${name}`);
-  }
-  assert.ok(m.endsWith('\n') && !m.endsWith('\n\n'));
-  assert.throws(() => manifestOfCommit({ commit: 'HEAD', version: 1, cwd: ROOT }), /full commit id/);
-  assert.throws(() => manifestText({ commit: head, version: 0, hashes: {} }), /version/);
+test('the generator hashes the artifacts of a COMMIT (its Git objects, never the working tree), canonically; a non-commit or bad version is refused', () => {
+  // a disposable repository holding exactly the reviewed artifacts (the project's own repository is never written)
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'topology-manifest-')));
+  try {
+    const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+    git('init', '-q');
+    for (const [, path] of MANIFEST_ARTIFACTS) { mkdirSync(join(repo, path, '..'), { recursive: true }); cpSync(join(ROOT, path), join(repo, path)); }
+    git('add', '-A'); git('commit', '-q', '-m', 'artifacts');
+    const head = git('rev-parse', 'HEAD');
+    writeFileSync(join(repo, MANIFEST_ARTIFACTS[0][1]), 'changed after the commit\n'); // the working tree differs from the commit
+    const m = manifestOfCommit({ commit: head, version: 7, cwd: repo });
+    const lines = m.split('\n');
+    assert.deepEqual(lines.slice(0, 4), ['nawara-core-topology-monitor-manifest v2', `core_commit=${head}`, 'version=7', 'state_schema=2']);
+    assert.equal(lines.length, 4 + MANIFEST_ARTIFACTS.length + 1);
+    for (const [i, [name, path]] of MANIFEST_ARTIFACTS.entries()) assert.equal(lines[4 + i], `file=${sha(readFileSync(join(ROOT, path)))} ${name}`);
+    assert.ok(m.endsWith('\n') && !m.endsWith('\n\n'));
+    assert.throws(() => manifestOfCommit({ commit: 'HEAD', version: 1, cwd: repo }), /full commit id/);
+    assert.throws(() => manifestText({ commit: head, version: 0, hashes: {} }), /version/);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
 test('1, 11, 14, 34: a valid Owner-signed manifest installs; the verification PASSES; no unit is enabled, started or reloaded', withLab((L) => {
@@ -372,6 +382,113 @@ test('enablement: a timer enabled without a signed activation authorization FAIL
   assert.equal(v.status, 3, v.out);
   assert.match(v.out, /RESULT: UNKNOWN/);
   assert.match(v.out, /systemctl_unavailable/);
+}));
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-A: the external alert carrier
+
+const activation = (L, timers) => {
+  const a = join(L.istate, 'activation');
+  rmSync(a, { force: true }); rmSync(`${a}.sig`, { force: true });
+  writeFileSync(a, `nawara-core-topology-monitor-activation v1\ncore_commit=${COMMIT}\nversion=1\ntimers=${timers}\n`, { mode: 0o600 });
+  assert.equal(spawnSync('ssh-keygen', ['-Y', 'sign', '-q', '-f', key(L, 'owner'), '-n', 'nawara-core-topology-install', a], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
+  chmodSync(`${a}.sig`, 0o600);
+};
+test('A25, A27, A29, A32: the carrier and its units are signed artifacts, installed DISABLED; no credential is an artifact or installed', withLab((L) => {
+  assert.deepEqual(MANIFEST_ARTIFACTS.map(([n]) => n).filter((n) => /alert/.test(n)), ['topology-alert-carrier.sh', 'nawara-core-topology-alert.service', 'nawara-core-topology-alert.timer']);
+  assert.ok(!MANIFEST_ARTIFACTS.some(([n]) => /pushover|healthchecks|token|credential/i.test(n)));
+  const body = approve(L);
+  assert.match(body, /^nawara-core-topology-monitor-manifest v2\n/);
+  assert.match(body, /^file=[0-9a-f]{64} topology-alert-carrier\.sh$/m);
+  const r = run(L, 'install');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(L.install, 'topology-alert-carrier.sh'), 'utf8'), readFileSync(join(SRC, 'topology-alert-carrier.sh'), 'utf8'));
+  for (const u of ['nawara-core-topology-alert.service', 'nawara-core-topology-alert.timer']) assert.ok(existsSync(join(L.units, u)), u);
+  assert.ok(!existsSync(L.carrierEtc) && !existsSync(L.carrierDir), 'no credential directory and no carrier state are created by the installer');
+  assert.equal(existsSync(join(L.ctl, 'systemctl-calls')), false, 'nothing enabled or started');
+  const v = verify(L);
+  assert.equal(v.status, 0, v.out);
+  assert.match(v.out, /ok +artifact topology-alert-carrier\.sh: sha256 equals the signed manifest/);
+  assert.match(v.out, /ok +artifact nawara-core-topology-alert\.timer: sha256 equals the signed manifest/);
+  assert.match(v.out, /ok +hardening: nawara-core-topology-alert\.service is isolated from the broker and the Auth carrier/);
+  assert.match(v.out, /info +carrier: not configured/);
+}));
+
+test('A26: a tampered carrier source is refused; a carrier unit weakened in a SIGNED manifest still FAILS its hardening check', withLab((L) => {
+  approve(L);
+  writeFileSync(join(L.src, 'topology-alert-carrier.sh'), `${readFileSync(join(L.src, 'topology-alert-carrier.sh'), 'utf8')}curl https://elsewhere.invalid\n`);
+  const r = run(L, 'install');
+  assert.equal(r.status, 1); assert.match(r.stderr, /REFUSED \(source_hash\): the source topology-alert-carrier\.sh/);
+  writeFileSync(join(L.src, 'topology-alert-carrier.sh'), readFileSync(join(SRC, 'topology-alert-carrier.sh')));
+  const unit = join(L.src, 'nawara-core-topology-alert.service');
+  writeFileSync(unit, readFileSync(unit, 'utf8').replace(/^InaccessiblePaths=-\/run\/docker\.sock.*\n/m, '').replace('UMask=0077', 'UMask=0077\nReadWritePaths=/var/lib/nawara-core-topology-monitor'));
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  const v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /FAIL +hardening \(unit_hardening\): nawara-core-topology-alert\.service lacks: InaccessiblePaths=-\/run\/docker\.sock.* \(an identity, a writable path/);
+}));
+
+test('A29: the carrier timer is enabled only under a signed activation that LISTS it', withLab((L) => {
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  writeFileSync(join(L.ctl, 'enabled'), 'nawara-core-topology-monitor.timer\nnawara-core-topology-alert.timer\n');
+  activation(L, 'nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer');
+  let v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /unauthorized_activation\): nawara-core-topology-monitor\.timer nawara-core-topology-alert\.timer enabled without a signed activation authorization for the installed version that lists it/);
+  activation(L, 'nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer,nawara-core-topology-alert.timer');
+  v = verify(L);
+  assert.equal(v.status, 0, v.out);
+  activation(L, 'nawara-core-topology-alert.timer');
+  assert.equal(verify(L).status, 1, 'never a list that is not the canonical one');
+}));
+
+test('A27, A31, A33: the carrier credentials, when configured: root-only files, the providers\' form, two distinct checks; never printed', withLab((L) => {
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  mkdirSync(L.carrierEtc, { mode: 0o700 }); chmodSync(L.carrierEtc, 0o700);
+  mkdirSync(L.carrierDir, { mode: 0o700 }); chmodSync(L.carrierDir, 0o700);
+  const secret = { token: 'TestTokenOnly00000000000000001', user: 'TestUserOnly000000000000000001', m: 'https://hc-ping.com/11111111-1111-4111-8111-111111111111', w: 'https://hc-ping.com/22222222-2222-4222-8222-222222222222' };
+  const write = (vals, mode = 0o400) => {
+    for (const [f, v] of [['pushover.token', vals.token], ['pushover.user', vals.user], ['healthchecks-monitor.url', vals.m], ['healthchecks-watchdog.url', vals.w]]) {
+      rmSync(join(L.carrierEtc, f), { force: true }); writeFileSync(join(L.carrierEtc, f), `${v}\n`, { mode }); chmodSync(join(L.carrierEtc, f), mode);
+    }
+  };
+  write(secret);
+  let v = verify(L);
+  assert.equal(v.status, 0, v.out);
+  assert.match(v.out, /ok +carrier heartbeats: two different Healthchecks\.io checks/);
+  for (const s of Object.values(secret)) assert.ok(!v.out.includes(s), 'a credential value is never printed');
+  write(secret, 0o644);
+  v = verify(L); assert.equal(v.status, 1); assert.match(v.out, /credential_unsafe/);
+  write({ ...secret, w: secret.m });
+  v = verify(L); assert.equal(v.status, 1); assert.match(v.out, /shared_check/);
+  write({ ...secret, m: 'https://hc-ping.example.invalid/11111111-1111-4111-8111-111111111111' });
+  v = verify(L); assert.equal(v.status, 1); assert.match(v.out, /credential_format/);
+  write(secret); rmSync(join(L.carrierEtc, 'pushover.user')); symlinkSync(join(L.carrierEtc, 'pushover.token'), join(L.carrierEtc, 'pushover.user'));
+  v = verify(L); assert.equal(v.status, 1); assert.match(v.out, /credential_unsafe/);
+  for (const s of Object.values(secret)) assert.ok(!v.out.includes(s));
+  // nothing in the reviewed artifacts is a real endpoint or secret: only the fixed provider hosts and placeholders
+  for (const [n, path] of MANIFEST_ARTIFACTS) {
+    const t = readFileSync(join(ROOT, path), 'utf8');
+    assert.doesNotMatch(t, /hc-ping\.com\/[0-9a-f]{8}-|hc-ping\.com\/[A-Za-z0-9_-]{22}\//, `${n}: no real check URL`);
+    assert.doesNotMatch(t, /(token|user)=[A-Za-z0-9]{30}\b/, `${n}: no Pushover credential`);
+  }
+}));
+
+test('A30: an installation recorded under the OD-BRK-2b-I v1 contract is refused by upgrade (installed_contract), changing nothing', withLab((L) => {
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  containedState(L);
+  const f = join(L.istate, 'installed', 'manifest');
+  writeFileSync(f, readFileSync(f, 'utf8').replace('manifest v2', 'manifest v1'));
+  const before = snapshot(L);
+  approve(L, { version: 2 });
+  const r = run(L, 'upgrade');
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /REFUSED \(installed_contract\)/);
+  assert.deepEqual(snapshot(L), before);
+  assert.ok(!existsSync(L.txn));
 }));
 
 /** Replaces a file (removed first, as a mode 0440 file cannot be rewritten) with `text` and `mode`. */

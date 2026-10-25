@@ -314,6 +314,10 @@ requeue (above). The route exists only for broker-driven dead-lettering.
       **OD-BRK-2b-I** authenticates the installation: an Owner-signed manifest (generated off the server from the approved commit)
       is the only authority for the installed artifacts; upgrades are monotonic, transactional, repairable and never touch the
       containment state, the nonce ledger, the latch or the trust keys.
+      **OD-BRK-2b-A** adds an external alert carrier, separate from Auth's A5-R3 carrier but built on its pattern (Pushover, plus
+      Healthchecks.io for heartbeats). The monitor's and the watchdog's completed runs each ping their own check, and only a PASS
+      counts as healthy. Containment never waits for it. The carrier is part of the signed v2 manifest and is installed disabled.
+      Provisioning and activating it are part of **OD-BRK-2b-2**.
     - *Runtime rules (Owner-approved for OD-BRK-2b, 2026-10-24; operational source: the runbook):* a server-side check every
       5 minutes, plus after authorized topology changes; FAIL contains immediately; UNKNOWN alerts on the first, escalates on the
       second and contains on the third consecutive result; containment revokes Notification's permissions and closes its

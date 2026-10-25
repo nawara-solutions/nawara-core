@@ -140,7 +140,10 @@ only what is missing, and never deletes or replaces protected state. Deleting th
 - the protected state;
 - the recovery key, if present;
 - the optional trigger, if configured: its exact sudoers rule, no other rule reaching its user, sshd's effective settings, and the
-  restricted forced-command key, which must not be the scheduled-backup key.
+  restricted forced-command key, which must not be the scheduled-backup key;
+- the external alert carrier (§7): its unit's isolation (no capability, the broker's and the Auth carrier's paths inaccessible, no
+  environment, exactly its four systemd credentials) and, if configured, its root-only credential files (form checked, never printed),
+  two distinct heartbeat checks and its state directory.
 
 Results:
 
@@ -155,7 +158,14 @@ Results:
 Enabling the timers is a separately authorized step. The verifier FAILs any enabled timer unless
 `/var/lib/nawara-core-topology-install/activation` (root 0600) and its signature authorize it. That file holds
 `nawara-core-topology-monitor-activation v1`, `core_commit=`, `version=` (the installed ones) and
-`timers=nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer`, signed by the Owner in the installation namespace.
+`timers=nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer` (optionally followed by
+`,nawara-core-topology-alert.timer`), signed by the Owner in the installation namespace. Every enabled timer must be in that list.
+
+**Contract v2 (OD-BRK-2b-A).** The manifest header is `nawara-core-topology-monitor-manifest v2`. It lists 14 artifacts: the carrier
+`topology-alert-carrier.sh` and its two units are added. The carrier's credentials are never artifacts and the installer never writes
+them. The installer refuses to `upgrade` an installation recorded under the OD-BRK-2b-I v1 contract (`installed_contract`). No such
+installation exists in production, because OD-BRK-2b-2 has not run. A lab installation is removed and installed fresh. Any later
+production upgrade that changes the contract again needs its own Owner-signed manifest and a separately authorized installation.
 
 ## 3. The trigger (OD-BRK-2b-2; not authorized here)
 
@@ -286,10 +296,146 @@ recovers: provisioning refuses while the latch is contained.
 Fields: version, timestamps, mode, phase, result, reason code, verifier check ids, UNKNOWN counter, containment outcome, attempts and the
 watchdog's status. Never a message, a code, a credential, an HMAC key, the Erlang cookie, a policy definition or a broker address.
 
-`alerts.jsonl` is a spool: **delivery is a pending dependency** (no production carrier exists for this control; the A5-R3 carrier is
-Auth's and is not installed). Containment never depends on an alert being written or delivered.
+`alerts.jsonl` is a local spool. The external carrier (§7) reads it on its own timer. Containment never depends on an alert being
+written or delivered.
 
-## 7. Exit codes
+## 7. External alerts and independent heartbeats (OD-BRK-2b-A; installing or enabling any of it is OD-BRK-2b-2, not authorized here)
+
+### Architecture
+
+`topology-alert-carrier.sh` runs one cycle every 60 s, from `nawara-core-topology-alert.service` and its own timer. It is a separate
+instance of the A5-R3 carrier pattern (`infra/alerting/auth-readiness-alert.sh`). It uses the same providers: Pushover for alerts and
+Healthchecks.io for heartbeats. It shares A5-R3's handling of credentials (protected files, passed to curl only through `--config -`),
+its fixed HTTPS endpoints with certificate verification and no redirects, and its acceptance rules. It has its own unit, state
+directory (`/var/lib/nawara-core-topology-alert`), queue, cursor, ledger and credentials. It never reads or writes the Auth carrier's
+state, and both of that carrier's directories are inaccessible to its unit.
+
+The producers write only local lines and never wait for the carrier:
+- the monitor (`containment_started` is written before the broker changes, then `verification_fail`, `contained`, and so on);
+- the watchdog;
+- the signed recovery (`recovery_authorized`, `recovery_refused`, `recovery_reverted`, `recovered`).
+
+None of them calls the network or the carrier (`npm run check:repo` enforces this).
+
+The carrier only reads `alerts.jsonl`, `evidence.jsonl` and `watchdog`. It takes no producer lock, writes nothing outside its own
+directory, holds no broker credential and never runs docker, rabbitmqctl or systemctl. Its unit makes the Docker and containerd sockets,
+the Docker data, `/opt/nawara-core` and the recovery inbox inaccessible.
+
+### Event contract
+
+Each event is one canonical record. Every field is a closed code, a number or an id:
+- `v`, `id` (32 hex: the SHA-256 of the source line, or deterministic for the carrier's own events);
+- `code`, `severity`, `component` (`monitor | watchdog | recovery | carrier`);
+- `at`, `at_epoch`, `incident` (`none` or 32 hex), `reason`, `problems`;
+- `count`, `last_epoch`, `queued_epoch`.
+
+The carrier's table sets the severity, never the line. Producer kinds keep their names and map to codes:
+
+| Code | From | Severity |
+|---|---|---|
+| `topology_verification_fail` | monitor `verification_fail` | critical |
+| `topology_verification_unknown` / `topology_unknown_escalated` / `topology_unknown_cleared` | monitor `unknown_first` / `unknown_escalated` / `unknown_cleared` | warning / critical / info |
+| `containment_started` / `containment_confirmed` / `containment_unconfirmed` | monitor `containment_started` / `contained` / `containment_unconfirmed` | critical |
+| `containment_latch_restored` / `containment_incident_rebound` | monitor | critical |
+| `watchdog_quiet` | monitor | warning |
+| `monitor_overdue` / `monitor_stalled` / `monitor_killed` / `monitor_timer_inactive` / `monitor_service_failed` / `watchdog_state_invalid` / `watchdog_not_installed` | watchdog | critical |
+| `watchdog_ok` / `watchdog_contained` | watchdog | info |
+| `recovery_authorized` / `recovery_refused` / `recovery_reverted` | recovery | critical |
+| `recovery_completed` | recovery `recovered` | warning |
+| `installation_integrity_failed` / `installation_integrity_restored` | carrier: the installed artifacts checked against the signed installed manifest (alerting only) | critical / info |
+| `heartbeat_delivery_failed` | carrier | warning |
+| `spool_event_rejected` (`malformed`, `oversized`, `unrecognized`), `spool_gap`, `spool_unreadable`, `spool_cursor_invalid` | carrier | critical |
+| `carrier_started` | carrier | info |
+
+A line that is longer than 1024 bytes, does not match the producers' exact schema, carries any extra field, or names an unknown kind
+never reaches a provider. It becomes a fixed `spool_event_rejected` alert. The following never reach the queue, the journal or a
+provider:
+- message bodies, authentication or recovery codes, nonces, signers, signed payloads, keys, the Erlang cookie, broker addresses or
+  credentials;
+- exception text or free-form metadata.
+
+### Delivery
+
+- **Order and priority.** Critical events go first. A message carries up to 8 events and a cycle sends up to 3 messages. Pushover
+  priority is 1 when any event is critical; emergency priority (2) is never used.
+- **Acceptance.** An event counts as delivered only on HTTP 200 with `"status":1`. `deliveries.jsonl` records `submitted` before each
+  request and `accepted` (with Pushover's receipt id) after.
+- **Retries.**
+  - A timeout, a connection failure or a 5xx backs off 60, 120, 240, 480, then at most 900 s.
+  - A 4xx or 429 is recorded as `rejected` and backs off 3600 s.
+  - A 200 without `"status":1`, or a redirect, backs off 900 s.
+  - Nothing is dropped while undelivered.
+- **Deduplication and coalescing.**
+  - A bounded ledger of 4000 ids keeps a replayed or rewritten spool line from being delivered twice.
+  - A pending event with the same code, incident, reason and problems absorbs repeats as a count (for example `x50`).
+  - The carrier's lasting conditions are reported at most once an hour.
+- **At-least-once.** A cycle killed after the provider accepted a message, but before its queue files were removed, sends it again.
+  Exactly-once is not claimed.
+- **Crash safety.** The queue, the ledger, the cursor and the state are written atomically and flushed before anything is sent. A
+  partial spool line waits for the next cycle.
+- **Cursor and state.**
+  - A missing, corrupt or symbolically linked cursor or state is set aside and raises a critical `spool_cursor_invalid` alert. The
+    carrier then replays the last 24 h through the ledger.
+  - A cursor line that the producer's 2000-line bound has dropped raises `spool_gap`, meaning possible loss.
+- **Saturation.** The queue holds at most 256 files. Beyond that, events are counted by severity and the next message carries an
+  `OVERFLOW` line. The spool on the host keeps the lines. A critical event that waits more than 600 s, or any critical overflow, also
+  escalates through the other provider (next section). This is fail-visible and never loops back into the broken carrier.
+
+### Heartbeats (two independent checks)
+
+The carrier pings Healthchecks.io's `/<exit-status>` endpoint. Status 0 is a success; any other status is a failure that Healthchecks.io
+alerts on. Each check is pinged only for a **new completed run** of its own component, read from:
+- the monitor's last `evidence.jsonl` line, written at the very end of a run;
+- the watchdog's `watchdog` check-in.
+
+A run is pinged only if it completed within 360 s (`HB_FRESH`), and only once. The carrier never invents a run that did not happen.
+After an outage, the latest run is pinged only if it is still fresh; older runs are not pinged, because that would hide the gap.
+
+| Component | Exit status pinged |
+|---|---|
+| monitor | 0 PASS · 10 UNKNOWN · 20 contained · 21 containment unconfirmed · 1 anything else · 75 PASS while critical alerts cannot reach the Owner |
+| watchdog | 0 its run found no problem (or only containment) · 1 it found a problem |
+
+What each situation looks like from outside:
+- **A local UNKNOWN:** a failure ping (10), plus a Pushover alert.
+- **A missed monitor run:** no ping. The monitor check goes down after its grace period. The watchdog reports `monitor_overdue`, and
+  `heartbeats.jsonl` records `missed` locally after 900 s.
+- **A dead watchdog timer:** the watchdog check goes down on its own; the monitor's check is unaffected.
+- **A network outage:** a failed ping is recorded locally (`failed`, with the HTTP status) and retried while the run is fresh.
+  `heartbeat_delivery_failed` goes out through Pushover at most once an hour.
+- **A carrier failure:** both checks go down at once, and the unit fails locally.
+
+Neither check can stand in for the other, and the carrier refuses to send any heartbeat when both URLs are the same.
+
+**Required check settings (Owner, in Healthchecks.io):** two checks, each with a period of 5 minutes and a grace of 10 minutes. A
+missing run then alerts after about 15 minutes; the last real run was pinged within 60 s of completing.
+
+### Credentials (placed by the Owner at the console; never in Git, a manifest, an image, the environment or a command line)
+
+`/etc/nawara-core-topology-alert/` is root 0700. Each file is root-owned, mode 0400 or 0600, one link, and not a symbolic link:
+
+| File | Value |
+|---|---|
+| `pushover.token` | the Pushover application token (30 × `[A-Za-z0-9]`) |
+| `pushover.user` | the Pushover user or group key (30 × `[A-Za-z0-9]`) |
+| `healthchecks-monitor.url` | the monitor check's ping URL (`https://hc-ping.com/<uuid>` or `/<ping-key>/<slug>`, no suffix) |
+| `healthchecks-watchdog.url` | the watchdog check's ping URL (a different check) |
+
+systemd passes them through `LoadCredential=`. They are not shared with the Auth carrier's files; the Owner decides whether the same
+Pushover application or user is reused. Each credential is validated and never printed. A missing or invalid one disables only what it
+serves (exit 78). The intake and the local evidence still run. Certification uses only disposable values and a local HTTPS receiver.
+
+### Prerequisites before any production use (OD-BRK-2b-2, separately authorized)
+
+1. The Owner creates the two Healthchecks.io checks and a Pushover application, and places the four credential files.
+2. A newly signed v2 manifest is installed.
+3. `verify-topology-monitor-install.sh` returns PASS.
+4. A signed activation lists the carrier's timer.
+5. A real end-to-end delivery is demonstrated, as A5-R3 required for its carrier.
+
+Nothing in this repository installs, enables or starts the carrier.
+
+## 8. Exit codes
 
 | Code | Monitor | Watchdog | Trigger | Recovery |
 |---|---|---|---|---|
@@ -306,9 +452,14 @@ Auth's and is not installed). Containment never depends on an alert being writte
 | 75 | lock busy (60 s) | lock busy | | lock busy |
 | 78 | not installed | | | |
 
-## 8. Remaining production gates
+Carrier: 0 everything delivered and every due heartbeat sent; 3 events stay queued; 4 a heartbeat could not be sent; 64 an argument or
+a client command; 65 an unsafe installation or state, or not root; 69 a tool missing; 78 a credential missing or invalid (the intake
+still ran).
 
-OD-BRK-2b-2 (installation, enablement, the trigger key and its sudoers rule, an alert carrier and an external heartbeat, with its own
+## 9. Remaining production gates
+
+OD-BRK-2b-2 (installation, enablement, the trigger key and its sudoers rule, the provisioning and activation of the OD-BRK-2b-A alert
+carrier and its two heartbeats, with its own
 Owner-approved decision on these host-level privileged choices, and pointers in ADR-0053 and `core-rabbitmq-production.md`); NP-K; S1-R;
 the applicable A12 / A5-R3 alert readiness; OD-BRK-3 to OD-BRK-5; the S1e-5 recertification; explicit Owner authorization for
 Notification's production activation.

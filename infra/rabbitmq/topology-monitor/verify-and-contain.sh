@@ -25,8 +25,9 @@
 # show no grant, no topic grant, no connection and the latch contained. Only then is the result CONTAINED; otherwise, after at most
 # MAX_ATTEMPTS bounded attempts, CONTAINMENT_UNCONFIRMED. Command exit statuses are never taken as proof.
 #
-# Evidence: one bounded JSON line per run in STATE_DIR/evidence.jsonl, alerts in STATE_DIR/alerts.jsonl (a spool: delivery is a pending
-# dependency, and containment never depends on it), and a summary line in the journal. Only closed codes, counters, timestamps and
+# Evidence: one bounded JSON line per run in STATE_DIR/evidence.jsonl, alerts in STATE_DIR/alerts.jsonl (a local spool: the separate
+# external carrier, topology-alert-carrier.sh (OD-BRK-2b-A), reads it on its own timer; containment never waits for or depends on it),
+# and a summary line in the journal. Only closed codes, counters, timestamps and
 # verifier check ids: never a message, a code, a credential, a policy definition or a broker address.
 #
 # It takes no input beyond the one fixed argument, runs nothing a client sends, uses no environment value except its own pins, and runs
@@ -210,8 +211,8 @@ append() { # append <file> <json line>
   printf '%s\n' "$2" >>"$f" 2>/dev/null || return 1
   bound "$f"
 }
-alert() { # alert <severity> <kind>: queued for the (pending) carrier; a spool failure is logged and never blocks anything
-  append alerts.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$1\",\"kind\":\"$2\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"incident\":\"$ST_INCIDENT\"}" \
+alert() { # alert <severity> <kind> [reason]: a local line for the external carrier; a spool failure is logged and never blocks anything
+  append alerts.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$1\",\"kind\":\"$2\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"incident\":\"$ST_INCIDENT\"${3:+,\"reason\":\"$3\"}}" \
     || log "alert spool unavailable (kind=$2); containment never depends on it"
   log "ALERT severity=$1 kind=$2"
 }
@@ -301,6 +302,8 @@ contain() { # contain <reason>
   persist_incident || log "the incident binding could not be persisted (containment cannot be confirmed)"
   persist_latch || log "the containment latch could not be persisted (containment cannot be confirmed)"
   CONTAINMENT=unconfirmed
+  # a local line only (never a network call): the Owner learns of a new containment even if this run is killed before it confirms
+  if [ "$NEW_CONTAINMENT" = 1 ]; then alert critical containment_started "$1"; fi
   while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
     attempt=$((attempt + 1))
     revoke
@@ -363,12 +366,13 @@ fi
 
 if [ "$ST_CONTAINED" = 1 ]; then
   save_state "$LAST_RESULT" || log "the state file could not be written"
+  if [ "$NEW_CONTAINMENT" = 1 ] && [ "$REASON" = verifier_fail ]; then alert critical verification_fail verifier_fail; fi
   if [ "$CONTAINMENT" = confirmed ]; then
-    if [ "$NEW_CONTAINMENT" = 1 ]; then alert critical contained; fi
+    if [ "$NEW_CONTAINMENT" = 1 ]; then alert critical contained "$REASON"; fi
     if [ "$REASON" = latch_not_contained ]; then alert critical latch_restored_by_monitor; fi
     if [ "$INCIDENT_REBOUND" = 1 ]; then alert critical incident_binding_restored; fi
   else
-    alert critical containment_unconfirmed
+    alert critical containment_unconfirmed "$REASON"
   fi
 fi
 WD=$(watchdog_status)
