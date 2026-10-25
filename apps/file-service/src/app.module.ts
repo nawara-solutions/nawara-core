@@ -8,6 +8,7 @@ import { PersistenceModule } from './persistence/persistence.module.js';
 import { StorageModule } from './storage/storage.module.js';
 import { DeletionModule } from './deletion/deletion.module.js';
 import { DownloadModule } from './download/download.module.js';
+import { GrantModule } from './grants/grant.module.js';
 import { UploadModule } from './upload/upload.module.js';
 import { OpsCounters, OPS_COUNTERS_TOKEN } from './ops/ops-counters.js';
 import { OpsModule } from './ops/ops-reporter.js';
@@ -48,7 +49,8 @@ class ConfigModule {
  * delete route and the bounded cleanup workers: orphan expiry, delete worker, upload-lease sweep, ticket retention).
  *
  * Stage 18.7.4 adds the central audit intent (`FileAuditModule`: `file.deleted`, `file.integrity_incident`) and the kit outbox relay that
- * publishes it to RabbitMQ — the only events this service produces; it consumes none.
+ * publishes it to RabbitMQ — the only events this service produces; it consumes none. Core V2 S2-File.1 adds evidence grants
+ * (`GrantModule`: issuance and revocation by the file's owner service, `file.grant_issued` / `file.grant_revoked`).
  *
  * Deliberately NOT here (ADR-0048): object storage is not a readiness dependency; no call to Auth or to any product service, for any
  * purpose.
@@ -84,6 +86,7 @@ export class AppModule {
         UploadModule,
         DownloadModule,
         DeletionModule,
+        GrantModule, // Core V2 S2-File.1: evidence-grant issuance and revocation (owner services; no granted read yet)
         OpsModule, // Stage 17.9: the operational snapshot (file_ops_snapshot / file_ops_counters / file_storage_ops)
       ],
     };

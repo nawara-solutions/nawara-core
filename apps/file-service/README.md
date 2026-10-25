@@ -32,7 +32,7 @@ owns immutable bytes, generic metadata, integrity, lifecycle, storage and contro
 | `GET /health` (liveness) and `GET /ready` (readiness: `database` + `migrations`), at the root | `HealthModule`, `DbModule` |
 | SIGTERM / SIGINT: `/ready` 503 and new requests refused, running requests drained within `HTTP_DRAIN_TIMEOUT_MS`, the pool closed last, exit | `HttpDrain` (Stage 15.5) |
 | Service-token authentication (`SERVICE_TOKENS`); the caller is always the token's service | `ServiceAuthModule` |
-| `FILE_SERVICE_POLICY`: per-caller operations, organization mode, media types and size ceiling, deny by default, validated at startup | this service |
+| `FILE_SERVICE_POLICY`: per-caller operations, organization mode, media types and size ceiling, deny by default, validated at startup (S2-File.1: `grant` with its `grantPurposes`) | this service |
 
 **Persistence (17.3):** `db/migrations/0001_file_schema.sql` (metadata only, never bytes) and `src/persistence/`: `FileRepository`
 (`createUploading`, the owner- and organization-scoped `findOwned`; no unscoped lookup), `TicketRepository` (digest-only tickets:
@@ -65,6 +65,15 @@ or of the wrong size (`file_reconciliation`), ONE event per (file, reason) (a de
 changes a download's answer; the reconcile CLI writes into the outbox and the running service's relay publishes it. The kit outbox relay
 publishes to RabbitMQ (`RABBITMQ_URL`, required in production); nothing is consumed. See the
 [Stage 18.7 record](../../docs/architecture/stage-18/stage-18-7-core-producer-integration.md).
+
+**Evidence grants (Core V2 S2-File.1, ADR-0048 Amendment 1; `src/grants/`):** `POST /file/files/{id}/evidence-grants` (owner, `grant`;
+`{ purpose, caseRef, expiresInSeconds? }`, `Idempotency-Key` required: `201`, a replay `200`, a different request `422`) and
+`POST /file/evidence-grants/{grantId}/revoke` (the grantor; terminal, idempotent). The purpose fixes the grantee (`dispute_evidence` →
+`payment-service`; `surplus_evidence`, `settlement_evidence` → `billing-service`) and must be in the caller's `grantPurposes`; the grant
+takes the file's organization; the file must be `AVAILABLE` and attached; 24 hours by default, at most 7 days, never extended.
+`file_evidence_grant` (migration `0004`) re-checks every binding and keeps the row immutable except its one revocation; rows are never
+deleted. `file.grant_issued` / `file.grant_revoked` are written in the same transaction. A grant is a record, not a credential, and it
+opens no existing route to the grantee: granted reads are S2-File.2 (`GrantRepository.findUsable` is their validation foundation).
 
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no File
 domain events (the broker carries only the audit intent); no user JWT; no malware scanner (decision B); no public or presigned URL,
@@ -107,9 +116,11 @@ Range, multipart or versions.
     "core-notification": { "operations": ["read"], "organizations": "none" } } }
 ```
 
-Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`. `mediaTypes` (a subset of `application/pdf`, `image/jpeg`,
+Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`, `grant`. `mediaTypes` (a subset of `application/pdf`, `image/jpeg`,
 `image/png`, `image/webp`, `image/heic`, `image/heif`) and `maxBytes` are required exactly when the caller may `upload` or
-`issue_ticket`. Unknown properties, operations or types, a wildcard, or a `maxBytes` above `FILE_MAX_BYTES` stop the process.
+`issue_ticket`. S2-File.1: `grant` (issue and revoke evidence grants on the caller's own files) requires a non-empty `grantPurposes`
+(a subset of `dispute_evidence`, `surplus_evidence`, `settlement_evidence`), allowed only with `grant`. Unknown properties, operations,
+types or purposes, a wildcard, or a `maxBytes` above `FILE_MAX_BYTES` stop the process.
 
 ## Run
 

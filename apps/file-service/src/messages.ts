@@ -153,4 +153,21 @@ export const FILE_MESSAGES = defineMessages({
     fr: "Le fichier n'a aucun contenu à supprimer.",
     ar: 'لا يحتوي الملف على أي محتوى لحذفه.',
   },
+  // evidence grants (Core V2 S2-File.1)
+  purposeNotAllowed: {
+    en: 'This caller cannot grant files for this purpose.',
+    fr: 'Cet appelant ne peut pas autoriser de fichiers pour cet usage.',
+    ar: 'لا يمكن لهذا المستدعي منح ملفات لهذا الغرض.',
+  },
+  fileNotGrantable: {
+    en: 'Only an available, attached file can be granted.',
+    fr: 'Seul un fichier disponible et rattaché peut être autorisé.',
+    ar: 'لا يمكن منح سوى ملف متاح ومرفق.',
+  },
+  grantIdempotencyKeyReused: {
+    en: 'This Idempotency-Key was used for a different grant.',
+    fr: 'Cette Idempotency-Key a été utilisée pour une autre autorisation.',
+    ar: 'استُخدم مفتاح Idempotency-Key هذا لتفويض مختلف.',
+  },
+  noSuchGrant: { en: 'No such grant.', fr: 'Autorisation inexistante.', ar: 'التفويض غير موجود.' },
 });

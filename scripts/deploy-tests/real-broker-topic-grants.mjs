@@ -225,8 +225,8 @@ test('provisioning: every identity selected gets EXACTLY its generated topic gra
   assertGrantsAre(GEN, ALL);
   assert.equal(GEN['auth-service'].domainEvents, 'inactive');
   assert.deepEqual(Object.fromEntries(ALL.map((s) => [s, [GEN[s].write.keys.length, GEN[s].read.keys.length]])), {
-    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1)
-    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9],
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1); file-service: 2 + the two evidence-grant actions (S2-File.1)
+    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [4, 0], 'notification-service': [0, 9],
     'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0],
   });
 });

@@ -105,13 +105,13 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 
 describe('nothing else was broadened', () => {
   it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the four of A5.4-AC1 (batches 1 and 2), and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(63); // + the three authorization receipt actions of Core V2 S2-Audit.2 (D1) and the two legal-hold actions of S2-Audit.4
+    expect(AUDIT_ACTIONS).toHaveLength(65); // + the three authorization receipt actions of Core V2 S2-Audit.2 (D1), the two legal-hold actions of S2-Audit.4 and the two evidence-grant actions of S2-File.1
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',
       'product.created', 'product.archived', 'price.created', 'price.retired']);
     const optional = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.organization === 'optional' && !corrected.has(a));
-    expect(optional.sort()).toEqual(['file.deleted', 'file.integrity_incident', 'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded'].filter((a) => !corrected.has(a)).sort());
+    expect(optional.sort()).toEqual(['file.deleted', 'file.grant_issued', 'file.grant_revoked', 'file.integrity_incident', 'payment.cancelled', 'payment.created', 'payment.expired', 'payment.failed', 'payment.succeeded'].filter((a) => !corrected.has(a)).sort());
     const withUser = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'payment-service' && AUDIT_CATALOG.get(a)!.actors.user);
     expect(withUser.sort()).toEqual(['payment.failed', 'payment.succeeded']);
   });

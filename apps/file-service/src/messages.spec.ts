@@ -50,6 +50,10 @@ describe('FILE_MESSAGES', () => {
       tooManyRequests: 'Too many requests.',
       uploadStillInProgress: 'The upload is still in progress.',
       noContentToDelete: 'The file has no content to delete.',
+      purposeNotAllowed: 'This caller cannot grant files for this purpose.',
+      fileNotGrantable: 'Only an available, attached file can be granted.',
+      grantIdempotencyKeyReused: 'This Idempotency-Key was used for a different grant.',
+      noSuchGrant: 'No such grant.',
     };
     expect(Object.keys(FILE_MESSAGES).sort()).toEqual(Object.keys(before).sort());
     for (const [id, en] of Object.entries(before)) expect(FILE_MESSAGES[id as keyof typeof FILE_MESSAGES].en).toBe(en);

@@ -1,8 +1,9 @@
 import { ConfigError, parseCallerPolicy } from '@nawara/service-kit';
+import { EVIDENCE_PURPOSES, type EvidencePurpose } from '../grants/evidence-purposes.js';
 import { FILE_MEDIA_TYPES, type FileMediaType } from './media-types.js';
 
 /** The operations a caller policy can grant (SDD §11). Nothing is granted unless listed. */
-export const FILE_OPERATIONS = ['upload', 'read', 'attach', 'delete', 'issue_ticket'] as const;
+export const FILE_OPERATIONS = ['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant'] as const;
 export type FileOperation = (typeof FILE_OPERATIONS)[number];
 
 /** Operations that create bytes, so they need the caller's own media types and size ceiling. */
@@ -16,9 +17,11 @@ export interface CallerPolicy {
   mediaTypes?: ReadonlySet<FileMediaType>;
   /** Present exactly when the caller may create bytes: at most FILE_MAX_BYTES; a caller can never raise its own ceiling. */
   maxBytes?: number;
+  /** Present exactly when the caller may `grant` (S2-File.1, OD-FILE F8): the evidence purposes it may grant its own files for. */
+  grantPurposes?: ReadonlySet<EvidencePurpose>;
 }
 
-const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes']);
+const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes', 'grantPurposes']);
 
 /**
  * `FILE_SERVICE_POLICY` (ADR-0048 §7, SDD §11; the Notification / Organization `SERVICE_POLICY` pattern), parsed and validated at
@@ -26,6 +29,9 @@ const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes']);
  *
  *   { "callers": { "<caller>": { "operations": ["upload", "read", "attach", "delete", "issue_ticket"], "organizations": "request",
  *                                "mediaTypes": ["application/pdf", "image/jpeg"], "maxBytes": 10485760 } } }
+ *
+ * S2-File.1: `grant` (issue and revoke evidence grants on the caller's own files) needs an explicit, non-empty `grantPurposes` list from
+ * the closed evidence vocabulary (no wildcard); the grantee is fixed by the purpose, never chosen by the caller or the request.
  *
  * Deny by default: a caller registered in `SERVICE_TOKENS` with no entry, or an entry for a caller with no token, refuses to boot; an
  * unknown operation, property, media type or an over-ceiling `maxBytes` refuses to boot. The policy is authorization only: the
@@ -64,7 +70,16 @@ export class FileCallerPolicy {
         } else if (e.mediaTypes !== undefined || e.maxBytes !== undefined) {
           throw new ConfigError(`${at}: mediaTypes and maxBytes apply only to a caller that may upload or issue tickets`);
         }
-        return { operations, organizations: e.organizations, mediaTypes, maxBytes };
+        let grantPurposes: Set<EvidencePurpose> | undefined;
+        if (operations.has('grant')) {
+          if (!Array.isArray(e.grantPurposes) || e.grantPurposes.length === 0) throw new ConfigError(`${at} may grant, so it needs an explicit, non-empty grantPurposes list`);
+          for (const p of e.grantPurposes) if (!(EVIDENCE_PURPOSES as readonly unknown[]).includes(p)) throw new ConfigError(`${at} lists a grant purpose other than ${EVIDENCE_PURPOSES.join(' / ')}`);
+          grantPurposes = new Set(e.grantPurposes as EvidencePurpose[]);
+          if (grantPurposes.size !== e.grantPurposes.length) throw new ConfigError(`${at} lists a grant purpose twice`);
+        } else if (e.grantPurposes !== undefined) {
+          throw new ConfigError(`${at}: grantPurposes applies only to a caller that may grant`);
+        }
+        return { operations, organizations: e.organizations, mediaTypes, maxBytes, grantPurposes };
       },
     });
     return new FileCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));

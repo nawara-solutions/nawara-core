@@ -1,6 +1,7 @@
 # 0048. File Service architecture
 
 - **Status:** Accepted (2026-09-24, Stage 17.1; F16 decided by the owner: product-issued access tickets)
+- **Amended:** **Amendment 1 (2026-10-25, Core V2 OD-FILE, decisions F1 to F8 approved by the owner)** at the end of this ADR adds evidence grants, holds and the ticket reservation lease direction. The ADR **stays Accepted**; the original text is unchanged; nothing in it is narrowed or replaced.
 - **Date:** 2026-09-24
 - **Deciders:** Anwar (project owner)
 - **Related:** [ADR-0032](./0032-database-per-service-on-a-shared-server.md) (database per service), [ADR-0033](./0033-service-to-service-authentication-and-user-identity.md)
@@ -81,3 +82,32 @@ operations with `503 storage_unavailable` and is signalled separately, instead o
 - **Open (production enablement, not architecture):** the production storage provider (O2 / F6, before production enablement); the malware
   policy (F19, before production enablement); legal retention durations (F23, owner / legal).
 - **Follow-up:** the Stage 17.2–17.10 roadmap in the Stage 17.1 record; Notification attachments after File V1 (ADR-0046 §16).
+
+## Amendment 1 (2026-10-25): evidence grants, holds and the ticket lease (Core V2 OD-FILE)
+
+The owner resolved OD-FILE ([D-A2 contract register](../architecture/core-v2-d-a2-contract-register.md) §5.5, FIL-01 to FIL-07) with
+decisions F1 to F8. They add to this ADR; they do not change its existing decisions (owner-only service access, product-issued tickets,
+the caller policy, deletion). The frozen invariants stay: a grant never widens organization scope; a held file cannot be deleted; tickets
+are single-purpose and bounded.
+
+- **F1 (grantor):** only the file's owner service, identified by its verified service token, with the explicit `grant` operation, on its
+  own file in its own organization, while the file is `AVAILABLE` and attached. No human, public or third-party issuance; no ownership
+  or organization from the request.
+- **F2 (purpose and grantee):** a closed vocabulary, each purpose with exactly one grantee: `dispute_evidence` → `payment-service`
+  (PAY-10), `surplus_evidence` → `billing-service` (BIL-30), `settlement_evidence` → `billing-service` (BIL-32). A grant is bound to one
+  file, one organization (the file's), one purpose, one case reference and one grantee; it gives the grantee no general file access.
+- **F3 (lifetime):** an explicit expiry, 24 hours by default, at most 7 days; never extended (renewal is a new grant); expired or revoked
+  grants are never reactivated or consumed.
+- **F4 (holds, S2-File.3):** only the file's owner service places or releases a File evidence hold. Audit's legal-hold authority is not
+  carried over.
+- **F5 (ticket lease, S2-File.4):** reservation before consumption; the lease duration, commit, rollback and interrupted-stream
+  semantics are decided with that slice.
+- **F6 (audit):** `file.grant_issued`, `file.grant_revoked`, `file.hold_placed`, `file.hold_released` and `file.granted_read`, written
+  through the transactional outbox, never with grant data beyond identifiers, file content or evidence.
+- **F7 (this record):** recorded as an amendment, consistent with the ADR status lifecycle.
+- **F8 (policy):** `FILE_SERVICE_POLICY` gains `grant` and the caller's `grantPurposes` (deny by default, no wildcard). Losing either
+  stops new issuance and revocation; granted reads (S2-File.2) re-check the policy at use.
+
+**Implemented in S2-File.1:** the `file_evidence_grant` table (migration `0004`), issuance (`POST /file/files/{id}/evidence-grants`,
+idempotent by `Idempotency-Key`) and revocation (`POST /file/evidence-grants/{grantId}/revoke`), the first two audit actions. A grant is a
+record, not a credential: there is no grant secret. Granted reads, holds and the lease are later slices.
