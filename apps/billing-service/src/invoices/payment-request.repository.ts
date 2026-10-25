@@ -12,6 +12,7 @@ import { ACTIVE_PAYMENT_REQUEST_STATUSES } from '../domain/state-machines.js';
 import type { PaymentSnapshot } from '../payment-integration/payment-client.js';
 import { INVOICE_COLUMNS, type InvoiceRow, type PaymentRequestRow } from './invoice.types.js';
 import { recordTransition } from '../domain/transitions.js';
+import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscription.repository.js';
 import { SubscriptionRepository } from '../subscriptions/subscription.repository.js';
 import { BILLING_MESSAGES } from '../messages.js';
 
@@ -28,7 +29,8 @@ export interface PaymentRequestResult {
  * `unrouted` (Core V2 S3a): a paid invoice with a subscription-looking line but no routing record (issued before S3a), or whose record
  * does not name that Organization subscription: no Subscription effect, logged for review (ADR-0044 B9).
  */
-export type SubscriptionSettlementOutcome = 'settled' | 'conflict' | 'unrouted' | null;
+/** `purchased` (Core V2 S3c): a routed `direct_purchase` recorded in its beneficiary's Personal Subscription ledger. */
+export type SubscriptionSettlementOutcome = 'settled' | 'purchased' | 'conflict' | 'unrouted' | null;
 
 export interface EventApplication {
   outcome: Decision['outcome'];
@@ -75,6 +77,7 @@ export class PaymentRequestRepository {
     private readonly db: DbService,
     private readonly subscriptions: SubscriptionRepository,
     private readonly audit: BillingAudit,
+    private readonly personal: PersonalSubscriptionRepository,
   ) {}
 
   /** State-idempotent creation (BI-13): the current active request is returned instead of a second one. */
@@ -381,6 +384,19 @@ export class PaymentRequestRepository {
    * can or cannot do with the commercial classification.
    */
   private async linkSubscription(q: Queryable, invoice: InvoiceRow, paymentRequestId: string, receiptId: string, settledAt: Date, ctx: TransitionContext): Promise<SubscriptionSettlementOutcome> {
+    // Core V2 S3c (ADR-0044 B4): a routed `direct_purchase` is recorded in ITS beneficiary's Personal Subscription ledger (the routing
+    // record's beneficiary and product, never the invoice's Organization), with this transaction's verified settlement as evidence.
+    const personalRouting = (await q.query<{ beneficiaryUserId: string; productId: string }>(
+      `SELECT "beneficiaryUserId", "productId" FROM invoice_entitlement WHERE "invoiceId" = $1 AND purpose = 'direct_purchase'`, [invoice.id])).rows[0];
+    if (personalRouting) {
+      const line = (await q.query<{ priceId: string }>(
+        `SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1 AND "productId" = $2 AND "interval" = 'recurring'`, [invoice.id, personalRouting.productId])).rows;
+      if (line.length !== 1) return 'unrouted';
+      await this.personal.recordPurchase(q, {
+        userId: personalRouting.beneficiaryUserId, productId: personalRouting.productId, priceId: line[0]!.priceId, invoiceId: invoice.id, paymentRequestId, receiptId, settledAt,
+      });
+      return 'purchased';
+    }
     if (invoice.organizationId === null) return null;
     const { rows: lines } = await q.query<{ productId: string; priceId: string; interval: string }>(
       `SELECT "productId", "priceId", "interval" FROM invoice_line WHERE "invoiceId" = $1`,

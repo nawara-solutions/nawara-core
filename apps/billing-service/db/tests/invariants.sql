@@ -65,7 +65,8 @@ SELECT pg_temp.assert_eq('BI-01', 'no money column is anything but bigint',
     AND data_type <> 'bigint'), '0');
 SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the eight the SDD defines',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND data_type = 'bigint'
-    AND table_name NOT IN ('invoice_number_sequence')), '8');
+    AND table_name NOT IN ('invoice_number_sequence')
+    AND NOT (table_name = 'subscription_purchase' AND column_name = 'ledgerSeq')), '8'); -- S3c: the ledger's ORDER, not money
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');

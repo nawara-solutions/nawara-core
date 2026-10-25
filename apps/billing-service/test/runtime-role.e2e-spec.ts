@@ -96,6 +96,26 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     }
   });
 
+  it('Core V2 S3c: the runtime role holds only INSERT and SELECT on personal_subscription, subscription_purchase and subscription_purchase_reversal', async () => {
+    const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await owner.connect();
+    await app.connect();
+    try {
+      for (const table of ['personal_subscription', 'subscription_purchase', 'subscription_purchase_reversal']) {
+        const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);
+        expect(grants.rows.map((r) => r.privilege_type), table).toEqual(['INSERT', 'SELECT']);
+        await expect(app.query(`DELETE FROM ${table}`), table).rejects.toThrow(/permission denied/);
+        await expect(app.query(`TRUNCATE ${table}`), table).rejects.toThrow(/permission denied/);
+      }
+      // the ledger's identity column is usable by the runtime role (a purchase can be appended)
+      expect((await owner.query(`SELECT has_sequence_privilege($1, pg_get_serial_sequence('subscription_purchase', 'ledgerSeq'), 'USAGE') AS ok`, [appRole])).rows[0].ok).toBe(true);
+    } finally {
+      await owner.end();
+      await app.end();
+    }
+  });
+
   it('Core V2 S3b (DB-9 / DB-10): the runtime role holds only INSERT and SELECT on subscription_settlement; UPDATE, DELETE and TRUNCATE are refused by privilege', async () => {
     const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
     const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
