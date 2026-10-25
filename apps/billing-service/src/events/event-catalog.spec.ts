@@ -45,6 +45,7 @@ const invoice = (over: Partial<InvoiceRecord> = {}): InvoiceRecord => ({
     productCode: 'P1', description: 'line text', quantity: 1, unitAmount: '1000', lineTotal: '1000', taxAmount: '190', entitlementKind: 'none',
     interval: 'one_time', intervalUnit: null, intervalCount: null, sourceType: null, sourceId: null, createdAt: at,
   }],
+  routing: { purpose: 'non_entitlement', target: 'none', beneficiaryUserId: null, organizationId: null, productId: null }, // Core V2 S3a: never in an event
   ...over,
 });
 

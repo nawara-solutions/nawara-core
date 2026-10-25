@@ -25,6 +25,18 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
 - **Financial invariants BI-01 .. BI-21 enforced by the database** (CHECKs, composite foreign keys, unique and partial unique
   indexes, an immutable-by-default allow-list trigger, deferred constraint triggers for totals and history, append-only and
   no-delete guards), so no code path, including a bug or the runtime role, can break them.
+- **Invoice target routing (Core V2 S3a; ADR-0044 B1 / B2, Owner decision Option C; `db/migrations/0019`, `0020`,
+  `src/domain/invoice-routing.ts`):** every product declares `subscriptionTarget` (`none` | `organization` | `personal`); a
+  subscription product names its `platformId` (one of the producer's `allowedPlatforms`) and has recurring prices only; both fields are
+  immutable. Issuing an invoice records, in the same transaction, an immutable `invoice_entitlement` decided by the server from its own
+  rows (never from `entitlementKind`): `organization_subscription` (a user pays an Organization's subscription; the Organization must
+  belong to the product's Platform, verified through Billing's Organization authority), `direct_purchase` (a user buys a personal
+  product for themself) or `non_entitlement` (no subscription line). Anything else, including an Organization paying a subscription
+  (B7) and the not-yet-available assisted and recovery settlements, is `422 invoice_routing_invalid` and the invoice stays a draft.
+  The database enforces DB-1 to DB-4 (append-only with INSERT / SELECT only for the runtime role, one record per issued invoice at
+  commit, the valid combinations, the payer and the product target by composite keys). A paid invoice changes an Organization's
+  Subscription only through an `organization_subscription` record for that Organization; an invoice issued before S3a (no record) is
+  never routed after the fact and is logged `payment_event_subscription_unrouted`. The settlement-based activation is S3b.
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).

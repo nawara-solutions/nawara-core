@@ -36,9 +36,9 @@ export class ProductRepository {
       await q.query('SAVEPOINT create_product');
       try {
         const { rows } = await q.query<ProductRow>(
-          `INSERT INTO product (producer, "sellerType", "sellerId", code, name, description, "entitlementKind")
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [producer, input.seller.type, input.seller.id, input.code, input.name, input.description, input.entitlementKind],
+          `INSERT INTO product (producer, "sellerType", "sellerId", code, name, description, "entitlementKind", "subscriptionTarget", "platformId")
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+          [producer, input.seller.type, input.seller.id, input.code, input.name, input.description, input.entitlementKind, input.subscriptionTarget, input.platformId],
         );
         const product = rows[0]!;
         await this.audit.record(q, 'product.created', { organizationId: sellerOrganization(product), resource: { type: 'product', id: product.id } }, requestTransitionContext({ type: 'service', id: producer }));
@@ -64,7 +64,8 @@ export class ProductRepository {
     );
     const existing = rows[0];
     if (!existing) throw e; // lost the race in a way that also lost the row: surface the original error
-    if (existing.name !== input.name || existing.description !== input.description || existing.entitlementKind !== input.entitlementKind) {
+    if (existing.name !== input.name || existing.description !== input.description || existing.entitlementKind !== input.entitlementKind
+      || existing.subscriptionTarget !== input.subscriptionTarget || existing.platformId !== input.platformId) {
       throw billingError(409, 'product_conflict', BILLING_MESSAGES.productConflict);
     }
     return { product: existing, changed: false };

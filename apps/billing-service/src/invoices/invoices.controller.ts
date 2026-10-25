@@ -118,11 +118,20 @@ export class InvoicesController {
   @ApiResponse({ status: 403 })
   @ApiResponse({ status: 404 })
   @ApiResponse({ status: 409, description: 'invalid_state_transition: the invoice is paid or void' })
+  @ApiResponse({ status: 422, description: 'invoice_routing_invalid (S3a): more than one subscription line, an Organization paying an Organization subscription, an assisted or recovery settlement (not yet available), a Platform outside the caller\'s, an Organization of another Platform' })
+  @ApiResponse({ status: 503, description: 'hierarchy_unavailable: an Organization subscription\'s Organization could not be verified; nothing was written' })
   async issue(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string, @Body() body: unknown) {
     const { locale } = normaliseIssueInvoiceInput(body);
     const caller = { kind: 'service' as const, service: producer };
     const ctx = requestTransitionContext(actorOf(caller));
-    const { invoice } = await this.invoices.issue(id, caller, { template: SYSTEM_TEMPLATE_V1, locale }, ctx);
+    // Core V2 S3a: an Organization subscription's Organization must belong to the product's Platform, verified through Billing's
+    // Organization authority OUTSIDE the issuing transaction (403 / 503 as for every Organization a caller names); the issue re-decides.
+    const plan = await this.invoices.planIssue(id, caller);
+    const organizationPlatformId = plan && 'routed' in plan && plan.routed.purpose === 'organization_subscription' && plan.routed.organizationId
+      ? await this.organizationScope.platformOf(producer, plan.routed.organizationId)
+      : null;
+    const callerPlatforms = this.config.servicePolicy.of(producer)?.allowedPlatforms ?? new Set<string>();
+    const { invoice } = await this.invoices.issue(id, caller, { template: SYSTEM_TEMPLATE_V1, locale }, ctx, { callerPlatforms, organizationPlatformId });
     return representInvoice(invoice, await this.paymentRequests.findActiveForInvoice(id));
   }
 

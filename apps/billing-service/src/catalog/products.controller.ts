@@ -27,14 +27,17 @@ export class ProductsController {
   @ApiResponse({ status: 200, description: 'Identical replay of an existing product (Idempotent-Replayed: true).' })
   @ApiResponse({ status: 400, description: 'invalid_product_request' })
   @ApiResponse({ status: 401 })
-  @ApiResponse({ status: 403, description: 'operation_not_permitted / organization_not_permitted (unknown or outside the caller\'s Platform scope: one answer)' })
-  @ApiResponse({ status: 409, description: 'product_conflict: same (seller, code), different content' })
+  @ApiResponse({ status: 403, description: 'operation_not_permitted / organization_not_permitted (unknown or outside the caller\'s Platform scope: one answer) / platform_not_permitted (platformId outside the caller\'s Platforms)' })
+  @ApiResponse({ status: 409, description: 'product_conflict: same (seller, code), different content (subscriptionTarget and platformId included)' })
   @ApiResponse({ status: 503, description: 'hierarchy_unavailable: the organization could not be verified; nothing was written' })
   async create(@CallerService() producer: string, @Body() body: unknown, @Res({ passthrough: true }) res: Response) {
     const input = normaliseCreateProductInput(body);
     // Stage 21.C.2 (ADR-0052 decision 3): an Organization seller is verified BEFORE anything is written, unless (seller, code) already
     // exists (then this is a replay or a conflict of a product whose Organization was verified when it was created).
-    if (input.seller.type === 'organization' && !(await this.products.naturalKeyExists(input))) await this.organizationScope.assertInScope(producer, input.seller.id);
+    const exists = await this.products.naturalKeyExists(input);
+    if (input.seller.type === 'organization' && !exists) await this.organizationScope.assertInScope(producer, input.seller.id);
+    // Core V2 S3a (B1): a product's Platform must be one the producer may act in (its explicit allowedPlatforms), checked before writing.
+    if (input.platformId !== null && !exists) this.organizationScope.assertPlatformInScope(producer, input.platformId);
     const { product, changed } = await this.products.create(producer, input);
     res.status(changed ? 201 : 200);
     if (!changed) res.setHeader('Idempotent-Replayed', 'true');

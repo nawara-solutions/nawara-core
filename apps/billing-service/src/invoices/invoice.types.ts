@@ -61,6 +61,16 @@ export interface InvoiceLineRow {
 
 export interface InvoiceRecord extends InvoiceRow {
   lines: InvoiceLineRow[];
+  /** Core V2 S3a (B2): the immutable routing record written at issue; null for a draft, a discarded draft, or an invoice issued before S3a. */
+  routing: InvoiceRoutingRow | null;
+}
+
+export interface InvoiceRoutingRow {
+  purpose: string;
+  target: string;
+  beneficiaryUserId: string | null;
+  organizationId: string | null;
+  productId: string | null;
 }
 
 export interface PaymentRequestRow {

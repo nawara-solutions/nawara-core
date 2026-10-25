@@ -15,6 +15,11 @@ import { PaymentRequestRepository } from '../src/invoices/payment-request.reposi
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 
+// Core V2 S3a: a subscription product names its Platform; the issuing caller and the invoice's Organization belong to it (the controller
+// resolves both before the issuing transaction; these tests call the repository directly and pass what the controller would).
+const PLATFORM = '99999999-9999-4999-8999-999999999999';
+const VERIFIED = { callerPlatforms: new Set([PLATFORM]), organizationPlatformId: PLATFORM };
+
 /**
  * Stage 18.7.2: Billing's central audit intent on real PostgreSQL 16. Every one of the 11 Billing catalog actions is written by
  * `AuditEventWriter` into the kit outbox on the SAME transaction as the change and its `billing_transition` row; the organization is always
@@ -56,7 +61,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
   async function seedPrice(o: { seller?: { type: string; id: string }; recurring?: boolean } = {}) {
     seq += 1;
     const seller = o.seller ?? { type: 'organization', id: ORG };
-    const product = await rows(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status) VALUES ($1, $2, $3, $4, 'Secret Product Name', 'active') RETURNING id`, [PRODUCER, seller.type, seller.id, `p-${seq}-${Math.random().toString(36).slice(2, 7)}`]);
+    const product = await rows(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ($1, $2, $3, $4, 'Secret Product Name', 'active', $5, $6) RETURNING id`, [PRODUCER, seller.type, seller.id, `p-${seq}-${Math.random().toString(36).slice(2, 7)}`, o.recurring ? 'organization' : 'none', o.recurring ? PLATFORM : null]);
     const price = await rows(
       `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, $2, 'TND', 9876, $3, $4, $5) RETURNING id`,
       [product[0].id, `r-${seq}`, o.recurring ? 'recurring' : 'one_time', o.recurring ? 'month' : null, o.recurring ? 1 : null],
@@ -71,7 +76,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       issuerSnapshot: { schemaVersion: 1 }, billToSnapshot: { schemaVersion: 1 }, lines: [{ priceId, quantity: 1 }],
     });
     const { invoice } = await invoices.createDraft(PRODUCER, input, ['TND'], svcCtx);
-    return (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, svcCtx)).invoice;
+    return (await invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, svcCtx, VERIFIED)).invoice;
   }
   async function requested(invoice: { id: string }) {
     const { request } = await requests.createForInvoice(invoice.id, payer, userCtx('member'));
@@ -167,7 +172,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       const [line] = await rows(`SELECT "priceId" FROM invoice_line WHERE "invoiceId" = $1`, [first.id]);
       const input = normaliseCreateInvoiceInput({ invoiceRequestId: crypto.randomUUID(), seller: { type: 'organization', id: ORG }, payer: { type: 'user', id: PAYER }, sourceType: 'contract', sourceId: 'renewal', issuerSnapshot: { schemaVersion: 1 }, billToSnapshot: { schemaVersion: 1 }, lines: [{ priceId: line.priceId, quantity: 1 }] });
       const draft = (await invoices.createDraft(PRODUCER, input, ['TND'], svcCtx)).invoice;
-      const second = (await invoices.issue(draft.id, producer, { template: 'system:1', locale: 'fr' }, svcCtx)).invoice;
+      const second = (await invoices.issue(draft.id, producer, { template: 'system:1', locale: 'fr' }, svcCtx, VERIFIED)).invoice;
       const r2 = await requested(second);
       const before = (await rows(`SELECT "currentPeriodEnd" FROM subscription WHERE id = $1`, [sub.id]))[0].currentPeriodEnd as Date;
       const reconciler: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: null }, correlationId: 'reconcile-run-0001' };
@@ -184,7 +189,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       const prices = t.app.get(PriceRepository);
       for (const seller of [{ type: 'organization' as const, id: ORG }, { type: 'user' as const, id: 'seller-user-5' }]) {
         const expectOrg = seller.type === 'organization' ? ORG : null;
-        const { product } = await products.create(PRODUCER, { seller, code: `c-${++seq}`, name: 'Name Not In Audit', description: 'Desc Not In Audit', entitlementKind: 'none' } as never);
+        const { product } = await products.create(PRODUCER, { seller, code: `c-${++seq}`, name: 'Name Not In Audit', description: 'Desc Not In Audit', entitlementKind: 'none', subscriptionTarget: 'none', platformId: null } as never);
         const { price } = await prices.create(producer, { productId: product.id, clientReference: `ref-${seq}`, currency: 'TND', unitAmount: 1234n, interval: 'one_time', intervalUnit: null, intervalCount: null, effectiveFrom: new Date() } as never, ['TND']);
         await prices.retire(price.id, producer);
         await products.archive(product.id, producer);
@@ -203,7 +208,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
 
     it('a replayed product creation (same seller and code) writes no second audit intent', async () => {
       const products = t.app.get(ProductRepository);
-      const input = { seller: { type: 'organization', id: ORG }, code: `replay-${++seq}`, name: 'N', description: 'D', entitlementKind: 'none' } as never;
+      const input = { seller: { type: 'organization', id: ORG }, code: `replay-${++seq}`, name: 'N', description: 'D', entitlementKind: 'none', subscriptionTarget: 'none', platformId: null } as never;
       const a = await products.create(PRODUCER, input);
       const b = await products.create(PRODUCER, input);
       expect(b.changed).toBe(false);
@@ -217,7 +222,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       const input = normaliseCreateInvoiceInput({ invoiceRequestId: crypto.randomUUID(), seller: { type: 'organization', id: ORG }, payer: { type: 'user', id: PAYER }, sourceType: 'contract', sourceId: 'y', issuerSnapshot: { schemaVersion: 1 }, billToSnapshot: { schemaVersion: 1 }, lines: [{ priceId, quantity: 1 }] });
       const { invoice } = await invoices.createDraft(PRODUCER, input, ['TND'], svcCtx);
       vi.spyOn(t.app.get(BillingAudit), 'record').mockRejectedValueOnce(new Error('simulated audit failure'));
-      await expect(invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, svcCtx)).rejects.toThrow('simulated audit failure');
+      await expect(invoices.issue(invoice.id, producer, { template: 'system:1', locale: 'fr' }, svcCtx, VERIFIED)).rejects.toThrow('simulated audit failure');
       const [row] = await rows(`SELECT status, number FROM invoice WHERE id = $1`, [invoice.id]);
       expect(row).toEqual({ status: 'draft', number: null });
       expect(await rows(`SELECT 1 FROM outbox WHERE payload->>'invoiceId' = $1 OR payload->'resource'->>'id' = $1`, [invoice.id])).toHaveLength(0);
@@ -229,7 +234,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       const original = audit_.record.bind(audit_);
       vi.spyOn(audit_, 'record').mockImplementationOnce((q, action, fact, ctx) => original(q, action, { ...fact, organizationId: 'NOT-A-UUID' }, ctx));
       const code = `refused-${++seq}`;
-      await expect(t.app.get(ProductRepository).create(PRODUCER, { seller: { type: 'organization', id: ORG }, code, name: 'N', description: 'D', entitlementKind: 'none' } as never)).rejects.toThrow('invalid_organization');
+      await expect(t.app.get(ProductRepository).create(PRODUCER, { seller: { type: 'organization', id: ORG }, code, name: 'N', description: 'D', entitlementKind: 'none', subscriptionTarget: 'none', platformId: null } as never)).rejects.toThrow('invalid_organization');
       expect(await rows(`SELECT 1 FROM product WHERE code = $1`, [code])).toHaveLength(0);
     });
 

@@ -255,5 +255,31 @@ export const BILLING_MESSAGES = defineMessages({
     en: 'A subscription that is {status} cannot be terminated.',
     fr: "Un abonnement à l'état {status} ne peut pas être résilié.",
     ar: 'لا يمكن إنهاء اشتراك في الحالة {status}.',
+  },  // Core V2 S3a: subscription targets and invoice routing (ADR-0044 B1, B2)
+  subscriptionTargetValues: {
+    en: 'subscriptionTarget must be none, organization or personal',
+    fr: 'subscriptionTarget doit valoir none, organization ou personal',
+    ar: 'يجب أن تكون قيمة subscriptionTarget إحدى القيم none أو organization أو personal',
+  },
+  platformIdUuid: { en: 'platformId must be a uuid', fr: 'platformId doit être un uuid', ar: 'يجب أن يكون platformId بصيغة uuid' },
+  subscriptionProductNeedsPlatform: {
+    en: 'a subscription product (organization or personal) requires platformId',
+    fr: "un produit d'abonnement (organization ou personal) exige platformId",
+    ar: 'يتطلب منتج الاشتراك (organization أو personal) قيمة platformId',
+  },
+  platformNotPermitted: {
+    en: 'This Platform is not permitted for the caller.',
+    fr: "Cette plateforme n'est pas autorisée pour l'appelant.",
+    ar: 'هذه المنصة غير مسموح بها للجهة المستدعية.',
+  },
+  subscriptionPriceNotRecurring: {
+    en: 'A subscription product has recurring prices only.',
+    fr: "Un produit d'abonnement n'a que des prix récurrents.",
+    ar: 'لا يملك منتج الاشتراك إلا أسعارًا متكررة.',
+  },
+  invoiceRoutingInvalid: {
+    en: 'The invoice cannot be routed ({reason}).',
+    fr: 'La facture ne peut pas être acheminée ({reason}).',
+    ar: 'لا يمكن توجيه الفاتورة ({reason}).',
   },
 });

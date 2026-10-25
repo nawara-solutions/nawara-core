@@ -227,5 +227,7 @@ export class PaymentEventConsumer implements OnApplicationBootstrap, OnModuleDes
     // organization's existing Subscription never rolls back the payment (section 24), so it needs its own, separately
     // visible signal rather than being folded into `payment_event_conflict` above.
     if (result.subscription === 'conflict') this.logger.error(`payment_event_subscription_conflict — settlement applied but its offering conflicts with the organization's existing Subscription; needs manual review`, at);
+    // Core V2 S3a (B9): a paid invoice without a matching routing record changes no Subscription; it needs review, never a guess.
+    if (result.subscription === 'unrouted') this.logger.error(`payment_event_subscription_unrouted — settlement applied; the invoice has no organization_subscription routing for that Organization, so no Subscription changed; needs manual review`, at);
   }
 }

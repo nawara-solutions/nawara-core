@@ -9,6 +9,8 @@ export interface ProductRepresentation {
   name: string;
   description: string | null;
   entitlementKind: string;
+  subscriptionTarget: string;
+  platformId: string | null;
   status: string;
   revision: number;
   createdAt: string;
@@ -23,6 +25,8 @@ export function representProduct(row: ProductRow): ProductRepresentation {
     name: row.name,
     description: row.description,
     entitlementKind: row.entitlementKind,
+    subscriptionTarget: row.subscriptionTarget,
+    platformId: row.platformId,
     status: row.status,
     revision: row.revision,
     createdAt: row.createdAt.toISOString(),

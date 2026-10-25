@@ -30,10 +30,12 @@ const BILLING_MIGRATIONS = [
   '0016_payment_event_receipt_applied_claim.sql', // V2 A3M.3 (G11): indexes only, no table
   '0017_event_provenance.sql', // Core V2 S1b: event_provenance and event_provenance_conflict (append-only)
   '0018_payment_event_origin.sql', // Core V2 S1e-2: payment_event_origin (append-only trusted envelope of verified originals)
+  '0019_product_subscription_target.sql', // Core V2 S3a: product.subscriptionTarget / platformId (catalog configuration, B1)
+  '0020_invoice_entitlement_routing.sql', // Core V2 S3a: the append-only invoice_entitlement routing record (B2)
 ];
-/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
+/** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
-  'billing_transition', 'currency', 'event_provenance', 'event_provenance_conflict', 'inbox', 'invoice', 'invoice_line', 'invoice_number_sequence', 'kit_rate_limit', 'outbox',
+  'billing_transition', 'currency', 'event_provenance', 'event_provenance_conflict', 'inbox', 'invoice', 'invoice_entitlement', 'invoice_line', 'invoice_number_sequence', 'kit_rate_limit', 'outbox',
   'payment_event_origin', 'payment_event_receipt', 'payment_request', 'platform_currency', 'price', 'product', 'schema_migrations', 'subscription',
 ];
 
@@ -214,7 +216,7 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
       expect(before.map((r) => `${r.status}/${r.unit}`)).toEqual(['active/month', 'grace/month', 'expired/year', 'pending/month', 'active/week', 'active/day']);
 
       const result = await runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir]);
-      expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql', '0016_payment_event_receipt_applied_claim.sql', '0017_event_provenance.sql', '0018_payment_event_origin.sql']); // V2 A3M.3: 0016 (indexes only), S1b's 0017 and S1e-2's 0018 follow
+      expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql', '0016_payment_event_receipt_applied_claim.sql', '0017_event_provenance.sql', '0018_payment_event_origin.sql', '0019_product_subscription_target.sql', '0020_invoice_entitlement_routing.sql']); // V2 A3M.3: 0016 (indexes only), S1b's 0017, S1e-2's 0018 and S3a's 0019 / 0020 follow
 
       expect((await c.query(SNAPSHOT)).rows).toEqual(before); // revision, updatedAt, graceUntil, period and history count: all unchanged
       const anchors = (await c.query(`SELECT "billingAnchorAt" FROM subscription ORDER BY "organizationId"`)).rows.map((r) => r.billingAnchorAt);

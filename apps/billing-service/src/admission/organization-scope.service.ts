@@ -24,6 +24,24 @@ export class OrganizationScopeService {
     @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
   ) {}
 
+  /** Core V2 S3a: a Platform the caller names (a product's) must be one of its explicit `allowedPlatforms`. No call to any authority. */
+  assertPlatformInScope(caller: string, platformId: string): void {
+    if (this.config.servicePolicy.of(caller)?.allowedPlatforms.has(platformId)) return;
+    this.log.warn(`platform_scope_denied caller=${caller} platformId=${platformId} correlationId=${getRequestContext()?.correlationId ?? '-'}`);
+    throw httpError(403, 'platform_not_permitted', BILLING_MESSAGES.platformNotPermitted);
+  }
+
+  /**
+   * Core V2 S3a: the Platform of an Organization (through the same authority as `assertInScope`), only when the Organization is in the
+   * caller's scope; otherwise 403 `organization_not_permitted` (503 when the authority cannot answer).
+   */
+  async platformOf(caller: string, organizationId: string): Promise<string> {
+    const allowed = this.config.servicePolicy.of(caller)?.allowedPlatforms;
+    const ref = await this.reference.resolve(organizationId);
+    if (!allowed || !ref || !allowed.has(ref.platformId)) throw organizationNotPermitted();
+    return ref.platformId;
+  }
+
   async assertInScope(caller: string, organizationId: string): Promise<void> {
     const allowed = this.config.servicePolicy.of(caller)?.allowedPlatforms;
     const ref = await this.reference.resolve(organizationId);

@@ -52,6 +52,8 @@ export interface InvoiceCommonRepresentation {
 
 export interface InvoiceRepresentation extends InvoiceCommonRepresentation {
   lines: InvoiceLineRepresentation[];
+  /** Core V2 S3a (register BIL-08): the server-determined routing, from issue on; null before (and for an invoice issued before S3a). */
+  routing: { purpose: string; target: string } | null;
 }
 
 export type InvoiceSummaryRepresentation = InvoiceCommonRepresentation;
@@ -115,7 +117,10 @@ function common(
 
 /** The full detail representation (endpoint 8: `GET /billing/invoices/{id}`), with lines. */
 export function representInvoice(invoice: InvoiceRecord, activePaymentRequest: ActivePaymentRequestRepresentation | null): InvoiceRepresentation {
-  return { ...common(invoice, activePaymentRequest), lines: invoice.lines.map(representLine) };
+  return {
+    ...common(invoice, activePaymentRequest), lines: invoice.lines.map(representLine),
+    routing: invoice.routing ? { purpose: invoice.routing.purpose, target: invoice.routing.target } : null,
+  };
 }
 
 /** The list-item representation (endpoint 9: `GET /billing/invoices`), without lines (unbounded for a page of up to 100). */

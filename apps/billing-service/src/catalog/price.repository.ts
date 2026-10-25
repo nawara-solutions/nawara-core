@@ -20,6 +20,8 @@ export interface PriceWriteResult {
  * through its product (SDD 11): the caller must be the producer that created the PARENT product — this checks that chain
  * of custody, never a seller scope (which services may act for which sellers is B-029, B-031, not decided).
  */
+type OwnedProduct = { id: string; producer: string; status: string; sellerType: string; sellerId: string; subscriptionTarget: string };
+
 @Injectable()
 export class PriceRepository {
   constructor(
@@ -37,6 +39,8 @@ export class PriceRepository {
     if (!supportedCurrencies.includes(input.currency)) throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotSupported);
     return this.db.tx(async (q) => {
       const product = await this.assertOwnsProduct(q, input.productId, caller);
+      // Core V2 S3a (B1): a subscription product's prices recur (the schema refuses the rest too: price_subscription_recurring)
+      if (product.subscriptionTarget !== 'none' && input.interval !== 'recurring') throw billingError(422, 'subscription_price_not_recurring', BILLING_MESSAGES.subscriptionPriceNotRecurring);
 
       try {
         const { rows } = await q.query<PriceRow>(
@@ -95,8 +99,8 @@ export class PriceRepository {
     });
   }
 
-  private async assertOwnsProduct(q: Queryable, productId: string, caller: Caller): Promise<{ id: string; producer: string; status: string; sellerType: string; sellerId: string }> {
-    const { rows } = await q.query<{ id: string; producer: string; status: string; sellerType: string; sellerId: string }>(`SELECT id, producer, status, "sellerType", "sellerId" FROM product WHERE id = $1`, [productId]);
+  private async assertOwnsProduct(q: Queryable, productId: string, caller: Caller): Promise<OwnedProduct> {
+    const { rows } = await q.query<OwnedProduct>(`SELECT id, producer, status, "sellerType", "sellerId", "subscriptionTarget" FROM product WHERE id = $1`, [productId]);
     const product = rows[0];
     if (!product || catalogRelationTo(product, caller) === null) throw notFound();
     return product;

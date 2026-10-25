@@ -8,6 +8,9 @@ export interface ProductRow {
   name: string;
   description: string | null;
   entitlementKind: string;
+  /** Core V2 S3a (B1): immutable from creation. */
+  subscriptionTarget: 'none' | 'organization' | 'personal';
+  platformId: string | null;
   status: string;
   revision: number;
   createdAt: Date;

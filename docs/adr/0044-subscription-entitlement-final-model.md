@@ -230,6 +230,14 @@ Revision 1:
   | `direct_purchase` | `personal` | user (= beneficiary) | buyer | product |
   | `assisted_settlement` | `personal` | organization | consenting student | assistance request |
   | `recovery_settlement` | `none` | organization | — | recovery obligation |
+  | `non_entitlement` | `none` | any | — | — |
+
+  *Owner decision (Core V2 S3a, Option C):* `non_entitlement` is the routing of an ordinary invoice: it is allowed only when no line
+  belongs to a subscription product (`subscriptionTarget` `organization` or `personal`) and the invoice is neither an assisted nor a
+  recovery settlement; it never activates, renews or extends a subscription. With it, every newly issued invoice has exactly one
+  routing record (DB-2 unchanged). Subscription products declare their Platform and have recurring prices only; ordinary products are
+  `none`. Invoices issued before S3a are not backfilled: without a routing record they never change a subscription, and their
+  routing is never derived from `entitlementKind`.
 
   An invoice carries at most one entitlement-bearing line. A recovery invoice has exactly one line referencing its recovery
   obligation, no product, and an amount and currency copied from the obligation's outstanding amount; it never takes a

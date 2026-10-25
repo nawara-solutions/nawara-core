@@ -8,7 +8,7 @@ import { BrokerProxy, createTestDatabase, type TestDatabase } from '@nawara/serv
 import { describeWithEnv } from './support/env.js';
 import { startFakeAuthServer, type FakeAuthServer } from './support/fake-auth.js';
 import { spawnService, waitFor, waitForHealth, type LiveService } from './support/process.js';
-import { billingPolicy, paymentPolicy, startReferenceStub } from './support/admission.js';
+import { billingPolicy, paymentPolicy, startReferenceStub, TEST_PLATFORM } from './support/admission.js';
 import { createPaymentIdentity, tapPaymentEvents, type PaymentIdentity } from './support/payment-identity.js';
 
 /** Stage 21.C.2: a stand-in Organization reference read + test-only caller policies (support/admission.ts). */
@@ -196,7 +196,11 @@ describeWithEnv(
     let seq = 0;
     async function seedRecurringPrice(organizationId: string): Promise<{ productId: string; priceId: string }> {
       seq += 1;
-      const product = await asProducer('POST', '/billing/products', { seller: { type: 'organization', id: organizationId }, code: `e2e-sub-product-${seq}`, name: `E2E subscription product ${seq}` });
+      // Core V2 S3a: an Organization subscription product declares its target and Platform (the test Platform every Organization belongs to)
+      const product = await asProducer('POST', '/billing/products', {
+        seller: { type: 'organization', id: organizationId }, code: `e2e-sub-product-${seq}`, name: `E2E subscription product ${seq}`,
+        subscriptionTarget: 'organization', platformId: TEST_PLATFORM,
+      });
       expect(product.status).toBe(201);
       const price = await asProducer('POST', '/billing/prices', {
         productId: product.json.id,
