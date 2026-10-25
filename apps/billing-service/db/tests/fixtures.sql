@@ -138,7 +138,7 @@ END $$;
 CREATE FUNCTION t_mk_recurring_price(unit bigint DEFAULT 1000) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE pid uuid; prid uuid;
 BEGIN
-  INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('billing-test', 'organization', '00000000-0000-4000-8000-0000000000a1', 'sp'||substr(md5(random()::text), 1, 10), 'A subscription product') RETURNING id INTO pid;
+  INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-test', 'organization', '00000000-0000-4000-8000-0000000000a1', 'sp'||substr(md5(random()::text), 1, 10), 'A subscription product', 'organization', '00000000-0000-4000-8000-00000000f1a7') RETURNING id INTO pid;
   INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES (pid, substr(md5(random()::text), 1, 12), 'TND', unit, 'recurring', 'month', 1) RETURNING id INTO prid;
   RETURN prid;
 END $$;
@@ -153,11 +153,59 @@ BEGIN
   RETURN sid;
 END $$;
 
+-- Core V2 S3b (DB-11): the verified settlement that alone lets a period start or extend, in the CALLER's transaction: an
+-- organization_subscription invoice for the subscription's Organization and product (routed, issued), its payment request paid, the
+-- invoice paid, the APPLIED payment.succeeded receipt, then the subscription_settlement (mirrors PaymentRequestRepository.applyPaymentEvent
+-- + SubscriptionRepository.applySettlement). Returns the invoice.
+CREATE FUNCTION t_paid_org_invoice(sub uuid, OUT iid uuid, OUT rid uuid, OUT rcpt uuid) LANGUAGE plpgsql AS $$
+DECLARE s subscription%ROWTYPE; p price%ROWTYPE; pcode text; r int;
+BEGIN
+  SELECT * INTO s FROM subscription WHERE id = sub;
+  SELECT * INTO p FROM price WHERE id = s."priceId";
+  SELECT code INTO pcode FROM product WHERE id = s."productId";
+  INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId", "sourceType", "sourceId",
+                       currency, subtotal, "taxTotal", total, "issuerSnapshot", "billToSnapshot")
+  VALUES ('billing-test', gen_random_uuid(), encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex'), 'company', 'billing-test-seller',
+          'user', 'user-1', s."organizationId", 'contract', 'src-1', 'TND', p."unitAmount", 0, p."unitAmount", '{"schemaVersion":1}', '{"schemaVersion":1}')
+  RETURNING id INTO iid;
+  INSERT INTO invoice_line ("invoiceId", currency, "lineNumber", "priceId", "productId", "productCode", description, quantity, "unitAmount", "lineTotal", "entitlementKind", "interval", "intervalUnit", "intervalCount")
+  VALUES (iid, 'TND', 1, p.id, s."productId", pcode, 'A plan', 1, p."unitAmount", p."unitAmount", 'none', 'recurring', p."intervalUnit", p."intervalCount");
+  PERFORM t_hist('invoice', iid, NULL, 'draft', 0);
+  INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "organizationId", "productId")
+  VALUES (iid, 'organization_subscription', 'organization', 'user', 'user-1', s."organizationId", s."productId");
+  UPDATE invoice SET status = 'open', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}'::jsonb WHERE id = iid RETURNING revision INTO r;
+  PERFORM t_hist('invoice', iid, 'draft', 'open', r);
+  rid := t_mk_request(iid);
+  PERFORM t_advance(rid, 'sending'); PERFORM t_advance(rid, 'requested'); PERFORM t_advance(rid, 'paid');
+  UPDATE invoice SET status = 'paid', "paidAt" = now() WHERE id = iid RETURNING revision INTO r;
+  PERFORM t_hist('invoice', iid, 'open', 'paid', r);
+  INSERT INTO payment_event_receipt ("eventId", "eventName", "paymentRequestId", "paymentId", outcome, "paymentRevision", "causeType")
+  VALUES (NULL, 'payment.succeeded', rid, (SELECT "paymentId" FROM payment_request WHERE id = rid), 'applied', 1, 'reconciliation') RETURNING id INTO rcpt;
+END $$;
+
+-- the APPLIED payment.succeeded receipt of a paid invoice's (only) payment request (the verified-settlement evidence of any invoice)
+CREATE FUNCTION t_receipt(inv uuid) RETURNS uuid LANGUAGE sql AS $$
+  INSERT INTO payment_event_receipt ("eventId", "eventName", "paymentRequestId", "paymentId", outcome, "paymentRevision", "causeType")
+  SELECT NULL, 'payment.succeeded', pr.id, pr."paymentId", 'applied', 1, 'reconciliation' FROM payment_request pr WHERE pr."invoiceId" = inv
+  RETURNING id;
+$$;
+
+CREATE FUNCTION t_settle(sub uuid, at timestamptz DEFAULT now()) RETURNS uuid LANGUAGE plpgsql AS $$
+DECLARE s subscription%ROWTYPE; e record;
+BEGIN
+  SELECT * INTO s FROM subscription WHERE id = sub;
+  SELECT * INTO e FROM t_paid_org_invoice(sub);
+  INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+  VALUES (e.iid, 'organization_subscription', s."organizationId", s."productId", sub, e.rid, e.rcpt, at, pg_current_xact_id());
+  RETURN e.iid;
+END $$;
+
 -- pending -> active over the given period, writing its history row; a month/year price's billing anchor is the
--- activation instant (mirrors SubscriptionRepository.activate)
+-- activation instant (mirrors SubscriptionRepository.applySettlement's first activation, with its settlement)
 CREATE FUNCTION t_activate(sub uuid, p_start timestamptz, p_end timestamptz) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE r int;
 BEGIN
+  PERFORM t_settle(sub, p_start);
   UPDATE subscription s SET status = 'active', "currentPeriodStart" = p_start, "currentPeriodEnd" = p_end,
          "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN p_start END
     FROM price p WHERE p.id = s."priceId" AND s.id = sub RETURNING s.revision INTO r;
@@ -177,7 +225,7 @@ END $$;
 CREATE FUNCTION t_mk_anchored_subscription(unit text, cnt int, p_start timestamptz) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE pid uuid; prid uuid; sid uuid;
 BEGIN
-  INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('billing-test', 'organization', '00000000-0000-4000-8000-0000000000a1', 'sa'||substr(md5(random()::text), 1, 10), 'An anchored subscription product') RETURNING id INTO pid;
+  INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-test', 'organization', '00000000-0000-4000-8000-0000000000a1', 'sa'||substr(md5(random()::text), 1, 10), 'An anchored subscription product', 'organization', '00000000-0000-4000-8000-00000000f1a7') RETURNING id INTO pid;
   INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES (pid, substr(md5(random()::text), 1, 12), 'TND', 1000, 'recurring', unit, cnt) RETURNING id INTO prid;
   INSERT INTO subscription ("organizationId", "productId", "priceId") VALUES (gen_random_uuid(), pid, prid) RETURNING id INTO sid;
   PERFORM t_hist('subscription', sid, NULL, 'pending', 0);
@@ -195,6 +243,7 @@ CREATE FUNCTION t_try_renew(sub uuid, at timestamptz DEFAULT now()) RETURNS void
 DECLARE row subscription%ROWTYPE; late boolean; anchor timestamptz; r int;
 BEGIN
   SELECT * INTO row FROM subscription WHERE id = sub FOR UPDATE;
+  PERFORM t_settle(sub, at); -- Core V2 S3b (DB-11): no extension without its settlement
   late := at > coalesce(row."graceUntil", row."currentPeriodEnd");
   anchor := CASE WHEN late THEN at ELSE row."currentPeriodEnd" END;
   UPDATE subscription s SET status = 'active', "currentPeriodStart" = anchor,
@@ -230,6 +279,7 @@ END $$;
 CREATE FUNCTION t_set_period_end(sub uuid, new_end timestamptz, flag boolean) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE r int;
 BEGIN
+  PERFORM t_settle(sub); -- Core V2 S3b (DB-11): an extension is only ever a settled one
   UPDATE subscription SET "currentPeriodEnd" = new_end, "cancelAtPeriodEnd" = flag WHERE id = sub RETURNING revision INTO r;
   PERFORM t_hist('subscription', sub, 'active', 'active', r);
 END $$;
