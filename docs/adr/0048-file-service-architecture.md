@@ -111,3 +111,7 @@ are single-purpose and bounded.
 **Implemented in S2-File.1:** the `file_evidence_grant` table (migration `0004`), issuance (`POST /file/files/{id}/evidence-grants`,
 idempotent by `Idempotency-Key`) and revocation (`POST /file/evidence-grants/{grantId}/revoke`), the first two audit actions. A grant is a
 record, not a credential: there is no grant secret. Granted reads, holds and the lease are later slices.
+
+**Implemented in S2-File.2:** granted metadata and content reads and grant tickets for the grantee (`read_granted` with `readPurposes`,
+the F8 policy dimension on the grantee side), re-checked at every access and at every ticket redemption; `file.granted_read` records each
+authorized access (not a delivery). Holds (S2-File.3) and the lease (S2-File.4) remain.

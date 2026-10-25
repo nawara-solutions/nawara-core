@@ -28,6 +28,9 @@ export interface AuditedGrant {
   expiresAt: Date;
 }
 
+/** What a granted access authorized (the catalog's `access` values). */
+export type GrantedAccess = 'metadata' | 'content_authorized' | 'ticket_issued' | 'ticket_redemption_authorized';
+
 // Arbitrary, fixed namespace for File's deterministically derived audit event ids (RFC 4122 §4.3).
 const NAMESPACE = Buffer.from('6d1f0c9a2b3e4f5a8b7c6d5e4f3a2b1c', 'hex');
 
@@ -80,6 +83,21 @@ export class FileAudit {
       resource: { type: 'file_evidence_grant', id: grant.id }, outcome: 'succeeded',
       changes: { file_id: grant.fileId, purpose: grant.purpose },
     }, { eventId: deterministicEventId(grant.id, 'audit.file.grant_revoked') });
+  }
+
+  /**
+   * S2-File.2: one access through a grant, written in the transaction that authorizes it (so a failed write refuses the access). Each
+   * access is its own record (a fresh event id). `content_authorized` / `ticket_redemption_authorized` record the authorization, never
+   * a completed delivery. A redemption has no authenticated caller: its actor is the redemption process.
+   */
+  async grantedRead(q: Queryable, grant: AuditedGrant, access: GrantedAccess): Promise<void> {
+    const actor = access === 'ticket_redemption_authorized'
+      ? { type: 'system' as const, id: 'file_granted_ticket_redemption' }
+      : { type: 'service' as const, id: grant.granteeService };
+    await this.writer.write(q, {
+      action: 'file.granted_read', actor, organizationId: grant.organizationId, resource: { type: 'file_evidence_grant', id: grant.id }, outcome: 'succeeded',
+      changes: { file_id: grant.fileId, purpose: grant.purpose, access },
+    });
   }
 
   async integrityIncident(q: Queryable, file: AuditedFile, detector: IntegrityDetector, reason: IntegrityReason): Promise<void> {

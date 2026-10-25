@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
 import { FILE_MEDIA_TYPES, type FileMediaType } from '../policy/media-types.js';
-import type { FileRow, FileScope } from './file.repository.js';
+import { reviveFileRow, type FileRow, type FileScope } from './file.repository.js';
+import { reviveGrantRow, type GrantRow } from './grant.repository.js';
 import { FilePersistenceError } from './persistence-error.js';
 import { assertTicketDigest, type TicketDigest } from './ticket-digest.js';
 
@@ -32,16 +33,31 @@ export interface TicketRow {
   revokedAt: Date | null;
   expiresAt: Date;
   createdAt: Date;
+  /** S2-File.2: the evidence grant a download ticket was issued from (its issuer is then the grantee), or null for an owner's ticket. */
+  grantId: string | null;
 }
 
 const COLUMNS = `id, operation, "fileId", "issuedBy", "organizationId", disposition, "maxBytes", "mediaTypes", attach, "singleUse",
-  "useCount", "usedAt", "revokedAt", "expiresAt", "createdAt"`;
+  "useCount", "usedAt", "revokedAt", "expiresAt", "createdAt", "grantId"`;
 
 export interface NewDownloadTicket {
   /** The issuer (the authenticated owner) and the file's organization, exactly as for `FileRepository.findOwned`. */
   scope: FileScope;
   fileId: string;
   tokenDigest: TicketDigest;
+  lifetimeSeconds: number;
+  singleUse: boolean;
+  disposition: 'attachment' | 'inline';
+}
+
+/** S2-File.2: a download ticket issued by a grantee from its evidence grant. */
+export interface NewGrantDownloadTicket {
+  grantId: string;
+  fileId: string;
+  /** The grantee (the authenticated caller); the grant must name it. */
+  granteeService: string;
+  tokenDigest: TicketDigest;
+  /** The configured ticket lifetime; the ticket ends earlier when its grant does. */
   lifetimeSeconds: number;
   singleUse: boolean;
   disposition: 'attachment' | 'inline';
@@ -67,14 +83,6 @@ function reviveTicket(raw: Record<string, unknown>): TicketRow {
   return t;
 }
 
-function reviveFile(raw: Record<string, unknown>): FileRow {
-  const f = raw as unknown as FileRow & Record<string, unknown>;
-  for (const k of ['uploadExpiresAt', 'attachDeadline', 'attachedAt', 'createdAt', 'availableAt', 'deletionRequestedAt', 'deletedAt', 'updatedAt', 'deleteNextAttemptAt', 'deleteLeaseUntil'] as const) {
-    if (f[k] !== null) (f as Record<string, unknown>)[k] = new Date(f[k] as unknown as string);
-  }
-  if (f.sizeBytes !== null) f.sizeBytes = String(f.sizeBytes);
-  return f;
-}
 
 function checkLifetime(seconds: number): void {
   if (!Number.isInteger(seconds) || seconds < TICKET_LIFETIME_MIN_SECONDS || seconds > TICKET_LIFETIME_MAX_SECONDS) {
@@ -111,6 +119,30 @@ export class TicketRepository {
        RETURNING ${COLUMNS}`,
       [randomUUID(), input.fileId, input.scope.ownerService, input.scope.organizationId, input.tokenDigest, input.disposition,
         input.singleUse, input.lifetimeSeconds]);
+  }
+
+  /**
+   * S2-File.2: records a download ticket from an evidence grant, or `undefined` when the grant (named for this grantee and file, active)
+   * or its file (AVAILABLE, the grantor's, in the grant's organization) does not hold, or when the grant ends within the minimum ticket
+   * lifetime. The ticket expires at the earlier of its own lifetime and the grant's expiry: a ticket never extends a grant. One
+   * statement under `FOR SHARE` of the grant and the file (a revocation or a deletion waits for it, then revokes the ticket); the schema
+   * re-checks the binding.
+   */
+  async recordGrantDownload(input: NewGrantDownloadTicket, q: Queryable = this.db): Promise<TicketRow | undefined> {
+    assertTicketDigest(input.tokenDigest);
+    checkLifetime(input.lifetimeSeconds);
+    if (!UUID.test(input.grantId) || !UUID.test(input.fileId)) return undefined;
+    return this.insert(q,
+      `INSERT INTO file_access_ticket (id, operation, "fileId", "issuedBy", "organizationId", "tokenDigest", disposition, "singleUse", "expiresAt", "grantId")
+       SELECT $1, 'download', f.id, g."granteeService", g."organizationId", $5, $6, $7, LEAST(now() + make_interval(secs => $8), g."expiresAt"), g.id
+       FROM file_evidence_grant g
+       JOIN file f ON f.id = g."fileId" AND f."ownerService" = g."grantorService" AND f."organizationId" IS NOT DISTINCT FROM g."organizationId"
+       WHERE g.id = $2 AND g."fileId" = $3 AND g."granteeService" = $4 AND g."revokedAt" IS NULL
+         AND g."expiresAt" >= now() + make_interval(secs => $9) AND f.status = 'AVAILABLE'
+       FOR SHARE OF g, f
+       RETURNING ${COLUMNS}`,
+      [randomUUID(), input.grantId, input.fileId, input.granteeService, input.tokenDigest, input.disposition, input.singleUse,
+        input.lifetimeSeconds, TICKET_LIFETIME_MIN_SECONDS]);
   }
 
   /** Records a single-use upload ticket: one intent (organization, size limit, types, attach flag), no file yet. */
@@ -182,26 +214,35 @@ export class TicketRepository {
    * claimed once (concurrent claims serialize on the ticket row). Stage 17.8: at most `maxUses` claims of any ticket (the reusable
    * download cap, F32), enforced by the same conditional UPDATE, so concurrent claims can never exceed it.
    */
-  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db, maxUses = 2_147_483_647): Promise<{ ticket: TicketRow; file: FileRow } | undefined> {
+  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db, maxUses = 2_147_483_647): Promise<{ ticket: TicketRow; file: FileRow; grant?: GrantRow } | undefined> {
     assertTicketDigest(tokenDigest);
     if (!Number.isSafeInteger(maxUses) || maxUses < 1) throw new Error('maxUses must be a positive integer');
-    const { rows } = await q.query<{ ticket: Record<string, unknown>; file: Record<string, unknown> }>(
+    const { rows } = await q.query<{ ticket: Record<string, unknown>; file: Record<string, unknown>; grant: Record<string, unknown> | null }>(
       `WITH claimed AS (
          UPDATE file_access_ticket t SET "useCount" = t."useCount" + 1, "usedAt" = COALESCE(t."usedAt", now())
          FROM file f
          WHERE t."tokenDigest" = $1 AND t.operation = 'download' AND t."revokedAt" IS NULL AND t."expiresAt" > now()
            AND (NOT t."singleUse" OR t."useCount" = 0) AND t."useCount" < $2
-           AND f.id = t."fileId" AND f.status = 'AVAILABLE' AND f."ownerService" = t."issuedBy"
-           AND f."organizationId" IS NOT DISTINCT FROM t."organizationId"
+           AND f.id = t."fileId" AND f.status = 'AVAILABLE' AND f."organizationId" IS NOT DISTINCT FROM t."organizationId"
+           AND (
+             (t."grantId" IS NULL AND f."ownerService" = t."issuedBy")
+             -- S2-File.2: a grant ticket's issuer is the grantee; its grant must still name this file, issuer and organization and be
+             -- active NOW (not revoked, not expired), and the file must still be the grantor's.
+             OR (t."grantId" IS NOT NULL AND EXISTS (
+               SELECT 1 FROM file_evidence_grant g
+               WHERE g.id = t."grantId" AND g."fileId" = f.id AND g."granteeService" = t."issuedBy" AND g."grantorService" = f."ownerService"
+                 AND g."organizationId" IS NOT DISTINCT FROM t."organizationId" AND g."revokedAt" IS NULL AND g."expiresAt" > now()))
+           )
          RETURNING t.id, t.operation, t."fileId", t."issuedBy", t."organizationId", t.disposition, t."maxBytes", t."mediaTypes", t.attach,
-           t."singleUse", t."useCount", t."usedAt", t."revokedAt", t."expiresAt", t."createdAt", to_jsonb(f.*) AS file
+           t."singleUse", t."useCount", t."usedAt", t."revokedAt", t."expiresAt", t."createdAt", t."grantId", to_jsonb(f.*) AS file,
+           (SELECT to_jsonb(g.*) - 'idempotencyKey' - 'requestHash' FROM file_evidence_grant g WHERE g.id = t."grantId") AS grant
        )
-       SELECT to_jsonb(claimed.*) - 'file' AS ticket, claimed.file AS file FROM claimed`,
+       SELECT to_jsonb(claimed.*) - 'file' - 'grant' AS ticket, claimed.file AS file, claimed.grant AS grant FROM claimed`,
       [tokenDigest, maxUses],
     );
     const row = rows[0];
     if (!row) return undefined;
-    return { ticket: reviveTicket(row.ticket), file: reviveFile(row.file) };
+    return { ticket: reviveTicket(row.ticket), file: reviveFileRow(row.file), grant: row.grant ? reviveGrantRow({ ...row.grant, active: true }) : undefined };
   }
 
   /**
@@ -225,7 +266,8 @@ export class TicketRepository {
    */
   async revokeAllForFile(q: Queryable, fileId: string): Promise<number> {
     const { rowCount } = await q.query(
-      `UPDATE file_access_ticket SET "revokedAt" = now() WHERE "fileId" = $1 AND "revokedAt" IS NULL`,
+      // GREATEST: the deletion's transaction may have started (now()) before a ticket it waited for (FOR SHARE) was created.
+      `UPDATE file_access_ticket SET "revokedAt" = GREATEST(now(), "createdAt") WHERE "fileId" = $1 AND "revokedAt" IS NULL`,
       [fileId],
     );
     return rowCount ?? 0;

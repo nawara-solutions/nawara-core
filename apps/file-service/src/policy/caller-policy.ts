@@ -3,7 +3,7 @@ import { EVIDENCE_PURPOSES, type EvidencePurpose } from '../grants/evidence-purp
 import { FILE_MEDIA_TYPES, type FileMediaType } from './media-types.js';
 
 /** The operations a caller policy can grant (SDD §11). Nothing is granted unless listed. */
-export const FILE_OPERATIONS = ['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant'] as const;
+export const FILE_OPERATIONS = ['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant', 'read_granted'] as const;
 export type FileOperation = (typeof FILE_OPERATIONS)[number];
 
 /** Operations that create bytes, so they need the caller's own media types and size ceiling. */
@@ -19,9 +19,11 @@ export interface CallerPolicy {
   maxBytes?: number;
   /** Present exactly when the caller may `grant` (S2-File.1, OD-FILE F8): the evidence purposes it may grant its own files for. */
   grantPurposes?: ReadonlySet<EvidencePurpose>;
+  /** Present exactly when the caller may `read_granted` (S2-File.2): the evidence purposes it may read granted files for. */
+  readPurposes?: ReadonlySet<EvidencePurpose>;
 }
 
-const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes', 'grantPurposes']);
+const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes', 'grantPurposes', 'readPurposes']);
 
 /**
  * `FILE_SERVICE_POLICY` (ADR-0048 §7, SDD §11; the Notification / Organization `SERVICE_POLICY` pattern), parsed and validated at
@@ -32,6 +34,8 @@ const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes', '
  *
  * S2-File.1: `grant` (issue and revoke evidence grants on the caller's own files) needs an explicit, non-empty `grantPurposes` list from
  * the closed evidence vocabulary (no wildcard); the grantee is fixed by the purpose, never chosen by the caller or the request.
+ * S2-File.2: `read_granted` (read, and issue download tickets for, files granted TO the caller) needs an explicit, non-empty
+ * `readPurposes` list from the same vocabulary; it opens nothing but the caller's own active grants.
  *
  * Deny by default: a caller registered in `SERVICE_TOKENS` with no entry, or an entry for a caller with no token, refuses to boot; an
  * unknown operation, property, media type or an over-ceiling `maxBytes` refuses to boot. The policy is authorization only: the
@@ -79,7 +83,8 @@ export class FileCallerPolicy {
         } else if (e.grantPurposes !== undefined) {
           throw new ConfigError(`${at}: grantPurposes applies only to a caller that may grant`);
         }
-        return { operations, organizations: e.organizations, mediaTypes, maxBytes, grantPurposes };
+        const readPurposes = purposes(at, operations.has('read_granted'), e.readPurposes, 'read_granted', 'readPurposes');
+        return { operations, organizations: e.organizations, mediaTypes, maxBytes, grantPurposes, readPurposes };
       },
     });
     return new FileCallerPolicy(new Map(map.callers().map((c) => [c, map.of(c)!])));
@@ -94,4 +99,17 @@ export class FileCallerPolicy {
   allows(caller: string, operation: FileOperation): boolean {
     return this.callers.get(caller)?.operations.has(operation) ?? false;
   }
+}
+
+/** A purpose list required exactly when `enabled` (the operation is granted): non-empty, from the closed vocabulary, no repeat. */
+function purposes(at: string, enabled: boolean, raw: unknown, operation: string, key: string): Set<EvidencePurpose> | undefined {
+  if (!enabled) {
+    if (raw !== undefined) throw new ConfigError(`${at}: ${key} applies only to a caller that may ${operation}`);
+    return undefined;
+  }
+  if (!Array.isArray(raw) || raw.length === 0) throw new ConfigError(`${at} may ${operation}, so it needs an explicit, non-empty ${key} list`);
+  for (const p of raw) if (!(EVIDENCE_PURPOSES as readonly unknown[]).includes(p)) throw new ConfigError(`${at} lists a ${key} entry other than ${EVIDENCE_PURPOSES.join(' / ')}`);
+  const set = new Set(raw as EvidencePurpose[]);
+  if (set.size !== raw.length) throw new ConfigError(`${at} lists a ${key} entry twice`);
+  return set;
 }

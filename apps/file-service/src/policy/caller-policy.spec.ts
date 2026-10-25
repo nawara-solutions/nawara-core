@@ -60,12 +60,19 @@ describe('FILE_SERVICE_POLICY', () => {
     ['a wildcard grant purpose', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none', grantPurposes: ['*'] } } })],
     ['a repeated grant purpose', JSON.stringify({ callers: { a: { operations: ['grant'], organizations: 'none', grantPurposes: ['dispute_evidence', 'dispute_evidence'] } } })],
     ['grantPurposes without grant', JSON.stringify({ callers: { a: { operations: ['read'], organizations: 'none', grantPurposes: ['dispute_evidence'] } } })],
+    ['a granted reader without readPurposes', JSON.stringify({ callers: { a: { operations: ['read_granted'], organizations: 'none' } } })],
+    ['a granted reader with empty readPurposes', JSON.stringify({ callers: { a: { operations: ['read_granted'], organizations: 'none', readPurposes: [] } } })],
+    ['an unknown read purpose', JSON.stringify({ callers: { a: { operations: ['read_granted'], organizations: 'none', readPurposes: ['any'] } } })],
+    ['a wildcard read purpose', JSON.stringify({ callers: { a: { operations: ['read_granted'], organizations: 'none', readPurposes: ['*'] } } })],
+    ['a repeated read purpose', JSON.stringify({ callers: { a: { operations: ['read_granted'], organizations: 'none', readPurposes: ['dispute_evidence', 'dispute_evidence'] } } })],
+    ['readPurposes without read_granted', JSON.stringify({ callers: { a: { operations: ['read'], organizations: 'none', readPurposes: ['dispute_evidence'] } } })],
+    ['grantPurposes on a granted reader (each list belongs to its operation)', JSON.stringify({ callers: { a: { operations: ['read_granted'], organizations: 'none', readPurposes: ['dispute_evidence'], grantPurposes: ['dispute_evidence'] } } })],
   ])('refuses %s at startup', (_label, raw) => {
     expect(() => FileCallerPolicy.parse(raw, ['a'], CEILING)).toThrow(ConfigError);
   });
 
-  it('the operation vocabulary is closed (S2-File.1 adds grant)', () => {
-    expect([...FILE_OPERATIONS]).toEqual(['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant']);
+  it('the operation vocabulary is closed (S2-File.1 adds grant, S2-File.2 read_granted)', () => {
+    expect([...FILE_OPERATIONS]).toEqual(['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant', 'read_granted']);
   });
 
   it('the V1 allow-list is exactly the frozen one (ADR-0048 F13)', () => {
@@ -86,6 +93,17 @@ describe('Core V2 S2-File.1: the grant dimension (OD-FILE F8)', () => {
     expect(p.allows('core-drive', 'grant')).toBe(true);
     expect(p.allows('core-notification', 'grant')).toBe(false);
     expect(p.of('core-notification')?.grantPurposes).toBeUndefined();
+  });
+});
+
+describe('Core V2 S2-File.2: the granted-read dimension', () => {
+  it('a granted reader names the evidence purposes it may read; it needs no media types (its tickets create no bytes)', () => {
+    const p = parse({ 'payment-service': { operations: ['read_granted'], organizations: 'none', readPurposes: ['dispute_evidence'] }, 'core-notification': reader });
+    expect(p.of('payment-service')).toEqual({
+      operations: new Set(['read_granted']), organizations: 'none', mediaTypes: undefined, maxBytes: undefined, grantPurposes: undefined,
+      readPurposes: new Set(['dispute_evidence']),
+    });
+    expect(p.allows('core-notification', 'read_granted')).toBe(false);
   });
 });
 

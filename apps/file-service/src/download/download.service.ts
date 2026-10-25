@@ -4,7 +4,8 @@ import { pipeline } from 'node:stream/promises';
 import { HttpException, Inject, Injectable, Logger } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { DbService } from '@nawara/service-kit';
-import { IntegrityIncidents } from '../audit/file-audit.js';
+import { FileAudit, IntegrityIncidents } from '../audit/file-audit.js';
+import { granteeMayRead, grantorStillAllows } from '../grants/granted-access.js';
 import type { FileConfig } from '../config/file-config.js';
 import { FILE_CONFIG } from '../config/file-config.token.js';
 import { FileRepository, type FileRow, type FileScope } from '../persistence/file.repository.js';
@@ -102,6 +103,7 @@ export class DownloadService {
     private readonly usage: UsageLimiter,
     @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
     @Inject(IntegrityIncidents) private readonly incidents: IntegrityIncidents,
+    @Inject(FileAudit) private readonly audit: FileAudit,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── path A: trusted services
@@ -174,9 +176,16 @@ export class DownloadService {
           // Ticket + file binding + AVAILABLE + the use cap (Stage 17.8: a leaked reusable ticket is not an unlimited download), one statement.
           const c = await this.tickets.claimDownload(digest, q, this.config.limits.ticketMaxDownloads);
           if (!c) return undefined;
-          const policy = this.config.callerPolicy.of(c.ticket.issuedBy);
-          // The issuer must STILL hold `issue_ticket` (and its organization mode) now (SDD §11.1); otherwise roll back: nothing consumed.
-          if (!policy?.operations.has('issue_ticket') || (c.ticket.organizationId !== null && policy.organizations === 'none')) throw new TicketNoLongerValid();
+          if (c.grant) {
+            // S2-File.2: a grant ticket. The claim proved the grant active and bound; the grantee must STILL hold `read_granted` for the
+            // purpose and the grantor `grant` for it, now; the authorized redemption is recorded in this transaction (no record, no use).
+            if (!granteeMayRead(this.config.callerPolicy, c.ticket.issuedBy, c.grant.purpose) || !grantorStillAllows(this.config.callerPolicy, c.grant)) throw new TicketNoLongerValid();
+            await this.audit.grantedRead(q, c.grant, 'ticket_redemption_authorized');
+          } else {
+            const policy = this.config.callerPolicy.of(c.ticket.issuedBy);
+            // The issuer must STILL hold `issue_ticket` (and its organization mode) now (SDD §11.1); otherwise roll back: nothing consumed.
+            if (!policy?.operations.has('issue_ticket') || (c.ticket.organizationId !== null && policy.organizations === 'none')) throw new TicketNoLongerValid();
+          }
           // Stage 17.9: the download slot is taken INSIDE the claim's transaction, once the ticket has proved valid. A full process throws
           // here and the claim rolls back (no use spent; the client retries the same URL), and an invalid ticket never occupies a slot, so
           // a flood of junk tickets cannot starve real downloads (measured: taking the slot before the claim did exactly that).
@@ -199,6 +208,21 @@ export class DownloadService {
     }
   }
 
+  /**
+   * S2-File.2: a granted content read. The download slot is taken first (a full process refuses before anything is authorized or
+   * recorded), then `authorize` runs the grant check and records the access in its own committed transaction; only then is the store
+   * opened. A revocation committed after `authorize` cannot recall a stream already authorized.
+   */
+  async grantedContent(req: Request, res: Response, authorize: () => Promise<FileRow>): Promise<void> {
+    const release = this.admitDownload();
+    try {
+      const file = await authorize();
+      await this.stream(file, 'attachment', req, res, 'granted');
+    } finally {
+      release();
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────────────────────────────── streaming
 
   /**
@@ -206,7 +230,7 @@ export class DownloadService {
    * Errors before the first byte are normal HTTP errors; a failure after it can only end the connection (the client sees a body
    * shorter than its Content-Length).
    */
-  private async stream(file: FileRow, disposition: 'attachment' | 'inline', req: Request, res: Response, route: 'service' | 'ticket'): Promise<void> {
+  private async stream(file: FileRow, disposition: 'attachment' | 'inline', req: Request, res: Response, route: 'service' | 'ticket' | 'granted'): Promise<void> {
     const started = performance.now();
     const media = file.mediaType as FileMediaType;
     const size = Number(file.sizeBytes);

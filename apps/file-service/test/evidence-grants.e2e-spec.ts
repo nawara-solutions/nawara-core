@@ -5,6 +5,7 @@ import { validateAuditPayload } from '@nawara/audit-contract';
 import { generateServiceToken, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { fileMigrationsDir } from '../src/app.module.js';
+import type { EvidencePurpose } from '../src/grants/evidence-purposes.js';
 import { GrantRepository } from '../src/persistence/grant.repository.js';
 import { ALL_LOGS, createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
@@ -77,6 +78,8 @@ describeWithEnv('evidence grants (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL']
   const rows = (fileId: string) => s.query<Record<string, unknown>>('SELECT * FROM file_evidence_grant WHERE "fileId" = $1 ORDER BY "createdAt"', [fileId]);
   const audits = (grantId: string) =>
     s.query<{ name: string; payload: Record<string, any> }>(`SELECT name, payload FROM outbox WHERE name LIKE 'audit.%' AND payload->'resource'->>'id' = $1 ORDER BY "occurredAt", id`, [grantId]);
+  const use = (grantId: string, fileId: string, granteeService = 'payment-service', purposes: EvidencePurpose[] = ['dispute_evidence']) =>
+    ({ grantId, fileId, granteeService, purposes: new Set(purposes) });
   const seconds = (b: { expiresAt: string; createdAt: string }) => (Date.parse(b.expiresAt) - Date.parse(b.createdAt)) / 1000;
 
   // ───────────────────────────────────────────────────────────────────────────────────────────── issuance (FIL-01)
@@ -349,7 +352,7 @@ describeWithEnv('evidence grants (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL']
          VALUES ($1, $2, 'core-drive', 'payment-service', 'dispute_evidence', $3, NULL, $4, $5, now() - interval '1 hour', now() - interval '2 hours') RETURNING id`,
         [randomUUID(), id, randomUUID(), randomUUID(), 'c'.repeat(64)],
       );
-      expect(await t.app.get(GrantRepository).findUsable(old!.id, 'payment-service', 'dispute_evidence')).toBeUndefined();
+      expect(await t.app.get(GrantRepository).findUsable(use(old!.id, id))).toBeUndefined();
       const r = await revoke(old!.id);
       expect(r.body).toMatchObject({ status: 'revoked' });
     });
@@ -357,21 +360,25 @@ describeWithEnv('evidence grants (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL']
 
   // ───────────────────────────────────────────────────────────────────────────────── the granted-read foundation (S2-File.2)
 
-  it('findUsable: exactly the grantee and the purpose, while active and the file AVAILABLE; anything else is undefined', async () => {
+  it('findUsable: exactly the grantee, the file and an allowed purpose, while active and the file AVAILABLE; anything else is undefined', async () => {
     const repo = t.app.get(GrantRepository);
     const id = await uploaded();
     const g = (await grant(id, dispute())).body;
-    expect(await repo.findUsable(g.grantId, 'payment-service', 'dispute_evidence')).toMatchObject({ id: g.grantId, fileId: id, active: true });
-    expect(await repo.findUsable(g.grantId, 'billing-service', 'dispute_evidence')).toBeUndefined();
-    expect(await repo.findUsable(g.grantId, 'payment-service', 'surplus_evidence')).toBeUndefined();
-    expect(await repo.findUsable('nope', 'payment-service', 'dispute_evidence')).toBeUndefined();
+    expect((await repo.findUsable(use(g.grantId, id)))?.grant).toMatchObject({ id: g.grantId, fileId: id, active: true });
+    expect((await repo.findUsable(use(g.grantId, id)))?.file).toMatchObject({ id, status: 'AVAILABLE' });
+    expect(await repo.findUsable(use(g.grantId, id, 'billing-service'))).toBeUndefined();
+    expect(await repo.findUsable(use(g.grantId, id, 'payment-service', ['surplus_evidence']))).toBeUndefined();
+    expect(await repo.findUsable(use(g.grantId, id, 'payment-service', []))).toBeUndefined();
+    expect(await repo.findUsable(use(g.grantId, await uploaded()))).toBeUndefined();
+    expect(await repo.findUsable(use('nope', id))).toBeUndefined();
     const deleted = await uploaded();
     const dg = (await grant(deleted, dispute())).body;
     await request(server()).delete(`/file/files/${deleted}`).set(auth(drive));
-    expect(await repo.findUsable(dg.grantId, 'payment-service', 'dispute_evidence')).toBeUndefined();
+    expect(await repo.findUsable(use(dg.grantId, deleted))).toBeUndefined();
     await revoke(g.grantId);
-    expect(await repo.findUsable(g.grantId, 'payment-service', 'dispute_evidence')).toBeUndefined();
+    expect(await repo.findUsable(use(g.grantId, id))).toBeUndefined();
   });
+
 
   // ─────────────────────────────────────────────────────────────────────────────────────── database integrity
 

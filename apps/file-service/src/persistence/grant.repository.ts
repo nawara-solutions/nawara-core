@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import type { EvidenceGrantee, EvidencePurpose } from '../grants/evidence-purposes.js';
-import type { FileRow, FileScope } from './file.repository.js';
+import { reviveFileRow, type FileRow, type FileScope } from './file.repository.js';
 
 /** OD-FILE F3: an explicit lifetime, 24 hours by default, at most 7 days (the schema enforces the same ceiling); never extended. */
 export const GRANT_LIFETIME_DEFAULT_SECONDS = 24 * 3600;
@@ -52,7 +52,8 @@ export type IssueOutcome =
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-function revive(raw: Record<string, unknown>): GrantRow {
+/** A `file_evidence_grant` row (also one read as JSON): its timestamps back to Dates. */
+export function reviveGrantRow(raw: Record<string, unknown>): GrantRow {
   const g = raw as unknown as GrantRow & Record<string, unknown>;
   for (const k of ['expiresAt', 'revokedAt', 'createdAt'] as const) if (g[k] !== null) (g as Record<string, unknown>)[k] = new Date(g[k] as unknown as string);
   return g;
@@ -99,7 +100,7 @@ export class GrantRepository {
           input.idempotencyKey, input.requestHash, input.lifetimeSeconds],
       );
       if (!rows[0]) return (await this.byKey(q, input.scope.ownerService, input.idempotencyKey))!; // a concurrent issuance won
-      const grant = revive(rows[0]);
+      const grant = reviveGrantRow(rows[0]);
       await onCreated(q, grant);
       return { kind: 'created', grant };
     });
@@ -108,7 +109,7 @@ export class GrantRepository {
   /**
    * Revokes one of the grantor's grants in that organization, in ONE transaction with `onRevoked` (the audit intent), which runs only on
    * the active → revoked transition. Idempotent: an already revoked grant answers with its first revocation and writes nothing. An
-   * expired grant can still be revoked (it records the grantor's decision; nothing it allowed changes).
+   * expired grant can still be revoked (it records the grantor's decision; nothing it allowed changes). Its tickets are revoked with it.
    */
   async revoke(scope: FileScope, id: string, onRevoked: (q: Queryable, grant: GrantRow) => Promise<void>): Promise<{ grant: GrantRow; revoked: boolean } | undefined> {
     if (!UUID.test(id)) return undefined;
@@ -120,7 +121,11 @@ export class GrantRepository {
         [id, scope.ownerService, scope.organizationId],
       );
       if (rows[0]) {
-        const grant = revive(rows[0]);
+        const grant = reviveGrantRow(rows[0]);
+        // S2-File.2: the grant's download tickets die with it, in this transaction. A redemption claiming a ticket concurrently either
+        // committed first (its stream was authorized before the revocation) or waits on the ticket row and then finds it revoked.
+        // GREATEST: this transaction may have started (now()) before a ticket it waited for was created; a stamp never precedes it.
+        await q.query(`UPDATE file_access_ticket SET "revokedAt" = GREATEST(now(), "createdAt") WHERE "grantId" = $1 AND "revokedAt" IS NULL`, [grant.id]);
         await onRevoked(q, grant);
         return { grant, revoked: true };
       }
@@ -128,26 +133,34 @@ export class GrantRepository {
         `SELECT ${COLUMNS} FROM file_evidence_grant WHERE id = $1 AND "grantorService" = $2 AND "organizationId" IS NOT DISTINCT FROM $3`,
         [id, scope.ownerService, scope.organizationId],
       );
-      return current.rows[0] ? { grant: revive(current.rows[0]), revoked: false } : undefined;
+      return current.rows[0] ? { grant: reviveGrantRow(current.rows[0]), revoked: false } : undefined;
     });
   }
 
   /**
-   * The validation foundation of granted reads (S2-File.2; no route uses it yet): the grant, only when it is usable NOW by exactly this
-   * grantee for exactly this purpose: not revoked, not expired (database clock), and its file still AVAILABLE, still the grantor's, in
-   * the grant's organization. Anything else is the same `undefined`. `FOR SHARE` (inside the caller's transaction) holds off a concurrent
-   * revocation until the use commits.
+   * S2-File.2, the access boundary of a granted read: the grant and its file, only when usable NOW by exactly this grantee, for exactly
+   * this file, for one of `purposes` (the grantee's current `readPurposes`): not revoked, not expired (database clock), its file still
+   * AVAILABLE, still the grantor's, in the grant's organization. Anything else is the same `undefined` (no oracle). Inside the caller's
+   * transaction, `FOR SHARE` on both rows holds off a concurrent revocation and a deletion request until the access is authorized and
+   * committed: a revocation committed first is seen (the row is re-read), one arriving later waits.
    */
-  async findUsable(id: string, granteeService: string, purpose: EvidencePurpose, q: Queryable = this.db): Promise<GrantRow | undefined> {
-    if (!UUID.test(id)) return undefined;
-    const { rows } = await q.query<Record<string, unknown>>(
-      `SELECT ${G_COLUMNS} FROM file_evidence_grant g
-       JOIN file f ON f.id = g."fileId" AND f."ownerService" = g."grantorService" AND f."organizationId" IS NOT DISTINCT FROM g."organizationId"
-       WHERE g.id = $1 AND g."granteeService" = $2 AND g.purpose = $3 AND g."revokedAt" IS NULL AND g."expiresAt" > now() AND f.status = 'AVAILABLE'
-       FOR SHARE OF g`,
-      [id, granteeService, purpose],
+  async findUsable(
+    use: { grantId: string; fileId: string; granteeService: string; purposes: ReadonlySet<EvidencePurpose> },
+    q: Queryable = this.db,
+  ): Promise<{ grant: GrantRow; file: FileRow } | undefined> {
+    if (!UUID.test(use.grantId) || !UUID.test(use.fileId) || use.purposes.size === 0) return undefined;
+    const { rows } = await q.query<{ grant: Record<string, unknown>; file: FileRow }>(
+      `SELECT to_jsonb(x.*) - 'file' AS grant, x.file FROM (
+         SELECT ${G_COLUMNS}, to_jsonb(f.*) AS file FROM file_evidence_grant g
+         JOIN file f ON f.id = g."fileId" AND f."ownerService" = g."grantorService" AND f."organizationId" IS NOT DISTINCT FROM g."organizationId"
+         WHERE g.id = $1 AND g."fileId" = $2 AND g."granteeService" = $3 AND g.purpose = ANY($4::text[])
+           AND g."revokedAt" IS NULL AND g."expiresAt" > now() AND f.status = 'AVAILABLE'
+         FOR SHARE OF g, f
+       ) x`,
+      [use.grantId, use.fileId, use.granteeService, [...use.purposes]],
     );
-    return rows[0] ? revive(rows[0]) : undefined;
+    const row = rows[0];
+    return row ? { grant: reviveGrantRow(row.grant), file: reviveFileRow(row.file as unknown as Record<string, unknown>) } : undefined;
   }
 
   private async byKey(q: Queryable, grantor: string, key: string): Promise<IssueOutcome | undefined> {
@@ -157,6 +170,6 @@ export class GrantRepository {
     );
     if (!rows[0]) return undefined;
     const { requestHash, ...grant } = rows[0];
-    return { kind: 'existing', grant: revive(grant), requestHash: requestHash as string };
+    return { kind: 'existing', grant: reviveGrantRow(grant), requestHash: requestHash as string };
   }
 }

@@ -170,4 +170,9 @@ export const FILE_MESSAGES = defineMessages({
     ar: 'استُخدم مفتاح Idempotency-Key هذا لتفويض مختلف.',
   },
   noSuchGrant: { en: 'No such grant.', fr: 'Autorisation inexistante.', ar: 'التفويض غير موجود.' },
+  grantExpiring: {
+    en: 'The grant expires too soon for a download ticket.',
+    fr: "L'autorisation expire trop tôt pour un ticket de téléchargement.",
+    ar: 'تنتهي صلاحية التفويض قبل الأوان لإصدار تذكرة تنزيل.',
+  },
 });
