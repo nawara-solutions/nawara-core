@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DbService, kitMigrationsDir, runMigrations } from '@nawara/service-kit';
+import { kitMigrationsDir, runMigrations } from '@nawara/service-kit';
 import { createTestDatabase, type TestDatabase } from '@nawara/service-kit/testing';
 import { billingMigrationsDir } from '../src/app.module.js';
 import type { TransitionContext } from '../src/domain/actors.js';
@@ -9,6 +9,7 @@ import { SubscriptionRepository } from '../src/subscriptions/subscription.reposi
 import { createTestApp, type TestApp } from './support/app.js';
 import { anchorOccurrence, monthlyPeriodEndingBy, periodEnds } from './support/billing-calendar.js';
 import { describeWithEnv } from './support/env.js';
+import { settle as settleThroughPayment, subscriptionPrice } from './support/settlement.js';
 
 const ctx: TransitionContext = { actor: { type: 'service', id: 'test-producer' }, cause: { type: 'request', id: 'r1' }, correlationId: 'c1' };
 const rejects = (p: Promise<unknown>, status: number, code: string) => expect(p).rejects.toMatchObject({ status, response: { code } });
@@ -33,16 +34,25 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     await db.drop();
   });
 
-  /** A fresh product + a recurring, monthly price of its own, sold to nobody in particular. */
-  async function recurringPrice(unit = 1000): Promise<{ productId: string; priceId: string }> {
-    const seller = crypto.randomUUID();
-    const productId = (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('test-producer', 'organization', $1, 'sub-plan', 'Plan') RETURNING id`, [seller])).rows[0].id;
-    const priceId = (await admin.query(
-      `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, 'p', 'TND', $2, 'recurring', 'month', 1) RETURNING id`,
-      [productId, unit],
-    )).rows[0].id;
-    return { productId, priceId };
-  }
+  /** A fresh Organization-subscription product (S3a target) + a recurring, monthly price of its own. */
+  const recurringPrice = (unit = 1000) => subscriptionPrice(admin, { unit });
+
+  // Core V2 S3b: there is no direct activation or renewal. These test shims reach the SAME periods only through the real settlement path
+  // (support/settlement.ts: a routed invoice, a payment request, Payment's verified `payment.succeeded`): `activate` settles at the period
+  // start and checks that the settlement produced exactly the expected period; `renew` settles at the given instant.
+  const priceOf = async (organizationId: string) => (await admin.query(`SELECT "priceId" FROM subscription WHERE "organizationId" = $1`, [organizationId])).rows[0].priceId as string;
+  const paidVia = (app: () => TestApp) => ({
+    activate: async (organizationId: string, period: { start: Date; end: Date }) => {
+      const r = await settleThroughPayment(app().app, { organizationId, priceId: await priceOf(organizationId), at: period.start });
+      expect(r.subscription!.currentPeriodEnd).toEqual(period.end);
+      return { subscription: r.subscription!, changed: r.application.subscription === 'settled' };
+    },
+    renew: async (organizationId: string, at: Date) => {
+      const r = await settleThroughPayment(app().app, { organizationId, priceId: await priceOf(organizationId), at });
+      return { subscription: r.subscription!, changed: r.application.subscription === 'settled' };
+    },
+  });
+  const paid = paidVia(() => t);
 
   const org = () => crypto.randomUUID();
 
@@ -55,7 +65,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
 
     const start = new Date('2026-01-01T00:00:00Z');
     const end = new Date('2026-02-01T00:00:00Z');
-    const activated = await subs.activate(organizationId, { start, end }, ctx);
+    const activated = await paid.activate(organizationId, { start, end });
     expect(activated).toMatchObject({ changed: true, subscription: { status: 'active', currentPeriodStart: start, currentPeriodEnd: end, revision: 1 } });
 
     const history = (await admin.query(`SELECT "fromStatus", "toStatus", revision FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1 ORDER BY revision`, [activated.subscription.id])).rows;
@@ -118,16 +128,11 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     expect((await admin.query(`SELECT count(*)::int AS n FROM subscription WHERE "organizationId" = $1`, [conflictOrg])).rows[0].n).toBe(1);
   });
 
-  it('16. an invalid period (end <= start) is refused with a stable error code, and activation is refused for a non-pending subscription', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await subs.create(organizationId, productId, priceId, ctx);
-    const start = new Date('2026-02-01T00:00:00Z');
-    await rejects(subs.activate(organizationId, { start, end: start }, ctx), 400, 'invalid_subscription_period');
-    await rejects(subs.activate(organizationId, { start, end: new Date(start.getTime() - day) }, ctx), 400, 'invalid_subscription_period');
-
-    await subs.activate(organizationId, { start, end: anchorOccurrence(start, 1) }, ctx);
-    await rejects(subs.activate(organizationId, { start, end: anchorOccurrence(start, 1) }, ctx), 409, 'invalid_subscription_transition');
+  it('S3b (S-4): the direct activate() / renew() operations are retired: the repository has no way to start or extend a period without a settlement', () => {
+    expect((subs as unknown as Record<string, unknown>).activate).toBeUndefined();
+    expect((subs as unknown as Record<string, unknown>).renew).toBeUndefined();
+    expect((subs as unknown as Record<string, unknown>).applySuccessfulPayment).toBeUndefined();
+    expect(typeof subs.applySettlement).toBe('function');
   });
 
   it('the database itself refuses currentPeriodEnd <= currentPeriodStart, independent of the repository', async () => {
@@ -145,23 +150,23 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       const { productId, priceId } = await recurringPrice();
       await subs.create(organizationId, productId, priceId, ctx);
       // activated one anchored month before `periodEnd`: the billing anchor (the activation instant) is on periodEnd's cadence
-      await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+      await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
       return organizationId;
     }
 
     it('2. early renewal: anchors on the period end, not on now — no purchased time is lost', async () => {
       const periodEnd = new Date('2026-11-01T00:00:00Z');
       const organizationId = await activeSubscription(periodEnd);
-      const renewed = await subs.renew(organizationId, new Date('2026-10-20T00:00:00Z'), ctx);
+      const renewed = await paid.renew(organizationId, new Date('2026-10-20T00:00:00Z'));
       expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: periodEnd, currentPeriodEnd: anchorOccurrence(periodEnd, 1), billingAnchorAt: anchorOccurrence(periodEnd, -1) });
     });
 
     it('3. multiple early renewals stay deterministic: each extends from the previous end', async () => {
       const periodEnd = new Date('2026-11-01T00:00:00Z');
       const organizationId = await activeSubscription(periodEnd);
-      const r1 = await subs.renew(organizationId, new Date('2026-10-20T00:00:00Z'), ctx);
+      const r1 = await paid.renew(organizationId, new Date('2026-10-20T00:00:00Z'));
       expect(r1.subscription.currentPeriodEnd).toEqual(anchorOccurrence(periodEnd, 1));
-      const r2 = await subs.renew(organizationId, new Date('2026-11-15T00:00:00Z'), ctx);
+      const r2 = await paid.renew(organizationId, new Date('2026-11-15T00:00:00Z'));
       expect(r2.subscription.currentPeriodEnd).toEqual(anchorOccurrence(periodEnd, 2));
       expect(r2.subscription.revision).toBe(r1.subscription.revision + 1);
     });
@@ -169,7 +174,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     it('4. exact-boundary renewal: now === currentPeriodEnd anchors on currentPeriodEnd, identically to just-before', async () => {
       const periodEnd = new Date('2026-11-01T00:00:00Z');
       const organizationId = await activeSubscription(periodEnd);
-      const renewed = await subs.renew(organizationId, periodEnd, ctx);
+      const renewed = await paid.renew(organizationId, periodEnd);
       expect(renewed.subscription).toMatchObject({ currentPeriodStart: periodEnd, currentPeriodEnd: anchorOccurrence(periodEnd, 1) });
     });
 
@@ -179,7 +184,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       await subs.expire(organizationId, ctx);
       // past periodEnd (Nov 1) AND past the 7-day grace `activate` already precomputed (Nov 8) — genuinely, not just nominally, late.
       const lateAt = new Date(periodEnd.getTime() + 10 * day);
-      const renewed = await subs.renew(organizationId, lateAt, ctx);
+      const renewed = await paid.renew(organizationId, lateAt);
       // ...and, being genuinely late, restarts the billing anchor at the settlement (ADR-0044 B-025)
       expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: lateAt, currentPeriodEnd: anchorOccurrence(lateAt, 1), billingAnchorAt: lateAt });
     });
@@ -191,7 +196,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       // exactly the kind of staleness a delayed sweeper would also produce in production.
       await subs.expire(organizationId, ctx);
       const stillInGrace = new Date(periodEnd.getTime() + 4 * day); // grace runs Nov 1 -> Nov 8; Nov 5 is inside it
-      const renewed = await subs.renew(organizationId, stillInGrace, ctx);
+      const renewed = await paid.renew(organizationId, stillInGrace);
       expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: periodEnd, currentPeriodEnd: anchorOccurrence(periodEnd, 1), billingAnchorAt: anchorOccurrence(periodEnd, -1) });
     });
 
@@ -202,7 +207,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       // normalizes the status label, it does not (and cannot) choose a timestamp.
       expect((await subs.getByOrganization(organizationId)).graceUntil).toEqual(new Date(periodEnd.getTime() + 7 * day));
       await subs.enterGrace(organizationId, ctx);
-      const renewed = await subs.renew(organizationId, new Date(periodEnd.getTime() + 4 * day), ctx);
+      const renewed = await paid.renew(organizationId, new Date(periodEnd.getTime() + 4 * day));
       const newEnd = anchorOccurrence(periodEnd, 1);
       expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: periodEnd, currentPeriodEnd: newEnd, graceUntil: new Date(newEnd.getTime() + 7 * day) });
     });
@@ -213,7 +218,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
     // R1: graceUntil was already computed by `activate`, from the deployment's configured policy — `enterGrace` only
     // flips the status label and touches nothing else.
     const graceUntil = new Date(periodEnd.getTime() + 7 * day);
@@ -229,7 +234,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
     await subs.enterGrace(organizationId, ctx);
     await rejects(subs.enterGrace(organizationId, ctx), 409, 'invalid_subscription_transition'); // already in grace
   });
@@ -238,11 +243,12 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const noGrace = await createTestApp({ databaseUrl: db.url, env: { SUBSCRIPTION_GRACE_DAYS: '' } });
     try {
       const noGraceSubs = noGrace.app.get(SubscriptionRepository);
+      const noGracePaid = paidVia(() => noGrace);
       const organizationId = org();
       const { productId, priceId } = await recurringPrice();
       await noGraceSubs.create(organizationId, productId, priceId, ctx);
       const periodEnd = new Date('2026-11-01T00:00:00Z');
-      const activated = await noGraceSubs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+      const activated = await noGracePaid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
       expect(activated.subscription.graceUntil).toBeNull();
       await rejects(noGraceSubs.enterGrace(organizationId, ctx), 409, 'subscription_grace_unavailable');
       // the only path left when the period ends is straight to expired — never invented, never client-supplied
@@ -258,7 +264,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
     const row = await subs.getByOrganization(organizationId);
     await expect(admin.query(`UPDATE subscription SET status = 'grace', "graceUntil" = "currentPeriodEnd" WHERE id = $1`, [row.id])).rejects.toMatchObject({ code: '23514' });
     await expect(admin.query(`UPDATE subscription SET status = 'grace', "graceUntil" = "currentPeriodEnd" - interval '1 day' WHERE id = $1`, [row.id])).rejects.toMatchObject({ code: '23514' });
@@ -269,7 +275,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
 
     const scheduled = await subs.scheduleCancellation(organizationId, ctx);
     expect(scheduled).toMatchObject({ changed: true, subscription: { cancelAtPeriodEnd: true, currentPeriodEnd: periodEnd, status: 'active' } });
@@ -287,9 +293,9 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
     await subs.scheduleCancellation(organizationId, ctx);
-    const renewed = await subs.renew(organizationId, new Date('2026-10-20T00:00:00Z'), ctx);
+    const renewed = await paid.renew(organizationId, new Date('2026-10-20T00:00:00Z'));
     expect(renewed.subscription.cancelAtPeriodEnd).toBe(false);
   });
 
@@ -299,7 +305,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     await subs.create(organizationId, productId, priceId, ctx);
     const start = new Date();
     const periodEnd = anchorOccurrence(start, 1);
-    await subs.activate(organizationId, { start, end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start, end: periodEnd });
 
     const terminated = await subs.terminate(organizationId, ctx);
     expect(terminated.subscription.status).toBe('expired');
@@ -316,21 +322,20 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const start = new Date();
-    await subs.activate(organizationId, { start, end: anchorOccurrence(start, 1) }, ctx);
+    await paid.activate(organizationId, { start, end: anchorOccurrence(start, 1) });
     await subs.terminate(organizationId, ctx);
 
-    const reactivated = await subs.renew(organizationId, new Date(), ctx); // a late renewal reactivates it
+    const reactivated = await paid.renew(organizationId, new Date()); // a late renewal reactivates it
     expect(reactivated.subscription).toMatchObject({ status: 'active', effectiveTerminationAt: null });
 
     const terminatedAgain = await subs.terminate(organizationId, ctx);
     expect(terminatedAgain.subscription.effectiveTerminationAt).not.toBeNull();
   });
 
-  it('15. invalid transitions are refused with a stable error code: join/renew a pending subscription, or act on one that never existed', async () => {
+  it('15. invalid transitions are refused with a stable error code: grace or terminate a pending subscription, or act on one that never existed', async () => {
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    await rejects(subs.renew(organizationId, new Date(), ctx), 409, 'invalid_subscription_transition');
     await rejects(subs.enterGrace(organizationId, ctx), 409, 'invalid_subscription_transition');
     await rejects(subs.terminate(organizationId, ctx), 409, 'invalid_subscription_transition');
     await rejects(subs.getByOrganization(org()), 404, 'not_found');
@@ -341,9 +346,9 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
     await subs.scheduleCancellation(organizationId, ctx);
-    await subs.renew(organizationId, new Date('2026-10-20T00:00:00Z'), ctx);
+    await paid.renew(organizationId, new Date('2026-10-20T00:00:00Z'));
     const row = await subs.getByOrganization(organizationId);
     const history = (await admin.query(`SELECT revision, "fromStatus", "toStatus" FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1 ORDER BY revision`, [row.id])).rows;
     expect(history.map((h: any) => h.revision)).toEqual([0, 1, 2, 3]);
@@ -364,7 +369,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     expect(rowB.organizationId).toBe(orgB);
     // acting on A never reaches or moves B
     const periodEnd = new Date('2026-11-01T00:00:00Z');
-    await subs.activate(orgA, { start: anchorOccurrence(periodEnd, -1), end: periodEnd }, ctx);
+    await paid.activate(orgA, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
     expect((await subs.getByOrganization(orgB)).status).toBe('pending');
   });
 
@@ -384,17 +389,21 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    await subs.activate(organizationId, { start: anchor, end: anchorOccurrence(anchor, 1) }, ctx);
+    await paid.activate(organizationId, { start: anchor, end: anchorOccurrence(anchor, 1) });
 
     // 6 concurrent early renewals against the SAME subscription: row-level locking must serialize them, so no purchased
     // time is lost and every attempt is individually reflected: revision advances by exactly 6, and the period ends at the
     // anchor's 7th occurrence (Aug 31 2090), whatever order the transactions won the lock in. One lost renewal would end a
     // month short (Jul 31); an anchor that drifted at February would end on the 28th.
     const now = new Date();
-    const results = await Promise.all(Array.from({ length: 6 }, () => subs.renew(organizationId, now, ctx)));
+    const results = await Promise.all(Array.from({ length: 6 }, () => paid.renew(organizationId, now)));
     expect(results.every((r) => r.changed)).toBe(true);
-    const ends = results.map((r) => r.subscription.currentPeriodEnd!.getTime()).sort((a, b) => a - b);
-    expect(ends).toEqual(periodEnds(anchor, 'month', 1, 7).slice(1).map((d) => d.getTime())); // each renewal took the next period, none shared one
+    // each settlement took the next period (none shared one): the six settlement-written renewals are the anchor's 2nd..7th occurrences
+    const renewedEnds = (await admin.query(
+      `SELECT payload->'changes'->'period_end'->>'to' AS e FROM outbox WHERE name = 'audit.subscription.renewed' AND payload->'resource'->>'id' = $1`,
+      [(await subs.getByOrganization(organizationId)).id],
+    )).rows.map((r) => Date.parse(r.e as string)).sort((a, b) => a - b);
+    expect(renewedEnds).toEqual(periodEnds(anchor, 'month', 1, 7).slice(1).map((d) => d.getTime()));
     const row = await subs.getByOrganization(organizationId);
     expect(row.revision).toBe(7); // create is revision 0 (no UPDATE yet); activate is the first UPDATE (1); 6 renewals (2..7) — none lost
     expect(row.currentPeriodEnd).toEqual(new Date('2090-08-31T10:00:00Z'));
@@ -407,8 +416,8 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     const race = await recurringPrice();
     await subs.create(raceOrg, race.productId, race.priceId, ctx);
     const raceStart = new Date();
-    await subs.activate(raceOrg, { start: raceStart, end: anchorOccurrence(raceStart, 1) }, ctx);
-    const settled = await Promise.allSettled([subs.renew(raceOrg, new Date(), ctx), subs.terminate(raceOrg, ctx)]);
+    await paid.activate(raceOrg, { start: raceStart, end: anchorOccurrence(raceStart, 1) });
+    const settled = await Promise.allSettled([paid.renew(raceOrg, new Date()), subs.terminate(raceOrg, ctx)]);
     expect(settled.every((s) => s.status === 'fulfilled')).toBe(true); // both a renew and a terminate are always legal from `active`
     const final = await subs.getByOrganization(raceOrg);
     expect(['active', 'expired']).toContain(final.status); // whichever ran last, deterministically, under the row lock
@@ -421,17 +430,12 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     type Unit = 'day' | 'week' | 'month' | 'year';
     type Sub = { organizationId: string; productId: string; priceId: string };
     const at = (ymd: string, time = '09:30:00') => new Date(`${ymd}T${time}Z`);
-    // the actor/cause a real settlement carries (the Payment event consumer), which the audit contract requires
-    const paymentCtx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'evt' }, correlationId: 'corr-evt' };
-    const settle = (sub: Sub, settledAt: Date) => t.app.get(DbService).tx((q) => subs.applySuccessfulPayment(q, { ...sub, settledAt }, paymentCtx));
+    // Core V2 S3b: through the real settlement path (an organization_subscription invoice paid by Payment's verified settlement)
+    const settle = async (sub: Sub, settledAt: Date) => ({ subscription: (await settleThroughPayment(t.app, { organizationId: sub.organizationId, priceId: sub.priceId, at: settledAt })).subscription! });
 
     async function settledSubscription(firstAt: Date, unit: Unit = 'month', count = 1): Promise<Sub> {
       const organizationId = org();
-      const productId = (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('test-producer', 'organization', $1, 'anchor-plan', 'Plan') RETURNING id`, [crypto.randomUUID()])).rows[0].id;
-      const priceId = (await admin.query(
-        `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, 'p', 'TND', 1000, 'recurring', $2, $3) RETURNING id`,
-        [productId, unit, count],
-      )).rows[0].id;
+      const { productId, priceId } = await subscriptionPrice(admin, { intervalUnit: unit, intervalCount: count });
       const sub = { organizationId, productId, priceId };
       await settle(sub, firstAt);
       return sub;
@@ -510,90 +514,8 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       expect((await settle(lastGraceInstant, at('2027-03-07'))).subscription).toMatchObject({ currentPeriodEnd: at('2027-03-31'), billingAnchorAt: at('2027-01-31') });
     });
 
-    describe('direct activation (`activate({ start, end })`): a month/year first period must end on its own anchor cadence', () => {
-      /** A pending subscription to a fresh `count` x `unit` price. */
-      async function pendingSubscription(unit: Unit, count = 1): Promise<string> {
-        const organizationId = org();
-        const productId = (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('test-producer', 'organization', $1, 'activation-plan', 'Plan') RETURNING id`, [crypto.randomUUID()])).rows[0].id;
-        const priceId = (await admin.query(
-          `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, 'p', 'TND', 1000, 'recurring', $2, $3) RETURNING id`,
-          [productId, unit, count],
-        )).rows[0].id;
-        await subs.create(organizationId, productId, priceId, ctx);
-        return organizationId;
-      }
-      /** An off-cadence end is refused, and the refusal leaves the subscription exactly as it was: pending, revision 0, one history row. */
-      async function refusedOffCadence(organizationId: string, start: Date, end: Date): Promise<void> {
-        await rejects(subs.activate(organizationId, { start, end }, ctx), 400, 'invalid_subscription_period');
-        const row = await subs.getByOrganization(organizationId);
-        expect(row).toMatchObject({ status: 'pending', revision: 0, currentPeriodStart: null, currentPeriodEnd: null, billingAnchorAt: null });
-        expect((await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [row.id])).rows[0].n).toBe(1);
-      }
-
-      it('monthly: Jan 31 2027 -> Feb 28 2027 is accepted and anchored on Jan 31; renewals continue Mar 31 -> Apr 30 -> May 31', async () => {
-        const organizationId = await pendingSubscription('month');
-        const activated = await subs.activate(organizationId, { start: at('2027-01-31'), end: at('2027-02-28') }, ctx);
-        expect(activated.subscription).toMatchObject({ status: 'active', currentPeriodStart: at('2027-01-31'), currentPeriodEnd: at('2027-02-28'), billingAnchorAt: at('2027-01-31'), revision: 1 });
-        const ends: Date[] = [];
-        for (let i = 0; i < 3; i++) {
-          const row = await subs.getByOrganization(organizationId);
-          ends.push((await subs.renew(organizationId, row.currentPeriodStart!, ctx)).subscription.currentPeriodEnd!); // early renewals
-        }
-        expect(days(ends)).toEqual(['2027-03-31', '2027-04-30', '2027-05-31']);
-        expect(ends).toEqual(periodEnds(at('2027-01-31'), 'month', 1, 4).slice(1));
-      });
-
-      it('monthly: Jan 31 2027 -> Feb 15 2027 is refused, as is any end that is not exactly the anchored Feb 28 (Mar 3, one millisecond off)', async () => {
-        const organizationId = await pendingSubscription('month');
-        await refusedOffCadence(organizationId, at('2027-01-31'), at('2027-02-15'));
-        await refusedOffCadence(organizationId, at('2027-01-31'), at('2027-03-03')); // `Date` month overflow, never the cadence
-        await refusedOffCadence(organizationId, at('2027-01-31'), new Date(at('2027-02-28').getTime() + 1));
-        await refusedOffCadence(organizationId, at('2027-01-31'), at('2027-02-28', '09:29:59')); // the anchor keeps its time of day
-        // the refusals changed nothing: the on-cadence period is still accepted afterwards
-        await subs.activate(organizationId, { start: at('2027-01-31'), end: at('2027-02-28') }, ctx);
-      });
-
-      it('monthly, leap year: Jan 31 2028 -> Feb 29 2028 is accepted; Feb 28 2028 is refused', async () => {
-        const refused = await pendingSubscription('month');
-        await refusedOffCadence(refused, at('2028-01-31'), at('2028-02-28'));
-        const organizationId = await pendingSubscription('month');
-        const activated = await subs.activate(organizationId, { start: at('2028-01-31'), end: at('2028-02-29') }, ctx);
-        expect(activated.subscription).toMatchObject({ currentPeriodEnd: at('2028-02-29'), billingAnchorAt: at('2028-01-31') });
-      });
-
-      it('yearly, Feb 29 anchor: Feb 29 2028 -> Feb 28 2029 is accepted; Mar 1 2029 is refused', async () => {
-        const refused = await pendingSubscription('year');
-        await refusedOffCadence(refused, at('2028-02-29'), at('2029-03-01'));
-        const organizationId = await pendingSubscription('year');
-        const activated = await subs.activate(organizationId, { start: at('2028-02-29'), end: at('2029-02-28') }, ctx);
-        expect(activated.subscription).toMatchObject({ currentPeriodEnd: at('2029-02-28'), billingAnchorAt: at('2028-02-29') });
-        expect(activated.subscription.currentPeriodEnd).toEqual(periodEnds(at('2028-02-29'), 'year', 1, 1)[0]);
-      });
-
-      it('intervalCount > 1 follows the same rule: every 2 months from Jan 31 2027 ends Mar 31 (one month, Feb 28, is refused); every 3 months from Nov 30 2026 ends Feb 28 2027', async () => {
-        const refused = await pendingSubscription('month', 2);
-        await refusedOffCadence(refused, at('2027-01-31'), at('2027-02-28'));
-        const two = await pendingSubscription('month', 2);
-        const activated = await subs.activate(two, { start: at('2027-01-31'), end: at('2027-03-31') }, ctx);
-        expect(activated.subscription).toMatchObject({ currentPeriodEnd: at('2027-03-31'), billingAnchorAt: at('2027-01-31') });
-        expect((await subs.renew(two, at('2027-01-31'), ctx)).subscription.currentPeriodEnd).toEqual(at('2027-05-31'));
-        const three = await pendingSubscription('month', 3);
-        await subs.activate(three, { start: at('2026-11-30'), end: at('2027-02-28') }, ctx);
-        expect((await subs.renew(three, at('2026-11-30'), ctx)).subscription.currentPeriodEnd).toEqual(at('2027-05-30'));
-      });
-
-      it('day and week prices keep the caller-supplied first period, as before, and carry no billing anchor', async () => {
-        const week = await pendingSubscription('week', 2);
-        const weekly = await subs.activate(week, { start: at('2027-01-31'), end: at('2027-02-10') }, ctx); // not start + 2 weeks: still accepted
-        expect(weekly.subscription).toMatchObject({ status: 'active', currentPeriodEnd: at('2027-02-10'), billingAnchorAt: null });
-        const tenDays = await pendingSubscription('day', 10);
-        const daily = await subs.activate(tenDays, { start: at('2027-01-31'), end: at('2027-02-03') }, ctx);
-        expect(daily.subscription).toMatchObject({ status: 'active', currentPeriodEnd: at('2027-02-03'), billingAnchorAt: null });
-        // and they still refuse an empty or negative period
-        const empty = await pendingSubscription('week');
-        await rejects(subs.activate(empty, { start: at('2027-01-31'), end: at('2027-01-31') }, ctx), 400, 'invalid_subscription_period');
-      });
-    });
+    // Core V2 S3b: `activate({ start, end })` (a caller-supplied first period) is retired; a first period now always comes from a
+    // settlement and is anchored on its settlement instant (the monthly / yearly / multi-interval cases above prove its cadence).
 
     it('day and week prices keep start + interval and carry no billing anchor', async () => {
       const week = await settledSubscription(at('2027-01-31'), 'week', 2);
@@ -625,7 +547,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       await subs.create(organizationId, productId, priceId, ctx);
       const start = new Date('2026-10-01T00:00:00Z');
       const end = new Date('2026-11-01T00:00:00Z');
-      await subs.activate(organizationId, { start, end }, ctx);
+      await paid.activate(organizationId, { start, end });
       const row = await subs.getByOrganization(organizationId); // round-tripped through `pg`: timestamptz -> JS Date
       // `activate` also precomputed graceUntil (the test app's default SUBSCRIPTION_GRACE_DAYS=7), so the row's OWN
       // effective boundary is graceUntil, not currentPeriodEnd — exactly what a real, grace-configured deployment sees.
@@ -641,7 +563,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       const { productId, priceId } = await recurringPrice();
       await subs.create(organizationId, productId, priceId, ctx);
       const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() - 3 * day)); // period already ended (3 to 6 days ago)
-      await subs.activate(organizationId, { start, end }, ctx); // graceUntil is precomputed here (7-day test default), status stays 'active'
+      await paid.activate(organizationId, { start, end }); // graceUntil is precomputed here (7-day test default), status stays 'active'
       const row = await subs.getByOrganization(organizationId);
       expect(row.status).toBe('active');
       expect(row.graceUntil).not.toBeNull();

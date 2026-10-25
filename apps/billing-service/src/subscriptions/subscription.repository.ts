@@ -65,69 +65,14 @@ export class SubscriptionRepository {
     return { subscription: existing, changed: false };
   }
 
-  /**
-   * `pending -> active`: the first paid period. `end` must be strictly after `start` (the database CHECK is the
-   * unreachable backstop). For a month/year price `start` becomes the billing anchor, so `end` must be the period end
-   * that anchor gives (ADR-0044 B-025): the same `billing_subscription_period_end` every renewal uses, never a second
-   * calendar here. An off-cadence first period (a trial, an introductory or prorated period) is not a V1 concept
-   * (B-019, B-023) and is refused. A day/week price keeps its caller-supplied period. Precomputes `graceUntil` (R1)
-   * from the deployment's configured grace policy — never from a caller — in the SAME statement, so it is a
-   * trustworthy timestamp from the moment the period exists, not only once some later sweeper gets around to calling
-   * `enterGrace`.
-   */
-  async activate(organizationId: string, period: { start: Date; end: Date }, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    if (period.end.getTime() <= period.start.getTime()) throw billingError(400, 'invalid_subscription_period', BILLING_MESSAGES.periodEndAfterStart);
-    return this.db.tx(async (q) => {
-      const row = await this.lock(q, organizationId);
-      if (row.status !== 'pending') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.subscriptionCannotBeActivated, { status: row.status });
-      const { rows: cadence } = await q.query<{ anchoredEnd: Date | null }>(
-        `SELECT CASE WHEN "intervalUnit" IN ('month', 'year')
-                  THEN billing_subscription_period_end($2::timestamptz, $2::timestamptz, "intervalUnit", "intervalCount") END AS "anchoredEnd"
-           FROM price WHERE id = $1`,
-        [row.priceId, period.start],
-      );
-      const anchoredEnd = cadence[0]!.anchoredEnd;
-      if (anchoredEnd && anchoredEnd.getTime() !== period.end.getTime()) {
-        throw billingError(400, 'invalid_subscription_period', `currentPeriodEnd must be ${anchoredEnd.toISOString()}: the first period of a monthly or yearly price ends on its billing anchor's cadence.`);
-      }
-      const graceDays = this.config.subscriptionGraceDays ?? null;
-      // A month/year price's billing anchor is established here, at the activation instant (ADR-0044 B-025).
-      const { rows } = await q.query<SubscriptionRow>(
-        `UPDATE subscription s SET status = 'active', "currentPeriodStart" = $2, "currentPeriodEnd" = $3,
-                "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN $2::timestamptz END,
-                "graceUntil" = CASE WHEN $4::int IS NULL THEN NULL ELSE (($3::timestamptz AT TIME ZONE 'UTC') + ($4::int || ' days')::interval) AT TIME ZONE 'UTC' END
-           FROM price p WHERE p.id = s."priceId" AND s.id = $1 RETURNING s.*`,
-        [row.id, period.start, period.end, graceDays],
-      );
-      const updated = rows[0]!;
-      await this.record(q, row, updated, ctx);
-      return { subscription: updated, changed: true };
-    });
-  }
-
-  /**
-   * Applies a successful commercial renewal (early, on-time, during grace, or fully late — sections 22-25): the ONE
-   * operation for all of them, because the anchor rule (`renewalAnchor`) already accounts for every case from the row's
-   * OWN currently-locked state. Always ends in `active`. Refused only for a `pending` subscription, which has never
-   * been activated and has no period to renew (`activate` is the first step).
-   */
-  async renew(organizationId: string, now: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    return this.db.tx((q) => this.renewTx(q, organizationId, now, ctx));
-  }
-
-  /** The composable core of `renew` (Stage 12.4): callable from within an ALREADY-OPEN transaction. */
-  private async renewTx(q: Queryable, organizationId: string, now: Date, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    const row = await this.lock(q, organizationId);
-    if (row.status === 'pending') throw billingError(409, 'invalid_subscription_transition', BILLING_MESSAGES.pendingMustBeActivated);
-    const basis = { currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil };
-    return this.rollPeriod(q, row, renewalAnchor(basis, now), isLateRenewal(basis, now), ctx);
-  }
+  // Core V2 S3b (ADR-0044 B3, S-4): the direct `activate(period)` and `renew(now)` operations are RETIRED. A period starts or extends
+  // only through `applySettlement`, in the transaction that records the verified settlement (DB-11 refuses anything else at commit).
 
   /**
    * Rolls a subscription's period forward to start at `anchor`, extending by its own price's recurring interval, and
    * recomputing `graceUntil` from the configured policy (R1) — the one place that actually performs this UPDATE.
-   * `renewTx` computes `anchor` via the frozen renewal-anchor rule; `applySuccessfulPayment`'s first-activation branch
-   * uses the authoritative settlement instant directly as `anchor` instead (there is no prior period to anchor from).
+   * `applySettlement` computes `anchor` via the frozen renewal-anchor rule, or, for the first activation, uses the authoritative
+   * settlement instant directly (there is no prior period to anchor from).
    * Either way this is the SAME move the database allows from `pending`, `active`, `grace` or `expired` alike.
    *
    * `resetBillingAnchor` (the first activation, or a genuinely late renewal) makes `anchor` the new persistent billing
@@ -164,22 +109,31 @@ export class SubscriptionRepository {
   }
 
   /**
-   * Stage 12.4: applies an authoritative, already-validated successful settlement to the Organization's Subscription,
-   * within the CALLER's own transaction (`q`) — never opening its own, so the receipt, the PaymentRequest/Invoice
-   * transition and this Subscription effect commit or roll back as one unit (section 15). Ensures the subscription
-   * exists for this exact `(organizationId, productId, priceId)` offering (idempotent; throws `subscription_conflict`
-   * if the organization already has a DIFFERENT offering — never a silent, disguised upgrade), then either performs
-   * the FIRST activation (anchored on `settledAt` itself, since there is no prior period to compare against) or a
-   * normal renewal (anchored per the frozen rule against whatever period/grace the row already has) — the same
-   * `rollPeriod` primitive either way, so period/grace arithmetic is never duplicated here.
+   * Core V2 S3b (ADR-0044 B3; DB-9 to DB-11): the ONE way an Organization Subscription starts or extends a period. Within the CALLER's
+   * transaction (`q`) — the one that applied Payment's verified settlement (the applied `payment.succeeded` receipt, its request and
+   * invoice `paid`) — it records the `subscription_settlement` of the invoice's `organization_subscription` routing record, then rolls the
+   * period. The database checks the evidence (the receipt, the request and the invoice paid), that the routing names THIS Organization
+   * and product, that the Subscription is theirs, and (DB-11, at commit) that no period moved without this settlement. One settlement per
+   * invoice (DB-10): an invoice already settled extends nothing again.
+   *
+   * Ensures the subscription exists for this exact `(organizationId, productId, priceId)` offering (idempotent; `subscription_conflict`
+   * for a DIFFERENT offering — never a silent, disguised upgrade), then performs the first activation (anchored on `settledAt`) or a
+   * renewal (anchored per the frozen rule against the row's own period and grace), through the same `rollPeriod` primitive.
    */
-  async applySuccessfulPayment(
+  async applySettlement(
     q: Queryable,
-    params: { organizationId: string; productId: string; priceId: string; settledAt: Date },
+    params: { organizationId: string; productId: string; priceId: string; settledAt: Date; invoiceId: string; paymentRequestId: string; receiptId: string },
     ctx: TransitionContext,
   ): Promise<SubscriptionWriteResult> {
     await this.createTx(q, params.organizationId, params.productId, params.priceId, ctx); // idempotent; conflict on offering mismatch
     const row = await this.lock(q, params.organizationId); // re-read UNDER LOCK: createTx's own "existing" read is not locked
+    const settled = await q.query<{ id: string }>(
+      `INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+       VALUES ($1, 'organization_subscription', $2, $3, $4, $5, $6, $7, pg_current_xact_id())
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [params.invoiceId, params.organizationId, params.productId, row.id, params.paymentRequestId, params.receiptId, params.settledAt],
+    );
+    if (!settled.rows[0]) return { subscription: row, changed: false }; // this invoice (or receipt) was already settled: nothing extends twice
     const basis = row.status === 'pending' ? null : { currentPeriodEnd: row.currentPeriodEnd!, graceUntil: row.graceUntil };
     const anchor = basis ? renewalAnchor(basis, params.settledAt) : params.settledAt;
     // the first activation establishes the billing anchor; a genuinely late renewal resets it; any other renewal keeps it
@@ -196,14 +150,14 @@ export class SubscriptionRepository {
         changes: { period_end: { from: row.currentPeriodEnd!.toISOString(), to: updated.currentPeriodEnd!.toISOString() } },
       }, ctx);
     }
-    // `expired -> active` (a reactivation) has no catalog action and is unreachable today (nothing expires a subscription yet); the direct
-    // `renew()` / `activate()` API has no production caller. Whatever makes either live must come with its catalog review (18.7 record).
+    // `expired -> active` (a reactivation) has no catalog action and is unreachable today (nothing expires a subscription yet). Whatever
+    // makes it live must come with its catalog review (18.7 record).
     return result;
   }
 
   /**
    * `active -> grace`: normalizes the STATUS LABEL once `currentPeriodEnd` has passed. It does not set `graceUntil` —
-   * that boundary was already precomputed by `activate`/`renew` from the deployment's configured grace policy (R1), so
+   * that boundary was already precomputed by the settlement that established the period from the deployment's configured grace policy (R1), so
    * this is a pure reporting/consistency move a future sweeper would call, never the source of the grace timestamp
    * itself. Refused when this subscription has no grace window at all (no `SUBSCRIPTION_GRACE_DAYS` configured when its
    * current period was established): there is nothing to normalize into, and it should go straight to `expire`.

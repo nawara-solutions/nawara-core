@@ -96,6 +96,23 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     }
   });
 
+  it('Core V2 S3b (DB-9 / DB-10): the runtime role holds only INSERT and SELECT on subscription_settlement; UPDATE, DELETE and TRUNCATE are refused by privilege', async () => {
+    const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await owner.connect();
+    await app.connect();
+    try {
+      const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = 'subscription_settlement' ORDER BY 1`, [appRole]);
+      expect(grants.rows.map((r) => r.privilege_type)).toEqual(['INSERT', 'SELECT']);
+      await expect(app.query(`UPDATE subscription_settlement SET "settledAt" = now()`)).rejects.toThrow(/permission denied/);
+      await expect(app.query(`DELETE FROM subscription_settlement`)).rejects.toThrow(/permission denied/);
+      await expect(app.query(`TRUNCATE subscription_settlement`)).rejects.toThrow(/permission denied/);
+    } finally {
+      await owner.end();
+      await app.end();
+    }
+  });
+
   it('Core V2 S3a (DB-1): the runtime role holds only INSERT and SELECT on invoice_entitlement; UPDATE, DELETE and TRUNCATE are refused by privilege', async () => {
     const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
     const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });

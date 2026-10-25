@@ -343,6 +343,7 @@ export class PaymentRequestRepository {
       );
       const detail = 'detail' in decision ? decision.detail : null;
       if (receipt.rowCount === 0) return { outcome: decision.outcome, detail, firstDelivery: false, subscription: null };
+      const receiptId = (receipt.rows[0] as { id: string }).id;
 
       let subscription: SubscriptionSettlementOutcome = null;
       if (decision.outcome === 'applied' && request && invoice) {
@@ -356,7 +357,7 @@ export class PaymentRequestRepository {
           const updated = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'paid', "paidAt" = now() WHERE id = $1 RETURNING *`, [invoice.id]);
           await recordTransition(q, { entityType: 'invoice', entityId: invoice.id, from: 'open', to: 'paid', revision: updated.rows[0]!.revision, ctx });
           await this.audit.record(q, 'invoice.paid', { organizationId: invoice.organizationId, resource: { type: 'invoice', id: invoice.id } }, ctx); // Stage 18.7.2
-          subscription = await this.linkSubscription(q, invoice, settledAt, ctx);
+          subscription = await this.linkSubscription(q, invoice, request.id, receiptId, settledAt, ctx);
         }
       }
       return { outcome: decision.outcome, detail, firstDelivery: true, subscription };
@@ -379,7 +380,7 @@ export class PaymentRequestRepository {
    * and never allowed to roll back the payment itself: the money still genuinely settled regardless of what Billing
    * can or cannot do with the commercial classification.
    */
-  private async linkSubscription(q: Queryable, invoice: InvoiceRow, settledAt: Date, ctx: TransitionContext): Promise<SubscriptionSettlementOutcome> {
+  private async linkSubscription(q: Queryable, invoice: InvoiceRow, paymentRequestId: string, receiptId: string, settledAt: Date, ctx: TransitionContext): Promise<SubscriptionSettlementOutcome> {
     if (invoice.organizationId === null) return null;
     const { rows: lines } = await q.query<{ productId: string; priceId: string; interval: string }>(
       `SELECT "productId", "priceId", "interval" FROM invoice_line WHERE "invoiceId" = $1`,
@@ -399,7 +400,9 @@ export class PaymentRequestRepository {
     const { productId, priceId } = recurring[0]!;
     if (routing.organizationId !== invoice.organizationId || routing.productId !== productId) return 'unrouted';
     try {
-      await this.subscriptions.applySuccessfulPayment(q, { organizationId: routing.organizationId, productId, priceId, settledAt }, ctx);
+      // Core V2 S3b (B3, DB-9 to DB-11): the settlement evidence is THIS transaction's applied `payment.succeeded` receipt, its request and
+      // its invoice (both now `paid`); the Subscription moves only together with the recorded `subscription_settlement`.
+      await this.subscriptions.applySettlement(q, { organizationId: routing.organizationId, productId, priceId, settledAt, invoiceId: invoice.id, paymentRequestId, receiptId }, ctx);
       return 'settled';
     } catch (e) {
       const response = e instanceof HttpException ? e.getResponse() : null;

@@ -508,8 +508,9 @@ SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending t
 -- row at COMMIT (BI-19, deferred), so a bare UPDATE with no paired history insert would abort this whole script at the
 -- statement's own commit, outside any handler here — never something `expect_ok`/`expect_error` could turn into a clean result.
 SELECT pg_temp.expect_ok('SUB', 'pending -> active with a valid period', format($$
+  SELECT t_settle(%L, '2026-01-01');
   UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L;
-  SELECT t_hist('subscription', %L, 'pending', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+  SELECT t_hist('subscription', %L, 'pending', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend', :'pend'));
 SELECT pg_temp.assert_eq('SUB', 'activation advanced the revision to 1', (SELECT revision::text FROM subscription WHERE id = :'pend'), '1');
 SELECT pg_temp.expect_error('SUB', 'a self-loop is refused for any status OTHER than active (no in-place change while pending/grace/expired)',
   format($$UPDATE subscription SET "cancelAtPeriodEnd" = false WHERE id = %L$$, t_mk_subscription()), '23514');
@@ -531,8 +532,9 @@ SELECT pg_temp.expect_ok('SUB', 'active -> expired (natural expiry, no effective
   SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
 SELECT pg_temp.assert_eq('SUB', 'a naturally expired subscription has no effectiveTerminationAt', (SELECT "effectiveTerminationAt"::text FROM subscription WHERE id = :'pend'), NULL);
 SELECT pg_temp.expect_ok('SUB', 'expired -> active: a late renewal can always reactivate', format($$
+  SELECT t_settle(%L, '2026-03-01');
   UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-03-01', "currentPeriodEnd" = '2026-04-01', "billingAnchorAt" = '2026-03-01' WHERE id = %L;
-  SELECT t_hist('subscription', %L, 'expired', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
+  SELECT t_hist('subscription', %L, 'expired', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend', :'pend'));
 
 -- effective termination: may only SHORTEN access, and never survives past its own `expired` episode (a later
 -- reactivation clears it — see the migration comment on why no separate "set once" check is needed)
@@ -637,6 +639,42 @@ SELECT pg_temp.expect_error('ANCHOR', 'a new period cannot set the anchor to any
   format($$UPDATE subscription SET "currentPeriodStart" = '2027-08-31T09:30:00Z', "currentPeriodEnd" = '2027-09-30T09:30:00Z', "billingAnchorAt" = '2027-02-28T09:30:00Z' WHERE id = %L$$, :'a31'), '23514');
 SELECT pg_temp.expect_error('ANCHOR', 'a month subscription cannot drop its anchor',
   format($$UPDATE subscription SET "billingAnchorAt" = NULL WHERE id = %L$$, :'a31'), '23514');
+
+-- ======================================================================================== Core V2 S3b: DB-9, DB-10, DB-11
+SELECT t_mk_active_subscription('2030-01-31T09:30:00Z') AS s3b \gset
+SELECT pg_temp.expect_error('DB-11', 'a period extension with no settlement in its transaction cannot commit',
+  format($$UPDATE subscription SET "currentPeriodStart" = "currentPeriodEnd", "currentPeriodEnd" = "currentPeriodEnd" + interval '1 month' WHERE id = %L;
+          SELECT t_hist('subscription', %L, 'active', 'active', (SELECT revision FROM subscription WHERE id = %L)); SET CONSTRAINTS ALL IMMEDIATE$$, :'s3b', :'s3b', :'s3b'), '23514', 'subscription_period_settled');
+SELECT t_mk_subscription() AS s3b_pend \gset
+SELECT pg_temp.expect_error('DB-11', 'a NEW period start (an activation) with no settlement cannot commit',
+  format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2031-01-01', "currentPeriodEnd" = '2031-02-01', "billingAnchorAt" = '2031-01-01' WHERE id = %L;
+          SELECT t_hist('subscription', %L, 'pending', 'active', 1); SET CONSTRAINTS ALL IMMEDIATE$$, :'s3b_pend', :'s3b_pend'), '23514', 'subscription_period_settled');
+SELECT pg_temp.expect_ok('DB-11', 'shortening (termination) or a status change needs no settlement', format($$
+  UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = least(now(), "currentPeriodEnd") WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L)); SET CONSTRAINTS ALL IMMEDIATE$$, :'s3b', :'s3b', :'s3b'));
+SELECT "invoiceId" AS s3b_inv, "receiptId" AS s3b_rcpt, "paymentRequestId" AS s3b_req, "subscriptionId" AS s3b_sub, "organizationId" AS s3b_org, "productId" AS s3b_prod
+  FROM subscription_settlement WHERE "subscriptionId" = :'s3b' \gset
+SELECT pg_temp.expect_error('DB-10', 'a second settlement of the same invoice is refused', format($$
+  INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+  VALUES (%L, 'organization_subscription', %L, %L, %L, %L, %L, now(), pg_current_xact_id())$$, :'s3b_inv', :'s3b_org', :'s3b_prod', :'s3b_sub', :'s3b_req', :'s3b_rcpt'), '23505');
+SELECT * FROM t_paid_org_invoice(:'s3b') \gset fresh_
+SELECT pg_temp.expect_error('DB-9', 'a settlement may only be of an organization_subscription purpose', format($$
+  INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+  VALUES (%L, 'direct_purchase', %L, %L, %L, %L, %L, now(), pg_current_xact_id())$$, :'fresh_iid', :'s3b_org', :'s3b_prod', :'s3b_sub', :'fresh_rid', :'fresh_rcpt'), '23514', 'subscription_settlement_purpose');
+SELECT pg_temp.expect_error('DB-9', 'a settlement cannot name another Organization than its invoice was routed to', format($$
+  INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+  VALUES (%L, 'organization_subscription', gen_random_uuid(), %L, %L, %L, %L, now(), pg_current_xact_id())$$, :'fresh_iid', :'s3b_prod', :'s3b_sub', :'fresh_rid', :'fresh_rcpt'), '23503', 'subscription_settlement_routing_fk');
+SELECT t_mk_paid() AS ne_inv \gset
+SELECT t_receipt(:'ne_inv') AS ne_rcpt \gset
+SELECT pg_temp.expect_error('DB-9', 'a verified settlement of a non_entitlement invoice can never be a subscription settlement (no organization_subscription routing)', format($$
+  INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+  VALUES (%L, 'organization_subscription', %L, %L, %L, (SELECT id FROM payment_request WHERE "invoiceId" = %L), %L, now(), pg_current_xact_id())$$,
+  :'ne_inv', :'s3b_org', :'s3b_prod', :'s3b_sub', :'ne_inv', :'ne_rcpt'), '23503', 'subscription_settlement_routing_fk');
+SELECT pg_temp.expect_error('S3b', 'a settlement without verified evidence (no applied receipt for its request) is refused', format($$
+  INSERT INTO subscription_settlement ("invoiceId", purpose, "organizationId", "productId", "subscriptionId", "paymentRequestId", "receiptId", "settledAt", "transactionId")
+  VALUES (%L, 'organization_subscription', %L, %L, %L, %L, %L, now(), pg_current_xact_id())$$, :'fresh_iid', :'s3b_org', :'s3b_prod', :'s3b_sub', :'fresh_rid', :'ne_rcpt'), '23514', 'subscription_settlement_verified');
+SELECT pg_temp.expect_error('S3b', 'a settlement record is append-only', format($$UPDATE subscription_settlement SET "settledAt" = now() WHERE "invoiceId" = %L$$, :'s3b_inv'), '23514');
+SELECT pg_temp.expect_error('S3b', 'a settlement record is never deleted', format($$DELETE FROM subscription_settlement WHERE "invoiceId" = %L$$, :'s3b_inv'), '23514');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

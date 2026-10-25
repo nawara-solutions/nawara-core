@@ -9,6 +9,7 @@ import { SubscriptionRepository } from '../src/subscriptions/subscription.reposi
 import { createTestApp, type TestApp } from './support/app.js';
 import { monthlyPeriodEndingBy } from './support/billing-calendar.js';
 import { describeWithEnv } from './support/env.js';
+import { settle, subscriptionPrice } from './support/settlement.js';
 
 /**
  * Stage 12.5: the HTTP transport over Stage 12.3's `deriveEntitlement` (already exhaustively proven at the unit level,
@@ -66,21 +67,8 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
   const getEntitlementNoGrace = (organizationId: string) =>
     request(noGrace.app.getHttpServer()).get(`/billing/organizations/${organizationId}/entitlement`).set('authorization', `Bearer ${producer.token}`);
 
-  let seq = 0;
-  async function recurringPrice(): Promise<{ productId: string; priceId: string }> {
-    seq += 1;
-    const seller = crypto.randomUUID();
-    const productId = (
-      await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name) VALUES ('test-producer', 'organization', $1, $2, 'Plan') RETURNING id`, [seller, `plan-${seq}`])
-    ).rows[0].id;
-    const priceId = (
-      await admin.query(
-        `INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES ($1, $2, 'TND', 1000, 'recurring', 'month', 1) RETURNING id`,
-        [productId, `ref-${seq}`],
-      )
-    ).rows[0].id;
-    return { productId, priceId };
-  }
+  /** Core V2 S3a / S3b: an Organization subscription product (the only kind a settlement can apply to) with a monthly price. */
+  const recurringPrice = () => subscriptionPrice(admin);
 
   // ---------------------------------------------------------------------------------------------------- commercial scenarios
   it('1. no Subscription at all for the Organization -> 200, valid:false, expiresAt:null (never 404 — no Subscription is a normal commercial state)', async () => {
@@ -101,7 +89,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
     const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
-    await noGraceSubs.activate(organizationId, { start, end }, ctx);
+    await settle(noGrace.app, { organizationId, priceId, at: start });
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
   });
@@ -110,7 +98,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    await noGraceSubs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - hour)), ctx);
+    await settle(noGrace.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - hour)).start });
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(res.body).toEqual({ valid: false, expiresAt: null });
   });
@@ -119,18 +107,18 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    const activated = await subs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - hour)), ctx); // default app: 7-day grace precomputed at activation
-    expect(activated.subscription.status).toBe('active'); // never normalized to 'grace' — no sweeper exists (section 45)
-    expect(activated.subscription.graceUntil).not.toBeNull();
+    const activated = await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - hour)).start }); // default app: 7-day grace precomputed at activation
+    expect(activated.subscription!.status).toBe('active'); // never normalized to 'grace' — no sweeper exists (section 45)
+    expect(activated.subscription!.graceUntil).not.toBeNull();
     const res = await getEntitlement(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: true, expiresAt: activated.subscription.graceUntil!.toISOString() });
+    expect(res.body).toEqual({ valid: true, expiresAt: activated.subscription!.graceUntil!.toISOString() });
   });
 
   it('6. explicit grace status -> true/graceUntil', async () => {
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
-    await subs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - hour)), ctx);
+    await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - hour)).start });
     const graced = await subs.enterGrace(organizationId, ctx);
     expect(graced.subscription.status).toBe('grace');
     const res = await getEntitlement(organizationId).expect(200);
@@ -142,7 +130,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const { productId, priceId } = await recurringPrice();
     await subs.create(organizationId, productId, priceId, ctx);
     // end 10 (to 13) days ago; default 7-day grace => graceUntil 3 (to 6) days ago, already elapsed too
-    await subs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() - 10 * day)), ctx);
+    await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - 10 * day)).start });
     const res = await getEntitlement(organizationId).expect(200);
     expect(res.body).toEqual({ valid: false, expiresAt: null });
   });
@@ -160,7 +148,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
     const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 20 * day));
-    await noGraceSubs.activate(organizationId, { start, end }, ctx);
+    await settle(noGrace.app, { organizationId, priceId, at: start });
 
     const before = await getEntitlementNoGrace(organizationId).expect(200);
     expect(before.body).toEqual({ valid: true, expiresAt: end.toISOString() });
@@ -175,7 +163,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
     const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
-    await noGraceSubs.activate(organizationId, { start, end }, ctx);
+    await settle(noGrace.app, { organizationId, priceId, at: start });
     await noGraceSubs.scheduleCancellation(organizationId, ctx);
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
@@ -186,7 +174,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
     const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
-    await noGraceSubs.activate(organizationId, { start, end }, ctx);
+    await settle(noGrace.app, { organizationId, priceId, at: start });
     const expired = await noGraceSubs.expire(organizationId, ctx); // a legal active->expired transition, independent of whether time has actually elapsed
     expect(expired.subscription.status).toBe('expired');
     const res = await getEntitlementNoGrace(organizationId).expect(200);
@@ -224,7 +212,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const a = await recurringPrice();
     const b = await recurringPrice();
     await noGraceSubs.create(orgA, a.productId, a.priceId, ctx);
-    await noGraceSubs.activate(orgA, monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)), ctx);
+    await settle(noGrace.app, { organizationId: orgA, priceId: a.priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
     await noGraceSubs.create(orgB, b.productId, b.priceId, ctx); // orgB stays pending — a different commercial state entirely
 
     const resA = await getEntitlementNoGrace(orgA).expect(200);
@@ -242,7 +230,7 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    await noGraceSubs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)), ctx);
+    await settle(noGrace.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
     const res = await getEntitlementNoGrace(organizationId).expect(200);
     expect(Object.keys(res.body).sort()).toEqual(['expiresAt', 'valid']);
   });
@@ -252,17 +240,17 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     const organizationId = org();
     const { productId, priceId } = await recurringPrice();
     await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const activated = await noGraceSubs.activate(organizationId, monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)), ctx);
+    const activated = await settle(noGrace.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
 
-    const before = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription.id])).rows[0];
-    const historyBefore = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [activated.subscription.id])).rows[0].n;
+    const before = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription!.id])).rows[0];
+    const historyBefore = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [activated.subscription!.id])).rows[0].n;
 
     await getEntitlementNoGrace(organizationId).expect(200);
     await getEntitlementNoGrace(organizationId).expect(200);
 
-    const after = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription.id])).rows[0];
+    const after = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription!.id])).rows[0];
     expect(after).toEqual(before);
-    const historyAfter = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [activated.subscription.id])).rows[0].n;
+    const historyAfter = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [activated.subscription!.id])).rows[0].n;
     expect(historyAfter).toBe(historyBefore);
   });
 });

@@ -241,20 +241,22 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
   });
 
   // ============================================================================================================== G/H. lifecycle operation races (sections 28, 29)
-  it('G. concurrent renew() and terminate() on the same active Subscription: deterministic, valid outcome under either lock order — never a malformed period, never an undefined resurrection', async () => {
+  it('G. a concurrent renewal SETTLEMENT and terminate() on the same active Subscription: deterministic, valid outcome under either lock order — never a malformed period, never an undefined resurrection', async () => {
     const organizationId = org();
     const price = await seedRecurringPrice({ organizationId });
-    await subs.create(organizationId, price.productId, price.priceId, ctx);
     // terminate() anchors `effectiveTerminationAt` to the DATABASE's own real now() (section 31, unlike renew()/activate(),
     // which always take an explicit anchor) — the period must stay comfortably around REAL wall-clock time, not a fixed
     // calendar fixture, or the termination CHECK (`effectiveTerminationAt <= COALESCE(graceUntil, currentPeriodEnd)`) would
     // reject it for reasons that have nothing to do with this race. The price is monthly, so the first period ends on the
     // anchor cadence (ADR-0044 B-025): one anchored month after `start`.
     const start = new Date(Date.now() - day);
-    const end = anchorOccurrence(start, 1);
-    const activated = await subs.activate(organizationId, { start, end }, ctx);
+    const first = await requestedRecurring({ organizationId, priceId: price.priceId });
+    await succeed(first.open, first.request, first.paymentId, start); // Core V2 S3b: the first period comes from its settlement
+    const activated = { subscription: await subs.getByOrganization(organizationId) };
+    expect(activated.subscription.currentPeriodEnd).toEqual(anchorOccurrence(start, 1));
 
-    const [renewResult, terminateResult] = await Promise.allSettled([subs.renew(organizationId, new Date(), ctx), subs.terminate(organizationId, ctx)]);
+    const second = await requestedRecurring({ organizationId, priceId: price.priceId });
+    const [renewResult, terminateResult] = await Promise.allSettled([succeed(second.open, second.request, second.paymentId, new Date()), subs.terminate(organizationId, ctx)]);
     // Both operations are ALWAYS valid on an active subscription (renew: any non-pending status; terminate: active|grace) —
     // whichever wins the row lock first, the second sees the first's already-committed change and proceeds from there.
     expect(renewResult.status).toBe('fulfilled');
@@ -275,13 +277,15 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     expect(history).toBe(row.revision + 1);
   });
 
-  it('H. concurrent renew() and scheduleCancellation() on the same active Subscription: deterministic per the already-established "period change force-clears cancelAtPeriodEnd" policy', async () => {
+  it('H. a concurrent renewal SETTLEMENT and scheduleCancellation() on the same active Subscription: deterministic per the already-established "period change force-clears cancelAtPeriodEnd" policy', async () => {
     const organizationId = org();
     const price = await seedRecurringPrice({ organizationId });
-    await subs.create(organizationId, price.productId, price.priceId, ctx);
-    await subs.activate(organizationId, { start: new Date('2026-06-01T00:00:00Z'), end: new Date('2026-07-01T00:00:00Z') }, ctx);
+    const first = await requestedRecurring({ organizationId, priceId: price.priceId });
+    await succeed(first.open, first.request, first.paymentId, new Date('2026-06-01T00:00:00Z'));
+    expect((await subs.getByOrganization(organizationId)).currentPeriodEnd).toEqual(new Date('2026-07-01T00:00:00Z'));
 
-    const [renewResult, cancelResult] = await Promise.allSettled([subs.renew(organizationId, new Date('2026-06-15T00:00:00Z'), ctx), subs.scheduleCancellation(organizationId, ctx)]);
+    const second = await requestedRecurring({ organizationId, priceId: price.priceId });
+    const [renewResult, cancelResult] = await Promise.allSettled([succeed(second.open, second.request, second.paymentId, new Date('2026-06-15T00:00:00Z')), subs.scheduleCancellation(organizationId, ctx)]);
     expect(renewResult.status).toBe('fulfilled');
     expect(cancelResult.status).toBe('fulfilled');
 
@@ -297,7 +301,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
   });
 
   // ============================================================================================================== I. lock-order / deadlock (sections 25, 26)
-  it('I. SubscriptionRepository.renew() (locks subscription alone) racing a full Payment settlement (locks invoice -> payment_request -> subscription, in that fixed order) for the SAME organization: no deadlock, both effects land', async () => {
+  it('I. two full Payment settlements (each locks invoice -> payment_request -> subscription, in that fixed order) racing for the SAME organization: no deadlock, both effects land (the direct renew() they once raced is retired, S3b)', async () => {
     const organizationId = org();
     const price = await seedRecurringPrice({ organizationId });
     const first = await requestedRecurring({ organizationId, priceId: price.priceId });
@@ -305,7 +309,8 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     await succeed(first.open, first.request, first.paymentId, anchor);
 
     const second = await requestedRecurring({ organizationId, priceId: price.priceId });
-    const results = await Promise.allSettled([subs.renew(organizationId, new Date('2026-06-10T00:00:00Z'), ctx), succeed(second.open, second.request, second.paymentId, new Date('2026-06-11T00:00:00Z'))]);
+    const third = await requestedRecurring({ organizationId, priceId: price.priceId });
+    const results = await Promise.allSettled([succeed(third.open, third.request, third.paymentId, new Date('2026-06-10T00:00:00Z')), succeed(second.open, second.request, second.paymentId, new Date('2026-06-11T00:00:00Z'))]);
     expect(results.every((r) => r.status === 'fulfilled')).toBe(true); // no deadlock, no lock-order inversion error
 
     const row = await subs.getByOrganization(organizationId);
@@ -344,7 +349,8 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
       const duringRead = await subs.findForOrganization(organizationId);
       expect(duringRead).toEqual(before);
 
-      await client.query('COMMIT');
+      // Core V2 S3b (DB-11): this hand-written extension has no settlement, so it can never commit.
+      await expect(client.query('COMMIT')).rejects.toThrow(/subscription_settlement in the same transaction/);
     } catch (e) {
       await client.query('ROLLBACK'); // never leave an aborted transaction on a connection returned to the shared pool
       throw e;
@@ -353,7 +359,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
     }
 
     const afterRead = await subs.findForOrganization(organizationId);
-    expect(afterRead!.currentPeriodEnd).toEqual(new Date(before!.currentPeriodEnd!.getTime() + 30 * day)); // now visible, once committed
+    expect(afterRead).toEqual(before); // the refused extension never became visible
   });
 
   // ============================================================================================================== K. tenant isolation under concurrency (section 77)

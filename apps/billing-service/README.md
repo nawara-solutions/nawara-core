@@ -36,7 +36,16 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   The database enforces DB-1 to DB-4 (append-only with INSERT / SELECT only for the runtime role, one record per issued invoice at
   commit, the valid combinations, the payer and the product target by composite keys). A paid invoice changes an Organization's
   Subscription only through an `organization_subscription` record for that Organization; an invoice issued before S3a (no record) is
-  never routed after the fact and is logged `payment_event_subscription_unrouted`. The settlement-based activation is S3b.
+  never routed after the fact and is logged `payment_event_subscription_unrouted`.
+- **Verified settlement activation (Core V2 S3b; ADR-0044 B3, S-4, DB-9 to DB-11; `db/migrations/0021`):** an Organization
+  Subscription starts or extends a period ONLY in the transaction that applies Payment's verified settlement (the applied
+  `payment.succeeded` receipt: a provenance-verified Payment event or the reconciler's direct read of Payment) to an
+  `organization_subscription` invoice, and records it as an append-only `subscription_settlement` (INSERT / SELECT only for the runtime
+  role). The database checks the evidence (the applied receipt, the request and the invoice `paid`), that the settlement names the
+  routing record's own Organization and product (DB-9), one settlement per invoice and per receipt (DB-10), and, at commit, that no
+  period started or extended without a settlement in the same transaction (DB-11). The direct `activate()` / `renew()` operations are
+  retired; grace, expiry, cancellation and termination are unchanged. Personal purchases (S3c) and recovery payments (S6) settle into
+  their own tables when those slices exist.
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).
