@@ -3505,7 +3505,8 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     assert.deepEqual(a.read, { keys: ['audit.#'], regex: '^(audit\\.#)$', bindingException: 'audit-all-actions' });
     assert.ok(matches(a.read.regex, 'audit.#') && !matches(a.read.regex, '#') && !matches(a.read.regex, 'payment.#') && !matches(a.read.regex, 'audit.#.x'));
     assert.equal(a.write.regex, tp.DENY_ALL); // its own action is recorded locally, never published
-    assert.deepEqual(a.localOnlyAuditActions, ['audit.platform_query.executed']);
+    // + the legal-hold records of Core V2 S2-Audit.4: written locally by audit-service, never published
+    assert.deepEqual(a.localOnlyAuditActions, ['audit.audit_legal_hold.placed', 'audit.audit_legal_hold.released', 'audit.platform_query.executed']);
   });
 
   test('S1d-1 activation: Auth domain events only when explicitly active; unknown, missing or extra declarations fail closed', () => {

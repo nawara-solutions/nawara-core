@@ -31,6 +31,8 @@ const BEFORE_A1 = {
 const PURPOSE = 'hierarchy.reference.repair';
 /** S2-Auth.1: the refund authorization purpose; only the receipt issuance consumes it, through the exported constant. */
 const REFUND = 'refund.authorize';
+/** S2-Audit.4: verified and consumed by audit-service through POST /auth/step-up/verify (not Auth-local). */
+const LEGAL_HOLD = ['audit.legal_hold.place', 'audit.legal_hold.release'] as const;
 
 describe('step-up purposes (A5.4-A1)', () => {
   it('the 19 earlier purposes keep exactly their methods', () => {
@@ -39,12 +41,16 @@ describe('step-up purposes (A5.4-A1)', () => {
   });
 
   it('A1 adds exactly one purpose, hierarchy.reference.repair, factor-only (never the secret key); S2-Auth.1 then adds refund.authorize', () => {
-    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND]);
+    expect(Object.keys(STEP_UP_METHODS).filter((p) => !(p in BEFORE_A1))).toEqual([PURPOSE, REFUND, ...LEGAL_HOLD]);
     expect([...STEP_UP_METHODS[PURPOSE]]).toEqual(['totp', 'webauthn']);
   });
 
   it('S2-Auth.1 (ADR-0067 decision 1): refund.authorize is factor-only, never the secret key', () => {
     expect([...STEP_UP_METHODS[REFUND]]).toEqual(['totp', 'webauthn']);
+  });
+
+  it('S2-Audit.4 (Owner decision H3): the two legal-hold purposes are factor-only, never the secret key', () => {
+    for (const p of LEGAL_HOLD) expect([...STEP_UP_METHODS[p]], p).toEqual(['totp', 'webauthn']);
   });
 
   it('no application source outside the allow-list names either purpose literally (each has one Auth-local consumer)', () => {

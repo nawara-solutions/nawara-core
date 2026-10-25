@@ -108,4 +108,11 @@ export const AUDIT_MESSAGES = defineMessages({
     ar: 'لا يمكن قراءة أدلة التدقيق لمنصة هنا إلا للمشغّل.',
   },
   platformIdInvalid: { en: 'platformId is not valid', fr: "platformId n'est pas valide", ar: 'platformId غير صالح' },
+  // Core V2 S2-Audit.4: legal holds (AUD-05)
+  stepUpRequired: {
+    en: 'A valid step-up verification is required for this action.',
+    fr: 'Une vérification renforcée valide est requise pour cette action.',
+    ar: 'يلزم إجراء تحقق إضافي صالح لتنفيذ هذا الإجراء.',
+  },
+  legalHoldInvalid: { en: 'The legal hold request is not valid.', fr: "La demande de conservation légale n'est pas valide.", ar: 'طلب الحجز القانوني غير صالح.' },
 });

@@ -72,7 +72,7 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
           SELECT gen_random_uuid(),'organization-service','membership.revoked','business',1,'service','x-service',$1,'membership',gen_random_uuid()::text,'succeeded',now() FROM generate_series(1,20)`, [ORG]);
         const digest = async () => (await sql<{ h: string }>(db.adminUrl, `SELECT md5(string_agg(row_to_json(r)::text, ',' ORDER BY id)) AS h FROM (SELECT id, "eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId", "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt" FROM audit_record) r`))[0]!.h;
         const h0 = await digest();
-        expect((await runMigrations(db.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual(['0006_audit_contract_v2.sql', '0007_audit_approved_by.sql']);
+        expect((await runMigrations(db.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual(['0006_audit_contract_v2.sql', '0007_audit_approved_by.sql', '0008_audit_legal_hold.sql']);
         expect(await digest()).toBe(h0);
         const nulls = await sql<{ n: string }>(db.adminUrl, `SELECT count(*) AS n FROM audit_record WHERE "companyId" IS NOT NULL OR "platformId" IS NOT NULL OR "liveMode" IS NOT NULL OR "producerIdentityVerified" IS NOT NULL OR replayed IS NOT NULL`);
         expect(nulls[0]!.n).toBe('0');

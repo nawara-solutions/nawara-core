@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import amqp, { type Channel, type ChannelModel } from 'amqplib';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { AUDIT_ACTIONS } from '@nawara/audit-contract';
+import { AUDIT_ACTIONS, AUDIT_CATALOG } from '@nawara/audit-contract';
 import { SAMPLE_IDS, sampleAuditPayload } from '@nawara/audit-contract/testing';
 import { RabbitMqEventBus, kitMigrationsDir, replayDeadLetter, runMigrations, type EventEnvelope } from '@nawara/service-kit';
 import { BrokerProxy } from '@nawara/service-kit/testing';
@@ -119,7 +119,8 @@ describeWithEnv('audit ingestion over a real RabbitMQ (real PostgreSQL 16)', ['T
 
   it('events of every catalog producer are admitted when their source is the action\'s owner (all 60 bus actions; release-service since Stages 20.3 / 20.4; the A5.4-AC1 reference-repair actions, batches 1 and 2; the S2-Audit.2 receipt actions); audit-service\'s own action never over the bus', async () => {
     await start();
-    const events = AUDIT_ACTIONS.filter((a) => a !== 'platform_query.executed').map((a) => auditEnvelope(a));
+    // every bus action: audit-service's own actions (the read record, and the S2-Audit.4 legal-hold records) are never delivered over the bus
+    const events = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer !== 'audit-service').map((a) => auditEnvelope(a));
     const self = auditEnvelope('platform_query.executed'); // source audit-service: written only by audit-service itself (18.6)
     await publish(self);
     for (const e of events) await publish(e);

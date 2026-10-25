@@ -57,6 +57,11 @@ export const STEP_UP_METHODS = {
   // the issuance of an authorization receipt; like the repair, it is Auth-local: the generic
   // POST /auth/step-up/verify refuses it without consuming it, so no calling service can verify or burn a refund proof.
   'refund.authorize': ['totp', 'webauthn'],
+  // Core V2 S2-Audit.4 (OD-13 resolved, Owner decision H3): an Owner places / releases a legal hold on their Company's audit evidence
+  // with a fresh, factor-only proof, never the bare key. Verified and consumed by audit-service through POST /auth/step-up/verify
+  // (the Owner's own bearer): bound to this owner, session and exact purpose, single use, so a place proof never releases and vice versa.
+  'audit.legal_hold.place': ['totp', 'webauthn'],
+  'audit.legal_hold.release': ['totp', 'webauthn'],
 } as const satisfies Record<string, readonly StepUpMethod[]>;
 export type StepUpPurpose = keyof typeof STEP_UP_METHODS;
 

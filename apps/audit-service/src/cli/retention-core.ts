@@ -55,7 +55,8 @@ export async function runRetention(db: RetentionDb, opts: RetentionOptions, repo
     const r: CategoryReport = { category: p.category, retainDays: p.retainDays, rows: 0, batches: 0, truncated: false };
     if (opts.dryRun) {
       const { rows } = await db.query<{ n: string }>(
-        `SELECT count(*) AS n FROM audit_record WHERE category = $1 AND "recordedAt" < now() - make_interval(days => $2)`,
+        // Core V2 S2-Audit.4: a held record is never a candidate (ADR-0069 decision 6: the retention role skips held records)
+        `SELECT count(*) AS n FROM audit_record WHERE category = $1 AND "recordedAt" < now() - make_interval(days => $2) AND NOT audit_record_is_held(id)`,
         [p.category, p.retainDays],
       );
       r.rows = Number(rows[0]!.n);
@@ -70,6 +71,7 @@ export async function runRetention(db: RetentionDb, opts: RetentionOptions, repo
             `WITH doomed AS MATERIALIZED (
                SELECT id FROM audit_record
                 WHERE category = $1 AND "recordedAt" < now() - make_interval(days => $2)
+                  AND NOT audit_record_is_held(id) -- S2-Audit.4: skipped; the delete trigger re-checks under the Company's hold lock
                 ORDER BY "recordedAt", id LIMIT $3)
              DELETE FROM audit_record a USING doomed WHERE a.id = doomed.id`,
             [p.category, p.retainDays, opts.batchSize],

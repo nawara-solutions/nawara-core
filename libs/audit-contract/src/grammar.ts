@@ -24,6 +24,8 @@ export const TYPE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 export const CHANGE_KEY = /^[a-z][a-z0-9_]{0,31}$/;
 /** A `code` change value: an enum-like lowercase identifier; `audit_change_scalar_valid` allows `[A-Za-z0-9._:+-]{1,64}`. */
 export const CODE_VALUE = /^[a-z][a-z0-9_.]{0,63}$/;
+/** Core V2 S2-Audit.4: a `token` change value, a bounded code whose vocabulary is the recording service's (never free text). */
+export const TOKEN_VALUE = /^[a-z][a-z0-9_]{0,63}$/;
 /** A `timestamp` change value, UTC with millisecond precision (what `Date.prototype.toISOString` produces). */
 export const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /** The kit correlation-id grammar (`request-context.ts` `SAFE_ID`) and `audit_record_correlation_shape`. */
