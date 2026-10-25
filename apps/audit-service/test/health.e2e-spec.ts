@@ -40,7 +40,7 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL, real 
       expect(again.alreadyApplied).toEqual(applied.applied);
       // Stage 18.3: exactly one audit table (no actor, resource, organization, user or catalog table).
       expect((await sql<{ table_name: string }>(db.url, `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'audit%' ORDER BY 1`)).map((r) => r.table_name))
-        .toEqual(['audit_record', 'audit_retention_policy', 'audit_retention_run']); // Stage 18.8: the retention policy and ledger
+        .toEqual(['audit_record', 'audit_record_scope', 'audit_retention_policy', 'audit_retention_run']); // Stage 18.8: the retention policy and ledger; S2-Audit.1: the trusted scope rows
     } finally {
       await t.app.close();
     }
