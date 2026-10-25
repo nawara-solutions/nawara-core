@@ -123,7 +123,9 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
       eventId: randomUUID(), sourceService: 'auth-service', action: 'membership.revoked', category: 'business', schemaVersion: 1,
       actor: { type: 'user', id: OWNER_A, userKind: 'owner' }, organizationId, resource: { type: 'membership', id: randomUUID() },
       subject: { type: 'user', id: randomUUID() }, outcome: 'succeeded', changes: { authority: 'owner', was_admin: false },
-      correlationId: null, causationId: null, occurredAt: at(minutes), ...over,
+      correlationId: null, causationId: null, occurredAt: at(minutes),
+      // S2-Audit.5 (AUD-07): the seeded evidence came through a broker-verified delivery; the unverified cases are the AUD-07 suite below
+      delivery: { producerIdentityVerified: true, replayed: false }, ...over,
     };
   }
 
@@ -430,6 +432,92 @@ describeWithEnv('Audit-X: Company owner reads one organization (real PostgreSQL 
       expect(logs).not.toContain('owner-a-bearer');
       expect(logs).not.toContain(OWNER_A);
       for (const item of r.body.items) expect(logs).not.toContain(item.eventId);
+    });
+  });
+
+  describe('AUD-07 (Core V2 S2-Audit.5): a human sees verified evidence only (ADR-0069 decision 4)', () => {
+    /** Records of A1 (Owner A's organization) through every delivery assessment; the service read sees them all, the owner read only one. */
+    const cases = async () => {
+      const repo = t.app.get(AuditRecordRepository);
+      const base = 2000 + Math.floor(Math.random() * 1000);
+      const make = (i: number, delivery: NewAuditRecord['delivery']) => rec(A1, base + i, { delivery });
+      const verified = make(0, { producerIdentityVerified: true, replayed: false });
+      const verifiedReplay = make(1, { producerIdentityVerified: true, replayed: true });
+      const unverified = make(2, { producerIdentityVerified: false, replayed: false });
+      const unverifiedReplay = make(3, { producerIdentityVerified: false, replayed: true });
+      const historical = make(4, null); // before any assessment (every record stored before S2-Audit.1)
+      for (const r of [verified, verifiedReplay, unverified, unverifiedReplay, historical]) expect((await repo.insertOnce(r)).kind).toBe('inserted');
+      return { shown: [verified, verifiedReplay].map((r) => r.eventId).sort(), hidden: [unverified, unverifiedReplay, historical].map((r) => r.eventId).sort() };
+    };
+    const window = (minutes: number) => ({ from: at(minutes - 1).toISOString(), to: at(minutes + 10).toISOString() });
+
+    it('unverified and historical records of the owner\'s organization are never returned to the owner; verified ones are (a replay included)', async () => {
+      const c = await cases();
+      const all = new Set<string>();
+      let cursor: string | undefined;
+      for (let i = 0; i < 20; i++) {
+        const r = await owner(A1, 'owner-a-bearer', { limit: '100', ...(cursor ? { cursor } : {}) });
+        expect(r.status).toBe(200);
+        for (const x of r.body.items as Array<{ eventId: string }>) all.add(x.eventId);
+        cursor = r.body.nextCursor ?? undefined;
+        if (!cursor) break;
+      }
+      for (const id of c.shown) expect(all.has(id), id).toBe(true);
+      for (const id of c.hidden) expect(all.has(id), id).toBe(false);
+    });
+
+    it('service callers keep reading every record of the organization (decision 4: records without trusted scope stay readable by services)', async () => {
+      const c = await cases();
+      const svc = await request(server()).get(`/audit/organizations/${A1}/records`).query({ ...WINDOW, limit: '100' }).set('authorization', `Bearer ${service.token}`);
+      expect(svc.status).toBe(200);
+      const ids = new Set((svc.body.items as Array<{ eventId: string }>).map((x) => x.eventId));
+      for (const id of [...c.shown, ...c.hidden]) expect(ids.has(id), id).toBe(true);
+    });
+
+    it('filters and pagination only narrow inside the verified set: no filter, cursor or page size brings an unverified record back', async () => {
+      const c = await cases();
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < 50; i++) {
+        const r = await owner(A1, 'owner-a-bearer', { limit: '1', action: 'membership.revoked', ...(cursor ? { cursor } : {}) });
+        expect(r.status).toBe(200);
+        seen.push(...(r.body.items as Array<{ eventId: string }>).map((x) => x.eventId));
+        cursor = r.body.nextCursor ?? undefined;
+        if (!cursor) break;
+      }
+      expect(new Set(seen).size).toBe(seen.length); // no duplicate across pages
+      for (const id of c.hidden) expect(seen).not.toContain(id);
+      for (const id of c.shown) expect(seen).toContain(id);
+      const byCorrelation = await owner(A1, 'owner-a-bearer', { correlationId: 'corr-never-used-0001' });
+      expect(byCorrelation.body.items).toEqual([]);
+    });
+
+    it('cross-Company and cross-organization isolation and live authority are unchanged: B1 and unknown organizations are 404, a revoked owner 401', async () => {
+      await cases();
+      expect((await owner(B1, 'owner-a-bearer')).status).toBe(404);
+      expect((await owner(randomUUID(), 'owner-a-bearer')).status).toBe(404);
+      expect((await owner(A1, 'owner-b-bearer')).status).toBe(404);
+      auth.state.revoked.add('owner-c-bearer');
+      try {
+        expect((await owner(A1, 'owner-c-bearer')).status).toBe(401);
+      } finally { auth.state.revoked.delete('owner-c-bearer'); }
+    });
+
+    it('nothing historical is upgraded: the hidden records keep their stored assessment', async () => {
+      const c = await cases();
+      await owner(A1, 'owner-a-bearer');
+      const rows = await sql<{ v: boolean | null }>(adminDb(), `SELECT "producerIdentityVerified" AS v FROM audit_record WHERE "eventId" = ANY($1::uuid[]) ORDER BY "eventId"`, [c.hidden]);
+      expect([rows.filter((r) => r.v === false).length, rows.filter((r) => r.v === null).length, rows.length]).toEqual([2, 1, 3]);
+    });
+
+    it('every owner read is still recorded, with the count of what the owner actually saw', async () => {
+      await cases();
+      const before = (await selfRecords(OWNER_A)).length;
+      const r = await owner(A1, 'owner-a-bearer', window(0));
+      expect(r.status).toBe(200);
+      const after = await selfRecords(OWNER_A);
+      expect(after.length).toBe(before + 1);
+      expect(after.at(-1)!.changes.result_count).toBe((r.body.items as unknown[]).length);
     });
   });
 });

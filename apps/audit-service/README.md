@@ -53,6 +53,12 @@ ingestion route (A16: the bus is the only way in); no write, delete or search ro
   category_not_allowed | source_not_allowed`, `429 rate_limited`, `503 accountability_unavailable` (platform only).
 - **OpenAPI:** `/audit/docs` behind basic auth, only when `SWAGGER_PASSWORD` is set.
 
+**Core V2 S2-Audit.5 (AUD-07, ADR-0069 decision 4): the Company owner's organization read returns broker-verified records only.** Auth
+still confirms, live on every request, that the organization belongs to the owner's Company; a record's own organization claim is trusted
+only from a broker-verified delivery (`producerIdentityVerified`). Unverified records and every record stored before verification existed
+(historical, unassessed) are never shown to a human; service callers (`read_organization` / `read_platform`) keep reading them unchanged.
+Nothing is inferred or upgraded. Persisted Organization-reference scope rows are not built: Audit has no Organization reference yet.
+
 ## Ingestion (18.5)
 
 | | |

@@ -89,6 +89,7 @@ export class AuditRecordRepository {
     const s = query.scope;
     if (s.kind === 'organization' || s.target === 'organization') where.push(`"organizationId" = ${bind(s.organizationId)}::uuid`);
     else if (s.target === 'platform') where.push(`"organizationId" IS NULL`);
+    if (query.verifiedOnly) where.push(`"producerIdentityVerified" IS TRUE`); // S2-Audit.5 AUD-07: a human read sees verified evidence only
     where.push(`category = ANY(${bind(query.policy.categories)}::text[])`);
     if (query.policy.sourceServices) where.push(`"sourceService" = ANY(${bind(query.policy.sourceServices)}::text[])`);
     where.push(`"occurredAt" >= ${bind(query.window.from)}`, `"occurredAt" < ${bind(query.window.to)}`);
