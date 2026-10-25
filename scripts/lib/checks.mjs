@@ -3296,6 +3296,38 @@ export function checkTopologyMonitor({ files = {}, verifier, provision, workflow
   if (verForbidden) problems.push(`${at('verify-topology-monitor-install.sh')}: must stay read-only (found "${verForbidden[2]}"); ${why}`);
   if (/(^|[^0-9&])>{1,2}[ \t]*[^ \t\n&(/]/.test(verCode.replace(/[0-9]?>\s*\/dev\/null|[0-9]?>&[0-9]/g, '').replace(/'[^'\n]*'|"[^"\n]*"/g, 'S'))) problems.push(`${at('verify-topology-monitor-install.sh')}: must write no file; ${why}`);
   if (!/"\$SYSTEMCTL" is-enabled/.test(verCode) || /"\$SYSTEMCTL" (enable|start|stop|disable|daemon-reload|restart|mask|unmask)/.test(verCode)) problems.push(`${at('verify-topology-monitor-install.sh')}: may only read units' enablement (never change it); ${why}`);
+  // OD-BRK-2b-W (W1): an ACTIVATED installation passes only when every timer the signed activation lists is enabled persistently and
+  // active, its service not failed (a started or failed timer is an activation); an unreadable state is UNKNOWN, never PASS
+  const verNeeds = ['AC[$u]=$("$SYSTEMCTL" is-active "$u" 2>/dev/null || true)', 'sf=$("$SYSTEMCTL" is-failed "$s" 2>/dev/null || true)',
+    'active | activating | deactivating | reloading | refreshing | failed) [[ " $ENABLED " == *" $u "* ]] || ENABLED+=" $u" ;;',
+    'enabled) en=1 ;;', 'enabled-runtime) en=0; fail "timer (runtime_only)', 'disabled | static | indirect) en=0; fail "timer (timer_disabled)',
+    'not-found) en=0; fail "timer (timer_missing)', 'active) ac=1 ;;', 'inactive) ac=0; fail "timer (timer_inactive)', 'failed) ac=0; fail "timer (timer_failed)',
+    'failed) fail "service (service_failed)', 'if [ "$en" = 1 ] && [ "$ac" = 1 ]; then ok "timer: '];
+  const verMissing = verNeeds.filter((n) => !verCode.includes(n));
+  if (verMissing.length) problems.push(`${at('verify-topology-monitor-install.sh')}: an activated installation passes only with every listed timer enabled and active and its service not failed (missing: ${verMissing[0]}); ${why}`);
+  // OD-BRK-2b-W (W2): every write of the alert spool holds its one bounded lock; without it a line is parked, never appended
+  const spoolWait = Number(/^readonly SPOOL_LOCK_WAIT=(\d+)$/m.exec(files['verify-and-contain.sh'])?.[1]);
+  for (const n of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh']) {
+    const code = files[n].replace(/^\s*#.*$/gm, '');
+    const wait = Number(/^readonly SPOOL_LOCK_WAIT=(\d+)$/m.exec(code)?.[1]);
+    const lockOk = code.includes(' l="$STATE_DIR/alerts.lock"') && code.includes('{ exec 7>>"$l"; } 2>/dev/null && flock -w "$SPOOL_LOCK_WAIT" 7');
+    const fn = n === 'recover-notification-topology.sh' ? 'alert() {' : 'spool_append() {';
+    const body = code.slice(code.indexOf(fn), code.indexOf('\n}\n', code.indexOf(fn)));
+    const fallback = body.slice(body.indexOf('\n  fi\n', body.indexOf('\n    return ')));   // after the locked branch
+    // the parked line is published whole and durably (written, synced, renamed, its directory synced), and a merged one is removed only
+    // after the spool holding it is synced
+    const park = code.slice(code.indexOf('spool_park() {'), code.indexOf('\n}\n', code.indexOf('spool_park() {')));
+    const parks = park.includes('name="$d/$(date +%s%N).$$.$(printf \'%06d\' "$PARK_SEQ").${tmp##*.}.line"')
+      && park.includes('if printf \'%s\' "$1" >"$tmp" && sync -- "$tmp" && mv -f -- "$tmp" "$name"; then') && park.includes('sync -- "$d" ||')
+      && park.includes('mkdir -m 700 -- "$d" 2>/dev/null && sync -- "$STATE_DIR" || return 1') && park.includes('rm -f -- "$tmp"')
+      && code.includes(n === 'recover-notification-topology.sh' ? 'if sync -- "$f"; then rm -f -- "${merged[@]}"' : 'if sync -- "$STATE_DIR/alerts.jsonl"; then rm -f -- "${merged[@]}"')
+      && !/rm -f -- "\$p"/.test(code);
+    const direct = (code.match(/>>"\$STATE_DIR\/alerts\.jsonl"|append alerts\.jsonl /g) ?? []).length;
+    if (!lockOk || !(wait >= 1 && wait <= 5) || wait !== spoolWait || !parks || /alerts\.jsonl|>>"\$f"/.test(fallback) || direct !== (n === 'recover-notification-topology.sh' ? 0 : 2)) {
+      problems.push(`${at(n)}: every append and trim of alerts.jsonl holds STATE_DIR/alerts.lock (fd 7, at most SPOOL_LOCK_WAIT, 1 to 5 s, equal in all three writers); without it the line is parked whole and durably under alerts.pending (synced before and after its rename), never appended, and removed only after the spool is synced; ${why}`);
+    }
+  }
+  if (!/^spool_flush \|\| true$/m.test(files['verify-and-contain.sh']) || !/^spool_flush \|\| true$/m.test(files['topology-watchdog.sh'])) problems.push(`${TOPOLOGY_MONITOR_DIR}: the monitor and the watchdog each flush the parked alert lines once a run; ${why}`);
   // OD-BRK-2b-A: the external alert carrier (A5-R3's providers and acceptance rules), isolated and never on the containment path
   const car = files['topology-alert-carrier.sh'];
   const carCode = car.replace(/(^|\s)#(\s.*)?$/gm, '');
@@ -3380,6 +3412,43 @@ export function checkTopologyMonitor({ files = {}, verifier, provision, workflow
     problems.push(`${at('nawara-core-topology-monitor.service')}: must run the pinned entry for notification-service, count only 10 and 20 as success, and never create its state (no StateDirectory=); ${why}`);
   }
   if (!/^ExecStart=\/usr\/local\/libexec\/nawara-core-topology\/topology-watchdog\.sh$/m.test(unit('nawara-core-topology-watchdog.service'))) problems.push(`${at('nawara-core-topology-watchdog.service')}: must run the pinned watchdog; ${why}`);
+  // OD-BRK-2b-W (W3): the watchdog is an observer: no network, no capability, no Docker, no carrier, installation or recovery material,
+  // writable only the monitor's state directory
+  const wu = unit('nawara-core-topology-watchdog.service');
+  const wuNeeds = ['Type=oneshot', 'TimeoutStartSec=60', 'ReadWritePaths=/var/lib/nawara-core-topology-monitor', 'NoNewPrivileges=yes', 'CapabilityBoundingSet=', 'AmbientCapabilities=',
+    'ProtectSystem=strict', 'ProtectHome=yes', 'PrivateDevices=yes', 'PrivateNetwork=yes', 'RestrictAddressFamilies=AF_UNIX', 'RestrictNamespaces=yes', 'RestrictSUIDSGID=yes',
+    'InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core',
+    'InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert -/etc/nawara-core-topology-alert -/var/lib/nawara-core-topology-alert',
+    'InaccessiblePaths=-/var/lib/nawara-core-topology-install -/var/lib/nawara-core-topology-monitor/recovery'];
+  const wuMissing = wuNeeds.filter((d) => !wu.split('\n').includes(d));
+  if (wuMissing.length || (wu.match(/^ReadWritePaths=/gm) ?? []).length !== 1 || (wu.match(/^RestrictAddressFamilies=/gm) ?? []).length !== 1
+    || /^(User|DynamicUser|Group|SupplementaryGroups|Environment|EnvironmentFile|PassEnvironment|BindPaths|BindReadOnlyPaths|StateDirectory|Restart|ExecStartPre|ExecStartPost|ExecStopPost|PrivateNetwork=no|AmbientCapabilities=.|CapabilityBoundingSet=.)/m.test(wu)) {
+    problems.push(`${at('nawara-core-topology-watchdog.service')}: an observer sandbox: no network (AF_UNIX only), no capability, no Docker, carrier, installation or recovery path, writable only the monitor's state directory, no identity, environment or extra command (missing: ${wuMissing[0] ?? 'none; a forbidden directive is present'}); ${why}`);
+  }
+  if ((wu.match(/^ExecStart=/gm) ?? []).length !== 1 || wu.split('\n').some((l) => /recover/i.test(l) && !l.startsWith('#') && l !== 'InaccessiblePaths=-/var/lib/nawara-core-topology-install -/var/lib/nawara-core-topology-monitor/recovery')) {
+    problems.push(`${at('nawara-core-topology-watchdog.service')}: one command, and no recovery path but the inaccessible inbox (the watchdog has no recovery authority); ${why}`);
+  }
+  // OD-BRK-2b-W (C4): the watchdog's code never reaches recovery material or authority (the single-use ledger, the inbox, the trust
+  // key, the incident, the latch, the recovery guard), never the broker, never changes a unit, and writes only its own records, its
+  // check-in and the alert spool. The ledger still sits in its writable state directory: these guards keep the reviewed code from
+  // touching it; they cannot remove that residual access (runbook §4).
+  const wdCode = files['topology-watchdog.sh'].replace(/^\s*#.*$/gm, '');
+  const wdBad = [];
+  const wdForbidden = /recovery-consumed|\/recovery\b|recover-notification-topology|TRUSTED_SIGNERS|recovery-allowed-signers|ssh-keygen|nonce|incidents\.jsonl|INCIDENT|LATCH|\blatch\b|docker|rabbitmqctl|\bsudo\b|\bsystemctl\b|\$SYSTEMCTL" (?!is-active --quiet|is-failed --quiet)[a-z-]/
+    .exec(wdCode.replace(/^readonly SYSTEMCTL='\/usr\/bin\/systemctl'$/m, ''));   // the pinned path is the one systemctl reference allowed
+  if (wdForbidden) wdBad.push(`references ${wdForbidden[0]}`);
+  for (const m of wdCode.matchAll(/>>?\s*"([^"]+)"/g)) if (!['$tmp', '$WLOCK', '$f', '$l'].includes(m[1])) wdBad.push(`writes ${m[1]}`);
+  for (const m of wdCode.matchAll(/\bappend ([^ ]+) /g)) if (!['alerts.jsonl', 'watchdog.jsonl'].includes(m[1])) wdBad.push(`appends to ${m[1]}`);
+  for (const m of wdCode.matchAll(/\bwrite_atomic ("[^"]+")/g)) if (!['"$f"', '"$STATE_DIR/watchdog"'].includes(m[1])) wdBad.push(`replaces ${m[1]}`);
+  for (const m of wdCode.matchAll(/(^|[;&|({\s])(mv|rm|mkdir|chmod) (-[^\n;|&]*)/gm)) {
+    if (!['mv -f -- "$tmp" "$1"', 'mv -f -- "$tmp" "$name"', 'rm -f -- "$tmp"', 'rm -f -- "${merged[@]}"', 'mkdir -m 700 -- "$d" 2>/dev/null', 'chmod 600 -- "$tmp"'].some((ok) => `${m[2]} ${m[3]}`.trim().startsWith(ok))) wdBad.push(`runs ${m[2]} ${m[3]}`.slice(0, 80));
+  }
+  if (/(^|[;&|(\s])(ln|cp|tee|truncate|dd|touch|chown|chgrp|install|rmdir|eval|source)(?=\s)/m.test(wdCode)) wdBad.push('a command that writes or runs elsewhere');
+  for (const [v, want] of [['WLOCK', '"$STATE_DIR/watchdog.lock"'], ['l', '"$STATE_DIR/alerts.lock"'], ['d', '"$STATE_DIR/alerts.pending"']]) {
+    for (const m of wdCode.matchAll(new RegExp(`(?:^|[\\s;])(?:local )?${v}=("[^"]*")`, 'gm'))) if (m[1] !== want) wdBad.push(`${v}=${m[1]}`);
+  }
+  if (!wdCode.includes('local f="$STATE_DIR/$1" n')) wdBad.push('append writes outside the state directory');
+  if (wdBad.length) problems.push(`${at('topology-watchdog.sh')}: an observer: it never touches recovery material or authority, the broker or a unit, and writes only its own records, check-in and the alert spool (${wdBad[0]}); ${why}`);
   if (!/^OnUnitActiveSec=5min$/m.test(unit('nawara-core-topology-monitor.timer')) || !/^OnUnitActiveSec=5min$/m.test(unit('nawara-core-topology-watchdog.timer'))) problems.push(`${TOPOLOGY_MONITOR_DIR}: both timers run every 5 minutes; ${why}`);
   // inert in the repository: no workflow installs, enables or starts it
   for (const [name, text] of Object.entries(workflows)) {

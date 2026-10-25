@@ -135,10 +135,26 @@ export function world({ state = {}, latch = LATCH_INACTIVE, installed = true, br
     if (state !== null) d.writeIncident(d.writeState(state));
   }
   if (latch !== null) writeFileSync(d.latch, latch, { mode: 0o644 });
-  // crash injection: `mv` and `sync` shims kill their caller at the point a test names (ctl/crash), then remove the instruction
+  // crash injection: `mv` and `sync` shims kill their caller at the point a test names (ctl/crash), then remove the instruction.
+  // Interleaving (OD-BRK-2b-W): `<command> <substring>` in ctl/pause makes that call signal ctl/paused and wait (at most 10 s) for
+  // ctl/release before it runs, once, so a test can act while a script is between two steps. While ctl/trace exists, every call is
+  // appended to it (`<command> <arguments>`, in order); `<command> <substring>` in ctl/fail makes that call fail (exit 1), once, and in
+  // ctl/fail-always every time (`<command> =<arguments>` matches the arguments exactly).
   for (const [cmd, real] of [['mv', '/usr/bin/mv'], ['sync', '/usr/bin/sync'], ['cp', '/usr/bin/cp']]) {
     writeFileSync(join(d.shim, cmd), [
       '#!/usr/bin/env bash',
+      `t=${JSON.stringify(join(d.ctl, 'trace'))}`,
+      `if [ -f "$t" ]; then printf '%s %s\\n' ${cmd} "$*" >> "$t"; fi`,
+      'matches() { if [[ $1 == =* ]]; then [ "${1#=}" = "$2" ]; else [[ " $2 " == *"$1"* ]]; fi; }',
+      `x=${JSON.stringify(join(d.ctl, 'fail'))}`,
+      `if [ -f "$x" ] && read -r w m < "$x" && [ "$w" = ${cmd} ] && matches "$m" "$*"; then rm -f "$x"; exit 1; fi`,
+      `x=${JSON.stringify(join(d.ctl, 'fail-always'))}`,
+      `if [ -f "$x" ] && read -r w m < "$x" && [ "$w" = ${cmd} ] && matches "$m" "$*"; then exit 1; fi`,
+      `p=${JSON.stringify(join(d.ctl, 'pause'))}`,
+      `if [ -f "$p" ] && read -r w m < "$p" && [ "$w" = ${cmd} ] && [[ " $* " == *"$m"* ]]; then`,
+      `  rm -f "$p"; : > ${JSON.stringify(join(d.ctl, 'paused'))}`,
+      `  for _ in $(seq 1 200); do [ -f ${JSON.stringify(join(d.ctl, 'release'))} ] && break; sleep 0.05; done`,
+      'fi',
       `c=${JSON.stringify(join(d.ctl, 'crash'))}`,
       `if [ -f "$c" ] && read -r w m when < "$c" && [ "$w" = ${cmd} ] && [[ " $* " == *"$m"* ]]; then`,
       `  rm -f "$c"`,

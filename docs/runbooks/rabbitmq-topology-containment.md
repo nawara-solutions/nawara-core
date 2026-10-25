@@ -14,7 +14,7 @@ first-activation gate in `infra/rabbitmq/provision.sh`. This control keeps verif
 | Unit | Runs | Does |
 |---|---|---|
 | `nawara-core-topology-monitor.timer` → `.service` | every 5 minutes (server-side; never GitHub Actions) | `verify-and-contain.sh notification-service`: one serialized run |
-| `nawara-core-topology-watchdog.timer` → `.service` | every 5 minutes, on its own timer, offset | `topology-watchdog.sh`: checks that the monitor runs (§4) |
+| `nawara-core-topology-watchdog.timer` → `.service` | every 5 minutes, on its own timer (its phase relative to the monitor's is not guaranteed; §4) | `topology-watchdog.sh`: checks that the monitor runs (§4) |
 | `topology-trigger.sh` (forced command) | on demand, after an authorized topology change | starts the monitor unit once (§3) |
 
 Files (all root-owned, from `infra/rabbitmq/topology-monitor/`):
@@ -24,7 +24,7 @@ Files (all root-owned, from `infra/rabbitmq/topology-monitor/`):
 | `/usr/local/libexec/nawara-core-topology/` | 0755 | the six scripts (0555) and the pinned `verify-topology.sh` (0444) |
 | `/var/lib/nawara-core-topology-install/` | 0700 | `incoming/`, the signed `installed/` record, `history.jsonl`, an open `transaction/` (OD-BRK-2b-I) |
 | `/etc/nawara-core-topology/install-allowed-signers` | 0644 | the Owner's installation key (separate from the recovery key) |
-| `/var/lib/nawara-core-topology-monitor/` | 0700 | `installed`, `state` (v2: with the incident), `lock`, `evidence.jsonl`, `alerts.jsonl`, `incidents.jsonl`, `recovery-consumed`, `watchdog`, `watchdog.jsonl`, the `recovery/` inbox (0700) |
+| `/var/lib/nawara-core-topology-monitor/` | 0700 | `installed`, `state` (v2: with the incident), `lock`, `evidence.jsonl`, `alerts.jsonl`, `alerts.lock` and `alerts.pending/` (OD-BRK-2b-W, §6), `incidents.jsonl`, `recovery-consumed`, `watchdog`, `watchdog.lock`, `watchdog.jsonl`, the `recovery/` inbox (0700) |
 | `/var/lib/nawara-core-topology/notification-service.containment` | 0644 (dir 0755) | the OD-BRK-2a latch, read by provisioning |
 | `/var/lib/nawara-core-topology/notification-service.incident` | 0644 | the current incident, bound next to the latch (OD-BRK-2b-R) |
 | `/etc/nawara-core-topology/recovery-allowed-signers` | 0644 (dir 0755) | the Owner's public key: installed by a separate key-lifecycle operation (§5) |
@@ -136,7 +136,8 @@ only what is missing, and never deletes or replaces protected state. Deleting th
 
 `verify-topology-monitor-install.sh` (read-only) authenticates the installed record with the installation key. It checks:
 - every artifact (hash, owner, exact mode, one link, no symbolic link, nothing extra) and every ancestor directory;
-- the units' hardening, and that no drop-in or same-named unit exists in any systemd unit directory;
+- the units' hardening (the watchdog's sandbox included, OD-BRK-2b-W §4), and that no drop-in or same-named unit exists in any
+  systemd unit directory;
 - the protected state;
 - the recovery key, if present;
 - the optional trigger, if configured: its exact sudoers rule, no other rule reaching its user, sshd's effective settings, and the
@@ -161,6 +162,21 @@ Enabling the timers is a separately authorized step. The verifier FAILs any enab
 `timers=nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer` (optionally followed by
 `,nawara-core-topology-alert.timer`), signed by the Owner in the installation namespace. Every enabled timer must be in that list.
 
+**Installed, not activated, versus activated and operational (OD-BRK-2b-W).** The verifier tells the two states apart and never enables,
+starts or changes a unit:
+- **Installed, not activated:** no timer is enabled, running or failed. This passes. It is the state between an installation and its
+  separately authorized activation.
+- **Activated:** any timer is enabled, running or failed (a timer started by hand without enablement is an activation too). Then the
+  signed activation must list every such timer, and **every timer it lists must be enabled persistently and active, its service not
+  failed.** The monitor's and the watchdog's timers are always listed, so a monitor without its watchdog never passes. The carrier's
+  timer is optional: unlisted, it must be neither enabled nor running (`info carrier: not activated`); listed, it is required like the
+  others.
+- Reason codes: `timer_disabled`, `timer_inactive`, `timer_failed`, `runtime_only` (enabled only until the next reboot),
+  `timer_masked`, `timer_missing`, `service_failed`, `unauthorized_activation`. A state that cannot be read, or a timer that is still
+  activating, is UNKNOWN (exit 3), never PASS.
+
+The activation procedure therefore enables **and** starts every listed timer, then runs the verifier, and stops on anything but PASS.
+
 **Contract v2 (OD-BRK-2b-A).** The manifest header is `nawara-core-topology-monitor-manifest v2`. It lists 14 artifacts: the carrier
 `topology-alert-carrier.sh` and its two units are added. The carrier's credentials are never artifacts and the installer never writes
 them. The installer refuses to `upgrade` an installation recorded under the OD-BRK-2b-I v1 contract (`installed_contract`). No such
@@ -183,9 +199,33 @@ completed run for 15 minutes), `monitor_stalled` (a run holding the lock beyond 
 holding the lock), `state_invalid`, `timer_inactive`, `service_failed` and `not_installed`. It records every check, alerts on a change
 of status (and hourly while a problem lasts), and writes its own check-in, which the monitor reads in turn (`watchdog_quiet`).
 
-Response policy: evidence and alerts only. It never contains, grants or restarts. **Limits:** it shares the host and systemd with the
-monitor, so a dead host or a stopped systemd silences both. Covering that needs an **external heartbeat** (a dead-man's switch, as the
-A5-R3 carrier uses for Auth): a pending dependency. Whether a silent monitor should cause autonomous containment is an Owner decision.
+Response policy: evidence and alerts only. It is an observer, never a second containment authority: it never contains, grants or
+restarts, and it holds no broker access. **Limits:** it shares the host and systemd with the monitor, so a dead host or a stopped
+systemd silences both. The **external heartbeat** that covers this (a dead-man's switch: each one's own Healthchecks.io check, pinged by
+the OD-BRK-2b-A carrier, §7) is implemented in code, but it is installed and activated only by the separately authorized OD-BRK-2b-2;
+nothing in production uses it yet. Whether a silent monitor should cause autonomous containment is an Owner decision.
+
+**Timers.** Both timers run every 5 minutes, each on its own schedule (`OnUnitActiveSec=5min`). Their phase relative to each other is
+not guaranteed: the boot offsets (2 and 7 minutes) are one period apart, and timers enabled together fire together, so the two can run
+at the same moment. Nothing depends on an offset: the watchdog's checks hold whatever the phase, and the alert spool's lock (§6)
+serializes their writes. The real systemd behaviour of the timers and of the sandbox below is certified by OD-BRK-2b-L, not by the
+repository's tests (which use a `systemctl` stand-in).
+
+**Sandbox (OD-BRK-2b-W).** The watchdog's unit has no network (`PrivateNetwork=yes`, `AF_UNIX` only, for `systemctl`'s read-only
+queries), no capability, and only the monitor's state directory writable (its records, its check-in and the spool are written there by
+atomic rename, so it stays one writable directory; individual files are never bind-mounted, which would break those renames). The
+Docker and containerd sockets and state, the host checkout `/opt/nawara-core`, both alert carriers' state and credentials, the
+installation state and the Owner's `recovery/` inbox are inaccessible. `check:repo` and the installation verifier both pin these
+directives.
+
+**Recovery authority and the residual ledger access.** The watchdog has no recovery authority: the trust key, the latch, the incident
+binding and the inbox are out of its reach, and it never runs the recovery guard. `check:repo` also guards its code (OD-BRK-2b-W C4): it
+never references the single-use ledger (`recovery-consumed`), the inbox, the trust key, the incident, the latch, the recovery guard, the
+broker or a unit change, and it writes only its own records (`watchdog.jsonl`), its check-in (`watchdog`), its lock and the alert spool
+(`alerts.jsonl`, `alerts.lock`, `alerts.pending/`). These are static guards on the reviewed code. They cannot remove the residual
+access: the ledger sits in the state directory the watchdog's unit may write, so code that was altered (which needs root) could still
+reach it. The ledger is not moved, because individual files in that directory cannot be bind-mounted without breaking the monitor's
+atomic renames.
 
 ## 5. Recovery (Owner-signed, incident-bound, single use; never automatic)
 
@@ -298,6 +338,49 @@ watchdog's status. Never a message, a code, a credential, an HMAC key, the Erlan
 
 `alerts.jsonl` is a local spool. The external carrier (§7) reads it on its own timer. Containment never depends on an alert being
 written or delivered.
+
+**The spool's lock (OD-BRK-2b-W).** Three writers append to `alerts.jsonl`: the monitor, the watchdog and the recovery. Trimming it
+(keep the newest 1000 lines once it exceeds 2000) rewrites the file and renames it into place, so an append landing between the read and
+the rename would be lost. Every append and every trim therefore holds one lock, `alerts.lock`, always the innermost lock, waited for at
+most 2 s (`SPOOL_LOCK_WAIT`):
+- With the lock, parked lines (below) are appended first, oldest first, then the new line, then the spool is trimmed if needed.
+- Without the lock within 2 s, the line is **never** appended (that is the race). It is parked whole in its own file under
+  `alerts.pending/`, and the journal says so (`alert spool lock unavailable within 2s: the line is parked`), with no event content.
+- Every monitor and watchdog run also flushes `alerts.pending/` under the lock, so a parked line reaches the spool within one period
+  even when nothing else is alerted.
+- A containment waits at most 2 s per alert for the lock, and never longer: an unusable lock (a symbolic link, a directory) parks the
+  line at once. The publication and merge below add only local file synchronization, never a wait on another process. The carrier
+  reads only `alerts.jsonl`, unchanged: its cursor, gap detection and acknowledgement are unaffected.
+
+**Publishing a parked line (durability).** A parked line is written to a unique temporary file in `alerts.pending/` (`.tmp.` + a random
+suffix, mode 0600), its content synced, then renamed to its final name, and the directory synced (a new `alerts.pending/` is itself
+synced into the state directory first). Only names ending in `.line` are ever merged, so a partial file is never visible to a merge. If
+the content cannot be synced, nothing is published, the temporary file is removed and the journal reports the alert's spool as
+unavailable. If the directory cannot be synced after the rename, the line is published (whole) and the journal says a power loss
+could still drop it. When merging, the writer that holds the lock appends the parked lines, syncs `alerts.jsonl`, and only then removes
+the parked files: an interruption before the removal repeats lines (the carrier ignores a line it has already seen), never loses one.
+The syncing relies on GNU coreutils `sync FILE` (an `fsync` of each named file or directory) and on the file system honouring it; the
+repository's tests check the order of these steps and their failure handling, not the behaviour of a disk after a power loss, which
+OD-BRK-2b-L does not certify either. The spool's own appends (`alerts.jsonl`) are not synced individually, as before.
+
+**Ordering.** A parked file's name is its sort key: `<time in ns>.<process id>.<per-process sequence>.<random suffix>.line`. Each writer
+numbers its own parked lines, so it keeps its own order. Lines from different writers are merged in sort-key order: by the wall-clock
+time at which each was parked, which is not necessarily the order in which the events occurred, and a change of the clock (a step by
+time synchronization) can change it. Parked lines are appended before the line of the writer that merges them. If an append fails
+while merging, the merge stops there and keeps the remaining lines parked, in order; that writer still appends its own line, so in this
+failure case a remaining parked line reaches the spool after it.
+
+**Orphaned temporary files.** A writer killed between creating a temporary file and its rename leaves an unpublished `.tmp.*` file in
+`alerts.pending/`. It is never merged (only `.line` files are) and is never an accepted alert: the writer that made it ended before
+publishing, and its journal shows no `the line is parked` message for it. Nothing removes these files automatically. During an
+investigation, `ls -la /var/lib/nawara-core-topology-monitor/alerts.pending/` lists both the parked lines (`*.line`, awaiting a merge)
+and any orphans (`.tmp.*`); each contains one JSON line with closed codes only.
+
+**Delivery delay is local evidence only.** A parked line waits for the next writer that holds the lock: normally a run of the monitor
+or the watchdog, within one 5-minute period after the lock is free. The lock's holders are bounded by their units (the monitor by its
+280 s timeout, the watchdog by 60 s; the recovery holds it only for one append). The delay is visible in the journal (`parked`,
+`parked lines stay parked`) and in `alerts.pending/`, **not** necessarily through an external alert to the Owner: no heartbeat or
+Pushover message reports a parked line.
 
 ## 7. External alerts and independent heartbeats (OD-BRK-2b-A; installing or enabling any of it is OD-BRK-2b-2, not authorized here)
 

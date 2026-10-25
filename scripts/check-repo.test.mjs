@@ -3942,3 +3942,83 @@ test('Core V2 OD-BRK-2b-A: the external alert carrier keeps A5-R3\'s endpoints, 
   assert.match(mutate('install-topology-monitor.sh', 'fresh_operational_state() {', 'carrier_credentials() { install -m 0400 pushover.token /etc/nawara-core-topology-alert/pushover.token; }\nfresh_operational_state() {'), /no carrier credential is ever an artifact or installed by the installer/);
   assert.match(mutate('install-topology-monitor.sh', ' nawara-core-topology-alert.service nawara-core-topology-alert.timer\'', '\''), /the manifest's artifacts are exactly/);
 });
+
+test('Core V2 OD-BRK-2b-W: activated means operational, the alert spool has one bounded lock, and the watchdog is a sandboxed observer', async () => {
+  const { checkTopologyMonitor, TOPOLOGY_MONITOR_DIR, TOPOLOGY_MONITOR_FILES, PROVISION_SCRIPT, TOPOLOGY_VERIFIER } = await import('./lib/checks.mjs');
+  const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
+  const files = Object.fromEntries(TOPOLOGY_MONITOR_FILES.map((n) => [n, read(`${TOPOLOGY_MONITOR_DIR}/${n}`)]));
+  const base = { files, verifier: read(TOPOLOGY_VERIFIER), provision: read(PROVISION_SCRIPT), workflows: {} };
+  assert.deepEqual(checkTopologyMonitor(base), []);
+  const mutate = (file, from, to) => {
+    assert.ok(files[file].includes(from), `fixture drifted: ${file}: ${from}`);
+    return checkTopologyMonitor({ ...base, files: { ...files, [file]: files[file].replace(from, to) } }).join('\n');
+  };
+  const V = 'verify-topology-monitor-install.sh';
+  const W = 'nawara-core-topology-watchdog.service';
+  // W1: a listed timer disabled, stopped or failed, or its service failed, never passes; a started timer is an activation
+  const w1 = /an activated installation passes only with every listed timer enabled and active/;
+  assert.match(mutate(V, 'inactive) ac=0; fail "timer (timer_inactive)', 'inactive) ac=1; ok "timer (timer_inactive)'), w1);
+  assert.match(mutate(V, 'disabled | static | indirect) en=0; fail "timer (timer_disabled)', 'disabled | static | indirect) en=1; ok "timer (timer_disabled)'), w1);
+  assert.match(mutate(V, 'failed) ac=0; fail "timer (timer_failed)', 'failed) ac=1; ok "timer (timer_failed)'), w1);
+  assert.match(mutate(V, 'enabled-runtime) en=0; fail "timer (runtime_only)', 'enabled-runtime) en=1; ok "timer (runtime_only)'), w1);
+  assert.match(mutate(V, 'failed) fail "service (service_failed)', 'failed) ok "service (service_failed)'), w1);
+  assert.match(mutate(V, 'AC[$u]=$("$SYSTEMCTL" is-active "$u" 2>/dev/null || true)', 'AC[$u]=active'), w1);
+  assert.match(mutate(V, 'active | activating | deactivating | reloading | refreshing | failed) [[ " $ENABLED " == *" $u "* ]] || ENABLED+=" $u" ;;', 'active | activating | deactivating | reloading | refreshing | failed) ;;'), w1);
+  assert.match(mutate(V, 'AC[$u]=$("$SYSTEMCTL" is-active "$u" 2>/dev/null || true)', 'AC[$u]=$("$SYSTEMCTL" start "$u" 2>/dev/null || true)'), /may only read units' enablement/);
+  // W2: one bounded lock; without it a line is parked, never appended; each run flushes
+  const w2 = /every append and trim of alerts\.jsonl holds STATE_DIR\/alerts\.lock/;
+  for (const n of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh']) {
+    assert.match(mutate(n, 'flock -w "$SPOOL_LOCK_WAIT" 7', 'flock -w 600 7'), w2, `${n}: an unbounded wait`);
+    assert.match(mutate(n, 'readonly SPOOL_LOCK_WAIT=2', 'readonly SPOOL_LOCK_WAIT=30'), w2, `${n}: a long wait`);
+    assert.match(mutate(n, '/alerts.lock"', '/alerts-other.lock"'), w2, `${n}: another lock`);
+  }
+  assert.match(mutate('verify-and-contain.sh', '    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: the line is parked for the next writer that holds it"\n    return 0',
+    '    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: the line is parked for the next writer that holds it"\n    printf \'%s\\n\' "$1" >>"$STATE_DIR/alerts.jsonl"\n    return 0'), w2, 'an unlocked append in the fallback');
+  assert.match(mutate('topology-watchdog.sh', '  spool_append "{\\"v\\":1,', '  append alerts.jsonl "{\\"v\\":1,'), w2, 'the watchdog appending outside the lock');
+  assert.match(mutate('recover-notification-topology.sh', '    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: the line is parked for the next writer that holds it"\n  else',
+    '    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: the line is parked for the next writer that holds it"\n    printf \'%s\\n\' "$line" >>"$f"\n  else'), w2, 'the recovery appending without the lock');
+  assert.match(mutate('topology-watchdog.sh', '\nspool_flush || true\n', '\n'), /flush the parked alert lines once a run/);
+  // W3: the watchdog's sandbox
+  const w3 = /an observer sandbox/;
+  for (const d of ['PrivateNetwork=yes', 'RestrictAddressFamilies=AF_UNIX', 'NoNewPrivileges=yes', 'CapabilityBoundingSet=',
+    'InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core',
+    'InaccessiblePaths=-/var/lib/nawara-core-topology-install -/var/lib/nawara-core-topology-monitor/recovery']) {
+    assert.match(mutate(W, `\n${d}\n`, '\n'), w3, `without ${d}`);
+  }
+  assert.match(mutate(W, 'RestrictAddressFamilies=AF_UNIX', 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6'), w3);
+  assert.match(mutate(W, 'ReadWritePaths=/var/lib/nawara-core-topology-monitor', 'ReadWritePaths=/var/lib/nawara-core-topology-monitor\nReadWritePaths=/var/lib/nawara-core-topology'), w3);
+  assert.match(mutate(W, 'TimeoutStartSec=60', 'TimeoutStartSec=60\nRestart=on-failure'), w3, 'never restarted outside its timer');
+  assert.match(mutate(W, 'CapabilityBoundingSet=\n', 'CapabilityBoundingSet=CAP_SYS_ADMIN\n'), w3);
+  assert.match(mutate(W, 'TimeoutStartSec=60', 'TimeoutStartSec=60\nExecStartPost=/usr/bin/systemctl start nawara-core-topology-monitor.service'), w3, 'never restarts the monitor');
+  // C1: a parked line is published durably (synced before and after its rename); a merged one is removed only after the spool is synced
+  for (const n of ['verify-and-contain.sh', 'topology-watchdog.sh', 'recover-notification-topology.sh']) {
+    assert.match(mutate(n, 'if printf \'%s\' "$1" >"$tmp" && sync -- "$tmp" && mv -f -- "$tmp" "$name"; then', 'if printf \'%s\' "$1" >"$tmp" && mv -f -- "$tmp" "$name"; then'), w2, `${n}: renamed before its content is synced`);
+    assert.match(mutate(n, '    sync -- "$d" || log', '    true || log'), w2, `${n}: the rename never synced`);
+    assert.match(mutate(n, 'mkdir -m 700 -- "$d" 2>/dev/null && sync -- "$STATE_DIR" || return 1', 'mkdir -m 700 -- "$d" 2>/dev/null || return 1'), w2, `${n}: a new directory never synced`);
+  }
+  assert.match(mutate('verify-and-contain.sh', 'if sync -- "$STATE_DIR/alerts.jsonl"; then rm -f -- "${merged[@]}" || rc=1; else rc=1; fi', 'rm -f -- "${merged[@]}" || rc=1'), w2, 'removed before the spool is synced');
+  assert.match(mutate('topology-watchdog.sh', 'if append alerts.jsonl "$(head -c 2048 -- "$p")"; then merged+=("$p"); else rc=1; break; fi', 'append alerts.jsonl "$(head -c 2048 -- "$p")" && rm -f -- "$p" || rc=1'), w2, 'each file removed right after its append');
+  assert.match(mutate('recover-notification-topology.sh', 'if sync -- "$f"; then rm -f -- "${merged[@]}" || ok=0; else ok=0; fi', 'rm -f -- "${merged[@]}" || ok=0'), w2, 'the recovery removing before the sync');
+  // C4: the watchdog never reaches recovery material or authority, and writes only its own records, check-in and the spool
+  const c4 = /an observer: it never touches recovery material or authority/;
+  const WD = 'topology-watchdog.sh';
+  const at = 'spool_flush || true\n';
+  for (const [what, line] of [
+    ['the single-use ledger', 'rm -f -- "$STATE_DIR/recovery-consumed"'],
+    ['the ledger, by its own name', ': > "$STATE_DIR/recovery-consumed"'],
+    ['the monitor\'s state', ': > "$STATE_DIR/state"'],
+    ['the monitor\'s state, atomically', 'write_atomic "$STATE_DIR/state" "x"'],
+    ['the inbox', 'ls -- "$STATE_DIR/recovery" >/dev/null'],
+    ['the recovery guard', '/usr/local/libexec/nawara-core-topology/recover-notification-topology.sh'],
+    ['the trust key', 'cat /etc/nawara-core-topology/recovery-allowed-signers >/dev/null'],
+    ['the incident history', 'append incidents.jsonl "{}"'],
+    ['the broker', 'docker exec nawara-core-rabbitmq rabbitmqctl list_users >/dev/null'],
+    ['a unit', '"$SYSTEMCTL" start nawara-core-topology-monitor.service'],
+    ['a copy elsewhere', 'cp -- "$STATE_DIR/state" /tmp/x'],
+    ['another directory as its spool', 'd="$STATE_DIR/recovery"'],
+  ]) assert.match(mutate(WD, at, `${at}${line}\n`), c4, what);
+  assert.match(mutate(WD, 'local f="$STATE_DIR/$1" n', 'local f="/var/lib/nawara-core-topology/$1" n'), c4, 'records outside the state directory');
+  assert.match(mutate(W, 'ReadWritePaths=/var/lib/nawara-core-topology-monitor', 'ReadWritePaths=/var/lib/nawara-core-topology-monitor/recovery'), w3, 'the inbox writable');
+  assert.match(mutate(W, 'TimeoutStartSec=60', 'TimeoutStartSec=60\nExecStart=/usr/local/libexec/nawara-core-topology/recover-notification-topology.sh'), /one command, and no recovery path/, 'the recovery guard as a second command');
+  assert.match(mutate(W, 'UMask=0077', 'UMask=0077\nReadOnlyPaths=/var/lib/nawara-core-topology-monitor/recovery'), /one command, and no recovery path/, 'the inbox made readable');
+});

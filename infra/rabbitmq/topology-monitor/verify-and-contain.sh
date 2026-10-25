@@ -62,6 +62,7 @@ readonly LOCK_WAIT=60
 readonly WATCHDOG_MAX_AGE=1200
 readonly REMINDER_SECONDS=3600
 readonly RECORD_MAX_LINES=2000
+readonly SPOOL_LOCK_WAIT=2
 readonly LATCH_INACTIVE=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=inactive'
 readonly LATCH_CONTAINED=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=contained'
 readonly STATE_RE=$'^nawara-core-topology-monitor-state v2\nservice=notification-service\ncontained=([01])\nincident=(none|[0-9a-f]{32})\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
@@ -211,8 +212,77 @@ append() { # append <file> <json line>
   printf '%s\n' "$2" >>"$f" 2>/dev/null || return 1
   bound "$f"
 }
+# The alert spool's lock (OD-BRK-2b-W), shared with the watchdog and the recovery: every append to alerts.jsonl and every trim of it
+# holds STATE_DIR/alerts.lock, so a trim (read the newest lines, rename over the file) can never drop a line another writer appends
+# meanwhile. It is always the innermost lock, held for one append (and a trim), and waited for at most SPOOL_LOCK_WAIT seconds. Without
+# it a line is never appended (that is the race): it is PARKED whole in its own uniquely named file under STATE_DIR/alerts.pending,
+# published durably (spool_park), and the next writer that holds the lock appends the parked lines first, in their sort-key order, then
+# syncs the spool before removing them (spool_merge: a crash repeats a line, which the carrier deduplicates; it never loses one). Each
+# writer keeps its own order; across writers the order is the sort key's (wall-clock time first), not necessarily the order the events
+# happened in. Each run also flushes what is parked (spool_flush), so a parked line reaches the spool within one monitor or watchdog
+# period even when nothing else is alerted. Containment never waits longer than SPOOL_LOCK_WAIT for the lock.
+spool_locked() { # holds the spool's lock on fd 7 (waiting at most SPOOL_LOCK_WAIT seconds), or returns 1
+  local l="$STATE_DIR/alerts.lock"
+  if [ ! -L "$l" ] && { [ ! -e "$l" ] || [ -f "$l" ]; } && { exec 7>>"$l"; } 2>/dev/null && flock -w "$SPOOL_LOCK_WAIT" 7; then return 0; fi
+  { exec 7>&-; } 2>/dev/null || true
+  return 1
+}
+spool_merge() { # under the lock: the parked lines in sort-key order (their file names), appended, the spool synced, and only then the
+  # parked files removed: a crash before the removal repeats lines (the carrier deduplicates them), never loses one
+  local d="$STATE_DIR/alerts.pending" p rc=0
+  local -a merged=()
+  if [ -d "$d" ] && [ ! -L "$d" ]; then
+    for p in "$d"/*.line; do
+      if [ -f "$p" ] && [ ! -L "$p" ]; then
+        if append alerts.jsonl "$(head -c 2048 -- "$p")"; then merged+=("$p"); else rc=1; break; fi
+      fi
+    done
+    if [ "${#merged[@]}" -gt 0 ]; then
+      if sync -- "$STATE_DIR/alerts.jsonl"; then rm -f -- "${merged[@]}" || rc=1; else rc=1; fi
+    fi
+  fi
+  return "$rc"
+}
+spool_park() { # spool_park <json line>: published whole and durably, or not at all: a unique temporary file (never merged: only
+  # *.line is), written, synced, renamed to its sort key <ns time>.<pid>.<per-process sequence>.<unique suffix>.line, the directory synced
+  local d="$STATE_DIR/alerts.pending" tmp name
+  if [ ! -e "$d" ] && [ ! -L "$d" ]; then mkdir -m 700 -- "$d" 2>/dev/null && sync -- "$STATE_DIR" || return 1; fi
+  [ -d "$d" ] && [ ! -L "$d" ] || return 1
+  tmp=$(mktemp -- "$d/.tmp.XXXXXXXX" 2>/dev/null) || return 1
+  PARK_SEQ=$((${PARK_SEQ:-0} + 1))
+  name="$d/$(date +%s%N).$$.$(printf '%06d' "$PARK_SEQ").${tmp##*.}.line"
+  if printf '%s' "$1" >"$tmp" && sync -- "$tmp" && mv -f -- "$tmp" "$name"; then
+    sync -- "$d" || log "alert spool: a parked line is published, but its directory could not be synced (a power loss could drop it)"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+spool_append() { # spool_append <json line>
+  local rc=0
+  if spool_locked; then
+    spool_merge || rc=1
+    append alerts.jsonl "$1" || rc=1
+    exec 7>&-
+    return "$rc"
+  fi
+  if spool_park "$1"; then
+    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: the line is parked for the next writer that holds it"
+    return 0
+  fi
+  return 1
+}
+spool_flush() { # once a run: parked lines into the spool (nothing to do, and no lock taken, when none is parked)
+  [ -d "$STATE_DIR/alerts.pending" ] || return 0
+  if spool_locked; then
+    spool_merge || log "alert spool unavailable: parked lines stay parked"
+    exec 7>&-
+  else
+    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: parked lines stay parked"
+  fi
+}
 alert() { # alert <severity> <kind> [reason]: a local line for the external carrier; a spool failure is logged and never blocks anything
-  append alerts.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$1\",\"kind\":\"$2\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"incident\":\"$ST_INCIDENT\"${3:+,\"reason\":\"$3\"}}" \
+  spool_append "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$1\",\"kind\":\"$2\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"incident\":\"$ST_INCIDENT\"${3:+,\"reason\":\"$3\"}}" \
     || log "alert spool unavailable (kind=$2); containment never depends on it"
   log "ALERT severity=$1 kind=$2"
 }
@@ -377,6 +447,7 @@ if [ "$ST_CONTAINED" = 1 ]; then
 fi
 WD=$(watchdog_status)
 if [ "$WD" != ok ] && [ "$(last_alert_age watchdog_quiet)" -gt "$REMINDER_SECONDS" ]; then alert warning watchdog_quiet; fi
+spool_flush || true
 
 append evidence.jsonl "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"mode\":\"$MODE\",\"phase\":\"$V_PHASE\",\"result\":\"$LAST_RESULT\",\"reason\":\"$REASON\",\"checks\":\"$V_IDS\",\"unknown_streak\":$ST_STREAK,\"containment\":\"$CONTAINMENT\",\"attempts\":$ATTEMPTS,\"watchdog\":\"$WD\",\"incident\":\"$ST_INCIDENT\",\"new_incident\":$NEW_INCIDENT}" \
   || log "evidence record unavailable"

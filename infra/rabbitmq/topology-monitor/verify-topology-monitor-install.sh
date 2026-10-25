@@ -6,7 +6,8 @@
 # Its authority is the Owner-SIGNED manifest recorded by the installer (INSTALL_STATE/installed), verified against the installation
 # trust key, never hashes kept on the server: every installed artifact must equal it. It checks the artifacts (hash, owner, mode, one
 # link, no symbolic link, nothing extra), every ancestor directory, the units (content, hardening, no drop-in or same-named override in
-# any unit directory systemd reads, enabled only under a signed activation authorization), the protected state (the marker, a valid
+# any unit directory systemd reads, enabled only under a signed activation authorization; once activated, every listed timer enabled and
+# active and its service not failed: OD-BRK-2b-W), the protected state (the marker, a valid
 # state, the incident binding, the inbox, the latch), the recovery trust key if present, and the optional trigger (its sudoers rule and
 # its forced-command key, separate from the scheduled-backup key) if present, and the external alert carrier (OD-BRK-2b-A: its unit's
 # isolation from the broker and the Auth carrier, its root-only credentials, two distinct heartbeat checks, its state directory) if
@@ -148,7 +149,8 @@ artifact() { # artifact <name> <path> <mode>
 for a in $SCRIPTS; do artifact "$a" "$INSTALL_DIR/$a" 555; done
 artifact verify-topology.sh "$INSTALL_DIR/verify-topology.sh" 444
 
-# 3. The units: the signed content, their hardening, no override, enabled only under a signed activation authorization.
+# 3. The units: the signed content, their hardening, no override, enabled only under a signed activation authorization, and, once
+# activated, operational (OD-BRK-2b-W).
 ancestors "$UNIT_DIR/x"
 for u in $UNITS; do artifact "$u" "$UNIT_DIR/$u" 644; done
 for u in nawara-core-topology-monitor.service nawara-core-topology-watchdog.service; do
@@ -159,6 +161,19 @@ for u in nawara-core-topology-monitor.service nawara-core-topology-watchdog.serv
     if [ -z "$missing" ]; then ok "hardening: $u keeps its directives and runs as root"; else fail "hardening (unit_hardening): $u lacks:$missing"; fi
   fi
 done
+# The watchdog (OD-BRK-2b-W): an observer: no network, no Docker, carrier, installation or recovery path, nothing else writable.
+u=nawara-core-topology-watchdog.service
+if [ -f "$UNIT_DIR/$u" ]; then
+  missing=''
+  for d in 'PrivateNetwork=yes' 'RestrictAddressFamilies=AF_UNIX' 'ReadWritePaths=/var/lib/nawara-core-topology-monitor' \
+    'InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core' \
+    'InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert -/etc/nawara-core-topology-alert -/var/lib/nawara-core-topology-alert' \
+    'InaccessiblePaths=-/var/lib/nawara-core-topology-install -/var/lib/nawara-core-topology-monitor/recovery'; do
+    grep -qxF -- "$d" "$UNIT_DIR/$u" || missing+=" $d"
+  done
+  if [ "$(grep -c '^ReadWritePaths=' -- "$UNIT_DIR/$u")" != 1 ] || grep -qE '^(Restart|ExecStartPre|ExecStartPost|BindPaths|AmbientCapabilities=.)' -- "$UNIT_DIR/$u"; then missing+=' (another writable path, a restart or an extra command)'; fi
+  if [ -z "$missing" ]; then ok "hardening: $u is a sandboxed observer (no network, no broker, carrier, installation or recovery path)"; else fail "hardening (unit_hardening): $u lacks:$missing"; fi
+fi
 # The carrier (OD-BRK-2b-A): no capability, no broker path, no Auth carrier path, no environment, credentials only as systemd credentials,
 # and no write access beyond its own state directory.
 u=nawara-core-topology-alert.service
@@ -186,29 +201,75 @@ for d in $UNIT_SEARCH; do
   done
 done
 if [ -z "$overrides" ]; then ok "overrides: no drop-in or same-named unit in any systemd unit directory"; else fail "overrides (unit_override): systemd would also read:$overrides"; fi
-listed() { local t; for t in $ENABLED; do [[ $1 == *",$t,"* ]] || return 1; done; }   # every enabled timer is in the signed list
+# Two distinct states (OD-BRK-2b-W). INSTALLED, NOT ACTIVATED: no timer enabled, active or failed (the state between an installation and
+# its separately authorized activation). ACTIVATED: any timer enabled, active or failed; then the Owner-signed activation must list every
+# such timer, and EVERY listed timer (the monitor's and the watchdog's always, the carrier's only when listed) must be enabled persistently
+# and active, its service not failed. A watchdog that is disabled, stopped or failed is never an operational installation. An answer that
+# cannot be read is UNKNOWN (never PASS), never taken as fine.
+TIMERS='nawara-core-topology-monitor.timer nawara-core-topology-watchdog.timer nawara-core-topology-alert.timer'
+listed() { local t; for t in $ENABLED; do [[ $1 == *",$t,"* ]] || return 1; done; }   # every enabled or active timer is in the signed list
+declare -A EN=() AC=()
 ENABLED=''
-for u in nawara-core-topology-monitor.timer nawara-core-topology-watchdog.timer nawara-core-topology-alert.timer; do
+for u in $TIMERS; do
   st=$("$SYSTEMCTL" is-enabled "$u" 2>/dev/null || true)
+  EN[$u]=$st
   case "$st" in
     enabled | enabled-runtime) ENABLED+=" $u" ;;
-    disabled | static | indirect) ;;
+    disabled | static | indirect | not-found) ;;
     masked | masked-runtime) info "unit $u is masked" ;;
     *) unknown "enablement (systemctl_unavailable): the state of $u could not be read (${st:-no answer})" ;; # never taken as disabled
   esac
+  AC[$u]=$("$SYSTEMCTL" is-active "$u" 2>/dev/null || true)
+  case "${AC[$u]}" in
+    # a timer that was started, even if it has since failed, is an activation whatever its enablement
+    active | activating | deactivating | reloading | refreshing | failed) [[ " $ENABLED " == *" $u "* ]] || ENABLED+=" $u" ;;
+    inactive) ;;
+    *) unknown "activity (systemctl_unavailable): whether $u is active could not be read (${AC[$u]:-no answer})" ;;
+  esac
 done
 if [ -z "$ENABLED" ]; then
-  ok "enablement: no timer is enabled (activation is a separately authorized step)"
+  ok "enablement: no timer is enabled or active: installed, NOT activated (activation is a separately authorized step)"
 else
-  A="$INSTALL_STATE/activation"
+  A="$INSTALL_STATE/activation"; LIST=''
   if [ "$TRUST_OK" = 1 ] && [ "$M_OK" = 1 ] && node_ok "$A" f 600 && node_ok "$A.sig" f 600 \
     && atext=$(cat -- "$A"; printf x) && atext=${atext%x} && [[ $atext =~ $ACTIVATION_RE ]] && [ "${BASH_REMATCH[1]}" = "$M_COMMIT" ] && [ "${BASH_REMATCH[2]}" = "$M_VERSION" ] \
-    && listed ",${BASH_REMATCH[3]}," \
+    && LIST=",${BASH_REMATCH[3]}," && listed "$LIST" \
     && env -i PATH="$SAFE_PATH" timeout 10 ssh-keygen -Y verify -f "$INSTALL_TRUST" -I "$PRINCIPAL" -n "$INSTALL_NAMESPACE" -s "$A.sig" <"$A" >/dev/null 2>&1; then
-    ok "enablement:$ENABLED enabled under a signed activation authorization for version $M_VERSION"
+    ok "enablement:$ENABLED enabled or active under a signed activation authorization for version $M_VERSION"
   else
-    fail "enablement (unauthorized_activation):$ENABLED enabled without a signed activation authorization for the installed version that lists it"
+    LIST=''
+    fail "enablement (unauthorized_activation):$ENABLED enabled or active without a signed activation authorization for the installed version that lists it"
   fi
+  # ACTIVATED and OPERATIONAL: every timer the signed activation lists is enabled persistently and active, and its service is not failed
+  for u in $TIMERS; do
+    if [ -z "$LIST" ] || [[ $LIST != *",$u,"* ]]; then
+      if [ -n "$LIST" ] && [ "$u" = nawara-core-topology-alert.timer ]; then info "carrier: not activated (optional; the signed activation does not list it)"; fi
+      continue
+    fi
+    case "${EN[$u]}" in
+      enabled) en=1 ;;
+      enabled-runtime) en=0; fail "timer (runtime_only): $u is enabled only until the next reboot; a listed timer must be enabled persistently" ;;
+      disabled | static | indirect) en=0; fail "timer (timer_disabled): $u is listed by the signed activation but not enabled" ;;
+      masked | masked-runtime) en=0; fail "timer (timer_masked): $u is listed by the signed activation but masked" ;;
+      not-found) en=0; fail "timer (timer_missing): $u is listed by the signed activation but systemd does not know it" ;;
+      *) en=0 ;;   # already UNKNOWN
+    esac
+    case "${AC[$u]}" in
+      active) ac=1 ;;
+      inactive) ac=0; fail "timer (timer_inactive): $u is listed by the signed activation but not running" ;;
+      failed) ac=0; fail "timer (timer_failed): $u is listed by the signed activation and in the failed state" ;;
+      activating | deactivating | reloading | refreshing) ac=0; unknown "timer (timer_transitional): $u is ${AC[$u]}; check again" ;;
+      *) ac=0 ;;   # already UNKNOWN
+    esac
+    if [ "$en" = 1 ] && [ "$ac" = 1 ]; then ok "timer: $u is enabled and active, as the signed activation requires"; fi
+    s=${u%.timer}.service
+    sf=$("$SYSTEMCTL" is-failed "$s" 2>/dev/null || true)
+    case "$sf" in
+      failed) fail "service (service_failed): $s is in the failed state" ;;
+      active | inactive | activating | deactivating | reloading | refreshing) ok "service: $s is not failed ($sf)" ;;
+      *) unknown "service (systemctl_unavailable): whether $s has failed could not be read (${sf:-no answer})" ;;
+    esac
+  done
 fi
 
 # 4. The protected state: present and valid (a missing or corrupt state is never ready).

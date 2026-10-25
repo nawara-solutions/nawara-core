@@ -1,6 +1,13 @@
 # Core V2 OD-BRK-2b-1: ONE check of the topology monitor by its independent watchdog (docs/runbooks/rabbitmq-topology-containment.md §4):
 # missed or stalled runs, a killed run, an invalid state, an inactive timer or a failed monitor unit. Read-only towards the broker, the
-# latch and the monitor's state; it writes only its own check-in and records. Never installed, enabled or started by repository tooling.
+# latch and the monitor's state; it writes only its own check-in and records, and the alert spool under the spool's lock (OD-BRK-2b-W).
+# An observer, never a second containment authority: it never contains, grants or restarts. Never installed, enabled or started by
+# repository tooling.
+#
+# OD-BRK-2b-W sandbox: no network (PrivateNetwork, AF_UNIX only, for systemctl's read-only queries); writable only the monitor's state
+# directory (its records, check-in and the spool live there, written by atomic rename, so it stays a directory, never per-file mounts);
+# the Docker and containerd sockets and state, the host checkout, both alert carriers' state and credentials, the installation state
+# and the Owner's recovery inbox are inaccessible. These directives are certified on a real systemd only by OD-BRK-2b-L.
 [Unit]
 Description=Nawara Core: Notification topology monitor watchdog (OD-BRK-2b), one check
 
@@ -10,6 +17,9 @@ ExecStart=/usr/local/libexec/nawara-core-topology/topology-watchdog.sh
 TimeoutStartSec=60
 UnsetEnvironment=SSH_ORIGINAL_COMMAND
 ReadWritePaths=/var/lib/nawara-core-topology-monitor
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/containerd -/var/lib/docker -/var/lib/containerd -/opt/nawara-core
+InaccessiblePaths=-/etc/nawara-auth-readiness-alert -/var/lib/nawara-auth-readiness-alert -/etc/nawara-core-topology-alert -/var/lib/nawara-core-topology-alert
+InaccessiblePaths=-/var/lib/nawara-core-topology-install -/var/lib/nawara-core-topology-monitor/recovery
 UMask=0077
 NoNewPrivileges=yes
 CapabilityBoundingSet=
