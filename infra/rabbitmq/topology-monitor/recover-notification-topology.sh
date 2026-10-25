@@ -67,6 +67,7 @@ readonly CONFIRM_INTERVAL=5
 readonly CTL_TIMEOUT=30
 readonly VERIFY_TIMEOUT=150
 readonly LOCK_WAIT=60
+readonly SPOOL_LOCK_WAIT=2
 readonly LATCH_INACTIVE=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=inactive'
 readonly LATCH_CONTAINED=$'nawara-core-topology-containment v1\nservice=notification-service\nstate=contained'
 readonly STATE_RE=$'^nawara-core-topology-monitor-state v2\nservice=notification-service\ncontained=([01])\nincident=(none|[0-9a-f]{32})\nunknown_streak=([0-9]{1,3})\nlast_result=(NONE|PASS|FAIL|UNKNOWN)\nlast_run=([0-9]{1,12})$'
@@ -158,11 +159,51 @@ record() { # record <kind> <extra json>: the evidence (never required for the de
   printf '%s\n' "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"kind\":\"$1\",\"incident\":\"$INCIDENT\"$2}" >>"$STATE_DIR/evidence.jsonl" 2>/dev/null \
     || log "evidence record unavailable"
 }
+spool_park() { # spool_park <json line>: published whole and durably, or not at all (the protocol of verify-and-contain.sh, spool_park)
+  local d="$STATE_DIR/alerts.pending" tmp name
+  if [ ! -e "$d" ] && [ ! -L "$d" ]; then mkdir -m 700 -- "$d" 2>/dev/null && sync -- "$STATE_DIR" || return 1; fi
+  [ -d "$d" ] && [ ! -L "$d" ] || return 1
+  tmp=$(mktemp -- "$d/.tmp.XXXXXXXX" 2>/dev/null) || return 1
+  PARK_SEQ=$((${PARK_SEQ:-0} + 1))
+  name="$d/$(date +%s%N).$$.$(printf '%06d' "$PARK_SEQ").${tmp##*.}.line"
+  if printf '%s' "$1" >"$tmp" && sync -- "$tmp" && mv -f -- "$tmp" "$name"; then
+    sync -- "$d" || log "alert spool: a parked line is published, but its directory could not be synced (a power loss could drop it)"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
 alert() { # alert <kind> <severity> [reason]: a local line for the external carrier (OD-BRK-2b-A); never required for the decision
-  local f="$STATE_DIR/alerts.jsonl"
+  # under the alert spool's lock (OD-BRK-2b-W: the protocol of verify-and-contain.sh, spool_append), at most SPOOL_LOCK_WAIT seconds, so
+  # a watchdog trim can never drop it; without the lock the line is parked whole under STATE_DIR/alerts.pending, never appended. Parked
+  # lines are appended first, in sort-key order, and removed only once the spool is synced (a crash repeats a line, never loses one).
+  local f="$STATE_DIR/alerts.jsonl" l="$STATE_DIR/alerts.lock" d="$STATE_DIR/alerts.pending" p line ok=1
+  local -a merged=()
+  line="{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$2\",\"kind\":\"$1\",\"incident\":\"$INCIDENT\"${3:+,\"reason\":\"$3\"}}"
   [ ! -L "$f" ] && { [ ! -e "$f" ] || [ -f "$f" ]; } || { log "alert spool unavailable"; return 0; }
-  printf '%s\n' "{\"v\":1,\"at\":\"$(iso)\",\"at_epoch\":$(now),\"service\":\"$SERVICE\",\"severity\":\"$2\",\"kind\":\"$1\",\"incident\":\"$INCIDENT\"${3:+,\"reason\":\"$3\"}}" >>"$f" 2>/dev/null \
-    || log "alert spool unavailable"
+  if [ ! -L "$l" ] && { [ ! -e "$l" ] || [ -f "$l" ]; } && { exec 7>>"$l"; } 2>/dev/null && flock -w "$SPOOL_LOCK_WAIT" 7; then
+    if [ -d "$d" ] && [ ! -L "$d" ]; then
+      for p in "$d"/*.line; do
+        if [ -f "$p" ] && [ ! -L "$p" ]; then
+          if printf '%s\n' "$(head -c 2048 -- "$p")" >>"$f" 2>/dev/null; then merged+=("$p"); else ok=0; break; fi
+        fi
+      done
+    fi
+    printf '%s\n' "$line" >>"$f" 2>/dev/null || ok=0
+    if [ "${#merged[@]}" -gt 0 ]; then
+      if sync -- "$f"; then rm -f -- "${merged[@]}" || ok=0; else ok=0; fi
+    fi
+    [ "$ok" = 1 ] || log "alert spool unavailable"
+    exec 7>&-
+    return 0
+  fi
+  { exec 7>&-; } 2>/dev/null || true
+  if spool_park "$line"; then
+    log "alert spool lock unavailable within ${SPOOL_LOCK_WAIT}s: the line is parked for the next writer that holds it"
+  else
+    log "alert spool unavailable"
+  fi
+  return 0
 }
 contain_again() { # the SAME incident, contained again (state, binding, latch), after a doubt once the latch was touched
   write_atomic "$STATE_DIR/state" "$(printf 'nawara-core-topology-monitor-state v2\nservice=%s\ncontained=1\nincident=%s\nunknown_streak=0\nlast_result=UNKNOWN\nlast_run=%s\n' "$SERVICE" "$INCIDENT" "$(now)")" 600 || true

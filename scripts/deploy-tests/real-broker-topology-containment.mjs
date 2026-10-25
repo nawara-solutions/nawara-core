@@ -200,7 +200,10 @@ before(async () => {
     `exec ${JSON.stringify(hostDocker)} "$@"`,
     '',
   ].join('\n'), { mode: 0o755 });
-  writeFileSync(join(D.shim, 'systemctl'), `#!/usr/bin/env bash\ncase "$1" in is-active) exit 0 ;; is-failed) exit 1 ;; is-enabled) echo disabled; exit 1 ;; *) exit 9 ;; esac\n`, { mode: 0o755 });
+  // a systemctl stand-in: the watchdog asks `is-active --quiet` for the monitor's timer (answered active, as on a running host); the
+  // read-only installation verifier asks for the printed state (OD-BRK-2b-W) and sees an installed, NOT activated system: nothing enabled,
+  // running or failed. No unit is ever enabled or started here.
+  writeFileSync(join(D.shim, 'systemctl'), `#!/usr/bin/env bash\ncase "$1 $2" in\n  "is-active --quiet") exit 0 ;;\n  "is-failed --quiet") exit 1 ;;\nesac\ncase "$1" in is-active) echo inactive; exit 3 ;; is-failed) echo inactive; exit 1 ;; is-enabled) echo disabled; exit 1 ;; *) exit 9 ;; esac\n`, { mode: 0o755 });
   fault('none');
   // the source tree the AUTHENTIC installer installs from: the reviewed scripts with only their locations and broker name re-pinned
   const tm = join(D.src, 'infra/rabbitmq/topology-monitor');

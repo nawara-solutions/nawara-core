@@ -760,3 +760,34 @@ test('size: a queued event left by an earlier carrier with a 200-character probl
   assert.ok(!existsSync(f), 'acknowledged only once sent whole');
   sizesHold(w); eachAckedEventWhole(w, [...lines, whole]); noLeak(w, r.out);
 }));
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-W (W2): parked lines
+
+test('W2: 11: lines parked while the spool\'s lock was held reach the carrier whole and in order once a run flushes them', withLab({}, async (w) => {
+  await started(w);
+  w.setVerifier('PASS', 0); assert.equal(w.monitor().status, 0); assert.equal(w.watchdog().status, 0);
+  w.tick(30); assert.equal((await w.run()).code, 0); w.rx.requests.length = 0;
+  const holder = spawn('flock', [join(w.state, 'alerts.lock'), 'sleep', '60'], { detached: true, stdio: 'ignore' });
+  spawnSync('sleep', ['0.3']);
+  let incident;
+  try {
+    w.setVerifier('FAIL', 1, [['P1', 'FAIL', 'regular_policy_applies']]);
+    const m = w.monitor();
+    assert.equal(m.status, 20, m.stdout + m.stderr);
+    assert.match(m.stdout, /the line is parked/);
+    incident = w.stateOf().incident;
+    w.tick(30);
+    assert.ok([0, 3].includes((await w.run()).code));
+    assert.ok(!w.lines().some((l) => l.includes(incident)), 'parked lines are not in the spool yet: nothing of the incident is sent');
+  } finally { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* gone */ } spawnSync('sleep', ['0.2']); }
+  // the lock is free: the watchdog's next run flushes the parked lines (it alerts nothing new for them), the carrier delivers them
+  w.tick(30);
+  w.watchdog();
+  assert.deepEqual(readdirSync(join(w.state, 'alerts.pending')).filter((f) => f.endsWith('.line')), [], 'nothing left parked');
+  w.tick(30);
+  const r = await w.run();
+  assert.ok([0, 3].includes(r.code), r.out);
+  const sent = w.lines().filter((l) => l.includes(`incident=${incident}`)).map((l) => /^CRITICAL ([a-z_]+) /.exec(l)?.[1]);
+  assert.deepEqual(sent, ['containment_started', 'topology_verification_fail', 'containment_confirmed'], 'whole, in their order');
+  noLeak(w, r.out);
+}));

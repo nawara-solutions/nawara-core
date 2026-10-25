@@ -48,8 +48,19 @@ function lab() {
       `if [ -f "$c" ] && read -r w m when < "$c" && [ "$w" = ${cmd} ] && [[ " $* " == *"$m"* ]]; then rm -f "$c"; if [ "$when" = after ]; then ${real} "$@"; fi; kill -9 "$PPID"; exit 1; fi`,
       `exec ${real} "$@"`, ''].join('\n'), { mode: 0o755 });
   }
-  // systemctl: records every call; `is-enabled` answers from ctl/enabled (default: disabled)
-  writeFileSync(join(L.shim, 'systemctl'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(join(L.ctl, 'systemctl-calls'))}\nif [ -f ${JSON.stringify(join(L.ctl, 'systemctl-broken'))} ]; then exit 4; fi\nif [ "$1" = is-enabled ]; then if grep -qxF "$2" ${JSON.stringify(join(L.ctl, 'enabled'))} 2>/dev/null; then echo enabled; exit 0; fi; echo disabled; exit 1; fi\nexit 9\n`, { mode: 0o755 });
+  // systemctl: records every call; `is-enabled` answers from ctl/enabled (default: disabled), `is-active` from ctl/active (default:
+  // inactive), `is-failed` from ctl/failed (default: inactive); a line "<verb> <unit> <word>" in ctl/answers overrides any of them
+  const c = (n) => JSON.stringify(join(L.ctl, n));
+  writeFileSync(join(L.shim, 'systemctl'), `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${c('systemctl-calls')}
+if [ -f ${c('systemctl-broken')} ]; then exit 4; fi
+a=$(grep -m1 -F "$1 $2 " ${c('answers')} 2>/dev/null | cut -d' ' -f3- || true)
+if [ -n "$a" ]; then echo "$a"; case "$a" in enabled | active | failed) exit 0 ;; *) exit 3 ;; esac; fi
+if [ "$1" = is-enabled ]; then if grep -qxF "$2" ${c('enabled')} 2>/dev/null; then echo enabled; exit 0; fi; echo disabled; exit 1; fi
+if [ "$1" = is-active ]; then if grep -qxF "$2" ${c('active')} 2>/dev/null; then echo active; exit 0; fi; echo inactive; exit 3; fi
+if [ "$1" = is-failed ]; then if grep -qxF "$2" ${c('failed')} 2>/dev/null; then echo failed; exit 0; fi; echo inactive; exit 1; fi
+exit 9
+`, { mode: 0o755 });
   // sshd -T: effective settings (ctl/sshd-extra overrides), the authorized keys file under the lab
   L.ak = p('authorized_keys');
   writeFileSync(join(L.shim, 'sshd'), `#!/usr/bin/env bash\nprintf 'pubkeyauthentication yes\\npermituserenvironment no\\nauthorizedkeysfile %s\\n' ${JSON.stringify(L.ak)}\ncat ${JSON.stringify(join(L.ctl, 'sshd-extra'))} 2>/dev/null\nexit 0\n`, { mode: 0o755 });
@@ -373,9 +384,16 @@ test('enablement: a timer enabled without a signed activation authorization FAIL
   writeFileSync(a, `nawara-core-topology-monitor-activation v1\ncore_commit=${COMMIT}\nversion=1\ntimers=nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer\n`, { mode: 0o600 });
   assert.equal(spawnSync('ssh-keygen', ['-Y', 'sign', '-q', '-f', key(L, 'owner'), '-n', 'nawara-core-topology-install', a], { stdio: ['ignore', 'pipe', 'pipe'] }).status, 0);
   chmodSync(`${a}.sig`, 0o600);
+  // OD-BRK-2b-W (R1): authorized, but the watchdog the activation lists is not enabled: never an operational installation
+  v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /enabled or active under a signed activation authorization for version 1/);
+  assert.match(v.out, /FAIL +timer \(timer_disabled\): nawara-core-topology-watchdog\.timer is listed by the signed activation but not enabled/);
+  writeFileSync(join(L.ctl, 'enabled'), 'nawara-core-topology-monitor.timer\nnawara-core-topology-watchdog.timer\n');
+  writeFileSync(join(L.ctl, 'active'), 'nawara-core-topology-monitor.timer\nnawara-core-topology-watchdog.timer\n');
   v = verify(L);
   assert.equal(v.status, 0, v.out);
-  assert.match(v.out, /enabled under a signed activation authorization for version 1/);
+  assert.match(v.out, /ok +timer: nawara-core-topology-watchdog\.timer is enabled and active, as the signed activation requires/);
   void manifest;
   writeFileSync(join(L.ctl, 'systemctl-broken'), '');
   v = verify(L);
@@ -435,8 +453,13 @@ test('A29: the carrier timer is enabled only under a signed activation that LIST
   activation(L, 'nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer');
   let v = verify(L);
   assert.equal(v.status, 1, v.out);
-  assert.match(v.out, /unauthorized_activation\): nawara-core-topology-monitor\.timer nawara-core-topology-alert\.timer enabled without a signed activation authorization for the installed version that lists it/);
+  assert.match(v.out, /unauthorized_activation\): nawara-core-topology-monitor\.timer nawara-core-topology-alert\.timer enabled or active without a signed activation authorization for the installed version that lists it/);
   activation(L, 'nawara-core-topology-monitor.timer,nawara-core-topology-watchdog.timer,nawara-core-topology-alert.timer');
+  v = verify(L);
+  assert.equal(v.status, 1, 'OD-BRK-2b-W: the watchdog it lists is neither enabled nor active');
+  assert.match(v.out, /timer_disabled\): nawara-core-topology-watchdog\.timer/);
+  const all = 'nawara-core-topology-monitor.timer\nnawara-core-topology-watchdog.timer\nnawara-core-topology-alert.timer\n';
+  writeFileSync(join(L.ctl, 'enabled'), all); writeFileSync(join(L.ctl, 'active'), all);
   v = verify(L);
   assert.equal(v.status, 0, v.out);
   activation(L, 'nawara-core-topology-alert.timer');
@@ -518,4 +541,137 @@ test('30-32: the optional trigger: absent is "not configured"; a wrong forced co
   put(rule, `Defaults!/usr/bin/systemctl env_reset\n${L.user} ALL=(root) NOPASSWD: /usr/bin/systemctl start nawara-core-topology-monitor.service\n`, 0o440);
   writeFileSync(join(L.ctl, 'sshd-extra'), 'forcecommand /bin/bash\n');
   assert.match(verify(L).out, /sshd_settings/);
+}));
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-W (W1): activated means operational
+
+const MON_T = 'nawara-core-topology-monitor.timer';
+const WD_T = 'nawara-core-topology-watchdog.timer';
+const AL_T = 'nawara-core-topology-alert.timer';
+/** An installed, signed, ACTIVATED and operational monitor and watchdog (the carrier not activated). */
+function operational(L) {
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  activation(L, `${MON_T},${WD_T}`);
+  writeFileSync(join(L.ctl, 'enabled'), `${MON_T}\n${WD_T}\n`);
+  writeFileSync(join(L.ctl, 'active'), `${MON_T}\n${WD_T}\n`);
+  const v = verify(L);
+  assert.equal(v.status, 0, v.out);
+  assert.match(v.out, /ok +timer: nawara-core-topology-monitor\.timer is enabled and active/);
+  assert.match(v.out, /ok +timer: nawara-core-topology-watchdog\.timer is enabled and active/);
+  assert.match(v.out, /ok +service: nawara-core-topology-watchdog\.service is not failed/);
+  assert.match(v.out, /info +carrier: not activated \(optional; the signed activation does not list it\)/, '5: the optional carrier, intentionally inactive');
+}
+const answers = (L, ...lines) => writeFileSync(join(L.ctl, 'answers'), `${lines.join('\n')}\n`);
+
+test('W1: installed but NOT activated passes; a timer started without enablement, or left failed, is an unauthorized activation', withLab((L) => {
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  let v = verify(L);
+  assert.equal(v.status, 0, v.out);
+  assert.match(v.out, /ok +enablement: no timer is enabled or active: installed, NOT activated/);
+  writeFileSync(join(L.ctl, 'active'), `${WD_T}\n`);   // started by hand, never enabled, no signed activation
+  v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /unauthorized_activation\): nawara-core-topology-watchdog\.timer enabled or active without a signed activation/);
+  rmSync(join(L.ctl, 'active'));
+  answers(L, `is-active ${MON_T} failed`);
+  v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /unauthorized_activation\): nawara-core-topology-monitor\.timer enabled or active/);
+  assert.ok(readFileSync(join(L.ctl, 'systemctl-calls'), 'utf8').split('\n').filter(Boolean).every((c) => /^is-(enabled|active|failed) /.test(c)), 'the verifier only reads states');
+}));
+
+test('W1: 1, 2, 3: the watchdog timer DISABLED, INACTIVE, FAILED, runtime-only, masked or missing never passes an activated installation', withLab((L) => {
+  operational(L);
+  const cases = [
+    [() => writeFileSync(join(L.ctl, 'enabled'), `${MON_T}\n`), /FAIL +timer \(timer_disabled\): nawara-core-topology-watchdog\.timer/],
+    [() => writeFileSync(join(L.ctl, 'active'), `${MON_T}\n`), /FAIL +timer \(timer_inactive\): nawara-core-topology-watchdog\.timer is listed by the signed activation but not running/],
+    [() => answers(L, `is-active ${WD_T} failed`), /FAIL +timer \(timer_failed\): nawara-core-topology-watchdog\.timer/],
+    [() => answers(L, `is-enabled ${WD_T} enabled-runtime`), /FAIL +timer \(runtime_only\): nawara-core-topology-watchdog\.timer/],
+    [() => answers(L, `is-enabled ${WD_T} masked`, `is-active ${WD_T} inactive`), /FAIL +timer \(timer_masked\): nawara-core-topology-watchdog\.timer/],
+    [() => answers(L, `is-enabled ${WD_T} not-found`, `is-active ${WD_T} inactive`), /FAIL +timer \(timer_missing\): nawara-core-topology-watchdog\.timer/],
+    [() => answers(L, `is-enabled ${MON_T} disabled`), /FAIL +timer \(timer_disabled\): nawara-core-topology-monitor\.timer/],
+  ];
+  for (const [set, expected] of cases) {
+    writeFileSync(join(L.ctl, 'enabled'), `${MON_T}\n${WD_T}\n`); writeFileSync(join(L.ctl, 'active'), `${MON_T}\n${WD_T}\n`); rmSync(join(L.ctl, 'answers'), { force: true });
+    set();
+    const v = verify(L);
+    assert.equal(v.status, 1, `${expected}: ${v.out}`);
+    assert.match(v.out, expected);
+    assert.match(v.out, /RESULT: FAIL/);
+  }
+}));
+
+test('W1: a FAILED monitor or watchdog service fails the activated installation', withLab((L) => {
+  operational(L);
+  for (const s of ['nawara-core-topology-watchdog.service', 'nawara-core-topology-monitor.service']) {
+    writeFileSync(join(L.ctl, 'failed'), `${s}\n`);
+    const v = verify(L);
+    assert.equal(v.status, 1, v.out);
+    assert.match(v.out, new RegExp(`FAIL +service \\(service_failed\\): ${s.replace(/\./g, '\\.')} is in the failed state`));
+  }
+}));
+
+test('W1: 4: an unreadable, unknown or transitional systemd state is UNKNOWN (exit 3), never PASS', withLab((L) => {
+  operational(L);
+  for (const [line, expected] of [
+    [`is-active ${WD_T} what-is-this`, /UNKNOWN +activity \(systemctl_unavailable\): whether nawara-core-topology-watchdog\.timer is active could not be read/],
+    [`is-enabled ${WD_T} what-is-this`, /UNKNOWN +enablement \(systemctl_unavailable\): the state of nawara-core-topology-watchdog\.timer could not be read/],
+    [`is-failed nawara-core-topology-watchdog.service what-is-this`, /UNKNOWN +service \(systemctl_unavailable\): whether nawara-core-topology-watchdog\.service has failed could not be read/],
+    [`is-active ${WD_T} activating`, /UNKNOWN +timer \(timer_transitional\): nawara-core-topology-watchdog\.timer is activating/],
+  ]) {
+    answers(L, line);
+    const v = verify(L);
+    assert.equal(v.status, 3, `${line}: ${v.out}`);
+    assert.match(v.out, expected);
+    assert.match(v.out, /RESULT: UNKNOWN/);
+  }
+  rmSync(join(L.ctl, 'answers'));
+  writeFileSync(join(L.ctl, 'systemctl-broken'), '');
+  const v = verify(L);
+  assert.equal(v.status, 3, v.out);
+  assert.doesNotMatch(v.out, /RESULT: PASS/);
+}));
+
+test('W1: 5: the carrier is optional: unlisted and inactive passes; unlisted but running, or listed but stopped, fails', withLab((L) => {
+  operational(L);
+  writeFileSync(join(L.ctl, 'active'), `${MON_T}\n${WD_T}\n${AL_T}\n`);
+  let v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /unauthorized_activation\):.*nawara-core-topology-alert\.timer/);
+  activation(L, `${MON_T},${WD_T},${AL_T}`);
+  writeFileSync(join(L.ctl, 'active'), `${MON_T}\n${WD_T}\n`);
+  writeFileSync(join(L.ctl, 'enabled'), `${MON_T}\n${WD_T}\n${AL_T}\n`);
+  v = verify(L);
+  assert.equal(v.status, 1, v.out);
+  assert.match(v.out, /FAIL +timer \(timer_inactive\): nawara-core-topology-alert\.timer/);
+}));
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-W (W3): the watchdog's sandbox
+
+test('W3: 13, 14: the installed watchdog is a sandboxed observer; a weakened unit fails both its signed hash and its hardening', withLab((L) => {
+  approve(L);
+  assert.equal(run(L, 'install').status, 0);
+  let v = verify(L);
+  assert.equal(v.status, 0, v.out);
+  assert.match(v.out, /ok +hardening: nawara-core-topology-watchdog\.service is a sandboxed observer/);
+  assert.match(v.out, /ok +artifact nawara-core-topology-watchdog\.service: sha256 equals the signed manifest/, '14: the signed manifest still covers it');
+  const f = join(L.units, 'nawara-core-topology-watchdog.service');
+  for (const [what, edit] of [
+    ['the Docker socket reachable', (t) => t.replace(/^InaccessiblePaths=-\/run\/docker\.sock.*\n/m, '')],
+    ['the recovery inbox reachable', (t) => t.replace(/^InaccessiblePaths=-\/var\/lib\/nawara-core-topology-install .*\n/m, '')],
+    ['a network', (t) => t.replace('PrivateNetwork=yes', 'PrivateNetwork=no').replace('RestrictAddressFamilies=AF_UNIX', 'RestrictAddressFamilies=AF_UNIX AF_INET')],
+    ['a second writable path', (t) => t.replace('ReadWritePaths=/var/lib/nawara-core-topology-monitor', 'ReadWritePaths=/var/lib/nawara-core-topology-monitor\nReadWritePaths=/var/lib/nawara-core-topology')],
+    ['a restart of the monitor', (t) => t.replace('TimeoutStartSec=60', 'TimeoutStartSec=60\nExecStartPost=/usr/bin/systemctl start nawara-core-topology-monitor.service')],
+  ]) {
+    const original = readFileSync(f, 'utf8');
+    writeFileSync(f, edit(original));
+    v = verify(L);
+    assert.equal(v.status, 1, `${what}: ${v.out}`);
+    assert.match(v.out, /FAIL +hardening \(unit_hardening\): nawara-core-topology-watchdog\.service lacks/, what);
+    assert.match(v.out, /artifact nawara-core-topology-watchdog\.service \(hash_mismatch\)/, what);
+    writeFileSync(f, original);
+  }
+  assert.equal(verify(L).status, 0);
 }));

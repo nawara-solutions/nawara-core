@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LATCH_CONTAINED, LATCH_INACTIVE, ROLE, ROOT, SRC, authorizationText, hex, variant, world } from './lib/topology-monitor-world.mjs';
 
@@ -681,4 +681,311 @@ test('the four units: never reference a workflow, run the pinned paths, and trea
   for (const f of readdirSync(join(ROOT, '.github/workflows'))) {
     assert.doesNotMatch(readFileSync(join(ROOT, '.github/workflows', f), 'utf8'), /topology-monitor|nawara-core-topology|verify-and-contain/, `${f} never installs or starts the control`);
   }
+});
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-W (W2): the alert spool's lock
+
+/** A script run in the background: resolves { status, out } (bounded by the test's own timeout). */
+const startScript = (path) => new Promise((resolve) => {
+  const c = spawn(path, [], { env: { PATH: '/usr/bin:/bin' } });
+  let out = '';
+  c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { out += d; });
+  c.on('close', (status) => resolve({ status, out }));
+});
+const startMonitor = (w) => new Promise((resolve) => {
+  const c = spawn(join(w.install, 'verify-and-contain.sh'), [SERVICE], { env: { PATH: '/usr/bin:/bin' } });
+  let out = '';
+  c.stdout.on('data', (d) => { out += d; }); c.stderr.on('data', (d) => { out += d; });
+  c.on('close', (status) => resolve({ status, out }));
+});
+const waitFor = async (p, ms = 10_000) => { const end = Date.now() + ms; while (!existsSync(p)) { assert.ok(Date.now() < end, `${p} within ${ms} ms`); await new Promise((r) => setTimeout(r, 50)); } };
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+/** A spool exactly at its bound (RECORD_MAX_LINES): the next append trims it to the newest half. */
+const fillSpool = (w, n = 2000) => {
+  const f = join(w.state, 'alerts.jsonl');
+  writeFileSync(f, Array.from({ length: n }, (_, i) => `{"v":1,"kind":"filler","n":${i}}`).join('\n') + '\n', { mode: 0o600 });
+  chmodSync(f, 0o600);
+};
+const spoolLines = (w) => readFileSync(join(w.state, 'alerts.jsonl'), 'utf8').split('\n').filter(Boolean);
+/**
+ * Starts the watchdog so that its alert append TRIMS the spool, and pauses it between reading the newest lines and the rename.
+ * Resolves { run } (the watchdog's completion), wrapped: an async function that returned the bare promise would wait for it.
+ */
+const watchdogPausedInTrim = async (w) => {
+  fillSpool(w);
+  writeFileSync(join(w.ctl, 'pause'), 'mv alerts.jsonl\n');
+  const run = startScript(join(w.install, 'topology-watchdog.sh'));
+  await waitFor(join(w.ctl, 'paused'));
+  return { run };
+};
+
+test('W2: 6: a trim racing an append drops NO line: the monitor\'s alert waits for the watchdog\'s trim, then lands after it, intact and in order', async () => {
+  const w = watchdogWorld();
+  try {
+    assert.equal(monitor(w).status, 0);
+    const { run: wd } = await watchdogPausedInTrim(w);
+    assert.equal(spawnSync('flock', ['-n', '-E', '99', join(w.state, 'alerts.lock'), 'true']).status, 99, 'the paused trim holds the spool\'s lock');
+    w.setVerifier('UNKNOWN', 3, [['B0', 'UNKNOWN', 'broker_not_reachable']]);
+    const mon = startMonitor(w);
+    await sleepMs(500);   // the monitor is now waiting for the spool's lock, held by the paused trim
+    assert.ok(!spoolLines(w).some((l) => l.includes('"kind":"unknown_first"')), 'the monitor did not append into the file being trimmed');
+    writeFileSync(join(w.ctl, 'release'), '');
+    const [rw, rm] = await Promise.all([wd, mon]);
+    assert.equal(rm.status, 10, rm.out);
+    assert.doesNotMatch(rm.out, /alert spool lock unavailable/, 'the lock was acquired within its bound');
+    assert.ok(!existsSync(join(w.state, 'alerts.pending')), 'nothing parked');
+    assert.ok([0, 1].includes(rw.status), rw.out);
+    const lines = spoolLines(w);
+    const monitorAlerts = (rm.out.match(/\] ALERT severity=/g) ?? []).length;
+    assert.ok(monitorAlerts >= 1);
+    assert.equal(lines.length, 1000 + monitorAlerts, 'trimmed to the newest half, then every one of the monitor\'s lines after the trim');
+    assert.match(lines[999], /"kind":"watchdog_ok"/, 'the watchdog\'s own line survived its trim');
+    assert.deepEqual(lines.slice(1000).map((l) => JSON.parse(l).kind)[0], 'unknown_first', 'the monitor\'s lines, appended after the trim, are not lost');
+    for (const l of lines) JSON.parse(l);   // every line complete
+  } finally { w.cleanup(); }
+});
+
+test('W2: 10: a recovery\'s alert racing the watchdog\'s trim is not lost either', async () => {
+  const w = containedWorld();
+  try {
+    const systemctl = join(w.shim, 'systemctl');
+    writeFileSync(systemctl, '#!/usr/bin/env bash\ncase "$1" in is-active) exit 0 ;; is-failed) exit 1 ;; *) exit 9 ;; esac\n', { mode: 0o755 });
+    w.put('topology-watchdog.sh', { SYSTEMCTL: systemctl });
+    const { run: wd } = await watchdogPausedInTrim(w);
+    const rec = startScript(join(w.install, 'recover-notification-topology.sh'));   // no authorization in the inbox: refused, alerted
+    await sleepMs(500);
+    writeFileSync(join(w.ctl, 'release'), '');
+    const [, rr] = await Promise.all([wd, rec]);
+    assert.equal(rr.status, 1, rr.out);
+    assert.match(rr.out, /REFUSED \(authorization_file\)/);
+    const lines = spoolLines(w);
+    assert.match(lines.at(-1), /"kind":"recovery_refused"/, 'the recovery\'s line survives the trim');
+    assert.equal(lines.length, 1000 + 1);
+    assert.equal(w.latchText(), LATCH_CONTAINED, 'containment unchanged');
+  } finally { w.cleanup(); }
+});
+
+test('W2: 7, 12: with the spool\'s lock held elsewhere, a containment still completes within its bound; its lines are PARKED, then appended in order', () => {
+  const w = world();
+  try {
+    const lock = join(w.state, 'alerts.lock');
+    const holder = spawn('flock', [lock, 'sleep', '60'], { detached: true, stdio: 'ignore' });
+    spawnSync('sleep', ['0.3']);
+    let parked;
+    try {
+      fillSpool(w);
+      w.setVerifier('FAIL', 1);
+      const t0 = Date.now();
+      const r = monitor(w);
+      const ms = Date.now() - t0;
+      assert.equal(r.status, 20, r.stdout + r.stderr);
+      assert.equal(w.latchText(), LATCH_CONTAINED);
+      assert.deepEqual(brokerChanges(w).map((c) => c.sub).slice(0, 2), ['clear_permissions', 'clear_topic_permissions'], 'the grants were revoked');
+      const waits = (r.stdout.match(/alert spool lock unavailable within 2s: the line is parked for the next writer that holds it/g) ?? []).length;
+      assert.ok(waits >= 3, `every alert of the run waited at most 2 s, then was parked (${waits})`);
+      assert.ok(ms < waits * 2_000 + 8_000, `bounded: ${ms} ms for ${waits} alerts waiting at most 2 s each`);
+      assert.equal(spoolLines(w).length, 2000, 'nothing appended or trimmed without the lock');
+      parked = readdirSync(join(w.state, 'alerts.pending')).filter((f) => f.endsWith('.line')).sort()
+        .map((f) => JSON.parse(readFileSync(join(w.state, 'alerts.pending', f), 'utf8')).kind);
+      assert.equal(parked.length, waits);
+      assert.deepEqual(parked.slice(0, 3), ['containment_started', 'verification_fail', 'contained'], 'parked whole, in their order');
+    } finally { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* gone */ } spawnSync('sleep', ['0.2']); }
+    // the next run, once the lock is free, flushes the parked lines, in order, even with nothing new to alert; none lost, none left
+    w.setVerifier('FAIL', 1);
+    const r2 = monitor(w);
+    assert.equal(r2.status, 20, r2.stdout + r2.stderr);
+    assert.doesNotMatch(r2.stdout, /alert spool lock unavailable/);
+    const kinds2 = spoolLines(w).map((l) => JSON.parse(l).kind).filter((k) => k !== 'filler');
+    assert.deepEqual(kinds2.slice(0, parked.length), parked, 'every parked line, in its order, reached the spool (then trimmed with the rest, never lost)');
+    assert.deepEqual(readdirSync(join(w.state, 'alerts.pending')).filter((f) => f.endsWith('.line')), []);
+    // an unusable lock (a directory) never blocks containment either: parked, never lost
+    rmSync(lock, { force: true });
+    mkdirSync(lock);
+    w.writeState({});
+    w.writeIncident('none');
+    writeFileSync(w.latch, LATCH_INACTIVE);
+    const r3 = monitor(w);
+    assert.equal(r3.status, 20, r3.stdout + r3.stderr);
+    assert.match(r3.stdout, /the line is parked/);
+    assert.ok(readdirSync(join(w.state, 'alerts.pending')).filter((f) => f.endsWith('.line')).length >= 3);
+  } finally { w.cleanup(); }
+});
+
+test('W2: 8, 9: a watchdog killed while holding its locks frees them; a second watchdog at the same time refuses (75) and changes nothing', async () => {
+  const w = watchdogWorld();
+  try {
+    assert.equal(monitor(w).status, 0);
+    // 9: two watchdogs at once: the second finds the first holding its lock
+    const { run: first } = await watchdogPausedInTrim(w);
+    const before = readFileSync(join(w.state, 'alerts.jsonl'), 'utf8');
+    const second = w.watchdog();
+    assert.equal(second.status, 75, second.stdout + second.stderr);
+    assert.equal(readFileSync(join(w.state, 'alerts.jsonl'), 'utf8'), before, 'the refused run wrote nothing');
+    writeFileSync(join(w.ctl, 'release'), '');
+    await first;
+    rmSync(join(w.ctl, 'release'));
+    // 8: killed inside the trim (before the rename), holding the watchdog's and the spool's locks
+    fillSpool(w, 2001);
+    rmSync(join(w.state, 'watchdog'));   // a status change, so it alerts (and trims)
+    w.crashAt('mv', 'alerts.jsonl', 'before');
+    const killed = w.watchdog();
+    assert.equal(killed.signal, 'SIGKILL', 'killed inside its trim');
+    assert.equal(spoolLines(w).length, 2002, 'killed before the rename: the spool is untouched, its new line kept');
+    // the kernel released both locks with the process: the next writers proceed at once
+    w.setVerifier('UNKNOWN', 3, [['B0', 'UNKNOWN', 'broker_not_reachable']]);
+    const t0 = Date.now();
+    const r = monitor(w);
+    assert.equal(r.status, 10, r.stdout + r.stderr);
+    assert.ok(Date.now() - t0 < 2_000 + 3_000);
+    assert.doesNotMatch(r.stdout, /alert spool lock unavailable/);
+    assert.notEqual(w.watchdog().status, 75, 'no stale lock');
+    assert.ok(spoolLines(w).some((l) => l.includes('"kind":"unknown_first"')));
+  } finally { w.cleanup(); }
+});
+
+// ------------------------------------------------------------------------------------------------ OD-BRK-2b-W (C1, C2, C3): parked lines
+
+/** Holds the spool's lock from another process for the duration of `fn` (its own process group: released at once afterwards). */
+const withSpoolLockHeld = async (w, fn) => {
+  const holder = spawn('flock', [join(w.state, 'alerts.lock'), 'sleep', '60'], { detached: true, stdio: 'ignore' });
+  spawnSync('sleep', ['0.3']);
+  try { return await fn(); } finally { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* gone */ } spawnSync('sleep', ['0.2']); }
+};
+const pendingDir = (w) => join(w.state, 'alerts.pending');
+const parkedFiles = (w) => (existsSync(pendingDir(w)) ? readdirSync(pendingDir(w)).filter((f) => f.endsWith('.line')).sort() : []);
+const orphanFiles = (w) => (existsSync(pendingDir(w)) ? readdirSync(pendingDir(w)).filter((f) => f.startsWith('.tmp.')) : []);
+const traced = (w) => readFileSync(join(w.ctl, 'trace'), 'utf8').split('\n').filter(Boolean);
+const UNKNOWN_RUN = [['B0', 'UNKNOWN', 'broker_not_reachable']];
+
+test('C1: a parked line is published only whole and durably: written, synced, renamed, its directory synced; merged ones removed only after the spool is synced', async () => {
+  const w = world();
+  try {
+    writeFileSync(join(w.ctl, 'trace'), '');
+    await withSpoolLockHeld(w, () => { w.setVerifier('UNKNOWN', 3, UNKNOWN_RUN); assert.equal(monitor(w).status, 10); });
+    const files = parkedFiles(w);
+    assert.ok(files.length >= 1);
+    const calls = traced(w);
+    const d = pendingDir(w);
+    // the directory itself, new, is synced into the state directory first
+    assert.ok(calls.includes(`sync -- ${w.state}`), 'the new pending directory is made durable');
+    for (const f of files) {
+      const mvAt = calls.findIndex((c) => c.startsWith('mv -f -- ') && c.endsWith(` ${join(d, f)}`));
+      assert.ok(mvAt > 0, `${f} was published by a rename`);
+      const tmp = calls[mvAt].split(' ')[3];
+      assert.match(tmp, /\/alerts\.pending\/\.tmp\.[A-Za-z0-9]{8}$/, 'from a unique temporary file in the same directory');
+      assert.ok(calls.slice(0, mvAt).includes(`sync -- ${tmp}`), `${f}: its content synced BEFORE the rename`);
+      assert.ok(calls.slice(mvAt + 1).includes(`sync -- ${d}`), `${f}: the directory synced AFTER the rename`);
+      assert.equal(statSync(join(d, f)).mode & 0o777, 0o600);
+    }
+    assert.equal(statSync(d).mode & 0o777, 0o700);
+    assert.deepEqual(orphanFiles(w), []);
+    // the merge: appended, the spool synced, and only then the parked files removed
+    writeFileSync(join(w.ctl, 'trace'), '');
+    w.setVerifier('PASS', 0);
+    assert.equal(monitor(w).status, 0);
+    const merge = traced(w);
+    const syncAt = merge.indexOf(`sync -- ${join(w.state, 'alerts.jsonl')}`);
+    assert.ok(syncAt >= 0, 'the spool is synced before the parked files go');
+    assert.deepEqual(parkedFiles(w), []);
+  } finally { w.cleanup(); }
+});
+
+test('C1: a failed sync never publishes a partial line: no parked file, no temporary left, the failure in the journal, containment unaffected', async () => {
+  const w = world();
+  try {
+    await withSpoolLockHeld(w, () => {
+      writeFileSync(join(w.ctl, 'fail'), 'sync alerts.pending/.tmp.\n');   // the content sync of the first parked line fails
+      w.setVerifier('FAIL', 1);
+      const r = monitor(w);
+      assert.equal(r.status, 20, r.stdout + r.stderr);
+      assert.equal(w.latchText(), LATCH_CONTAINED, 'containment never depends on the spool');
+      assert.match(r.stdout, /alert spool unavailable \(kind=containment_started\); containment never depends on it/);
+      assert.ok(!parkedFiles(w).some((f) => readFileSync(join(pendingDir(w), f), 'utf8').includes('"kind":"containment_started"')), 'the unsynced line was never published');
+      assert.deepEqual(orphanFiles(w), [], 'its temporary file was removed');
+      assert.ok(parkedFiles(w).length >= 2, 'the next lines park normally');
+    });
+    // a failed directory sync after the rename: the line is published (whole), and the journal says its durability is not confirmed
+    await withSpoolLockHeld(w, () => {
+      writeFileSync(join(w.ctl, 'fail'), `sync =-- ${pendingDir(w)}\n`);   // exactly the directory's sync, after the rename
+      w.setVerifier('UNKNOWN', 3, UNKNOWN_RUN);
+      w.writeState({});
+      w.writeIncident('none');
+      writeFileSync(w.latch, LATCH_INACTIVE);
+      const r = monitor(w);
+      assert.match(r.stdout, /a parked line is published, but its directory could not be synced/);
+    });
+  } finally { w.cleanup(); }
+});
+
+test('C1: a merge interrupted before its sync, or whose sync fails, repeats lines and never loses one', async () => {
+  const w = watchdogWorld();
+  try {
+    assert.equal(monitor(w).status, 0);
+    await withSpoolLockHeld(w, () => { w.setVerifier('UNKNOWN', 3, UNKNOWN_RUN); assert.equal(monitor(w).status, 10); });
+    const lines = parkedFiles(w).map((f) => readFileSync(join(pendingDir(w), f), 'utf8'));
+    assert.ok(lines.length >= 1);
+    // the spool's sync keeps failing: the lines are appended, but the parked files stay
+    writeFileSync(join(w.ctl, 'fail-always'), `sync =-- ${join(w.state, 'alerts.jsonl')}\n`);
+    w.watchdog();
+    assert.equal(parkedFiles(w).length, lines.length, 'not removed without a synced spool');
+    assert.ok(lines.every((l) => spoolLines(w).includes(l)), 'yet appended: the next merge repeats them, never loses them');
+    rmSync(join(w.ctl, 'fail-always'));
+    // killed right after the spool's sync, before the removal: next time the lines are appended again (duplicates), never lost
+    w.crashAt('sync', join(w.state, 'alerts.jsonl'), 'after');
+    w.watchdog();
+    assert.equal(parkedFiles(w).length, lines.length, 'killed before the removal: still parked');
+    w.watchdog();
+    assert.deepEqual(parkedFiles(w), [], 'a later run removes them once merged and synced');
+    const spool = spoolLines(w);
+    for (const l of lines) assert.ok(spool.filter((x) => x === l).length >= 1, 'every parked line reached the spool (possibly more than once)');
+  } finally { w.cleanup(); }
+});
+
+test('C2: two writers parking concurrently: each keeps its own order, and the merge follows the file-name sort key', async () => {
+  const w = watchdogWorld();
+  try {
+    assert.equal(monitor(w).status, 0);
+    rmSync(join(w.state, 'watchdog'), { force: true });   // the watchdog alerts (a change of status) and the monitor reports it quiet
+    await withSpoolLockHeld(w, async () => {
+      w.setVerifier('FAIL', 1);   // a containment: three lines, always in this order, from one writer
+      const [m, d] = await Promise.all([startMonitor(w), startScript(join(w.install, 'topology-watchdog.sh'))]);
+      assert.equal(m.status, 20, m.out);
+      assert.ok([0, 1].includes(d.status), d.out);
+    });
+    const files = parkedFiles(w);
+    const meta = files.map((f) => { const [ns, pid, seq] = f.split('.'); return { f, ns, pid, seq: Number(seq), kind: JSON.parse(readFileSync(join(pendingDir(w), f), 'utf8')).kind }; });
+    assert.ok(new Set(meta.map((x) => x.pid)).size === 2, `two writers parked (${files.join(', ')})`);
+    for (const pid of new Set(meta.map((x) => x.pid))) {
+      const own = meta.filter((x) => x.pid === pid);
+      assert.deepEqual(own.map((x) => x.seq), own.map((_, i) => i + 1), 'each writer numbers its own lines 1, 2, ... in its own order');
+    }
+    assert.ok(meta.every((x) => /^\d{19}$/.test(x.ns)), 'the sort key starts with a fixed-width nanosecond time');
+    const monitorKinds = meta.filter((x) => ['containment_started', 'verification_fail', 'contained'].includes(x.kind)).map((x) => x.kind);
+    assert.deepEqual(monitorKinds, ['containment_started', 'verification_fail', 'contained'], 'the monitor\'s own order survives the sort');
+    // the merge (the next writer holding the lock) appends them exactly in sort-key order
+    w.watchdog();
+    const kinds = spoolLines(w).map((l) => JSON.parse(l).kind);
+    const at = kinds.indexOf(meta[0].kind);
+    assert.deepEqual(kinds.slice(at, at + meta.length), meta.map((x) => x.kind), 'merged in sort-key order');
+  } finally { w.cleanup(); }
+});
+
+test('C3: a crash while publishing leaves an unpublished temporary file: never merged, never taken as an accepted line, and inspectable', async () => {
+  const w = watchdogWorld();
+  try {
+    assert.equal(monitor(w).status, 0);
+    await withSpoolLockHeld(w, () => {
+      w.crashAt('mv', 'alerts.pending/.tmp.', 'before');   // killed between the synced temporary file and its rename
+      w.setVerifier('UNKNOWN', 3, UNKNOWN_RUN);
+      const r = monitor(w);
+      assert.equal(r.signal, 'SIGKILL');
+    });
+    const orphans = orphanFiles(w);
+    assert.equal(orphans.length, 1, 'one unpublished temporary file');
+    assert.match(readFileSync(join(pendingDir(w), orphans[0]), 'utf8'), /"kind":"unknown_first"/, 'its content is inspectable');
+    assert.deepEqual(parkedFiles(w), [], 'never published');
+    w.watchdog();
+    assert.ok(!spoolLines(w).some((l) => l.includes('"kind":"unknown_first"')), 'never merged into the spool');
+    assert.deepEqual(orphanFiles(w), orphans, 'and never removed automatically (left for an investigation)');
+  } finally { w.cleanup(); }
 });
