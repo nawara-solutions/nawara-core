@@ -291,7 +291,7 @@ describeWithEnv('Stage 17.10 certification (real PostgreSQL, filesystem store)',
         ['/file/files', 'post', ['200', '201', '400', '401', '403', '408', '409', '411', '413', '415', '422', '429', '500', '503']],
         ['/file/files/{id}/attach', 'post', ['200', '400', '401', '403', '404', '409']],
         ['/file/t/{token}', 'put', ['200', '201', '400', '404', '408', '409', '411', '413', '415', '422', '429', '500', '503']],
-        ['/file/t/{token}', 'get', ['200', '404', '429', '500', '503']],
+        ['/file/t/{token}', 'get', ['200', '404', '409', '429', '500', '503']], // 409 ticket_in_use: S2-File.4
         ['/file/files/{id}', 'get', ['200', '400', '401', '403', '404']],
         ['/file/files/{id}', 'delete', ['202', '400', '401', '403', '404', '409']],
         ['/file/files/{id}/content', 'get', ['200', '400', '401', '403', '404', '409', '410', '429', '500', '503']],
@@ -404,7 +404,13 @@ async function lifecycle(t: TestApp, s: Sql, storage: StoragePort): Promise<void
   const once = await request(server()).post(`/file/files/${id}/tickets`).set(auth(drive, org)).send({ operation: 'download', singleUse: true });
   const oncePath = new URL(once.body.url as string).pathname;
   expect((await request(server()).get(oncePath)).status).toBe(200);
-  expect((await request(server()).get(oncePath)).body.code).toBe('ticket_invalid');
+  // S2-File.4: the reservation settles just after the response; until then a retry is 409 ticket_in_use, then consumed
+  let onceAgain = await request(server()).get(oncePath);
+  for (let i = 0; i < 100 && onceAgain.body.code === 'ticket_in_use'; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+    onceAgain = await request(server()).get(oncePath);
+  }
+  expect(onceAgain.body.code).toBe('ticket_invalid');
   const service = await request(server()).get(`/file/files/${id}/content`).set(auth(drive, org));
   expect([service.status, service.headers['cross-origin-resource-policy']]).toEqual([200, 'same-origin']);
 

@@ -244,7 +244,9 @@ describeWithEnv('download + authorization (real PostgreSQL, filesystem store)', 
     const url = (await issue(f.id, { singleUse: true })).body.url as string;
     const results = await Promise.all(Array.from({ length: 20 }, () => request(server()).get(path(url))));
     expect(results.filter((r) => r.status === 200)).toHaveLength(1);
-    expect(results.filter((r) => r.status === 404 && r.body.code === 'ticket_invalid')).toHaveLength(19);
+    // S2-File.4: a loser meets the winner's reservation in progress (409 ticket_in_use) or, once it committed, a consumed ticket (404)
+    expect(results.filter((r) => (r.status === 409 && r.body.code === 'ticket_in_use') || (r.status === 404 && r.body.code === 'ticket_invalid'))).toHaveLength(19);
+    expect((await request(server()).get(path(url))).body.code).toBe('ticket_invalid');
   });
 
   it('every unusable ticket is the same 404 ticket_invalid (malformed, unknown, expired, revoked, upload ticket, file gone, issuer lost the right)', async () => {

@@ -480,7 +480,10 @@ const SPEC = {
   },
   // Core V2 S2-File.2 (OD-FILE F6): every access to a file THROUGH an evidence grant, recorded in the transaction that authorizes it,
   // before any byte or metadata leaves. `access` says what was authorized; `content_authorized` and `ticket_redemption_authorized` are
-  // NOT proof of delivery (a stream can still fail or be cut after authorization). The grantee service is the actor; a ticket redemption
+  // NOT proof of delivery (a stream can still fail or be cut after authorization). S2-File.4 adds how a single-use grant ticket's
+  // reservation settled: `ticket_redemption_committed` (the server finished writing the response; still not proof of receipt),
+  // `ticket_redemption_uncertain` (bytes may have been sent, or the lease ran out unsettled: consumed, never reusable) and
+  // `ticket_redemption_released` (failed before any header was sent: the ticket is usable again). The grantee service is the actor; a ticket redemption
   // has no authenticated caller, so its actor is File's redemption process. No ticket, token, secret, file name or byte travels.
   'file.granted_read': {
     producer: 'file-service', category: 'security', since: 1, actors: { service: true, system: ['file_granted_ticket_redemption'] },
@@ -488,7 +491,12 @@ const SPEC = {
     changes: {
       file_id: { type: 'uuid', shape: 'value', required: true },
       purpose: { type: 'code', shape: 'value', required: true, values: ['dispute_evidence', 'surplus_evidence', 'settlement_evidence'] },
-      access: { type: 'code', shape: 'value', required: true, values: ['metadata', 'content_authorized', 'ticket_issued', 'ticket_redemption_authorized'] },
+      access: {
+        type: 'code', shape: 'value', required: true,
+        values: ['metadata', 'content_authorized', 'ticket_issued', 'ticket_redemption_authorized',
+          // S2-File.4 (OD-FILE F5), additive: how a single-use grant ticket's reservation settled
+          'ticket_redemption_committed', 'ticket_redemption_uncertain', 'ticket_redemption_released'],
+      },
     },
     purpose: 'A Core service was authorized, through an active evidence grant, to read a file\'s metadata or content or to issue or redeem a download ticket for it (authorization, not proof of delivery).',
   },

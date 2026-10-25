@@ -119,3 +119,9 @@ authorized access (not a delivery). Holds (S2-File.3) and the lease (S2-File.4) 
 **Implemented in S2-File.3:** F4 holds (`hold` operation): placed and released by the file's owner service under its own uuid
 `holdRef`, several per file, no expiry, append-only history; while any is active no deletion path can proceed (enforced in the database);
 `file.hold_placed` / `file.hold_released`. The lease (S2-File.4) remains.
+
+**Implemented in S2-File.4 (F5):** a single-use download ticket is reserved, not consumed, at redemption: one reservation at a time,
+a lease of at most 60 s bounded by the ticket's and its grant's expiry; committed when the response has been completely written (not
+proof of receipt); released to unused only when nothing was sent (no header left the process); otherwise, and whenever a lease runs out
+unsettled (a crash, a failed settlement), consumed as `uncertain` and never reusable. No renewal: a lease running out only ends in
+`uncertain`, so a slow transfer can never open a second redemption.

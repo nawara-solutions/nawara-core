@@ -287,7 +287,13 @@ describeWithEnv('granted reads and grant tickets (real PostgreSQL)', ['TEST_DATA
       const g = await granted();
       const tk = await ticket(g, { singleUse: true });
       expect((await redeem(tk.body.url as string)).status).toBe(200);
-      expect(bodyCode(await redeem(tk.body.url as string))).toBe('ticket_invalid');
+      // S2-File.4: until the reservation settles (just after the response), a retry meets it in progress (409); then it is consumed
+      let again = await redeem(tk.body.url as string);
+      for (let i = 0; i < 100 && bodyCode(again) === 'ticket_in_use'; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        again = await redeem(tk.body.url as string);
+      }
+      expect(bodyCode(again)).toBe('ticket_invalid');
     });
 
     it('disposition: inline only for an image', async () => {

@@ -38,7 +38,10 @@ export interface AuditedHold {
 }
 
 /** What a granted access authorized (the catalog's `access` values). */
-export type GrantedAccess = 'metadata' | 'content_authorized' | 'ticket_issued' | 'ticket_redemption_authorized';
+export type GrantedAccess =
+  | 'metadata' | 'content_authorized' | 'ticket_issued' | 'ticket_redemption_authorized'
+  // S2-File.4: how a single-use grant ticket's reservation settled (never proof the client received the body)
+  | 'ticket_redemption_committed' | 'ticket_redemption_uncertain' | 'ticket_redemption_released';
 
 // Arbitrary, fixed namespace for File's deterministically derived audit event ids (RFC 4122 §4.3).
 const NAMESPACE = Buffer.from('6d1f0c9a2b3e4f5a8b7c6d5e4f3a2b1c', 'hex');
@@ -100,7 +103,7 @@ export class FileAudit {
    * a completed delivery. A redemption has no authenticated caller: its actor is the redemption process.
    */
   async grantedRead(q: Queryable, grant: AuditedGrant, access: GrantedAccess): Promise<void> {
-    const actor = access === 'ticket_redemption_authorized'
+    const actor = access.startsWith('ticket_redemption_')
       ? { type: 'system' as const, id: 'file_granted_ticket_redemption' }
       : { type: 'service' as const, id: grant.granteeService };
     await this.writer.write(q, {

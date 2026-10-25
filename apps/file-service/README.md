@@ -96,6 +96,16 @@ holds active. No expiry. While any hold is active the file cannot be deleted by 
 append-only rows (`file_hold`, `file_hold_release`); `file.hold_placed` / `file.hold_released` are written in the same transaction.
 Reads, grants and tickets are unchanged.
 
+**Single-use ticket leases (Core V2 S2-File.4; migration `0007`, `src/tickets/ticket-leases.ts`):** redeeming a single-use download
+ticket RESERVES it (one reservation at a time, a lease of `FILE_TICKET_LEASE_SECONDS`, never past the ticket's or its grant's expiry;
+every existing check still applies at the claim). It then settles on what the server knows: **committed** once the response has been
+completely written (not proof the client received it), **released** back to unused only when the transfer failed before any header left
+the process (the same link can be retried), otherwise **uncertain** (bytes may have been sent): consumed, never reusable. A reservation
+nobody settles (a crash, a failed settlement write) is settled `uncertain` when its lease runs out, by the next redemption or the cleanup
+pass, never returned. While a reservation is in progress (also just after a completed response, until its settlement lands), the link
+answers `409 ticket_in_use`. Reusable tickets are unchanged. A grant ticket's settlement is recorded (`file.granted_read`:
+`ticket_redemption_committed` / `_uncertain` / `_released`); the `ticket_lease_*` counters cover every ticket.
+
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no File
 domain events (the broker carries only the audit intent); no user JWT; no malware scanner (decision B); no public or presigned URL,
 Range, multipart or versions.
@@ -125,6 +135,7 @@ Range, multipart or versions.
 | `FILE_DOWNLOAD_TICKET_TTL_SECONDS`, `FILE_DOWNLOAD_IDLE_TIMEOUT_MS` | 120 s, 30 s | 60–300 s, 1–120 s | download tickets; a client that stops reading is cut off |
 | `FILE_CLEANUP_ENABLED`, `FILE_CLEANUP_INTERVAL_MS`, `FILE_CLEANUP_BATCH_SIZE`, `FILE_DELETE_CONCURRENCY`, `FILE_DELETE_LEASE_SECONDS`, `FILE_DELETE_RETRY_BASE_SECONDS` / `FILE_DELETE_RETRY_MAX_SECONDS`, `FILE_TICKET_RETENTION_SECONDS` | true, 30 s, 20, 4, 300 s, 30 s / 1 h, 24 h | see the [17.7 record](../../docs/architecture/stage-17/stage-17-7-delete-cleanup-lifecycle.md) §10 | the cleanup workers; `FILE_DELETE_RETRY_MAX_SECONDS` (1–86400) must be at least the base |
 | `FILE_{UPLOAD,TICKET,DOWNLOAD}_RATE_PER_CALLER` / `_PER_ORGANIZATION`, `FILE_TICKET_MAX_DOWNLOADS`, `FILE_UPLOAD_MAX_IN_FLIGHT` | 600 / 120, 1200 / 300, 1200 / 300 per min; 50; 64 | see the [17.8 record](../../docs/architecture/stage-17/stage-17-8-security-integrity.md) §4 | usage limits (F32), reusable-ticket cap, per-process upload bound |
+| `FILE_TICKET_LEASE_SECONDS` | 60 (10–60) | Core V2 S2-File.4 | how long a single-use download ticket's reservation stays in progress (also bounded by the ticket's and its grant's expiry); an unsettled one past it is consumed as `uncertain`, never returned |
 | `FILE_DOWNLOAD_MAX_IN_FLIGHT`, `FILE_DOWNLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND`, `FILE_S3_MAX_SOCKETS` | 64, 16 KiB/s, 96 | see the [17.9 record](../../docs/architecture/stage-17/stage-17-9-operational-hardening.md) §17 | per-process download bound (`503 download_busy`), whole-transfer download deadline, S3 socket pool per client (checked against the bounds at boot) |
 | `FILE_OPS_REPORT_INTERVAL_MS`, `FILE_CLEANUP_MAX_BATCHES_PER_PASS`, `FILE_CLEANUP_PURGE_BATCH_SIZE`, `FILE_REQUEST_HASH_PREVIOUS_KEYS` | 60 s, 10, 500, empty | 17.9 record §17 | the operational snapshot, cleanup drain mode, request-hash key rotation |
 

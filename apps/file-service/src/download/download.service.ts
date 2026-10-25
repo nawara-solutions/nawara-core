@@ -19,6 +19,7 @@ import { STORAGE_PORT, type StoragePort, type StoredObjectStream } from '../stor
 import { UsageLimiter, type UsageKind } from '../limits/usage-limiter.js';
 import { OPS_COUNTERS_TOKEN, type OpsCounters } from '../ops/ops-counters.js';
 import { RedemptionLimiter } from '../tickets/redemption-limiter.js';
+import { TicketLeases } from '../tickets/ticket-leases.js';
 import { FILE_NOT_FOUND, fileError, fileView, organizationHeader, sizeBucket, type FileView } from '../upload/upload-http.js';
 import { contentDisposition } from './content-disposition.js';
 import { FILE_MESSAGES } from '../messages.js';
@@ -34,6 +35,10 @@ class TicketNoLongerValid extends Error {}
 class DownloadBusy extends Error {}
 
 const DOWNLOAD_BUSY = () => fileError(503, 'download_busy', FILE_MESSAGES.tooManyDownloads);
+const TICKET_IN_USE = () => fileError(409, 'ticket_in_use', FILE_MESSAGES.ticketInUse);
+
+/** How a stream that started ended: the response was completely written, or it was cut (bytes may or may not have left). */
+type StreamEnd = 'completed' | 'interrupted';
 
 /**
  * Verifies what is sent against the record without holding the object (Stage 17.8): counts the bytes (a body that runs over fails as
@@ -104,6 +109,7 @@ export class DownloadService {
     @Inject(OPS_COUNTERS_TOKEN) private readonly counters: OpsCounters,
     @Inject(IntegrityIncidents) private readonly incidents: IntegrityIncidents,
     @Inject(FileAudit) private readonly audit: FileAudit,
+    private readonly leases: TicketLeases,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────────────────────── path A: trusted services
@@ -174,7 +180,8 @@ export class DownloadService {
       try {
         claimed = await this.db.tx(async (q) => {
           // Ticket + file binding + AVAILABLE + the use cap (Stage 17.8: a leaked reusable ticket is not an unlimited download), one statement.
-          const c = await this.tickets.claimDownload(digest, q, this.config.limits.ticketMaxDownloads);
+          // S2-File.4: a single-use ticket is RESERVED here (one reservation at a time, under a short lease), not consumed.
+          const c = await this.tickets.claimDownload(digest, q, this.config.limits.ticketMaxDownloads, this.config.limits.ticketLeaseSeconds);
           if (!c) return undefined;
           if (c.grant) {
             // S2-File.2: a grant ticket. The claim proved the grant active and bound; the grantee must STILL hold `read_granted` for the
@@ -201,8 +208,36 @@ export class DownloadService {
         }
         throw e;
       }
-      if (!claimed) throw await invalid();
-      await this.stream(claimed.file, claimed.ticket.disposition ?? 'attachment', req, res, 'ticket');
+      if (!claimed) {
+        // S2-File.4: a reservation still in progress is `409 ticket_in_use` (not a failed redemption); one that ran out unsettled is
+        // settled `uncertain` here (consumed) and, like everything else, is `ticket_invalid`.
+        let inProgress = false;
+        try {
+          inProgress = await this.leases.afterRefusedClaim(digest);
+        } catch {
+          // fail closed: the answer stays ticket_invalid; the settling sweep will settle the lease
+        }
+        if (inProgress) {
+          this.counters.bump('ticket_in_use');
+          throw TICKET_IN_USE();
+        }
+        throw await invalid();
+      }
+      const lease = claimed.ticket.redemption === 'reserved' && claimed.ticket.leaseId ? { ticket: claimed.ticket.id, id: claimed.ticket.leaseId } : undefined;
+      let end: StreamEnd;
+      try {
+        end = await this.stream(claimed.file, claimed.ticket.disposition ?? 'attachment', req, res, 'ticket');
+      } catch (e) {
+        // A refusal before the stream (the store unavailable, the object missing or wrong, the client gone): nothing was sent, so the
+        // reservation is released and the same link can be retried. Should headers ever have left, it is uncertain instead.
+        if (lease) await this.leases.settle(lease.ticket, lease.id, res.headersSent ? 'uncertain' : 'released');
+        throw e;
+      }
+      // Settled on what the server KNOWS once the response-writing lifecycle is over: the response was completely written (committed: not
+      // proof the client received it), or it was cut after headers left (uncertain: consumed, never reusable), or before anything left
+      // (released). Until this settlement lands, a retry meets the reservation in progress (409). A settlement that cannot be written
+      // leaves the reservation to run out: uncertain.
+      if (lease) await this.leases.settle(lease.ticket, lease.id, end === 'completed' ? 'committed' : res.headersSent ? 'uncertain' : 'released');
     } finally {
       release?.(); // also when the commit itself failed after the slot was taken
     }
@@ -230,7 +265,7 @@ export class DownloadService {
    * Errors before the first byte are normal HTTP errors; a failure after it can only end the connection (the client sees a body
    * shorter than its Content-Length).
    */
-  private async stream(file: FileRow, disposition: 'attachment' | 'inline', req: Request, res: Response, route: 'service' | 'ticket' | 'granted'): Promise<void> {
+  private async stream(file: FileRow, disposition: 'attachment' | 'inline', req: Request, res: Response, route: 'service' | 'ticket' | 'granted'): Promise<StreamEnd> {
     const started = performance.now();
     const media = file.mediaType as FileMediaType;
     const size = Number(file.sizeBytes);
@@ -293,6 +328,7 @@ export class DownloadService {
     try {
       await pipeline(object.body, counter, res);
       log('ok', counter.bytes);
+      return 'completed';
     } catch (e) {
       // Headers (and possibly bytes) are gone: the only safe end is closing the connection; the store stream is destroyed with it.
       if (!res.destroyed) res.destroy();
@@ -306,6 +342,7 @@ export class DownloadService {
         await this.incidents.detected(file, e.message === 'digest_mismatch' ? 'digest_mismatch' : 'size_mismatch');
       }
       log(failed ? 'stream_failed' : overDeadline ? 'deadline' : abort.signal.aborted ? 'aborted' : 'stream_failed', counter.bytes);
+      return 'interrupted';
     } finally {
       clearTimeout(deadline);
       res.off('close', onClose);

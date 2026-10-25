@@ -8,6 +8,7 @@ import { TicketRepository } from '../persistence/ticket.repository.js';
 import { isStorageError } from '../storage/storage-error.js';
 import { STORAGE_PORT, type StoragePort } from '../storage/storage.port.js';
 import { deleteRetryDelaySeconds } from './cleanup-config.js';
+import { TicketLeases } from '../tickets/ticket-leases.js';
 
 export interface CleanupPassResult {
   expired: number;
@@ -16,6 +17,8 @@ export interface CleanupPassResult {
   abandoned: number;
   ticketsPurged: number;
   limitsPurged: number;
+  /** S2-File.4: single-use ticket reservations past their lease, settled `uncertain` (fail closed). */
+  leasesSettled: number;
 }
 
 /**
@@ -45,6 +48,7 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
     private readonly tickets: TicketRepository,
     @Inject(STORAGE_PORT) private readonly storage: StoragePort,
     private readonly usage: UsageLimiter,
+    private readonly leases: TicketLeases,
   ) {
     this.loop = new PollLoop(
       () => this.runOnce(),
@@ -88,11 +92,13 @@ export class CleanupWorker implements OnApplicationBootstrap, BeforeApplicationS
       abandoned += r.failed;
       return r.failed;
     });
+    // S2-File.4: settle runaway reservations first (the retention purge never removes a reservation still open).
+    const leasesSettled = await this.drain(batchSize, () => this.leases.settleExpired(batchSize));
     const ticketsPurged = await this.drain(purgeBatchSize, () => this.tickets.purgeExpired(this.config.cleanup.ticketRetentionSeconds, purgeBatchSize));
     const limitsPurged = await this.drain(purgeBatchSize, () => this.usage.purgeExpiredWindows(purgeBatchSize));
-    const result = { expired, deleted, retried, abandoned, ticketsPurged, limitsPurged };
-    if (expired + deleted + retried + abandoned + ticketsPurged + limitsPurged > 0) {
-      this.logger.log(`file_cleanup_pass expired=${expired} deleted=${deleted} retried=${retried} abandoned=${abandoned} tickets_purged=${ticketsPurged} limits_purged=${limitsPurged}`);
+    const result = { expired, deleted, retried, abandoned, ticketsPurged, limitsPurged, leasesSettled };
+    if (expired + deleted + retried + abandoned + ticketsPurged + limitsPurged + leasesSettled > 0) {
+      this.logger.log(`file_cleanup_pass expired=${expired} deleted=${deleted} retried=${retried} abandoned=${abandoned} tickets_purged=${ticketsPurged} limits_purged=${limitsPurged} leases_settled=${leasesSettled}`);
     }
     return result;
   }

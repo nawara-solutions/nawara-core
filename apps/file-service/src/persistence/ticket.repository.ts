@@ -35,10 +35,27 @@ export interface TicketRow {
   createdAt: Date;
   /** S2-File.2: the evidence grant a download ticket was issued from (its issuer is then the grantee), or null for an owner's ticket. */
   grantId: string | null;
+  /** S2-File.4: a single-use download ticket's redemption (null: unused, or a multi-use / upload ticket). */
+  redemption: TicketRedemption | null;
+  leaseId: string | null;
+  leaseUntil: Date | null;
+}
+
+/** S2-File.4: the redemption states of a single-use download ticket (migration 0007). */
+export type TicketRedemption = 'reserved' | 'committed' | 'uncertain';
+
+/** A settled (or settling) reservation, with the grant of a grant ticket (for its record). */
+export interface LeasedTicket {
+  ticket: TicketRow;
+  grant?: GrantRow;
 }
 
 const COLUMNS = `id, operation, "fileId", "issuedBy", "organizationId", disposition, "maxBytes", "mediaTypes", attach, "singleUse",
-  "useCount", "usedAt", "revokedAt", "expiresAt", "createdAt", "grantId"`;
+  "useCount", "usedAt", "revokedAt", "expiresAt", "createdAt", "grantId", redemption, "leaseId", "leaseUntil"`;
+
+/** S2-File.4: a settled ticket row `s` (never its digest) and, for a grant ticket, its grant without the idempotency data. */
+const SETTLED = `SELECT to_jsonb(s.*) - 'tokenDigest' AS ticket,
+  (SELECT to_jsonb(g.*) - 'idempotencyKey' - 'requestHash' FROM file_evidence_grant g WHERE g.id = s."grantId") AS grant FROM s`;
 
 export interface NewDownloadTicket {
   /** The issuer (the authenticated owner) and the file's organization, exactly as for `FileRepository.findOwned`. */
@@ -78,7 +95,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** JSON rows (to_jsonb) carry timestamps as strings: restore the Date fields of the row types. */
 function reviveTicket(raw: Record<string, unknown>): TicketRow {
   const t = raw as unknown as TicketRow & Record<string, unknown>;
-  for (const k of ['usedAt', 'revokedAt', 'expiresAt', 'createdAt'] as const) if (t[k] !== null) (t as Record<string, unknown>)[k] = new Date(t[k] as unknown as string);
+  for (const k of ['usedAt', 'revokedAt', 'expiresAt', 'createdAt', 'leaseUntil'] as const) if (t[k] !== null && t[k] !== undefined) (t as Record<string, unknown>)[k] = new Date(t[k] as unknown as string);
   if (t.maxBytes !== null) t.maxBytes = String(t.maxBytes);
   return t;
 }
@@ -214,15 +231,23 @@ export class TicketRepository {
    * claimed once (concurrent claims serialize on the ticket row). Stage 17.8: at most `maxUses` claims of any ticket (the reusable
    * download cap, F32), enforced by the same conditional UPDATE, so concurrent claims can never exceed it.
    */
-  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db, maxUses = 2_147_483_647): Promise<{ ticket: TicketRow; file: FileRow; grant?: GrantRow } | undefined> {
+  async claimDownload(tokenDigest: TicketDigest, q: Queryable = this.db, maxUses = 2_147_483_647, leaseSeconds = 60): Promise<{ ticket: TicketRow; file: FileRow; grant?: GrantRow } | undefined> {
     assertTicketDigest(tokenDigest);
     if (!Number.isSafeInteger(maxUses) || maxUses < 1) throw new Error('maxUses must be a positive integer');
+    if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 60) throw new Error('a lease lasts 1-60 seconds');
     const { rows } = await q.query<{ ticket: Record<string, unknown>; file: Record<string, unknown>; grant: Record<string, unknown> | null }>(
       `WITH claimed AS (
-         UPDATE file_access_ticket t SET "useCount" = t."useCount" + 1, "usedAt" = COALESCE(t."usedAt", now())
+         UPDATE file_access_ticket t SET
+           -- S2-File.4: a single-use ticket is RESERVED (its use is counted when the reservation settles); a reusable one counts now.
+           "useCount" = CASE WHEN t."singleUse" THEN t."useCount" ELSE t."useCount" + 1 END,
+           "usedAt" = CASE WHEN t."singleUse" THEN t."usedAt" ELSE COALESCE(t."usedAt", now()) END,
+           redemption = CASE WHEN t."singleUse" THEN 'reserved' END,
+           "leaseId" = CASE WHEN t."singleUse" THEN gen_random_uuid() END,
+           "leaseUntil" = CASE WHEN t."singleUse" THEN LEAST(now() + make_interval(secs => $3), t."expiresAt",
+             COALESCE((SELECT g."expiresAt" FROM file_evidence_grant g WHERE g.id = t."grantId"), t."expiresAt")) END
          FROM file f
          WHERE t."tokenDigest" = $1 AND t.operation = 'download' AND t."revokedAt" IS NULL AND t."expiresAt" > now()
-           AND (NOT t."singleUse" OR t."useCount" = 0) AND t."useCount" < $2
+           AND (NOT t."singleUse" OR (t."useCount" = 0 AND t.redemption IS NULL)) AND t."useCount" < $2
            AND f.id = t."fileId" AND f.status = 'AVAILABLE' AND f."organizationId" IS NOT DISTINCT FROM t."organizationId"
            AND (
              (t."grantId" IS NULL AND f."ownerService" = t."issuedBy")
@@ -234,11 +259,12 @@ export class TicketRepository {
                  AND g."organizationId" IS NOT DISTINCT FROM t."organizationId" AND g."revokedAt" IS NULL AND g."expiresAt" > now()))
            )
          RETURNING t.id, t.operation, t."fileId", t."issuedBy", t."organizationId", t.disposition, t."maxBytes", t."mediaTypes", t.attach,
-           t."singleUse", t."useCount", t."usedAt", t."revokedAt", t."expiresAt", t."createdAt", t."grantId", to_jsonb(f.*) AS file,
+           t."singleUse", t."useCount", t."usedAt", t."revokedAt", t."expiresAt", t."createdAt", t."grantId", t.redemption, t."leaseId", t."leaseUntil",
+           to_jsonb(f.*) AS file,
            (SELECT to_jsonb(g.*) - 'idempotencyKey' - 'requestHash' FROM file_evidence_grant g WHERE g.id = t."grantId") AS grant
        )
        SELECT to_jsonb(claimed.*) - 'file' - 'grant' AS ticket, claimed.file AS file, claimed.grant AS grant FROM claimed`,
-      [tokenDigest, maxUses],
+      [tokenDigest, maxUses, leaseSeconds],
     );
     const row = rows[0];
     if (!row) return undefined;
@@ -280,12 +306,68 @@ export class TicketRepository {
   async purgeExpired(retentionSeconds: number, limit: number): Promise<number> {
     const { rowCount } = await this.db.query(
       `WITH old AS MATERIALIZED (
-         SELECT id FROM file_access_ticket WHERE "expiresAt" < now() - make_interval(secs => $1) ORDER BY "expiresAt" LIMIT $2 FOR UPDATE SKIP LOCKED
+         SELECT id FROM file_access_ticket WHERE "expiresAt" < now() - make_interval(secs => $1) AND redemption IS DISTINCT FROM 'reserved'
+         ORDER BY "expiresAt" LIMIT $2 FOR UPDATE SKIP LOCKED
        )
        DELETE FROM file_access_ticket t USING old WHERE t.id = old.id`,
       [retentionSeconds, limit],
     );
     return rowCount ?? 0;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────── S2-File.4: settling a single-use reservation
+
+  /**
+   * Settles THIS lease (the redemption that holds it, identified by its lease id): `committed` (the server finished writing the response;
+   * also from `uncertain`, when the lease ran out first), `uncertain` (bytes may have been sent), or released back to unused (proven: no
+   * header left the process). `undefined` when that lease is not in a state allowing it (already settled another way, or not this lease).
+   */
+  async settleLease(ticketId: string, leaseId: string, to: 'committed' | 'uncertain' | 'released', q: Queryable = this.db): Promise<LeasedTicket | undefined> {
+    if (!UUID.test(ticketId) || !UUID.test(leaseId)) return undefined;
+    const set = to === 'released'
+      ? `redemption = NULL, "leaseId" = NULL, "leaseUntil" = NULL`
+      : `redemption = '${to}', "useCount" = 1, "usedAt" = COALESCE("usedAt", GREATEST(now(), "createdAt"))`;
+    const from = to === 'committed' ? `('reserved', 'uncertain')` : `('reserved')`;
+    const { rows } = await q.query<{ ticket: Record<string, unknown>; grant: Record<string, unknown> | null }>(
+      `WITH s AS (UPDATE file_access_ticket t SET ${set} WHERE t.id = $1 AND t."leaseId" = $2 AND t.redemption IN ${from} RETURNING t.*)
+       ${SETTLED}`,
+      [ticketId, leaseId],
+    );
+    return rows[0] ? leased(rows[0]) : undefined;
+  }
+
+  /**
+   * After a refused claim: settles this ticket's reservation as `uncertain` if its lease ran out unsettled (a crash, a lost settlement:
+   * fail closed), and tells whether a reservation is still in progress (another redemption is transferring it right now).
+   */
+  async afterRefusedClaim(tokenDigest: TicketDigest, q: Queryable = this.db): Promise<{ inProgress: boolean; settled?: LeasedTicket }> {
+    assertTicketDigest(tokenDigest);
+    const { rows } = await q.query<{ ticket: Record<string, unknown>; grant: Record<string, unknown> | null }>(
+      `WITH s AS (
+         UPDATE file_access_ticket t SET redemption = 'uncertain', "useCount" = 1, "usedAt" = COALESCE(t."usedAt", GREATEST(now(), t."createdAt"))
+         WHERE t."tokenDigest" = $1 AND t.redemption = 'reserved' AND t."leaseUntil" <= now() RETURNING t.*
+       )
+       ${SETTLED}`,
+      [tokenDigest],
+    );
+    if (rows[0]) return { inProgress: false, settled: leased(rows[0]) };
+    const live = await q.query(`SELECT 1 FROM file_access_ticket WHERE "tokenDigest" = $1 AND redemption = 'reserved' AND "leaseUntil" > now()`, [tokenDigest]);
+    return { inProgress: live.rows.length === 1 };
+  }
+
+  /** The settling sweep (the cleanup pass): reservations whose lease ran out unsettled become `uncertain`, a bounded batch. */
+  async settleExpiredLeases(limit: number, q: Queryable = this.db): Promise<LeasedTicket[]> {
+    const { rows } = await q.query<{ ticket: Record<string, unknown>; grant: Record<string, unknown> | null }>(
+      `WITH due AS MATERIALIZED (
+         SELECT id FROM file_access_ticket WHERE redemption = 'reserved' AND "leaseUntil" <= now() ORDER BY "leaseUntil" LIMIT $1 FOR UPDATE SKIP LOCKED
+       ), s AS (
+         UPDATE file_access_ticket t SET redemption = 'uncertain', "useCount" = 1, "usedAt" = COALESCE(t."usedAt", GREATEST(now(), t."createdAt"))
+         FROM due WHERE t.id = due.id AND t.redemption = 'reserved' RETURNING t.*
+       )
+       ${SETTLED}`,
+      [limit],
+    );
+    return rows.map(leased);
   }
 
   private async insert(q: Queryable, sql: string, params: unknown[]): Promise<TicketRow | undefined> {
@@ -296,4 +378,8 @@ export class TicketRepository {
       throw e;
     }
   }
+}
+
+function leased(row: { ticket: Record<string, unknown>; grant: Record<string, unknown> | null }): LeasedTicket {
+  return { ticket: reviveTicket(row.ticket), grant: row.grant ? reviveGrantRow({ ...row.grant, active: false }) : undefined };
 }

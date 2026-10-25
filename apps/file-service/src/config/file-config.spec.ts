@@ -144,11 +144,13 @@ describe('file-service configuration', () => {
       perCaller: { upload: 600, ticket: 1_200, download: 1_200 },
       perOrganization: { upload: 120, ticket: 300, download: 300 },
       ticketMaxDownloads: 50,
+      ticketLeaseSeconds: 60,
       uploadMaxInFlight: 64,
       downloadMaxInFlight: 64,
     });
     expect(() => loadFileConfig(env({ FILE_TICKET_RATE_PER_CALLER: '10', FILE_TICKET_RATE_PER_ORGANIZATION: '11' }))).toThrow(/FILE_TICKET_RATE_PER_ORGANIZATION must not exceed/);
-    for (const bad of [{ FILE_UPLOAD_RATE_PER_CALLER: '0' }, { FILE_DOWNLOAD_RATE_PER_ORGANIZATION: 'lots' }, { FILE_TICKET_MAX_DOWNLOADS: '0' }, { FILE_TICKET_MAX_DOWNLOADS: '10001' }]) {
+    for (const bad of [{ FILE_UPLOAD_RATE_PER_CALLER: '0' }, { FILE_DOWNLOAD_RATE_PER_ORGANIZATION: 'lots' }, { FILE_TICKET_MAX_DOWNLOADS: '0' }, { FILE_TICKET_MAX_DOWNLOADS: '10001' },
+      { FILE_TICKET_LEASE_SECONDS: '9' }, { FILE_TICKET_LEASE_SECONDS: '61' }, { FILE_TICKET_LEASE_SECONDS: 'soon' }]) {
       expect(() => loadFileConfig(env(bad))).toThrow(ConfigError);
     }
   });
