@@ -108,7 +108,7 @@ permissions_for() {
 # audit-service: write 0, read 1, domain events none, read binding exception audit-all-actions
 # auth-service: write 31, read 0, domain events inactive
 # billing-service: write 12, read 4, domain events active
-# file-service: write 5, read 0, domain events none
+# file-service: write 7, read 0, domain events none
 # notification-service: write 0, read 9, domain events none
 # organization-service: write 7, read 0, domain events none
 # payment-service: write 10, read 0, domain events active
@@ -125,7 +125,7 @@ topic_grants_for() {
       TOPIC_WRITE='^(audit\.invoice\.discarded|audit\.invoice\.issued|audit\.invoice\.paid|audit\.payment_request\.cancelled|audit\.payment_request\.created|audit\.price\.created|audit\.price\.retired|audit\.product\.archived|audit\.product\.created|audit\.subscription\.activated|audit\.subscription\.renewed|invoice\.created)$'
       TOPIC_READ='^(payment\.cancelled|payment\.expired|payment\.failed|payment\.succeeded)$' ;;
     file-service)
-      TOPIC_WRITE='^(audit\.file\.deleted|audit\.file\.grant_issued|audit\.file\.grant_revoked|audit\.file\.granted_read|audit\.file\.integrity_incident)$'
+      TOPIC_WRITE='^(audit\.file\.deleted|audit\.file\.grant_issued|audit\.file\.grant_revoked|audit\.file\.granted_read|audit\.file\.hold_placed|audit\.file\.hold_released|audit\.file\.integrity_incident)$'
       TOPIC_READ='^(?!)$' ;;
     notification-service)
       TOPIC_WRITE='^(?!)$'

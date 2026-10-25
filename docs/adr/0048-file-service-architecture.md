@@ -115,3 +115,7 @@ record, not a credential: there is no grant secret. Granted reads, holds and the
 **Implemented in S2-File.2:** granted metadata and content reads and grant tickets for the grantee (`read_granted` with `readPurposes`,
 the F8 policy dimension on the grantee side), re-checked at every access and at every ticket redemption; `file.granted_read` records each
 authorized access (not a delivery). Holds (S2-File.3) and the lease (S2-File.4) remain.
+
+**Implemented in S2-File.3:** F4 holds (`hold` operation): placed and released by the file's owner service under its own uuid
+`holdRef`, several per file, no expiry, append-only history; while any is active no deletion path can proceed (enforced in the database);
+`file.hold_placed` / `file.hold_released`. The lease (S2-File.4) remains.

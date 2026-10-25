@@ -94,7 +94,7 @@ describeWithEnv('runtime database role: ready, DML only, no DDL (real PostgreSQL
 
   it('Stage 17.3: the file schema belongs to the migrator; the runtime role uses it through the repositories (DML only)', async () => {
     const owners = await sql<{ t: string; o: string }>(adminTo(dbName), `SELECT tablename AS t, tableowner AS o FROM pg_tables WHERE tablename LIKE 'file%' ORDER BY 1`);
-    expect(owners).toEqual([{ t: 'file', o: migrator }, { t: 'file_access_ticket', o: migrator }, { t: 'file_evidence_grant', o: migrator }]);
+    expect(owners).toEqual([{ t: 'file', o: migrator }, { t: 'file_access_ticket', o: migrator }, { t: 'file_evidence_grant', o: migrator }, { t: 'file_hold', o: migrator }, { t: 'file_hold_release', o: migrator }]);
     const f = await t.app.get(FileRepository).createUploading({
       scope: { ownerService: 'core-drive', organizationId: null }, storage: { provider: 'filesystem', keyPrefix: 'files' }, uploadLeaseSeconds: 600, attachment: { deadlineSeconds: 3_600 },
     });

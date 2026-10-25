@@ -86,6 +86,16 @@ the grant revokes its tickets. Every access writes `file.granted_read` (`access`
 `ticket_redemption_authorized`) in the authorizing transaction, before anything is returned: an authorization, never a delivery
 confirmation. A revocation cannot recall a stream already authorized. HEAD is refused on the two GET routes.
 
+**Evidence holds (Core V2 S2-File.3; `src/holds/`):** `POST /file/files/{id}/holds` and `POST /file/files/{id}/holds/release`
+(`{ holdRef }`, a uuid), for the file's owner only (`hold`). A hold is the holder's reference on that file, in the file's organization:
+placing it again is `200` (the same hold), reusing it for another file is `409 hold_ref_conflict`, a released reference is never placed
+again (`409 hold_released`); release names exactly that hold (`404 hold_not_found` otherwise), is final and idempotent, and leaves other
+holds active. No expiry. While any hold is active the file cannot be deleted by any path: `DELETE /file/files/{id}` is
+`409 file_held`, the unattached-file expiry and the delete worker skip it, and `file_hold_guard` (migration `0006`) refuses the move to
+`DELETING` / `DELETED` in the database itself (also for a deletion that waited for a placing transaction). Placements and releases are
+append-only rows (`file_hold`, `file_hold_release`); `file.hold_placed` / `file.hold_released` are written in the same transaction.
+Reads, grants and tickets are unchanged.
+
 **Not here, by design (ADR-0048):** no call to Auth or to any product service; object storage is not a readiness dependency; no File
 domain events (the broker carries only the audit intent); no user JWT; no malware scanner (decision B); no public or presigned URL,
 Range, multipart or versions.
@@ -127,7 +137,7 @@ Range, multipart or versions.
     "core-notification": { "operations": ["read"], "organizations": "none" } } }
 ```
 
-Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`, `grant`, `read_granted`. `mediaTypes` (a subset of `application/pdf`, `image/jpeg`,
+Operations: `upload`, `read`, `attach`, `delete`, `issue_ticket`, `grant`, `read_granted`, `hold`. `mediaTypes` (a subset of `application/pdf`, `image/jpeg`,
 `image/png`, `image/webp`, `image/heic`, `image/heif`) and `maxBytes` are required exactly when the caller may `upload` or
 `issue_ticket`. S2-File.1: `grant` (issue and revoke evidence grants on the caller's own files) requires a non-empty `grantPurposes`
 (a subset of `dispute_evidence`, `surplus_evidence`, `settlement_evidence`), allowed only with `grant`. S2-File.2: `read_granted` (read,

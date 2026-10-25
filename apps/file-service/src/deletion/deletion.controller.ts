@@ -22,7 +22,7 @@ export class DeletionController {
   @ApiResponse({ status: 401, description: 'no or unknown service token' })
   @ApiResponse({ status: 403, description: 'operation_not_allowed | organization_not_allowed' })
   @ApiResponse({ status: 404, description: 'file_not_found (also another owner\'s or organization\'s file)' })
-  @ApiResponse({ status: 409, description: 'upload_in_progress | file_not_available (a refused or failed upload)' })
+  @ApiResponse({ status: 409, description: 'upload_in_progress | file_not_available (a refused or failed upload) | file_held (an evidence hold is active, S2-File.3)' })
   requestDeletion(@CallerService() caller: string, @Req() req: Request, @Param('id') id: string) {
     return this.deletions.requestDeletion(caller, req, id);
   }

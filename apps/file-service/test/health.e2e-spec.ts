@@ -32,12 +32,12 @@ describeWithEnv('health, readiness and database shutdown (real PostgreSQL)', ['T
       expect((await request(t.app.getHttpServer()).get('/ready').expect(503)).body.failed).toEqual(['migrations']); // the file schema is missing
       await request(t.app.getHttpServer()).get('/health').expect(200);
       const applied = await runMigrations(db.url, [kitMigrationsDir, fileMigrationsDir]);
-      expect(applied.applied).toEqual(['0001_file_schema.sql', '0002_file_deletion_worker.sql', '0003_file_name_marks.sql', '0004_file_evidence_grant.sql', '0005_file_granted_ticket.sql']);
+      expect(applied.applied).toEqual(['0001_file_schema.sql', '0002_file_deletion_worker.sql', '0003_file_name_marks.sql', '0004_file_evidence_grant.sql', '0005_file_granted_ticket.sql', '0006_file_evidence_hold.sql']);
       await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
       const again = await runMigrations(db.url, [kitMigrationsDir, fileMigrationsDir]);
       expect(again.applied).toEqual([]); // a re-run is a no-op
       const tables = await sql<{ t: string }>(db.url, `SELECT table_name AS t FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'file%' ORDER BY 1`);
-      expect(tables.map((r) => r.t)).toEqual(['file', 'file_access_ticket', 'file_evidence_grant']);
+      expect(tables.map((r) => r.t)).toEqual(['file', 'file_access_ticket', 'file_evidence_grant', 'file_hold', 'file_hold_release']);
     } finally {
       await t.app.close();
     }
