@@ -11,6 +11,7 @@ only: a change is a new numbered file. Only `*.sql` files count; this README is 
 | `0003_file_name_marks.sql` | 17.8 | `file_original_name_no_marks` (`NOT VALID`): no bidi mark, line / paragraph separator or BOM in a stored name ([record](../../../../docs/architecture/stage-17/stage-17-8-security-integrity.md) §4.5) |
 | `0004_file_evidence_grant.sql` | Core V2 S2-File.1 | `file_evidence_grant`: the owner-only, organization-preserving binding (trigger, file row `FOR SHARE`), the closed purpose-grantee pairs, the 7-day lifetime ceiling, per-grantor idempotency, immutability except one terminal revocation, no delete (ADR-0048 Amendment 1) |
 | `0005_file_granted_ticket.sql` | Core V2 S2-File.2 | `file_access_ticket."grantId"` (FK, download only, immutable) and the binding rule for a grant ticket: its grant names the file, the issuer as grantee and the organization, is active, and outlives the ticket; an owner's ticket keeps the `0001` rule |
+| `0006_file_evidence_hold.sql` | Core V2 S2-File.3 | `file_hold` and `file_hold_release` (append-only; one hold per holder reference; one release per hold), the owner-only placement binding (file row `FOR SHARE`), and `file_hold_guard` on `file`: no move to `DELETING` / `DELETED` while a hold is active (constraint name `file_held`) |
 
 **Upgrade precondition for `0003` (Stage 17.10):** a `NOT VALID` CHECK is still enforced on every UPDATE of an existing row, so a row
 written before `0003` whose name holds one of those marks could never change state again and would fail every worker batch it joins.

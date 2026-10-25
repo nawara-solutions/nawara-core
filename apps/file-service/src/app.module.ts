@@ -9,6 +9,7 @@ import { StorageModule } from './storage/storage.module.js';
 import { DeletionModule } from './deletion/deletion.module.js';
 import { DownloadModule } from './download/download.module.js';
 import { GrantModule } from './grants/grant.module.js';
+import { HoldModule } from './holds/hold.module.js';
 import { UploadModule } from './upload/upload.module.js';
 import { OpsCounters, OPS_COUNTERS_TOKEN } from './ops/ops-counters.js';
 import { OpsModule } from './ops/ops-reporter.js';
@@ -86,7 +87,8 @@ export class AppModule {
         UploadModule,
         DownloadModule,
         DeletionModule,
-        GrantModule, // Core V2 S2-File.1: evidence-grant issuance and revocation (owner services; no granted read yet)
+        GrantModule, // Core V2 S2-File.1 / .2: evidence grants (owner services) and granted reads (grantees)
+        HoldModule, // Core V2 S2-File.3: evidence holds (owner services); a held file cannot be deleted
         OpsModule, // Stage 17.9: the operational snapshot (file_ops_snapshot / file_ops_counters / file_storage_ops)
       ],
     };

@@ -55,6 +55,10 @@ describe('FILE_MESSAGES', () => {
       grantIdempotencyKeyReused: 'This Idempotency-Key was used for a different grant.',
       noSuchGrant: 'No such grant.',
       grantExpiring: 'The grant expires too soon for a download ticket.',
+      fileHeld: 'The file is under an evidence hold.',
+      holdRefConflict: 'This hold reference is already used for another file.',
+      holdReleased: 'This hold was released and cannot be placed again.',
+      noSuchHold: 'No such hold.',
     };
     expect(Object.keys(FILE_MESSAGES).sort()).toEqual(Object.keys(before).sort());
     for (const [id, en] of Object.entries(before)) expect(FILE_MESSAGES[id as keyof typeof FILE_MESSAGES].en).toBe(en);

@@ -28,6 +28,15 @@ export interface AuditedGrant {
   expiresAt: Date;
 }
 
+/** The persisted facts of an evidence hold (S2-File.3): its own row, never a request value. */
+export interface AuditedHold {
+  id: string;
+  fileId: string;
+  holderService: string;
+  holdRef: string;
+  organizationId: string | null;
+}
+
 /** What a granted access authorized (the catalog's `access` values). */
 export type GrantedAccess = 'metadata' | 'content_authorized' | 'ticket_issued' | 'ticket_redemption_authorized';
 
@@ -98,6 +107,25 @@ export class FileAudit {
       action: 'file.granted_read', actor, organizationId: grant.organizationId, resource: { type: 'file_evidence_grant', id: grant.id }, outcome: 'succeeded',
       changes: { file_id: grant.fileId, purpose: grant.purpose, access },
     });
+  }
+
+  /**
+   * S2-File.3: the hold's own transition, in its transaction, once (a repeated placement or release writes nothing); the event id derives
+   * from the hold, so a retried write can never record a second transition.
+   */
+  async holdPlaced(q: Queryable, hold: AuditedHold): Promise<void> {
+    await this.holdEvent(q, hold, 'file.hold_placed');
+  }
+
+  async holdReleased(q: Queryable, hold: AuditedHold): Promise<void> {
+    await this.holdEvent(q, hold, 'file.hold_released');
+  }
+
+  private async holdEvent(q: Queryable, hold: AuditedHold, action: 'file.hold_placed' | 'file.hold_released'): Promise<void> {
+    await this.writer.write(q, {
+      action, actor: { type: 'service', id: hold.holderService }, organizationId: hold.organizationId, resource: { type: 'file_hold', id: hold.id },
+      outcome: 'succeeded', changes: { file_id: hold.fileId, hold_ref: hold.holdRef },
+    }, { eventId: deterministicEventId(hold.id, `audit.${action}`) });
   }
 
   async integrityIncident(q: Queryable, file: AuditedFile, detector: IntegrityDetector, reason: IntegrityReason): Promise<void> {

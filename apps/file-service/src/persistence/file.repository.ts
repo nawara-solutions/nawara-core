@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import { DbService, isUniqueViolation, type Queryable } from '@nawara/service-kit';
+import { DbService, isUniqueViolation, pgConstraint, type Queryable } from '@nawara/service-kit';
 import type { FileMediaType } from '../policy/media-types.js';
 import { FilePersistenceError } from './persistence-error.js';
 import { newStorageKey } from './storage-key.js';
@@ -51,7 +51,11 @@ export interface FileRow {
 export type DeletionRequest =
   | { kind: 'deleting'; file: FileRow } // AVAILABLE → DELETING now, or already DELETING / DELETED (idempotent)
   | { kind: 'not_found' }
-  | { kind: 'not_deletable'; file: FileRow }; // UPLOADING / VERIFYING (no cancellation in V1), REJECTED / FAILED (terminal, no bytes)
+  | { kind: 'not_deletable'; file: FileRow } // UPLOADING / VERIFYING (no cancellation in V1), REJECTED / FAILED (terminal, no bytes)
+  | { kind: 'held' }; // S2-File.3: an evidence hold is active (nothing changed)
+
+/** S2-File.3: an active evidence hold, as `file_hold_guard` reports it (and the sweeps' own filter). */
+const HELD = `EXISTS (SELECT 1 FROM file_hold h WHERE h."fileId" = f.id AND NOT EXISTS (SELECT 1 FROM file_hold_release r WHERE r."holdId" = h.id))`;
 
 /** One claimed deletion: the row's key and the attempt number that fences its completion / rescheduling. */
 export interface DeletionClaim {
@@ -196,6 +200,16 @@ export class FileRepository {
    */
   async requestDeletion(scope: FileScope, id: string, within?: (q: Queryable, file: FileRow) => Promise<void>): Promise<DeletionRequest> {
     if (!UUID.test(id)) return { kind: 'not_found' };
+    try {
+      return await this.deletionTx(scope, id, within);
+    } catch (e) {
+      // S2-File.3: `file_hold_guard` refused the transition (a hold committed while this request waited for the row): nothing changed.
+      if (pgConstraint(e) === 'file_held') return { kind: 'held' };
+      throw e;
+    }
+  }
+
+  private deletionTx(scope: FileScope, id: string, within?: (q: Queryable, file: FileRow) => Promise<void>): Promise<DeletionRequest> {
     return this.db.tx(async (q) => {
       const { rows } = await q.query<FileRow>(
         `UPDATE file SET status = 'DELETING', "deletionRequestedAt" = now(), "deleteNextAttemptAt" = now()
@@ -226,8 +240,9 @@ export class FileRepository {
   async claimDeletions(limit: number, leaseSeconds: number): Promise<DeletionClaim[]> {
     const { rows } = await this.db.query<DeletionClaim>(
       `WITH due AS MATERIALIZED (
-         SELECT id FROM file
+         SELECT id FROM file f
          WHERE status = 'DELETING' AND "deleteNextAttemptAt" <= now() AND ("deleteLeaseUntil" IS NULL OR "deleteLeaseUntil" < now())
+           AND NOT ${HELD} -- S2-File.3: never claimed while held (placement needs AVAILABLE, so this is a second line)
          ORDER BY "deleteNextAttemptAt" LIMIT $1 FOR UPDATE SKIP LOCKED
        )
        UPDATE file f SET "deleteLeaseUntil" = now() + make_interval(secs => $2), "deleteAttempts" = f."deleteAttempts" + 1
@@ -273,7 +288,8 @@ export class FileRepository {
     return this.db.tx(async (q) => {
       const { rows } = await q.query<{ id: string }>(
         `WITH due AS MATERIALIZED (
-           SELECT id FROM file WHERE status = 'AVAILABLE' AND "attachedAt" IS NULL AND "attachDeadline" <= now()
+           SELECT id FROM file f WHERE status = 'AVAILABLE' AND "attachedAt" IS NULL AND "attachDeadline" <= now()
+             AND NOT ${HELD} -- S2-File.3: a held unattached file is kept; a placement in progress holds the row (SKIP LOCKED)
            ORDER BY "attachDeadline" LIMIT $1 FOR UPDATE SKIP LOCKED
          )
          UPDATE file f SET status = 'DELETING', "deletionRequestedAt" = now(), "deleteNextAttemptAt" = now()

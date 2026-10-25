@@ -492,6 +492,21 @@ const SPEC = {
     },
     purpose: 'A Core service was authorized, through an active evidence grant, to read a file\'s metadata or content or to issue or redeem a download ticket for it (authorization, not proof of delivery).',
   },
+  // Core V2 S2-File.3 (OD-FILE F4 / F6): a file's owner service places or releases an evidence hold (while any is active, the file cannot
+  // be deleted by any path). Written in the transition's own transaction, once per transition (a repeated placement or release writes
+  // nothing); the hold is the resource; the file and the holder's reference are uuids; no content, token or URL travels.
+  'file.hold_placed': {
+    producer: 'file-service', category: 'security', since: 1, actors: { service: true }, organization: 'optional',
+    resource: ['file_hold'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { file_id: { type: 'uuid', shape: 'value', required: true }, hold_ref: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'A file\'s owner service placed an evidence hold on it: the file can no longer be deleted while the hold is active.',
+  },
+  'file.hold_released': {
+    producer: 'file-service', category: 'security', since: 1, actors: { service: true }, organization: 'optional',
+    resource: ['file_hold'], subject: NO_SUBJECT, outcomes: OK,
+    changes: { file_id: { type: 'uuid', shape: 'value', required: true }, hold_ref: { type: 'uuid', shape: 'value', required: true } },
+    purpose: 'A file\'s owner service released one of its evidence holds: the file may be deleted again once no other hold is active.',
+  },
 
   // ---------------------------------------------------------------------------------------------------------------------------- release-service
   // Stage 20.3 (ADR-0051 §9): CI automation registers and publishes releases with a narrow per-product service credential; the actor is

@@ -87,7 +87,7 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `payment.failed` | commercial | user (member, owner, operator); service; system (`payment_webhook`, `payment_attempt_resolver`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection definitively failed. |
 | `payment.expired` | commercial | system (`payment_expiry_sweep`) | as recorded (UUID or null) | payment | — | succeeded | — | A collection lapsed unpaid. |
 
-## file-service (5)
+## file-service (7)
 
 | Action | Category | Actors | Organization | Resource | Subject | Outcomes | Changes | Purpose |
 |---|---|---|---|---|---|---|---|---|
@@ -96,6 +96,8 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `file.grant_issued` | security | service | as recorded (UUID or null) | file_evidence_grant | — | succeeded | `file_id`: uuid<br>`purpose`: dispute_evidence \| surplus_evidence \| settlement_evidence<br>`case_ref`: uuid<br>`expires_at`: timestamp | A file's owner service granted another Core service the time-bounded use of that file as evidence of one case. |
 | `file.grant_revoked` | security | service | as recorded (UUID or null) | file_evidence_grant | — | succeeded | `file_id`: uuid<br>`purpose`: dispute_evidence \| surplus_evidence \| settlement_evidence | A file's owner service revoked an evidence grant: the grantee can no longer use the file for that case. |
 | `file.granted_read` | security | service; system (`file_granted_ticket_redemption`) | as recorded (UUID or null) | file_evidence_grant | — | succeeded | `file_id`: uuid<br>`purpose`: dispute_evidence \| surplus_evidence \| settlement_evidence<br>`access`: metadata \| content_authorized \| ticket_issued \| ticket_redemption_authorized | A Core service was authorized, through an active evidence grant, to read a file's metadata or content or to issue or redeem a download ticket for it (authorization, not proof of delivery). |
+| `file.hold_placed` | security | service | as recorded (UUID or null) | file_hold | — | succeeded | `file_id`: uuid<br>`hold_ref`: uuid | A file's owner service placed an evidence hold on it: the file can no longer be deleted while the hold is active. |
+| `file.hold_released` | security | service | as recorded (UUID or null) | file_hold | — | succeeded | `file_id`: uuid<br>`hold_ref`: uuid | A file's owner service released one of its evidence holds: the file may be deleted again once no other hold is active. |
 
 ## audit-service (3)
 
@@ -119,4 +121,4 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 No action: no privileged Notification capability exists (Stage 18.1 A64). Delivery history stays in
 notification-service.
 
-**Total: 66 actions.**
+**Total: 68 actions.**

@@ -3,7 +3,7 @@ import { EVIDENCE_PURPOSES, type EvidencePurpose } from '../grants/evidence-purp
 import { FILE_MEDIA_TYPES, type FileMediaType } from './media-types.js';
 
 /** The operations a caller policy can grant (SDD §11). Nothing is granted unless listed. */
-export const FILE_OPERATIONS = ['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant', 'read_granted'] as const;
+export const FILE_OPERATIONS = ['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant', 'read_granted', 'hold'] as const;
 export type FileOperation = (typeof FILE_OPERATIONS)[number];
 
 /** Operations that create bytes, so they need the caller's own media types and size ceiling. */
@@ -36,6 +36,7 @@ const KEYS = new Set(['operations', 'organizations', 'mediaTypes', 'maxBytes', '
  * the closed evidence vocabulary (no wildcard); the grantee is fixed by the purpose, never chosen by the caller or the request.
  * S2-File.2: `read_granted` (read, and issue download tickets for, files granted TO the caller) needs an explicit, non-empty
  * `readPurposes` list from the same vocabulary; it opens nothing but the caller's own active grants.
+ * S2-File.3: `hold` (place and release evidence holds on the caller's own files) has no further dimension.
  *
  * Deny by default: a caller registered in `SERVICE_TOKENS` with no entry, or an entry for a caller with no token, refuses to boot; an
  * unknown operation, property, media type or an over-ceiling `maxBytes` refuses to boot. The policy is authorization only: the

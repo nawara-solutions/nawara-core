@@ -170,6 +170,19 @@ export const FILE_MESSAGES = defineMessages({
     ar: 'استُخدم مفتاح Idempotency-Key هذا لتفويض مختلف.',
   },
   noSuchGrant: { en: 'No such grant.', fr: 'Autorisation inexistante.', ar: 'التفويض غير موجود.' },
+  // evidence holds (Core V2 S2-File.3)
+  fileHeld: { en: 'The file is under an evidence hold.', fr: "Le fichier fait l'objet d'une conservation de preuve.", ar: 'الملف خاضع لحجز إثبات.' },
+  holdRefConflict: {
+    en: 'This hold reference is already used for another file.',
+    fr: 'Cette référence de conservation est déjà utilisée pour un autre fichier.',
+    ar: 'مرجع الحجز هذا مستخدم بالفعل لملف آخر.',
+  },
+  holdReleased: {
+    en: 'This hold was released and cannot be placed again.',
+    fr: 'Cette conservation a été levée et ne peut pas être replacée.',
+    ar: 'تم رفع هذا الحجز ولا يمكن وضعه مرة أخرى.',
+  },
+  noSuchHold: { en: 'No such hold.', fr: 'Conservation inexistante.', ar: 'الحجز غير موجود.' },
   grantExpiring: {
     en: 'The grant expires too soon for a download ticket.',
     fr: "L'autorisation expire trop tôt pour un ticket de téléchargement.",

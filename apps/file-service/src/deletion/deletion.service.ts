@@ -30,6 +30,8 @@ export class DeletionService {
     // The audit intent is written in the deletion's transaction, from the row it changed (its organization) and the authenticated caller.
     const outcome = await this.files.requestDeletion({ ownerService: caller, organizationId }, id, (q, file) => this.audit.deleted(q, file, caller));
     if (outcome.kind === 'not_found') throw FILE_NOT_FOUND(); // a foreign, missing or malformed id: the same answer
+    // S2-File.3: an active evidence hold (checked in the database itself, also against a hold committed while this request waited).
+    if (outcome.kind === 'held') throw fileError(409, 'file_held', FILE_MESSAGES.fileHeld);
     if (outcome.kind === 'not_deletable') {
       // No cancellation of an upload in progress (V1); a refused or failed upload has no bytes and is already terminal.
       if (outcome.file.status === 'UPLOADING' || outcome.file.status === 'VERIFYING') throw fileError(409, 'upload_in_progress', FILE_MESSAGES.uploadStillInProgress);

@@ -71,8 +71,8 @@ describe('FILE_SERVICE_POLICY', () => {
     expect(() => FileCallerPolicy.parse(raw, ['a'], CEILING)).toThrow(ConfigError);
   });
 
-  it('the operation vocabulary is closed (S2-File.1 adds grant, S2-File.2 read_granted)', () => {
-    expect([...FILE_OPERATIONS]).toEqual(['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant', 'read_granted']);
+  it('the operation vocabulary is closed (S2-File.1 adds grant, S2-File.2 read_granted, S2-File.3 hold)', () => {
+    expect([...FILE_OPERATIONS]).toEqual(['upload', 'read', 'attach', 'delete', 'issue_ticket', 'grant', 'read_granted', 'hold']);
   });
 
   it('the V1 allow-list is exactly the frozen one (ADR-0048 F13)', () => {
