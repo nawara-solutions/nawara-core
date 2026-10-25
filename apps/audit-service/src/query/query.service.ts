@@ -267,7 +267,10 @@ export class AuditQueryService {
   /** The owner read proper, after Auth verified the owner and the organization: the read and its self-audit in one transaction. */
   private async ownerRead(ownerId: string, organizationId: string, parsed: ParsedQuery): Promise<AuditPage> {
     const caller = `owner:${ownerId}`;
-    const query = this.authorized(caller, OWNER_POLICY, { kind: 'organization', organizationId }, parsed);
+    // Core V2 S2-Audit.5 (AUD-07): the organization is the owner's Company's by Auth's LIVE answer (checked before this call); the record's own
+    // organization claim is trusted only from a broker-verified producer, so this human read returns verified records only (fail closed:
+    // unverified and historical records stay readable by service callers only, ADR-0069 decision 4). Never inferred, never upgraded.
+    const query: AuthorizedAuditQuery = { ...this.authorized(caller, OWNER_POLICY, { kind: 'organization', organizationId }, parsed), verifiedOnly: true };
     const rows = await this.db.tx(async (q) => {
       const found = await this.records.findPage(query, q);
       await this.recordPlatformQuery(q, { type: 'user', id: ownerId, userKind: 'owner' }, query, Math.min(found.length, query.limit), parsed.cursor !== undefined, organizationId);

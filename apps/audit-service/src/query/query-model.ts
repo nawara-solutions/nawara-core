@@ -42,6 +42,13 @@ export interface AuthorizedAuditQuery {
   window: { from: Date; to: Date };
   limit: number;
   after?: CursorPosition;
+  /**
+   * Core V2 S2-Audit.5 (AUD-07; ADR-0069 decision 4): set by the server for a HUMAN-facing read only (the Company owner's organization read):
+   * only records whose delivery was broker-verified (`producerIdentityVerified IS TRUE`: broker user = source = the action's catalog owner).
+   * An unverified, unassessed (historical) or Audit-written record is never shown to a human; service reads are unchanged (decision 4:
+   * "records without [trusted scope] stay readable only by service callers"). Never a request value.
+   */
+  verifiedOnly?: true;
 }
 
 export const DEFAULT_LIMIT = 50;
