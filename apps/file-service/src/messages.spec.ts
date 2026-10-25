@@ -59,6 +59,7 @@ describe('FILE_MESSAGES', () => {
       holdRefConflict: 'This hold reference is already used for another file.',
       holdReleased: 'This hold was released and cannot be placed again.',
       noSuchHold: 'No such hold.',
+      ticketInUse: 'This link is being used; try again shortly.',
     };
     expect(Object.keys(FILE_MESSAGES).sort()).toEqual(Object.keys(before).sort());
     for (const [id, en] of Object.entries(before)) expect(FILE_MESSAGES[id as keyof typeof FILE_MESSAGES].en).toBe(en);

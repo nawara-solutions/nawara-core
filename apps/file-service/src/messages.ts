@@ -183,6 +183,12 @@ export const FILE_MESSAGES = defineMessages({
     ar: 'تم رفع هذا الحجز ولا يمكن وضعه مرة أخرى.',
   },
   noSuchHold: { en: 'No such hold.', fr: 'Conservation inexistante.', ar: 'الحجز غير موجود.' },
+  // single-use ticket reservations (Core V2 S2-File.4)
+  ticketInUse: {
+    en: 'This link is being used; try again shortly.',
+    fr: "Ce lien est en cours d'utilisation ; réessayez dans un instant.",
+    ar: 'هذا الرابط قيد الاستخدام؛ حاول مرة أخرى بعد قليل.',
+  },
   grantExpiring: {
     en: 'The grant expires too soon for a download ticket.',
     fr: "L'autorisation expire trop tôt pour un ticket de téléchargement.",

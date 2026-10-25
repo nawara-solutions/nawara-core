@@ -18,6 +18,12 @@ export interface UsageLimitsConfig {
   perOrganization: Record<UsageKind, number>;
   /** `FILE_TICKET_MAX_DOWNLOADS` (default 50): redemptions of ONE reusable download ticket over its whole (≤ 300 s) lifetime. */
   ticketMaxDownloads: number;
+  /**
+   * Core V2 S2-File.4: `FILE_TICKET_LEASE_SECONDS` (default 60, 10–60): how long a single-use download ticket's reservation stays
+   * "in progress" (bounded again by the ticket's and its grant's expiry). An unsettled reservation past it is consumed as `uncertain`,
+   * never returned: a slower transfer only loses the ticket, it never opens a second redemption.
+   */
+  ticketLeaseSeconds: number;
   /** `FILE_UPLOAD_MAX_IN_FLIGHT` (default 64): uploads streaming at once in ONE process (threat model: bounded concurrency). */
   uploadMaxInFlight: number;
   /**
@@ -47,6 +53,7 @@ export function loadUsageLimitsConfig(reader: EnvReader): UsageLimitsConfig {
     perCaller,
     perOrganization,
     ticketMaxDownloads: reader.int('FILE_TICKET_MAX_DOWNLOADS', { default: 50, min: 1, max: 10_000 }),
+    ticketLeaseSeconds: reader.int('FILE_TICKET_LEASE_SECONDS', { default: 60, min: 10, max: 60 }),
     uploadMaxInFlight: reader.int('FILE_UPLOAD_MAX_IN_FLIGHT', { default: 64, min: 1, max: 4_096 }),
     downloadMaxInFlight: reader.int('FILE_DOWNLOAD_MAX_IN_FLIGHT', { default: 64, min: 1, max: 4_096 }),
   };

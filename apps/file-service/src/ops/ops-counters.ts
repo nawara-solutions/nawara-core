@@ -16,6 +16,12 @@ export const OPS_COUNTERS = [
   'integrity_size_mismatch', // the stored object's size contradicts the record
   'integrity_object_missing', // the record is AVAILABLE, the object is gone
   'download_deadline', // a download cut by its whole-transfer bound (a client too slow)
+  // Core V2 S2-File.4, single-use ticket reservations: how they settled (never proof the client received the body)
+  'ticket_lease_committed', // the server finished writing the response
+  'ticket_lease_released', // failed before any header left the process: the ticket is usable again
+  'ticket_lease_uncertain', // bytes may have been sent, or the lease ran out unsettled: consumed, never reusable
+  'ticket_lease_settle_failed', // the settlement could not be written (the lease then runs out: uncertain)
+  'ticket_in_use', // 409: another redemption of the same single-use ticket is in progress
 ] as const;
 export type OpsCounter = (typeof OPS_COUNTERS)[number];
 

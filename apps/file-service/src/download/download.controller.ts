@@ -108,6 +108,7 @@ export class DownloadController {
   @ApiParam({ name: 'token', description: 'The opaque ticket (from the issuing service)' })
   @ApiResponse({ status: 200, ...BYTES })
   @ApiResponse({ status: 404, description: 'ticket_invalid' })
+  @ApiResponse({ status: 409, description: 'ticket_in_use (S2-File.4: a single-use ticket whose reservation is in progress; nothing consumed by this request)' })
   @ApiResponse({ status: 429, description: 'rate_limited' })
   @ApiResponse({ status: 500, description: 'file_content_missing (an integrity incident) | storage_error' })
   @ApiResponse({ status: 503, description: 'storage_unavailable | download_busy (too many downloads in progress in this process; retry, nothing consumed)' })

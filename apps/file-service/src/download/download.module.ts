@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { UsageLimitsModule } from '../limits/usage-limiter.js';
 import { PersistenceModule } from '../persistence/persistence.module.js';
 import { RedemptionModule } from '../tickets/redemption-limiter.js';
+import { TicketLeaseModule } from '../tickets/ticket-leases.js';
 import { DownloadController } from './download.controller.js';
 import { DownloadService } from './download.service.js';
 
@@ -25,7 +26,7 @@ export function refuseHead(_req: Request, res: Response): void {
 
 /** The byte-read boundary (Stage 17.6): owner reads, download tickets (issue, redeem), ticket revocation. */
 @Module({
-  imports: [PersistenceModule, RedemptionModule, UsageLimitsModule],
+  imports: [PersistenceModule, RedemptionModule, UsageLimitsModule, TicketLeaseModule],
   controllers: [DownloadController],
   providers: [DownloadService],
   exports: [DownloadService], // S2-File.2: granted content reads stream through the same boundary
