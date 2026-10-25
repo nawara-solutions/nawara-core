@@ -80,4 +80,9 @@ export interface AuditPayload {
   platformId?: string;
   /** Whether the fact happened in live mode (ADR-0069 decision 7; production Audit refuses `false`). */
   liveMode?: boolean;
+  /**
+   * Core V2 S2-Audit.2 (ADR-0069 decision 3, D5): the verified human who approved the fact, from the RECORDING service's own verification
+   * (never a request value). Accepted only for an action whose catalog entry has an `approval` rule.
+   */
+  approvedBy?: UserActor;
 }

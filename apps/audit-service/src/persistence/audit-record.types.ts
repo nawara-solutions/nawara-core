@@ -35,6 +35,8 @@ export interface NewAuditRecord {
   companyId?: string | null;
   platformId?: string | null;
   liveMode?: boolean | null;
+  /** Core V2 S2-Audit.2: the verified approver the producer recorded (version 2; only an action whose catalog entry allows it). */
+  approvedBy?: { id: string; userKind: UserKind } | null;
   /**
    * Core V2 S2-Audit.1: how the delivery that creates the record was assessed (ADR-0069 decision 2). Absent = not assessed (Audit's own
    * records; never delivered over the bus). A DELIVERY fact, not evidence: it is not compared between duplicates and never changes later.
@@ -77,6 +79,8 @@ export interface AuditRecordRow {
   liveMode: boolean | null;
   producerIdentityVerified: boolean | null;
   replayed: boolean | null;
+  approvedByUserId: string | null;
+  approvedByUserKind: UserKind | null;
 }
 
 /** A row of a query page (Stage 18.6): the stored record plus its keyset position (`occurredAt` in epoch microseconds). */

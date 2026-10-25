@@ -59,6 +59,10 @@ export function validateAuditEvent(event: AuditEnvelopeInput): ValidatedAuditEve
 
   const name = event.name;
   if (typeof name !== 'string' || !name.startsWith(EVENT_TYPE_PREFIX)) refuse('event_type_mismatch');
+  // ADR-0069 decision 2: a version-1 event of an action introduced in version 2 is refused for its VERSION, before its payload is judged
+  // (whatever else it lacks); the payload check below then confirms the name is exactly `audit.` + its action.
+  const named = catalogEntry(name.slice(EVENT_TYPE_PREFIX.length));
+  if (named && named.since > version) refuse('unsupported_version');
   const payload = validateAuditPayload(event.payload, source, version); // version-2 fields only in a version-2 event
   if (name !== `${EVENT_TYPE_PREFIX}${payload.action}`) refuse('event_type_mismatch');
   if (payload.causationId === id) refuse('invalid_causation');

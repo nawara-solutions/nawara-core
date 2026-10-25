@@ -11,7 +11,7 @@ type P = Record<string, any>;
 const EVENT_ID = '5e5e5e5e-0000-4000-8000-000000000001';
 const envelope = (a: AuditAction, payload: P = sampleAuditPayload(a, 'complete'), headers: P = {}) => ({
   id: EVENT_ID, name: `audit.${payload.action ?? a}`, payload,
-  headers: { eventId: EVENT_ID, occurredAt: '2026-09-26T10:00:00.000Z', source: AUDIT_CATALOG.get(a)!.producer, version: 1, correlationId: 'corr-0001-abcd', ...headers },
+  headers: { eventId: EVENT_ID, occurredAt: '2026-09-26T10:00:00.000Z', source: AUDIT_CATALOG.get(a)!.producer, version: AUDIT_CATALOG.get(a)!.since, correlationId: 'corr-0001-abcd', ...headers },
 });
 const base = (a: AuditAction = 'membership.revoked') => JSON.parse(JSON.stringify(sampleAuditPayload(a, 'complete'))) as P;
 const MARKERS = ['STAGE18_SECRET_MARKER', 'STAGE18_TOKEN_MARKER', 'privacy-marker@example.invalid', '+99912345678'];

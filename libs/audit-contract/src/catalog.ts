@@ -54,6 +54,15 @@ export interface ScopeRule {
   platform?: 'required' | 'optional';
 }
 
+/**
+ * Core V2 S2-Audit.2 (ADR-0069 decision 3, D5): the action records a verified human approver as `approvedBy` (a user reference of one
+ * of `userKinds`). Absent = `approvedBy` is refused for the action. The recording service must take it from its own verification.
+ */
+export interface ApprovalRule {
+  required: boolean;
+  userKinds: readonly UserKind[];
+}
+
 export interface ActorRule {
   /** Allowed user kinds when a verified user acts; absent = a user actor is not allowed. */
   user?: readonly UserKind[];
@@ -76,8 +85,13 @@ export interface CatalogEntry {
   subject: SubjectRule;
   outcomes: readonly AuditOutcome[];
   changes: Readonly<Record<string, ChangeSpec>>;
-  /** Core V2 S2-Audit.1: the scope a version-2 event of this action may assert. Absent in every entry today (see `ScopeRule`). */
+  /**
+   * Core V2 S2-Audit.1: the scope a version-2 event of this action may assert. Granted ONLY to the three `authorization_receipt.*` actions
+   * (S2-Audit.2, Owner decision D3: Company, from Auth's own Owner–Company row); every other action asserts none.
+   */
   scope?: Readonly<ScopeRule>;
+  /** Core V2 S2-Audit.2: whether the action records `approvedBy` (only `authorization_receipt.consumed`, D5). */
+  approval?: Readonly<ApprovalRule>;
   /** Why the action has central accountability value (A7); shown in the catalog document. */
   purpose: string;
 }
@@ -89,6 +103,8 @@ const DENIED = ['denied'] as const;
 const NO_SUBJECT = { rule: 'forbidden' } as const;
 const SUBJECT_USER = { rule: 'required', type: 'user' } as const;
 const NONE = {} as const;
+/** Core V2 S2-Audit.2 (D3): the authorization receipts' scope: their Company, always. No Platform. */
+const RECEIPT_SCOPE = { company: 'required' } as const;
 
 const SPEC = {
   // ------------------------------------------------------------------------------------------------ auth-service (emits after its outbox, 18.7)
@@ -254,6 +270,26 @@ const SPEC = {
       operation: { type: 'code', shape: 'value', required: true, values: ['reference_repair', 'join_code_creation', 'invitation_creation', 'platform_assignment_grant'] },
     },
     purpose: 'A cached hierarchy parent link disagreed with the authority (a reused id or tampered data): the operation failed closed and nothing was overwritten.',
+  },
+
+  // Core V2 S2-Audit.2 (ADR-0067 decision 7; Owner decisions D1 to D5): the authorization receipts' lifecycle. Version 2 only (D2), the
+  // Company always (D3), the receipt as the resource; never a secret, a digest, a step-up proof, a binding or an amount (D4). A REFUSED
+  // consumption has no central action (D1): it stays an Auth-local record.
+  'authorization_receipt.issued': {
+    producer: 'auth-service', category: 'security', since: 2, actors: { user: ['owner'] }, organization: 'none',
+    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, scope: RECEIPT_SCOPE,
+    purpose: 'An Owner, after a fresh factor-only step-up, issued a single-use authorization receipt approving one exact refund of their Company.',
+  },
+  'authorization_receipt.consumed': {
+    producer: 'auth-service', category: 'security', since: 2, actors: { service: true }, organization: 'none',
+    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, scope: RECEIPT_SCOPE,
+    approval: { required: true, userKinds: ['owner'] },
+    purpose: 'The bound service consumed an authorization receipt: the commit point of the Owner\'s refund approval (approvedBy: the issuing Owner, verified by Auth).',
+  },
+  'authorization_receipt.voided': {
+    producer: 'auth-service', category: 'security', since: 2, actors: { system: ['authorization_receipt_replay'] }, organization: 'none',
+    resource: ['authorization_receipt'], subject: NO_SUBJECT, outcomes: OK, changes: NONE, scope: RECEIPT_SCOPE,
+    purpose: 'A replayed issue request (its response possibly lost) voided an unconsumed receipt automatically, so a secret that may have leaked can never be used.',
   },
 
   // ----------------------------------------------------------------------------------------------------------------------- organization-service

@@ -72,7 +72,7 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
           SELECT gen_random_uuid(),'organization-service','membership.revoked','business',1,'service','x-service',$1,'membership',gen_random_uuid()::text,'succeeded',now() FROM generate_series(1,20)`, [ORG]);
         const digest = async () => (await sql<{ h: string }>(db.adminUrl, `SELECT md5(string_agg(row_to_json(r)::text, ',' ORDER BY id)) AS h FROM (SELECT id, "eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId", "resourceType", "resourceId", "subjectType", "subjectId", outcome, changes, "correlationId", "causationId", "occurredAt", "recordedAt" FROM audit_record) r`))[0]!.h;
         const h0 = await digest();
-        expect((await runMigrations(db.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual(['0006_audit_contract_v2.sql']);
+        expect((await runMigrations(db.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual(['0006_audit_contract_v2.sql', '0007_audit_approved_by.sql']);
         expect(await digest()).toBe(h0);
         const nulls = await sql<{ n: string }>(db.adminUrl, `SELECT count(*) AS n FROM audit_record WHERE "companyId" IS NOT NULL OR "platformId" IS NOT NULL OR "liveMode" IS NOT NULL OR "producerIdentityVerified" IS NOT NULL OR replayed IS NOT NULL`);
         expect(nulls[0]!.n).toBe('0');
@@ -214,5 +214,90 @@ describeWithEnv('S2-Audit.1 audit contract version 2 and trusted scope (real Pos
       expect(createHash('sha256').update(text).digest('hex')).toMatch(/^[0-9a-f]{64}$/); // logs exist and were scanned
     });
   });
-});
 
+  describe('S2-Audit.2: the authorization receipt actions (ingestion as the runtime role)', () => {
+    const OWNER_ID = 'aaaaaaaa-0000-4000-8000-00000000000a';
+    const receiptEnvelope = (action: 'issued' | 'consumed' | 'voided', over: Record<string, unknown> = {}, headers: Record<string, unknown> = {}): EventEnvelope => {
+      const id = randomUUID();
+      const actor = action === 'issued' ? { type: 'user', id: OWNER_ID, userKind: 'owner' } : action === 'consumed' ? { type: 'service', id: 'payment-service' }
+        : { type: 'system', id: 'authorization_receipt_replay' };
+      return {
+        id, name: `audit.authorization_receipt.${action}`,
+        payload: {
+          action: `authorization_receipt.${action}`, actor, organizationId: null, resource: { type: 'authorization_receipt', id: randomUUID() }, outcome: 'succeeded',
+          companyId: COMPANY, ...(action === 'consumed' ? { approvedBy: { type: 'user', id: OWNER_ID, userKind: 'owner' } } : {}), ...over,
+        },
+        headers: { eventId: id, occurredAt: '2026-10-25T10:00:00.000Z', correlationId: 'corr-rcpt-0001', source: 'auth-service', version: 2, ...headers } as EventEnvelope['headers'],
+      };
+    };
+    const verified = (e: EventEnvelope) => ({ decision: 'accept', basis: 'verified_original', origin: origin(e.id, e.name) }) as never;
+    const unverified = { decision: 'compatibility', basis: 'unverified_original', verified: false } as never;
+    const reason = async (p: Promise<unknown>) => p.then(() => 'stored', (x: { reason?: string }) => x.reason);
+
+    it('a verified event of each action is stored with its Company and gets exactly one trusted scope row (Company only)', async () => {
+      for (const a of ['issued', 'consumed', 'voided'] as const) {
+        const e = receiptEnvelope(a);
+        expect(await ingestion.ingest(e, verified(e))).toBe('persisted');
+        const row = (await repo.findBySourceAndEventId('auth-service', e.id))!;
+        expect(row).toMatchObject({ schemaVersion: 2, category: 'security', companyId: COMPANY, platformId: null, producerIdentityVerified: true });
+        expect(await scopeRows(row.id), a).toEqual([{ basis: 'verified_producer', companyId: COMPANY, platformId: null }]);
+      }
+    });
+
+    it('.consumed stores the verified approver; the other two store none', async () => {
+      const c = receiptEnvelope('consumed');
+      await ingestion.ingest(c, verified(c));
+      expect(await repo.findBySourceAndEventId('auth-service', c.id)).toMatchObject({ approvedByUserId: OWNER_ID, approvedByUserKind: 'owner', actorType: 'service', actorId: 'payment-service' });
+      const i = receiptEnvelope('issued');
+      await ingestion.ingest(i, verified(i));
+      expect(await repo.findBySourceAndEventId('auth-service', i.id)).toMatchObject({ approvedByUserId: null, approvedByUserKind: null });
+    });
+
+    it('an unverified delivery (compatibility phase) is stored but NEVER becomes trusted scope', async () => {
+      const e = receiptEnvelope('issued');
+      expect(await ingestion.ingest(e, unverified)).toBe('persisted');
+      const row = (await repo.findBySourceAndEventId('auth-service', e.id))!;
+      expect([row.companyId, row.producerIdentityVerified]).toEqual([COMPANY, false]);
+      expect(await scopeRows(row.id)).toEqual([]);
+    });
+
+    it('refused before anything is stored: another producer, a version-1 event, a Platform, a forged approver, an Owner-attributed void', async () => {
+      const before = Number((await sql<{ n: string }>(d.adminUrl, 'SELECT count(*) AS n FROM audit_record'))[0]!.n);
+      const cases: Array<[EventEnvelope, string]> = [
+        [receiptEnvelope('issued', {}, { source: 'payment-service' }), 'producer_not_admitted'],
+        [receiptEnvelope('issued', {}, { version: 1 }), 'unsupported_version'],
+        [receiptEnvelope('consumed', { platformId: PLATFORM }), 'invalid_scope'],
+        [receiptEnvelope('issued', { companyId: undefined }), 'invalid_scope'],
+        [receiptEnvelope('issued', { approvedBy: { type: 'user', id: OWNER_ID, userKind: 'owner' } }), 'invalid_approval'],
+        [receiptEnvelope('consumed', { approvedBy: { type: 'user', id: OWNER_ID, userKind: 'operator' } }), 'invalid_approval'],
+        [receiptEnvelope('voided', { actor: { type: 'user', id: OWNER_ID, userKind: 'owner' } }), 'invalid_actor'],
+        [receiptEnvelope('consumed', { secretDigest: 'a'.repeat(64) }), 'sensitive_field'],
+      ];
+      for (const [e, expected] of cases) {
+        const payload = JSON.parse(JSON.stringify(e.payload)); // drops an `undefined` field, as the wire would
+        expect(await reason(ingestion.ingest({ ...e, payload }, verified(e))), expected).toBe(expected);
+      }
+      expect(Number((await sql<{ n: string }>(d.adminUrl, 'SELECT count(*) AS n FROM audit_record'))[0]!.n)).toBe(before);
+    });
+
+    it('duplicate delivery is deterministic: the same event again is a duplicate with no second scope row; another approver is a conflict', async () => {
+      const e = receiptEnvelope('consumed');
+      expect(await ingestion.ingest(e, verified(e))).toBe('persisted');
+      expect(await ingestion.ingest(e, { decision: 'accept', basis: 'verified_duplicate', origin: origin(e.id, e.name) } as never)).toBe('duplicate');
+      const row = (await repo.findBySourceAndEventId('auth-service', e.id))!;
+      expect(await scopeRows(row.id)).toHaveLength(1);
+      const other = { ...e, payload: { ...(e.payload as object), approvedBy: { type: 'user', id: randomUUID(), userKind: 'owner' } } };
+      expect(await reason(ingestion.ingest(other, verified(e)))).toBe('event_id_conflict');
+      expect((await repo.findBySourceAndEventId('auth-service', e.id))!.approvedByUserId).toBe(OWNER_ID);
+    });
+
+    it('the approver columns are version-2 only and paired (database CHECK)', async () => {
+      const e = await failure(d.appUrl, `INSERT INTO audit_record ("eventId","sourceService",action,category,"schemaVersion","actorType","actorId","resourceType","resourceId",outcome,"occurredAt","approvedByUserId","approvedByUserKind")
+        VALUES (gen_random_uuid(),'auth-service','membership.revoked','business',1,'service','x-service','membership','m1','succeeded',now(),$1,'owner')`, [OWNER_ID]);
+      expect(e.constraint).toBe('audit_record_approved_by_valid');
+      const half = await failure(d.appUrl, `INSERT INTO audit_record ("eventId","sourceService",action,category,"schemaVersion","actorType","actorId","resourceType","resourceId",outcome,"occurredAt","approvedByUserId")
+        VALUES (gen_random_uuid(),'auth-service','authorization_receipt.consumed','security',2,'service','payment-service','authorization_receipt','r1','succeeded',now(),$1)`, [OWNER_ID]);
+      expect(half.constraint).toBe('audit_record_approved_by_valid');
+    });
+  });
+});

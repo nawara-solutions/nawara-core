@@ -70,7 +70,7 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
       const foundation = await runMigrations(up.migratorUrl, [kitMigrationsDir]); // the 18.2 state: the kit baseline, no audit migration
       expect(foundation.applied.every((n) => n.startsWith('kit_'))).toBe(true);
       const upgrade = await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir]);
-      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql', '0005_event_provenance.sql', '0006_audit_contract_v2.sql']);
+      expect(upgrade.applied).toEqual(['0001_audit_record.sql', '0002_audit_record_time_idx.sql', '0003_retention.sql', '0004_changes_validation_search_path.sql', '0005_event_provenance.sql', '0006_audit_contract_v2.sql', '0007_audit_approved_by.sql']);
       expect((await runMigrations(up.migratorUrl, [kitMigrationsDir, auditMigrationsDir])).applied).toEqual([]);
       const grants = await sql<{ p: string }>(up.adminUrl, `SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'audit_record' AND grantee = $1 ORDER BY 1`, [up.app]);
       expect(grants.map((g) => g.p)).toEqual(['INSERT', 'SELECT']);
@@ -85,11 +85,13 @@ describeWithEnv('audit_record: append-only persistence (real PostgreSQL)', ['TES
     expect(cols.map((c) => c.c)).toEqual(['id', 'eventId', 'sourceService', 'action', 'category', 'schemaVersion', 'actorType', 'actorId', 'userKind',
       'organizationId', 'resourceType', 'resourceId', 'subjectType', 'subjectId', 'outcome', 'changes', 'correlationId', 'causationId', 'occurredAt', 'recordedAt',
       // Core V2 S2-Audit.1 (0006): identifiers and booleans only, all nullable (history never rewritten)
-      'companyId', 'platformId', 'liveMode', 'producerIdentityVerified', 'replayed']);
+      'companyId', 'platformId', 'liveMode', 'producerIdentityVerified', 'replayed',
+      // Core V2 S2-Audit.2 (0007): the verified approver, an id and a user kind
+      'approvedByUserId', 'approvedByUserKind']);
     expect(Object.fromEntries(cols.map((c) => [c.c, c.n])) as Record<string, string>).toMatchObject({
       eventId: 'NO', sourceService: 'NO', action: 'NO', category: 'NO', actorType: 'NO', actorId: 'NO', resourceType: 'NO', resourceId: 'NO', occurredAt: 'NO', recordedAt: 'NO',
       organizationId: 'YES', userKind: 'YES', subjectType: 'YES', changes: 'YES', correlationId: 'YES', causationId: 'YES',
-      companyId: 'YES', platformId: 'YES', liveMode: 'YES', producerIdentityVerified: 'YES', replayed: 'YES',
+      companyId: 'YES', platformId: 'YES', liveMode: 'YES', producerIdentityVerified: 'YES', replayed: 'YES', approvedByUserId: 'YES', approvedByUserKind: 'YES',
     });
     for (const c of cols) expect(c.c).not.toMatch(/email|phone|name|ip|agent|password|token|secret|payload|snapshot|metadata|updated/i);
     expect(await sql(d.adminUrl, `SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'audit_record'::regclass`)).toEqual([]);

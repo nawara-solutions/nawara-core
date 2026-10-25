@@ -1,5 +1,5 @@
 import { AUDIT_ACTIONS, AUDIT_CATALOG, validateAuditPayload, type AuditAction } from '../src/index.js';
-import { SAMPLE_IDS, sampleAuditPayload } from '../src/testing.js';
+import { SAMPLE_IDS, sampleAuditPayload, sampleVersion } from '../src/testing.js';
 
 /**
  * Stage 18.7 catalog corrections G1–G5, discovered during real producer integration (each justified by a code path or the persisted model;
@@ -9,7 +9,7 @@ import { SAMPLE_IDS, sampleAuditPayload } from '../src/testing.js';
 type P = Record<string, any>;
 const producer = (a: AuditAction) => AUDIT_CATALOG.get(a)!.producer;
 const base = (a: AuditAction): P => JSON.parse(JSON.stringify(sampleAuditPayload(a)));
-const ok = (a: AuditAction, over: P) => () => validateAuditPayload({ ...base(a), ...over }, producer(a));
+const ok = (a: AuditAction, over: P) => () => validateAuditPayload({ ...base(a), ...over }, producer(a), sampleVersion(a)); // each action at its own version (S2-Audit.2)
 const USER = { type: 'user', id: SAMPLE_IDS.user, userKind: 'member' };
 const system = (id: string) => ({ type: 'system', id });
 
@@ -54,7 +54,7 @@ describe('G3: invoice / payment_request actions record the invoice\'s organizati
     expect(ok(a, { organizationId: null })).not.toThrow();
     for (const bad of ['*', 'all', SAMPLE_IDS.organization.toUpperCase(), [SAMPLE_IDS.organization]]) expect(ok(a, { organizationId: bad })).toThrow('invalid_organization');
     const { organizationId: _o, ...missing } = base(a);
-    expect(() => validateAuditPayload(missing, producer(a))).toThrow('invalid_organization'); // still explicit, even when null
+    expect(() => validateAuditPayload(missing, producer(a), sampleVersion(a))).toThrow('invalid_organization'); // still explicit, even when null
   });
 
   it('the subscription actions keep organization REQUIRED (a subscription always belongs to one organization)', () => {
@@ -105,7 +105,7 @@ describe('G5: organization.updated accepts a member (an org-admin member of THAT
 
 describe('nothing else was broadened', () => {
   it('the catalog has the 50 actions of Stage 18.7 plus the two of Stage 20.3, the two of Stage 20.4 and the four of A5.4-AC1 (batches 1 and 2), and only the corrected entries changed their actor or organization rules (snapshot of the rest)', () => {
-    expect(AUDIT_ACTIONS).toHaveLength(58);
+    expect(AUDIT_ACTIONS).toHaveLength(61); // + the three authorization receipt actions of Core V2 S2-Audit.2 (Owner decision D1)
     expect(AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'release-service'))
       .toEqual(['release.registered', 'release.published', 'release.withdrawn', 'compatibility_policy.changed']); // Stages 20.3 / 20.4 (ADR-0051 §9), additive
     const corrected = new Set(['payment.succeeded', 'payment.failed', 'payment_request.cancelled', 'invoice.issued', 'invoice.discarded', 'invoice.paid', 'payment_request.created',

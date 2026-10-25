@@ -1,8 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
+import { CentralAudit, ownerActor } from '../audit/central-audit.js';
 import { APP_CONFIG, type AppConfig } from '../config/app-config.js';
-import { DbService, isUniqueViolation, pgCode, pgConstraint, provesNothingCommitted } from '../db/db.service.js';
+import type { AuditActor } from '@nawara/audit-contract';
+import { DbService, isUniqueViolation, pgCode, pgConstraint, provesNothingCommitted, type Queryable } from '../db/db.service.js';
 import { REFUND_AUTHORIZE_PURPOSE, StepUpService } from '../owner/step-up.service.js';
 import {
   bindingDigest, canonicalBinding, parseBinding, requestHash, secretDigest, type RefundBinding,
@@ -59,7 +61,27 @@ export class AuthorizationReceiptService {
     @Inject(APP_CONFIG) private readonly cfg: AppConfig,
     @Inject(StepUpService) private readonly stepUps: StepUpService,
     @Inject(AuditService) private readonly audit: AuditService,
+    @Inject(CentralAudit) private readonly central: CentralAudit,
   ) {}
+
+  /**
+   * Core V2 S2-Audit.2 (ADR-0067 decision 7; Owner decisions D1 to D5): the central audit intent of a receipt change, written by the kit
+   * outbox writer ON THE SAME TRANSACTION as the change and its Auth-local record: both commit or neither. Delivery is the relay's, after
+   * COMMIT, with its own durable retries, so a broker or Audit outage never rolls back a committed receipt. `companyId` is always Auth's
+   * own Owner–Company row (never the request's binding); nothing secret travels: no secret, digest, proof, binding or amount.
+   */
+  private recordCentrally(q: Queryable, action: 'authorization_receipt.issued' | 'authorization_receipt.consumed' | 'authorization_receipt.voided',
+    a: { receiptId: string; companyId: string; actor: AuditActor; approvedBy?: { userId: string } }) {
+    // explicit literals (no spread): the outbox generates every event id (outbox retention safety, check:repo)
+    const resource = { type: 'authorization_receipt', id: a.receiptId } as const;
+    if (a.approvedBy) {
+      return this.central.write(q, {
+        action, actor: a.actor, organizationId: null, resource, outcome: 'succeeded', companyId: a.companyId,
+        approvedBy: { type: 'user', id: a.approvedBy.userId, userKind: 'owner' },
+      });
+    }
+    return this.central.write(q, { action, actor: a.actor, organizationId: null, resource, outcome: 'succeeded', companyId: a.companyId });
+  }
 
   private pepper(): Buffer {
     const p = this.cfg.secrets.authorizationReceiptPepper;
@@ -110,6 +132,8 @@ export class AuthorizationReceiptService {
           type: 'authorization_receipt.issued', outcome: 'success', actorId: owner.userId, targetId: id, sessionFamilyId: owner.sid,
           metadata: { companyId: binding.companyId },
         }, q);
+        // the Company from Auth's own Owner row (`o[0]`, read in this transaction), equal to the binding's by the check above
+        await this.recordCentrally(q, 'authorization_receipt.issued', { receiptId: id, companyId: o[0].companyId, actor: ownerActor(owner) });
         return { receiptId: id, secret, expiresAt: ins[0]!.expiresAt };
       });
     } catch (e) {
@@ -137,15 +161,21 @@ export class AuthorizationReceiptService {
       if (r.status === 'voided') throw receiptError('receipt_issued_response_lost');
       if (r.expired) throw receiptError('receipt_expired'); // Q6: deterministic, nothing restored or changed
       const voided = await this.db.tx(async (q) => {
-        const { rows: v } = await q.query(
+        const { rows: v } = await q.query<{ id: string; companyId: string }>(
           `UPDATE authorization_receipt SET status = 'voided', "voidedAt" = clock_timestamp()
-            WHERE id = $1 AND status = 'issued' AND "expiresAt" > clock_timestamp() RETURNING id`,
+            WHERE id = $1 AND status = 'issued' AND "expiresAt" > clock_timestamp()
+            RETURNING id, (SELECT o."companyId"::text FROM owner o WHERE o."userId" = authorization_receipt."issuerUserId") AS "companyId"`,
           [r.id],
         );
         if (!v[0]) return false;
         await this.audit.record({
           type: 'authorization_receipt.voided', outcome: 'success', actorId: owner.userId, targetId: r.id, sessionFamilyId: owner.sid,
         }, q);
+        // D4: the void is the automatic F-5 replay rule, so its central actor is that process, never the Owner (the local record keeps who
+        // sent the replaying request). The Company is the issuer's own Owner row.
+        await this.recordCentrally(q, 'authorization_receipt.voided', {
+          receiptId: r.id, companyId: v[0].companyId, actor: { type: 'system', id: 'authorization_receipt_replay' },
+        });
         return true;
       });
       if (voided) throw receiptError('receipt_issued_response_lost');
@@ -176,12 +206,13 @@ export class AuthorizationReceiptService {
     let consumed: ReceiptConsumption | undefined;
     try {
       consumed = await this.db.tx(async (q) => {
-        const { rows } = await q.query<{ id: string; issuerUserId: string; consumedAt: Date }>(
+        const { rows } = await q.query<{ id: string; issuerUserId: string; consumedAt: Date; companyId: string }>(
           `UPDATE authorization_receipt r SET status = 'consumed', "consumedAt" = clock_timestamp(), "consumeRef" = $3, "consumedBy" = $4
             WHERE r."secretDigest" = $1 AND r."bindingDigest" = $2 AND r.status = 'issued' AND r."expiresAt" > clock_timestamp()
               AND EXISTS (SELECT 1 FROM owner o JOIN "user" u ON u.id = o."userId" AND u.kind = 'owner'
                            WHERE o."userId" = r."issuerUserId" AND o."companyId" = $5 AND u."isActive")
-            RETURNING r.id, r."issuerUserId", r."consumedAt"`,
+            RETURNING r.id, r."issuerUserId", r."consumedAt",
+                      (SELECT o."companyId"::text FROM owner o WHERE o."userId" = r."issuerUserId") AS "companyId"`,
           [sDigest, bDigest, input.consumeRef, caller, binding.companyId],
         );
         const row = rows[0];
@@ -190,6 +221,10 @@ export class AuthorizationReceiptService {
           type: 'authorization_receipt.consumed', outcome: 'success', actorId: null, targetId: row.id,
           metadata: { caller, companyId: binding.companyId, approvedBy: row.issuerUserId },
         }, q);
+        // D4/D5: the authenticated service is the actor; the approver is the issuer this statement just proved an active Owner of the Company
+        await this.recordCentrally(q, 'authorization_receipt.consumed', {
+          receiptId: row.id, companyId: row.companyId, actor: { type: 'service', id: caller }, approvedBy: { userId: row.issuerUserId },
+        });
         return this.consumption(row, input.consumeRef, binding);
       });
     } catch (e) {

@@ -225,7 +225,8 @@ test('provisioning: every identity selected gets EXACTLY its generated topic gra
   assertGrantsAre(GEN, ALL);
   assert.equal(GEN['auth-service'].domainEvents, 'inactive');
   assert.deepEqual(Object.fromEntries(ALL.map((s) => [s, [GEN[s].write.keys.length, GEN[s].read.keys.length]])), {
-    'audit-service': [0, 1], 'auth-service': [28, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9],
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1)
+    'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9],
     'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0],
   });
 });
@@ -486,7 +487,7 @@ test('R1: a re-emission publishes under Payment\'s ordinary grant with the origi
 test('Auth active (TEST-ONLY variant, production file unchanged): its 12 domain events publish, Notification receives exactly its nine; the production script narrows it back', async () => {
   const ACTIVE = { ...ACTIVATION, domainEvents: { ...ACTIVATION.domainEvents, 'auth-service': 'active' } };
   const activePolicy = generate({ activation: ACTIVE });
-  assert.equal(activePolicy['auth-service'].write.keys.length, 40);
+  assert.equal(activePolicy['auth-service'].write.keys.length, 43); // 31 audit actions (S2-Audit.2: +3) + 12 domain events
   assert.equal(provision(variantScript('auth-active', { activation: ACTIVE }), 'auth-service').code, 0);
   assert.equal(effectiveGrants().topic['auth-service'].write, activePolicy['auth-service'].write.regex);
   const auth = bus('auth-service');

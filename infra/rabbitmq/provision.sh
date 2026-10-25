@@ -106,7 +106,7 @@ permissions_for() {
 # infra/rabbitmq/topic-activation.json (ADR-0057 S0-C5, S1d-1). Never edit by hand: `npm run check:repo` fails on any difference.
 # environment: production
 # audit-service: write 0, read 1, domain events none, read binding exception audit-all-actions
-# auth-service: write 28, read 0, domain events inactive
+# auth-service: write 31, read 0, domain events inactive
 # billing-service: write 12, read 4, domain events active
 # file-service: write 2, read 0, domain events none
 # notification-service: write 0, read 9, domain events none
@@ -119,7 +119,7 @@ topic_grants_for() {
       TOPIC_WRITE='^(?!)$'
       TOPIC_READ='^(audit\.#)$' ;;
     auth-service)
-      TOPIC_WRITE='^(audit\.account\.disabled|audit\.account\.enabled|audit\.admin_invitation\.created|audit\.admin_invitation\.revoked|audit\.hierarchy\.reference_anchor_mismatch_detected|audit\.hierarchy\.reference_repair_denied|audit\.hierarchy\.reference_repair_unresolved|audit\.hierarchy\.reference_repaired|audit\.join_code\.created|audit\.join_code\.revoked|audit\.membership\.admin_granted|audit\.membership\.admin_provisioned|audit\.membership\.admin_revoked|audit\.membership\.approved|audit\.membership\.rejected|audit\.membership\.revoked|audit\.operator\.created|audit\.owner\.factor_enrolled|audit\.owner\.factor_removed|audit\.owner\.password_changed|audit\.owner\.recovery_cancelled|audit\.owner\.recovery_completed|audit\.owner\.recovery_started|audit\.owner\.secret_key_rotated|audit\.owner\.webauthn_clone_suspected|audit\.platform_assignment\.granted|audit\.platform_assignment\.revoked|audit\.session\.refresh_reuse_detected)$'
+      TOPIC_WRITE='^(audit\.account\.disabled|audit\.account\.enabled|audit\.admin_invitation\.created|audit\.admin_invitation\.revoked|audit\.authorization_receipt\.consumed|audit\.authorization_receipt\.issued|audit\.authorization_receipt\.voided|audit\.hierarchy\.reference_anchor_mismatch_detected|audit\.hierarchy\.reference_repair_denied|audit\.hierarchy\.reference_repair_unresolved|audit\.hierarchy\.reference_repaired|audit\.join_code\.created|audit\.join_code\.revoked|audit\.membership\.admin_granted|audit\.membership\.admin_provisioned|audit\.membership\.admin_revoked|audit\.membership\.approved|audit\.membership\.rejected|audit\.membership\.revoked|audit\.operator\.created|audit\.owner\.factor_enrolled|audit\.owner\.factor_removed|audit\.owner\.password_changed|audit\.owner\.recovery_cancelled|audit\.owner\.recovery_completed|audit\.owner\.recovery_started|audit\.owner\.secret_key_rotated|audit\.owner\.webauthn_clone_suspected|audit\.platform_assignment\.granted|audit\.platform_assignment\.revoked|audit\.session\.refresh_reuse_detected)$'
       TOPIC_READ='^(?!)$' ;;
     billing-service)
       TOPIC_WRITE='^(audit\.invoice\.discarded|audit\.invoice\.issued|audit\.invoice\.paid|audit\.payment_request\.cancelled|audit\.payment_request\.created|audit\.price\.created|audit\.price\.retired|audit\.product\.archived|audit\.product\.created|audit\.subscription\.activated|audit\.subscription\.renewed|invoice\.created)$'

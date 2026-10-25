@@ -65,7 +65,8 @@ test('identities: one per service, non-guest administrator, least-privilege gran
   // Core V2 S1d-2: Auth publishes exactly its own audit actions (its domain events are inactive); Audit binds exactly `audit.#` and
   // publishes nothing (deny-all, not '^$', which would match the empty routing key).
   assert.deepEqual(b.topic['auth-service'], topicOf('auth-service'), 'Auth: its generated grants');
-  assert.equal(GENERATED['auth-service'].write.keys.length, 28);
+  // 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1)
+  assert.equal(GENERATED['auth-service'].write.keys.length, 31);
   assert.ok(GENERATED['auth-service'].write.keys.every((k) => k.startsWith('audit.')), 'no Auth domain event while inactive');
   assert.equal(b.topic['auth-service'].read, DENY_ALL);
   assert.deepEqual(b.topic['audit-service'], { exchange: 'nawara.events', write: DENY_ALL, read: '^(audit\\.#)$' }, 'Audit binds audit.# only, publishes nothing to the exchange');
@@ -137,7 +138,8 @@ test('S1d-2: every identity, when selected, gets exactly its generated topic gra
   assert.deepEqual(Object.keys(b.users).sort(), GATED_FREE);
   for (const svc of GATED_FREE) assert.deepEqual(b.topic[svc], topicOf(svc), `${svc}: generated topic grants`);
   const counts = Object.fromEntries(ALL.map((s) => [s, [GENERATED[s].write.keys.length, GENERATED[s].read.keys.length]]));
-  assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [28, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+  // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1)
+  assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
   // RabbitMQ evaluates a topic grant as a regex over the routing key (write) or binding key (read)
   const pub = (svc, key) => new RegExp(b.topic[svc].write).test(key);
   const bind = (svc, key) => new RegExp(b.topic[svc].read).test(key);

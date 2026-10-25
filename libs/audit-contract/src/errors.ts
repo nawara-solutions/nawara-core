@@ -32,6 +32,8 @@ export const AUDIT_REFUSALS = [
   'invalid_scope',
   /** Core V2 S2-Audit.1: `liveMode` that is not a boolean. */
   'invalid_live_mode',
+  /** Core V2 S2-Audit.2: `approvedBy` malformed, of a user kind the action does not allow, missing when required, or not allowed. */
+  'invalid_approval',
   /** Resource missing, malformed, or of a type the action does not use. */
   'invalid_resource',
   /** Subject supplied when forbidden, missing when required, malformed, or of the wrong type. */

@@ -3473,7 +3473,8 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     }
     // the investigation's counts
     const counts = Object.fromEntries(Object.entries(out.identities).map(([s, id]) => [s, [id.write.keys.length, id.read.keys.length]]));
-    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [28, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
+    // auth-service: 28 + the three authorization receipt actions (Core V2 S2-Audit.2, D1)
+    assert.deepEqual(counts, { 'audit-service': [0, 1], 'auth-service': [31, 0], 'billing-service': [12, 4], 'file-service': [2, 0], 'notification-service': [0, 9], 'organization-service': [7, 0], 'payment-service': [10, 0], 'release-service': [4, 0] });
   });
 
   test('S1d-1 Payment: its five ordinary events and five audit actions; not the re-emission allow-list; no unregistered action', () => {
@@ -3514,7 +3515,7 @@ test('Core V2 S1c-3 R2a: payment-service is eligibility-only (read-only inspecti
     assert.ok(inactive.deniedInactive.includes('member.contact_verification_requested'));
     assert.ok(inactive.write.keys.every((k) => k.startsWith('audit.')));
     const active = gen({ activation: manifest({ 'auth-service': 'active', 'billing-service': 'active', 'payment-service': 'active' }) }).identities['auth-service'];
-    assert.equal(active.write.keys.length, 40);
+    assert.equal(active.write.keys.length, 43); // 31 audit actions (S2-Audit.2: +3) + 12 domain events
     assert.ok(matches(active.write.regex, 'admin.operator_code_issued'));
     refused({ activation: undefined }, /an activation manifest is required/, 'no manifest');
     refused({ activation: manifest({ 'billing-service': 'active', 'payment-service': 'active' }) }, /does not declare auth-service/, 'missing producer');
