@@ -155,8 +155,9 @@ describe('Stage 19.3: platform_query.executed accepts a verified Company owner (
     expect(ok('platform_query.executed', { actor: { type: 'service', id: 'platform-reader' }, changes: { ...facts, target: 'all' } })).not.toThrow();
   });
 
-  it('operators, members and system actors are refused; the record stays platform-level; organization_id is a UUID', () => {
-    for (const userKind of ['operator', 'member']) expect(ok('platform_query.executed', { actor: { ...owner, userKind }, changes: facts }), userKind).toThrow('invalid_actor');
+  it('members and system actors are refused (an operator is admitted since S2-Audit.3); the record stays platform-level; organization_id is a UUID', () => {
+    expect(ok('platform_query.executed', { actor: { ...owner, userKind: 'member' }, changes: facts })).toThrow('invalid_actor');
+    expect(ok('platform_query.executed', { actor: { ...owner, userKind: 'operator' }, changes: { ...facts, target: 'operator_platform', platform_id: SAMPLE_IDS.uuidA } })).not.toThrow();
     expect(ok('platform_query.executed', { actor: system('audit_query'), changes: facts })).toThrow('invalid_actor');
     expect(ok('platform_query.executed', { actor: owner, organizationId: SAMPLE_IDS.organization, changes: facts })).toThrow('invalid_organization');
     for (const bad of ['*', 'all', [SAMPLE_IDS.organization]]) expect(ok('platform_query.executed', { actor: owner, changes: { ...facts, organization_id: bad } })).toThrow('invalid_changes');

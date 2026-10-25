@@ -33,3 +33,14 @@ export class AuditPageDto {
   @ApiProperty({ type: [AuditRecordDto] }) items!: AuditRecordDto[];
   @ApiProperty({ nullable: true, type: String, description: 'Opaque; valid only with the same query; null when there is no further page' }) nextCursor!: string | null;
 }
+
+/** Core V2 S2-Audit.3: a record of a scoped read carries its verified approver (version 2; null when none). */
+export class ScopedAuditRecordDto extends AuditRecordDto {
+  @ApiProperty({ type: AuditActorDto, nullable: true, description: 'The verified human approver, as the recording service verified it' }) approvedBy!: AuditActorDto | null;
+}
+
+/** Core V2 S2-Audit.3 (register AUD-03 / AUD-04): `{records, nextCursor}`. */
+export class ScopedAuditPageDto {
+  @ApiProperty({ type: [ScopedAuditRecordDto] }) records!: ScopedAuditRecordDto[];
+  @ApiProperty({ nullable: true, type: String, description: 'Opaque, signed and expiring; valid only for the same caller and query; null at the end' }) nextCursor!: string | null;
+}

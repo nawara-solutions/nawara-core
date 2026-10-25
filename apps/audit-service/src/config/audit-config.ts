@@ -1,5 +1,5 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials, type BaseConfig, type ServiceTokenEntry,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertRuntimeDatabaseRole, loadBaseConfig, parseServiceTokens, readDocsCredentials, readKeyRing, type BaseConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
 import { AUDIT_ENFORCEMENT_MODES, type AuditEnforcementMode } from '../ingestion/trust-policy.js';
 import { AuditCallerPolicy } from '../policy/caller-policy.js';
@@ -56,6 +56,14 @@ export interface AuditConfig extends BaseConfig {
    * 1–100000): requests per verified owner per 60 s. `AUTH_TIMEOUT_MS` (default 3000, 100–30000): a slower Auth fails the read closed.
    */
   ownerAccess?: { authServiceUrl: string; ratePerOwner: number; authTimeoutMs: number };
+  /**
+   * Core V2 S2-Audit.3 (AUD-03, AUD-04; OD-14 cursor requirements): the scoped human reads, mounted ONLY when `AUDIT_CURSOR_KEYS` is set
+   * (and then `AUTH_SERVICE_URL` is required: authority is always Auth's live answer). `AUDIT_CURSOR_KEYS` = `id:base64(32 bytes)[,…]`, a
+   * key ring dedicated to cursor authentication (never another secret; two ids during a rotation), `AUDIT_CURSOR_ACTIVE_KEY_ID` the one
+   * that signs. `AUDIT_CURSOR_TTL_SEC` (default 900, the access-token lifetime convention; 60–3600): a cursor older than this is refused.
+   * `AUDIT_OPERATOR_QUERY_RATE_PER_OPERATOR` (default 30, 1–100000): requests per verified operator per 60 s.
+   */
+  scopedAccess?: { cursorKeys: ReadonlyMap<string, Buffer>; cursorActiveKeyId: string; cursorTtlSec: number; ratePerOperator: number };
   /** OpenAPI at `/audit/docs`, behind basic auth, mounted only when `SWAGGER_PASSWORD` (16+ characters) is set. */
   docs: { username: string; password?: string };
 }
@@ -86,7 +94,24 @@ export function loadAuditConfig(env: NodeJS.ProcessEnv = process.env): AuditConf
         authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3_000, min: 100, max: 30_000 }),
       },
     }),
+    ...scopedAccess(reader, base.isProduction),
     docs: readDocsCredentials(reader),
+  };
+}
+
+/** Core V2 S2-Audit.3: the cursor key ring and the scoped-read bounds; absent unless `AUDIT_CURSOR_KEYS` is set. Errors never echo a key. */
+function scopedAccess(reader: EnvReader, isProduction: boolean): Pick<AuditConfig, 'scopedAccess'> {
+  if (reader.get('AUDIT_CURSOR_KEYS') === undefined) return {};
+  if (reader.get('AUTH_SERVICE_URL') === undefined) {
+    throw new ConfigError('AUDIT_CURSOR_KEYS needs AUTH_SERVICE_URL: the scoped reads are authorized only by Auth\'s live answer');
+  }
+  const ring = readKeyRing(reader, 'AUDIT_CURSOR_KEYS', 'AUDIT_CURSOR_ACTIVE_KEY_ID', { isProduction, exactBytes: 32 });
+  return {
+    scopedAccess: {
+      cursorKeys: ring.keys, cursorActiveKeyId: ring.activeKeyId,
+      cursorTtlSec: reader.int('AUDIT_CURSOR_TTL_SEC', { default: 900, min: 60, max: 3600 }),
+      ratePerOperator: reader.int('AUDIT_OPERATOR_QUERY_RATE_PER_OPERATOR', { default: 30, min: 1, max: 100_000 }),
+    },
   };
 }
 

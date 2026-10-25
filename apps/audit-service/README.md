@@ -119,6 +119,8 @@ There is no HTTP route that deletes a record, and no erasure path (A42 / P-A3: r
 | `AUDIT_QUERY_RATE_PER_CALLER`, `AUDIT_QUERY_RATE_PER_ORGANIZATION`, `AUDIT_PLATFORM_QUERY_RATE_PER_CALLER` | 600, 120, 30 | 1–100000 (per organization ≤ per caller) | reads per 60 s: organization scope per caller and per (caller, organization); platform scope per caller |
 | `AUTH_SERVICE_URL` | unset (no owner route; Audit calls no other service) | `http:` / `https:` | Stage 19.3 Audit-X: mounts `GET /audit/owner/organizations/{id}/records`, which verifies the Company owner and the organization through Auth with the owner's own bearer |
 | `AUDIT_OWNER_QUERY_RATE_PER_OWNER`, `AUTH_TIMEOUT_MS` | 30, 3000 | 1–100000, 100–30000 | owner reads per verified owner per 60 s; Auth slower than the timeout fails the read closed (503) |
+| `AUDIT_CURSOR_KEYS`, `AUDIT_CURSOR_ACTIVE_KEY_ID` | unset (no scoped reads) | `id:base64(32 bytes)[,…]` (**secret, file**), an id of the ring | Core V2 S2-Audit.3: mounts `GET /audit/owner/company/records` (AUD-03) and `GET /audit/operator/platforms/{id}/records` (AUD-04); requires `AUTH_SERVICE_URL`. A key ring dedicated to signing their cursors (HMAC-SHA-256); during a rotation the previous key keeps verifying while the active one signs |
+| `AUDIT_CURSOR_TTL_SEC`, `AUDIT_OPERATOR_QUERY_RATE_PER_OPERATOR` | 900, 30 | 60–3600, 1–100000 | a scoped-read cursor older than this is refused (`invalid_cursor`); operator reads per verified operator per 60 s |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | `docs`, unset | password ≥ 16 characters | OpenAPI at `/audit/docs`, mounted only with a password |
 
 ## Run and test

@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, canonicalJson, type Queryable } from '@nawara/service-kit';
 import { AuditPersistenceError } from './persistence-error.js';
-import type { AuthorizedAuditQuery } from '../query/query-model.js';
+import type { AuthorizedAuditQuery, ScopedAuditQuery } from '../query/query-model.js';
 import type { AuditRecordRow, InsertOutcome, NewAuditRecord, PagedAuditRow } from './audit-record.types.js';
 
 const COLUMNS = `id, "eventId", "sourceService", action, category, "schemaVersion", "actorType", "actorId", "userKind", "organizationId",
@@ -107,6 +107,38 @@ export class AuditRecordRepository {
     const sql = `SELECT ${COLUMNS}, (extract(epoch FROM "occurredAt") * 1000000)::bigint::text AS "occurredAtUs"
                    FROM audit_record WHERE ${where.join(' AND ')}
                   ORDER BY "occurredAt" DESC, id DESC LIMIT ${bind(query.limit + 1)}`;
+    const { rows } = await q.query<PagedAuditRow>(sql, params);
+    return rows;
+  }
+
+  /**
+   * Core V2 S2-Audit.3 (AUD-03, AUD-04): one keyset page of the records with a TRUSTED scope row for the server-built scope, newest first
+   * (`"occurredAt" DESC, id DESC`, deterministic), `LIMIT limit + 1`. The scope is an inner JOIN on `audit_record_scope` (basis
+   * `verified_producer` only), applied before any limit; the record must also be producer-verified (defence in depth: the 0006 trigger
+   * already guarantees it). A record without a scope row, an unverified record or another Company / Platform can never be returned. Every
+   * predicate is a fixed fragment with a bound parameter; the request contributes only the two filters, the window and the position.
+   */
+  async findScopedPage(query: ScopedAuditQuery, q: Queryable = this.db): Promise<PagedAuditRow[]> {
+    const params: unknown[] = [];
+    const bind = (v: unknown) => {
+      params.push(v);
+      return `$${params.length}`;
+    };
+    const scope = query.scope.kind === 'company'
+      ? `s."companyId" = ${bind(query.scope.companyId)}::uuid`
+      : `s."platformId" = ${bind(query.scope.platformId)}::uuid`;
+    const where = [`r."producerIdentityVerified" IS TRUE`, `r."occurredAt" >= ${bind(query.window.from)}`, `r."occurredAt" < ${bind(query.window.to)}`];
+    if (query.filters.action !== undefined) where.push(`r.action = ${bind(query.filters.action)}`);
+    if (query.filters.correlationId !== undefined) where.push(`r."correlationId" = ${bind(query.filters.correlationId)}`);
+    if (query.after) {
+      where.push(`(r."occurredAt", r.id) < ('epoch'::timestamptz + ${bind(query.after.occurredAtUs)}::bigint * interval '1 microsecond', ${bind(query.after.id)}::bigint)`);
+    }
+    const columns = COLUMNS.split(',').map((c) => `r.${c.trim()}`).join(', ');
+    const sql = `SELECT ${columns}, (extract(epoch FROM r."occurredAt") * 1000000)::bigint::text AS "occurredAtUs"
+                   FROM audit_record r
+                   JOIN audit_record_scope s ON s."recordId" = r.id AND s.basis = 'verified_producer' AND ${scope}
+                  WHERE ${where.join(' AND ')}
+                  ORDER BY r."occurredAt" DESC, r.id DESC LIMIT ${bind(query.limit + 1)}`;
     const { rows } = await q.query<PagedAuditRow>(sql, params);
     return rows;
   }
