@@ -13,6 +13,11 @@ import { spawnService, waitFor, waitForHealth, type LiveService } from './suppor
  * `AUTH_SERVICE_URL`, the evidence that Auth itself produced (outbox → relay → RabbitMQ → audit_record). Audit verifies the owner and the
  * organization through Auth with the owner's own bearer; the read is recorded with the owner as actor; another Company's organization is a
  * 404; the account-level `account.disabled` of Stage 19.2 (organization none) is never visible to the owner.
+ *
+ * Core V2 S2-Audit.5 (AUD-07, ADR-0069 decision 4): a HUMAN read shows broker-verified evidence only. This job's Auth publishes as the shared
+ * `guest` broker user (no per-service broker identity on this CI broker), so its evidence is ingested UNVERIFIED (the S1 compatibility
+ * phase): it is stored and readable by services, and the owner's read correctly returns it to no human. The verified case is proven by
+ * `apps/audit-service/test/owner-query.e2e-spec.ts` (AUD-07 suite).
  */
 const AUTH_DIR = `${APPS}auth-service`;
 const AUTH_PORT = 3891;
@@ -116,10 +121,17 @@ describeWithEnv('Audit-X: a real Auth owner reads real evidence through a real a
     await waitFor(async () => (await audit.records(`action IN ('membership.revoked','account.disabled')`)).length === 2, 30_000, 'both records ingested');
     const [revokedRecord] = await audit.records(`action = 'membership.revoked'`);
 
-    // The owner reads A1: exactly A1's evidence, including the real membership.revoked; never the account-level record.
+    // The real evidence is stored, unverified (shared broker identity here), and a service reader of the organization sees it.
+    expect(revokedRecord.producerIdentityVerified).toBe(false);
+    const service = await call('GET', `${audit.url}/audit/organizations/${ids.a1}/records?${new URLSearchParams({ ...window(), limit: '100' })}`, audit.orgReader.token);
+    expect(service.status, JSON.stringify(service.body)).toBe(200);
+    expect(service.body.items.map((i: { eventId: string }) => i.eventId)).toContain(revokedRecord.eventId);
+
+    // The owner reads A1 (forged identity headers change nothing): 200, but AUD-07 shows a human verified evidence only, so the unverified
+    // membership.revoked is not returned; and never the account-level record.
     const read = await ownerRead(ids.a1, ownerToken, { 'x-owner-id': ids.member, 'x-user-kind': 'operator', 'x-acting-user': ids.member });
     expect(read.status, JSON.stringify(read.body)).toBe(200);
-    expect(read.body.items.map((i: { eventId: string }) => i.eventId)).toContain(revokedRecord.eventId);
+    expect(read.body.items.map((i: { eventId: string }) => i.eventId)).not.toContain(revokedRecord.eventId);
     expect(read.body.items.every((i: { organizationId: string }) => i.organizationId === ids.a1)).toBe(true);
     expect(read.body.items.some((i: { action: string }) => i.action === 'account.disabled')).toBe(false);
 
@@ -127,7 +139,7 @@ describeWithEnv('Audit-X: a real Auth owner reads real evidence through a real a
     const self = await audit.records(`action = 'platform_query.executed'`);
     expect(self).toHaveLength(1);
     expect(self[0]).toMatchObject({ sourceService: 'audit-service', actorType: 'user', actorId: ids.owner, userKind: 'owner', organizationId: null });
-    expect(self[0].changes).toMatchObject({ target: 'organization', organization_id: ids.a1, page: 'first', filtered: false });
+    expect(self[0].changes).toMatchObject({ target: 'organization', organization_id: ids.a1, page: 'first', filtered: false, result_count: read.body.items.length });
 
     // Another Company's organization: the collapsed 404, nothing recorded.
     const cross = await ownerRead(ids.b1, ownerToken);
