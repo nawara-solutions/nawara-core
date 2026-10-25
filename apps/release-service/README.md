@@ -63,6 +63,20 @@ Human only (ADR-0051 decision 8, ADR-0050):
 - **Consumption happens in Auth**, so a mutation that fails afterwards needs a new step-up.
 - **Auth failures** fail closed: 503 `auth_timeout` / `auth_unavailable`. One `AUTH_TIMEOUT_MS` budget covers every Auth call of the request.
 
+### Owner reads (Core V2 S2-Release.1, register REL-01 to REL-03)
+
+The same caller as the owner administration (the owner of the operating Company, own bearer, verified live through Auth on every request);
+no step-up (nothing changes), no audit record, no CI, operator or member access. Internal ids are never returned: keys are the identity.
+
+| Read | Route | Answer |
+|---|---|---|
+| Products | `GET /release/admin/products` | `{products: [{product, components: [{component, kind}]}]}`, ordered by key; no query parameter |
+| Releases | `GET /release/admin/products/{product}/components/{component}/releases` `?status&limit&cursor` | `{product, component, kind, releases: [{version, status, buildId, sourceRevision, notesRef, registeredAt, publishedAt, withdrawnAt}], nextCursor}`, newest registration first |
+| Policy history | `GET /release/admin/products/{product}/components/{component}/compatibility-policy/history` `?limit&cursor` | `{product, component, kind, entries: [{policyVersion, minimumVersion, createdAt}], nextCursor}`, newest version first; 409 `policy_not_applicable` for a backend |
+
+`limit` is 1–100 (default 50). `cursor` is the previous page's `nextCursor`, valid only with the same route, product, component and status
+(`400 invalid_cursor` otherwise); it carries no authority. Refusals as the owner administration: 401, 403 `operation_not_allowed`, 503.
+
 ## Public compatibility decision (Stage 20.5)
 
 `GET /release/products/{product}/components/{component}/compatibility?version=2.5.0`

@@ -123,4 +123,7 @@ export const RELEASE_MESSAGES = defineMessages({
     fr: 'Opération non autorisée pour cet appelant.',
     ar: 'العملية غير مسموح بها لهذا المستدعي.',
   },
+  // Core V2 S2-Release.1: the owner reads (REL-01 to REL-03)
+  invalidQuery: { en: 'The query is invalid.', fr: 'La requête est invalide.', ar: 'الاستعلام غير صالح.' },
+  invalidCursor: { en: 'The cursor is not valid for this query.', fr: "Le curseur n'est pas valide pour cette requête.", ar: 'المؤشر غير صالح لهذا الاستعلام.' },
 });

@@ -97,6 +97,52 @@ export class ReleaseStore {
     return (rows[0] as Component | undefined) ?? null;
   }
 
+  // ─────────────────────────────────────────────────────────────── owner reads (Core V2 S2-Release.1)
+
+  /** REL-01: every product of the registry with its components (keys and kinds), ordered by key. The registry is small and bounded. */
+  async listProducts(q: Queryable = this.db): Promise<Array<{ product: string; components: Array<{ component: string; kind: Component['kind'] }> }>> {
+    const { rows } = await q.query<{ product: string; component: string | null; kind: Component['kind'] | null }>(
+      `SELECT p.key AS product, c.key AS component, c.kind FROM product p LEFT JOIN component c ON c."productId" = p.id ORDER BY p.key, c.key`,
+    );
+    const out = new Map<string, Array<{ component: string; kind: Component['kind'] }>>();
+    for (const r of rows) {
+      const list = out.get(r.product) ?? [];
+      if (r.component !== null && r.kind !== null) list.push({ component: r.component, kind: r.kind });
+      out.set(r.product, list);
+    }
+    return [...out.entries()].map(([product, components]) => ({ product, components }));
+  }
+
+  /**
+   * REL-02: one page of a component's releases, newest registration first (`registeredAt DESC, id DESC`, deterministic), optionally of one
+   * status, after a keyset position (`registeredAt` in epoch µs, id). `LIMIT limit + 1`: one extra row means "there is a next page".
+   */
+  async listReleases(componentId: string, o: { status?: Release['status']; after?: { registeredAtUs: string; id: string }; limit: number }, q: Queryable = this.db) {
+    const params: unknown[] = [componentId];
+    const bind = (v: unknown) => `$${params.push(v)}`;
+    const where = [`"componentId" = $1`];
+    if (o.status) where.push(`status = ${bind(o.status)}`);
+    if (o.after) where.push(`("registeredAt", id) < ('epoch'::timestamptz + ${bind(o.after.registeredAtUs)}::bigint * interval '1 microsecond', ${bind(o.after.id)}::uuid)`);
+    const { rows } = await q.query(
+      `SELECT id, "componentId", version, "buildId", "sourceRevision", "notesRef", status, "registeredAt", "publishedAt", "withdrawnAt",
+              (extract(epoch FROM "registeredAt") * 1000000)::bigint::text AS "registeredAtUs"
+         FROM release WHERE ${where.join(' AND ')} ORDER BY "registeredAt" DESC, id DESC LIMIT ${bind(o.limit + 1)}`,
+      params,
+    );
+    return rows.map((r) => ({ release: release(r), registeredAtUs: r.registeredAtUs as string }));
+  }
+
+  /** REL-03: one page of a component's append-only policy history, newest version first, after a policy version. */
+  async policyHistory(componentId: string, o: { beforeVersion?: number; limit: number }, q: Queryable = this.db): Promise<CompatibilityPolicy[]> {
+    const { rows } = await q.query(
+      `SELECT "componentId", "policyVersion", "minimumVersion", "createdAt" FROM compatibility_policy
+        WHERE "componentId" = $1 AND ($2::integer IS NULL OR "policyVersion" < $2::integer)
+        ORDER BY "policyVersion" DESC LIMIT $3`,
+      [componentId, o.beforeVersion ?? null, o.limit + 1],
+    );
+    return rows.map(policy);
+  }
+
   // ─────────────────────────────────────────────────────────────── release
 
   /**
