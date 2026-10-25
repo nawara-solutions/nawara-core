@@ -34,10 +34,18 @@ BEGIN
   RETURN iid;
 END $$;
 
+-- Core V2 S3a (DB-2): an invoice leaves draft only with its routing record, written in the same transaction while it is still a draft.
+-- These fixtures sell ordinary one-time products, so the routing is `non_entitlement` (the service decides it the same way).
+CREATE FUNCTION t_route(inv uuid) RETURNS void LANGUAGE sql AS $$
+  INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId")
+  SELECT id, 'non_entitlement', 'none', "payerType", "payerId" FROM invoice WHERE id = inv;
+$$;
+
 -- issue a draft: the trigger allocates the number; returns it
 CREATE FUNCTION t_issue(inv uuid) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE r int; n text;
 BEGIN
+  PERFORM t_route(inv);
   UPDATE invoice SET status = 'open', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}'::jsonb WHERE id = inv RETURNING revision, number INTO r, n;
   PERFORM t_hist('invoice', inv, 'draft', 'open', r);
   RETURN n;
@@ -93,6 +101,7 @@ CREATE FUNCTION t_try_issue(inv uuid) RETURNS boolean LANGUAGE plpgsql AS $$
 DECLARE r int; n int;
 BEGIN
   PERFORM 1 FROM invoice WHERE id = inv FOR UPDATE;
+  IF EXISTS (SELECT 1 FROM invoice WHERE id = inv AND status = 'draft') THEN PERFORM t_route(inv); END IF;
   UPDATE invoice SET status = 'open', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}'::jsonb WHERE id = inv AND status = 'draft' RETURNING revision INTO r;
   GET DIAGNOSTICS n = ROW_COUNT;
   IF n = 1 THEN PERFORM t_hist('invoice', inv, 'draft', 'open', r); END IF;

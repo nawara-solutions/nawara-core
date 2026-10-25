@@ -183,7 +183,7 @@ SELECT pg_temp.assert_eq('BI-10', 'consecutive issues for one seller get consecu
 SELECT pg_temp.expect_error('BI-10', 'a number cannot be changed after issue', format($$UPDATE invoice SET number = '999' WHERE id = %L$$, :'n1'), '23514');
 SELECT pg_temp.expect_error('BI-10', 'a number cannot be set on a draft without issuing it', format($$UPDATE invoice SET number = '999' WHERE id = %L$$, :'n3'), '23514');
 SELECT t_mk_invoice() AS nx \gset
-SELECT pg_temp.expect_ok('BI-10', 'issuing with a caller-supplied number succeeds', format($$UPDATE invoice SET status = 'open', number = '7777', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}' WHERE id = %L; SELECT t_hist('invoice', %L, 'draft', 'open', 1)$$, :'nx', :'nx'));
+SELECT pg_temp.expect_ok('BI-10', 'issuing with a caller-supplied number succeeds', format($$SELECT t_route(%L); UPDATE invoice SET status = 'open', number = '7777', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}' WHERE id = %L; SELECT t_hist('invoice', %L, 'draft', 'open', 1)$$, :'nx', :'nx', :'nx'));
 SELECT pg_temp.assert_eq('BI-10', 'a caller-supplied number is discarded at issue: the counter decides', (SELECT (number <> '7777')::text FROM invoice WHERE id = :'nx'), 'true');
 SELECT pg_temp.expect_error('BI-10', 'a duplicate number for one seller is refused by the unique index', format($$SELECT set_config('session_replication_role', 'replica', true);
   UPDATE invoice SET number = (SELECT number FROM invoice WHERE id = %L) WHERE id = %L$$, :'n2', :'n1'), '23505', 'invoice_number_unique');
