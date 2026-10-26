@@ -10,15 +10,15 @@ describe('TestPaymentProvider', () => {
     const p = new TestPaymentProvider();
     const result = await p.initiate(payment(), { merchantReference: 'att-1' });
     expect(result).toMatchObject({ kind: 'accepted', providerTransactionId: 'ptx_att-1' });
-    await expect(p.fetchStatus('ptx_att-1')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND' });
-    await expect(p.fetchStatus('att-1')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND' });
+    await expect(p.fetchStatus('ptx_att-1')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: 'ptx_att-1' }); // S4d: the fact identity
+    await expect(p.fetchStatus('att-1')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: 'ptx_att-1' }); // S4d: the fact identity
   });
 
   it('success_amount_mismatch: accepts, but fetchStatus later reports an amount that differs from the payment snapshot (FI-13 fixture)', async () => {
     const p = new TestPaymentProvider();
     const result = await p.initiate(payment(), { merchantReference: 'att-mismatch', options: { scenario: 'success_amount_mismatch' } });
     expect(result).toMatchObject({ kind: 'accepted' });
-    await expect(p.fetchStatus('att-mismatch')).resolves.toEqual({ kind: 'succeeded', amount: 1001, currency: 'TND' });
+    await expect(p.fetchStatus('att-mismatch')).resolves.toEqual({ kind: 'succeeded', amount: 1001, currency: 'TND', providerTransactionId: 'ptx_att-mismatch' }); // S4d: the fact identity
   });
 
   it('failure: rejects with the given (or default) failure class/code, and fetchStatus reports failed', async () => {
@@ -51,7 +51,7 @@ describe('TestPaymentProvider', () => {
     const p = new TestPaymentProvider();
     const result = await p.initiate(payment(), { merchantReference: 'att-6', options: { scenario: 'timeout_after_accept' } });
     expect(result).toEqual({ kind: 'ambiguous' });
-    await expect(p.fetchStatus('att-6')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND' });
+    await expect(p.fetchStatus('att-6')).resolves.toEqual({ kind: 'succeeded', amount: 1000, currency: 'TND', providerTransactionId: 'ptx_att-6' }); // S4d: the fact identity
   });
 
   it('fetchStatus is notFound for a reference the provider has never seen', async () => {
@@ -72,7 +72,7 @@ describe('TestPaymentProvider', () => {
       const result = await p.verifyWebhook(body, { 'x-test-provider-signature': signature });
       expect(result).toEqual({
         signatureValid: true,
-        parsed: { providerEventId: 'evt_att-8', type: 'payment.succeeded', reference: 'ptx_att-8', amount: 1000, currency: 'TND', data: undefined },
+        parsed: { providerEventId: 'evt_att-8', type: 'payment.succeeded', reference: 'ptx_att-8', providerTransactionId: 'ptx_att-8', amount: 1000, currency: 'TND', data: undefined },
       });
     });
 
@@ -98,5 +98,12 @@ describe('TestPaymentProvider', () => {
       const sig = createHmac('sha256', 'test-provider-webhook-secret').update(body).digest('hex');
       await expect(p.verifyWebhook(body, { 'x-test-provider-signature': sig })).resolves.toEqual({ signatureValid: true, parsed: null });
     });
+  });
+
+  it('Core V2 S4d: a notification naming the merchant reference or the provider transaction names the SAME provider transaction', () => {
+    const p = new TestPaymentProvider();
+    const parse = (reference: string) => p.parseStoredBody(Buffer.from(JSON.stringify({ eventId: 'e', type: 'payment.succeeded', reference, amount: 1, currency: 'TND' })));
+    expect(parse('att-9')?.providerTransactionId).toBe('ptx_att-9');
+    expect(parse('ptx_att-9')?.providerTransactionId).toBe('ptx_att-9');
   });
 });

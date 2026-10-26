@@ -83,7 +83,7 @@ export class TestPaymentProvider implements PaymentProvider {
     const key = ref.startsWith('ptx_') ? ref.slice('ptx_'.length) : ref;
     const record = this.records.get(key);
     if (!record) return { kind: 'notFound' };
-    if (record.status === 'accepted') return { kind: 'succeeded', amount: record.amount, currency: record.currency };
+    if (record.status === 'accepted') return { kind: 'succeeded', amount: record.amount, currency: record.currency, providerTransactionId: record.providerTransactionId ?? `ptx_${key}` };
     if (record.status === 'rejected') return { kind: 'failed', failureClass: record.failureClass ?? 'terminal', failureCode: record.failureCode ?? 'unknown' };
     return { kind: 'pending' };
   }
@@ -136,6 +136,9 @@ export class TestPaymentProvider implements PaymentProvider {
         providerEventId: body.eventId,
         type: body.type,
         reference: body.reference,
+        // Core V2 S4d: this provider's transaction ids are `ptx_<merchantReference>` (initiate), so a notification naming either form
+        // names the same transaction; derived from the message alone (the retrier re-parses stored bodies)
+        providerTransactionId: body.reference.startsWith('ptx_') ? body.reference : `ptx_${body.reference}`,
         amount: typeof body.amount === 'number' ? body.amount : undefined,
         currency: typeof body.currency === 'string' ? body.currency : undefined,
         data: body.data,

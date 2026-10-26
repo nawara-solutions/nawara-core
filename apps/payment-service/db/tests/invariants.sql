@@ -408,6 +408,46 @@ SELECT pg_temp.expect_error('S4c', 'F-4: a webhook-sourced record names its stor
 SELECT pg_temp.assert_eq('S4c', 'F-4: recording a late success leaves the payment final and unchanged', (SELECT status FROM payment WHERE id = :'c1'), 'cancelled');
 \o
 
+-- ======================================================= Core V2 S4d: provider transaction facts (0013) ----
+\o /dev/null
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS f1 \gset
+SELECT pg_temp.new_attempt(:'f1', 1) AS f1a \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS f2 \gset
+SELECT pg_temp.new_attempt(:'f2', 1) AS f2a \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('test', 'evt-s4d-1', 'payment.succeeded', '\x7b7d') RETURNING id AS wh_test \gset
+INSERT INTO webhook_event (provider, "providerEventId", "eventType", "rawBody") VALUES ('other', 'evt-s4d-2', 'payment.succeeded', '\x7b7d') RETURNING id AS wh_other \gset
+CREATE FUNCTION pg_temp.fact(p uuid, a uuid, prov text, txn text, amt bigint, src text, wh uuid, kind text DEFAULT 'capture', live text DEFAULT 'false') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "webhookEventId", "observedAt")
+    VALUES (%L, %L, %L, %L, %L, %s, 'TND', %s, %L, %L, '2000-01-01')$$, prov, txn, kind, p, a, amt, live, src, wh);
+$f$;
+SELECT pg_temp.expect_ok('S4d', 'FC-1: a capture fact from a verified webhook of the same provider', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-1', 1000, 'webhook', :'wh_test'));
+SELECT pg_temp.assert_eq('S4d', 'observedAt is the database time, never a supplied one', (SELECT ("observedAt" > now() - interval '1 minute')::text FROM provider_transaction_fact WHERE "providerTxnId" = 'ptx-s4d-1'), 'true');
+SELECT pg_temp.expect_error('S4d', 'FC-1: one fact per (provider, providerTxnId, kind)', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-1', 1000, 'status_check', NULL), '23505');
+SELECT pg_temp.expect_ok('S4d', 'a status-read fact (no webhook) for another transaction', pg_temp.fact(:'f2', :'f2a', 'test', 'ptx-s4d-2', 1000, 'status_check', NULL));
+SELECT pg_temp.expect_error('S4d', 'a fact is bound to ITS attempt''s payment (no cross-payment association)', pg_temp.fact(:'f2', :'f1a', 'test', 'ptx-s4d-3', 1000, 'status_check', NULL), '23503');
+SELECT pg_temp.expect_error('S4d', 'a fact is bound to ITS attempt''s provider (no cross-provider association)', pg_temp.fact(:'f1', :'f1a', 'other', 'ptx-s4d-4', 1000, 'status_check', NULL), '23503');
+SELECT pg_temp.expect_error('S4d', 'a webhook-sourced fact names a stored webhook of the same provider', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-5', 1000, 'webhook', :'wh_other'), '23514');
+SELECT pg_temp.expect_error('S4d', 'a webhook-sourced fact names its webhook', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-6', 1000, 'webhook', NULL), '23514');
+SELECT pg_temp.expect_error('S4d', 'a status-read fact names no webhook', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-7', 1000, 'status_check', :'wh_test'), '23514');
+SELECT pg_temp.expect_error('S4d', 'only the capture kind exists in S4d (refunds and chargebacks are S6)', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-8', 1000, 'status_check', NULL, 'refund'), '23514');
+SELECT pg_temp.expect_error('S4d', 'FC-10 under P-6: a live fact is refused (simulation only)', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-9', 1000, 'status_check', NULL, 'capture', 'true'), '23514');
+SELECT pg_temp.expect_error('S4d', 'a fact moves money: a zero amount is no fact', pg_temp.fact(:'f1', :'f1a', 'test', 'ptx-s4d-10', 0, 'status_check', NULL), '23514');
+SELECT pg_temp.expect_error('S4d', 'FC-1: a fact is never edited', $$UPDATE provider_transaction_fact SET amount = 1$$, '23514');
+SELECT pg_temp.expect_error('S4d', 'FC-1: a fact is never deleted', $$DELETE FROM provider_transaction_fact$$, '23514');
+SELECT pg_temp.expect_error('S4d', 'FC-1: facts are never truncated', $$TRUNCATE provider_transaction_fact CASCADE$$, '23514');
+SELECT id AS fact1 FROM provider_transaction_fact WHERE "providerTxnId" = 'ptx-s4d-1' \gset
+INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", provider, amount, currency, source) VALUES (:'fact1', :'f1', :'f1a', 'test', 999, 'TND', 'status_check');
+SELECT pg_temp.expect_error('S4d', 'a contradiction redelivered is recorded once', format($$INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", provider, amount, currency, source) VALUES (%L, %L, %L, 'test', 999, 'TND', 'status_check')$$, :'fact1', :'f1', :'f1a'), '23505');
+SELECT pg_temp.expect_error('S4d', 'a contradiction is never edited', $$UPDATE provider_transaction_fact_conflict SET amount = 1$$, '23514');
+SELECT pg_temp.expect_error('S4d', 'a contradiction is never deleted', $$DELETE FROM provider_transaction_fact_conflict$$, '23514');
+SELECT pg_temp.assert_eq('S4d', 'a contradiction never changes its fact', (SELECT amount::text FROM provider_transaction_fact WHERE id = :'fact1'), '1000');
+SELECT pg_temp.expect_ok('S4d', 'C2: a late success references its own fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f1', :'f1a', :'fact1'));
+SELECT pg_temp.expect_error('S4d', 'C2: a late success never references another attempt''s fact', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus", "factId") VALUES (%L, %L, 'status_check', 1000, 'TND', 'created', %L)$$, :'f2', :'f2a', :'fact1'), '23514');
+SELECT pg_temp.assert_eq('S4d', 'the runtime grants: no UPDATE or DELETE on facts for anyone but the owner',
+  (SELECT count(*)::text FROM information_schema.role_table_grants g JOIN pg_tables t ON t.tablename = g.table_name
+    WHERE g.table_name IN ('provider_transaction_fact', 'provider_transaction_fact_conflict') AND g.privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE') AND g.grantee <> t.tableowner), '0');
+\o
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

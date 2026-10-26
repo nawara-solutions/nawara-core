@@ -44,6 +44,13 @@ is `cancelled`, `expired` or `failed` while uncertain, no new attempt starts whi
 after the workflow ended is recorded in `payment_late_success`, never applied. `finality` (`open`, `uncertain`, `final`) is derived on every
 read and means workflow finality only, never that a refund, dispute, chargeback or late evidence is impossible.
 
+**Core V2 S4d (provider transaction facts; S0 FC-1, V-2; ADR-0035 C2; register PAY-05 F):** every capture a provider reports through an
+authenticated channel (a signature-verified webhook or the provider's status read) is first committed, in its own transaction, as an
+immutable `provider_transaction_fact` keyed `(provider, providerTxnId, kind = capture)`; only then does the existing processing decide
+what it means (settle, FI-13 refusal, late success). A fact is never refused, edited or deleted; redeliveries are the same fact; a
+contradicting observation is kept in `provider_transaction_fact_conflict`; `payment_late_success` references its fact. Refund and
+chargeback facts, allocation (FC-2) and the association of unmatched evidence are S6.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.

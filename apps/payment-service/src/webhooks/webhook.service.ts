@@ -84,7 +84,7 @@ export class WebhookService {
   private async process(
     eventId: string,
     provider: PaymentProvider,
-    parsed: { providerEventId: string; type: string; reference: string; amount?: number; currency?: string; data: unknown },
+    parsed: { providerEventId: string; type: string; reference: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date },
     claim?: Queryable,
   ): Promise<WebhookResult> {
     const status = this.toStatus(parsed);
@@ -115,10 +115,10 @@ export class WebhookService {
     }
   }
 
-  private toStatus(parsed: { type: string; amount?: number; currency?: string; data: unknown }): FetchStatusResult | null {
+  private toStatus(parsed: { type: string; amount?: number; currency?: string; data: unknown; providerTransactionId?: string; providerOccurredAt?: Date }): FetchStatusResult | null {
     if (parsed.type === 'payment.succeeded') {
       if (typeof parsed.amount !== 'number' || typeof parsed.currency !== 'string') return null;
-      return { kind: 'succeeded', amount: parsed.amount, currency: parsed.currency };
+      return { kind: 'succeeded', amount: parsed.amount, currency: parsed.currency, providerTransactionId: parsed.providerTransactionId, providerOccurredAt: parsed.providerOccurredAt };
     }
     if (parsed.type === 'payment.failed') {
       const data = (parsed.data ?? {}) as { failureCode?: string; failureClass?: string };
