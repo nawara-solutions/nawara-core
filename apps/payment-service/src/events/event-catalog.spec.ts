@@ -23,6 +23,7 @@ function conformance(payload: Record<string, unknown>, declared: Readonly<Record
       string: () => typeof v === 'string',
       datetime: () => typeof v === 'string' && !Number.isNaN(Date.parse(v)) && v.endsWith('Z'),
       integer: () => Number.isSafeInteger(v),
+      boolean: () => typeof v === 'boolean',
       object: () => typeof v === 'object' && !Array.isArray(v),
       array: () => Array.isArray(v),
       enum: () => typeof v === 'string' && (f.values ?? []).includes(v),
@@ -56,7 +57,12 @@ const row: PaymentRow = {
   createdAt: new Date(),
   updatedAt: new Date(),
   closedAt: new Date('2026-01-01T12:00:00Z'),
+  purpose: null, // a payment created before S4a: no purpose, beneficiary or mode travels
+  beneficiaryUserId: null,
+  liveMode: null,
 };
+/** Core V2 S4a: a payment created since S4a carries its purpose, beneficiary and mode (added optional fields). */
+const s4aRow: PaymentRow = { ...row, purpose: 'direct_purchase', beneficiaryUserId: 'user-1', liveMode: false };
 
 describe('payment-service event catalog (V2 A3M.2)', () => {
   it('contracts/events.json is exactly this catalog (regenerate with `vitest -u` after a deliberate contract change)', async () => {
@@ -76,9 +82,11 @@ describe('payment-service event catalog (V2 A3M.2)', () => {
     for (const name of Object.keys(PRODUCED_EVENTS) as PaymentEventName[]) {
       for (const extra of extras[name]) {
         for (const ctx of contexts) {
-          const ev = paymentEvent(name, { ...row, organizationId: ctx === contexts[0] ? '33333333-3333-4333-8333-333333333333' : null }, ctx, extra);
-          expect(ev.name).toBe(name);
-          expect(conformance(JSON.parse(JSON.stringify(ev.payload)) as Record<string, unknown>, PRODUCED_EVENTS[name].payload), name).toEqual([]);
+          for (const base of [row, s4aRow]) {
+            const ev = paymentEvent(name, { ...base, organizationId: ctx === contexts[0] ? '33333333-3333-4333-8333-333333333333' : null }, ctx, extra);
+            expect(ev.name).toBe(name);
+            expect(conformance(JSON.parse(JSON.stringify(ev.payload)) as Record<string, unknown>, PRODUCED_EVENTS[name].payload), name).toEqual([]);
+          }
         }
       }
     }

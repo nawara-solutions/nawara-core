@@ -14,7 +14,7 @@ import { SubscriptionRepository } from '../src/subscriptions/subscription.reposi
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
 import { anchorOccurrence } from './support/billing-calendar.js';
-import { configurePlatform } from './support/settlement.js';
+import { configurePlatform, paymentPurposeOf } from './support/settlement.js';
 
 // Core V2 S3a: a subscription product names its Platform; the issuing caller and the invoice's Organization belong to it (the controller
 // resolves both before the issuing transaction; these tests call the repository directly and pass what the controller would).
@@ -134,14 +134,14 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
   const eventFor = (invoice: { id: string; total: string; currency: string; organizationId?: string | null }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded', over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
     name, source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
     payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: invoice.organizationId ?? ORG }, organizationId: invoice.organizationId ?? ORG,
-    amount: Number(invoice.total), currency: invoice.currency, revision: 1, ...over,
+    amount: Number(invoice.total), currency: invoice.currency, revision: 1, purpose: 'organization_subscription', liveMode: false, ...over, // S4a: as Payment echoes them
   });
   const succeed = (open: { id: string; total: string; currency: string; organizationId?: string | null }, request: { id: string }, paymentId: string, settledAt: Date, over: Partial<PaymentEventFacts> = {}, eventId = crypto.randomUUID()) =>
     requests.applyPaymentEvent(eventId, eventFor(open, request, paymentId, 'payment.succeeded', over), paymentCtx, settledAt);
   const snapshotFor = (invoice: { id: string; total: string; currency: string; organizationId?: string | null }, request: { id: string }, paymentId: string, closedAt: Date, over: Partial<PaymentSnapshot> = {}): PaymentSnapshot => ({
     paymentId, paymentRequestId: request.id, status: 'succeeded', amount: Number(invoice.total), currency: invoice.currency,
     sourceType: 'invoice', sourceId: invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: invoice.organizationId ?? ORG },
-    organizationId: invoice.organizationId ?? ORG, closedAt, ...over,
+    organizationId: invoice.organizationId ?? ORG, closedAt, purpose: 'organization_subscription', liveMode: false, ...over, // S4a
   });
 
   // -------------------------------------------------------------------------------------------------------------- tests
@@ -260,7 +260,7 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     const organizationId = crypto.randomUUID();
     const priceId = await seedOneTimePrice({ organizationId });
     const { open, request, paymentId } = await requestedRecurring({ organizationId, priceId });
-    const result = await succeed(open, request, paymentId, new Date());
+    const result = await succeed(open, request, paymentId, new Date(), { purpose: 'non_entitlement' }); // S4a: an ordinary invoice's purpose
     expect(result).toMatchObject({ outcome: 'applied', subscription: null });
     await expect(subs.getByOrganization(organizationId)).rejects.toMatchObject({ status: 404 });
     expect((await admin.query(`SELECT status FROM invoice WHERE id = $1`, [open.id])).rows[0].status).toBe('paid'); // the sale itself is unaffected
@@ -298,7 +298,8 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     const result = await requests.applyPaymentEvent(
       crypto.randomUUID(),
       { name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: open.id,
-        payer: { type: 'user', id: 'user-1' }, seller: { type: 'company', id: companyId }, organizationId: null, amount: Number(open.total), currency: open.currency, revision: 1 },
+        payer: { type: 'user', id: 'user-1' }, seller: { type: 'company', id: companyId }, organizationId: null, amount: Number(open.total), currency: open.currency, revision: 1,
+        ...(await paymentPurposeOf(t.app.get(DbService), open.id)) },
       paymentCtx, new Date(),
     );
     expect(result).toMatchObject({ outcome: 'applied', subscription: null });

@@ -11,7 +11,7 @@ const paymentMigrationsDir = fileURLToPath(new URL('../db/migrations/', import.m
 const validBody = (over: Partial<Record<string, unknown>> = {}) => {
   const organizationId = crypto.randomUUID();
   return {
-    paymentRequestId: crypto.randomUUID(),
+    paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement',
     sourceType: 'invoice',
     sourceId: 'inv-1',
     payer: { type: 'user', id: 'user-1' },

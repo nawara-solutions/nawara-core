@@ -36,6 +36,10 @@ export interface PaymentEventFacts {
   amount: unknown;
   currency: string;
   revision: number;
+  /** Core V2 S4a (optional, added to version 1): absent on a payment created before S4a. */
+  purpose?: string;
+  beneficiaryUserId?: string;
+  liveMode?: boolean;
 }
 
 export interface RequestFacts {
@@ -44,6 +48,8 @@ export interface RequestFacts {
   paymentId: string | null;
   amount: bigint;
   currency: string;
+  /** Core V2 S4a: the mapping version the request pinned (2 sends the routing purpose and beneficiary; 1 sent neither). */
+  mappingVersion?: number;
 }
 
 export interface InvoiceFacts {
@@ -56,12 +62,20 @@ export interface InvoiceFacts {
   organizationId: string | null;
   currency: string;
   total: bigint;
+  /** Core V2 S4a: the routing record's purpose and beneficiary (null on an invoice issued before S3a). */
+  purpose?: string | null;
+  beneficiaryUserId?: string | null;
+}
+
+/** Core V2 S4a (FC-10): in production, Billing applies only LIVE financial events; Core V2 has none, so production applies nothing. */
+export interface DecisionOptions {
+  requireLive?: boolean;
 }
 
 export type Decision =
   | { outcome: 'ignored'; detail: 'unknown_payment_request' | 'already_applied' }
   | { outcome: 'deferred'; detail: 'payment_id_not_recorded' }
-  | { outcome: 'conflict'; detail: 'wrong_source' | 'producer_mismatch' | 'payment_id_mismatch' | 'snapshot_mismatch' | 'amount_mismatch' | 'invalid_amount' | 'request_already_terminal' | 'invoice_not_open' | 'invoice_missing' }
+  | { outcome: 'conflict'; detail: 'wrong_source' | 'producer_mismatch' | 'payment_id_mismatch' | 'snapshot_mismatch' | 'amount_mismatch' | 'invalid_amount' | 'request_already_terminal' | 'invoice_not_open' | 'invoice_missing' | 'non_live_event' }
   | { outcome: 'applied'; requestTo: 'paid' | 'failed' | 'expired' | 'cancelled'; invoiceTo: 'paid' | null };
 
 const TARGET: Record<PaymentEventName, 'paid' | 'failed' | 'expired' | 'cancelled'> = {
@@ -71,10 +85,12 @@ const TARGET: Record<PaymentEventName, 'paid' | 'failed' | 'expired' | 'cancelle
   'payment.cancelled': 'cancelled',
 };
 
-export function decidePaymentEvent(event: PaymentEventFacts, request: RequestFacts | null, invoice: InvoiceFacts | null): Decision {
+export function decidePaymentEvent(event: PaymentEventFacts, request: RequestFacts | null, invoice: InvoiceFacts | null, opts: DecisionOptions = {}): Decision {
   // No such request: someone else's payment (another producer may use the same source type), never an alert.
   if (request === null) return { outcome: 'ignored', detail: 'unknown_payment_request' };
   if (invoice === null) return { outcome: 'conflict', detail: 'invoice_missing' };
+  // Core V2 S4a (FC-10, P-6): production never applies a simulation (or mode-less) event; recorded and alerted, never applied
+  if (opts.requireLive && event.liveMode !== true) return { outcome: 'conflict', detail: 'non_live_event' };
 
   // The request has no paymentId yet (dispatch not recorded): NOTHING is applied and NOTHING is bound from this event.
   if (request.paymentId === null) return { outcome: 'deferred', detail: 'payment_id_not_recorded' };
@@ -93,6 +109,14 @@ export function decidePaymentEvent(event: PaymentEventFacts, request: RequestFac
     event.organizationId !== invoice.organizationId
   ) {
     return { outcome: 'conflict', detail: 'snapshot_mismatch' };
+  }
+  // Core V2 S4a (P-1, P-2, S-6): a mapping-version-2 request was sent the routing record's purpose and beneficiary, so its payment must carry
+  // exactly those; a version-1 request sent neither, so its payment carries neither. Anything else is not the payment Billing asked for.
+  if (request.mappingVersion !== undefined) {
+    const v2 = request.mappingVersion >= 2;
+    if ((event.purpose ?? null) !== (v2 ? invoice.purpose ?? null : null) || (event.beneficiaryUserId ?? null) !== (v2 ? invoice.beneficiaryUserId ?? null : null)) {
+      return { outcome: 'conflict', detail: 'snapshot_mismatch' };
+    }
   }
 
   const target = TARGET[event.name];

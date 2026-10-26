@@ -5,7 +5,7 @@
  * changes a published contract: an added optional field keeps the version, anything else is a new version (ADR-0057 §5).
  * The types are local on purpose (no shared event-contract library, no domain contract in the kit).
  */
-export type EventFieldType = 'id' | 'uuid' | 'string' | 'datetime' | 'integer' | 'object' | 'array' | 'enum';
+export type EventFieldType = 'id' | 'uuid' | 'string' | 'datetime' | 'integer' | 'boolean' | 'object' | 'array' | 'enum';
 export interface EventField {
   readonly type: EventFieldType;
   /** `enum` only: the allowed values. */
@@ -45,6 +45,10 @@ const COMMON = {
   actor: { type: 'object' },
   cause: { type: 'object' },
   producer: { type: 'string' },
+  // Core V2 S4a (additive, optional: version 1 unchanged): absent on a payment created before S4a
+  purpose: { type: 'enum', values: ['organization_subscription', 'direct_purchase', 'assisted_settlement', 'recovery_settlement', 'non_entitlement'], optional: true },
+  beneficiaryUserId: { type: 'string', optional: true },
+  liveMode: { type: 'boolean', optional: true },
 } as const;
 
 export const PRODUCED_EVENTS = {

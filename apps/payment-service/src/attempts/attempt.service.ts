@@ -7,7 +7,7 @@ import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
 import { paymentError } from '../errors.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
-import type { PaymentRow } from '../payments/payment.types.js';
+import { CORE_V2_LIVE_MODE, type PaymentRow } from '../payments/payment.types.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import type { FetchStatusResult, PaymentProvider } from '../providers/provider.port.js';
 import type { AttemptRow } from './attempt.types.js';
@@ -74,8 +74,9 @@ export class AttemptService {
       const attemptNumber = countRows[0].count + 1;
 
       const { rows: inserted } = await q.query<AttemptRow>(
-        `INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES ($1,$2,$3,$4) RETURNING *`,
-        [attemptId, paymentId, attemptNumber, providerId],
+        `INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        // Core V2 S4a (P-6): the payment's mode (a payment created before S4a has none: its new attempts are simulation, like Core V2)
+        [attemptId, paymentId, attemptNumber, providerId, payment.liveMode ?? CORE_V2_LIVE_MODE],
       );
       await q.query(`UPDATE payment SET status = 'pending' WHERE id = $1`, [paymentId]);
       return { replay: false as const, payment, attempt: inserted[0] };

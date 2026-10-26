@@ -34,6 +34,10 @@ export interface PaymentRepresentation {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /** Core V2 S4a: null only on a payment created before S4a (never re-interpreted). */
+  purpose: string | null;
+  beneficiaryUserId: string | null;
+  liveMode: boolean | null;
 }
 
 export async function representPayment(q: Queryable, payment: PaymentRow): Promise<PaymentRepresentation> {
@@ -74,5 +78,8 @@ export async function representPayment(q: Queryable, payment: PaymentRow): Promi
     createdAt: payment.createdAt.toISOString(),
     updatedAt: payment.updatedAt.toISOString(),
     closedAt: payment.closedAt ? payment.closedAt.toISOString() : null,
+    purpose: payment.purpose,
+    beneficiaryUserId: payment.beneficiaryUserId,
+    liveMode: payment.liveMode,
   };
 }

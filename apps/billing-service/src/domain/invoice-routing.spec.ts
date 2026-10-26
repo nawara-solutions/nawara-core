@@ -13,12 +13,16 @@ function randomish(): string {
 
 /** Core V2 S3a (ADR-0044 B2, Owner decision Option C): the server's routing of an invoice as it leaves draft. */
 describe('decideRouting', () => {
-  it('no subscription line at all: non_entitlement, target none, no beneficiary or reference, whatever the payer', () => {
-    for (const payerType of ['user', 'organization', 'company']) {
+  it('no subscription line at all: non_entitlement, target none, no beneficiary or reference, for a user or a Company payer', () => {
+    for (const payerType of ['user', 'company']) {
       expect(decideRouting({ payerType, payerId: 'p', organizationId: ORG, lines: [line('none'), line('none')] })).toEqual({
         routed: { purpose: 'non_entitlement', target: 'none', beneficiaryUserId: null, organizationId: null, productId: null, platformId: null },
       });
     }
+  });
+
+  it('Core V2 S4a (P-1, the prospective B2 narrowing; B7, DB-15): an Organization never pays an ordinary invoice', () => {
+    expect(decideRouting({ payerType: 'organization', payerId: ORG, organizationId: ORG, lines: [line('none')] })).toEqual({ refused: 'organization_payer' });
   });
 
   it('one organization line, a user payer and an Organization: organization_subscription for THAT Organization and product', () => {
@@ -49,6 +53,6 @@ describe('decideRouting', () => {
 
   it('never reads entitlementKind: only the product target decides (a legacy organization_license line with target none is ordinary)', () => {
     const legacy = { ...line('none'), entitlementKind: 'organization_license', interval: 'recurring' } as RoutingLine;
-    expect(decideRouting({ payerType: 'organization', payerId: ORG, organizationId: ORG, lines: [legacy] })).toMatchObject({ routed: { purpose: 'non_entitlement' } });
+    expect(decideRouting({ payerType: 'user', payerId: 'u-1', organizationId: ORG, lines: [legacy] })).toMatchObject({ routed: { purpose: 'non_entitlement' } });
   });
 });

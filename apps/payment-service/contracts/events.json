@@ -11,11 +11,19 @@
         "amount": {
           "type": "integer"
         },
+        "beneficiaryUserId": {
+          "type": "string",
+          "optional": true
+        },
         "cause": {
           "type": "object"
         },
         "currency": {
           "type": "string"
+        },
+        "liveMode": {
+          "type": "boolean",
+          "optional": true
         },
         "organizationId": {
           "type": "string",
@@ -32,6 +40,17 @@
         },
         "producer": {
           "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "optional": true
         },
         "revision": {
           "type": "integer"
@@ -60,11 +79,19 @@
         "amount": {
           "type": "integer"
         },
+        "beneficiaryUserId": {
+          "type": "string",
+          "optional": true
+        },
         "cause": {
           "type": "object"
         },
         "currency": {
           "type": "string"
+        },
+        "liveMode": {
+          "type": "boolean",
+          "optional": true
         },
         "organizationId": {
           "type": "string",
@@ -81,6 +108,17 @@
         },
         "producer": {
           "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "optional": true
         },
         "revision": {
           "type": "integer"
@@ -109,6 +147,10 @@
         "amount": {
           "type": "integer"
         },
+        "beneficiaryUserId": {
+          "type": "string",
+          "optional": true
+        },
         "cause": {
           "type": "object"
         },
@@ -117,6 +159,10 @@
         },
         "expiresAt": {
           "type": "datetime"
+        },
+        "liveMode": {
+          "type": "boolean",
+          "optional": true
         },
         "organizationId": {
           "type": "string",
@@ -133,6 +179,17 @@
         },
         "producer": {
           "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "optional": true
         },
         "revision": {
           "type": "integer"
@@ -161,6 +218,10 @@
         "amount": {
           "type": "integer"
         },
+        "beneficiaryUserId": {
+          "type": "string",
+          "optional": true
+        },
         "cause": {
           "type": "object"
         },
@@ -170,6 +231,10 @@
         "failureCode": {
           "type": "string",
           "nullable": true
+        },
+        "liveMode": {
+          "type": "boolean",
+          "optional": true
         },
         "organizationId": {
           "type": "string",
@@ -186,6 +251,17 @@
         },
         "producer": {
           "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "optional": true
         },
         "revision": {
           "type": "integer"
@@ -214,11 +290,19 @@
         "amount": {
           "type": "integer"
         },
+        "beneficiaryUserId": {
+          "type": "string",
+          "optional": true
+        },
         "cause": {
           "type": "object"
         },
         "currency": {
           "type": "string"
+        },
+        "liveMode": {
+          "type": "boolean",
+          "optional": true
         },
         "organizationId": {
           "type": "string",
@@ -235,6 +319,17 @@
         },
         "producer": {
           "type": "string"
+        },
+        "purpose": {
+          "type": "enum",
+          "values": [
+            "organization_subscription",
+            "direct_purchase",
+            "assisted_settlement",
+            "recovery_settlement",
+            "non_entitlement"
+          ],
+          "optional": true
         },
         "revision": {
           "type": "integer"

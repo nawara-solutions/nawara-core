@@ -87,7 +87,7 @@ describeWithEnv('runtime database role: service runs as a non-owner, DML-only ro
   it('the whole Phase 1 flow works as the runtime role: create, attempt, signed webhook, outbox, resolver, sweeper, rate limiter, readiness', async () => {
     const server = t.app.getHttpServer();
     const organizationId = crypto.randomUUID();
-    const body = { paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'i-1', payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: organizationId }, organizationId, amount: 1000, currency: 'TND' };
+    const body = { paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'i-1', payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: organizationId }, organizationId, amount: 1000, currency: 'TND' };
     const payment = (await request(server).post('/payment/payments').set('authorization', `Bearer ${billing.token}`).send(body).expect(201)).body;
     const attempt = (await request(server).post(`/payment/payments/${payment.id}/attempts`).set('authorization', 'Bearer user-1-jwt').set('idempotency-key', 'rv-key-aaaa').send({ providerOptions: { scenario: 'success' } }).expect(201)).body;
     const { body: raw, signature } = t.app.get(TestPaymentProvider).signSuccessCallback(attempt.id);

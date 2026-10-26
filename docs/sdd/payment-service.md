@@ -19,6 +19,22 @@
 This document **replaces** the earlier payment SDD (superseded on 2026-09-19). The old text, including the sections earlier ADRs cite (for example the license-status contract of ADR-0004), is preserved in git history: `git show 126a52b:docs/sdd/payment-service.md`. It is the design contract
 for the implementation phase. It defines what can be defined and marks what cannot be decided from the repository.
 
+## Core V2 S4a amendment (DOC-6, 2026-10-26)
+
+Recorded with the Owner's S4a decisions P-1 to P-8 (register [PAY-01 F](../architecture/core-v2-d-a2-contract-register.md)); for Core
+V2 **development and simulation only**. Where this amendment and the text below differ, the amendment governs. It approves nothing else
+in this document.
+
+| Class | Content |
+|---|---|
+| **Frozen** (S0 §3.2 DB-15, S-6, FC-10; [ADR-0044](../adr/0044-subscription-entitlement-final-model.md) B2 and B7; [ADR-0035](../adr/0035-financial-service-boundaries.md) C4) | An Organization pays **if and only if** the purpose is `assisted_settlement` or `recovery_settlement` (DB-15, enforced by Payment independently of Billing, B7). Payer, purpose, beneficiary, amount, currency and seller are immutable once requested (S-6). Every new money record and event carries `liveMode`. Payment never calls Billing (C4) |
+| **Owner clarifications** (P-1 to P-7) | `purpose` is Billing's immutable routing purpose (ADR-0044 B2): `organization_subscription` and `direct_purchase` are paid by a user, `non_entitlement` by a user or a Company, never an Organization (a **prospective narrowing** of B2's "any" payer, P-1). `beneficiaryUserId` exactly for `direct_purchase` (equal to the payer) and `assisted_settlement` (P-3). `liveMode` is server-derived and `false` on every new payment and attempt: Core V2 is simulation only (P-6). `payer_purpose_mismatch` (422) for a payer the purpose does not admit; `invalid_payment_request` (400) for a missing, unknown or not-yet-open purpose and a missing or extra beneficiary (P-7). No `platformId` on Payment records ([ADR-0042](../adr/0042-service-token-scopes-and-administrative-authorization.md) Amendment 1 DEC-5, P-4) |
+| **Historical compatibility** | Payments and attempts created before S4a keep `purpose`, `beneficiaryUserId` and `liveMode` NULL: never backfilled, never re-interpreted as purpose-bearing. A purpose-less request is accepted only as an identical replay of such a payment; a request with a purpose for its id is `409 payment_request_conflict`. Their events carry none of the three fields |
+| **Future stages** | The API does not accept `assisted_settlement` or `recovery_settlement` (P-5: the database admits them, DB-15) until S4e / S5 / S6 open those workflows; the Organization-payer scope rule (`organizationId` of an Organization payer) is decided then. `liveMode = true` needs a separately authorized real-provider stage and migration. DB-16 is S4b. **Trust-based cash confirmation (sections 4.3, 5.3) is not part of Core V2:** cash settlement of Nawara-sold products is refused (FC-11, [ADR-0068](../adr/0068-no-cash-settlement-for-nawara-sold-products.md); DB-16 in S4b), and cash for other sellers is deferred (S0 §5, D1) |
+| **Production blockers** | Unchanged: no real provider, production refuses the test provider at boot, Billing in production applies only live financial events (FC-10), B-001 and B-007 open |
+
+Implemented in `apps/payment-service/db/migrations/0010_payment_purpose_live_mode.sql` and `src/payments/`.
+
 ## 0. How to read this document
 
 Every design point carries one marker:
@@ -119,6 +135,10 @@ payment-service [T].
 | `expiresAt` | absolute timestamp with offset, or null | authoritative | Drives expiry. A null value, and any default or maximum lifetime, is a policy question **[B, O-16]**; until decided, a payment without `expiresAt` has no expiry as a **PROPOSED — NOT APPROVED fallback**, and is watched by the stuck-payment alert (section 12) |
 | `description` | string, at most 140 characters | **descriptive** | Statement and display text only. Never used in a decision [T] |
 | `reference` | string, at most 64 characters | descriptive | For example an invoice number. Never used in a decision [T] |
+| `purpose` | `organization_subscription`, `direct_purchase` or `non_entitlement` (S4a) | **authoritative** | Core V2 S4a (DB-15, B2, B7): required on a new payment; checked against the payer (`422 payer_purpose_mismatch`). `assisted_settlement` and `recovery_settlement` are not accepted yet (P-5) |
+| `beneficiaryUserId` | string, 1 to 128 characters | **authoritative** | Core V2 S4a: required for `direct_purchase` and equal to the payer; forbidden otherwise |
+
+`liveMode` is **not** a request field: Payment derives it (`false`, Core V2 simulation only) and a body naming it is refused (`400`), as is a `platformId` (ADR-0042 DEC-5).
 
 Not in the contract in this phase: line items, tax, fees, price rules, return URLs, allowed payment methods, customer contact data,
 and any product-specific field [X]. Method availability per seller is decided by payment configuration and providers, not by the request.
@@ -154,7 +174,7 @@ this database. Money is `bigint` minor units plus `currency char(3)`; CHECK cons
 | Purpose | One obligation to collect, created from one payment request; the aggregate that carries state, attempts, at most one cash submission, and refunds |
 | Ownership | payment-service |
 | Important fields | `id`, `producer` (calling service name), `paymentRequestId`, `sourceType`, `sourceId`, `payerType`/`payerId`, `sellerType`/`sellerId`, `organizationId`, `amount`, `currency`, `description`, `reference`, `expiresAt`, `status`, `statusReason`, `settledMethod` (`gateway` or `cash`, set on success), `succeededAttemptId` (the payment attempt that succeeded, for gateway payments; it is what a refund is executed against), `revision`, `createdAt`, `updatedAt`, `closedAt` |
-| Immutable | everything in the snapshot (`producer`, `paymentRequestId`, `source*`, `payer*`, `seller*`, `organizationId`, `amount`, `currency`, `description`, `reference`, `expiresAt`) and `createdAt`; enforced by trigger [D] |
+| Immutable | everything in the snapshot (`producer`, `paymentRequestId`, `source*`, `payer*`, `seller*`, `organizationId`, `amount`, `currency`, `description`, `reference`, `expiresAt`) and `createdAt`; enforced by trigger [D]. Core V2 S4a: `purpose`, `beneficiaryUserId` and `liveMode` too (S-6; NULL only before S4a); every attempt carries its payment's `liveMode` |
 | Mutable | `status`, `statusReason`, `settledMethod`, `succeededAttemptId` (set once), `revision` (incremented on every state change, carried in events), `updatedAt`, `closedAt` |
 | Relationships | 1 to N `payment_attempt`; 0 or 1 active/confirmed `cash_payment`; 1 to N `refund` |
 | Lifecycle | section 5.1 |
@@ -176,6 +196,8 @@ this database. Money is `bigint` minor units plus `currency char(3)`; CHECK cons
 | Isolation | inherits the payment's; reached only through it |
 
 ### 4.3 CashPayment (a cash submission and its decision)
+
+> **Core V2 (DOC-6):** not part of Core V2 — see the S4a amendment at the top. Kept for the historical record.
 
 | Aspect | Definition |
 |---|---|
@@ -604,6 +626,9 @@ Common payload for every payment event: `paymentId`, `paymentRequestId`, `source
 `seller{type,id}`, `amount`, `currency`, `status`, `revision`, `actor{type,id}` (`user`, `service`, `provider` or `system`) and
 `cause{type,id}` (the request, webhook event, sweep or cash decision that caused it; the correlation id is in the header, and `cause` is the
 causation reference). Amounts are JSON integers in minor units. Version `1` for all events below; a breaking payload change publishes a higher version under the same name.
+Core V2 S4a adds three **optional** fields to every payment event, keeping version 1 (ADR-0057 §5): `purpose`, `beneficiaryUserId` (when
+set) and `liveMode` (`false`); all three are absent for a payment created before S4a. Billing compares the purpose and beneficiary with its
+routing record and, in production, applies no event that is not live (FC-10).
 
 | Event | Emitted on | Extra payload | Consumers | Justification |
 |---|---|---|---|---|

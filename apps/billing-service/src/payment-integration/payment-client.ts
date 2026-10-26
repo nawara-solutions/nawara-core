@@ -29,6 +29,10 @@ export interface PaymentSnapshot {
    * converge on the identical Subscription anchor for the same settlement fact.
    */
   closedAt: Date | null;
+  /** Core V2 S4a: null or absent on a payment created before S4a. */
+  purpose?: string | null;
+  beneficiaryUserId?: string | null;
+  liveMode?: boolean | null;
 }
 
 /**
@@ -86,6 +90,9 @@ interface PaymentResponseBody {
   organizationId?: string | null;
   closedAt?: string | null;
   code?: string;
+  purpose?: string | null;
+  beneficiaryUserId?: string | null;
+  liveMode?: boolean | null;
 }
 
 function parseSnapshot(res: PaymentResponseBody | null): PaymentSnapshot | null {
@@ -102,7 +109,10 @@ function parseSnapshot(res: PaymentResponseBody | null): PaymentSnapshot | null 
     typeof res.payer?.id !== 'string' ||
     typeof res.seller?.type !== 'string' ||
     typeof res.seller?.id !== 'string' ||
-    (res.closedAt !== undefined && res.closedAt !== null && typeof res.closedAt !== 'string')
+    (res.closedAt !== undefined && res.closedAt !== null && typeof res.closedAt !== 'string') ||
+    (res.purpose != null && typeof res.purpose !== 'string') ||
+    (res.beneficiaryUserId != null && typeof res.beneficiaryUserId !== 'string') ||
+    (res.liveMode != null && typeof res.liveMode !== 'boolean')
   ) {
     return null;
   }
@@ -120,6 +130,9 @@ function parseSnapshot(res: PaymentResponseBody | null): PaymentSnapshot | null 
     seller: { type: res.seller.type, id: res.seller.id },
     organizationId: res.organizationId ?? null,
     closedAt,
+    purpose: res.purpose ?? null,
+    beneficiaryUserId: res.beneficiaryUserId ?? null,
+    liveMode: res.liveMode ?? null,
   };
 }
 

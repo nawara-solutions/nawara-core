@@ -239,6 +239,11 @@ Revision 1:
   `none`. Invoices issued before S3a are not backfilled: without a routing record they never change a subscription, and their
   routing is never derived from `entitlementKind`.
 
+  *Owner decision (Core V2 S4a, P-1, 2026-10-26; prospective):* the `non_entitlement` payer is narrowed from "any" to **a user or a
+  Company**: an Organization pays only `assisted_settlement` or `recovery_settlement` (B7, S0 DB-15, S-6). New `non_entitlement` routing
+  records refuse an Organization payer; records written earlier are immutable and are not re-judged. Payment stores the routing purpose as
+  its own immutable `purpose` and enforces the same pairing independently (register PAY-01 F). The rest of this table is unchanged.
+
   An invoice carries at most one entitlement-bearing line. A recovery invoice has exactly one line referencing its recovery
   obligation, no product, and an amount and currency copied from the obligation's outstanding amount; it never takes a
   client-supplied amount. Combination rules are same-row checks; consistency with the invoice payer, the product target, the

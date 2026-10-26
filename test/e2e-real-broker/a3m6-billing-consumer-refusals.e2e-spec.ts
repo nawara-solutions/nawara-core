@@ -139,7 +139,8 @@ describeWithEnv('V2 A3M.6: Billing consumer refusals and G11 over a real RabbitM
     }, 20_000, `payment request ${requestId} to reach 'requested' through the real dispatcher and the real Payment API`);
     const facts = (over: Record<string, unknown> = {}) => ({
       paymentId: requested.paymentId, producer: 'billing-service', paymentRequestId: requestId, sourceType: 'invoice', sourceId: invoice.json.id,
-      payer: { type: 'user', id: 'a3m6-payer' }, seller: { type: 'organization', id: sellerId }, organizationId: invoice.json.organizationId ?? null, currency: 'TND', revision: 0, amount: 1000, ...over,
+      payer: { type: 'user', id: 'a3m6-payer' }, seller: { type: 'organization', id: sellerId }, organizationId: invoice.json.organizationId ?? null, currency: 'TND', revision: 0, amount: 1000,
+      purpose: 'non_entitlement', liveMode: false, ...over, // Core V2 S4a: as the genuine Payment event carries them
     });
     return { requestId, paymentId: requested.paymentId as string, facts };
   }

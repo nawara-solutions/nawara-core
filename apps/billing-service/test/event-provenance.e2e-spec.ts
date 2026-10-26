@@ -154,7 +154,8 @@ describeWithEnv('S1b event provenance in Billing (real RabbitMQ, real PostgreSQL
     await dispatcher.dispatchOnce(60_000, 50);
     const facts = (over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
       name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: open.id,
-      payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: Number(open.total), currency: 'TND', revision: 1, ...over,
+      payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: Number(open.total), currency: 'TND', revision: 1,
+      purpose: 'non_entitlement', liveMode: false, ...over, // S4a: as Payment echoes them
     });
     return { open, request, paymentId, id: deterministicEventId(paymentId, 'payment.succeeded'), facts };
   }

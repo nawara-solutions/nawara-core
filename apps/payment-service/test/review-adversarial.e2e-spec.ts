@@ -21,7 +21,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const paymentBody = (over: Record<string, unknown> = {}) => {
   const organizationId = crypto.randomUUID();
   return {
-    paymentRequestId: crypto.randomUUID(),
+    paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement',
     sourceType: 'invoice',
     sourceId: 'inv-1',
     payer: { type: 'user', id: '1e0a7c5b-3d2f-4a6b-9c8d-7e6f5a4b3c21' },
@@ -442,8 +442,8 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
     const orgId = crypto.randomUUID();
     await expect(
       sql(
-        `INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency)
-         VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $1, NULL, 100, 'TND')`,
+        `INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose, "liveMode")
+         VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $1, NULL, 100, 'TND', 'non_entitlement', false)`,
         [orgId],
       ),
     ).rejects.toMatchObject({ code: '23514' });

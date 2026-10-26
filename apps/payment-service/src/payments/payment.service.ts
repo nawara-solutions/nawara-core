@@ -7,7 +7,7 @@ import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-machine.js';
-import type { PaymentRow } from './payment.types.js';
+import { ACCEPTED_PURPOSES, CORE_V2_LIVE_MODE, type PaymentPurpose, type PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
@@ -26,7 +26,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const SNAPSHOT_FIELDS = [
   'sourceType', 'sourceId', 'payerType', 'payerId', 'sellerType', 'sellerId', 'organizationId', 'amount', 'currency',
-  'description', 'reference',
+  'description', 'reference', 'purpose', 'beneficiaryUserId',
 ] as const;
 
 @Injectable()
@@ -65,6 +65,17 @@ export class PaymentService {
     if (expiresAt && Number.isNaN(expiresAt.getTime())) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.expiresAtInvalid);
     const ctx = requestContext({ type: 'service', id: producer });
 
+    // Core V2 S4a (P-1, P-2, P-3): a new payment names its purpose; only a replay of a payment created before S4a may omit it, and it is
+    // answered with that historical record, never re-interpreted as purpose-bearing.
+    if (dto.purpose === undefined) {
+      const { rows: prior } = await this.db.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
+      if (prior[0] && prior[0].purpose === null && isIdenticalSnapshot(prior[0], producer, dto, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
+      throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.purposeRequired);
+    }
+    // P-5, P-7: an unknown purpose, or an Organization-payer purpose whose workflow is not open yet, is 400 invalid_payment_request
+    if (!(ACCEPTED_PURPOSES as readonly string[]).includes(dto.purpose)) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.purposeNotAccepted);
+    assertPurposePairing(dto.purpose, dto.payer, dto.beneficiaryUserId);
+
     if (organizationId !== null) {
       // Stage 21.C.2 (ADR-0052 decision 3, ADR-0042 decision 5): a replay returns the record already created (and verified then) without
       // asking Organization Service; anything new is verified BEFORE the transaction, so a refusal or an unavailable authority writes
@@ -85,12 +96,13 @@ export class PaymentService {
         const { rows } = await q.query<PaymentRow>(
           `INSERT INTO payment(
              producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId",
-             "organizationId", amount, currency, description, reference, "expiresAt"
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             "organizationId", amount, currency, description, reference, "expiresAt", purpose, "beneficiaryUserId", "liveMode"
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            RETURNING *`,
           [
             producer, dto.paymentRequestId, dto.sourceType, dto.sourceId, dto.payer.type, dto.payer.id, seller.type,
             seller.id, organizationId, dto.amount, dto.currency, dto.description ?? null, dto.reference ?? null, expiresAt,
+            dto.purpose, dto.beneficiaryUserId ?? null, CORE_V2_LIVE_MODE, // liveMode: server-derived only (P-6)
           ],
         );
         const payment = rows[0];
@@ -160,6 +172,24 @@ export class PaymentService {
   }
 }
 
+/**
+ * Core V2 S4a (ADR-0044 B2 and B7; DB-15; the Owner's P-1, P-3, P-5, P-7): the payer and beneficiary each accepted purpose admits, checked
+ * here and again by the database. An Organization never pays these purposes (DB-15); an Organization subscription and a direct purchase
+ * are paid by a user; `non_entitlement` by a user or a Company. A direct purchase names its beneficiary, who is the payer; no other
+ * accepted purpose names one. A payer that does not fit the purpose is `422 payer_purpose_mismatch`; a missing or extra field is `400`.
+ */
+function assertPurposePairing(purpose: PaymentPurpose, payer: { type: string; id: string }, beneficiaryUserId: string | undefined): void {
+  const mismatch = () => paymentError(422, 'payer_purpose_mismatch', PAYMENT_MESSAGES.payerPurposeMismatch, { purpose });
+  if (payer.type === 'organization') throw mismatch(); // DB-15: an Organization pays only assisted or recovery settlements (not accepted yet, P-5)
+  if ((purpose === 'organization_subscription' || purpose === 'direct_purchase') && payer.type !== 'user') throw mismatch();
+  if (purpose === 'direct_purchase') {
+    if (beneficiaryUserId === undefined) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.beneficiaryRequired, { purpose });
+    if (beneficiaryUserId !== payer.id) throw mismatch(); // the buyer pays for themself; a beneficiary is never another payer
+  } else if (beneficiaryUserId !== undefined) {
+    throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.beneficiaryNotAllowed, { purpose });
+  }
+}
+
 function isIdenticalSnapshot(
   existing: PaymentRow,
   producer: string,
@@ -181,6 +211,8 @@ function isIdenticalSnapshot(
     currency: dto.currency,
     description: dto.description ?? null,
     reference: dto.reference ?? null,
+    purpose: dto.purpose ?? null,
+    beneficiaryUserId: dto.beneficiaryUserId ?? null,
   };
   for (const field of SNAPSHOT_FIELDS) if (existing[field] !== candidate[field]) return false;
   const existingExpiry = existing.expiresAt ? new Date(existing.expiresAt).getTime() : null;

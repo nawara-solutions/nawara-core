@@ -32,7 +32,7 @@ describeWithEnv('Payment error localization over real HTTP (R6.5)', ['TEST_DATAB
   const server = () => t.app.getHttpServer();
   const body = (over: Record<string, unknown> = {}) => {
     const organizationId = crypto.randomUUID();
-    return { paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: PAYER }, seller: { type: 'organization', id: organizationId }, organizationId, amount: 1000, currency: 'TND', ...over };
+    return { paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: PAYER }, seller: { type: 'organization', id: organizationId }, organizationId, amount: 1000, currency: 'TND', ...over };
   };
   const create = (b: Record<string, unknown>, l?: string) => {
     const r = request(server()).post('/payment/payments').set('authorization', `Bearer ${billing.token}`);

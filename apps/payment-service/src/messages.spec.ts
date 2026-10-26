@@ -20,6 +20,11 @@ describe('PAYMENT_MESSAGES', () => {
       organizationIdMustEqualSeller: 'organizationId must equal seller.id when seller.type is organization.',
       expiresAtInvalid: 'expiresAt is not a valid timestamp.',
       paymentRequestConflict: 'A payment already exists for this paymentRequestId with a different snapshot.',
+      purposeRequired: 'purpose is required for a new payment.', // Core V2 S4a: new messages
+      purposeNotAccepted: 'purpose must be organization_subscription, direct_purchase or non_entitlement.',
+      beneficiaryRequired: 'beneficiaryUserId is required for purpose {purpose}.',
+      beneficiaryNotAllowed: 'beneficiaryUserId is not allowed for purpose {purpose}.',
+      payerPurposeMismatch: 'This payer cannot pay for purpose {purpose}.',
       cannotCancelInStatus: 'Cannot cancel a payment in status {status}.',
       attemptStillOpen: 'An attempt is still open.',
       paymentExpired: 'This payment has expired.',
@@ -34,13 +39,13 @@ describe('PAYMENT_MESSAGES', () => {
     for (const [id, en] of Object.entries(before)) expect(PAYMENT_MESSAGES[id as keyof typeof PAYMENT_MESSAGES].en).toBe(en);
   });
 
-  it('translates every message for real and never leaks a catalog key or sentinel; the only placeholder is the machine status', () => {
+  it('translates every message for real and never leaks a catalog key or sentinel; the only placeholders are the machine status and purpose', () => {
     for (const [id, texts] of Object.entries(PAYMENT_MESSAGES)) {
       expect(texts.fr, id).not.toBe(texts.en);
       expect(texts.ar, id).toMatch(/[؀-ۿ]/);
       for (const text of [texts.en, texts.fr, texts.ar]) {
         expect(text, id).not.toMatch(/undefined|PAYMENT_MESSAGES/);
-        for (const placeholder of text.match(/\{\w+\}/g) ?? []) expect(placeholder, id).toBe('{status}');
+        for (const placeholder of text.match(/\{\w+\}/g) ?? []) expect(['{status}', '{purpose}'], id).toContain(placeholder);
       }
     }
   });

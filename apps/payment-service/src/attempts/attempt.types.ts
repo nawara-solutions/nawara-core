@@ -16,4 +16,6 @@ export interface AttemptRow {
   initiatedAt: Date;
   submittedAt: Date | null;
   completedAt: Date | null;
+  /** Core V2 S4a (P-6): its payment's mode, `false` (simulation only); NULL only on an attempt created before S4a. */
+  liveMode: boolean | null;
 }

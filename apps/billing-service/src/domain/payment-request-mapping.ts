@@ -8,7 +8,13 @@ import { MAX_MINOR_UNITS, toJsonAmount } from './money.js';
  * The limits below MIRROR Payment's contract (its SDD 3.1 and `CreatePaymentDto`). They are copied, not imported: a service never imports
  * another's source. Billing's database CHECKs (BI-18) make a violating invoice impossible to store; this is the last line of defence.
  */
-export const PAYMENT_MAPPING_VERSION = 1;
+/**
+ * Core V2 S4a (P-2): version 2 adds the settlement `purpose` and, for a direct purchase, `beneficiaryUserId`, both from the invoice's
+ * immutable routing record. Every new request pins version 2; a request made earlier keeps version 1 and its byte-identical body (so its
+ * retries still replay at Payment).
+ */
+export const PAYMENT_MAPPING_VERSION = 2;
+export const PAYMENT_MAPPING_VERSIONS = [1, 2] as const;
 
 export const PAYMENT_CONTRACT = {
   partyTypes: ['user', 'organization', 'company'] as const,
@@ -38,6 +44,9 @@ export interface InvoiceForMapping {
   organizationId: string | null;
   currency: string;
   description: string | null;
+  /** Core V2 S4a: the routing record's purpose and beneficiary (ADR-0044 B2); null only for an invoice without one (mapping version 1). */
+  purpose: string | null;
+  beneficiaryUserId: string | null;
 }
 
 export interface RequestForMapping {
@@ -58,10 +67,13 @@ export interface PaymentCreateBody {
   expiresAt?: string;
   description?: string;
   reference: string;
+  /** Core V2 S4a (mapping version 2): the settlement purpose and, for a direct purchase, its beneficiary. */
+  purpose?: string;
+  beneficiaryUserId?: string;
 }
 
 export function buildPaymentRequestBody(invoice: InvoiceForMapping, request: RequestForMapping, version: number = PAYMENT_MAPPING_VERSION): PaymentCreateBody {
-  if (version !== PAYMENT_MAPPING_VERSION) throw new PaymentMappingError(`unknown payment mapping version ${version}`);
+  if (!(PAYMENT_MAPPING_VERSIONS as readonly number[]).includes(version)) throw new PaymentMappingError(`unknown payment mapping version ${version}`);
   const c = PAYMENT_CONTRACT;
   const fail = (m: string): never => {
     throw new PaymentMappingError(m);
@@ -98,5 +110,11 @@ export function buildPaymentRequestBody(invoice: InvoiceForMapping, request: Req
   if (invoice.organizationId !== null) body.organizationId = invoice.organizationId;
   if (request.expiresAt !== null) body.expiresAt = request.expiresAt.toISOString();
   if (invoice.description !== null) body.description = invoice.description;
+  if (version >= 2) {
+    // Core V2 S4a (P-2): never sent without the routing record; never derived from anything else (a request, entitlementKind, the payer)
+    if (invoice.purpose === null) fail('mapping version 2 needs the invoice routing record');
+    body.purpose = invoice.purpose!;
+    if (invoice.beneficiaryUserId !== null) body.beneficiaryUserId = invoice.beneficiaryUserId;
+  }
   return body;
 }

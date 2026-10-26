@@ -77,6 +77,12 @@ export function paymentEvent(name: PaymentEventName, payment: PaymentRow, ctx: E
       actor: ctx.actor,
       cause: ctx.cause,
       ...extra,
+      // Core V2 S4a (P-1, P-3, P-6; ADR-0057 §5: added OPTIONAL fields keep version 1): present on every payment created since S4a and
+      // absent on an earlier one, which is never re-interpreted. After `...extra`, like `producer`: never overridable. Billing compares
+      // the purpose with its routing record and, in production, refuses an event that is not live (FC-10).
+      ...(payment.purpose !== null ? { purpose: payment.purpose } : {}),
+      ...(payment.beneficiaryUserId !== null ? { beneficiaryUserId: payment.beneficiaryUserId } : {}),
+      ...(payment.liveMode !== null ? { liveMode: payment.liveMode } : {}),
       // Placed AFTER `...extra` so nothing an event-specific caller passes can ever override Payment's own authoritative
       // producer (Billing SDD R-6): additional isolation evidence, never a replacement for full snapshot validation.
       producer: payment.producer,

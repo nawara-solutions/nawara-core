@@ -153,12 +153,13 @@ describeWithEnv('Payment/Billing Stage 4: dispatcher, reconciler, event consumer
   const snapshotFor = (invoice: { id: string; total: string; currency: string }, request: { id: string }, paymentId: string, status = 'succeeded', over: Partial<PaymentSnapshot> = {}): PaymentSnapshot => ({
     paymentId, paymentRequestId: request.id, status, amount: Number(invoice.total), currency: invoice.currency,
     sourceType: 'invoice', sourceId: invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG,
-    closedAt: new Date(), ...over,
+    closedAt: new Date(), purpose: 'non_entitlement', liveMode: false, ...over, // S4a: Payment's read echoes them
   });
 
   const factsFor = (invoice: { id: string; total: string; currency: string }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded', over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
     name, source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
-    payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: Number(invoice.total), currency: invoice.currency, revision: 1, ...over,
+    payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: Number(invoice.total), currency: invoice.currency, revision: 1,
+    purpose: 'non_entitlement', liveMode: false, ...over, // S4a: as Payment echoes them
   });
 
   function envelopeFor(facts: PaymentEventFacts, id = crypto.randomUUID()): EventEnvelope {

@@ -2,6 +2,8 @@
 
 > **Superseded in its financial parts (2026-09-19).** The financial model below (`Product`, `Charge`, `License`, `UserSubscription` inside one payment-service, a JWT `organizationId` claim, the forwarded admin JWT, fire-and-forget events) is replaced by [`docs/architecture/financial-architecture.md`](../architecture/financial-architecture.md) and ADR-0035 to ADR-0038: billing-service (what is owed, entitlements), payment-service (how money moved), accounting-service (accounting effect). The new design contract is the [payment SDD](../sdd/payment-service.md). Read this document only for the history and for the rules of ADR-0006, ADR-0007 and ADR-0008 that survive.
 
+> **Core V2 S4a (DOC-6, 2026-10-26).** A payment now carries the producer's immutable settlement `purpose`, an optional `beneficiaryUserId` and a server-derived `liveMode` (`false`: Core V2 is simulation only); an Organization pays only assisted or recovery settlements (DB-15, ADR-0044 B7), and no trust-based cash confirmation is part of Core V2 (FC-11, ADR-0068). Nothing below about cash confirmation, licenses or a Platform on payments applies to Core V2. The contract is the [payment SDD](../sdd/payment-service.md) "Core V2 S4a amendment" and register PAY-01 F.
+
 
 - **Status:** Draft <!-- Draft | Reviewed | Implemented -->
 - **Owners:** Anwar (project owner)

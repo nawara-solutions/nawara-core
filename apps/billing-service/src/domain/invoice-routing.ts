@@ -40,7 +40,7 @@ export interface Routing {
 /** Why an invoice cannot be routed (the `reason` of `422 invoice_routing_invalid`): codes, never client data. */
 export type RoutingRefusal =
   | 'multiple_subscription_lines' // at most one entitlement-bearing line (B2)
-  | 'organization_payer' // an Organization never pays an Organization subscription (B7)
+  | 'organization_payer' // an Organization pays only assisted or recovery settlements (B7): never an Organization subscription, nor an ordinary invoice (S4a P-1)
   | 'organization_missing' // an Organization subscription names its Organization
   | 'assisted_settlement_unavailable' // an Organization paying a personal product: an assisted settlement (S5a), not yet available
   | 'payer_not_user'; // a personal purchase is paid by its beneficiary, a user
@@ -50,6 +50,8 @@ export type RoutingDecision = { routed: Routing } | { refused: RoutingRefusal };
 export function decideRouting(input: RoutingInput): RoutingDecision {
   const subscriptionLines = input.lines.filter((l) => l.subscriptionTarget !== 'none');
   if (subscriptionLines.length === 0) {
+    // Core V2 S4a (the Owner's P-1, a prospective narrowing of B2's "any" payer): an Organization never pays an ordinary invoice (B7, DB-15)
+    if (input.payerType === 'organization') return { refused: 'organization_payer' };
     return { routed: { purpose: 'non_entitlement', target: 'none', beneficiaryUserId: null, organizationId: null, productId: null, platformId: null } };
   }
   if (subscriptionLines.length > 1) return { refused: 'multiple_subscription_lines' };

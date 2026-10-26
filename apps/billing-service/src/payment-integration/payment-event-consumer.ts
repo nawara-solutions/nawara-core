@@ -43,7 +43,11 @@ function parseFacts(event: EventEnvelope, t: TrustedPaymentEnvelope): PaymentEve
     !isParty(p.seller) ||
     (p.organizationId !== null && typeof p.organizationId !== 'string') ||
     typeof p.currency !== 'string' ||
-    typeof p.revision !== 'number'
+    typeof p.revision !== 'number' ||
+    // Core V2 S4a: optional on version 1 (absent before S4a); when present, exactly its type
+    (p.purpose !== undefined && typeof p.purpose !== 'string') ||
+    (p.beneficiaryUserId !== undefined && typeof p.beneficiaryUserId !== 'string') ||
+    (p.liveMode !== undefined && typeof p.liveMode !== 'boolean')
   ) {
     throw new MalformedPaymentEventError();
   }
@@ -61,6 +65,9 @@ function parseFacts(event: EventEnvelope, t: TrustedPaymentEnvelope): PaymentEve
     amount: p.amount, // decidePaymentEvent itself validates shape (a safe integer) — never trusted before that check
     currency: p.currency,
     revision: p.revision,
+    ...(p.purpose !== undefined ? { purpose: p.purpose as string } : {}),
+    ...(p.beneficiaryUserId !== undefined ? { beneficiaryUserId: p.beneficiaryUserId as string } : {}),
+    ...(p.liveMode !== undefined ? { liveMode: p.liveMode as boolean } : {}),
   };
 }
 

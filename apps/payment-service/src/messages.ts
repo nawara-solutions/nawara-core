@@ -52,6 +52,31 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "expiresAt n'est pas un horodatage valide.",
     ar: 'قيمة expiresAt ليست طابعًا زمنيًا صالحًا.',
   },
+  purposeRequired: {
+    en: 'purpose is required for a new payment.',
+    fr: 'purpose est obligatoire pour un nouveau paiement.',
+    ar: 'الحقل purpose مطلوب لعملية دفع جديدة.',
+  },
+  purposeNotAccepted: {
+    en: 'purpose must be organization_subscription, direct_purchase or non_entitlement.',
+    fr: 'purpose doit valoir organization_subscription, direct_purchase ou non_entitlement.',
+    ar: 'يجب أن تكون قيمة purpose هي organization_subscription أو direct_purchase أو non_entitlement.',
+  },
+  beneficiaryRequired: {
+    en: 'beneficiaryUserId is required for purpose {purpose}.',
+    fr: 'beneficiaryUserId est obligatoire pour l’objet {purpose}.',
+    ar: 'الحقل beneficiaryUserId مطلوب للغرض {purpose}.',
+  },
+  beneficiaryNotAllowed: {
+    en: 'beneficiaryUserId is not allowed for purpose {purpose}.',
+    fr: 'beneficiaryUserId n’est pas autorisé pour l’objet {purpose}.',
+    ar: 'الحقل beneficiaryUserId غير مسموح به للغرض {purpose}.',
+  },
+  payerPurposeMismatch: {
+    en: 'This payer cannot pay for purpose {purpose}.',
+    fr: 'Ce payeur ne peut pas payer pour l’objet {purpose}.',
+    ar: 'لا يمكن لهذا الدافع الدفع للغرض {purpose}.',
+  },
   paymentRequestConflict: {
     en: 'A payment already exists for this paymentRequestId with a different snapshot.',
     fr: 'Un paiement existe déjà pour ce paymentRequestId avec un instantané différent.',
