@@ -56,7 +56,6 @@ export class AttemptService {
         responseStatus: 201,
         resourceType: 'payment_attempt',
         resourceId: attemptId,
-        ttlHours: this.config.idempotencyTtlHours,
       });
       if (reserved.replay) return { replay: true as const, attemptId: reserved.resourceId };
 

@@ -19,7 +19,7 @@ describe('loadPaymentConfig', () => {
     expect(cfg.serviceName).toBe('payment-service');
     expect(cfg.supportedCurrencies).toEqual(['TND']);
     expect(cfg.maxAttempts).toBe(3);
-    expect(cfg.idempotencyTtlHours).toBe(24);
+    expect(cfg).not.toHaveProperty('idempotencyTtlHours'); // Core V2 S4g: class M, set by the database
     expect(cfg.testProviderEnabled).toBe(false);
     expect(cfg.rabbitmqUrl).toBeUndefined();
     expect(cfg.serviceTokens).toEqual([]);
@@ -240,5 +240,12 @@ describe('loadPaymentConfig', () => {
     expect(loadPaymentConfig({ ...BASE_ENV, RABBITMQ_HEARTBEAT_S: '5' }).rabbitmqHeartbeatS).toBe(5);
     expect(loadPaymentConfig({ ...BASE_ENV, RABBITMQ_HEARTBEAT_S: '60' }).rabbitmqHeartbeatS).toBe(60);
     for (const bad of ['0', '4', '61', '-1', 'abc', '2.5']) expect(() => loadPaymentConfig({ ...BASE_ENV, RABBITMQ_HEARTBEAT_S: bad })).toThrow(/RABBITMQ_HEARTBEAT_S must be an integer between 5 and 60/);
+  });
+
+  it('Core V2 S4g (PAY-15): the retired IDEMPOTENCY_TTL_HOURS is refused, whatever its value, never silently ignored', () => {
+    for (const v of ['24', '720', '2160', '1', 'ninety']) {
+      expect(() => loadPaymentConfig({ ...BASE_ENV, IDEMPOTENCY_TTL_HOURS: v }), v).toThrow(/IDEMPOTENCY_TTL_HOURS was retired by Core V2 S4g/);
+    }
+    expect(() => loadPaymentConfig({ ...BASE_ENV, IDEMPOTENCY_TTL_HOURS: '' })).not.toThrow(); // empty means unset, like every optional value
   });
 });
