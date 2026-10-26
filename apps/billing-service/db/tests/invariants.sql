@@ -808,6 +808,19 @@ SELECT pg_temp.expect_error('S3f', 'an idempotency record is never changed', $$U
 SELECT pg_temp.expect_error('S3f', 'an idempotency record is never deleted', $$DELETE FROM fee_command_idempotency$$, '23514');
 SELECT pg_temp.expect_error('S3f', 'only a success is recorded for replay', format($$INSERT INTO fee_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s3f-0002', 'x', repeat('a', 64), 409, '{}')$$, :'f_owner'), '23514', 'fee_command_idempotency_status');
 
+-- ------------------------------------------------------------------------------------------------------------- S3f direct checkout (0026)
+-- The reserved producer `billing-checkout` may only commit a complete direct checkout (simulation reference shape); anything else is
+-- refused at COMMIT. Other producers are untouched.
+SELECT pg_temp.expect_error('S3f-CO', 'a bare draft under the reserved producer cannot commit', $$
+  WITH i AS (INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
+             VALUES ('billing-checkout', gen_random_uuid(), repeat('a', 64), 'company', gen_random_uuid()::text, 'user', 'u-co', NULL, 'direct_checkout', 's', 'TND', 1, 1, '{"schemaVersion":2}', '{"schemaVersion":2}') RETURNING id)
+  INSERT INTO billing_transition ("entityType", "entityId", "fromStatus", "toStatus", revision, "actorType", "causeType") SELECT 'invoice', id, NULL, 'draft', 0, 'system', 'request' FROM i;
+  SET CONSTRAINTS ALL IMMEDIATE$$, '23514', 'checkout_invoice_shape');
+SELECT pg_temp.expect_ok('S3f-CO', 'another producer''s invoice is not subject to the checkout guard', $$SELECT t_mk_invoice(); SET CONSTRAINTS ALL IMMEDIATE$$);
+SELECT pg_temp.expect_error('S3f-CO', 'a checkout idempotency record is never changed', $$
+  INSERT INTO checkout_idempotency ("buyerUserId", "idempotencyKey", "requestHash", "responseStatus", "responseBody") VALUES ('u-co', 'k-co-00001', repeat('a', 64), 201, '{}');
+  UPDATE checkout_idempotency SET "responseStatus" = 200 WHERE "buyerUserId" = 'u-co'$$, '23514');
+
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

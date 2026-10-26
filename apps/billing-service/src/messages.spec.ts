@@ -85,6 +85,8 @@ describe('BILLING_MESSAGES', () => {
       [en('productNotAvailable'), 'The product is not available.'],
       [en('idempotencyKeyRequired'), 'An Idempotency-Key header of 8 to 128 characters of [A-Za-z0-9._:-] is required.'],
       [en('idempotencyKeyConflict'), 'This Idempotency-Key was already used for a different request.'],
+      [en('memberNotEligible'), 'Only an active member may check out.'], // Core V2 S3f checkout
+      [en('checkoutUncertain'), 'A checkout for this product is still in progress.'],
       [en('feeAmountRange'), 'amount must be an integer number of minor units from 0 to 9007199254740991'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned

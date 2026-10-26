@@ -39,63 +39,67 @@ export class InvoiceRepository {
 
   /** Creates a draft (header + lines, one transaction) or replays the identical earlier request. `422`/`409`/`400` per SDD endpoint 7. */
   async createDraft(producer: string, input: NormalisedCreateInvoiceInput, supportedCurrencies: string[], ctx: TransitionContext): Promise<WriteResult> {
+    return this.db.tx((q) => this.createDraftIn(q, producer, input, supportedCurrencies, ctx));
+  }
+
+  /** `createDraft` in the CALLER's transaction (Core V2 S3f: direct checkout creates, issues and requests payment atomically). */
+  async createDraftIn(q: Queryable, producer: string, input: NormalisedCreateInvoiceInput, supportedCurrencies: string[], ctx: TransitionContext): Promise<WriteResult> {
     const hash = requestHash({ producer, ...input });
-    return this.db.tx(async (q) => {
-      const existing = await this.findByNaturalKey(q, producer, input.invoiceRequestId);
-      if (existing) return this.replay(existing, hash);
 
-      const prices = await this.loadPrices(q, input.lines.map((l) => l.priceId));
-      const priced = input.lines.map((l) => {
-        const p = prices.get(l.priceId);
-        // unknown, retired, not yet effective, archived product, or a price of ANOTHER seller: all one answer (never leaks which)
-        if (!p || !p.available || p.sellerType !== input.seller.type || p.sellerId !== input.seller.id) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
-        return { line: l, price: p };
-      });
-      const currency = priced[0]!.price.currency;
-      if (priced.some((x) => x.price.currency !== currency)) throw billingError(422, 'price_not_available', BILLING_MESSAGES.linesShareCurrency);
-      if (!supportedCurrencies.includes(currency)) throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotSupported);
-      // Stage 12.4 R1: Billing can fulfil at most ONE recurring (Subscription) obligation per invoice — a Subscription
-      // is one product/price per Organization (Stage 12.2), so a second recurring line could never be fulfilled by
-      // anything Billing owns, whatever seller/organization is involved. Rejected HERE, before any PaymentRequest or
-      // provider settlement exists, rather than accepted and silently left commercially unfulfilled once paid. A
-      // recurring line alongside any number of one-time lines remains unambiguous and is untouched by this check.
-      if (priced.filter((x) => x.price.interval === 'recurring').length > 1) {
-        throw billingError(422, 'ambiguous_subscription_obligation', BILLING_MESSAGES.oneRecurringLine);
-      }
+    const existing = await this.findByNaturalKey(q, producer, input.invoiceRequestId);
+    if (existing) return this.replay(existing, hash);
 
-      const totals = computeTotals(priced.map((x) => ({ quantity: x.line.quantity, unitAmount: fromDbAmount(x.price.unitAmount) })));
-
-      // ON CONFLICT answers a concurrent identical request without raising, so the transaction stays usable.
-      const res = await q.query<InvoiceRow>(
-        `INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
-                              "sourceType", "sourceId", currency, subtotal, "taxTotal", total, description, "dueAt", "issuerSnapshot", "billToSnapshot")
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb)
-         ON CONFLICT (producer, "invoiceRequestId") DO NOTHING
-         RETURNING *`,
-        [producer, input.invoiceRequestId, hash, input.seller.type, input.seller.id, input.payer.type, input.payer.id, input.organizationId, input.sourceType, input.sourceId, currency,
-         totals.subtotal.toString(), totals.taxTotal.toString(), totals.total.toString(), input.description, input.dueAt, JSON.stringify(input.issuerSnapshot), JSON.stringify(input.billToSnapshot)],
-      );
-      const inserted = res.rows[0];
-      if (!inserted) {
-        // Lost a race with a concurrent identical request: the winner committed first (our INSERT waited on its uncommitted row).
-        const winner = await this.findByNaturalKey(q, producer, input.invoiceRequestId);
-        if (!winner) throw billingError(409, 'invoice_request_conflict', BILLING_MESSAGES.invoiceRequestConflict);
-        return this.replay(winner, hash);
-      }
-
-      for (const [i, x] of priced.entries()) {
-        const c = totals.lines[i]!;
-        await q.query(
-          `INSERT INTO invoice_line ("invoiceId", currency, "lineNumber", "priceId", "productId", "productCode", description, quantity, "unitAmount", "lineTotal", "taxAmount",
-                                     "entitlementKind", "interval", "intervalUnit", "intervalCount", "sourceType", "sourceId")
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-          [inserted.id, currency, c.lineNumber, x.price.priceId, x.price.productId, x.price.productCode, x.line.description ?? x.price.productName, c.quantity, c.unitAmount.toString(), c.lineTotal.toString(),
-           c.taxAmount.toString(), x.price.entitlementKind, x.price.interval, x.price.intervalUnit, x.price.intervalCount, x.line.sourceType, x.line.sourceId],
-        );
-      }
-      await recordTransition(q, { entityType: 'invoice', entityId: inserted.id, from: null, to: 'draft', revision: inserted.revision, ctx });
-      return { invoice: (await this.load(q, inserted.id))!, changed: true };
+    const prices = await this.loadPrices(q, input.lines.map((l) => l.priceId));
+    const priced = input.lines.map((l) => {
+      const p = prices.get(l.priceId);
+      // unknown, retired, not yet effective, archived product, or a price of ANOTHER seller: all one answer (never leaks which)
+      if (!p || !p.available || p.sellerType !== input.seller.type || p.sellerId !== input.seller.id) throw billingError(422, 'price_not_available', BILLING_MESSAGES.priceNotAvailable);
+      return { line: l, price: p };
     });
+    const currency = priced[0]!.price.currency;
+    if (priced.some((x) => x.price.currency !== currency)) throw billingError(422, 'price_not_available', BILLING_MESSAGES.linesShareCurrency);
+    if (!supportedCurrencies.includes(currency)) throw billingError(422, 'unsupported_currency', BILLING_MESSAGES.currencyNotSupported);
+    // Stage 12.4 R1: Billing can fulfil at most ONE recurring (Subscription) obligation per invoice — a Subscription
+    // is one product/price per Organization (Stage 12.2), so a second recurring line could never be fulfilled by
+    // anything Billing owns, whatever seller/organization is involved. Rejected HERE, before any PaymentRequest or
+    // provider settlement exists, rather than accepted and silently left commercially unfulfilled once paid. A
+    // recurring line alongside any number of one-time lines remains unambiguous and is untouched by this check.
+    if (priced.filter((x) => x.price.interval === 'recurring').length > 1) {
+      throw billingError(422, 'ambiguous_subscription_obligation', BILLING_MESSAGES.oneRecurringLine);
+    }
+
+    const totals = computeTotals(priced.map((x) => ({ quantity: x.line.quantity, unitAmount: fromDbAmount(x.price.unitAmount) })));
+
+    // ON CONFLICT answers a concurrent identical request without raising, so the transaction stays usable.
+    const res = await q.query<InvoiceRow>(
+      `INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
+                            "sourceType", "sourceId", currency, subtotal, "taxTotal", total, description, "dueAt", "issuerSnapshot", "billToSnapshot")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb)
+       ON CONFLICT (producer, "invoiceRequestId") DO NOTHING
+       RETURNING *`,
+      [producer, input.invoiceRequestId, hash, input.seller.type, input.seller.id, input.payer.type, input.payer.id, input.organizationId, input.sourceType, input.sourceId, currency,
+       totals.subtotal.toString(), totals.taxTotal.toString(), totals.total.toString(), input.description, input.dueAt, JSON.stringify(input.issuerSnapshot), JSON.stringify(input.billToSnapshot)],
+    );
+    const inserted = res.rows[0];
+    if (!inserted) {
+      // Lost a race with a concurrent identical request: the winner committed first (our INSERT waited on its uncommitted row).
+      const winner = await this.findByNaturalKey(q, producer, input.invoiceRequestId);
+      if (!winner) throw billingError(409, 'invoice_request_conflict', BILLING_MESSAGES.invoiceRequestConflict);
+      return this.replay(winner, hash);
+    }
+
+    for (const [i, x] of priced.entries()) {
+      const c = totals.lines[i]!;
+      await q.query(
+        `INSERT INTO invoice_line ("invoiceId", currency, "lineNumber", "priceId", "productId", "productCode", description, quantity, "unitAmount", "lineTotal", "taxAmount",
+                                   "entitlementKind", "interval", "intervalUnit", "intervalCount", "sourceType", "sourceId")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+        [inserted.id, currency, c.lineNumber, x.price.priceId, x.price.productId, x.price.productCode, x.line.description ?? x.price.productName, c.quantity, c.unitAmount.toString(), c.lineTotal.toString(),
+         c.taxAmount.toString(), x.price.entitlementKind, x.price.interval, x.price.intervalUnit, x.price.intervalCount, x.line.sourceType, x.line.sourceId],
+      );
+    }
+    await recordTransition(q, { entityType: 'invoice', entityId: inserted.id, from: null, to: 'draft', revision: inserted.revision, ctx });
+    return { invoice: (await this.load(q, inserted.id))!, changed: true };
   }
 
   /**
@@ -121,35 +125,41 @@ export class InvoiceRepository {
     invoiceId: string, caller: Caller, presentation: { template: string; locale: string }, ctx: TransitionContext,
     verified: { callerPlatforms: ReadonlySet<string>; organizationPlatformId: string | null } = { callerPlatforms: new Set(), organizationPlatformId: null },
   ): Promise<WriteResult> {
-    return this.db.tx(async (q) => {
-      const row = await this.lockForCaller(q, invoiceId, caller);
-      if (row.status === 'open') return { invoice: (await this.load(q, invoiceId))!, changed: false }; // state-idempotent (SDD 17.2)
-      if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', BILLING_MESSAGES.invoiceCannotBeIssued, { status: row.status });
-      const decision = decideRouting(await this.routingInput(q, row));
-      if ('refused' in decision) throw routingInvalid(decision.refused);
-      const routing = decision.routed;
-      if (routing.platformId !== null && !verified.callerPlatforms.has(routing.platformId)) throw routingInvalid('platform_out_of_scope');
-      if (routing.purpose === 'organization_subscription' && verified.organizationPlatformId !== routing.platformId) throw routingInvalid('organization_platform_mismatch');
-      await q.query(
-        `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId],
-      );
-      let snapshot;
-      try {
-        snapshot = buildPresentationSnapshot(presentation);
-      } catch (e) {
-        if (e instanceof SnapshotError) throw billingError(400, 'invalid_invoice_request', e.message);
-        throw e;
-      }
-      const { rows } = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'open', presentation = $2::jsonb WHERE id = $1 RETURNING *`, [invoiceId, JSON.stringify(snapshot)]);
-      const updated = rows[0]!;
-      await recordTransition(q, { entityType: 'invoice', entityId: invoiceId, from: 'draft', to: 'open', revision: updated.revision, ctx });
-      const invoice = (await this.load(q, invoiceId))!;
-      await this.outbox.enqueue(q, invoiceCreatedEvent(invoice, ctx));
-      await this.audit.record(q, 'invoice.issued', { organizationId: updated.organizationId, resource: { type: 'invoice', id: invoiceId } }, ctx); // Stage 18.7.2
-      return { invoice, changed: true };
-    });
+    return this.db.tx((q) => this.issueIn(q, invoiceId, caller, presentation, ctx, verified));
+  }
+
+  /** `issue` in the CALLER's transaction (Core V2 S3f: direct checkout). */
+  async issueIn(
+    q: Queryable, invoiceId: string, caller: Caller, presentation: { template: string; locale: string }, ctx: TransitionContext,
+    verified: { callerPlatforms: ReadonlySet<string>; organizationPlatformId: string | null },
+  ): Promise<WriteResult> {
+    const row = await this.lockForCaller(q, invoiceId, caller);
+    if (row.status === 'open') return { invoice: (await this.load(q, invoiceId))!, changed: false }; // state-idempotent (SDD 17.2)
+    if (row.status !== 'draft') throw billingError(409, 'invalid_state_transition', BILLING_MESSAGES.invoiceCannotBeIssued, { status: row.status });
+    const decision = decideRouting(await this.routingInput(q, row));
+    if ('refused' in decision) throw routingInvalid(decision.refused);
+    const routing = decision.routed;
+    if (routing.platformId !== null && !verified.callerPlatforms.has(routing.platformId)) throw routingInvalid('platform_out_of_scope');
+    if (routing.purpose === 'organization_subscription' && verified.organizationPlatformId !== routing.platformId) throw routingInvalid('organization_platform_mismatch');
+    await q.query(
+      `INSERT INTO invoice_entitlement ("invoiceId", purpose, target, "payerType", "payerId", "beneficiaryUserId", "organizationId", "productId")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [invoiceId, routing.purpose, routing.target, row.payerType, row.payerId, routing.beneficiaryUserId, routing.organizationId, routing.productId],
+    );
+    let snapshot;
+    try {
+      snapshot = buildPresentationSnapshot(presentation);
+    } catch (e) {
+      if (e instanceof SnapshotError) throw billingError(400, 'invalid_invoice_request', e.message);
+      throw e;
+    }
+    const { rows } = await q.query<InvoiceRow>(`UPDATE invoice SET status = 'open', presentation = $2::jsonb WHERE id = $1 RETURNING *`, [invoiceId, JSON.stringify(snapshot)]);
+    const updated = rows[0]!;
+    await recordTransition(q, { entityType: 'invoice', entityId: invoiceId, from: 'draft', to: 'open', revision: updated.revision, ctx });
+    const invoice = (await this.load(q, invoiceId))!;
+    await this.outbox.enqueue(q, invoiceCreatedEvent(invoice, ctx));
+    await this.audit.record(q, 'invoice.issued', { organizationId: updated.organizationId, resource: { type: 'invoice', id: invoiceId } }, ctx); // Stage 18.7.2
+    return { invoice, changed: true };
   }
 
   /** `draft -> void`: abandoning a draft. No event (a draft was never announced). Repeat is a no-op only for an already-discarded draft. */
