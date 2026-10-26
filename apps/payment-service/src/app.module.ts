@@ -12,6 +12,7 @@ import { PaymentConfigModule } from './config/payment-config.module.js';
 import { createEventBus } from './events/event-bus.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { ProvidersModule } from './providers/providers.module.js';
+import { SimulationModule } from './simulation/simulation.module.js';
 import { WebhooksModule } from './webhooks/webhooks.module.js';
 
 const config = loadPaymentConfig();
@@ -46,6 +47,8 @@ const config = loadPaymentConfig();
     PaymentsModule,
     AttemptsModule,
     WebhooksModule,
+    // Core V2 S4f (F-S5): the simulation harness exists only where the simulation provider is enabled; never in production routing
+    ...(config.simulation && !config.isProduction ? [SimulationModule] : []),
   ],
 })
 export class AppModule {}

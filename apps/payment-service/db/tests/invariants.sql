@@ -467,6 +467,47 @@ SET session_replication_role = origin;
 SELECT pg_temp.expect_ok('S4g', 'an expired record may be purged (nothing purges today; a later purge needs its own authorization)', $$DELETE FROM idempotency_key WHERE key = 'k-s4g-00002'$$);
 \o
 
+-- ======================================================= Core V2 S4f: the simulation provider's own records (0015) ----
+\o /dev/null
+SELECT pg_temp.new_payment(gen_random_uuid(), gen_random_uuid()) AS s4f_p \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), gen_random_uuid()) AS s4f_q \gset
+INSERT INTO payment_attempt ("paymentId", "attemptNumber", provider) VALUES (:'s4f_p', 1, 'simulation') RETURNING id AS s4f_a \gset
+SELECT pg_temp.new_attempt(:'s4f_q', 1) AS s4f_test_a \gset
+CREATE FUNCTION pg_temp.sim(cid text, kind text, pid text, aid text, instr text, code text DEFAULT NULL, amt text DEFAULT 'NULL', cur text DEFAULT NULL,
+                            txn text DEFAULT NULL, body text DEFAULT NULL, delivery text DEFAULT NULL) RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO simulation_provider_command ("commandId", kind, "paymentId", "attemptId", instruction, "failureCode", amount, currency, "providerTxnId", "eventBody", delivery, "createdAt")
+    VALUES (%L, %L, %L, %L, %L, %L, %s, %L, %L, %L::bytea, %L, '2000-01-01')$$, cid, kind, pid, aid, instr, code, amt, cur, txn, body, delivery);
+$f$;
+SELECT pg_temp.expect_ok('S4f', 'an initiation plan for a payment', pg_temp.sim('cmd-s4f-001', 'initiation', :'s4f_p', NULL, 'ambiguous'));
+SELECT pg_temp.assert_eq('S4f', 'createdAt is the database time, never a supplied one', (SELECT ("createdAt" > now() - interval '1 minute')::text FROM simulation_provider_command WHERE "commandId" = 'cmd-s4f-001'), 'true');
+SELECT pg_temp.expect_ok('S4f', 'a rejected plan carries its failure code', pg_temp.sim('cmd-s4f-002', 'initiation', :'s4f_p', NULL, 'rejected', 'do_not_honor'));
+SELECT pg_temp.expect_ok('S4f', 'a success outcome: derived money, the transaction, its notification', pg_temp.sim('cmd-s4f-003', 'outcome', :'s4f_p', :'s4f_a', 'succeeded', NULL, '1000', 'TND', 'sim_x', '{}', 'immediate'));
+SELECT pg_temp.expect_ok('S4f', 'a no-record outcome produces no notification', pg_temp.sim('cmd-s4f-004', 'outcome', :'s4f_p', :'s4f_a', 'no_record', NULL, 'NULL', NULL, 'sim_x'));
+SELECT pg_temp.expect_error('S4f', 'F-S6: one row per command identity', pg_temp.sim('cmd-s4f-001', 'initiation', :'s4f_p', NULL, 'accepted'), '23505');
+SELECT pg_temp.expect_error('S4f', 'the command identity has the Idempotency-Key shape', pg_temp.sim('short', 'initiation', :'s4f_p', NULL, 'accepted'), '23514');
+SELECT pg_temp.expect_error('S4f', 'F-S3: an outcome binds to an attempt OF THE SIMULATION PROVIDER (no cross-provider reference)', pg_temp.sim('cmd-s4f-010', 'outcome', :'s4f_q', :'s4f_test_a', 'pending', NULL, 'NULL', NULL, 'sim_x'), '23503');
+SELECT pg_temp.expect_error('S4f', 'F-S3: an outcome binds to its attempt''s payment (no cross-payment reference)', pg_temp.sim('cmd-s4f-011', 'outcome', :'s4f_q', :'s4f_a', 'pending', NULL, 'NULL', NULL, 'sim_x'), '23503');
+SELECT pg_temp.expect_error('S4f', 'an initiation names no attempt', pg_temp.sim('cmd-s4f-012', 'initiation', :'s4f_p', :'s4f_a', 'accepted'), '23514');
+SELECT pg_temp.expect_error('S4f', 'an outcome names its attempt', pg_temp.sim('cmd-s4f-013', 'outcome', :'s4f_p', NULL, 'pending', NULL, 'NULL', NULL, 'sim_x'), '23514');
+SELECT pg_temp.expect_error('S4f', 'an unknown instruction is refused', pg_temp.sim('cmd-s4f-014', 'outcome', :'s4f_p', :'s4f_a', 'refunded', NULL, 'NULL', NULL, 'sim_x'), '23514');
+SELECT pg_temp.expect_error('S4f', 'a failure needs its code', pg_temp.sim('cmd-s4f-015', 'outcome', :'s4f_p', :'s4f_a', 'failed', NULL, 'NULL', NULL, 'sim_x', '{}', 'held'), '23514');
+SELECT pg_temp.expect_error('S4f', 'only a failure or rejection carries a code', pg_temp.sim('cmd-s4f-016', 'outcome', :'s4f_p', :'s4f_a', 'pending', 'x', 'NULL', NULL, 'sim_x'), '23514');
+SELECT pg_temp.expect_error('S4f', 'a success carries its derived money', pg_temp.sim('cmd-s4f-017', 'outcome', :'s4f_p', :'s4f_a', 'succeeded', NULL, 'NULL', NULL, 'sim_x', '{}', 'held'), '23514');
+SELECT pg_temp.expect_error('S4f', 'no money on a non-success', pg_temp.sim('cmd-s4f-018', 'outcome', :'s4f_p', :'s4f_a', 'expired', NULL, '1000', 'TND', 'sim_x', '{}', 'held'), '23514');
+SELECT pg_temp.expect_error('S4f', 'a zero amount is no money movement', pg_temp.sim('cmd-s4f-019', 'outcome', :'s4f_p', :'s4f_a', 'succeeded', NULL, '0', 'TND', 'sim_x', '{}', 'held'), '23514');
+SELECT pg_temp.expect_error('S4f', 'a notifying outcome has its notification and delivery', pg_temp.sim('cmd-s4f-020', 'outcome', :'s4f_p', :'s4f_a', 'expired', NULL, 'NULL', NULL, 'sim_x'), '23514');
+SELECT pg_temp.expect_error('S4f', 'a status-only outcome has no notification', pg_temp.sim('cmd-s4f-021', 'outcome', :'s4f_p', :'s4f_a', 'pending', NULL, 'NULL', NULL, 'sim_x', '{}', 'held'), '23514');
+SELECT pg_temp.expect_error('S4f', 'an unknown delivery is refused', pg_temp.sim('cmd-s4f-022', 'outcome', :'s4f_p', :'s4f_a', 'expired', NULL, 'NULL', NULL, 'sim_x', '{}', 'later'), '23514');
+SELECT pg_temp.expect_error('S4f', 'an outcome names the provider transaction', pg_temp.sim('cmd-s4f-023', 'outcome', :'s4f_p', :'s4f_a', 'pending'), '23514');
+SELECT pg_temp.expect_error('S4f', 'the provider is always simulation', format($$INSERT INTO simulation_provider_command ("commandId", kind, "paymentId", provider, instruction) VALUES ('cmd-s4f-024', 'initiation', %L, 'test', 'accepted')$$, :'s4f_p'), '23514');
+SELECT pg_temp.expect_error('S4f', 'a command is never edited', $$UPDATE simulation_provider_command SET instruction = 'rejected'$$, '23514');
+SELECT pg_temp.expect_error('S4f', 'a command is never deleted', $$DELETE FROM simulation_provider_command$$, '23514');
+SELECT pg_temp.expect_error('S4f', 'commands are never truncated', $$TRUNCATE simulation_provider_command$$, '23514');
+SELECT pg_temp.assert_eq('S4f', 'the runtime grants: no UPDATE or DELETE on simulation commands for anyone but the owner',
+  (SELECT count(*)::text FROM information_schema.role_table_grants g JOIN pg_tables t ON t.tablename = g.table_name
+    WHERE g.table_name = 'simulation_provider_command' AND g.privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE') AND g.grantee <> t.tableowner), '0');
+\o
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

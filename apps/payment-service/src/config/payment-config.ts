@@ -1,8 +1,8 @@
 import {
-  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertNoPublishedServiceTokens, assertRuntimeDatabaseRole,
+  ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertNoPublishedServiceTokens, assertRuntimeDatabaseRole, isPublishedDevelopmentSecret,
   loadBaseConfig, loadOrganizationReferenceConfig, parseServiceTokens, readDocsCredentials, registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
-import { parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
+import { assertSimulationGrant, parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
 
 
 /** payment-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16). */
@@ -29,6 +29,11 @@ export interface PaymentConfig extends BaseConfig {
   maxAttempts: number;
   /** Refused when true and `isProduction` is also true (SDD section 13.2). */
   testProviderEnabled: boolean;
+  /**
+   * Core V2 S4f (PAY-14; the Owner's F-S1, F-S5, F-S7): the `simulation` provider and its harness, for non-production certification only.
+   * `undefined` when disabled; the webhook signing secret is the operator's own (never a published development value).
+   */
+  simulation?: { webhookSecret: string };
   returnUrlAllowlist: string[];
   /** Baseline abuse limits (SDD section 16): requests per minute per authenticated caller. Technical values, no business meaning. */
   rateLimits: { createPerMinute: number; attemptPerMinute: number };
@@ -41,6 +46,22 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   const testProviderEnabled = reader.bool('PAYMENT_TEST_PROVIDER', false);
   if (testProviderEnabled && base.isProduction) {
     throw new ConfigError('PAYMENT_TEST_PROVIDER must not be enabled when NODE_ENV=production');
+  }
+  // Core V2 S4f (F-S5, F-S7): the simulation provider is non-production only, needs its own signing secret, and never runs beside the test
+  // provider (whose client-chosen scenarios would let an ordinary caller influence outcomes in a deployed simulation environment)
+  const simulationEnabled = reader.bool('PAYMENT_SIMULATION_PROVIDER', false);
+  if (simulationEnabled && base.isProduction) throw new ConfigError('PAYMENT_SIMULATION_PROVIDER must not be enabled when NODE_ENV=production');
+  if (simulationEnabled && testProviderEnabled) {
+    throw new ConfigError('PAYMENT_SIMULATION_PROVIDER and PAYMENT_TEST_PROVIDER are mutually exclusive: a simulation environment refuses client-chosen outcomes');
+  }
+  let simulation: PaymentConfig['simulation'];
+  if (simulationEnabled) {
+    const secret = reader.optional('PAYMENT_SIMULATION_WEBHOOK_SECRET');
+    if (secret === undefined || secret.length < 32) throw new ConfigError('PAYMENT_SIMULATION_WEBHOOK_SECRET is required (at least 32 characters) when PAYMENT_SIMULATION_PROVIDER is enabled');
+    if (isPublishedDevelopmentSecret(secret)) throw new ConfigError('PAYMENT_SIMULATION_WEBHOOK_SECRET must not be a development value published in this repository');
+    simulation = { webhookSecret: secret };
+  } else if (reader.optional('PAYMENT_SIMULATION_WEBHOOK_SECRET') !== undefined && base.isProduction) {
+    throw new ConfigError('PAYMENT_SIMULATION_WEBHOOK_SECRET must not be configured when NODE_ENV=production');
   }
   const rabbitmqUrl = reader.optional('RABBITMQ_URL');
   if (rabbitmqUrl !== undefined) reader.url('RABBITMQ_URL', ['amqp:', 'amqps:']);
@@ -67,11 +88,13 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   // V2 A2.2 (OD-A2.2-1, the callee side): production refuses a registered digest of a token published in this repository.
   assertNoPublishedServiceTokens(serviceTokens, { isProduction: base.isProduction });
+  const servicePolicy = parsePaymentServicePolicy(reader.get('PAYMENT_SERVICE_POLICY'), registeredCallers(serviceTokens));
+  assertSimulationGrant(servicePolicy, simulation !== undefined);
   return {
     ...base,
     databaseUrl,
     serviceTokens,
-    servicePolicy: parsePaymentServicePolicy(reader.get('PAYMENT_SERVICE_POLICY'), registeredCallers(serviceTokens)),
+    servicePolicy,
     organizationReference: loadOrganizationReferenceConfig(reader, base.isProduction),
     authServiceUrl: reader.url('AUTH_SERVICE_URL', ['http:', 'https:']),
     authTimeoutMs: reader.int('AUTH_TIMEOUT_MS', { default: 3000, min: 100, max: 30_000 }),
@@ -81,6 +104,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     supportedCurrencies: [...new Set(supportedCurrencies)],
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
     testProviderEnabled,
+    ...(simulation ? { simulation } : {}),
     returnUrlAllowlist: (reader.optional('PAYMENT_RETURN_URL_ALLOWLIST', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     rateLimits: {
       createPerMinute: reader.int('PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE', { default: 300, min: 1, max: 100_000 }),

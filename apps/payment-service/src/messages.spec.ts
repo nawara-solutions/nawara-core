@@ -20,6 +20,10 @@ describe('PAYMENT_MESSAGES', () => {
       organizationIdMustEqualSeller: 'organizationId must equal seller.id when seller.type is organization.',
       expiresAtInvalid: 'expiresAt is not a valid timestamp.',
       paymentRequestConflict: 'A payment already exists for this paymentRequestId with a different snapshot.',
+      providerOptionsNotAccepted: 'This provider does not accept providerOptions: a payer cannot choose a simulated outcome.', // Core V2 S4f
+      invalidSimulationCommand: 'failureCode and delivery apply only to the outcomes that carry them.',
+      simulationCommandConflict: 'This commandId was already used for a different simulation command.',
+      simulationNothingToDeliver: 'This simulation command produced no provider notification.',
       paymentUncertain: 'An earlier attempt may still settle this payment; no new attempt is possible until it is resolved.', // Core V2 S4c
       purposeRequired: 'purpose is required for a new payment.', // Core V2 S4a: new messages
       purposeNotAccepted: 'purpose must be organization_subscription, direct_purchase or non_entitlement.',

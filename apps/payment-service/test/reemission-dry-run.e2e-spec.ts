@@ -60,6 +60,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0012_payment_closing_finality.sql', // Core V2 S4c: closing, uncertainty guards, payment_late_success
       '0013_provider_transaction_fact.sql', // Core V2 S4d: provider_transaction_fact (+ conflicts), late success -> fact
       '0014_class_m_idempotency_retention.sql', // Core V2 S4g: 90-day class-M retention, set and kept by the database
+      '0015_simulation_provider.sql', // Core V2 S4f: the simulation provider's own append-only records (non-production only)
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

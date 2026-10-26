@@ -18,6 +18,10 @@ export type ErrorCode =
   | 'idempotency_key_reused'
   | 'unsupported_currency'
   | 'invalid_provider'
+  | 'provider_options_not_accepted'
+  | 'invalid_simulation_command'
+  | 'simulation_command_conflict'
+  | 'simulation_nothing_to_deliver'
   | 'provider_error'
   | 'provider_unavailable'
   | 'auth_unavailable';
