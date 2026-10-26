@@ -293,6 +293,46 @@ SELECT pg_temp.assert_eq('S4a', 'no existing row was backfilled', (SELECT (purpo
 SELECT pg_temp.assert_eq('S4a', 'no Platform on Payment records (ADR-0042 DEC-5)', (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('payment', 'payment_attempt') AND column_name ILIKE '%platform%'), '0');
 \o
 
+-- ================================================= Core V2 S4b: no cash settlement of a Company seller (0011) ----
+-- Records a PASS only when the statement fails on exactly the named constraint (so another guard cannot mask the one under test).
+CREATE FUNCTION pg_temp.expect_constraint(tid text, tname text, stmt text, want text) RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE cn text;
+BEGIN
+  BEGIN
+    EXECUTE stmt;
+    INSERT INTO results VALUES (tid, tname, false, 'the statement succeeded');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS cn = CONSTRAINT_NAME;
+    INSERT INTO results VALUES (tid, tname, SQLSTATE = '23514' AND cn = want, CASE WHEN SQLSTATE = '23514' AND cn = want THEN NULL ELSE SQLSTATE||' '||coalesce(cn, '-')||': '||SQLERRM END);
+  END;
+END $f$;
+CREATE FUNCTION pg_temp.s4b(seller_type text, seller_id text, status text, method text) RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose, status, "settledMethod")
+    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u-1', %L, %L, %s, 100, 'TND', 'non_entitlement', %L, %L)$$,
+    seller_type, seller_id, CASE WHEN seller_type = 'organization' THEN quote_literal(seller_id) || '::uuid' ELSE 'NULL' END, status, method);
+$f$;
+\o /dev/null
+SELECT pg_temp.expect_constraint('S4b', 'DB-16: a Company seller''s payment is never inserted as settled in cash', pg_temp.s4b('company', 'nawara', 'succeeded', 'cash'), 'payment_no_company_cash_settlement');
+SELECT pg_temp.expect_ok('S4b', 'a Company seller''s unsettled payment (no method)', pg_temp.s4b('company', 'nawara', 'created', NULL));
+SELECT pg_temp.expect_ok('S4b', 'another seller type is unchanged by DB-16: an Organization seller (cash for it stays deferred, ADR-0068 d.4)', pg_temp.s4b('organization', '00000000-0000-4000-8000-00000000b4b1', 'succeeded', 'cash'));
+SELECT pg_temp.expect_ok('S4b', 'another seller type is unchanged by DB-16: a user seller', pg_temp.s4b('user', 'seller-u', 'succeeded', 'cash'));
+SELECT pg_temp.expect_error('S4b', 'a Company seller''s unsettled payment cannot carry cash either (DB-16 and the success-only rule both refuse it)', pg_temp.s4b('company', 'nawara', 'created', 'cash'), '23514');
+-- a Company payment settled the only way Core V2 settles: a verified gateway success on its succeeded attempt
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "beneficiaryUserId")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u-1', 'company', 'nawara', 100, 'TND', 'direct_purchase', 'u-1') RETURNING id AS s4b_gw \gset
+SELECT pg_temp.new_attempt(:'s4b_gw', 1) AS s4b_att \gset
+UPDATE payment SET status = 'pending' WHERE id = :'s4b_gw';
+UPDATE payment_attempt SET status = 'submitted' WHERE id = :'s4b_att';
+UPDATE payment_attempt SET status = 'succeeded' WHERE id = :'s4b_att';
+SELECT pg_temp.expect_ok('S4b', 'a Company seller''s payment is settled through a gateway', format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = %L, "closedAt" = now() WHERE id = %L$$, :'s4b_att', :'s4b_gw'));
+SELECT pg_temp.expect_constraint('S4b', 'DB-16: a settled Company payment cannot be re-labelled cash by a raw UPDATE', format($$UPDATE payment SET "settledMethod" = 'cash' WHERE id = %L$$, :'s4b_gw'), 'payment_no_company_cash_settlement');
+SELECT pg_temp.expect_error('S4b', 'S4a: the same payment''s purpose stays immutable', format($$UPDATE payment SET purpose = 'non_entitlement' WHERE id = %L$$, :'s4b_gw'), '23514');
+SELECT pg_temp.expect_error('S4b', 'S4a: the same payment''s seller stays immutable (a Company seller cannot become another type to take cash)', format($$UPDATE payment SET "sellerType" = 'user', "settledMethod" = 'cash' WHERE id = %L$$, :'s4b_gw'), '23514');
+SELECT pg_temp.assert_eq('S4b', 'the constraint is validated: every existing row satisfies it (nothing was rewritten)',
+  (SELECT convalidated::text FROM pg_constraint WHERE conname = 'payment_no_company_cash_settlement'), 'true');
+SELECT pg_temp.assert_eq('S4b', 'no Company payment is settled in cash', (SELECT count(*)::text FROM payment WHERE "sellerType" = 'company' AND "settledMethod" = 'cash'), '0');
+\o
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail
