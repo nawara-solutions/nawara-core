@@ -35,6 +35,10 @@ in this document.
 
 Implemented in `apps/payment-service/db/migrations/0010_payment_purpose_live_mode.sql` and `src/payments/`.
 
+**Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
+validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
+Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.
+
 ## 0. How to read this document
 
 Every design point carries one marker:

@@ -727,6 +727,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | a check-constraint violation (no API path sets `cash`) |
 | D. Existing | `settledMethod ∈ {gateway, cash}` (`apps/payment-service/db/migrations/0002_payment.sql`); no code path sets `cash` |
 | E. Open, gates | none. Stage S4b. Confidence H |
+| F. S4b (2026-10-26) | **IMPLEMENTED** (`apps/payment-service/db/migrations/0011_no_company_cash_settlement.sql`): `payment_no_company_cash_settlement CHECK ("settledMethod" IS DISTINCT FROM 'cash' OR "sellerType" <> 'company')`, added VALIDATED (every existing row satisfies it; nothing rewritten), refusing every INSERT and UPDATE whatever the path. It reads the seller TYPE only (no legal identity inferred). No route, DTO or error code (no code path sets `cash`; a body naming `settledMethod` is an unknown field). Cash for other seller types unchanged in the schema and deferred (ADR-0068 decision 4): nothing enables a cash workflow |
 
 #### PAY-07 Refund attempt
 
