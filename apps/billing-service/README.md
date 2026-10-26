@@ -178,6 +178,12 @@ classification but never blocks the underlying financial settlement.
 public route, `200 { valid, expiresAt }`, composing `EffectiveAccessService` (`organizationId -> SubscriptionRepository.findForOrganization -> deriveEntitlement`) with the caller-supplied request-time clock. No Subscription,
 `pending`, not-yet-started or expired are all `valid: false`, never a 404.
 
+`expiresAt` is the **exclusive access-validity deadline**, not the paid-period end (Core V2 S3e, Owner-confirmed): `graceUntil`, i.e.
+`currentPeriodEnd` plus the fixed 24-hour Organization grace, or an earlier `effectiveTerminationAt`; access is valid while
+`currentPeriodStart <= now < expiresAt`. The Personal read (`/billing/users/.../entitlement`, S3c) has no grace: its `expiresAt` is the
+end of the paid span run. The database check `subscription_grace_fixed` states `graceUntil IS NOT NULL` explicitly because a CHECK that
+evaluates to NULL passes in PostgreSQL; this enforces the frozen invariant (S0 §3.9) as written.
+
 ### Concurrency/lifecycle hardening (Stage 12.6)
 
 Real-PostgreSQL concurrency races, calling the repository/consumer layer directly (not a real broker — that is
