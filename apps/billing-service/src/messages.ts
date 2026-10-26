@@ -298,4 +298,40 @@ export const BILLING_MESSAGES = defineMessages({
     fr: "L'appelant n'a pas pu être vérifié. Rien n'a été modifié.",
     ar: 'تعذّر التحقق من الجهة المستدعية. لم يتم تغيير أي شيء.',
   },
+  // Core V2 S3f: fee caps, delegations and proposals (register BIL-04 to BIL-07)
+  feeAboveCap: {
+    en: "The fee is above the Platform's cap.",
+    fr: 'Les frais dépassent le plafond de la plateforme.',
+    ar: 'الرسوم أعلى من الحد الأقصى للمنصة.',
+  },
+  feeProposalNotPending: {
+    en: 'The fee proposal is no longer pending.',
+    fr: "La proposition de frais n'est plus en attente.",
+    ar: 'لم يعد اقتراح الرسوم قيد الانتظار.',
+  },
+  feeProposalPendingExists: {
+    en: 'A fee proposal for this Organization and product is already pending.',
+    fr: 'Une proposition de frais pour cette organisation et ce produit est déjà en attente.',
+    ar: 'يوجد بالفعل اقتراح رسوم قيد الانتظار لهذه المنظمة وهذا المنتج.',
+  },
+  productNotAvailable: {
+    en: 'The product is not available.',
+    fr: "Le produit n'est pas disponible.",
+    ar: 'المنتج غير متاح.',
+  },
+  idempotencyKeyRequired: {
+    en: 'An Idempotency-Key header of 8 to 128 characters of [A-Za-z0-9._:-] is required.',
+    fr: "Un en-tête Idempotency-Key de 8 à 128 caractères parmi [A-Za-z0-9._:-] est requis.",
+    ar: 'مطلوب ترويسة Idempotency-Key من 8 إلى 128 حرفًا من [A-Za-z0-9._:-].',
+  },
+  idempotencyKeyConflict: {
+    en: 'This Idempotency-Key was already used for a different request.',
+    fr: 'Cette Idempotency-Key a déjà été utilisée pour une autre requête.',
+    ar: 'سبق استخدام مفتاح Idempotency-Key هذا لطلب مختلف.',
+  },
+  feeAmountRange: {
+    en: 'amount must be an integer number of minor units from 0 to 9007199254740991',
+    fr: 'amount doit être un nombre entier d’unités mineures de 0 à 9007199254740991',
+    ar: 'يجب أن يكون amount عددًا صحيحًا من الوحدات الصغرى من 0 إلى 9007199254740991',
+  },
 });

@@ -14,10 +14,15 @@ export type Mode = 'ok' | 'hang' | 'down' | 'reset' | 'redirect' | 'no_content' 
  */
 export class FakeAuth {
   mode: Mode = 'ok';
-  target: 'grants' | 'access' | 'me' = 'grants';
+  target: 'grants' | 'access' | 'me' | 'organization' | 'assignments' = 'grants';
   readonly identities = new Map<string, Identity>();
   /** platformId -> companyId, as Auth knows it now. */
   readonly platforms = new Map<string, string>();
+  /** Core V2 S3f: operator userId -> the Platforms they hold an ACTIVE assignment to (and, below, the Company they belong to). */
+  readonly assignments = new Map<string, Set<string>>();
+  readonly operatorCompany = new Map<string, string>();
+  /** Core V2 S3f: organizationId -> platformId. */
+  readonly organizations = new Map<string, string>();
   readonly received: Array<{ path: string; authorization: string | undefined }> = [];
   readonly sinkReceived: string[] = [];
   private server!: Server;
@@ -59,7 +64,8 @@ export class FakeAuth {
     };
     const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '';
     const who = this.identities.get(bearer);
-    const route = req.url === '/auth/grants' ? 'grants' : req.url === '/auth/me' ? 'me' : req.url?.startsWith('/auth/platform-access/') ? 'access' : null;
+    const route = req.url === '/auth/grants' ? 'grants' : req.url === '/auth/me' ? 'me' : req.url?.startsWith('/auth/platform-access/') ? 'access'
+      : req.url?.startsWith('/auth/admin/organizations/') ? 'organization' : /^\/auth\/admin\/operators\/[^/]+\/platform-assignments$/.test(req.url ?? '') ? 'assignments' : null;
     if (route === null) return send(404, { message: 'Not Found' });
     if (route === this.target) {
       if (this.mode === 'hang') return;
@@ -83,11 +89,29 @@ export class FakeAuth {
       if (this.mode === 'bad_kind' && this.target === 'grants') return send(200, { ...who, kind: 'superuser', platformAssignments: [], organizationAdminMemberships: [] });
       return send(200, { userId: who.userId, kind: who.kind, ...(who.kind === 'owner' ? { companyId: who.companyId } : {}), platformAssignments: [], organizationAdminMemberships: [] });
     }
+    if (who.kind === 'member') return send(403, { message: 'Forbidden' });
+    // the platform-access rule (Auth's PlatformAccessService): an Owner of its Company, or an operator with an active assignment
+    const allowed = (platformId: string) => {
+      const company = this.platforms.get(platformId.toLowerCase());
+      if (!company) return false;
+      if (who.kind === 'owner') return company === who.companyId?.toLowerCase();
+      return this.assignments.get(who.userId)?.has(platformId.toLowerCase()) === true;
+    };
+    if (route === 'organization') {
+      const organizationId = decodeURIComponent(req.url!.slice('/auth/admin/organizations/'.length));
+      const p = this.organizations.get(organizationId.toLowerCase());
+      if (!p || !allowed(p)) return send(404, { message: 'Not Found' });
+      return send(200, { id: organizationId, platformId: p });
+    }
+    if (route === 'assignments') {
+      if (who.kind !== 'owner') return send(403, { message: 'Forbidden' });
+      const operatorId = decodeURIComponent(req.url!.split('/')[4]!);
+      if (this.operatorCompany.get(operatorId) !== who.companyId?.toLowerCase()) return send(404, { message: 'Not Found' });
+      return send(200, [...(this.assignments.get(operatorId) ?? [])].map((platformId) => ({ id: platformId, platformId, active: true, assignedAt: new Date().toISOString(), revokedAt: null })));
+    }
     const platformId = decodeURIComponent(req.url!.slice('/auth/platform-access/'.length));
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(platformId)) return send(400, { message: 'Validation failed (uuid is expected)' });
-    if (who.kind === 'member') return send(403, { message: 'Forbidden' });
-    const company = this.platforms.get(platformId.toLowerCase());
-    if (!company || who.kind !== 'owner' || company !== who.companyId?.toLowerCase()) return send(404, { message: 'Not Found' });
+    if (!allowed(platformId)) return send(404, { message: 'Not Found' });
     if (this.mode === 'wrong_platform' && this.target === 'access') return send(200, { platformId: '00000000-0000-4000-8000-000000000000', allowed: true });
     return send(200, { platformId, allowed: true });
   }

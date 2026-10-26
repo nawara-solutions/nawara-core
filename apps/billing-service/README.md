@@ -69,6 +69,17 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   requires its Platform's row (`409 platform_not_configured`, also a database guard), and a subscription product's prices use that
   currency (`422 unsupported_currency`, also a database guard). Nothing existing is backfilled or rewritten. `platform_currency` (0009)
   is superseded for Core V2 (OD-02): left as it is, with its data, and nothing new reads or writes it.
+- **Organization fees (Core V2 S3f; register BIL-04 to BIL-07; the Owner's decisions A1 to A5; `db/migrations/0025`, `src/fees/`):** the
+  optional, member-funded fee an Organization may add to one ACTIVE `personal` subscription product of its Platform (used by S5). The
+  Owner sets ONE maximum fixed fee per Platform in its S3d currency (minor units, ≥ 0, no percentage; versioned and immutable; no cap
+  means 0), delegates proposing to one operator per Platform (no expiry; explicit revocation), and alone approves or rejects; a delegated
+  operator proposes `{organizationId, productId, amount}` and may withdraw while pending. Every actor and scope is verified live through
+  Auth's existing routes (`/auth/grants`, `/auth/platform-access`, `/auth/admin/organizations/:id`, and the Owner's
+  `/auth/admin/operators/:id/platform-assignments`); a service token is never a fee actor. The database serializes a Platform's fee
+  writes, enforces the CURRENT cap at proposal and approval, one pending proposal per (Organization, product), one active delegation per
+  (Platform, operator), and one-way decisions; `billing_fee_for_use` re-checks the cap at the point of use. Every command needs an
+  `Idempotency-Key` (class K: per actor, bound to the exact request, kept permanently, a success replayed). Fees create no invoice,
+  payment request, settlement or purchase. Direct checkout (BIL-10) is not built: blocked by B-007 / B-028 (register BIL-10 F).
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).
@@ -177,6 +188,12 @@ classification but never blocks the underlying financial settlement.
 `GET /billing/organizations/:organizationId/entitlement` (`EntitlementController`, service-token only) — the one
 public route, `200 { valid, expiresAt }`, composing `EffectiveAccessService` (`organizationId -> SubscriptionRepository.findForOrganization -> deriveEntitlement`) with the caller-supplied request-time clock. No Subscription,
 `pending`, not-yet-started or expired are all `valid: false`, never a 404.
+
+`expiresAt` is the **exclusive access-validity deadline**, not the paid-period end (Core V2 S3e, Owner-confirmed): `graceUntil`, i.e.
+`currentPeriodEnd` plus the fixed 24-hour Organization grace, or an earlier `effectiveTerminationAt`; access is valid while
+`currentPeriodStart <= now < expiresAt`. The Personal read (`/billing/users/.../entitlement`, S3c) has no grace: its `expiresAt` is the
+end of the paid span run. The database check `subscription_grace_fixed` states `graceUntil IS NOT NULL` explicitly because a CHECK that
+evaluates to NULL passes in PostgreSQL; this enforces the frozen invariant (S0 §3.9) as written.
 
 ### Concurrency/lifecycle hardening (Stage 12.6)
 

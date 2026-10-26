@@ -26,7 +26,7 @@ export class PersonalEntitlementController {
   @ApiParam({ name: 'userId', description: 'The Auth user (the beneficiary)' })
   @ApiParam({ name: 'platformId', format: 'uuid' })
   @ApiParam({ name: 'productId', format: 'uuid' })
-  @ApiResponse({ status: 200, description: '{ valid: boolean, expiresAt: string | null } — the ONLY shape' })
+  @ApiResponse({ status: 200, description: '{ valid: boolean, expiresAt: string | null } — the ONLY shape. No grace: expiresAt is the exclusive end of the paid periods covering now.' })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted / platform_not_permitted (the Platform is not the caller\'s)' })
   @ApiResponse({ status: 404, description: 'not_found: not a personal subscription product of that Platform' })

@@ -79,6 +79,13 @@ describe('BILLING_MESSAGES', () => {
       [en('platformNotConfigured'), 'The Platform has no billing configuration.'], // Core V2 S3d
       [en('billingPlatformExists'), 'This Platform already has a different billing configuration.'],
       [en('authorityUnverified'), 'The caller could not be verified. Nothing was changed.'],
+      [en('feeAboveCap'), "The fee is above the Platform's cap."], // Core V2 S3f
+      [en('feeProposalNotPending'), 'The fee proposal is no longer pending.'],
+      [en('feeProposalPendingExists'), 'A fee proposal for this Organization and product is already pending.'],
+      [en('productNotAvailable'), 'The product is not available.'],
+      [en('idempotencyKeyRequired'), 'An Idempotency-Key header of 8 to 128 characters of [A-Za-z0-9._:-] is required.'],
+      [en('idempotencyKeyConflict'), 'This Idempotency-Key was already used for a different request.'],
+      [en('feeAmountRange'), 'amount must be an integer number of minor units from 0 to 9007199254740991'],
     ];
     expect(before).toHaveLength(Object.keys(BILLING_MESSAGES).length); // every entry is pinned
     for (const [rendered, expected] of before) expect(rendered).toBe(expected);
