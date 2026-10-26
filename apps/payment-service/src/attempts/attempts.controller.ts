@@ -49,7 +49,7 @@ export class AttemptsController {
     }
     const payment = await this.payments.findById(paymentId);
     if (!payment || !req.caller) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
-    this.authorization.assertCanStartAttempt(payment, req.caller);
+    await this.authorization.assertCanStartAttempt(payment, req.caller);
     const callerId = req.caller.kind === 'user' ? req.caller.identity.id : req.caller.service;
     // After authentication and authorization, so only a real payer consumes (and can exhaust) their own budget.
     await this.rateLimit.assert('payment-attempt', callerId, { limit: this.config.rateLimits.attemptPerMinute, windowSec: 60 });
@@ -72,7 +72,7 @@ export class AttemptsController {
   async sync(@Param('paymentId', new ParseUUIDPipe()) paymentId: string, @Param('attemptId', new ParseUUIDPipe()) attemptId: string, @Req() req: CallerRequest) {
     const payment = await this.payments.findById(paymentId);
     if (!payment || !req.caller) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
-    this.authorization.assertCanSync(payment, req.caller);
+    await this.authorization.assertCanSync(payment, req.caller);
     const attempt = await this.attempts.findById(attemptId);
     if (!attempt || attempt.paymentId !== paymentId) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
     const actor = req.caller.kind === 'user' ? ({ type: 'user', id: req.caller.identity.id } as const) : ({ type: 'service', id: req.caller.service } as const);

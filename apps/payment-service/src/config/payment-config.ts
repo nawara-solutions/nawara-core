@@ -2,7 +2,7 @@ import {
   ConfigError, DEFAULT_RABBITMQ_HEARTBEAT_S, EnvReader, RABBITMQ_HEARTBEAT_BOUNDS, assertNoPublishedServiceTokens, assertRuntimeDatabaseRole, isPublishedDevelopmentSecret,
   loadBaseConfig, loadOrganizationReferenceConfig, parseServiceTokens, readDocsCredentials, registeredCallers, type BaseConfig, type CallerPolicyMap, type OrganizationReferenceConfig, type ServiceTokenEntry,
 } from '@nawara/service-kit';
-import { assertSimulationGrant, parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
+import { assertOrganizationPayerGrant, assertSimulationGrant, parsePaymentServicePolicy, type PaymentCallerPolicy } from '../authorization/caller-admission.policy.js';
 
 
 /** payment-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16). */
@@ -90,6 +90,7 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   assertNoPublishedServiceTokens(serviceTokens, { isProduction: base.isProduction });
   const servicePolicy = parsePaymentServicePolicy(reader.get('PAYMENT_SERVICE_POLICY'), registeredCallers(serviceTokens));
   assertSimulationGrant(servicePolicy, simulation !== undefined);
+  assertOrganizationPayerGrant(servicePolicy, base.isProduction);
   return {
     ...base,
     databaseUrl,

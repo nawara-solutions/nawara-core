@@ -26,7 +26,9 @@ describe('PAYMENT_MESSAGES', () => {
       simulationNothingToDeliver: 'This simulation command produced no provider notification.',
       paymentUncertain: 'An earlier attempt may still settle this payment; no new attempt is possible until it is resolved.', // Core V2 S4c
       purposeRequired: 'purpose is required for a new payment.', // Core V2 S4a: new messages
-      purposeNotAccepted: 'purpose must be organization_subscription, direct_purchase or non_entitlement.',
+      purposeNotAccepted: 'purpose must be organization_subscription, direct_purchase, non_entitlement, assisted_settlement or recovery_settlement.', // Core V2 S4e
+      payerIdMustBeUuid: 'payer.id must be a uuid when payer.type is organization.',
+      organizationIdMustEqualPayer: 'organizationId must equal payer.id when payer.type is organization.',
       beneficiaryRequired: 'beneficiaryUserId is required for purpose {purpose}.',
       beneficiaryNotAllowed: 'beneficiaryUserId is not allowed for purpose {purpose}.',
       payerPurposeMismatch: 'This payer cannot pay for purpose {purpose}.',

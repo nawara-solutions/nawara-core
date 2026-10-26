@@ -283,4 +283,30 @@ describe('loadPaymentConfig', () => {
       expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: HARNESS_POLICY(['payment.simulation.resolve']) })).toThrow(/requires PAYMENT_SIMULATION_PROVIDER/);
     });
   });
+  describe('Core V2 S4e (PAY-03): payment.create.organization_payer is an inactive, default-denied capability (A-5)', () => {
+    const producer = generateServiceToken();
+    const policy = (operations: string[]) => JSON.stringify({ callers: { 'billing-service': { operations, allowedPlatforms: [P1] } } });
+    const env = { ...BASE_ENV, SERVICE_TOKENS: `billing-service:${producer.digest}` };
+    const prod = { ...env, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672' };
+
+    it('is never implied: the approved V1 policy does not hold it', () => {
+      expect(loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: BILLING_POLICY }).servicePolicy.of('billing-service')?.operations.has('payment.create.organization_payer')).toBe(false);
+    });
+
+    it('may be held by an isolated non-production test policy', () => {
+      const cfg = loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.create.organization_payer']) });
+      expect(cfg.servicePolicy.of('billing-service')?.operations.has('payment.create.organization_payer')).toBe(true);
+    });
+
+    it('is refused in production configuration (a separate Owner decision grants it to a real producer)', () => {
+      expect(() => loadPaymentConfig({ ...prod, PAYMENT_SERVICE_POLICY: policy(['payment.create', 'payment.create.organization_payer']) })).toThrow(/no production configuration may hold yet/);
+      expect(() => loadPaymentConfig({ ...prod, PAYMENT_SERVICE_POLICY: BILLING_POLICY })).not.toThrow();
+    });
+
+    it('no wildcard or prefix grants it', () => {
+      for (const op of ['*', 'payment.*', 'payment.create.*', 'payment.create.organization']) {
+        expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: policy(['payment.create', op]) }), op).toThrow();
+      }
+    });
+  });
 });

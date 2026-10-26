@@ -253,26 +253,27 @@ SELECT pg_temp.expect_error('FI-15', 'an amount a JSON number cannot carry exact
 -- ================================================ Core V2 S4a: purpose, beneficiary, liveMode (0010) ----
 -- A statement inserting one payment from `payer` (type, id) to a Company seller with the given purpose and beneficiary.
 CREATE FUNCTION pg_temp.s4a(ptype text, pid text, purpose text, beneficiary text, live text DEFAULT 'DEFAULT') RETURNS text LANGUAGE sql AS $f$
-  SELECT format($$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "beneficiaryUserId", "liveMode")
-    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', %L, %L, 'company', 'nawara', 100, 'TND', %L, %L, %s)$$, ptype, pid, purpose, beneficiary, live);
+  -- Core V2 S4e: an Organization payer is the payment's Organization (0016), so the fixture names it as organizationId too
+  SELECT format($$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose, "beneficiaryUserId", "liveMode")
+    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', %L, %L, 'company', 'nawara', %L, 100, 'TND', %L, %L, %s)$$, ptype, pid, CASE WHEN ptype = 'organization' THEN pid END, purpose, beneficiary, live);
 $f$;
 \o /dev/null
 SELECT pg_temp.expect_ok('S4a', 'an Organization subscription paid by a user, no beneficiary', pg_temp.s4a('user', 'u-1', 'organization_subscription', NULL));
 SELECT pg_temp.expect_ok('S4a', 'a direct purchase paid by its beneficiary', pg_temp.s4a('user', 'u-1', 'direct_purchase', 'u-1'));
 SELECT pg_temp.expect_ok('S4a', 'an ordinary invoice paid by a user', pg_temp.s4a('user', 'u-1', 'non_entitlement', NULL));
 SELECT pg_temp.expect_ok('S4a', 'an ordinary invoice paid by a Company', pg_temp.s4a('company', 'acme', 'non_entitlement', NULL));
-SELECT pg_temp.expect_ok('S4a', 'DB-15: an assisted settlement paid by an Organization (database-admitted; the API refuses it, P-5)', pg_temp.s4a('organization', 'o-1', 'assisted_settlement', 'u-2'));
-SELECT pg_temp.expect_ok('S4a', 'DB-15: a recovery settlement paid by an Organization (database-admitted; the API refuses it, P-5)', pg_temp.s4a('organization', 'o-1', 'recovery_settlement', NULL));
-SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays an ordinary invoice (the prospective B2 narrowing, P-1)', pg_temp.s4a('organization', 'o-1', 'non_entitlement', NULL), '23514');
-SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays an Organization subscription', pg_temp.s4a('organization', 'o-1', 'organization_subscription', NULL), '23514');
-SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays a direct purchase', pg_temp.s4a('organization', 'o-1', 'direct_purchase', 'o-1'), '23514');
+SELECT pg_temp.expect_ok('S4a', 'DB-15: an assisted settlement paid by an Organization (database-admitted; the API only behind payment.create.organization_payer, S4e)', pg_temp.s4a('organization', '00000000-0000-4000-8000-0000000000e1', 'assisted_settlement', 'u-2'));
+SELECT pg_temp.expect_ok('S4a', 'DB-15: a recovery settlement paid by an Organization (database-admitted; the API only behind payment.create.organization_payer, S4e)', pg_temp.s4a('organization', '00000000-0000-4000-8000-0000000000e1', 'recovery_settlement', NULL));
+SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays an ordinary invoice (the prospective B2 narrowing, P-1)', pg_temp.s4a('organization', '00000000-0000-4000-8000-0000000000e1', 'non_entitlement', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays an Organization subscription', pg_temp.s4a('organization', '00000000-0000-4000-8000-0000000000e1', 'organization_subscription', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays a direct purchase', pg_temp.s4a('organization', '00000000-0000-4000-8000-0000000000e1', 'direct_purchase', '00000000-0000-4000-8000-0000000000e1'), '23514');
 SELECT pg_temp.expect_error('S4a', 'DB-15: a user never pays an assisted settlement', pg_temp.s4a('user', 'u-1', 'assisted_settlement', 'u-1'), '23514');
 SELECT pg_temp.expect_error('S4a', 'DB-15: a Company never pays a recovery settlement', pg_temp.s4a('company', 'acme', 'recovery_settlement', NULL), '23514');
 SELECT pg_temp.expect_error('S4a', 'B2: a Company never pays an Organization subscription', pg_temp.s4a('company', 'acme', 'organization_subscription', NULL), '23514');
 SELECT pg_temp.expect_error('S4a', 'B2: a Company never pays a direct purchase', pg_temp.s4a('company', 'acme', 'direct_purchase', 'acme'), '23514');
 SELECT pg_temp.expect_error('S4a', 'B2: a direct purchase names its beneficiary', pg_temp.s4a('user', 'u-1', 'direct_purchase', NULL), '23514');
 SELECT pg_temp.expect_error('S4a', 'B2: a direct purchase''s beneficiary is its payer (never someone else)', pg_temp.s4a('user', 'u-1', 'direct_purchase', 'u-2'), '23514');
-SELECT pg_temp.expect_error('S4a', 'B2: an assisted settlement names its beneficiary', pg_temp.s4a('organization', 'o-1', 'assisted_settlement', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: an assisted settlement names its beneficiary', pg_temp.s4a('organization', '00000000-0000-4000-8000-0000000000e1', 'assisted_settlement', NULL), '23514');
 SELECT pg_temp.expect_error('S4a', 'B2: an ordinary invoice names no beneficiary', pg_temp.s4a('user', 'u-1', 'non_entitlement', 'u-1'), '23514');
 SELECT pg_temp.expect_error('S4a', 'B2: an Organization subscription names no beneficiary', pg_temp.s4a('user', 'u-1', 'organization_subscription', 'u-1'), '23514');
 SELECT pg_temp.expect_error('S4a', 'an unknown purpose is refused', pg_temp.s4a('user', 'u-1', 'gift', NULL), '23514');
@@ -506,6 +507,23 @@ SELECT pg_temp.expect_error('S4f', 'commands are never truncated', $$TRUNCATE si
 SELECT pg_temp.assert_eq('S4f', 'the runtime grants: no UPDATE or DELETE on simulation commands for anyone but the owner',
   (SELECT count(*)::text FROM information_schema.role_table_grants g JOIN pg_tables t ON t.tablename = g.table_name
     WHERE g.table_name = 'simulation_provider_command' AND g.privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE') AND g.grantee <> t.tableowner), '0');
+\o
+
+-- ======================================================= Core V2 S4e: an Organization payer is the payment's Organization (0016) ----
+\o /dev/null
+CREATE FUNCTION pg_temp.s4e(pid text, org text, seller_type text DEFAULT 'company', seller_id text DEFAULT 'nawara') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose, "liveMode")
+    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'organization', %L, %L, %L, %s, 100, 'TND', 'recovery_settlement', false)$$, pid, seller_type, seller_id, COALESCE(quote_literal(org), 'NULL'));
+$f$;
+SELECT pg_temp.expect_ok('S4e', 'A-4: an Organization payer names itself as the payment''s Organization', pg_temp.s4e('00000000-0000-4000-8000-0000000000e4', '00000000-0000-4000-8000-0000000000e4'));
+SELECT pg_temp.expect_constraint('S4e', 'A-4: an Organization payer without its Organization scope is refused', pg_temp.s4e('00000000-0000-4000-8000-0000000000e4', NULL), 'payment_organization_payer_scope');
+SELECT pg_temp.expect_constraint('S4e', 'A-4: an Organization payer naming another Organization is refused', pg_temp.s4e('00000000-0000-4000-8000-0000000000e4', '00000000-0000-4000-8000-0000000000e5'), 'payment_organization_payer_scope');
+SELECT pg_temp.expect_error('S4e', 'A-4: an Organization never pays an Organization seller (the seller rule then contradicts the payer rule)',
+  pg_temp.s4e('00000000-0000-4000-8000-0000000000e4', '00000000-0000-4000-8000-0000000000e4', 'organization', '00000000-0000-4000-8000-0000000000e5'), '23514');
+SELECT id AS s4e_p FROM payment WHERE "payerId" = '00000000-0000-4000-8000-0000000000e4' AND "payerType" = 'organization' LIMIT 1 \gset
+SELECT pg_temp.expect_error('S4e', 'the payer Organization scope never changes (organizationId)', format($$UPDATE payment SET "organizationId" = '00000000-0000-4000-8000-0000000000e5' WHERE id = %L$$, :'s4e_p'), '23514');
+SELECT pg_temp.expect_error('S4e', 'the payer Organization scope never changes (payerId)', format($$UPDATE payment SET "payerId" = '00000000-0000-4000-8000-0000000000e5' WHERE id = %L$$, :'s4e_p'), '23514');
+SELECT pg_temp.expect_ok('S4e', 'a user payer is unaffected (no organizationId needed)', pg_temp.s4a('user', 'u-s4e', 'non_entitlement', NULL));
 \o
 
 -- ---------------------------------------------------------------------------- verdict ----

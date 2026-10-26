@@ -42,6 +42,16 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: 'seller.id doit être un uuid lorsque seller.type vaut organization.',
     ar: 'يجب أن يكون seller.id بصيغة uuid عندما تكون قيمة seller.type هي organization.',
   },
+  payerIdMustBeUuid: {
+    en: 'payer.id must be a uuid when payer.type is organization.',
+    fr: 'payer.id doit être un uuid lorsque payer.type vaut organization.',
+    ar: 'يجب أن تكون قيمة payer.id معرّف uuid عندما تكون قيمة payer.type هي organization.',
+  },
+  organizationIdMustEqualPayer: {
+    en: 'organizationId must equal payer.id when payer.type is organization.',
+    fr: 'organizationId doit être égal à payer.id lorsque payer.type vaut organization.',
+    ar: 'يجب أن يساوي organizationId قيمة payer.id عندما تكون قيمة payer.type هي organization.',
+  },
   organizationIdMustEqualSeller: {
     en: 'organizationId must equal seller.id when seller.type is organization.',
     fr: 'organizationId doit être égal à seller.id lorsque seller.type vaut organization.',
@@ -83,9 +93,9 @@ export const PAYMENT_MESSAGES = defineMessages({
     ar: 'الحقل purpose مطلوب لعملية دفع جديدة.',
   },
   purposeNotAccepted: {
-    en: 'purpose must be organization_subscription, direct_purchase or non_entitlement.',
-    fr: 'purpose doit valoir organization_subscription, direct_purchase ou non_entitlement.',
-    ar: 'يجب أن تكون قيمة purpose هي organization_subscription أو direct_purchase أو non_entitlement.',
+    en: 'purpose must be organization_subscription, direct_purchase, non_entitlement, assisted_settlement or recovery_settlement.',
+    fr: 'purpose doit valoir organization_subscription, direct_purchase, non_entitlement, assisted_settlement ou recovery_settlement.',
+    ar: 'يجب أن تكون قيمة purpose هي organization_subscription أو direct_purchase أو non_entitlement أو assisted_settlement أو recovery_settlement.',
   },
   beneficiaryRequired: {
     en: 'beneficiaryUserId is required for purpose {purpose}.',
