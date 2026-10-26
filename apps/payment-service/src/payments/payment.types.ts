@@ -39,8 +39,10 @@ export interface PaymentRow {
 /** ADR-0044 B2 purposes (Core V2 S4a, P-1): the database admits all five (DB-15); the API accepts {@link ACCEPTED_PURPOSES} (P-5). */
 export const PAYMENT_PURPOSES = ['organization_subscription', 'direct_purchase', 'assisted_settlement', 'recovery_settlement', 'non_entitlement'] as const;
 export type PaymentPurpose = (typeof PAYMENT_PURPOSES)[number];
-/** P-5: the Organization-payer purposes stay closed at the API until their own stages (S4e, S5, S6) authorize those workflows. */
-export const ACCEPTED_PURPOSES = ['organization_subscription', 'direct_purchase', 'non_entitlement'] as const satisfies readonly PaymentPurpose[];
+/** P-5 as opened by Core V2 S4e (A-5): every purpose is accepted, the Organization-payer ones only from a caller holding the default-denied
+ * `payment.create.organization_payer` (no ordinary configuration does; S5b / S6f need their own Owner decision). */
+export const ACCEPTED_PURPOSES = PAYMENT_PURPOSES;
+export const ORGANIZATION_PAYER_PURPOSES = ['assisted_settlement', 'recovery_settlement'] as const satisfies readonly PaymentPurpose[];
 
 /**
  * Core V2 S4a (P-6, FC-10): Core V2 is certified on simulation only and no live provider exists or is authorized, so every new payment

@@ -9,9 +9,15 @@ import { ConfigError, parseCallerPolicy, policyList, type CallerPolicyMap } from
  * `simulation` provider what to answer. It is a service operation only (never a user's, an Organization administrator's or an Owner's), it
  * is held alone (a caller that creates or reads payments cannot also decide their outcomes), and granting it is refused unless the
  * simulation provider is enabled, so it can never be in force in production.
+ *
+ * Core V2 S4e (PAY-03, the Owner's A-5): `payment.create.organization_payer` is the explicitly inactive capability to create a payment whose
+ * payer is an Organization (`assisted_settlement`, `recovery_settlement`). Denied by default and never implied: `payment.create` alone does
+ * not include it (no wildcard exists). Refused in production configuration, so only isolated test policies hold it until a separate Owner
+ * decision grants it to a real Billing producer (S5b / S6f).
  */
-export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve'] as const;
+export const PAYMENT_OPERATIONS = ['payment.create', 'payment.read', 'payment.cancel', 'payment.simulation.resolve', 'payment.create.organization_payer'] as const;
 export const SIMULATION_RESOLVE_OPERATION = 'payment.simulation.resolve';
+export const ORGANIZATION_PAYER_CREATE_OPERATION = 'payment.create.organization_payer';
 export type PaymentOperation = (typeof PAYMENT_OPERATIONS)[number];
 
 export interface PaymentCallerPolicy {
@@ -51,6 +57,16 @@ export function assertSimulationGrant(policy: CallerPolicyMap<PaymentCallerPolic
   for (const caller of policy.callers()) {
     if (policy.of(caller)?.operations.has(SIMULATION_RESOLVE_OPERATION)) {
       throw new ConfigError(`PAYMENT_SERVICE_POLICY grants ${SIMULATION_RESOLVE_OPERATION}, which requires PAYMENT_SIMULATION_PROVIDER (never in production)`);
+    }
+  }
+}
+
+/** Core V2 S4e (A-5): no production configuration grants Organization-payer creation; that needs its own Owner decision (S5b / S6f). */
+export function assertOrganizationPayerGrant(policy: CallerPolicyMap<PaymentCallerPolicy>, isProduction: boolean): void {
+  if (!isProduction) return;
+  for (const caller of policy.callers()) {
+    if (policy.of(caller)?.operations.has(ORGANIZATION_PAYER_CREATE_OPERATION)) {
+      throw new ConfigError(`PAYMENT_SERVICE_POLICY grants ${ORGANIZATION_PAYER_CREATE_OPERATION}, which no production configuration may hold yet (a separate Owner decision)`);
     }
   }
 }

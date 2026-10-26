@@ -55,6 +55,15 @@ chargeback facts, allocation (FC-2) and the association of unmatched evidence ar
 money command, retained exactly 90 days from the database's own time, never rewritten and never deleted inside its window; the
 configurable `IDEMPOTENCY_TTL_HOURS` ceiling is retired and refused. The permanent business keys behind it are unchanged.
 
+**Core V2 S4e (Organization-payer attempts; ADR-0044 B7; S0 DB-15, §3.6; Owner A-1 to A-7; register PAY-03 F):** an Organization
+pays exactly `assisted_settlement` or `recovery_settlement`, created only by a caller holding the default-denied
+`payment.create.organization_payer` (refused in production configuration; no ordinary producer holds it, so the capability stays inactive
+until S5b / S6f and a separate Owner decision). The payer Organization is the payment's `organizationId` (database insert guard, immutable),
+inside the producer's Platforms (Organization reference read). Its **Organization actor**, an ordinary member whom Auth's live `/auth/me`
+shows active with an active administrator membership in that Organization on the Organization's authoritative Platform, starts and syncs
+its attempts and reads its payments; anyone else gets the collapsed `404`. This is the active-Organization actor set only: V-5 (inactive
+Organizations) and OD-R6a stay open, and R-6a with effective lifecycle enforcement must precede the V-4 activation.
+
 **Core V2 S4f (simulation provider and harness; S0 §1.1, FC-10; Owner OD-06 F-S1 to F-S7; register PAY-14 F):** a dedicated
 `simulation` provider beside `test`, both refused in production and mutually exclusive (with simulation enabled it is the server's default
 provider and payer `providerOptions` are refused: no client-chosen outcomes). A dedicated harness caller holding `payment.simulation.resolve`
@@ -530,7 +539,7 @@ A `company` payer or seller has **no user relation** in this phase: it is reacha
 | Create payment | a **producer service** with a valid token. Which services may create obligations for which organizations (token scopes) is not decided | **[B, O-13, O-14]** |
 | Validate the organization/platform/company context of a created payment | Payment stores `organizationId` as asserted by the authorized producer. The source that validates organization to platform to company when there is no user context is not decided | **[B, O-15]** |
 | Read a payment or its refunds | the `producer` (only its own payments) and the `payer` [T]. **Whether members of the payer or seller organization may read** (which exposes payer, amount and reference to them, including members of the organization named in `organizationId`) is a privacy and role decision | **[B, O-20]** (until decided, organization members have no read access) |
-| Start or sync an attempt | the `payer`; sync is also allowed to anyone with a read relation. For an organization payer, who may act for it is not decided | [T] for a user payer; **[B, O-18]** for an organization payer |
+| Start or sync an attempt | the `payer`; sync is also allowed to anyone with a read relation. For an organization payer, who may act for it is not decided (**Core V2 S4e:** decided for the active-Organization scope: its Organization actor, register PAY-03 F) | [T] for a user payer; **[B, O-18]** for an organization payer |
 | Submit cash | not decided | **[B, O-4]** |
 | Confirm or reject cash | not decided. **Controls proposed regardless of the model (PROPOSED — NOT APPROVED):** the confirmer is not the payer; the decision is recorded with the actor; it cannot be applied twice. Which relation and authority qualify (including for a `company` seller) is part of the decision | **[B, O-5]**; controls [T] |
 | Cancel | the `producer` only in this phase | [T] |
@@ -885,7 +894,7 @@ events (the inbox is unused in this phase).
 | O-19 | **What ends a payment as failed**: the attempt limit and its value, whether a declined attempt should end the payment | a decline ending the payment forces billing to issue a new request; not ending it lets the payer retry | payment state machine, `PAYMENT_MAX_ATTEMPTS` | yes (defaults in section 5.1: retry until the limit or expiry) | production |
 | O-20 | **Who may *read* a payment beyond its producer and payer** (organization members, seller staff) | privacy: payer, amount and reference become visible | read authorization, isolation tests | yes (no organization read access until decided) | any organization-facing screen |
 | O-17 | **Retention and privacy of raw webhook bodies and payment records** | legal retention and data protection | `webhook_event`, pruning | yes | production |
-| O-18 | **Who may pay on behalf of an organization** (for example an organization paying Nawara) | payer authorization for an organization | endpoints 3 and 4 for organization payers | yes, for user payers | implementing organization-payer flows |
+| O-18 | **Who may pay on behalf of an organization** (for example an organization paying Nawara). **Core V2 S4e (Owner A-2, A-3):** decided for an active Organization: its Organization actor (register PAY-03 F) | payer authorization for an organization | endpoints 3 and 4 for organization payers | yes, for user payers | implementing organization-payer flows |
 
 ## 20. Architecture consistency check
 

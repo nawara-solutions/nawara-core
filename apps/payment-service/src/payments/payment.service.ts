@@ -2,14 +2,15 @@ import { PaymentAudit } from '../audit/payment-audit.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, OutboxService, isUniqueViolation } from '@nawara/service-kit';
 import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
-import { paymentError } from '../errors.js';
+import { operationNotPermitted, paymentError } from '../errors.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-machine.js';
 import { isPaymentUncertain } from './payment-closing.js';
-import { ACCEPTED_PURPOSES, CORE_V2_LIVE_MODE, type PaymentPurpose, type PaymentRow } from './payment.types.js';
+import { ACCEPTED_PURPOSES, CORE_V2_LIVE_MODE, ORGANIZATION_PAYER_PURPOSES, type PaymentPurpose, type PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
+import { ORGANIZATION_PAYER_CREATE_OPERATION } from '../authorization/caller-admission.policy.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
 import { PAYMENT_MESSAGES } from '../messages.js';
 
@@ -52,6 +53,7 @@ export class PaymentService {
     // An organization is identified by a uuid (the `organizationId` column is a uuid): a seller of that type whose id is
     // not one is a bad request, not a database error. Compared and stored in canonical (lower-case) form.
     let seller = dto.seller;
+    let payer = dto.payer; // Core V2 S4e: an Organization payer is stored in canonical (lower-case) form, like an Organization seller
     let organizationId: string | null = dto.organizationId ? dto.organizationId.toLowerCase() : null;
     if (dto.seller.type === 'organization') {
       if (!UUID.test(dto.seller.id)) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.sellerIdMustBeUuid);
@@ -70,12 +72,27 @@ export class PaymentService {
     // answered with that historical record, never re-interpreted as purpose-bearing.
     if (dto.purpose === undefined) {
       const { rows: prior } = await this.db.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
-      if (prior[0] && prior[0].purpose === null && isIdenticalSnapshot(prior[0], producer, dto, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
+      if (prior[0] && prior[0].purpose === null && isIdenticalSnapshot(prior[0], producer, dto, payer, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
       throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.purposeRequired);
     }
     // P-5, P-7: an unknown purpose, or an Organization-payer purpose whose workflow is not open yet, is 400 invalid_payment_request
     if (!(ACCEPTED_PURPOSES as readonly string[]).includes(dto.purpose)) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.purposeNotAccepted);
+    // Core V2 S4e (A-5): an Organization payer, or an Organization-payer purpose, needs the default-denied creation grant (never implied by
+    // payment.create), checked before anything else about it so a caller without it learns nothing and writes nothing
+    const organizationPayer = dto.payer.type === 'organization' || (ORGANIZATION_PAYER_PURPOSES as readonly string[]).includes(dto.purpose);
+    if (organizationPayer && this.config.servicePolicy.of(producer)?.operations.has(ORGANIZATION_PAYER_CREATE_OPERATION) !== true) throw operationNotPermitted();
     assertPurposePairing(dto.purpose, dto.payer, dto.beneficiaryUserId);
+    if (dto.payer.type === 'organization') {
+      // Core V2 S4e (A-4): the payer Organization IS the payment's Organization scope, immutable with the snapshot; the producer's scope over
+      // it is verified below through the Organization reference read, exactly as for an Organization seller
+      if (!UUID.test(dto.payer.id)) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.payerIdMustBeUuid);
+      const payerOrganization = dto.payer.id.toLowerCase();
+      if (organizationId !== null && organizationId !== payerOrganization) {
+        throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.organizationIdMustEqualPayer);
+      }
+      organizationId = payerOrganization;
+      payer = { type: dto.payer.type, id: payerOrganization };
+    }
 
     if (organizationId !== null) {
       // Stage 21.C.2 (ADR-0052 decision 3, ADR-0042 decision 5): a replay returns the record already created (and verified then) without
@@ -83,7 +100,7 @@ export class PaymentService {
       // nothing. A concurrent identical create that wins the race is still handled by the unique-violation path below.
       const { rows: prior } = await this.db.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
       if (prior[0]) {
-        if (isIdenticalSnapshot(prior[0], producer, dto, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
+        if (isIdenticalSnapshot(prior[0], producer, dto, payer, seller, organizationId, expiresAt)) return { payment: prior[0], replayed: true };
         throw paymentError(409, 'payment_request_conflict', PAYMENT_MESSAGES.paymentRequestConflict);
       }
       await this.organizationScope.assertInScope(producer, organizationId);
@@ -101,7 +118,7 @@ export class PaymentService {
            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
            RETURNING *`,
           [
-            producer, dto.paymentRequestId, dto.sourceType, dto.sourceId, dto.payer.type, dto.payer.id, seller.type,
+            producer, dto.paymentRequestId, dto.sourceType, dto.sourceId, payer.type, payer.id, seller.type,
             seller.id, organizationId, dto.amount, dto.currency, dto.description ?? null, dto.reference ?? null, expiresAt,
             dto.purpose, dto.beneficiaryUserId ?? null, CORE_V2_LIVE_MODE, // liveMode: server-derived only (P-6)
           ],
@@ -115,7 +132,7 @@ export class PaymentService {
         await q.query('ROLLBACK TO SAVEPOINT create_payment');
         const { rows } = await q.query<PaymentRow>(`SELECT * FROM payment WHERE producer = $1 AND "paymentRequestId" = $2`, [producer, dto.paymentRequestId]);
         const existing = rows[0];
-        if (isIdenticalSnapshot(existing, producer, dto, seller, organizationId, expiresAt)) return { payment: existing, replayed: true };
+        if (isIdenticalSnapshot(existing, producer, dto, payer, seller, organizationId, expiresAt)) return { payment: existing, replayed: true };
         throw paymentError(409, 'payment_request_conflict', PAYMENT_MESSAGES.paymentRequestConflict);
       }
     });
@@ -183,11 +200,12 @@ export class PaymentService {
  */
 function assertPurposePairing(purpose: PaymentPurpose, payer: { type: string; id: string }, beneficiaryUserId: string | undefined): void {
   const mismatch = () => paymentError(422, 'payer_purpose_mismatch', PAYMENT_MESSAGES.payerPurposeMismatch, { purpose });
-  if (payer.type === 'organization') throw mismatch(); // DB-15: an Organization pays only assisted or recovery settlements (not accepted yet, P-5)
+  // DB-15 (Core V2 S4e opens it behind A-5): an Organization pays exactly the assisted and recovery settlements, and nothing else does
+  if ((payer.type === 'organization') !== (ORGANIZATION_PAYER_PURPOSES as readonly string[]).includes(purpose)) throw mismatch();
   if ((purpose === 'organization_subscription' || purpose === 'direct_purchase') && payer.type !== 'user') throw mismatch();
-  if (purpose === 'direct_purchase') {
+  if (purpose === 'direct_purchase' || purpose === 'assisted_settlement') {
     if (beneficiaryUserId === undefined) throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.beneficiaryRequired, { purpose });
-    if (beneficiaryUserId !== payer.id) throw mismatch(); // the buyer pays for themself; a beneficiary is never another payer
+    if (purpose === 'direct_purchase' && beneficiaryUserId !== payer.id) throw mismatch(); // the buyer pays for themself
   } else if (beneficiaryUserId !== undefined) {
     throw paymentError(400, 'invalid_payment_request', PAYMENT_MESSAGES.beneficiaryNotAllowed, { purpose });
   }
@@ -197,6 +215,7 @@ function isIdenticalSnapshot(
   existing: PaymentRow,
   producer: string,
   dto: CreatePaymentDto,
+  payer: { type: string; id: string },
   seller: { type: string; id: string },
   organizationId: string | null,
   expiresAt: Date | null,
@@ -205,8 +224,8 @@ function isIdenticalSnapshot(
   const candidate: Record<string, unknown> = {
     sourceType: dto.sourceType,
     sourceId: dto.sourceId,
-    payerType: dto.payer.type,
-    payerId: dto.payer.id,
+    payerType: payer.type,
+    payerId: payer.id,
     sellerType: seller.type,
     sellerId: seller.id,
     organizationId,

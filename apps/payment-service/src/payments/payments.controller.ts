@@ -61,7 +61,7 @@ export class PaymentsController {
   async get(@Param('id', new ParseUUIDPipe()) id: string, @Req() req: CallerRequest) {
     const payment = await this.payments.findById(id);
     if (!payment || !req.caller) throw notFound();
-    this.authorization.assertCanRead(payment, req.caller);
+    await this.authorization.assertCanRead(payment, req.caller);
     return representPayment(this.db, payment);
   }
 
@@ -91,7 +91,7 @@ export class PaymentsController {
     }
     const payment = await this.payments.findById(id);
     if (!payment) throw notFound();
-    this.authorization.assertCanCancel(payment, { kind: 'service', service: producer });
+    await this.authorization.assertCanCancel(payment, { kind: 'service', service: producer });
     const { payment: cancelled } = await this.payments.cancel(id, producer, idempotencyKey);
     if (cancelled.status === 'closing') res.status(202); // Core V2 S4c (F-7): Billing reads 202 as its existing `in_flight`
     return representPayment(this.db, cancelled);

@@ -294,9 +294,10 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
     users['member-jwt'] = identity('member-1', {
       memberships: [{ id: 'm1', organization: { id: orgId }, platform: { id: 'p1' }, status: 'active', isOrganizationAdmin: true }],
     });
-    // Core V2 S4a (DB-15, P-5): an Organization payer cannot even be requested yet; the seller-side boundary below is unchanged
-    const refused = await asBilling(request(server()).post('/payment/payments')).send(paymentBody({ payer: { type: 'organization', id: orgId } })).expect(422);
-    expect(refused.body.code).toBe('payer_purpose_mismatch');
+    // Core V2 S4e (A-5): an Organization payer needs the default-denied payment.create.organization_payer, which no ordinary producer
+    // holds (the Organization-actor path itself is certified in organization-payer.e2e-spec.ts); the seller-side boundary is unchanged (O-20)
+    const refused = await asBilling(request(server()).post('/payment/payments')).send(paymentBody({ payer: { type: 'organization', id: orgId } })).expect(403);
+    expect(refused.body.code).toBe('operation_not_permitted');
     const asSeller = await create({ seller: { type: 'organization', id: orgId }, organizationId: orgId });
     await get(asSeller.id, 'member-jwt').expect(404); // the seller organization's members cannot read either (O-20)
   });

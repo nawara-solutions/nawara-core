@@ -68,14 +68,15 @@ export class CreatePaymentDto {
     enum: ACCEPTED_PURPOSES,
     description: "Core V2 S4a: the producer's immutable settlement purpose (ADR-0044 B2). REQUIRED for every new payment; absent only when " +
       'replaying a payment created before S4a. organization_subscription and direct_purchase are paid by a user, non_entitlement by a ' +
-      'user or a Company. An Organization payer (assisted_settlement, recovery_settlement) is not accepted yet. liveMode is never a field: ' +
+      'user or a Company. An Organization payer pays exactly assisted_settlement or recovery_settlement (Core V2 S4e: only a caller holding ' +
+      'the default-denied payment.create.organization_payer, 403 otherwise; organizationId is the payer). liveMode is never a field: ' +
       'Payment derives it (false: Core V2 is simulation only).',
   })
   @IsOptional()
   @IsString() // the value is checked by the service: an unknown or not-yet-open purpose is 400 invalid_payment_request (P-7)
   purpose?: PaymentPurpose;
 
-  @ApiPropertyOptional({ description: 'Core V2 S4a: the beneficiary user; required for direct_purchase (and equal to the payer), forbidden otherwise.', minLength: 1, maxLength: 128 })
+  @ApiPropertyOptional({ description: 'Core V2 S4a: the beneficiary user; required for direct_purchase (and equal to the payer) and assisted_settlement (Core V2 S4e), forbidden otherwise.', minLength: 1, maxLength: 128 })
   @IsOptional()
   @IsString()
   @Length(1, 128)

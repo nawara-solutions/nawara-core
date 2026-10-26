@@ -84,9 +84,6 @@ describeWithEnv('payment purpose, payer, beneficiary and liveMode (Core V2 S4a) 
 
   describe('refusals: nothing is written', () => {
     it.each([
-      ['an Organization paying an ordinary invoice (P-1: B2 narrowed)', { payer: { type: 'organization', id: crypto.randomUUID() }, purpose: 'non_entitlement' }],
-      ['an Organization paying an Organization subscription', { payer: { type: 'organization', id: crypto.randomUUID() }, purpose: 'organization_subscription' }],
-      ['an Organization paying a direct purchase', { payer: { type: 'organization', id: crypto.randomUUID() }, purpose: 'direct_purchase', beneficiaryUserId: BUYER }],
       ['a Company paying an Organization subscription', { payer: { type: 'company', id: 'acme' }, purpose: 'organization_subscription' }],
       ['a Company paying a direct purchase', { payer: { type: 'company', id: 'acme' }, purpose: 'direct_purchase', beneficiaryUserId: 'acme' }],
       ['a direct purchase for someone else (a forged beneficiary)', { purpose: 'direct_purchase', beneficiaryUserId: OTHER_USER }],
@@ -98,9 +95,21 @@ describeWithEnv('payment purpose, payer, beneficiary and liveMode (Core V2 S4a) 
     });
 
     it.each([
+      ['assisted_settlement', { purpose: 'assisted_settlement', payer: { type: 'organization', id: crypto.randomUUID() }, beneficiaryUserId: BUYER }],
+      ['recovery_settlement', { purpose: 'recovery_settlement', payer: { type: 'organization', id: crypto.randomUUID() } }],
+      ['an Organization payer for another purpose', { purpose: 'non_entitlement', payer: { type: 'organization', id: crypto.randomUUID() } }],
+      ['an Organization paying an Organization subscription', { payer: { type: 'organization', id: crypto.randomUUID() }, purpose: 'organization_subscription' }],
+      ['an Organization paying a direct purchase', { payer: { type: 'organization', id: crypto.randomUUID() }, purpose: 'direct_purchase', beneficiaryUserId: BUYER }],
+      ['a user paying an assisted settlement', { purpose: 'assisted_settlement', beneficiaryUserId: BUYER }],
+    ])('Core V2 S4e (A-5): %s without payment.create.organization_payer is 403 operation_not_permitted, nothing written', async (_n, over) => {
+      const before = await count();
+      const r = await create(body(over));
+      expect([r.status, r.body.code], JSON.stringify(r.body)).toEqual([403, 'operation_not_permitted']);
+      expect(await count()).toBe(before);
+    });
+
+    it.each([
       ['an unknown purpose', { purpose: 'gift' }],
-      ['assisted_settlement (database-admitted, not open at the API: P-5)', { purpose: 'assisted_settlement', payer: { type: 'organization', id: crypto.randomUUID() }, beneficiaryUserId: BUYER }],
-      ['recovery_settlement (database-admitted, not open at the API: P-5)', { purpose: 'recovery_settlement', payer: { type: 'organization', id: crypto.randomUUID() } }],
       ['no purpose on a new payment (P-2)', { purpose: undefined }],
       ['a direct purchase without its beneficiary', { purpose: 'direct_purchase' }],
       ['a beneficiary on an ordinary invoice', { purpose: 'non_entitlement', beneficiaryUserId: BUYER }],
@@ -181,16 +190,18 @@ describeWithEnv('payment purpose, payer, beneficiary and liveMode (Core V2 S4a) 
     });
 
     it('straight at the database: DB-15, the B2 pairings, simulation-only mode and immutability hold whatever path writes', async () => {
+      // Core V2 S4e: an Organization payer names itself as organizationId (0016)
       const ins = (payerType: string, payerId: string, purpose: string | null, beneficiary: string | null, live: string = 'DEFAULT') =>
-        admin.query(`INSERT INTO payment (producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "beneficiaryUserId", "liveMode")
-                     VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', $1, $2, 'company', 'n', 100, 'TND', $3, $4, ${live}) RETURNING id`, [payerType, payerId, purpose, beneficiary]);
+        admin.query(`INSERT INTO payment (producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose, "beneficiaryUserId", "liveMode")
+                     VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', $1, $2, 'company', 'n', $5, 100, 'TND', $3, $4, ${live}) RETURNING id`,
+          [payerType, payerId, purpose, beneficiary, payerType === 'organization' && /^[0-9a-f-]{36}$/.test(payerId) ? payerId : null]);
       const refused = async (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ code: '23514' });
       await refused(ins('organization', 'o', 'non_entitlement', null));
       await refused(ins('user', 'u', 'assisted_settlement', 'u'));
       await refused(ins('user', 'u', 'direct_purchase', 'v'));
       await refused(ins('user', 'u', null, null));
       await refused(ins('user', 'u', 'non_entitlement', null, 'true'));
-      const ok = (await ins('organization', crypto.randomUUID(), 'recovery_settlement', null)).rows[0].id; // DB-15 admits it; the API does not (P-5)
+      const ok = (await ins('organization', crypto.randomUUID(), 'recovery_settlement', null)).rows[0].id; // DB-15 admits it; the API only behind A-5
       for (const set of [`purpose = 'non_entitlement'`, `"beneficiaryUserId" = 'x'`, `"liveMode" = NULL`, `"payerType" = 'user'`]) {
         await refused(admin.query(`UPDATE payment SET ${set} WHERE id = $1`, [ok]));
       }

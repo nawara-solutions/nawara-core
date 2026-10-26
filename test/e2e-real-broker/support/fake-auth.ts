@@ -12,7 +12,16 @@ export interface FakeAuthServer {
  * completely unmodified: only the identity behind a small, fixed set of bearer tokens is test-controlled, exactly as
  * a real auth-service would answer for those tokens.
  */
-export function startFakeAuthServer(identities: Record<string, { id: string; isActive: boolean }>): Promise<FakeAuthServer> {
+/** Core V2 S4e: an identity may carry memberships (the `/auth/me` shape: organization, platform, status, administrator flag); none by default. */
+export interface FakeMembership {
+  id: string;
+  organization: { id: string };
+  platform: { id: string };
+  status: 'pending' | 'active' | 'rejected' | 'revoked';
+  isOrganizationAdmin: boolean;
+}
+
+export function startFakeAuthServer(identities: Record<string, { id: string; isActive: boolean; memberships?: FakeMembership[] }>): Promise<FakeAuthServer> {
   return new Promise((resolve) => {
     const server: Server = createServer((req, res) => {
       const header = req.headers.authorization;
@@ -20,7 +29,7 @@ export function startFakeAuthServer(identities: Record<string, { id: string; isA
       const identity = token ? identities[token] : undefined;
       if (req.url === '/auth/me' && identity) {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ id: identity.id, isActive: identity.isActive, adminTier: null, memberships: [] }));
+        res.end(JSON.stringify({ id: identity.id, isActive: identity.isActive, adminTier: null, memberships: identity.memberships ?? [] }));
         return;
       }
       res.writeHead(401, { 'content-type': 'application/json' });

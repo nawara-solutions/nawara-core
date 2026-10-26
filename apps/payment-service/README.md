@@ -16,6 +16,13 @@ accounting system: it never decides what is owed and keeps no ledger.
   `ORGANIZATION_REFERENCE_TOKEN`, required in production) and must be in the caller's Platforms: otherwise `403
   organization_not_permitted`; if it cannot be verified (before the 21.x cutover it cannot), `503 hierarchy_unavailable` and nothing is
   written. A replay is answered from the stored payment. `ORGANIZATION_REFERENCE_FIXTURE` is non-production only.
+- **Organization payers (Core V2 S4e, register PAY-03 F; Owner A-1 to A-7).** `assisted_settlement` / `recovery_settlement` with an
+  Organization payer need the default-denied operation `payment.create.organization_payer` (never implied by `payment.create`; refused in
+  production configuration; no configured producer holds it, so the capability is inactive until S5b / S6f and a separate Owner decision).
+  The payer is the payment's `organizationId`. Its attempts are started and synced, and its payments read, only by an **Organization actor**:
+  an ordinary member whom Auth's live `/auth/me` shows active with an `active` administrator membership in that Organization, on the
+  Organization's authoritative Platform (the reference read). Everyone else gets the collapsed `404`; Auth or the reference unavailable is
+  `503`. Active Organizations only: V-5 and OD-R6a stay open.
 
 ## Status: Phase 1 (technical foundation)
 
