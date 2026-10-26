@@ -2544,7 +2544,7 @@ export function checkCiWorkspaceCoverage(ciText, { workspaces, imageApps }) {
  */
 export const EVENT_CONTRACT_EXEMPT = new Map([['audit-service', 'consumes only audit.* events, governed by @nawara/audit-contract (ADR-0049)']]);
 const CONTRACT_EVENT_NAME = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
-const CONTRACT_FIELD_TYPES = new Set(['id', 'uuid', 'string', 'datetime', 'integer', 'object', 'array', 'enum']);
+const CONTRACT_FIELD_TYPES = new Set(['id', 'uuid', 'string', 'datetime', 'integer', 'boolean', 'object', 'array', 'enum']); // Core V2 S4a: boolean (Payment's liveMode)
 const CODE_BEARING_PRODUCER = 'auth-service';
 const EVENT_TRAFFIC = [/\boutbox\.enqueue\(/, /\.subscribe\(\{/];
 

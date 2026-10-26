@@ -1,5 +1,5 @@
 import { BillingAudit } from '../audit/billing-audit.js';
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, Inject, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import { actorOf, type Caller, type TransitionContext } from '../domain/actors.js';
 import { deterministicEventId } from '../common/deterministic-id.js';
@@ -15,6 +15,8 @@ import { recordTransition } from '../domain/transitions.js';
 import { PersonalSubscriptionRepository } from '../subscriptions/personal-subscription.repository.js';
 import { SubscriptionRepository } from '../subscriptions/subscription.repository.js';
 import { BILLING_MESSAGES } from '../messages.js';
+import { BILLING_CONFIG } from '../config/billing-config.token.js';
+import type { BillingConfig } from '../config/billing-config.js';
 
 export interface PaymentRequestResult {
   request: PaymentRequestRow;
@@ -44,6 +46,8 @@ export interface EventApplication {
 export interface DispatchClaim {
   request: RequestForMapping;
   invoice: InvoiceForMapping;
+  /** The mapping version the request pinned at creation (immutable): its body is always rebuilt with it. */
+  mappingVersion: number;
   /** The claimed request's originating correlation id, or a deterministic fallback if it never had one. */
   correlationId: string;
   /** True when this claim re-sends a row that was ALREADY `sending` past the stale threshold (a prior attempt that
@@ -78,6 +82,7 @@ export class PaymentRequestRepository {
     private readonly subscriptions: SubscriptionRepository,
     private readonly audit: BillingAudit,
     private readonly personal: PersonalSubscriptionRepository,
+    @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
   ) {}
 
   /** State-idempotent creation (BI-13): the current active request is returned instead of a second one. */
@@ -98,6 +103,11 @@ export class PaymentRequestRepository {
       [invoiceId, [...ACTIVE_PAYMENT_REQUEST_STATUSES]],
     );
     if (active.rows[0]) return { request: active.rows[0], created: false };
+
+    // Core V2 S4a (P-2): a NEW request carries the routing record's purpose (mapping version 2); a legacy invoice without one cannot start
+    // a new request (the database refuses it too). An existing active request is still answered above (state-idempotent, BI-13).
+    const routed = await q.query(`SELECT 1 FROM invoice_entitlement WHERE "invoiceId" = $1`, [invoiceId]);
+    if (routed.rows.length === 0) throw billingError(422, 'invoice_routing_invalid', BILLING_MESSAGES.invoiceRoutingInvalid, { reason: 'routing_missing' });
 
     const actor = actorOf(caller);
     const inserted = await q.query<PaymentRequestRow>(
@@ -144,13 +154,16 @@ export class PaymentRequestRepository {
         // would collide with the row already recorded for that revision. Only the genuine `created -> sending` move gets one.
         if (row.status !== next.status) await recordTransition(q, { entityType: 'payment_request', entityId: next.id, from: row.status, to: 'sending', revision: next.revision, ctx: rowCtx });
         // Every field read here is immutable (BI-06/BI-07): no lock needed to read it safely.
+        // Core V2 S4a (P-2): the routing record's purpose and beneficiary (immutable, DB-1) for mapping version 2
         const { rows: invRows } = await q.query<InvoiceForMapping>(
-          `SELECT id, number, "payerType", "payerId", "sellerType", "sellerId", "organizationId", currency, description FROM invoice WHERE id = $1`,
+          `SELECT i.id, i.number, i."payerType", i."payerId", i."sellerType", i."sellerId", i."organizationId", i.currency, i.description,
+                  e.purpose, e."beneficiaryUserId"
+             FROM invoice i LEFT JOIN invoice_entitlement e ON e."invoiceId" = i.id WHERE i.id = $1`,
           [row.invoiceId],
         );
         const invoice = invRows[0];
         if (!invoice) continue; // cannot happen (FK); defensive only
-        claims.push({ request: { id: next.id, amount: fromDbAmount(next.amount), expiresAt: next.expiresAt }, invoice, correlationId, wasStale: row.status === 'sending' });
+        claims.push({ request: { id: next.id, amount: fromDbAmount(next.amount), expiresAt: next.expiresAt }, invoice, mappingVersion: next.mappingVersion, correlationId, wasStale: row.status === 'sending' });
       }
       return claims;
     });
@@ -234,6 +247,10 @@ export class PaymentRequestRepository {
       amount: snapshot.amount,
       currency: snapshot.currency,
       revision: 0, // not from a real event; decidePaymentEvent never reads it (informational only, SDD 21.4)
+      // Core V2 S4a: Payment's own read carries the same purpose, beneficiary and mode its events do (absent before S4a)
+      ...(snapshot.purpose != null ? { purpose: snapshot.purpose } : {}),
+      ...(snapshot.beneficiaryUserId != null ? { beneficiaryUserId: snapshot.beneficiaryUserId } : {}),
+      ...(snapshot.liveMode != null ? { liveMode: snapshot.liveMode } : {}),
     };
     // Stage 12.4 R2: `snapshot.closedAt` is the SAME authoritative instant a live event's `occurredAt` header would
     // carry for this same settlement fact (Payment sets `closedAt` in the same transaction as the terminal status
@@ -331,13 +348,19 @@ export class PaymentRequestRepository {
       const seen = await q.query<{ outcome: string; detailCode: string | null }>(`SELECT outcome, "detailCode" FROM payment_event_receipt WHERE "eventId" = $1 AND outcome = 'applied'`, [eventId]);
       if (seen.rows[0]) return { outcome: 'applied', detail: seen.rows[0].detailCode, firstDelivery: false, subscription: null };
 
+      // Core V2 S4a: the routing record (immutable, DB-1) the request's mapping version 2 sent to Payment
+      const routing = invoice
+        ? (await q.query<{ purpose: string; beneficiaryUserId: string | null }>(`SELECT purpose, "beneficiaryUserId" FROM invoice_entitlement WHERE "invoiceId" = $1`, [invoice.id])).rows[0] ?? null
+        : null;
       const decision = decidePaymentEvent(
         event,
-        request && { id: request.id, status: request.status, paymentId: request.paymentId, amount: fromDbAmount(request.amount), currency: request.currency },
+        request && { id: request.id, status: request.status, paymentId: request.paymentId, amount: fromDbAmount(request.amount), currency: request.currency, mappingVersion: request.mappingVersion },
         invoice && {
           id: invoice.id, status: invoice.status, payerType: invoice.payerType, payerId: invoice.payerId, sellerType: invoice.sellerType, sellerId: invoice.sellerId,
           organizationId: invoice.organizationId, currency: invoice.currency, total: fromDbAmount(invoice.total),
+          purpose: routing?.purpose ?? null, beneficiaryUserId: routing?.beneficiaryUserId ?? null,
         },
+        { requireLive: this.config.isProduction }, // FC-10 (P-6): production applies only live financial events
       );
 
       // Record first: ON CONFLICT settles two concurrent APPLIED deliveries of the same event with no error, so this transaction stays

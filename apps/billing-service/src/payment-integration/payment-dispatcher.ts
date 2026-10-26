@@ -78,7 +78,7 @@ export class PaymentDispatcher {
         }
         // One request that cannot be sent (a config fault, a rejection) must never block the ones behind it.
         try {
-          const body = buildPaymentRequestBody(claim.invoice, claim.request);
+          const body = buildPaymentRequestBody(claim.invoice, claim.request, claim.mappingVersion);
           // Scopes the outbound call under the request's own correlation id so `HttpPaymentClient`'s `correlationHeaders()`
           // (which otherwise reads nothing, since a background job has no ambient AsyncLocalStorage context) carries it
           // to payment-service — the gap the Stage 5 audit found (dispatcher → Payment hop lost the correlation id).

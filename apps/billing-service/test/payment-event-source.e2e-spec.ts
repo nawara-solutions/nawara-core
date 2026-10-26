@@ -96,7 +96,7 @@ describeWithEnv('G11: a message that does not apply never claims the event id (r
   }
   const snapshot = (open: { id: string; total: string }, requestId: string, paymentId: string, status: string): PaymentSnapshot => ({
     paymentId, paymentRequestId: requestId, status, amount: Number(open.total), currency: 'TND', sourceType: 'invoice', sourceId: open.id,
-    payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, closedAt: new Date(),
+    payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, closedAt: new Date(), purpose: 'non_entitlement', liveMode: false,
   });
   /** An invoice and its payment request; `dispatched` records Payment's paymentId on the request (Billing's own authenticated call). */
   async function setup(dispatched = true) {
@@ -109,7 +109,8 @@ describeWithEnv('G11: a message that does not apply never claims the event id (r
   }
   const facts = (open: { id: string; total: string }, requestId: string, paymentId: string, over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
     name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: requestId, sourceType: 'invoice', sourceId: open.id,
-    payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: Number(open.total), currency: 'TND', revision: 1, ...over,
+    payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: Number(open.total), currency: 'TND', revision: 1,
+    purpose: 'non_entitlement', liveMode: false, ...over, // S4a: as Payment echoes them
   });
   const envelope = (f: PaymentEventFacts, id: string): EventEnvelope => {
     const { name, source, ...payload } = f;

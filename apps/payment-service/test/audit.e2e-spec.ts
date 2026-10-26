@@ -24,7 +24,7 @@ describeWithEnv('Payment central audit intent (real PostgreSQL 16)', ['TEST_DATA
   const body = (over: Record<string, unknown> = {}) => {
     const organizationId = crypto.randomUUID();
     return {
-      paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'inv-SECRET-SOURCE', payer: { type: 'user', id: '7a7a7a7a-0000-4000-8000-000000000077' },
+      paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'inv-SECRET-SOURCE', payer: { type: 'user', id: '7a7a7a7a-0000-4000-8000-000000000077' },
       seller: { type: 'organization', id: organizationId }, organizationId, amount: 4242, currency: 'TND', description: 'DESC-NOT-IN-AUDIT', reference: 'REF-NOT-IN-AUDIT', ...over,
     };
   };

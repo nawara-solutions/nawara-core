@@ -53,7 +53,7 @@ describeWithEnv('21.C.3: the Organization memo never authorizes another caller (
   });
 
   const create = (token: string, org: string) => request(t.app.getHttpServer()).post('/payment/payments').set('authorization', `Bearer ${token}`).send({
-    paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'inv', payer: { type: 'user', id: 'u1' },
+    paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'inv', payer: { type: 'user', id: 'u1' },
     seller: { type: 'organization', id: org }, organizationId: org, amount: 1000, currency: 'TND',
   });
   const payments = async () => (await t.app.get(DbService).query<{ n: number }>('SELECT count(*)::int AS n FROM payment')).rows[0]!.n;

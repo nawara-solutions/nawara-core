@@ -11,7 +11,7 @@ import { PaymentRequestRepository } from '../src/invoices/payment-request.reposi
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
 import { describeWithEnv } from './support/env.js';
-import { configurePlatform } from './support/settlement.js';
+import { configurePlatform, paymentPurposeOf } from './support/settlement.js';
 
 const P1 = '11111111-0000-4000-8000-0000000000a1';
 const P2 = '22222222-0000-4000-8000-0000000000a2';
@@ -183,11 +183,12 @@ describeWithEnv('invoice target routing (real PostgreSQL)', ['TEST_DATABASE_ADMI
       expect(await routingRow(id)).toMatchObject({ purpose: 'direct_purchase', payerId: OTHER_USER, beneficiaryUserId: OTHER_USER, organizationId: null, productId });
     });
 
-    it('non_entitlement: no subscription line at all (one-time or ordinary recurring products), whatever the payer; entitlementKind never routes', async () => {
+    it('non_entitlement: no subscription line at all (one-time or ordinary recurring products), a user or Company payer; entitlementKind never routes', async () => {
       const oneTime = await priceFor();
       const legacy = await priceFor({ entitlementKind: 'organization_license', recurring: true }); // an ordinary product, however it is labelled
-      for (const [priceIds, payer] of [[[oneTime.priceId], { type: 'organization', id: ORG_A }], [[legacy.priceId, oneTime.priceId], { type: 'user', id: USER }]] as const) {
-        const id = await draft({ priceIds: [...priceIds], payer, organizationId: payer.type === 'organization' ? null : ORG_A });
+      // Core V2 S4a (P-1): a user or a Company, never an Organization (refused below)
+      for (const [priceIds, payer] of [[[oneTime.priceId], { type: 'company', id: 'acme' }], [[legacy.priceId, oneTime.priceId], { type: 'user', id: USER }]] as const) {
+        const id = await draft({ priceIds: [...priceIds], payer, organizationId: payer.type === 'company' ? null : ORG_A });
         expect((await issue(id)).body.routing).toEqual({ purpose: 'non_entitlement', target: 'none' });
         expect(await routingRow(id)).toMatchObject({ purpose: 'non_entitlement', target: 'none', beneficiaryUserId: null, organizationId: null, productId: null });
       }
@@ -206,6 +207,7 @@ describeWithEnv('invoice target routing (real PostgreSQL)', ['TEST_DATABASE_ADMI
       ['an Organization subscription naming no Organization', 'organization', { type: 'user', id: USER }, null, 'organization_missing'],
       ['an Organization paying a personal product (assisted settlement: S5a)', 'personal', { type: 'organization', id: ORG_A }, null, 'assisted_settlement_unavailable'],
       ['a company paying a personal product', 'personal', { type: 'company', id: 'acme' }, null, 'payer_not_user'],
+      ['an Organization paying an ordinary invoice (Core V2 S4a P-1: B2 narrowed; B7, DB-15)', 'none', { type: 'organization', id: ORG_A }, null, 'organization_payer'],
     ] as const)('refuses %s: 422 invoice_routing_invalid, the invoice stays a draft, nothing is recorded', async (_label, target, payer, organizationId, reason) => {
       const { priceId } = await priceFor({ target });
       const id = await draft({ priceIds: [priceId], payer, organizationId });
@@ -351,6 +353,7 @@ describeWithEnv('invoice target routing (real PostgreSQL)', ['TEST_DATABASE_ADMI
       return requests.applyPaymentEvent(crypto.randomUUID(), {
         name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: pr.id, sourceType: 'invoice', sourceId: invoiceId,
         payer: open.payer, seller: open.seller, organizationId: open.organizationId, amount: Number(open.total), currency: open.currency, revision: 1,
+        ...(await paymentPurposeOf(t.app.get(DbService), invoiceId)), // S4a: as Payment echoes them
       }, paymentCtx, new Date());
     }
     const subscriptionOf = (organizationId: string) => t.app.get(SubscriptionRepository).findForOrganization(organizationId);
@@ -386,11 +389,26 @@ describeWithEnv('invoice target routing (real PostgreSQL)', ['TEST_DATABASE_ADMI
       const { priceId } = await priceFor({ target: 'organization' });
       const id = await draft({ priceIds: [priceId], organizationId: org });
       expect((await issue(id)).status).toBe(200);
+      // its payment request was made before S4a too (mapping version 1, no purpose sent): created first, then both are made historical
+      const { request } = await t.app.get(PaymentRequestRepository).createForInvoice(id, { kind: 'service', service: 'test-producer' }, ctx);
       await admin.query(`SET session_replication_role = replica`);
       await admin.query(`DELETE FROM invoice_entitlement WHERE "invoiceId" = $1`, [id]); // as an invoice issued before 0019 would be
+      await admin.query(`UPDATE payment_request SET "mappingVersion" = 1 WHERE id = $1`, [request.id]);
       await admin.query(`SET session_replication_role = origin`);
       expect(await settle(id)).toMatchObject({ outcome: 'applied', subscription: 'unrouted' });
       expect(await subscriptionOf(org)).toBeNull();
+    });
+
+    it('Core V2 S4a (P-2): an invoice issued before S3a (no routing record) cannot start a NEW payment request: 422 invoice_routing_invalid', async () => {
+      const { priceId } = await priceFor();
+      const id = await draft({ priceIds: [priceId] });
+      expect((await issue(id)).status).toBe(200);
+      await admin.query(`SET session_replication_role = replica`);
+      await admin.query(`DELETE FROM invoice_entitlement WHERE "invoiceId" = $1`, [id]);
+      await admin.query(`SET session_replication_role = origin`);
+      await expect(t.app.get(PaymentRequestRepository).createForInvoice(id, { kind: 'service', service: 'test-producer' }, ctx))
+        .rejects.toMatchObject({ status: 422 });
+      expect(Number((await admin.query(`SELECT count(*) FROM payment_request WHERE "invoiceId" = $1`, [id])).rows[0].count)).toBe(0);
     });
   });
 });

@@ -108,7 +108,7 @@ describeWithEnv('all Core producers → one audit-service → query (all real)',
   it('one action per producer lands in ONE audit store, with its own source; the 18.6 query API returns them by organization and platform-wide', async () => {
     const from = new Date(Date.now() - 60_000).toISOString();
     const payment = await call('payment', 'POST', '/payment/payments', {
-      paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: crypto.randomUUID() },
+      paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: crypto.randomUUID() },
       seller: { type: 'organization', id: ORG }, organizationId: ORG, amount: 1500, currency: 'TND',
     });
     expect(payment.status, JSON.stringify(payment.body)).toBe(201);

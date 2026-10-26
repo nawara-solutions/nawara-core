@@ -335,7 +335,12 @@ describeWithEnv('billing HTTP API (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'
 
     it('refuses a payment request for a non-user payer (organization/company): 409 payment_request_not_supported (B-026)', async () => {
       const { priceId, sellerId } = await seedPrice();
-      const { body: draft } = await asProducer.post('/billing/invoices', { ...invoiceBody({ priceId, sellerId }), payer: { type: 'organization', id: crypto.randomUUID() } }).expect(201);
+      // Core V2 S4a (P-1): an Organization-paid ordinary invoice is refused at issue (an Organization pays only assisted or recovery settlements)
+      const { body: orgDraft } = await asProducer.post('/billing/invoices', { ...invoiceBody({ priceId, sellerId }), payer: { type: 'organization', id: crypto.randomUUID() } }).expect(201);
+      const refused = await asProducer.post(`/billing/invoices/${orgDraft.id}/issue`).expect(422);
+      expect(refused.body.code).toBe('invoice_routing_invalid');
+      expect(refused.body.message).toContain('organization_payer');
+      const { body: draft } = await asProducer.post('/billing/invoices', { ...invoiceBody({ priceId, sellerId }), payer: { type: 'company', id: 'acme' } }).expect(201);
       await asProducer.post(`/billing/invoices/${draft.id}/issue`).expect(200);
       const r = await asProducer.post(`/billing/invoices/${draft.id}/payment-requests`).expect(409);
       expect(r.body.code).toBe('payment_request_not_supported');

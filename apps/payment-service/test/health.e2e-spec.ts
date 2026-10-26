@@ -40,7 +40,7 @@ describeWithEnv('service foundation (real PostgreSQL)', ['TEST_DATABASE_ADMIN_UR
       await request(t.app.getHttpServer()).get('/ready').expect(200, { status: 'ready' });
       const organizationId = crypto.randomUUID();
       const created = await request(t.app.getHttpServer()).post('/payment/payments').set('authorization', `Bearer ${billing.token}`).send({
-        paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'inv-s21-5', payer: { type: 'user', id: 'user-1' },
+        paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'inv-s21-5', payer: { type: 'user', id: 'user-1' },
         seller: { type: 'organization', id: organizationId }, organizationId, amount: 1000, currency: 'TND',
       }).expect(201);
       const pending = await t.app.get(DbService).query<{ n: number }>(

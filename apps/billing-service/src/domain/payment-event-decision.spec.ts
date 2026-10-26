@@ -64,4 +64,30 @@ describe('payment event decision (SDD 21.4): a pure function', () => {
   it('never reads the clock or anything else: the same facts give the same decision', () => {
     expect(decidePaymentEvent(event, request, invoice)).toEqual(decidePaymentEvent(event, request, invoice));
   });
+
+  describe('Core V2 S4a: purpose, beneficiary and liveMode', () => {
+    const v2Request: RequestFacts = { ...request, mappingVersion: 2 };
+    const routed: InvoiceFacts = { ...invoice, purpose: 'direct_purchase', beneficiaryUserId: 'user-1' };
+    const v2Event: PaymentEventFacts = { ...event, purpose: 'direct_purchase', beneficiaryUserId: 'user-1', liveMode: false };
+
+    it('a version-2 request applies only an event carrying exactly the routing record\'s purpose and beneficiary', () => {
+      expect(decidePaymentEvent(v2Event, v2Request, routed)).toEqual({ outcome: 'applied', requestTo: 'paid', invoiceTo: 'paid' });
+      for (const over of [{ purpose: 'non_entitlement' }, { purpose: undefined }, { beneficiaryUserId: 'user-2' }, { beneficiaryUserId: undefined }]) {
+        expect(decidePaymentEvent({ ...v2Event, ...over }, v2Request, routed), JSON.stringify(over)).toEqual({ outcome: 'conflict', detail: 'snapshot_mismatch' });
+      }
+    });
+
+    it('a version-1 request (made before S4a) applies its purpose-less payment, and never one that claims a purpose', () => {
+      const v1Request: RequestFacts = { ...request, mappingVersion: 1 };
+      expect(decidePaymentEvent(event, v1Request, routed)).toEqual({ outcome: 'applied', requestTo: 'paid', invoiceTo: 'paid' });
+      expect(decidePaymentEvent(v2Event, v1Request, routed)).toEqual({ outcome: 'conflict', detail: 'snapshot_mismatch' });
+    });
+
+    it('FC-10 (P-6): production applies no simulation or mode-less event, even a correct one; outside production a simulation event applies', () => {
+      expect(decidePaymentEvent(v2Event, v2Request, routed, { requireLive: true })).toEqual({ outcome: 'conflict', detail: 'non_live_event' });
+      expect(decidePaymentEvent({ ...v2Event, liveMode: undefined }, v2Request, routed, { requireLive: true })).toEqual({ outcome: 'conflict', detail: 'non_live_event' });
+      expect(decidePaymentEvent({ ...v2Event, liveMode: true }, v2Request, routed, { requireLive: true })).toEqual({ outcome: 'applied', requestTo: 'paid', invoiceTo: 'paid' });
+      expect(decidePaymentEvent(v2Event, v2Request, routed, { requireLive: false })).toEqual({ outcome: 'applied', requestTo: 'paid', invoiceTo: 'paid' });
+    });
+  });
 });

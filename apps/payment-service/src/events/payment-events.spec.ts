@@ -26,6 +26,9 @@ const row: PaymentRow = {
   createdAt: new Date(),
   updatedAt: new Date(),
   closedAt: new Date(),
+  purpose: null,
+  beneficiaryUserId: null,
+  liveMode: null,
 };
 
 describe('paymentEvent (SDD section 11)', () => {
@@ -85,5 +88,17 @@ describe('paymentEvent (SDD section 11)', () => {
     expect(a.correlationId).not.toBe(b.correlationId);
     expect(a.cause.id).toBe(a.correlationId);
     expect(a.actor).toEqual({ type: 'system', id: null });
+  });
+
+  it('Core V2 S4a: a payment created since S4a carries purpose, beneficiary and liveMode; an earlier one carries none (never re-interpreted)', () => {
+    const s4a = paymentEvent('payment.succeeded', { ...row, purpose: 'direct_purchase', beneficiaryUserId: 'user-1', liveMode: false }, requestContext({ type: 'service', id: 'billing-service' }));
+    expect(s4a.payload).toMatchObject({ purpose: 'direct_purchase', beneficiaryUserId: 'user-1', liveMode: false });
+    const legacy = paymentEvent('payment.succeeded', row, requestContext({ type: 'service', id: 'billing-service' }));
+    for (const k of ['purpose', 'beneficiaryUserId', 'liveMode']) expect(legacy.payload).not.toHaveProperty(k);
+    const noBeneficiary = paymentEvent('payment.created', { ...row, purpose: 'non_entitlement', liveMode: false }, requestContext({ type: 'service', id: 'billing-service' }));
+    expect(noBeneficiary.payload).not.toHaveProperty('beneficiaryUserId');
+    // an event-specific extra can never override Payment's own mode or purpose (they are written after it, like `producer`)
+    const forged = paymentEvent('payment.created', { ...row, purpose: 'non_entitlement', liveMode: false }, requestContext({ type: 'service', id: 'b' }), { liveMode: true, purpose: 'x' });
+    expect(forged.payload).toMatchObject({ liveMode: false, purpose: 'non_entitlement' });
   });
 });

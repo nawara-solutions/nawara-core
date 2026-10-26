@@ -115,7 +115,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
   const eventFor = (invoice: { id: string; total: string; currency: string }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded', over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
     name, source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
     payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: ORG }, organizationId: ORG,
-    amount: Number(invoice.total), currency: invoice.currency, revision: 1, ...over,
+    amount: Number(invoice.total), currency: invoice.currency, revision: 1, purpose: 'non_entitlement', liveMode: false, ...over, // S4a: as Payment echoes them
   });
   const paymentCtx: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: 'evt' }, correlationId: 'corr-evt' };
 
@@ -389,7 +389,7 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
       const open = await openInvoice({ quantity: 4 });
       const first = await requests.createForInvoice(open.id, payer('user-1'), ctx);
       expect(first.created).toBe(true);
-      expect(first.request).toMatchObject({ invoiceId: open.id, amount: open.total, currency: 'TND', status: 'created', paymentId: null, mappingVersion: 1, expiresAt: null, createdByType: 'user', createdById: 'user-1' });
+      expect(first.request).toMatchObject({ invoiceId: open.id, amount: open.total, currency: 'TND', status: 'created', paymentId: null, mappingVersion: 2, expiresAt: null, createdByType: 'user', createdById: 'user-1' });
       expect((await history(first.request.id)).map((h) => h.toStatus)).toEqual(['created']);
       const again = await requests.createForInvoice(open.id, producer, ctx);
       expect(again).toMatchObject({ created: false });
@@ -407,8 +407,9 @@ describeWithEnv('invoice persistence: domain rules against a real PostgreSQL', [
     it('a draft or void invoice is 409 invoice_not_payable; a non-user payer is 409 payment_request_not_supported; strangers get 404', async () => {
       const draft = (await create(await draftInput())).invoice;
       await rejects(requests.createForInvoice(draft.id, producer, ctx), 409, 'invoice_not_payable');
-      const orgPayer = await openInvoice({ payerType: 'organization', payerId: crypto.randomUUID() });
-      await rejects(requests.createForInvoice(orgPayer.id, producer, ctx), 409, 'payment_request_not_supported');
+      // Core V2 S4a (P-1): an Organization-paid ordinary invoice is no longer issued at all; a Company payer is still a non-user payer
+      const companyPayer = await openInvoice({ payerType: 'company', payerId: 'acme' });
+      await rejects(requests.createForInvoice(companyPayer.id, producer, ctx), 409, 'payment_request_not_supported');
       const open = await openInvoice();
       await rejects(requests.createForInvoice(open.id, payer('user-2'), ctx), 404, 'not_found');
       await rejects(requests.findForCaller((await requests.createForInvoice(open.id, producer, ctx)).request.id, payer('user-2')), 404, 'not_found');

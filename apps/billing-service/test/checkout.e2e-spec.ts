@@ -111,6 +111,7 @@ describeWithEnv('direct checkout (Core V2 S3f, simulation) — real PostgreSQL',
     const facts: PaymentEventFacts = {
       name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: req.id, sourceType: 'invoice', sourceId: inv.id,
       payer: { type: 'user', id: payerId }, seller: { type: 'company', id: COMPANY }, organizationId: null, amount: Number(inv.total), currency: inv.currency, revision: 1,
+      purpose: 'direct_purchase', beneficiaryUserId: payerId, liveMode: false, // S4a: as Payment echoes them
     };
     const { name, source, ...payload } = facts;
     return { id, name, payload: payload as Record<string, unknown>, headers: { eventId: id, occurredAt: new Date().toISOString(), source, version: 1 } };

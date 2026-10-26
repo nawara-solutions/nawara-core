@@ -91,10 +91,10 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
     });
     return { request, paymentId };
   }
-  const eventFor = (invoice: { id: string; total: string; currency: string; organizationId: string | null }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded'): PaymentEventFacts => ({
+  const eventFor = (invoice: { id: string; total: string; currency: string; organizationId: string | null }, request: { id: string }, paymentId: string, name: PaymentEventFacts['name'] = 'payment.succeeded', over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
     name, source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
     payer: { type: 'user', id: PAYER }, seller: invoice.organizationId ? { type: 'organization', id: invoice.organizationId } : { type: 'user', id: 'seller-user' },
-    organizationId: invoice.organizationId, amount: Number(invoice.total), currency: invoice.currency, revision: 1,
+    organizationId: invoice.organizationId, amount: Number(invoice.total), currency: invoice.currency, revision: 1, purpose: 'non_entitlement', liveMode: false, ...over, // S4a
   });
   const consumer = (eventId: string): TransitionContext => ({ actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: eventId }, correlationId: `corr-${eventId.slice(0, 8)}` });
 
@@ -164,7 +164,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       const first = await openInvoice({ recurring: true });
       const r1 = await requested(first);
       const e1 = crypto.randomUUID();
-      await requests.applyPaymentEvent(e1, eventFor(first, r1.request, r1.paymentId), consumer(e1), new Date('2026-09-01T10:00:00Z'));
+      await requests.applyPaymentEvent(e1, eventFor(first, r1.request, r1.paymentId, 'payment.succeeded', { purpose: 'organization_subscription' }), consumer(e1), new Date('2026-09-01T10:00:00Z'));
       expect((await audit(first.id)).map((x) => x.payload)).toContainEqual({ action: 'invoice.paid', actor: { type: 'system', id: 'payment_event_consumer' }, organizationId: ORG, resource: { type: 'invoice', id: first.id }, outcome: 'succeeded', causationId: e1 });
       const [sub] = await rows(`SELECT * FROM subscription WHERE "organizationId" = $1`, [ORG]);
       const activated = (await audit(sub.id)).find((x) => x.name === 'audit.subscription.activated');
@@ -178,7 +178,7 @@ describeWithEnv('Billing central audit intent (real PostgreSQL 16)', ['TEST_DATA
       const r2 = await requested(second);
       const before = (await rows(`SELECT "currentPeriodEnd" FROM subscription WHERE id = $1`, [sub.id]))[0].currentPeriodEnd as Date;
       const reconciler: TransitionContext = { actor: { type: 'system', id: null }, cause: { type: 'reconciliation', id: null }, correlationId: 'reconcile-run-0001' };
-      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(second, r2.request, r2.paymentId), reconciler, new Date('2026-09-20T10:00:00Z'));
+      await requests.applyPaymentEvent(crypto.randomUUID(), eventFor(second, r2.request, r2.paymentId, 'payment.succeeded', { purpose: 'organization_subscription' }), reconciler, new Date('2026-09-20T10:00:00Z'));
       const after = (await rows(`SELECT "currentPeriodEnd" FROM subscription WHERE id = $1`, [sub.id]))[0].currentPeriodEnd as Date;
       const renewed = (await audit(sub.id)).find((x) => x.name === 'audit.subscription.renewed');
       expect(renewed!.payload).toEqual({ action: 'subscription.renewed', actor: { type: 'system', id: 'payment_reconciler' }, organizationId: ORG, resource: { type: 'subscription', id: sub.id }, outcome: 'succeeded', changes: { period_end: { from: before.toISOString(), to: after.toISOString() } } });

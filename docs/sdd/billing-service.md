@@ -313,6 +313,8 @@ A **payment request** is Billing's record of asking Payment to collect one invoi
 
 The body of `POST /payment/payments` is a **pure function** of `(invoice, payment_request)`, both immutable, so any retry is byte-for-byte the same request and Payment's natural-key replay (`200`, `Idempotent-Replayed: true`) is guaranteed (BI-15, `mappingVersion` pins the function).
 
+**Core V2 S4a (mapping version 2; register PAY-01 F, the Owner's P-2):** every new request pins version 2, which adds `purpose` (the invoice routing record's, ADR-0044 B2) and, for a direct purchase, `beneficiaryUserId` (the routing record's beneficiary), both from the immutable `invoice_entitlement`, never from a request. A new request needs the routing record (an invoice issued before S3a cannot start one). Requests made earlier keep version 1 and its body below. The consumer applies a Payment event only when its `purpose` and `beneficiaryUserId` are exactly what the request's version sent and, in production, only a live event (FC-10).
+
 | Payment field (SDD 3.1) | Billing source | Rule |
 |---|---|---|
 | `paymentRequestId` | `payment_request.id` | uuid, permanent |

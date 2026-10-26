@@ -24,8 +24,8 @@ echo "PASS: invariants.sql"
 echo "== concurrency: only one open attempt per payment survives a race =="
 newdb race; db="$DBNAME"; apply_all "$db"
 psql -q -v ON_ERROR_STOP=1 -d "$db" -c "
-INSERT INTO payment(id, producer, \"paymentRequestId\", \"sourceType\", \"sourceId\", \"payerType\", \"payerId\", \"sellerType\", \"sellerId\", \"organizationId\", amount, currency)
-VALUES ('00000000-0000-0000-0000-000000000001', 'billing-service', gen_random_uuid(), 'invoice', 'inv-1', 'user', 'u1', 'organization', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 1000, 'TND');
+INSERT INTO payment(id, producer, \"paymentRequestId\", \"sourceType\", \"sourceId\", \"payerType\", \"payerId\", \"sellerType\", \"sellerId\", \"organizationId\", amount, currency, purpose)
+VALUES ('00000000-0000-0000-0000-000000000001', 'billing-service', gen_random_uuid(), 'invoice', 'inv-1', 'user', 'u1', 'organization', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 1000, 'TND', 'non_entitlement');
 "
 racers=8
 outdir="$(mktemp -d)"
@@ -46,8 +46,8 @@ racers=8
 outdir="$(mktemp -d)"
 for i in $(seq 1 "$racers"); do
   ( psql -q -d "$db" >"$outdir/$i.out" 2>&1 -c "
-    INSERT INTO payment(producer, \"paymentRequestId\", \"sourceType\", \"sourceId\", \"payerType\", \"payerId\", \"sellerType\", \"sellerId\", \"organizationId\", amount, currency)
-    VALUES ('billing-service', '$reqid', 'invoice', 'inv-1', 'user', 'u1', 'organization', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 1000, 'TND');
+    INSERT INTO payment(producer, \"paymentRequestId\", \"sourceType\", \"sourceId\", \"payerType\", \"payerId\", \"sellerType\", \"sellerId\", \"organizationId\", amount, currency, purpose)
+    VALUES ('billing-service', '$reqid', 'invoice', 'inv-1', 'user', 'u1', 'organization', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a1', 1000, 'TND', 'non_entitlement');
   " ) &
 done
 wait

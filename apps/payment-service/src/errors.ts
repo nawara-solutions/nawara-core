@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'operation_not_permitted'
   | 'not_found'
   | 'payment_request_conflict'
+  | 'payer_purpose_mismatch'
   | 'payment_not_payable'
   | 'payment_expired'
   | 'payment_has_open_attempt'

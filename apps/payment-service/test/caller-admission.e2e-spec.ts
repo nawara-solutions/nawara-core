@@ -103,7 +103,7 @@ describeWithEnv('payment caller admission and Organization scope (real PostgreSQ
 
   const http = () => request(t.app.getHttpServer());
   const body = (organizationId: string | null, over: Record<string, unknown> = {}) => ({
-    paymentRequestId: crypto.randomUUID(),
+    paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement',
     sourceType: 'invoice',
     sourceId: 'inv-1',
     payer: { type: 'user', id: 'user-1' },

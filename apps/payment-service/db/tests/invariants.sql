@@ -46,8 +46,8 @@ $$;
 CREATE FUNCTION pg_temp.new_payment(req uuid, org uuid) RETURNS uuid LANGUAGE plpgsql AS $$
 DECLARE pid uuid;
 BEGIN
-  INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency)
-  VALUES ('billing-service', req, 'invoice', 'inv-1', 'user', 'user-1', 'organization', org::text, org, 1000, 'TND')
+  INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose)
+  VALUES ('billing-service', req, 'invoice', 'inv-1', 'user', 'user-1', 'organization', org::text, org, 1000, 'TND', 'non_entitlement')
   RETURNING id INTO pid;
   RETURN pid;
 END $$;
@@ -235,11 +235,62 @@ SELECT pg_temp.expect_error('CONTRACT', 'an organization seller with NO organiza
   format($$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency)
     VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', %L, 100, 'TND')$$, '00000000-0000-0000-0000-0000000000a1'), '23514');
 SELECT pg_temp.expect_ok('FI-01', 'the maximum safe integer amount (9007199254740991) is accepted and exact',
-  $$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency)
-    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'company', 'o', 9007199254740991, 'TND')$$);
+  $$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose)
+    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'company', 'o', 9007199254740991, 'TND', 'non_entitlement')$$);
 SELECT pg_temp.expect_error('FI-15', 'an amount a JSON number cannot carry exactly (2^53) is refused',
   $$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency)
     VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'company', 'o', 9007199254740992, 'TND')$$, '23514');
+\o
+
+-- ================================================ Core V2 S4a: purpose, beneficiary, liveMode (0010) ----
+-- A statement inserting one payment from `payer` (type, id) to a Company seller with the given purpose and beneficiary.
+CREATE FUNCTION pg_temp.s4a(ptype text, pid text, purpose text, beneficiary text, live text DEFAULT 'DEFAULT') RETURNS text LANGUAGE sql AS $f$
+  SELECT format($$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, "beneficiaryUserId", "liveMode")
+    VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', %L, %L, 'company', 'nawara', 100, 'TND', %L, %L, %s)$$, ptype, pid, purpose, beneficiary, live);
+$f$;
+\o /dev/null
+SELECT pg_temp.expect_ok('S4a', 'an Organization subscription paid by a user, no beneficiary', pg_temp.s4a('user', 'u-1', 'organization_subscription', NULL));
+SELECT pg_temp.expect_ok('S4a', 'a direct purchase paid by its beneficiary', pg_temp.s4a('user', 'u-1', 'direct_purchase', 'u-1'));
+SELECT pg_temp.expect_ok('S4a', 'an ordinary invoice paid by a user', pg_temp.s4a('user', 'u-1', 'non_entitlement', NULL));
+SELECT pg_temp.expect_ok('S4a', 'an ordinary invoice paid by a Company', pg_temp.s4a('company', 'acme', 'non_entitlement', NULL));
+SELECT pg_temp.expect_ok('S4a', 'DB-15: an assisted settlement paid by an Organization (database-admitted; the API refuses it, P-5)', pg_temp.s4a('organization', 'o-1', 'assisted_settlement', 'u-2'));
+SELECT pg_temp.expect_ok('S4a', 'DB-15: a recovery settlement paid by an Organization (database-admitted; the API refuses it, P-5)', pg_temp.s4a('organization', 'o-1', 'recovery_settlement', NULL));
+SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays an ordinary invoice (the prospective B2 narrowing, P-1)', pg_temp.s4a('organization', 'o-1', 'non_entitlement', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays an Organization subscription', pg_temp.s4a('organization', 'o-1', 'organization_subscription', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'DB-15: an Organization never pays a direct purchase', pg_temp.s4a('organization', 'o-1', 'direct_purchase', 'o-1'), '23514');
+SELECT pg_temp.expect_error('S4a', 'DB-15: a user never pays an assisted settlement', pg_temp.s4a('user', 'u-1', 'assisted_settlement', 'u-1'), '23514');
+SELECT pg_temp.expect_error('S4a', 'DB-15: a Company never pays a recovery settlement', pg_temp.s4a('company', 'acme', 'recovery_settlement', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: a Company never pays an Organization subscription', pg_temp.s4a('company', 'acme', 'organization_subscription', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: a Company never pays a direct purchase', pg_temp.s4a('company', 'acme', 'direct_purchase', 'acme'), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: a direct purchase names its beneficiary', pg_temp.s4a('user', 'u-1', 'direct_purchase', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: a direct purchase''s beneficiary is its payer (never someone else)', pg_temp.s4a('user', 'u-1', 'direct_purchase', 'u-2'), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: an assisted settlement names its beneficiary', pg_temp.s4a('organization', 'o-1', 'assisted_settlement', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: an ordinary invoice names no beneficiary', pg_temp.s4a('user', 'u-1', 'non_entitlement', 'u-1'), '23514');
+SELECT pg_temp.expect_error('S4a', 'B2: an Organization subscription names no beneficiary', pg_temp.s4a('user', 'u-1', 'organization_subscription', 'u-1'), '23514');
+SELECT pg_temp.expect_error('S4a', 'an unknown purpose is refused', pg_temp.s4a('user', 'u-1', 'gift', NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'a new payment names its purpose', pg_temp.s4a('user', 'u-1', NULL, NULL), '23514');
+SELECT pg_temp.expect_error('S4a', 'P-6: a live payment is refused (simulation only)', pg_temp.s4a('user', 'u-1', 'non_entitlement', NULL, 'true'), '23514');
+SELECT pg_temp.expect_error('S4a', 'a new payment carries liveMode (an explicit NULL is refused)', pg_temp.s4a('user', 'u-1', 'non_entitlement', NULL, 'NULL'), '23514');
+SELECT pg_temp.assert_eq('S4a', 'a new payment is non-live by default (server-derived)',
+  (SELECT "liveMode"::text FROM payment WHERE id = :'pay1'), 'false');
+SELECT pg_temp.expect_error('S4a', 'S-6: the purpose is immutable', format($$UPDATE payment SET purpose = 'organization_subscription' WHERE id = %L$$, :'pay1'), '23514');
+SELECT pg_temp.expect_error('S4a', 'S-6: the beneficiary is immutable', format($$UPDATE payment SET "beneficiaryUserId" = 'u-9' WHERE "beneficiaryUserId" = 'u-1'$$), '23514');
+SELECT pg_temp.expect_error('S4a', 'P-6: liveMode is immutable', format($$UPDATE payment SET "liveMode" = NULL WHERE id = %L$$, :'pay1'), '23514');
+SELECT pg_temp.new_attempt(:'pay1', 9) AS s4a_att \gset
+SELECT pg_temp.assert_eq('S4a', 'an attempt takes its payment''s mode', (SELECT "liveMode"::text FROM payment_attempt WHERE id = :'s4a_att'), 'false');
+SELECT pg_temp.expect_error('S4a', 'an attempt of a different mode than its payment is refused (and no attempt is live)',
+  format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), %L, 10, 'test', true)$$, :'pay1'), '23514');
+SELECT pg_temp.expect_error('S4a', 'an attempt''s mode is immutable', format($$UPDATE payment_attempt SET "liveMode" = NULL WHERE id = %L$$, :'s4a_att'), '23514');
+-- A payment created BEFORE S4a (simulated: the insert guard does not fire in replica mode) keeps NULL and is never re-interpreted
+SET session_replication_role = replica;
+INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, "liveMode")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'organization', 'o-legacy', 'company', 'nawara', 100, 'TND', NULL) RETURNING id AS legacy \gset
+SET session_replication_role = origin;
+SELECT pg_temp.expect_ok('S4a', 'a historical payment (no purpose, no mode) still moves through its lifecycle', format($$UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = %L$$, :'legacy'));
+SELECT pg_temp.expect_error('S4a', 'a historical payment is never given a purpose afterwards', format($$UPDATE payment SET purpose = 'non_entitlement' WHERE id = %L$$, :'legacy'), '23514');
+SELECT pg_temp.expect_error('S4a', 'a historical payment is never given a mode afterwards', format($$UPDATE payment SET "liveMode" = false WHERE id = %L$$, :'legacy'), '23514');
+SELECT pg_temp.assert_eq('S4a', 'no existing row was backfilled', (SELECT (purpose IS NULL AND "liveMode" IS NULL)::text FROM payment WHERE id = :'legacy'), 'true');
+SELECT pg_temp.assert_eq('S4a', 'no Platform on Payment records (ADR-0042 DEC-5)', (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('payment', 'payment_attempt') AND column_name ILIKE '%platform%'), '0');
 \o
 
 -- ---------------------------------------------------------------------------- verdict ----

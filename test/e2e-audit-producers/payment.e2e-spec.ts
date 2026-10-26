@@ -31,7 +31,7 @@ describeWithEnv('Payment → outbox → RabbitMQ → audit-service (all real)', 
     const r = await fetch(`${PAYMENT_URL}/payment/payments`, {
       method: 'POST',
       headers: { authorization: `Bearer ${billing.token}`, 'content-type': 'application/json', 'x-correlation-id': `e2e-${organizationId.slice(0, 8)}` },
-      body: JSON.stringify({ paymentRequestId: crypto.randomUUID(), sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: 'payer-1' },
+      body: JSON.stringify({ paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement', sourceType: 'invoice', sourceId: 'inv-1', payer: { type: 'user', id: 'payer-1' },
         seller: { type: 'organization', id: organizationId }, organizationId, amount: 1500, currency: 'TND' }),
     });
     expect(r.status).toBe(201);

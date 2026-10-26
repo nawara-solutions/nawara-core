@@ -113,14 +113,14 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
   const eventFor = (invoice: { id: string; total: string; currency: string; organizationId?: string | null }, request: { id: string }, paymentId: string, over: Partial<PaymentEventFacts> = {}): PaymentEventFacts => ({
     name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: invoice.id,
     payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: invoice.organizationId ?? ORG }, organizationId: invoice.organizationId ?? ORG,
-    amount: Number(invoice.total), currency: invoice.currency, revision: 1, ...over,
+    amount: Number(invoice.total), currency: invoice.currency, revision: 1, purpose: 'organization_subscription', liveMode: false, ...over, // S4a: as Payment echoes them
   });
   const succeed = (open: { id: string; total: string; currency: string; organizationId?: string | null }, request: { id: string }, paymentId: string, settledAt: Date, eventId = crypto.randomUUID()) =>
     requests.applyPaymentEvent(eventId, eventFor(open, request, paymentId), paymentCtx, settledAt);
   const snapshotFor = (invoice: { id: string; total: string; currency: string; organizationId?: string | null }, request: { id: string }, paymentId: string, closedAt: Date): PaymentSnapshot => ({
     paymentId, paymentRequestId: request.id, status: 'succeeded', amount: Number(invoice.total), currency: invoice.currency,
     sourceType: 'invoice', sourceId: invoice.id, payer: { type: 'user', id: 'user-1' }, seller: { type: 'organization', id: invoice.organizationId ?? ORG },
-    organizationId: invoice.organizationId ?? ORG, closedAt,
+    organizationId: invoice.organizationId ?? ORG, closedAt, purpose: 'organization_subscription', liveMode: false, // S4a
   });
   const org = () => crypto.randomUUID();
 

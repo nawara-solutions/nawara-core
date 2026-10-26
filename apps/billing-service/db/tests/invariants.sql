@@ -171,9 +171,13 @@ SELECT pg_temp.expect_error('BI-09', 'a second PAID request for one invoice is r
 SELECT pg_temp.expect_error('BI-09', 'a payment request for a draft invoice is refused', format($$INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType")
   SELECT id, total, currency, 'user' FROM invoice WHERE id = %L$$, :'d1'), '23514');
 SELECT t_mk_invoice('organization', 'org-payer-1') AS org_payer_draft \gset
-SELECT t_issue(:'org_payer_draft'::uuid) AS org_payer_no \gset
-SELECT pg_temp.expect_error('BI-09', 'a payment request for an ORGANIZATION payer is refused until B-026 is decided (it could never be closed)', format($$INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType")
-  SELECT id, total, currency, 'user' FROM invoice WHERE id = %L$$, :'org_payer_draft'), '23514');
+-- Core V2 S4a (P-1): an Organization-paid ordinary invoice can no longer be issued (its routing record is refused), so the request guard is
+-- exercised on an invoice moved to `open` inside the refused statement itself (rolled back with it, before any commit-time check)
+SELECT pg_temp.expect_error('S4a', 'an Organization never pays an ordinary invoice: its non_entitlement routing record is refused (B2 narrowed, P-1)',
+  format($$SELECT t_issue(%L::uuid)$$, :'org_payer_draft'), '23514', 'invoice_entitlement_non_entitlement_payer');
+SELECT pg_temp.expect_error('BI-09', 'a payment request for an ORGANIZATION payer is refused until B-026 is decided (it could never be closed)', format($$
+  UPDATE invoice SET status = 'open', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}'::jsonb WHERE id = %L;
+  INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType") SELECT id, total, currency, 'user' FROM invoice WHERE id = %L$$, :'org_payer_draft', :'org_payer_draft'), '23514');
 
 -- =================================================================================================================== BI-10
 SELECT t_mk_invoice() AS n1 \gset
@@ -239,7 +243,7 @@ SELECT t_mk_open() AS o4 \gset
 SELECT t_mk_request(:'o4'::uuid) AS o4_req \gset
 SELECT pg_temp.expect_error('BI-15', 'a payment request amount cannot change', format($$UPDATE payment_request SET amount = amount - 1 WHERE id = %L$$, :'o4_req'), '23514');
 SELECT pg_temp.expect_error('BI-15', 'a payment request expiry cannot change', format($$UPDATE payment_request SET "expiresAt" = now() WHERE id = %L$$, :'o4_req'), '23514');
-SELECT pg_temp.expect_error('BI-15', 'a payment request mapping version cannot change', format($$UPDATE payment_request SET "mappingVersion" = 2 WHERE id = %L$$, :'o4_req'), '23514');
+SELECT pg_temp.expect_error('BI-15', 'a payment request mapping version cannot change', format($$UPDATE payment_request SET "mappingVersion" = 1 WHERE id = %L$$, :'o4_req'), '23514');
 SELECT pg_temp.expect_error('BI-15', 'a payment request invoice cannot change', format($$UPDATE payment_request SET "invoiceId" = %L WHERE id = %L$$, :'o3', :'o4_req'), '23514');
 SELECT pg_temp.expect_error('BI-15', 'a payment request is never deleted', format($$DELETE FROM payment_request WHERE id = %L$$, :'o4_req'), '23514');
 
@@ -888,6 +892,25 @@ SET session_replication_role = origin;
 SELECT pg_temp.expect_ok('S3g', 'a pre-S3g proposal on a producer product can still be decided by the Owner (nothing invalidated)', format($$UPDATE fee_proposal SET status = 'rejected', "decidedBy" = gen_random_uuid() WHERE id = %L$$, :'g_legacy_prop'));
 SELECT pg_temp.expect_ok('S3g', 'archiving an Owner product is the one-way status change', format($$UPDATE product SET status = 'archived' WHERE id = %L$$, :'g_prod'));
 SELECT pg_temp.expect_error('S3g', 'an archived Owner product is never re-activated', format($$UPDATE product SET status = 'active' WHERE id = %L$$, :'g_prod'), '23514');
+
+-- ------------------------------------------------------------------------------------------------------------- S4a mapping v2 (0028)
+SELECT t_mk_open() AS s4a_open \gset
+SELECT t_mk_request(:'s4a_open') AS s4a_req \gset
+SELECT pg_temp.assert_eq('S4a', 'a new payment request pins mapping version 2', (SELECT "mappingVersion"::text FROM payment_request WHERE id = :'s4a_req'), '2');
+SELECT pg_temp.expect_error('S4a', 'a new payment request cannot pin mapping version 1', format($$
+  INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType", "mappingVersion") SELECT id, total, currency, 'user', 1 FROM invoice WHERE id = %L$$, :'s4a_open'), '23514', 'payment_request_mapping_v2');
+SELECT pg_temp.expect_error('S4a', 'an unknown mapping version is refused', format($$
+  INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType", "mappingVersion") SELECT id, total, currency, 'user', 3 FROM invoice WHERE id = %L$$, :'s4a_open'), '23514');
+-- a legacy invoice: open without a routing record (issued before S3a). Simulated inside the refused statement itself: the invoice leaves
+-- draft with no routing record (DB-2 would refuse that only at commit) and the request is refused at once, rolling both back
+SELECT t_mk_invoice() AS s4a_legacy \gset
+SELECT pg_temp.expect_error('S4a', 'a legacy invoice without a routing record cannot start a new payment request (P-2)', format($$
+  UPDATE invoice SET status = 'open', presentation = '{"schemaVersion":1,"template":"system:1","locale":"fr"}'::jsonb WHERE id = %L;
+  SELECT t_mk_request(%L)$$, :'s4a_legacy', :'s4a_legacy'), '23514', 'payment_request_routing_required');
+SELECT pg_temp.assert_eq('S4a', 'no existing routing record was re-judged by the B2 narrowing (NOT VALID)',
+  (SELECT convalidated::text FROM pg_constraint WHERE conname = 'invoice_entitlement_non_entitlement_payer'), 'false');
+SELECT pg_temp.assert_eq('S4a', 'existing payment requests keep their mapping version (no backfill)',
+  (SELECT count(*)::text FROM payment_request WHERE "mappingVersion" NOT IN (1, 2)), '0');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

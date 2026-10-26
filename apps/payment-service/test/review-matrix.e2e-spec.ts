@@ -21,7 +21,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const paymentBody = (over: Record<string, unknown> = {}) => {
   const organizationId = crypto.randomUUID();
   return {
-    paymentRequestId: crypto.randomUUID(),
+    paymentRequestId: crypto.randomUUID(), purpose: 'non_entitlement',
     sourceType: 'invoice',
     sourceId: 'inv-1',
     payer: { type: 'user', id: 'user-1' },
@@ -111,8 +111,8 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
           const id = crypto.randomUUID();
           const org = crypto.randomUUID();
           await client.query(
-            `INSERT INTO payment(id, producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, status, "settledMethod")
-             VALUES ($1, 'billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $2::text, $2::uuid, 100, 'TND', $3, $4)`,
+            `INSERT INTO payment(id, producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, status, "settledMethod", purpose, "liveMode")
+             VALUES ($1, 'billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $2::text, $2::uuid, 100, 'TND', $3, $4, 'non_entitlement', false)`,
             [id, org, from, from === 'succeeded' ? 'cash' : null],
           );
           let accepted = true;
@@ -143,12 +143,12 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
             const paymentId = crypto.randomUUID();
             const org = crypto.randomUUID();
             await client.query(
-              `INSERT INTO payment(id, producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency)
-               VALUES ($1, 'billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $2::text, $2::uuid, 100, 'TND')`,
+              `INSERT INTO payment(id, producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, purpose, "liveMode")
+               VALUES ($1, 'billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $2::text, $2::uuid, 100, 'TND', 'non_entitlement', false)`,
               [paymentId, org],
             );
             const attemptId = crypto.randomUUID();
-            await client.query(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, status, "failureInferred") VALUES ($1, $2, 1, 'test', $3, $4)`, [attemptId, paymentId, from, failureInferred]);
+            await client.query(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, status, "failureInferred", "liveMode") VALUES ($1, $2, 1, 'test', $3, $4, false)`, [attemptId, paymentId, from, failureInferred]);
             let accepted = true;
             try {
               await client.query(`UPDATE payment_attempt SET status = $2 WHERE id = $1`, [attemptId, to]);
@@ -286,9 +286,9 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
     users['member-jwt'] = identity('member-1', {
       memberships: [{ id: 'm1', organization: { id: orgId }, platform: { id: 'p1' }, status: 'active', isOrganizationAdmin: true }],
     });
-    const p = await create({ payer: { type: 'organization', id: orgId } });
-    await get(p.id, 'member-jwt').expect(404);
-    await start(p.id, 'm12-key-aaaa', 'member-jwt').expect(404);
+    // Core V2 S4a (DB-15, P-5): an Organization payer cannot even be requested yet; the seller-side boundary below is unchanged
+    const refused = await asBilling(request(server()).post('/payment/payments')).send(paymentBody({ payer: { type: 'organization', id: orgId } })).expect(422);
+    expect(refused.body.code).toBe('payer_purpose_mismatch');
     const asSeller = await create({ seller: { type: 'organization', id: orgId }, organizationId: orgId });
     await get(asSeller.id, 'member-jwt').expect(404); // the seller organization's members cannot read either (O-20)
   });

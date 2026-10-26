@@ -111,6 +111,20 @@ export async function settle(
   const application = await requests.applyPaymentEvent(eventId, {
     name: 'payment.succeeded', source: 'payment-service', paymentId, producer: 'billing-service', paymentRequestId: request.id, sourceType: 'invoice', sourceId: open.id,
     payer, seller: SELLER, organizationId: o.organizationId, amount: Number(open.total), currency: open.currency, revision: 1,
+    ...(await paymentPurposeOf(app.get(DbService), open.id)),
   }, { actor: { type: 'system', id: null }, cause: { type: 'payment_event', id: eventId }, correlationId: 'settle' }, o.at);
   return { application, subscription: o.organizationId ? await app.get(SubscriptionRepository).findForOrganization(o.organizationId) : null, invoiceId: open.id };
+}
+
+/**
+ * Core V2 S4a: what Payment's event carries for a mapping-version-2 request — the purpose and, for a direct purchase, the beneficiary of the
+ * invoice's routing record, exactly as Billing sent them (Payment stores and echoes them; it never derives them). Liveness is Payment's
+ * simulation mode, `false`.
+ */
+export async function paymentPurposeOf(
+  db: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, any>> }> },
+  invoiceId: string,
+): Promise<{ purpose?: string; beneficiaryUserId?: string; liveMode: boolean }> {
+  const r = (await db.query(`SELECT purpose, "beneficiaryUserId" FROM invoice_entitlement WHERE "invoiceId" = $1`, [invoiceId])).rows[0];
+  return { ...(r ? { purpose: r.purpose as string } : {}), ...(r?.beneficiaryUserId ? { beneficiaryUserId: r.beneficiaryUserId as string } : {}), liveMode: false };
 }
