@@ -392,6 +392,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | D. Existing | `apps/billing-service/src/subscriptions/`; optional `SUBSCRIPTION_GRACE_DAYS` (`apps/billing-service/src/config/billing-config.ts`) |
 | E. Open, gates | DOC-5 before S3e (roadmap §8). Stage S3b, S3e. Confidence H |
 | F. S3e (2026-10-26) | IMPLEMENTED (`0024_fixed_organization_grace.sql`): `graceUntil = currentPeriodEnd + interval '24 hours'` written by the settlement with the period; same-row check `subscription_grace_fixed` = `status = 'pending' OR (graceUntil IS NOT NULL AND graceUntil = currentPeriodEnd + interval '24 hours')` (the explicit `IS NOT NULL` closes SQL's NULL-passes-CHECK gap in the frozen wording); the lifecycle guard no longer clears `graceUntil` on an `active -> active` move (a cancellation toggle kept no grace in V1); `SUBSCRIPTION_GRACE_DAYS` retired and refused at startup; existing rows never rewritten (0024 refuses to apply over a different grace). `subscription_grace_unavailable`: unreachable, kept as a defensive refusal. Personal: no grace (unchanged). DOC-5 done |
+| G. S3e implementation clarifications (Owner-confirmed, 2026-10-26) | (1) `subscription_grace_fixed` carries an explicit `graceUntil IS NOT NULL`: under PostgreSQL's three-valued logic a CHECK whose expression is NULL passes, so the frozen wording alone would admit an established Organization Subscription with no grace. This enforces the frozen invariant as written; S0 §3.9 is unchanged. (2) The Organization entitlement read's `expiresAt` is the **exclusive access-validity deadline**: `graceUntil` (the period end plus the 24-hour grace), or an earlier `effectiveTerminationAt`; it is not the paid-period end. `valid` holds while `currentPeriodStart <= now < expiresAt`. The Personal read (BIL-11) has no grace: its `expiresAt` is the end of the paid span run |
 
 #### BIL-10 Direct checkout of personal Premium
 
@@ -412,6 +413,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | IMPLEMENTED-style `not_found` collapse; class R |
 | D. Existing | none |
 | E. Open, gates | none. Stage S3c. Confidence H |
+| F. S3e (Owner-confirmed, 2026-10-26) | Zero grace preserved: `expiresAt` is the exclusive end of the uninterrupted run of paid spans containing `now`, never extended by a grace; unlike the Organization read (BIL-09 G), whose `expiresAt` includes the 24-hour grace |
 
 #### BIL-12 A member's own personal subscriptions
 

@@ -27,7 +27,7 @@ export class EntitlementController {
       'elapsed grace window are all normal outcomes (`valid: false`), never a 404 or a transport error. `valid: true` while inside grace or ' +
       'before an early termination boundary reflects the same derivation Stage 12.3 already proves exhaustively; this endpoint only exposes it.',
   })
-  @ApiResponse({ status: 200, description: '{ valid: boolean, expiresAt: string | null } — the ONLY shape; never the underlying Subscription.' })
+  @ApiResponse({ status: 200, description: '{ valid: boolean, expiresAt: string | null } — the ONLY shape; never the underlying Subscription. expiresAt is the exclusive access deadline: the period end plus the fixed 24-hour Organization grace (or an earlier termination), not the paid-period end.' })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted / organization_not_permitted (unknown or outside the caller\'s Platform scope: one answer)' })
   @ApiResponse({ status: 503, description: 'hierarchy_unavailable: the organization\'s Platform could not be verified. Treat as UNKNOWN, never as entitled' })
