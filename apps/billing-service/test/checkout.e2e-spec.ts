@@ -74,9 +74,14 @@ describeWithEnv('direct checkout (Core V2 S3f, simulation) — real PostgreSQL',
 
   // ── fixtures
   let seq = 0;
-  const productOf = async (o: { platformId?: string; target?: string; status?: string; sellerType?: string; sellerId?: string } = {}) =>
-    (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ('test-producer', $1, $2, $3, 'Personal plan', $4, $5, $6) RETURNING id`,
-      [o.sellerType ?? 'company', o.sellerId ?? COMPANY, `plan-${++seq}`, o.status ?? 'active', o.target ?? 'personal', o.platformId ?? PLATFORM])).rows[0].id as string;
+  // S3g (D-CAT-8): checkout sells the Owner's products (provenance `billing-owner`); a shape the Owner cannot create is a producer's
+  const OWNER_SELLER: Record<string, string> = { [PLATFORM]: COMPANY, [OTHER_PLATFORM]: OTHER_COMPANY };
+  const productOf = async (o: { platformId?: string; target?: string; status?: string; sellerType?: string; sellerId?: string; producer?: string } = {}) => {
+    const [sellerType, sellerId, target, platformId] = [o.sellerType ?? 'company', o.sellerId ?? COMPANY, o.target ?? 'personal', o.platformId ?? PLATFORM];
+    const ownerShaped = sellerType === 'company' && target === 'personal' && OWNER_SELLER[platformId] === sellerId;
+    return (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ($1, $2, $3, $4, 'Personal plan', $5, $6, $7) RETURNING id`,
+      [o.producer ?? (ownerShaped ? 'billing-owner' : 'test-producer'), sellerType, sellerId, `plan-${++seq}`, o.status ?? 'active', target, platformId])).rows[0].id as string;
+  };
   const priceOf = async (productId: string, o: { unit?: number; retired?: boolean; from?: string } = {}) =>
     (await admin.query(`INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount", "effectiveFrom", "retiredAt") VALUES ($1, $2, 'TND', $3, 'recurring', 'month', 1, $4, $5) RETURNING id`,
       [productId, `r-${++seq}`, o.unit ?? 9000, o.from ?? '2020-01-01T00:00:00Z', o.retired ? new Date() : null])).rows[0].id as string;
@@ -213,6 +218,7 @@ describeWithEnv('direct checkout (Core V2 S3f, simulation) — real PostgreSQL',
         await productOf({ sellerId: OTHER_COMPANY }), // a conflicting Company seller reference
         await productOf({ sellerId: 'nawara' }), // a free-text "company" that is not the verified reference
         await productOf({ sellerType: 'organization', sellerId: randomUUID() }), // an Organization seller
+        await productOf({ producer: 'test-producer' }), // S3g (D-CAT-8): a PRODUCER's product of the same shape, not the Owner's
       ];
       for (const productId of [...cases, randomUUID()]) {
         expect((await checkout({ platformId: PLATFORM, productId, priceId: await priceOf(productId).catch(() => randomUUID()) })).body.code).toBe('product_not_available');
@@ -350,6 +356,39 @@ describeWithEnv('direct checkout (Core V2 S3f, simulation) — real PostgreSQL',
     expect(Number((await one(`SELECT count(*) FROM subscription_purchase WHERE "invoiceId" = $1`, [inv.id])).count)).toBe(1);
     // after the purchase, the same product may be bought again (a renewal): nothing is unfinished any more
     expect((await checkout(o, 'buyer-1')).status).toBe(201);
+  });
+
+  it('S3g (D-CAT-7): retiring the price and archiving the product after a settled purchase stop NEW sales only; the purchase, invoice and entitlement are untouched', async () => {
+    const o = await offering();
+    const yearly = await priceOf(o.productId, { unit: 90000 });
+    const c = await checkout(o, 'buyer-2');
+    const paymentId = randomUUID();
+    const inv = await one(`SELECT * FROM invoice WHERE id = $1`, [c.body.invoiceId]);
+    payment.outcomes.set(c.body.paymentRequestId, { kind: 'accepted', snapshot: {
+      paymentId, paymentRequestId: c.body.paymentRequestId, status: 'pending', amount: 9000, currency: 'TND', sourceType: 'invoice', sourceId: inv.id,
+      payer: { type: 'user', id: U2 }, seller: { type: 'company', id: COMPANY }, organizationId: null, closedAt: null,
+    } as PaymentSnapshot });
+    await dispatch();
+    await t.bus.deliver(succeeded(inv, { id: c.body.paymentRequestId }, paymentId, U2));
+    expect(await one(`SELECT status FROM invoice WHERE id = $1`, [inv.id])).toEqual({ status: 'paid' });
+    const before = {
+      invoice: await one(`SELECT status, total, currency, "sellerId", revision FROM invoice WHERE id = $1`, [inv.id]),
+      lines: (await admin.query(`SELECT * FROM invoice_line WHERE "invoiceId" = $1`, [inv.id])).rows,
+      purchases: (await admin.query(`SELECT * FROM subscription_purchase WHERE "invoiceId" = $1`, [inv.id])).rows,
+      entitlement: (await entitlement(U2, o.productId).expect(200)).body,
+    };
+    expect(before.entitlement.valid).toBe(true);
+
+    await admin.query(`UPDATE price SET "retiredAt" = now() WHERE id = $1`, [o.priceId]); // what the Owner's retire writes
+    expect((await checkout(o, 'buyer-2')).body.code).toBe('price_not_available'); // no new sale or renewal on the retired price
+    expect((await checkout({ ...o, priceId: yearly }, 'buyer-2')).status).toBe(201); // another price of the product is still sellable
+    await admin.query(`UPDATE product SET status = 'archived' WHERE id = $1`, [o.productId]); // what the Owner's archive writes
+    expect((await checkout({ ...o, priceId: yearly }, 'buyer-1')).body.code).toBe('product_not_available'); // no new sale of any of its prices
+
+    expect(await one(`SELECT status, total, currency, "sellerId", revision FROM invoice WHERE id = $1`, [inv.id])).toEqual(before.invoice);
+    expect((await admin.query(`SELECT * FROM invoice_line WHERE "invoiceId" = $1`, [inv.id])).rows).toEqual(before.lines);
+    expect((await admin.query(`SELECT * FROM subscription_purchase WHERE "invoiceId" = $1`, [inv.id])).rows).toEqual(before.purchases);
+    expect((await entitlement(U2, o.productId).expect(200)).body).toEqual(before.entitlement); // the paid entitlement is kept, never revoked
   });
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────── production and the database guard

@@ -72,10 +72,10 @@ enumerations). Every resource and subject id is a lowercase UUID. No change carr
 | `invoice.paid` | commercial | system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | invoice | — | succeeded | — | An issued invoice is settled. |
 | `payment_request.created` | commercial | user (member, owner, operator); service | as recorded (UUID or null) | payment_request | — | succeeded | `invoice_id`: uuid | Collection of an invoice is requested. |
 | `payment_request.cancelled` | commercial | user (member, owner, operator); service; system (`payment_event_consumer`, `payment_reconciler`) | as recorded (UUID or null) | payment_request | — | succeeded | `invoice_id`: uuid | A pending collection is withdrawn. |
-| `product.created` | administrative | service | as recorded (UUID or null) | product | — | succeeded | — | A sellable product enters the platform catalog. |
-| `product.archived` | administrative | service | as recorded (UUID or null) | product | — | succeeded | — | A product stops being sellable. |
-| `price.created` | administrative | service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price (what an organization will be charged) is published. |
-| `price.retired` | administrative | service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price stops being offered. |
+| `product.created` | administrative | user (owner); service | as recorded (UUID or null) | product | — | succeeded | — | A sellable product enters the platform catalog. |
+| `product.archived` | administrative | user (owner); service | as recorded (UUID or null) | product | — | succeeded | — | A product stops being sellable. |
+| `price.created` | administrative | user (owner); service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price (what an organization will be charged) is published. |
+| `price.retired` | administrative | user (owner); service | as recorded (UUID or null) | price | — | succeeded | `product_id`: uuid | A price stops being offered. |
 
 ## payment-service (5)
 

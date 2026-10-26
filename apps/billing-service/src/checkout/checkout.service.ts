@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import { BILLING_CONFIG } from '../config/billing-config.token.js';
-import { CHECKOUT_PRODUCER, type BillingConfig } from '../config/billing-config.js';
+import { CHECKOUT_PRODUCER, OWNER_CATALOG_PRODUCER, type BillingConfig } from '../config/billing-config.js';
 import type { Caller, TransitionContext } from '../domain/actors.js';
 import { requestHash } from '../domain/canonical.js';
 import { billingError, notFound } from '../domain/errors.js';
@@ -64,11 +64,12 @@ export class CheckoutService {
     const platform = (await q.query<{ companyId: string; currency: string }>(`SELECT "companyId", currency FROM billing_platform WHERE "platformId" = $1`, [input.platformId])).rows[0];
     if (!platform) throw billingError(409, 'platform_not_configured', BILLING_MESSAGES.platformNotConfigured);
     const sellerReference = platform.companyId;
-    // FC-12: an ACTIVE personal subscription product of THIS Platform whose Company seller reference is that Company (D4); any other
-    // product (another Platform's, an Organization's, a conflicting Company reference, archived, unknown) is one answer
+    // FC-12: an ACTIVE personal subscription product of THIS Platform whose Company seller reference is that Company (D4), created by the
+    // Owner (S3g D-CAT-8: the reserved `billing-owner` provenance; the database refuses any other line too); any other product (a
+    // producer's, another Platform's, an Organization's, a conflicting Company reference, archived, unknown) is one answer
     const product = (await q.query(
-      `SELECT 1 FROM product WHERE id = $1 AND "platformId" = $2 AND "subscriptionTarget" = 'personal' AND status = 'active' AND "sellerType" = 'company' AND "sellerId" = $3`,
-      [input.productId, input.platformId, sellerReference])).rows[0];
+      `SELECT 1 FROM product WHERE id = $1 AND "platformId" = $2 AND "subscriptionTarget" = 'personal' AND status = 'active' AND "sellerType" = 'company' AND "sellerId" = $3 AND producer = $4`,
+      [input.productId, input.platformId, sellerReference, OWNER_CATALOG_PRODUCER])).rows[0];
     if (!product) throw billingError(409, 'product_not_available', BILLING_MESSAGES.productNotAvailable);
     const price = (await q.query(
       `SELECT 1 FROM price WHERE id = $1 AND "productId" = $2 AND "retiredAt" IS NULL AND "effectiveFrom" <= now() AND "interval" = 'recurring' AND currency = $3`,

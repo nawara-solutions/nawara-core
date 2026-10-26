@@ -90,6 +90,18 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   identity. Only Payment's verified `payment.succeeded` records the purchase and grants entitlement. **Production refuses it** (not
   mounted under `NODE_ENV=production`; the service refuses too) until B-001 and B-007 are resolved and production activation is
   separately authorized.
+- **Owner catalog administration (Core V2 S3g; register BIL-02 F, BIL-03 F; the Owner's decisions D-CAT-1 to D-CAT-10;
+  `db/migrations/0027`, `src/catalog/owner-catalog.*`) — DEVELOPMENT AND SIMULATION ONLY:** the Owner, with their OWN bearer verified
+  live (`/auth/grants`, then `/auth/platform-access/:platformId`; no step-up; a service token `401`), manages the `personal` subscription
+  products of their configured Platform: `POST /billing/admin/platforms/:platformId/products` `{code, name, description?, entitlementKind?}`,
+  `POST .../products/:productId/prices` `{clientReference, unitAmount, intervalUnit, intervalCount, effectiveFrom}` (recurring, in the
+  Platform's currency), `POST .../products/:productId/archive`, `POST .../prices/:priceId/retire` and `GET .../products`. Billing sets the
+  seller (`company:<the Platform's Company>`, a simulation reference, not a legal issuer), the target and the reserved provenance
+  `billing-owner` (no service may hold that name). Natural keys replay an identical command and refuse other content (`409`); prices may
+  coexist; every price write locks its product. Another Company's Platform, another Platform's product and a producer's product are one
+  `404`. Direct checkout and new fee proposals accept Owner products only; producer routes and Organization workflows are unchanged.
+  Retiring or archiving stops new sales only: nothing issued, settled or purchased changes. **No catalog value is configured: the
+  products, durations, amounts and dates are OD-05, approved before the first real configuration.**
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).

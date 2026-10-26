@@ -771,8 +771,10 @@ SELECT pg_temp.assert_eq('S3e', 'no Personal table has a grace column',
 \set f_owner '00000000-0000-4000-8000-00000000f3a0'
 \set f_op '00000000-0000-4000-8000-00000000f3a1'
 \set f_org '00000000-0000-4000-8000-00000000f3b1'
-INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES (:'f_p', gen_random_uuid(), 'TND', :'f_owner');
-INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-test', 'company', 'acme', 's3f-p', 'P', 'personal', :'f_p') RETURNING id AS f_prod \gset
+\set f_company '00000000-0000-4000-8000-00000000f3c0'
+INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES (:'f_p', :'f_company', 'TND', :'f_owner');
+-- S3g (D-CAT-8): a fee is proposed on an Owner product only (the S3g section below pins the refusal for any other)
+INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-owner', 'company', :'f_company', 's3f-p', 'P', 'personal', :'f_p') RETURNING id AS f_prod \gset
 SELECT pg_temp.assert_eq('S3f', 'fee money columns are bigint', (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount' AND data_type = 'bigint'), '2');
 INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 99, 500, 'TND', :'f_owner');
 INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 99, 300, 'TND', :'f_owner');
@@ -820,6 +822,72 @@ SELECT pg_temp.expect_ok('S3f-CO', 'another producer''s invoice is not subject t
 SELECT pg_temp.expect_error('S3f-CO', 'a checkout idempotency record is never changed', $$
   INSERT INTO checkout_idempotency ("buyerUserId", "idempotencyKey", "requestHash", "responseStatus", "responseBody") VALUES ('u-co', 'k-co-00001', repeat('a', 64), 201, '{}');
   UPDATE checkout_idempotency SET "responseStatus" = 200 WHERE "buyerUserId" = 'u-co'$$, '23514');
+
+-- ------------------------------------------------------------------------------------------------------------- S3g Owner catalog (0027)
+-- The reserved provenance `billing-owner` is an Owner product: personal, on a configured Platform, sold by that Platform's Company
+-- reference. Checkout lines and new fee proposals require it; nothing existing is re-judged; producer products are untouched.
+\set g_p '00000000-0000-4000-8000-00000000a3a1'
+\set g_p2 '00000000-0000-4000-8000-00000000a3a2'
+\set g_free '00000000-0000-4000-8000-00000000a3a3'
+\set g_company '00000000-0000-4000-8000-00000000a3c1'
+\set g_company2 '00000000-0000-4000-8000-00000000a3c2'
+INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES (:'g_p', :'g_company', 'TND', gen_random_uuid()), (:'g_p2', :'g_company2', 'TND', gen_random_uuid());
+SELECT pg_temp.expect_error('S3g', 'an Owner product is personal (not an Organization subscription product)', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-owner', 'company', %L, 'g-org', 'P', 'organization', %L)$$, :'g_company', :'g_p'), '23514', 'product_owner_shape');
+SELECT pg_temp.expect_error('S3g', 'an Owner product is a subscription product (not an ordinary one)', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-owner', 'company', %L, 'g-none', 'P', 'none', %L)$$, :'g_company', :'g_p'), '23514', 'product_owner_shape');
+SELECT pg_temp.expect_error('S3g', 'an Owner product is sold by its Platform''s Company reference (not another Company''s)', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-owner', 'company', %L, 'g-other', 'P', 'personal', %L)$$, :'g_company2', :'g_p'), '23514', 'product_owner_shape');
+SELECT pg_temp.expect_error('S3g', 'an Owner product is sold by a Company (not an Organization or a user)', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-owner', 'user', %L, 'g-user', 'P', 'personal', %L)$$, :'g_company', :'g_p'), '23514', 'product_owner_shape');
+SELECT pg_temp.expect_error('S3g', 'an Owner product needs a configured Platform', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-owner', 'company', %L, 'g-free', 'P', 'personal', %L)$$, :'g_company', :'g_free'), '23514');
+INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-owner', 'company', :'g_company', 'g-monthly', 'P', 'personal', :'g_p') RETURNING id AS g_prod \gset
+SELECT pg_temp.expect_ok('S3g', 'a second Owner personal product on the same Platform (several Personal offerings)', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-owner', 'company', %L, 'g-second', 'P2', 'personal', %L)$$, :'g_company', :'g_p'));
+SELECT pg_temp.expect_error('S3g', 'a product code is unique per Company, across its Platforms (D-CAT-10)', format($$INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId")
+  VALUES ('billing-test', 'company', %L, 'g-monthly', 'P', 'personal', %L)$$, :'g_company', :'g_p'), '23505', 'product_code_unique');
+SELECT pg_temp.expect_error('S3g', 'an Owner product''s provenance is immutable', format($$UPDATE product SET producer = 'billing-test' WHERE id = %L$$, :'g_prod'), '23514');
+SELECT pg_temp.expect_error('S3g', 'an Owner product''s target is immutable', format($$UPDATE product SET "subscriptionTarget" = 'organization' WHERE id = %L$$, :'g_prod'), '23514');
+SELECT pg_temp.expect_error('S3g', 'a producer product cannot become an Owner product', format($$UPDATE product SET producer = 'billing-owner' WHERE id = (SELECT id FROM product WHERE producer <> 'billing-owner' LIMIT 1)$$), '23514');
+SELECT pg_temp.expect_ok('S3g', 'several active recurring prices coexist on one product (monthly and yearly)', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 'g-m', 'TND', 900, 'recurring', 'month', 1), (%L, 'g-y', 'TND', 9000, 'recurring', 'year', 1)$$, :'g_prod', :'g_prod'));
+SELECT pg_temp.expect_ok('S3g', 'a future-dated price coexists with the current one of the same period (scheduled successor)', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount", "effectiveFrom")
+  VALUES (%L, 'g-m2', 'TND', 990, 'recurring', 'month', 1, now() + interval '30 days')$$, :'g_prod'));
+SELECT pg_temp.expect_error('S3g', 'a price identity is unique per product', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 'g-m', 'TND', 1, 'recurring', 'month', 1)$$, :'g_prod'), '23505', 'price_reference_unique');
+SELECT pg_temp.expect_error('S3g', 'an Owner price is in its Platform''s currency', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
+  VALUES (%L, 'g-eur', 'EUR', 900, 'recurring', 'month', 1)$$, :'g_prod'), '23514', 'price_platform_currency');
+SELECT pg_temp.expect_error('S3g', 'an Owner price recurs', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval") VALUES (%L, 'g-once', 'TND', 900, 'one_time')$$, :'g_prod'), '23514', 'price_subscription_recurring');
+SELECT pg_temp.expect_error('S3g', 'an Owner price''s terms are immutable', format($$UPDATE price SET "unitAmount" = 1 WHERE "productId" = %L AND "clientReference" = 'g-m'$$, :'g_prod'), '23514');
+SELECT pg_temp.expect_error('S3g', 'the reserved provenance never produces an invoice', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
+  VALUES ('billing-owner', gen_random_uuid(), repeat('a', 64), 'company', 'c', 'user', 'u', 's', 's', 'TND', 1, 1, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_producer_not_owner');
+-- a producer's personal product on the same Platform, with the same Company reference: still a valid producer product
+INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-test', 'company', :'g_company', 'g-producer', 'P', 'personal', :'g_p') RETURNING id AS g_pprod \gset
+INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount") VALUES (:'g_pprod', 'g-pm', 'TND', 900, 'recurring', 'month', 1) RETURNING id AS g_pprice \gset
+SELECT id AS g_oprice FROM price WHERE "productId" = :'g_prod' AND "clientReference" = 'g-m' \gset
+SELECT pg_temp.expect_error('S3g', 'a direct-checkout line of a producer product is refused at insert', format($$
+  WITH i AS (INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
+             VALUES ('billing-checkout', gen_random_uuid(), repeat('a', 64), 'company', %L, 'user', 'u-g', 'direct_checkout', 's', 'TND', 900, 900, '{"schemaVersion":2}', '{"schemaVersion":2}') RETURNING id)
+  INSERT INTO invoice_line ("invoiceId", currency, "lineNumber", "priceId", "productId", "productCode", description, quantity, "unitAmount", "lineTotal", "entitlementKind", "interval", "intervalUnit", "intervalCount")
+  SELECT id, 'TND', 1, %L, %L, 'g-producer', 'P', 1, 900, 900, 'none', 'recurring', 'month', 1 FROM i$$, :'g_company', :'g_pprice', :'g_pprod'), '23514', 'checkout_owner_product');
+SELECT pg_temp.expect_error('S3g', 'a direct-checkout line of an Owner product passes the provenance guard (only S3f''s commit-time shape guard then judges it)', format($$
+  WITH i AS (INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot")
+             VALUES ('billing-checkout', gen_random_uuid(), repeat('a', 64), 'company', %L, 'user', 'u-g', 'direct_checkout', 's', 'TND', 900, 900, '{"schemaVersion":2}', '{"schemaVersion":2}') RETURNING id)
+  INSERT INTO invoice_line ("invoiceId", currency, "lineNumber", "priceId", "productId", "productCode", description, quantity, "unitAmount", "lineTotal", "entitlementKind", "interval", "intervalUnit", "intervalCount")
+  SELECT id, 'TND', 1, %L, %L, 'g-monthly', 'P', 1, 900, 900, 'none', 'recurring', 'month', 1 FROM i;
+  SET CONSTRAINTS ALL IMMEDIATE$$, :'g_company', :'g_oprice', :'g_prod'), '23514', 'checkout_invoice_shape');
+SELECT pg_temp.expect_ok('S3g', 'another producer''s invoice line of a producer product is untouched by the checkout provenance guard', $$SELECT t_mk_invoice()$$);
+INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES (:'g_p', gen_random_uuid(), gen_random_uuid()) RETURNING id AS g_del, "operatorUserId" AS g_op \gset
+SELECT pg_temp.expect_error('S3g', 'a new fee proposal on a producer product is refused', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (%L, gen_random_uuid(), %L, 0, 'TND', %L, %L)$$, :'g_p', :'g_pprod', :'g_del', :'g_op'), '23514', 'fee_proposal_owner_product');
+SELECT pg_temp.expect_ok('S3g', 'a new fee proposal on an Owner product is accepted', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (%L, gen_random_uuid(), %L, 0, 'TND', %L, %L)$$, :'g_p', :'g_prod', :'g_del', :'g_op'));
+-- a proposal submitted on a producer product BEFORE S3g (simulated: the insert guard does not fire in replica mode) is never re-judged
+SET session_replication_role = replica;
+INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (:'g_p', gen_random_uuid(), :'g_pprod', 0, 'TND', :'g_del', :'g_op') RETURNING id AS g_legacy_prop \gset
+SET session_replication_role = origin;
+SELECT pg_temp.expect_ok('S3g', 'a pre-S3g proposal on a producer product can still be decided by the Owner (nothing invalidated)', format($$UPDATE fee_proposal SET status = 'rejected', "decidedBy" = gen_random_uuid() WHERE id = %L$$, :'g_legacy_prop'));
+SELECT pg_temp.expect_ok('S3g', 'archiving an Owner product is the one-way status change', format($$UPDATE product SET status = 'archived' WHERE id = %L$$, :'g_prod'));
+SELECT pg_temp.expect_error('S3g', 'an archived Owner product is never re-activated', format($$UPDATE product SET status = 'active' WHERE id = %L$$, :'g_prod'), '23514');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

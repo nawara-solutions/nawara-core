@@ -54,9 +54,14 @@ describeWithEnv('fee caps, delegations and proposals (Core V2 S3f) — real Post
     auth.organizations.set(id, platformId);
     return id;
   };
-  const product = async (platformId: string, o: { target?: string; status?: string } = {}) =>
-    (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ('test-producer', 'company', 'nawara', $1, 'Plan', $2, $3, $4) RETURNING id`,
-      [`p-${randomUUID().slice(0, 12)}`, o.status ?? 'active', o.target ?? 'personal', platformId])).rows[0].id as string;
+  // S3g (D-CAT-8): a fee is proposed on the Owner's product (provenance `billing-owner`, sold by the Platform's Company reference); a
+  // shape the Owner cannot create (another target, an unconfigured Platform) or an explicit `producer` is a producer's
+  const product = async (platformId: string, o: { target?: string; status?: string; producer?: string } = {}) => {
+    const company = (await admin.query(`SELECT "companyId" FROM billing_platform WHERE "platformId" = $1`, [platformId])).rows[0]?.companyId as string | undefined;
+    const owner = o.producer === undefined && company !== undefined && (o.target ?? 'personal') === 'personal';
+    return (await admin.query(`INSERT INTO product (producer, "sellerType", "sellerId", code, name, status, "subscriptionTarget", "platformId") VALUES ($1, 'company', $2, $3, 'Plan', $4, $5, $6) RETURNING id`,
+      [owner ? 'billing-owner' : (o.producer ?? 'test-producer'), owner ? company : 'nawara', `p-${randomUUID().slice(0, 12)}`, o.status ?? 'active', o.target ?? 'personal', platformId])).rows[0].id as string;
+  };
 
   // ── HTTP
   let k = 0;
@@ -250,10 +255,11 @@ describeWithEnv('fee caps, delegations and proposals (Core V2 S3f) — real Post
       }
     });
 
-    it('the product must be an ACTIVE personal subscription product of this Platform: otherwise 409 product_not_available', async () => {
+    it('the product must be an ACTIVE personal subscription product of this Platform, created by the Owner (S3g): otherwise 409 product_not_available', async () => {
       const { p, org } = await ready();
       const other = await platform();
-      for (const productId of [await product(p, { target: 'organization' }), await product(p, { status: 'archived' }), await product(other), randomUUID()]) {
+      const producers = await product(p, { producer: 'test-producer' }); // S3g (D-CAT-8): a producer's personal product of this very Platform
+      for (const productId of [await product(p, { target: 'organization' }), await product(p, { status: 'archived' }), await product(other), producers, randomUUID()]) {
         expect((await propose(p, { organizationId: org, productId, amount: 1 })).body.code).toBe('product_not_available');
       }
     });

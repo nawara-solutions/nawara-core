@@ -76,6 +76,29 @@ describe('G4: product / price actions record the seller organization, or null wh
   });
 });
 
+describe('Core V2 S3g (D-CAT-9): the four catalog actions additionally accept the verified Owner, and nothing else widens', () => {
+  const CATALOG = ['product.created', 'product.archived', 'price.created', 'price.retired'] as const;
+  const owner = { ...USER, userKind: 'owner' };
+  it.each(CATALOG)('%s: the Owner with organization null, and still the producer service (with or without its seller organization)', (a) => {
+    expect(ok(a, { actor: owner, organizationId: null })).not.toThrow();
+    expect(ok(a, { actor: { type: 'service', id: 'some-product' }, organizationId: null })).not.toThrow();
+    expect(ok(a, { actor: { type: 'service', id: 'some-product' }, organizationId: SAMPLE_IDS.organization })).not.toThrow();
+  });
+
+  it.each(CATALOG)('%s: a member, an operator, an unknown kind and every system actor are still refused; the meaning (category, changes) is unchanged', (a) => {
+    for (const userKind of ['member', 'operator', 'admin']) expect(ok(a, { actor: { ...USER, userKind } }), userKind).toThrow('invalid_actor');
+    for (const id of ['payment_event_consumer', 'payment_reconciler', 'billing-owner']) expect(ok(a, { actor: system(id) }), id).toThrow('invalid_actor');
+    const entry = AUDIT_CATALOG.get(a)!;
+    expect([entry.producer, entry.category, entry.organization, entry.since]).toEqual(['billing-service', 'administrative', 'optional', 1]);
+    expect(entry.actors).toEqual({ user: ['owner'], service: true });
+  });
+
+  it('no other Billing action gains a user kind', () => {
+    const billingWithUser = AUDIT_ACTIONS.filter((a) => AUDIT_CATALOG.get(a)!.producer === 'billing-service' && AUDIT_CATALOG.get(a)!.actors.user);
+    expect(billingWithUser.sort()).toEqual(['invoice.discarded', 'invoice.issued', 'payment_request.cancelled', 'payment_request.created', ...CATALOG].sort());
+  });
+});
+
 describe('G5: organization.updated accepts a member (an org-admin member of THAT organization, per Organization\'s own authorization)', () => {
   it('member, owner, operator and a service are accepted; the kind is recorded as given, never another kind', () => {
     for (const userKind of ['member', 'owner', 'operator']) {

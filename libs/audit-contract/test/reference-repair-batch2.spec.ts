@@ -40,8 +40,15 @@ const valid = (p: P) => () => validateAuditPayload(p, 'auth-service');
  * Core V2 S2-Audit.3 changed ONE earlier entry, additively: `platform_query.executed` (audit-service's own read record) admits an operator
  * actor, the targets `company` / `operator_platform` and the optional `company_id` / `platform_id` facts. Everything it had is kept.
  */
+const S3G_OWNER_CATALOG = ['product.created', 'product.archived', 'price.created', 'price.retired'];
 function expectEarlierEntry(action: string, entry: any): void {
   const now = JSON.parse(JSON.stringify(AUDIT_CATALOG.get(action as never)));
+  if (S3G_OWNER_CATALOG.includes(action)) { // Core V2 S3g (D-CAT-9): ONLY the Owner user actor was added; everything else is as it was
+    expect(entry.actors.user, action).toBeUndefined();
+    expect(now.actors.user, action).toEqual(['owner']);
+    expect({ ...now, actors: { ...now.actors, user: undefined } }, action).toEqual({ ...entry, actors: { ...(entry.actors as object), user: undefined } });
+    return;
+  }
   if (action !== 'platform_query.executed') {
     expect(now, action).toEqual(entry);
     return;
