@@ -27,6 +27,25 @@ export interface OwnerAuthority {
    * unknown or not in the Owner's Company; 503 (`auth_timeout` / `auth_unavailable`) when Auth cannot say.
    */
   verifyPlatformOwner(userBearer: string, platformId: string, deadline: AbortSignal): Promise<VerifiedPlatformOwner>;
+  /** Core V2 S3f: `GET /auth/grants` — who the bearer is, live (kind, and the Company of an Owner). 401 refused; 503 unanswerable. */
+  actor(userBearer: string, deadline: AbortSignal): Promise<VerifiedActor>;
+  /** Core V2 S3f: `GET /auth/platform-access/:platformId` — may this Owner or operator act on the Platform right now? (404 is `false`.) */
+  platformAllowed(userBearer: string, platformId: string, deadline: AbortSignal): Promise<boolean>;
+  /** Core V2 S3f: `GET /auth/admin/organizations/:id` — the Organization's Platform as Auth derives it, when the caller may see it (else null). */
+  organizationPlatform(userBearer: string, organizationId: string, deadline: AbortSignal): Promise<string | null>;
+  /**
+   * Core V2 S3f: `GET /auth/admin/operators/:id/platform-assignments` with the OWNER's bearer — whether that operator of the Owner's Company
+   * holds an ACTIVE assignment to the Platform right now (an unknown operator, another Company's, or no assignment: `false`).
+   */
+  operatorAssigned(ownerBearer: string, operatorUserId: string, platformId: string, deadline: AbortSignal): Promise<boolean>;
+}
+
+/** Core V2 S3f: the live facts of `/auth/grants` the fee commands need. */
+export interface VerifiedActor {
+  userId: string;
+  kind: 'owner' | 'operator' | 'member';
+  /** The Owner's Company; null for an operator or a member (Billing never infers one). */
+  companyId: string | null;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -72,8 +91,8 @@ export class HttpOwnerAuthority implements OwnerAuthority {
     await res.body?.cancel().catch(() => undefined);
   }
 
-  /** A JSON object of at most `MAX_AUTH_RESPONSE_BYTES`, read under the request's deadline; anything else is a 503 (never guess). */
-  private async json(res: Response, deadline: AbortSignal): Promise<Record<string, unknown>> {
+  /** A JSON value of at most `MAX_AUTH_RESPONSE_BYTES`, read under the request's deadline; anything else is a 503 (never guess). */
+  private async body(res: Response, deadline: AbortSignal): Promise<unknown> {
     try {
       if (Number(res.headers.get('content-length') ?? 0) > MAX_AUTH_RESPONSE_BYTES || !res.body) throw new Error('oversized');
       const chunks: Uint8Array[] = [];
@@ -83,8 +102,7 @@ export class HttpOwnerAuthority implements OwnerAuthority {
         if (size > MAX_AUTH_RESPONSE_BYTES) throw new Error('oversized');
         chunks.push(chunk);
       }
-      const b: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      if (typeof b === 'object' && b !== null && !Array.isArray(b)) return b as Record<string, unknown>;
+      return JSON.parse(Buffer.concat(chunks).toString('utf8'));
     } catch {
       await this.release(res);
       if (deadline.aborted) throw this.failure(deadline);
@@ -92,30 +110,69 @@ export class HttpOwnerAuthority implements OwnerAuthority {
     throw new AuthDependencyError('auth_unavailable');
   }
 
-  async verifyPlatformOwner(userBearer: string, platformId: string, deadline: AbortSignal): Promise<VerifiedPlatformOwner> {
-    const grants = await this.send('/auth/grants', userBearer, deadline);
-    if (grants.status !== 200) {
-      await this.release(grants);
-      if (grants.status === 401) throw new UnauthorizedException();
-      throw new AuthDependencyError('auth_unavailable');
-    }
-    const g = await this.json(grants, deadline);
-    if (typeof g.userId !== 'string' || !UUID.test(g.userId) || (g.kind !== 'owner' && g.kind !== 'operator' && g.kind !== 'member')) throw new AuthDependencyError('auth_unavailable');
-    if (g.kind !== 'owner') throw operationNotPermitted(); // an operator or a member: one answer
-    if (typeof g.companyId !== 'string' || !UUID.test(g.companyId)) throw new AuthDependencyError('auth_unavailable'); // an owner always has a Company
+  private async json(res: Response, deadline: AbortSignal): Promise<Record<string, unknown>> {
+    const b = await this.body(res, deadline);
+    if (typeof b === 'object' && b !== null && !Array.isArray(b)) return b as Record<string, unknown>;
+    throw new AuthDependencyError('auth_unavailable');
+  }
 
-    const access = await this.send(`/auth/platform-access/${encodeURIComponent(platformId)}`, userBearer, deadline);
-    if (access.status === 404) {
-      await this.release(access);
-      throw notFound(); // unknown, or another Company's: Auth's one answer, and Billing's
-    }
-    if (access.status !== 200) {
-      await this.release(access);
-      if (access.status === 401) throw new UnauthorizedException(); // the session ended between the two calls
+  /** 200 is read; 404 is `null` (Auth's collapsed "unknown, not yours, not assigned"); 401 is 401; anything else is a 503. */
+  private async read(path: string, userBearer: string, deadline: AbortSignal): Promise<unknown> {
+    const res = await this.send(path, userBearer, deadline);
+    if (res.status === 200) return this.body(res, deadline);
+    await this.release(res);
+    if (res.status === 404) return null;
+    if (res.status === 401) throw new UnauthorizedException();
+    throw new AuthDependencyError('auth_unavailable');
+  }
+
+  async actor(userBearer: string, deadline: AbortSignal): Promise<VerifiedActor> {
+    const res = await this.send('/auth/grants', userBearer, deadline);
+    if (res.status !== 200) {
+      await this.release(res);
+      if (res.status === 401) throw new UnauthorizedException();
       throw new AuthDependencyError('auth_unavailable');
     }
-    const a = await this.json(access, deadline);
-    if (a.allowed !== true || typeof a.platformId !== 'string' || a.platformId.toLowerCase() !== platformId.toLowerCase()) throw new AuthDependencyError('auth_unavailable');
-    return { userId: g.userId.toLowerCase(), companyId: g.companyId.toLowerCase() };
+    const g = await this.json(res, deadline);
+    if (typeof g.userId !== 'string' || !UUID.test(g.userId) || (g.kind !== 'owner' && g.kind !== 'operator' && g.kind !== 'member')) throw new AuthDependencyError('auth_unavailable');
+    if (g.kind === 'owner' && (typeof g.companyId !== 'string' || !UUID.test(g.companyId))) throw new AuthDependencyError('auth_unavailable'); // an owner always has a Company
+    return { userId: g.userId.toLowerCase(), kind: g.kind, companyId: g.kind === 'owner' ? (g.companyId as string).toLowerCase() : null };
+  }
+
+  async platformAllowed(userBearer: string, platformId: string, deadline: AbortSignal): Promise<boolean> {
+    const a = await this.read(`/auth/platform-access/${encodeURIComponent(platformId)}`, userBearer, deadline);
+    if (a === null) return false; // unknown, another Company's, or not assigned: Auth's one answer
+    const o = a as Record<string, unknown>;
+    if (typeof a !== 'object' || Array.isArray(a) || o.allowed !== true || typeof o.platformId !== 'string' || o.platformId.toLowerCase() !== platformId.toLowerCase()) {
+      throw new AuthDependencyError('auth_unavailable');
+    }
+    return true;
+  }
+
+  async organizationPlatform(userBearer: string, organizationId: string, deadline: AbortSignal): Promise<string | null> {
+    const a = await this.read(`/auth/admin/organizations/${encodeURIComponent(organizationId)}`, userBearer, deadline);
+    if (a === null) return null;
+    const o = a as Record<string, unknown>;
+    if (typeof a !== 'object' || Array.isArray(a) || typeof o.id !== 'string' || o.id.toLowerCase() !== organizationId.toLowerCase()
+      || typeof o.platformId !== 'string' || !UUID.test(o.platformId)) throw new AuthDependencyError('auth_unavailable');
+    return o.platformId.toLowerCase();
+  }
+
+  async operatorAssigned(ownerBearer: string, operatorUserId: string, platformId: string, deadline: AbortSignal): Promise<boolean> {
+    const a = await this.read(`/auth/admin/operators/${encodeURIComponent(operatorUserId)}/platform-assignments`, ownerBearer, deadline);
+    if (a === null) return false; // not an operator of this Owner's Company
+    if (!Array.isArray(a)) throw new AuthDependencyError('auth_unavailable');
+    return a.some((r: unknown) => {
+      const o = r as Record<string, unknown> | null;
+      if (typeof o !== 'object' || o === null || typeof o.platformId !== 'string' || typeof o.active !== 'boolean') throw new AuthDependencyError('auth_unavailable');
+      return o.active && o.platformId.toLowerCase() === platformId.toLowerCase();
+    });
+  }
+
+  async verifyPlatformOwner(userBearer: string, platformId: string, deadline: AbortSignal): Promise<VerifiedPlatformOwner> {
+    const a = await this.actor(userBearer, deadline);
+    if (a.kind !== 'owner') throw operationNotPermitted(); // an operator or a member: one answer
+    if (!(await this.platformAllowed(userBearer, platformId, deadline))) throw notFound(); // unknown, or another Company's: Auth's one answer, and Billing's
+    return { userId: a.userId, companyId: a.companyId! };
   }
 }

@@ -31,7 +31,13 @@ export type BillingErrorCode =
   | 'invoice_routing_invalid' // Core V2 S3a (register BIL-08)
   | 'platform_not_configured' // Core V2 S3d (register BIL-01, BIL-02)
   | 'billing_platform_exists' // Core V2 S3d (register BIL-01)
-  | 'invalid_billing_platform_request'; // Core V2 S3d
+  | 'invalid_billing_platform_request' // Core V2 S3d
+  | 'invalid_fee_request' // Core V2 S3f (register BIL-04 to BIL-07)
+  | 'fee_above_cap'
+  | 'fee_proposal_not_pending'
+  | 'fee_proposal_pending_exists'
+  | 'product_not_available'
+  | 'idempotency_key_conflict';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

@@ -341,6 +341,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | OPEN; class K |
 | D. Existing | none |
 | E. Open, gates | **OD-03**, Q10, Q11. Stage S3f. Confidence L |
+| F. S3f (Owner decisions A1 to A5, 2026-10-26) | IMPLEMENTED (`0025_fee_caps_delegations_proposals.sql`, `src/fees/`). One maximum FIXED fee per Platform in its S3d currency, minor units, ≥ 0; no percentage; no cap = permitted fee 0 (A1). `PUT` `{amount}` → `201 {platformId, version, amount, currency, createdAt}` (a new immutable version) or `200` (unchanged); versions are the database's (A2). Owner bearer live; no step-up (A5). Idempotency class K: required `Idempotency-Key` per actor, bound to the exact request, permanent (≥ 90 days), success replayed, `409 idempotency_key_conflict` otherwise (A5) |
 
 #### BIL-05 Fee delegations
 
@@ -352,6 +353,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | D. Existing | none |
 | E. Open, gates | **OD-03**. Stage S3f. Confidence L |
 
+| F. S3f (Owner decisions A1 to A5, 2026-10-26) | IMPLEMENTED (`0025_fee_caps_delegations_proposals.sql`, `src/fees/`). `POST` `{operatorUserId}` → `201 {id, platformId, operatorUserId, createdAt, revokedAt}` (`200` when active already): one operator, one Platform; the operator must be of the Owner's Company with an ACTIVE assignment to the Platform (live `GET /auth/admin/operators/:id/platform-assignments`, Owner bearer), else the collapsed 404; no expiry. Revocation (A3, route implied by the decision): `POST /billing/admin/platforms/:platformId/fee-delegations/:delegationId/revoke`, final, append-only |
 #### BIL-06 Fee proposals
 
 | Part | Contract |
@@ -362,6 +364,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | D. Existing | none |
 | E. Open, gates | **OD-03**. Stage S3f. Confidence L |
 
+| F. S3f (Owner decisions A1 to A5, 2026-10-26) | IMPLEMENTED (`0025_fee_caps_delegations_proposals.sql`, `src/fees/`). `POST` `{organizationId, productId, amount}` → `201` pending. Live: the operator kind (`/auth/grants`), Platform access (`/auth/platform-access`), the Organization on this Platform (`/auth/admin/organizations/:id`, else `403 organization_not_permitted`); an active delegation (else `403 operation_not_permitted`); an ACTIVE `personal` subscription product of the Platform (else `409 product_not_available`); amount within the CURRENT cap (`422 fee_above_cap`); one pending per (Organization, product) (`409 fee_proposal_pending_exists`). Withdrawal by the proposer while delegated: `POST .../fee-proposals/:id/withdraw` (A4, route implied) |
 #### BIL-07 Fee proposal approval
 
 | Part | Contract |
@@ -372,6 +375,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | D. Existing | none |
 | E. Open, gates | **OD-03**, Q11. Stage S3f. Confidence L |
 
+| F. S3f (Owner decisions A1 to A5, 2026-10-26) | IMPLEMENTED (`0025_fee_caps_delegations_proposals.sql`, `src/fees/`). `approve` re-checks the CURRENT cap transactionally (`422 fee_above_cap`) and records `capVersion`; `reject` (A4, route implied: `POST /billing/admin/fee-proposals/:id/reject`); decisions once (`409 fee_proposal_not_pending`); an unknown or another Company's proposal is the collapsed 404. An approved fee is immutable; the latest approval supersedes prospectively; at the point of use (S5) `billing_fee_for_use` re-checks the current cap (`usable`) (A2). A Platform's fee writes are serialized by one advisory lock taken in the triggers |
 #### BIL-08 Invoice routing record at issue
 
 | Part | Contract |
@@ -404,6 +408,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | D. Existing | none (invoice and payment-request creation exist for service producers) |
 | E. Open, gates | **OD-01** (eligibility). Stage S3f; S3/S4 joint checkpoint (roadmap §4.4). Confidence M |
 
+| F. S3f (2026-10-26) | **NOT IMPLEMENTED — blocked.** OD-01 is resolved by the Owner's B6 (an active ordinary member, live `/auth/me`: `isActive` and `adminTier = null`; Auth reports `adminTier = null` exactly for kind `member`). Blocked by the Billing SDD gate (§34): issuing invoices to real customers needs **B-007** (mandatory issuer and customer snapshot content), and a user-bearer write other than a payer's own payment request needs **B-028**; the Owner's C9 forbids placeholder snapshots. Response clarification ready for review (C7): `201 {invoiceId, paymentRequestId, paymentId: string \| null}` — `paymentId` null until the existing asynchronous dispatcher has created the payment, never fabricated |
 #### BIL-11 Personal entitlement read
 
 | Part | Contract |
@@ -966,9 +971,9 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 | Q10 | Approval of the idempotency taxonomy of §2, including the retention of the new administrative class K | every class K entry |
 | Q11 | Step-up purposes beyond `refund.authorize` and those frozen by S0: which Owner actions require a step-up, and the purpose names | AUTH-04 and every Owner command |
 | Q12 | Effect of Company lifecycle state (ADR-0060) on receipt issue and consumption | AUTH-01, AUTH-02 |
-| OD-01 | Meaning of "eligible member" for direct purchase (FC-12, [OD] D2) | BIL-10 |
+| OD-01 | Meaning of "eligible member" for direct purchase (FC-12, [OD] D2). **Resolved (Owner B6, S3f, 2026-10-26):** an active, authenticated ordinary member verified live through `/auth/me`; checkout itself remains blocked by B-007 / B-028 (BIL-10 F) | BIL-10 |
 | OD-02 | Relation of `billing_platform` to the existing Platform currency configuration (`0009_platform_currency.sql`). **Resolved (Owner, S3d, 2026-10-26):** `billing_platform` is authoritative; `platform_currency` superseded for Core V2, kept untouched (BIL-01 F) | BIL-01 |
-| OD-03 | Fee cap, delegation and proposal model: scope (Platform or Organization), units, limits | BIL-04 to BIL-07 |
+| OD-03 | Fee cap, delegation and proposal model: scope (Platform or Organization), units, limits. **Resolved (Owner A1 to A5, S3f, 2026-10-26):** BIL-04 to BIL-07 F | BIL-04 to BIL-07 |
 | OD-04 | How an assistance request selects and freezes its approved school fee | BIL-13, BIL-19 |
 | OD-05 | Premium catalog products, plan durations and prices (the catalog gate, S0 §6) | BIL-02, BIL-03 configuration |
 | OD-06 | Simulation adapter: new beside the `test` provider or replacing it; harness caller and shape (the simulation-adapter gate, roadmap §7) | PAY-14 |

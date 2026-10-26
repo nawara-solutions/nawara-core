@@ -116,6 +116,28 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
     }
   });
 
+  it('Core V2 S3f: the runtime role holds INSERT and SELECT on the append-only fee tables, and UPDATE only on fee_proposal (its guarded decision)', async () => {
+    const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
+    const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });
+    await owner.connect();
+    await app.connect();
+    try {
+      const expected: Record<string, string[]> = {
+        fee_cap: ['INSERT', 'SELECT'], fee_delegation: ['INSERT', 'SELECT'], fee_delegation_revocation: ['INSERT', 'SELECT'],
+        fee_command_idempotency: ['INSERT', 'SELECT'], fee_proposal: ['INSERT', 'SELECT', 'UPDATE'],
+      };
+      for (const [table, privileges] of Object.entries(expected)) {
+        const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);
+        expect(grants.rows.map((r) => r.privilege_type), table).toEqual(privileges);
+        await expect(app.query(`DELETE FROM ${table}`), table).rejects.toThrow(/permission denied/);
+        await expect(app.query(`TRUNCATE ${table}`), table).rejects.toThrow(/permission denied/);
+      }
+    } finally {
+      await owner.end();
+      await app.end();
+    }
+  });
+
   it('Core V2 S3d (BIL-01): the runtime role holds only INSERT and SELECT on billing_platform; UPDATE, DELETE and TRUNCATE are refused by privilege', async () => {
     const owner = new pg.Client({ connectionString: urlFor(migrator, migPw) });
     const app = new pg.Client({ connectionString: urlFor(appRole, appPw) });

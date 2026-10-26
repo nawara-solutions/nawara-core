@@ -66,7 +66,8 @@ SELECT pg_temp.assert_eq('BI-01', 'no money column is anything but bigint',
 SELECT pg_temp.assert_eq('BI-01', 'the money columns that exist are exactly the eight the SDD defines',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND data_type = 'bigint'
     AND table_name NOT IN ('invoice_number_sequence')
-    AND NOT (table_name = 'subscription_purchase' AND column_name = 'ledgerSeq')), '8'); -- S3c: the ledger's ORDER, not money
+    AND NOT (table_name = 'subscription_purchase' AND column_name = 'ledgerSeq') -- S3c: the ledger's ORDER, not money
+    AND NOT (table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount')), '8'); -- S3f: school-fee configuration, checked below
 SELECT pg_temp.expect_error('BI-01', 'an invoice above 2^53-1 is refused', $$INSERT INTO invoice (producer, "invoiceRequestId", "requestHash", "sellerType", "sellerId", "payerType", "payerId", "organizationId",
   "sourceType", "sourceId", currency, subtotal, total, "issuerSnapshot", "billToSnapshot") VALUES ('billing-test', gen_random_uuid(), repeat('a', 64), 'organization', '00000000-0000-4000-8000-0000000000a1',
   'user', 'u', '00000000-0000-4000-8000-0000000000a1', 'contract', 's', 'TND', 9007199254740992, 9007199254740992, '{"schemaVersion":1}', '{"schemaVersion":1}')$$, '23514', 'invoice_amounts_safe');
@@ -764,6 +765,48 @@ SELECT pg_temp.assert_eq('S3e', 'every established subscription in this database
 -- Personal: the ledger's spans carry no grace (no grace column exists on personal_subscription or subscription_purchase)
 SELECT pg_temp.assert_eq('S3e', 'no Personal table has a grace column',
   (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('personal_subscription', 'subscription_purchase', 'subscription_purchase_reversal') AND column_name ILIKE '%grace%'), '0');
+
+-- ------------------------------------------------------------------------------------------------------------- S3f fee caps, delegations, proposals
+\set f_p '00000000-0000-4000-8000-00000000f3f1'
+\set f_owner '00000000-0000-4000-8000-00000000f3a0'
+\set f_op '00000000-0000-4000-8000-00000000f3a1'
+\set f_org '00000000-0000-4000-8000-00000000f3b1'
+INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") VALUES (:'f_p', gen_random_uuid(), 'TND', :'f_owner');
+INSERT INTO product (producer, "sellerType", "sellerId", code, name, "subscriptionTarget", "platformId") VALUES ('billing-test', 'company', 'acme', 's3f-p', 'P', 'personal', :'f_p') RETURNING id AS f_prod \gset
+SELECT pg_temp.assert_eq('S3f', 'fee money columns are bigint', (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('fee_cap', 'fee_proposal') AND column_name = 'amount' AND data_type = 'bigint'), '2');
+INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 99, 500, 'TND', :'f_owner');
+INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 99, 300, 'TND', :'f_owner');
+SELECT pg_temp.assert_eq('S3f', 'cap versions are the database''s: 1, 2 whatever was supplied', (SELECT string_agg(version::text, ',' ORDER BY version) FROM fee_cap WHERE "platformId" = :'f_p'), '1,2');
+SELECT pg_temp.expect_error('S3f', 'a negative cap is refused', format($$INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (%L, 1, -1, 'TND', %L)$$, :'f_p', :'f_owner'), '23514', 'fee_cap_amount_range');
+SELECT pg_temp.expect_error('S3f', 'a cap in another currency than the Platform''s is refused', format($$INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (%L, 1, 1, 'EUR', %L)$$, :'f_p', :'f_owner'), '23503');
+SELECT pg_temp.expect_error('S3f', 'a cap version is never changed', format($$UPDATE fee_cap SET amount = 1 WHERE "platformId" = %L$$, :'f_p'), '23514');
+INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES (:'f_p', :'f_op', :'f_owner') RETURNING id AS f_del \gset
+SELECT pg_temp.expect_error('S3f', 'one active delegation per (Platform, operator)', format($$INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES (%L, %L, %L)$$, :'f_p', :'f_op', :'f_owner'), '23505', 'fee_delegation_active_unique');
+SELECT pg_temp.expect_error('S3f', 'an Owner cannot delegate to themselves', format($$INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES (%L, %L, %L)$$, :'f_p', :'f_owner', :'f_owner'), '23514', 'fee_delegation_not_self');
+SELECT pg_temp.expect_error('S3f', 'a proposal above the CURRENT cap (300, not the earlier 500) is refused', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (%L, %L, %L, 301, 'TND', %L, %L)$$, :'f_p', :'f_org', :'f_prod', :'f_del', :'f_op'), '23514', 'fee_above_cap');
+SELECT pg_temp.expect_error('S3f', 'a proposal cannot be created already approved', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy", status, "decidedBy", "decidedAt") VALUES (%L, %L, %L, 1, 'TND', %L, %L, 'approved', %L, now())$$, :'f_p', :'f_org', :'f_prod', :'f_del', :'f_op', :'f_owner'), '23514', 'fee_proposal_created_pending');
+SELECT pg_temp.expect_error('S3f', 'a proposal for an Organization subscription or a non-subscription product is refused', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy", target) VALUES (%L, %L, %L, 1, 'TND', %L, %L, 'organization')$$, :'f_p', :'f_org', :'f_prod', :'f_del', :'f_op'), '23514', 'fee_proposal_target');
+INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (:'f_p', :'f_org', :'f_prod', 300, 'TND', :'f_del', :'f_op') RETURNING id AS f_prop \gset
+SELECT pg_temp.expect_error('S3f', 'one pending proposal per (Organization, product)', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (%L, %L, %L, 1, 'TND', %L, %L)$$, :'f_p', :'f_org', :'f_prod', :'f_del', :'f_op'), '23505');
+INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 0, 200, 'TND', :'f_owner');
+SELECT pg_temp.expect_error('S3f', 'approval re-checks the CURRENT cap (now 200 < 300)', format($$UPDATE fee_proposal SET status = 'approved', "decidedBy" = %L WHERE id = %L$$, :'f_owner', :'f_prop'), '23514', 'fee_above_cap');
+INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 0, 300, 'TND', :'f_owner');
+SELECT pg_temp.expect_ok('S3f', 'approval within the current cap', format($$UPDATE fee_proposal SET status = 'approved', "decidedBy" = %L WHERE id = %L$$, :'f_owner', :'f_prop'));
+SELECT pg_temp.assert_eq('S3f', 'the approval records the cap version it satisfied and the database clock', (SELECT ("capVersion" = 4 AND "decidedAt" IS NOT NULL)::text FROM fee_proposal WHERE id = :'f_prop'), 'true');
+SELECT pg_temp.expect_error('S3f', 'a decision is final', format($$UPDATE fee_proposal SET status = 'rejected' WHERE id = %L$$, :'f_prop'), '23514', 'fee_proposal_not_pending');
+SELECT pg_temp.expect_error('S3f', 'an approved fee''s amount is immutable', format($$UPDATE fee_proposal SET amount = 1 WHERE id = %L$$, :'f_prop'), '23514');
+SELECT pg_temp.expect_error('S3f', 'a proposal is never deleted', format($$DELETE FROM fee_proposal WHERE id = %L$$, :'f_prop'), '23514');
+SELECT pg_temp.assert_eq('S3f', 'the fee for use is the latest approval, usable under the current cap', (SELECT (amount = 300 AND usable)::text FROM billing_fee_for_use(:'f_org', :'f_prod')), 'true');
+INSERT INTO fee_cap ("platformId", version, amount, currency, "setBy") VALUES (:'f_p', 0, 100, 'TND', :'f_owner');
+SELECT pg_temp.assert_eq('S3f', 'at the point of use a since-lowered cap makes the approved fee unusable (never rewritten)', (SELECT (amount = 300 AND NOT usable)::text FROM billing_fee_for_use(:'f_org', :'f_prod')), 'true');
+INSERT INTO fee_delegation_revocation ("delegationId", "revokedBy") VALUES (:'f_del', :'f_owner');
+SELECT pg_temp.expect_error('S3f', 'a revoked delegation proposes nothing', format($$INSERT INTO fee_proposal ("platformId", "organizationId", "productId", amount, currency, "delegationId", "proposedBy") VALUES (%L, gen_random_uuid(), %L, 0, 'TND', %L, %L)$$, :'f_p', :'f_prod', :'f_del', :'f_op'), '23514', 'fee_proposal_delegation_active');
+SELECT pg_temp.expect_error('S3f', 'a revocation is final (one per delegation)', format($$INSERT INTO fee_delegation_revocation ("delegationId", "revokedBy") VALUES (%L, %L)$$, :'f_del', :'f_owner'), '23505');
+SELECT pg_temp.expect_ok('S3f', 'after a revocation the operator may be delegated again (a new delegation)', format($$INSERT INTO fee_delegation ("platformId", "operatorUserId", "grantedBy") VALUES (%L, %L, %L)$$, :'f_p', :'f_op', :'f_owner'));
+INSERT INTO fee_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (:'f_owner', 'k-s3f-0001', 'fee_cap.set', repeat('a', 64), 201, '{}');
+SELECT pg_temp.expect_error('S3f', 'an idempotency record is never changed', $$UPDATE fee_command_idempotency SET "responseStatus" = 200$$, '23514');
+SELECT pg_temp.expect_error('S3f', 'an idempotency record is never deleted', $$DELETE FROM fee_command_idempotency$$, '23514');
+SELECT pg_temp.expect_error('S3f', 'only a success is recorded for replay', format($$INSERT INTO fee_command_idempotency ("actorUserId", "idempotencyKey", operation, "requestHash", "responseStatus", "responseBody") VALUES (%L, 'k-s3f-0002', 'x', repeat('a', 64), 409, '{}')$$, :'f_owner'), '23514', 'fee_command_idempotency_status');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o
