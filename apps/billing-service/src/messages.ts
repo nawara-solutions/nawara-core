@@ -329,6 +329,17 @@ export const BILLING_MESSAGES = defineMessages({
     fr: 'Cette Idempotency-Key a déjà été utilisée pour une autre requête.',
     ar: 'سبق استخدام مفتاح Idempotency-Key هذا لطلب مختلف.',
   },
+  // Core V2 S3f: direct checkout (register BIL-10)
+  memberNotEligible: {
+    en: 'Only an active member may check out.',
+    fr: 'Seul un membre actif peut effectuer un achat.',
+    ar: 'لا يمكن إتمام الشراء إلا لعضو نشط.',
+  },
+  checkoutUncertain: {
+    en: 'A checkout for this product is still in progress.',
+    fr: 'Un achat de ce produit est encore en cours.',
+    ar: 'لا تزال عملية شراء لهذا المنتج قيد التنفيذ.',
+  },
   feeAmountRange: {
     en: 'amount must be an integer number of minor units from 0 to 9007199254740991',
     fr: 'amount doit être un nombre entier d’unités mineures de 0 à 9007199254740991',

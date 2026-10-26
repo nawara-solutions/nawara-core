@@ -82,29 +82,32 @@ export class PaymentRequestRepository {
 
   /** State-idempotent creation (BI-13): the current active request is returned instead of a second one. */
   async createForInvoice(invoiceId: string, caller: Caller, ctx: TransitionContext): Promise<PaymentRequestResult> {
-    return this.db.tx(async (q) => {
-      const { rows } = await q.query<InvoiceRow>(`SELECT ${INVOICE_COLUMNS} FROM invoice WHERE id = $1 FOR UPDATE`, [invoiceId]);
-      const invoice = rows[0];
-      if (!invoice || relationTo(invoice, caller) === null) throw notFound();
-      if (invoice.status !== 'open') throw billingError(409, 'invoice_not_payable', BILLING_MESSAGES.onlyOpenInvoicePayable);
-      if (invoice.payerType !== 'user') throw billingError(409, 'payment_request_not_supported', BILLING_MESSAGES.onlyUserPayer);
+    return this.db.tx((q) => this.createForInvoiceIn(q, invoiceId, caller, ctx));
+  }
 
-      const active = await q.query<PaymentRequestRow>(
-        `SELECT * FROM payment_request WHERE "invoiceId" = $1 AND status = ANY($2::text[])`,
-        [invoiceId, [...ACTIVE_PAYMENT_REQUEST_STATUSES]],
-      );
-      if (active.rows[0]) return { request: active.rows[0], created: false };
+  /** `createForInvoice` in the CALLER's transaction (Core V2 S3f: direct checkout). */
+  async createForInvoiceIn(q: Queryable, invoiceId: string, caller: Caller, ctx: TransitionContext): Promise<PaymentRequestResult> {
+    const { rows } = await q.query<InvoiceRow>(`SELECT ${INVOICE_COLUMNS} FROM invoice WHERE id = $1 FOR UPDATE`, [invoiceId]);
+    const invoice = rows[0];
+    if (!invoice || relationTo(invoice, caller) === null) throw notFound();
+    if (invoice.status !== 'open') throw billingError(409, 'invoice_not_payable', BILLING_MESSAGES.onlyOpenInvoicePayable);
+    if (invoice.payerType !== 'user') throw billingError(409, 'payment_request_not_supported', BILLING_MESSAGES.onlyUserPayer);
 
-      const actor = actorOf(caller);
-      const inserted = await q.query<PaymentRequestRow>(
-        `INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType", "createdById", "correlationId") VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-        [invoiceId, invoice.total, invoice.currency, actor.type, actor.id, ctx.correlationId ?? null],
-      );
-      const request = inserted.rows[0]!;
-      await recordTransition(q, { entityType: 'payment_request', entityId: request.id, from: null, to: 'created', revision: request.revision, ctx });
-      await this.audit.record(q, 'payment_request.created', { organizationId: invoice.organizationId, resource: { type: 'payment_request', id: request.id }, changes: { invoice_id: invoiceId } }, ctx); // Stage 18.7.2 (G3)
-      return { request, created: true };
-    });
+    const active = await q.query<PaymentRequestRow>(
+      `SELECT * FROM payment_request WHERE "invoiceId" = $1 AND status = ANY($2::text[])`,
+      [invoiceId, [...ACTIVE_PAYMENT_REQUEST_STATUSES]],
+    );
+    if (active.rows[0]) return { request: active.rows[0], created: false };
+
+    const actor = actorOf(caller);
+    const inserted = await q.query<PaymentRequestRow>(
+      `INSERT INTO payment_request ("invoiceId", amount, currency, "createdByType", "createdById", "correlationId") VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [invoiceId, invoice.total, invoice.currency, actor.type, actor.id, ctx.correlationId ?? null],
+    );
+    const request = inserted.rows[0]!;
+    await recordTransition(q, { entityType: 'payment_request', entityId: request.id, from: null, to: 'created', revision: request.revision, ctx });
+    await this.audit.record(q, 'payment_request.created', { organizationId: invoice.organizationId, resource: { type: 'payment_request', id: request.id }, changes: { invoice_id: invoiceId } }, ctx); // Stage 18.7.2 (G3)
+    return { request, created: true };
   }
 
   /**

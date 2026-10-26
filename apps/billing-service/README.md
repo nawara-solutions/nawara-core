@@ -79,7 +79,17 @@ Design and test detail: [`docs/tdd/billing-service-domain-schema.md`](../../docs
   writes, enforces the CURRENT cap at proposal and approval, one pending proposal per (Organization, product), one active delegation per
   (Platform, operator), and one-way decisions; `billing_fee_for_use` re-checks the cap at the point of use. Every command needs an
   `Idempotency-Key` (class K: per actor, bound to the exact request, kept permanently, a success replayed). Fees create no invoice,
-  payment request, settlement or purchase. Direct checkout (BIL-10) is not built: blocked by B-007 / B-028 (register BIL-10 F).
+  payment request, settlement or purchase. Direct checkout (BIL-10) is built for simulation only (below).
+- **Direct checkout (Core V2 S3f; register BIL-10 G; the Owner's D1 to D6, D4 Option A; `db/migrations/0026`, `src/checkout/`) —
+  DEVELOPMENT AND SIMULATION ONLY:** `POST /billing/checkout/direct` with the member's own bearer (live `/auth/me`: active, no admin
+  tier), an `Idempotency-Key` and exactly `{platformId, productId, priceId}`. One transaction creates and issues a one-line invoice
+  (quantity 1, `direct_purchase` to the member, no Organization) under the reserved producer `billing-checkout` and its payment request;
+  the existing dispatcher contacts Payment later (`paymentId` null until then; poll `GET /billing/payment-requests/:id`). The seller is
+  the Platform's Company from `billing_platform`, used as a **simulation commercial seller reference — not a verified legal seller, not
+  Nawara's registered operating Company**; the snapshots are version-2 **references** (`legalIdentity: not_determined`), never invented
+  identity. Only Payment's verified `payment.succeeded` records the purchase and grants entitlement. **Production refuses it** (not
+  mounted under `NODE_ENV=production`; the service refuses too) until B-001 and B-007 are resolved and production activation is
+  separately authorized.
 - **State machines** (`src/domain/state-machines.ts`): invoice `draft, open, paid, void` (`overdue` is derived from the database
   clock), payment request `created .. rejected`. A test proves TypeScript and the triggers agree on every pair.
 - **Snapshots**: party snapshots (container only; content is B-007) and a presentation snapshot v1 (`{schemaVersion, template, locale}`).

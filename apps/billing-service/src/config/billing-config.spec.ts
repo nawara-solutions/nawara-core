@@ -48,6 +48,11 @@ describe('loadBillingConfig', () => {
     for (const bad of ['TN', 'TNDD', 'T1D', ',', 'tnd;usd']) expect(refusal({ ...BASE, BILLING_SUPPORTED_CURRENCIES: bad })).toContain('BILLING_SUPPORTED_CURRENCIES');
   });
 
+  it('Core V2 S3f (D3): no service may hold a token in the reserved checkout producer name billing-checkout', () => {
+    const digest = 'a'.repeat(64);
+    expect(refusal({ ...BASE, SERVICE_TOKENS: `billing-checkout:${digest}` })).toContain('billing-checkout is reserved');
+  });
+
   it('Core V2 S3e: grace is not configurable — the retired SUBSCRIPTION_GRACE_DAYS is refused, whatever its value, never silently ignored', () => {
     for (const v of ['1', '7', '365', '0', 'seven']) expect(refusal({ ...BASE, SUBSCRIPTION_GRACE_DAYS: v })).toContain('SUBSCRIPTION_GRACE_DAYS was retired');
     expect(() => loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '' })).not.toThrow(); // empty means unset, like every other optional value

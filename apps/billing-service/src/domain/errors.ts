@@ -37,7 +37,10 @@ export type BillingErrorCode =
   | 'fee_proposal_not_pending'
   | 'fee_proposal_pending_exists'
   | 'product_not_available'
-  | 'idempotency_key_conflict';
+  | 'idempotency_key_conflict'
+  | 'invalid_checkout_request' // Core V2 S3f direct checkout (register BIL-10)
+  | 'member_not_eligible'
+  | 'checkout_uncertain';
 
 /**
  * `message`: a catalog entry (localized, ADR-0054), or a plain English string for the D10-deferred messages that carry a client-derived

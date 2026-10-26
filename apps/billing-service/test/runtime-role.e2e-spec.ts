@@ -125,6 +125,7 @@ describeWithEnv('runtime database role: the service runs as a non-owner, DML-onl
       const expected: Record<string, string[]> = {
         fee_cap: ['INSERT', 'SELECT'], fee_delegation: ['INSERT', 'SELECT'], fee_delegation_revocation: ['INSERT', 'SELECT'],
         fee_command_idempotency: ['INSERT', 'SELECT'], fee_proposal: ['INSERT', 'SELECT', 'UPDATE'],
+        checkout_idempotency: ['INSERT', 'SELECT'], // S3f direct checkout (0026)
       };
       for (const [table, privileges] of Object.entries(expected)) {
         const grants = await owner.query(`SELECT privilege_type FROM information_schema.role_table_grants WHERE grantee = $1 AND table_name = $2 ORDER BY 1`, [appRole, table]);

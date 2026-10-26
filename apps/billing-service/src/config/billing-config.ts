@@ -5,6 +5,9 @@ import {
 } from '@nawara/service-kit';
 import { parseBillingServicePolicy, type BillingCallerPolicy } from '../admission/caller-admission.policy.js';
 
+/** Core V2 S3f (D3): the reserved internal producer of direct-checkout invoices (never a service-token caller). */
+export const CHECKOUT_PRODUCER = 'billing-checkout';
+
 /**
  * billing-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16 lists the settings a Core
  * service needs). Stage 1 carries ONLY what the foundation itself uses; every later stage adds its own values with the feature
@@ -94,6 +97,8 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
   }
 
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
+  // Core V2 S3f (D3): `billing-checkout` is Billing's own reserved producer for direct checkout; no service may hold a token in its name.
+  if (serviceTokens.some((t) => t.caller === CHECKOUT_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${CHECKOUT_PRODUCER} is reserved by Billing`);
   const servicePolicy = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(serviceTokens));
   const config = {
     ...base,
