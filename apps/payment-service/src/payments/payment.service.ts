@@ -7,6 +7,7 @@ import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { canTransitionPayment, isTerminalPaymentStatus } from './payment-state-machine.js';
+import { isPaymentUncertain } from './payment-closing.js';
 import { ACCEPTED_PURPOSES, CORE_V2_LIVE_MODE, type PaymentPurpose, type PaymentRow } from './payment.types.js';
 import type { CreatePaymentDto } from './dto/create-payment.dto.js';
 import { OrganizationScopeService } from '../authorization/organization-scope.service.js';
@@ -153,14 +154,17 @@ export class PaymentService {
       const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [id]);
       const payment = rows[0];
       if (!payment) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
+      // Core V2 S4c (F-1, F-7): a payment already closing answers its closing state again (no second side effect)
+      if (payment.status === 'closing') return { payment, replayed: false };
       if (isTerminalPaymentStatus(payment.status) || !canTransitionPayment(payment.status, 'cancelled')) {
         throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.cannotCancelInStatus, { status: payment.status });
       }
-      const { rows: openAttempts } = await q.query(
-        `SELECT 1 FROM payment_attempt WHERE "paymentId" = $1 AND status IN ('initiated','submitted','unknown')`,
-        [id],
-      );
-      if (openAttempts.length > 0) throw paymentError(409, 'payment_has_open_attempt', PAYMENT_MESSAGES.attemptStillOpen);
+      // Core V2 S4c (F-1): while an attempt may still settle it, the cancel is recorded as closing (the controller answers 202); it ends
+      // cancelled — or succeeded — only when the provider's evidence resolves every such attempt. No event until then (F-7).
+      if (await isPaymentUncertain(q, id)) {
+        const { rows: closing } = await q.query<PaymentRow>(`UPDATE payment SET status = 'closing', "closingReason" = 'cancel' WHERE id = $1 RETURNING *`, [id]);
+        return { payment: closing[0], replayed: false };
+      }
       const { rows: updated } = await q.query<PaymentRow>(
         `UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = $1 RETURNING *`,
         [id],

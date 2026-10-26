@@ -33,7 +33,7 @@ for i in $(seq 1 "$racers"); do
   ( psql -q -d "$db" >"$outdir/$i.out" 2>&1 -c "INSERT INTO payment_attempt(id, \"paymentId\", \"attemptNumber\", provider) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000001', $i, 'test');" ) &
 done
 wait
-ok=$(grep -L "payment_attempt_one_open" "$outdir"/*.out | wc -l)
+ok=$(grep -L -E "payment_attempt_one_open|no new attempt while" "$outdir"/*.out | wc -l) # S4c: the uncertainty guard (serialized on the payment row) refuses first
 open_count=$(psql -Atq -d "$db" -c "SELECT count(*) FROM payment_attempt WHERE \"paymentId\"='00000000-0000-0000-0000-000000000001' AND status IN ('initiated','submitted','unknown')")
 rm -rf "$outdir"
 [ "$ok" -eq 1 ] && [ "$open_count" -eq 1 ] || fail "one open attempt per payment race: ok=$ok open_count=$open_count (want ok=1 open_count=1)"

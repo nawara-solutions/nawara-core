@@ -133,7 +133,7 @@ describeWithEnv('payment cancel API and event producer field (real PostgreSQL)',
     expect(r.body.code).toBe('not_found');
   });
 
-  it('refuses to cancel a pending payment with an open attempt (409 payment_has_open_attempt) — money may be in flight', async () => {
+  it('Core V2 S4c (F-1, F-7): a cancel while an attempt is open starts CLOSING (202), never cancels; a repeat answers the same 202, with no event', async () => {
     const created = await create(validBody()).expect(201);
     await request(t.app.getHttpServer())
       .post(`/payment/payments/${created.body.id}/attempts`)
@@ -141,8 +141,15 @@ describeWithEnv('payment cancel API and event producer field (real PostgreSQL)',
       .set('idempotency-key', 'attempt-key-1')
       .send({ provider: 'test', providerOptions: { scenario: 'timeout_after_accept' } })
       .expect(201);
-    const r = await cancel(created.body.id, billing.token, 'cancel-with-open-attempt').expect(409);
-    expect(r.body.code).toBe('payment_has_open_attempt');
+    const r = await cancel(created.body.id, billing.token, 'cancel-with-open-attempt').expect(202);
+    expect(r.body).toMatchObject({ status: 'closing', finality: 'uncertain', closingReason: 'cancel' });
+    expect(r.body.closingSince).toEqual(expect.any(String));
+    const again = await cancel(created.body.id, billing.token, 'cancel-again-while-closing').expect(202);
+    expect([again.body.status, again.body.closingSince]).toEqual(['closing', r.body.closingSince]); // no second side effect
+    const replay = await cancel(created.body.id, billing.token, 'cancel-with-open-attempt').expect(202); // same key: same answer
+    expect(replay.body.status).toBe('closing');
+    const dbService = t.app.get(DbService);
+    expect((await dbService.query(`SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.cancelled' AND payload->>'paymentId' = $1`, [created.body.id])).rows[0].n).toBe(0);
   });
 
   it('unknown payment id is 404', async () => {

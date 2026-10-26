@@ -72,17 +72,20 @@ export class PaymentsController {
   @ApiBearerAuth()
   @ApiOperation({
     summary:
-      'Cancel a payment (producer only; must equal the payment\'s own producer). Requires Idempotency-Key. Only created/pending ' +
-      'payments with no open attempt can be cancelled — terminal states (succeeded/failed/expired/cancelled) are refused.',
+      'Cancel a payment (producer only; must equal the payment\'s own producer). Requires Idempotency-Key. A created/pending payment ' +
+      'is cancelled at once (200) unless an attempt may still settle it: then it starts CLOSING (202, status closing) and ends cancelled ' +
+      '(payment.cancelled) or succeeded (payment.succeeded) when the provider resolves that attempt (Core V2 S4c). A repeat while closing ' +
+      'answers the same 202. Terminal states (succeeded/failed/expired/cancelled) are refused.',
   })
   @ApiResponse({ status: 200, description: 'Cancelled, or an identical replay of the original cancellation.' })
+  @ApiResponse({ status: 202, description: 'Closing: an attempt may still settle the payment; nothing more happens until the provider resolves it (Core V2 S4c, F-1, F-7).' })
   @ApiResponse({ status: 400, description: 'idempotency_key_required' })
   @ApiResponse({ status: 401 })
   @ApiResponse({ status: 403, description: 'operation_not_permitted: the calling service does not hold payment.cancel' })
   @ApiResponse({ status: 404, description: 'collapsed: missing, or not this caller\'s payment' })
-  @ApiResponse({ status: 409, description: 'invalid_state_transition / payment_has_open_attempt' })
+  @ApiResponse({ status: 409, description: 'invalid_state_transition' })
   @ApiResponse({ status: 422, description: 'idempotency_key_reused' })
-  async cancel(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string, @Headers('idempotency-key') idempotencyKey: string | undefined) {
+  async cancel(@CallerService() producer: string, @Param('id', new ParseUUIDPipe()) id: string, @Headers('idempotency-key') idempotencyKey: string | undefined, @Res({ passthrough: true }) res: Response) {
     if (!idempotencyKey || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
       throw paymentError(400, 'idempotency_key_required', PAYMENT_MESSAGES.idempotencyKeyRequired);
     }
@@ -90,6 +93,7 @@ export class PaymentsController {
     if (!payment) throw notFound();
     this.authorization.assertCanCancel(payment, { kind: 'service', service: producer });
     const { payment: cancelled } = await this.payments.cancel(id, producer, idempotencyKey);
+    if (cancelled.status === 'closing') res.status(202); // Core V2 S4c (F-7): Billing reads 202 as its existing `in_flight`
     return representPayment(this.db, cancelled);
   }
 }

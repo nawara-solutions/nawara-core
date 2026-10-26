@@ -79,40 +79,37 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
 
   // ---------------------------------------------------------------------------------------------- late success
 
-  it('R-01 late success for an INFERRED-failed attempt whose payment already ended `failed` is a recorded CONFLICT, not a 500 loop (SDD 5.1 "already terminal in another way")', async () => {
+  it('R-01 (Core V2 S4c F-3, F-4): an inferred failure at the attempt limit never fails the payment; it stays uncertain and a later verified success settles it once', async () => {
     const payment = await create(tOne);
     const a = (await startAttempt(tOne, payment.id, 'r01-key-aaaa', { scenario: 'timeout_after_accept' }).expect(201)).body;
     const provider = tOne.app.get(ProviderRegistry).get('test');
-    await tOne.app.get(AttemptService).applyStatus(a.id, { kind: 'notFound' }, provider); // inferred failure; limit 1 -> payment failed
-    expect((await getPayment(payment.id).expect(200)).body.status).toBe('failed');
+    await tOne.app.get(AttemptService).applyStatus(a.id, { kind: 'notFound' }, provider); // inferred failure; limit 1 reached
+    const before = (await getPayment(payment.id).expect(200)).body;
+    expect([before.status, before.finality]).toEqual(['created', 'uncertain']); // never `failed` on a guess (F-3)
+    expect(await outbox('payment.failed', payment.id)).toHaveLength(0);
 
     const { body, signature } = signedFor(a.id, `evt_${a.id}`);
     await postWebhook(tOne, body, signature).expect(200);
 
-    expect(await eventState(`evt_${a.id}`)).toEqual([{ state: 'conflict', outcome: 'invalid_state_transition', attempts: 1 }]);
+    expect(await eventState(`evt_${a.id}`)).toEqual([{ state: 'processed', outcome: null, attempts: 1 }]);
     const after = (await getPayment(payment.id).expect(200)).body;
-    expect(after.status).toBe('failed'); // a terminal payment never moves
-    expect(await outbox('payment.succeeded', payment.id)).toHaveLength(0);
+    expect([after.status, after.finality]).toEqual(['succeeded', 'final']);
+    expect(await outbox('payment.succeeded', payment.id)).toHaveLength(1);
   });
 
-  it('R-02 FI-03/FI-06: a late success on attempt A while attempt B is open settles once; a later success on B is a CONFLICT and never a second succeeded attempt', async () => {
+  it('R-02 (Core V2 S4c F-6, FI-03): no second attempt while an inferred failure may still settle the payment; the late success then settles it once', async () => {
     const payment = await create();
     const a = (await startAttempt(t, payment.id, 'r02-key-aaaa', { scenario: 'timeout_after_accept' }).expect(201)).body;
     const provider = t.app.get(ProviderRegistry).get('test');
     await t.app.get(AttemptService).applyStatus(a.id, { kind: 'notFound' }, provider); // A failed by inference; payment back to created
-    const b = (await startAttempt(t, payment.id, 'r02-key-bbbb', { scenario: 'success' }).expect(201)).body; // B submitted; payment pending
-    expect(b.status).toBe('submitted');
+    const refused = await startAttempt(t, payment.id, 'r02-key-bbbb', { scenario: 'success' }).expect(409); // no second collection
+    expect(refused.body.code).toBe('payment_uncertain');
 
     const late = signedFor(a.id, `evt_${a.id}`);
     await postWebhook(t, late.body, late.signature).expect(200);
     expect((await getPayment(payment.id).expect(200)).body.status).toBe('succeeded');
-
-    const second = testProvider(t).signSuccessCallback(b.id);
-    await postWebhook(t, second.body, second.signature).expect(200);
-
-    expect(await eventState(`evt_${b.id}`)).toEqual([{ state: 'conflict', outcome: 'invalid_state_transition', attempts: 1 }]);
-    const succeeded = await sql(`SELECT id FROM payment_attempt WHERE "paymentId" = $1 AND status = 'succeeded'`, [payment.id]);
-    expect(succeeded.rows).toEqual([{ id: a.id }]); // exactly one succeeded attempt (FI-03)
+    const succeeded = await sql(`SELECT id FROM payment_attempt WHERE "paymentId" = $1`, [payment.id]);
+    expect(succeeded.rows).toEqual([{ id: a.id }]); // exactly one attempt, and it is the one that succeeded (FI-03)
     expect(await outbox('payment.succeeded', payment.id)).toHaveLength(1);
     const p = (await sql('SELECT "succeededAttemptId" FROM payment WHERE id = $1', [payment.id])).rows[0];
     expect(p.succeededAttemptId).toBe(a.id);
@@ -408,14 +405,19 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
   it('R-21 DB FI-03: two succeeded attempts on one payment are refused by the database itself', async () => {
     const payment = await create();
     const pid = payment.id;
-    await sql(`UPDATE payment SET status = 'pending' WHERE id = $1`, [pid]);
     const first = crypto.randomUUID();
     const second = crypto.randomUUID();
     await sql(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES ($1, $2, 1, 'test')`, [first, pid]);
+    await sql(`UPDATE payment SET status = 'pending' WHERE id = $1`, [pid]);
     await sql(`UPDATE payment_attempt SET status = 'submitted' WHERE id = $1`, [first]);
     await sql(`UPDATE payment_attempt SET status = 'succeeded' WHERE id = $1`, [first]);
-    await sql(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES ($1, $2, 2, 'test')`, [second, pid]);
-    await sql(`UPDATE payment_attempt SET status = 'submitted' WHERE id = $1`, [second]);
+    // Core V2 S4c (F-6) refuses a second attempt outright now; beneath that guard the FI-03 index must still hold on its own, so the second
+    // attempt is written as pre-existing history (replica mode: no triggers, every index still enforced)
+    await t.app.get(DbService).tx(async (q) => {
+      await q.query(`SET LOCAL session_replication_role = replica`);
+      await q.query(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, status, "liveMode") VALUES ($1, $2, 2, 'test', 'submitted', false)`, [second, pid]);
+    });
+    await expect(sql(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES (gen_random_uuid(), $1, 3, 'test')`, [pid])).rejects.toMatchObject({ code: '23514' }); // the S4c guard
     await expect(sql(`UPDATE payment_attempt SET status = 'succeeded' WHERE id = $1`, [second])).rejects.toMatchObject({ code: '23505' });
   });
 
@@ -430,8 +432,8 @@ describeWithEnv('phase 1 acceptance review: adversarial regressions (real Postgr
     const payment = await create();
     const pid = payment.id;
     const attempt = crypto.randomUUID();
+    await sql(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES ($1, $2, 1, 'test')`, [attempt, pid]); // while created (S4c F-6)
     await sql(`UPDATE payment SET status = 'pending' WHERE id = $1`, [pid]);
-    await sql(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES ($1, $2, 1, 'test')`, [attempt, pid]);
     await sql(`UPDATE payment_attempt SET status = 'failed', "failureClass" = 'terminal', "failureCode" = 'card_declined' WHERE id = $1`, [attempt]); // provider-confirmed failure
     await sql(`UPDATE payment SET status = 'created' WHERE id = $1`, [pid]);
     // there is no legitimate way for this attempt to become succeeded, so the payment must not be forced to succeeded by a bare UPDATE either

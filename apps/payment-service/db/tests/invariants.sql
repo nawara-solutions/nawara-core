@@ -140,7 +140,7 @@ SELECT pg_temp.expect_error('SM', 'created -> succeeded is refused when the earl
 SELECT pg_temp.expect_error('SM', 'created -> succeeded is refused with no succeeded attempt at all',
   format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway' WHERE id = %L$$,
     pg_temp.new_payment('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-0000000000a1')), '23514');
-SELECT pg_temp.expect_error('FI-11', 'created -> failed is still not a valid transition (only succeeded has a late path from created)',
+SELECT pg_temp.expect_error('FI-11', 'created -> failed is refused (S4c: only after a CONFIRMED inferred failure; checked below)',
   format($$UPDATE payment SET status = 'failed' WHERE id = %L$$,
     pg_temp.new_payment('00000000-0000-0000-0000-0000000000b9', '00000000-0000-0000-0000-0000000000a1')), '23514');
 SELECT pg_temp.pending_with_succeeded_attempt('00000000-0000-0000-0000-0000000000b3', '00000000-0000-0000-0000-0000000000a1') AS pay3 \gset
@@ -209,8 +209,13 @@ SELECT pg_temp.expect_error('FI-09', 'the same (provider, providerTransactionId)
   format($$UPDATE payment_attempt SET status = 'submitted', "providerTransactionId" = 'ptx-1' WHERE id = %L$$, :'att7'), '23505');
 
 -- ================================================= "one open attempt per payment" (5.1) ----
-SELECT pg_temp.expect_error('OPENATTEMPT', 'a second open attempt on the same payment is refused',
-  format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES (gen_random_uuid(), %L, 2, 'test')$$, :'pay7'), '23505');
+SELECT pg_temp.expect_error('OPENATTEMPT', 'a second open attempt on the same payment is refused (S4c: by the uncertainty guard first)',
+  format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES (gen_random_uuid(), %L, 2, 'test')$$, :'pay7'), '23514');
+-- the unique index still holds on its own, beneath the guard (replica mode: no triggers, indexes enforced)
+SET session_replication_role = replica;
+SELECT pg_temp.expect_error('OPENATTEMPT', 'beneath the guard, the one-open-attempt index still refuses a second open attempt',
+  format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), %L, 2, 'test', false)$$, :'pay7'), '23505');
+SET session_replication_role = origin;
 
 -- ==================================================================== attempt immutable ----
 SELECT pg_temp.expect_error('ATTEMPT-IMMUTABLE', 'provider cannot change after creation',
@@ -224,7 +229,10 @@ SELECT pg_temp.expect_error('ATTEMPT-SM', 'submitted -> initiated is not a valid
 SELECT pg_temp.new_payment('00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000a1') AS pay_two \gset
 SELECT pg_temp.new_attempt(:'pay_two', 1) AS att_two_a \gset
 UPDATE payment_attempt SET status = 'failed', "failureInferred" = true WHERE id = :'att_two_a';
-SELECT pg_temp.new_attempt(:'pay_two', 2) AS att_two_b \gset
+-- S4c (F-6) refuses a second attempt while the first may still settle; this pre-S4c history is simulated in replica mode
+SET session_replication_role = replica;
+INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), :'pay_two', 2, 'test', false) RETURNING id AS att_two_b \gset
+SET session_replication_role = origin;
 UPDATE payment_attempt SET status = 'submitted' WHERE id = :'att_two_b';
 UPDATE payment_attempt SET status = 'succeeded' WHERE id = :'att_two_b';
 SELECT pg_temp.expect_error('FI-03', 'a second succeeded attempt on the same payment is refused (late success of an earlier inferred failure)',
@@ -276,10 +284,12 @@ SELECT pg_temp.assert_eq('S4a', 'a new payment is non-live by default (server-de
 SELECT pg_temp.expect_error('S4a', 'S-6: the purpose is immutable', format($$UPDATE payment SET purpose = 'organization_subscription' WHERE id = %L$$, :'pay1'), '23514');
 SELECT pg_temp.expect_error('S4a', 'S-6: the beneficiary is immutable', format($$UPDATE payment SET "beneficiaryUserId" = 'u-9' WHERE "beneficiaryUserId" = 'u-1'$$), '23514');
 SELECT pg_temp.expect_error('S4a', 'P-6: liveMode is immutable', format($$UPDATE payment SET "liveMode" = NULL WHERE id = %L$$, :'pay1'), '23514');
-SELECT pg_temp.new_attempt(:'pay1', 9) AS s4a_att \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS s4a_pay \gset
+SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') AS s4a_pay2 \gset
+SELECT pg_temp.new_attempt(:'s4a_pay', 9) AS s4a_att \gset
 SELECT pg_temp.assert_eq('S4a', 'an attempt takes its payment''s mode', (SELECT "liveMode"::text FROM payment_attempt WHERE id = :'s4a_att'), 'false');
 SELECT pg_temp.expect_error('S4a', 'an attempt of a different mode than its payment is refused (and no attempt is live)',
-  format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), %L, 10, 'test', true)$$, :'pay1'), '23514');
+  format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider, "liveMode") VALUES (gen_random_uuid(), %L, 10, 'test', true)$$, :'s4a_pay2'), '23514');
 SELECT pg_temp.expect_error('S4a', 'an attempt''s mode is immutable', format($$UPDATE payment_attempt SET "liveMode" = NULL WHERE id = %L$$, :'s4a_att'), '23514');
 -- A payment created BEFORE S4a (simulated: the insert guard does not fire in replica mode) keeps NULL and is never re-interpreted
 SET session_replication_role = replica;
@@ -331,6 +341,71 @@ SELECT pg_temp.expect_error('S4b', 'S4a: the same payment''s seller stays immuta
 SELECT pg_temp.assert_eq('S4b', 'the constraint is validated: every existing row satisfies it (nothing was rewritten)',
   (SELECT convalidated::text FROM pg_constraint WHERE conname = 'payment_no_company_cash_settlement'), 'true');
 SELECT pg_temp.assert_eq('S4b', 'no Company payment is settled in cash', (SELECT count(*)::text FROM payment WHERE "sellerType" = 'company' AND "settledMethod" = 'cash'), '0');
+\o
+
+-- ======================================================= Core V2 S4c: closing, uncertainty, late success (0012) ----
+CREATE FUNCTION pg_temp.s4c_pay() RETURNS uuid LANGUAGE sql AS $f$ SELECT pg_temp.new_payment(gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1') $f$;
+\o /dev/null
+-- an open attempt: uncertain
+SELECT pg_temp.s4c_pay() AS c1 \gset
+SELECT pg_temp.new_attempt(:'c1', 1) AS c1a \gset
+UPDATE payment SET status = 'pending' WHERE id = :'c1';
+SELECT pg_temp.assert_eq('S4c', 'F-2: a payment with an open attempt is uncertain', payment_is_uncertain(:'c1')::text, 'true');
+SELECT pg_temp.expect_error('S4c', 'F-1: never cancelled while uncertain (raw SQL)', format($$UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: never expired while uncertain (raw SQL)', format($$UPDATE payment SET status = 'expired', "closedAt" = now() WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-3: never failed while uncertain (raw SQL)', format($$UPDATE payment SET status = 'failed', "closedAt" = now() WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: closing records its reason', format($$UPDATE payment SET status = 'closing' WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: an unknown closing reason is refused', format($$UPDATE payment SET status = 'closing', "closingReason" = 'whim' WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_ok('S4c', 'F-1: a cancel while uncertain starts closing', format($$UPDATE payment SET status = 'closing', "closingReason" = 'cancel' WHERE id = %L$$, :'c1'));
+SELECT pg_temp.assert_eq('S4c', 'F-1: closingSince is the database time', (SELECT ("closingSince" > now() - interval '1 minute')::text FROM payment WHERE id = :'c1'), 'true');
+SELECT pg_temp.expect_error('S4c', 'F-1: a closing payment never returns to created', format($$UPDATE payment SET status = 'created' WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: a closing payment never returns to pending', format($$UPDATE payment SET status = 'pending' WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: a closing (cancel) payment cannot end expired', format($$UPDATE payment SET status = 'expired' WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: a closing payment cannot end while still uncertain', format($$UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-1: the closing reason is set once', format($$UPDATE payment SET "closingReason" = 'expiry' WHERE id = %L$$, :'c1'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-6: a closing payment takes no new attempt', format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES (gen_random_uuid(), %L, 2, 'test')$$, :'c1'), '23514');
+UPDATE payment_attempt SET status = 'submitted' WHERE id = :'c1a';
+UPDATE payment_attempt SET status = 'failed', "failureCode" = 'declined', "failureClass" = 'terminal' WHERE id = :'c1a';
+SELECT pg_temp.assert_eq('S4c', 'F-3: a provider-confirmed failure ends the uncertainty', payment_is_uncertain(:'c1')::text, 'false');
+SELECT pg_temp.expect_ok('S4c', 'F-1: closing (cancel) ends cancelled once nothing is uncertain', format($$UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = %L$$, :'c1'));
+SELECT pg_temp.assert_eq('S4c', 'F-1: the closing history is kept on the final payment', (SELECT "closingReason" FROM payment WHERE id = :'c1'), 'cancel');
+-- an inferred failure: uncertain until confirmed; closing (expiry) then succeeds on a verified late success
+SELECT pg_temp.s4c_pay() AS c2 \gset
+SELECT pg_temp.new_attempt(:'c2', 1) AS c2a \gset
+UPDATE payment_attempt SET status = 'unknown' WHERE id = :'c2a';
+UPDATE payment_attempt SET status = 'failed', "failureInferred" = true, "failureCode" = 'not_found', "failureClass" = 'terminal' WHERE id = :'c2a';
+SELECT pg_temp.assert_eq('S4c', 'F-2: an inferred failure keeps the payment uncertain', payment_is_uncertain(:'c2')::text, 'true');
+SELECT pg_temp.expect_error('S4c', 'F-6: no second attempt after an inferred failure (no second collection)', format($$INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES (gen_random_uuid(), %L, 2, 'test')$$, :'c2'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-3: an inferred failure never lets the payment fail', format($$UPDATE payment SET status = 'failed', "closedAt" = now() WHERE id = %L$$, :'c2'), '23514');
+SELECT pg_temp.expect_ok('S4c', 'F-1: an expiry while uncertain starts closing', format($$UPDATE payment SET status = 'closing', "closingReason" = 'expiry' WHERE id = %L$$, :'c2'));
+UPDATE payment_attempt SET status = 'succeeded' WHERE id = :'c2a';
+SELECT pg_temp.expect_ok('S4c', 'F-4: a verified success during closing settles the payment', format($$UPDATE payment SET status = 'succeeded', "settledMethod" = 'gateway', "succeededAttemptId" = %L, "closedAt" = now() WHERE id = %L$$, :'c2a', :'c2'));
+-- a confirmed inferred failure: definitive; created -> failed only then; the late-success edge closes
+SELECT pg_temp.s4c_pay() AS c3 \gset
+SELECT pg_temp.new_attempt(:'c3', 1) AS c3a \gset
+UPDATE payment_attempt SET status = 'unknown' WHERE id = :'c3a';
+UPDATE payment_attempt SET status = 'failed', "failureInferred" = true, "failureCode" = 'not_found', "failureClass" = 'terminal' WHERE id = :'c3a';
+SELECT pg_temp.expect_error('S4c', 'F-3: created -> failed is refused while the failure is only inferred', format($$UPDATE payment SET status = 'failed', "closedAt" = now() WHERE id = %L$$, :'c3'), '23514');
+UPDATE payment_attempt SET "failureConfirmedAt" = '2000-01-01', "confirmedFailureCode" = 'declined' WHERE id = :'c3a';
+SELECT pg_temp.assert_eq('S4c', 'F-3: the confirmation time is the database time', (SELECT ("failureConfirmedAt" > now() - interval '1 minute')::text FROM payment_attempt WHERE id = :'c3a'), 'true');
+SELECT pg_temp.assert_eq('S4c', 'F-3: a confirmed inferred failure ends the uncertainty', payment_is_uncertain(:'c3')::text, 'false');
+SELECT pg_temp.expect_error('S4c', 'F-3: a confirmation is never rewritten', format($$UPDATE payment_attempt SET "confirmedFailureCode" = 'other' WHERE id = %L$$, :'c3a'), '23514');
+SELECT pg_temp.expect_error('S4c', 'F-3: a confirmed failure has no late-success edge any more', format($$UPDATE payment_attempt SET status = 'succeeded' WHERE id = %L$$, :'c3a'), '23514');
+SELECT pg_temp.expect_ok('S4c', 'F-3: created -> failed once the inferred failure is confirmed', format($$UPDATE payment SET status = 'failed', "closedAt" = now() WHERE id = %L$$, :'c3'));
+SELECT pg_temp.expect_error('S4c', 'a confirmation only on an inferred failure', format($$UPDATE payment_attempt SET "failureConfirmedAt" = now(), "confirmedFailureCode" = 'x' WHERE id = %L$$, :'c1a'), '23514');
+-- not uncertain: closing is refused
+SELECT pg_temp.s4c_pay() AS c4 \gset
+SELECT pg_temp.expect_error('S4c', 'F-1: closing is refused when nothing is uncertain', format($$UPDATE payment SET status = 'closing', "closingReason" = 'cancel' WHERE id = %L$$, :'c4'), '23514');
+SELECT pg_temp.expect_ok('S4c', 'a payment with no attempt is cancelled at once (unchanged)', format($$UPDATE payment SET status = 'cancelled', "closedAt" = now() WHERE id = %L$$, :'c4'));
+SELECT pg_temp.expect_error('S4c', 'a payment is never created closing', $$INSERT INTO payment(producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", amount, currency, purpose, status, "closingReason")
+  VALUES ('billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'company', 'n', 100, 'TND', 'non_entitlement', 'closing', 'cancel')$$, '23514');
+-- F-4: the durable late-success record (append-only, once per attempt/source/webhook event)
+INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus") VALUES (:'c1', :'c1a', 'status_check', 1000, 'TND', 'cancelled');
+SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is recorded once per (attempt, source, webhook event)', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus") VALUES (%L, %L, 'status_check', 1000, 'TND', 'cancelled')$$, :'c1', :'c1a'), '23505');
+SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is never changed', $$UPDATE payment_late_success SET amount = 1$$, '23514');
+SELECT pg_temp.expect_error('S4c', 'F-4: a late-success record is never deleted', $$DELETE FROM payment_late_success$$, '23514');
+SELECT pg_temp.expect_error('S4c', 'F-4: a webhook-sourced record names its stored webhook event', format($$INSERT INTO payment_late_success ("paymentId", "attemptId", source, amount, currency, "paymentStatus") VALUES (%L, %L, 'webhook', 1000, 'TND', 'cancelled')$$, :'c1', :'c1a'), '23514');
+SELECT pg_temp.assert_eq('S4c', 'F-4: recording a late success leaves the payment final and unchanged', (SELECT status FROM payment WHERE id = :'c1'), 'cancelled');
 \o
 
 -- ---------------------------------------------------------------------------- verdict ----

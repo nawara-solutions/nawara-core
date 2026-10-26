@@ -5,6 +5,8 @@ const ALLOWED_PAIRS: [PaymentStatus, PaymentStatus][] = [
   ['created', 'pending'], ['pending', 'created'], ['pending', 'succeeded'], ['pending', 'failed'],
   ['created', 'cancelled'], ['pending', 'cancelled'], ['created', 'expired'], ['pending', 'expired'],
   ['created', 'succeeded'], // late success: an inferred failure already returned the payment to created
+  // Core V2 S4c (F-1, F-3): closing, and failed once an inferred failure is confirmed
+  ['created', 'failed'], ['created', 'closing'], ['pending', 'closing'], ['closing', 'succeeded'], ['closing', 'cancelled'], ['closing', 'expired'],
 ];
 
 describe('payment state machine (SDD section 5.1)', () => {
@@ -32,5 +34,17 @@ describe('payment state machine (SDD section 5.1)', () => {
   it('classifies succeeded, failed, cancelled and expired as terminal, and no others', () => {
     expect(TERMINAL_PAYMENT_STATUSES).toEqual(['succeeded', 'failed', 'cancelled', 'expired']);
     for (const s of PAYMENT_STATUSES) expect(isTerminalPaymentStatus(s)).toBe(TERMINAL_PAYMENT_STATUSES.includes(s));
+  });
+
+  it('Core V2 S4c (F-1, F-5): closing never returns to created or pending; finality is operational and derived', async () => {
+    const { paymentFinality } = await import('./payment-state-machine.js');
+    expect(canTransitionPayment('closing', 'created')).toBe(false);
+    expect(canTransitionPayment('closing', 'pending')).toBe(false);
+    expect(isTerminalPaymentStatus('closing')).toBe(false);
+    expect(paymentFinality('closing', false)).toBe('uncertain');
+    expect(paymentFinality('created', true)).toBe('uncertain');
+    expect(paymentFinality('created', false)).toBe('open');
+    expect(paymentFinality('pending', true)).toBe('uncertain');
+    for (const s of TERMINAL_PAYMENT_STATUSES) expect(paymentFinality(s, true)).toBe('final'); // workflow-final, even with evidence pending
   });
 });

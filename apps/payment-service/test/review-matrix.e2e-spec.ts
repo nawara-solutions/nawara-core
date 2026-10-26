@@ -113,8 +113,13 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
           await client.query(
             `INSERT INTO payment(id, producer, "paymentRequestId", "sourceType", "sourceId", "payerType", "payerId", "sellerType", "sellerId", "organizationId", amount, currency, status, "settledMethod", purpose, "liveMode")
              VALUES ($1, 'billing-service', gen_random_uuid(), 'invoice', 'i', 'user', 'u', 'organization', $2::text, $2::uuid, 100, 'TND', $3, $4, 'non_entitlement', false)`,
-            [id, org, from, from === 'succeeded' ? 'cash' : null],
+            [id, org, from === 'closing' ? 'created' : from, from === 'succeeded' ? 'cash' : null],
           );
+          if (from === 'closing') {
+            // Core V2 S4c: never created closing; reached only through the guarded move, while an attempt is open (uncertain), on a cancel
+            await client.query(`INSERT INTO payment_attempt(id, "paymentId", "attemptNumber", provider) VALUES (gen_random_uuid(), $1, 1, 'test')`, [id]);
+            await client.query(`UPDATE payment SET status = 'closing', "closingReason" = 'cancel' WHERE id = $1`, [id]);
+          }
           let accepted = true;
           try {
             await client.query(`UPDATE payment SET status = $2, "settledMethod" = $3 WHERE id = $1`, [id, to, to === 'succeeded' ? 'cash' : null]);
@@ -122,8 +127,11 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
             expect((e as { code?: string }).code, `${from}->${to}`).toBe('23514');
             accepted = false;
           }
-          // created -> succeeded is the one edge with a precondition (a succeeded, inferred-failed attempt): a bare UPDATE never meets it.
-          const expected = from === 'created' && to === 'succeeded' ? false : canTransitionPayment(from, to);
+          // Edges with a precondition a bare UPDATE never meets: created -> succeeded (a succeeded, inferred-failed attempt); Core V2 S4c:
+          // created -> failed (a CONFIRMED inferred failure), * -> closing (an attempt that may still settle it, and a reason), and here
+          // closing -> cancelled (its open attempt is still uncertain) and closing -> expired (its reason is cancel)
+          const PRECONDITIONED = new Set(['created>succeeded', 'created>failed', 'created>closing', 'pending>closing', 'closing>cancelled', 'closing>expired']);
+          const expected = PRECONDITIONED.has(`${from}>${to}`) ? false : canTransitionPayment(from, to);
           expect(accepted, `payment ${from} -> ${to}`).toBe(expected);
         }
       }
@@ -315,7 +323,7 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
     expect((await start(p.id, 'm14-key-bbbb')).status).toBe(409);
   });
 
-  it('M-15 case E: a payment that EXPIRED after an inferred failure, then gets a provider success, records a conflict and stays expired', async () => {
+  it('M-15 case E (Core V2 S4c F-1, F-4): a payment due for expiry after an inferred failure starts CLOSING; a provider success then settles it once', async () => {
     const soon = new Date(Date.now() + 400).toISOString();
     const p = await create({ expiresAt: soon });
     const a = (await start(p.id, 'm15-key-aaaa', 'user-1-jwt', { providerOptions: { scenario: 'timeout_after_accept' } }).expect(201)).body;
@@ -323,11 +331,37 @@ describeWithEnv('phase 1 acceptance review: matrices and boundaries (real Postgr
     await t.app.get(AttemptService).applyStatus(a.id, { kind: 'notFound' }, provider); // inferred failure; payment back to created
     await sleep(600);
     await t.app.get(ExpirySweeper).sweepOnce();
-    expect((await get(p.id).expect(200)).body.status).toBe('expired');
+    expect((await get(p.id).expect(200)).body).toMatchObject({ status: 'closing', closingReason: 'expiry', finality: 'uncertain' }); // never expired on a guess
     const late = signedFor(a.id, `evt_${a.id}`);
     await webhook(late.body, late.signature).expect(200);
-    expect((await sql('SELECT state FROM webhook_event WHERE "providerEventId" = $1', [`evt_${a.id}`])).rows[0].state).toBe('conflict');
-    expect((await get(p.id).expect(200)).body.status).toBe('expired');
+    expect((await sql('SELECT state FROM webhook_event WHERE "providerEventId" = $1', [`evt_${a.id}`])).rows[0].state).toBe('processed');
+    expect((await get(p.id).expect(200)).body).toMatchObject({ status: 'succeeded', finality: 'final', closingReason: 'expiry' });
+    expect((await sql(`SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.succeeded' AND payload->>'paymentId' = $1`, [p.id])).rows[0].n).toBe(1);
+    expect((await sql(`SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.expired' AND payload->>'paymentId' = $1`, [p.id])).rows[0].n).toBe(0);
+  });
+
+  it('M-15 case F (Core V2 S4c F-3, F-4): once the provider CONFIRMS the failure the payment expires; a later verified success is recorded, never settled', async () => {
+    const soon = new Date(Date.now() + 400).toISOString();
+    const p = await create({ expiresAt: soon });
+    const a = (await start(p.id, 'm15f-key-aaaa', 'user-1-jwt', { providerOptions: { scenario: 'timeout_after_accept' } }).expect(201)).body;
+    const provider = t.app.get(ProviderRegistry).get('test');
+    await t.app.get(AttemptService).applyStatus(a.id, { kind: 'notFound' }, provider); // inferred
+    await t.app.get(AttemptService).applyStatus(a.id, { kind: 'failed', failureClass: 'terminal', failureCode: 'card_declined' }, provider); // confirmed
+    expect((await sql('SELECT "failureConfirmedAt" IS NOT NULL AS c, "confirmedFailureCode" AS code FROM payment_attempt WHERE id = $1', [a.id])).rows[0]).toEqual({ c: true, code: 'card_declined' });
+    expect((await get(p.id).expect(200)).body.finality).toBe('open'); // nothing may settle it any more
+    await sleep(600);
+    await t.app.get(ExpirySweeper).sweepOnce();
+    expect((await get(p.id).expect(200)).body).toMatchObject({ status: 'expired', finality: 'final', closingReason: null });
+    const late = signedFor(a.id, `evt_${a.id}`);
+    await webhook(late.body, late.signature).expect(200);
+    const ev = (await sql('SELECT id, state FROM webhook_event WHERE "providerEventId" = $1', [`evt_${a.id}`])).rows[0];
+    expect(ev.state).toBe('conflict');
+    expect((await get(p.id).expect(200)).body.status).toBe('expired'); // never reopened
+    expect((await sql(`SELECT count(*)::int AS n FROM outbox WHERE name = 'payment.succeeded' AND payload->>'paymentId' = $1`, [p.id])).rows[0].n).toBe(0);
+    expect((await sql('SELECT source, "webhookEventId", amount::int, currency, "paymentStatus" FROM payment_late_success WHERE "attemptId" = $1', [a.id])).rows)
+      .toEqual([{ source: 'webhook', webhookEventId: ev.id, amount: 1000, currency: 'TND', paymentStatus: 'expired' }]);
+    await webhook(late.body, late.signature).expect(200); // the provider's redelivery records nothing more
+    expect((await sql('SELECT count(*)::int AS n FROM payment_late_success WHERE "attemptId" = $1', [a.id])).rows[0].n).toBe(1);
   });
 
   it('M-16 terminal payments refuse new attempts with the SDD codes (failed/expired/succeeded -> 409)', async () => {

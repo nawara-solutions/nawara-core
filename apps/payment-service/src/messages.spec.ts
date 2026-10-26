@@ -20,6 +20,7 @@ describe('PAYMENT_MESSAGES', () => {
       organizationIdMustEqualSeller: 'organizationId must equal seller.id when seller.type is organization.',
       expiresAtInvalid: 'expiresAt is not a valid timestamp.',
       paymentRequestConflict: 'A payment already exists for this paymentRequestId with a different snapshot.',
+      paymentUncertain: 'An earlier attempt may still settle this payment; no new attempt is possible until it is resolved.', // Core V2 S4c
       purposeRequired: 'purpose is required for a new payment.', // Core V2 S4a: new messages
       purposeNotAccepted: 'purpose must be organization_subscription, direct_purchase or non_entitlement.',
       beneficiaryRequired: 'beneficiaryUserId is required for purpose {purpose}.',

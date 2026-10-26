@@ -52,7 +52,7 @@ export type CreatePaymentOutcome =
 /** SDD 21.2's cancel response table. */
 export type CancelPaymentOutcome =
   | { kind: 'cancelled' }
-  | { kind: 'in_flight' } // 409 payment_has_open_attempt / cash_submission_exists: money may be in flight, must resolve first
+  | { kind: 'in_flight' } // 202 closing (Core V2 S4c), or 409 payment_has_open_attempt / cash_submission_exists: money may be in flight, must resolve first
   | { kind: 'already_terminal' } // 409 invalid_state_transition: Payment already reached a terminal state (settles from the terminal event/reconciler instead)
   | { kind: 'not_found' }
   | { kind: 'transient' }
@@ -186,6 +186,9 @@ export class HttpPaymentClient implements PaymentClient {
   async cancelPayment(paymentId: string, idempotencyKey: string): Promise<CancelPaymentOutcome> {
     const { status, body: res } = await this.call('POST', `/payment/payments/${encodeURIComponent(paymentId)}/cancel`, { 'idempotency-key': idempotencyKey });
     if (status === 200) return { kind: 'cancelled' };
+    // Core V2 S4c (F-7): Payment is CLOSING the payment (an attempt may still settle it): money may be in flight, exactly the existing
+    // `in_flight` outcome; the final payment.cancelled / payment.succeeded event closes the request later, as it always has
+    if (status === 202) return { kind: 'in_flight' };
     if (status === 404) return { kind: 'not_found' };
     if (status === 401 || status === 403) return { kind: 'auth_fault' };
     if (status === 409) {

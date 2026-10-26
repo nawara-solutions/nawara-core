@@ -2,6 +2,7 @@ import { PaymentAudit } from '../audit/payment-audit.js';
 import { Inject, Injectable, Logger, type BeforeApplicationShutdown, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleDestroy } from '@nestjs/common';
 import { DbService, OutboxService, PollLoop, describeFailure, type DrainOutcome } from '@nawara/service-kit';
 import { jobContext, paymentEvent, type EventContext } from '../events/payment-events.js';
+import { isPaymentUncertain } from './payment-closing.js';
 import type { PaymentRow } from './payment.types.js';
 
 /**
@@ -67,8 +68,12 @@ export class ExpirySweeper {
       const payment = rows[0];
       if (!payment || !payment.expiresAt || !payment.due) return false;
       if (payment.status !== 'created' && payment.status !== 'pending') return false;
-      const { rows: open } = await q.query(`SELECT 1 FROM payment_attempt WHERE "paymentId" = $1 AND status IN ('initiated', 'submitted', 'unknown')`, [paymentId]);
-      if (open.length > 0) return false; // money in flight must be resolved first (the resolver settles it)
+      // Core V2 S4c (F-1): while an attempt may still settle it, the expiry is recorded as closing (no event yet); it ends expired — or
+      // succeeded — only when the provider's evidence resolves every such attempt (the resolver keeps asking; no time limit, F-3)
+      if (await isPaymentUncertain(q, paymentId)) {
+        await q.query(`UPDATE payment SET status = 'closing', "closingReason" = 'expiry' WHERE id = $1`, [paymentId]);
+        return false;
+      }
       const { rows: updated } = await q.query<PaymentRow>(`UPDATE payment SET status = 'expired', "closedAt" = now() WHERE id = $1 RETURNING *`, [paymentId]);
       await this.outbox.enqueue(q, paymentEvent('payment.expired', updated[0], ctx, { expiresAt: payment.expiresAt.toISOString() }));
       await this.audit.record(q, 'payment.expired', updated[0], ctx); // Stage 18.7.1
