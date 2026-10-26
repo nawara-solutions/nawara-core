@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DbService, isUniqueViolation, pgConstraint, type Queryable } from '@nawara/service-kit';
 import { billingError, notFound, operationNotPermitted } from '../domain/errors.js';
+import { OWNER_CATALOG_PRODUCER } from '../config/billing-config.js';
 import { BILLING_MESSAGES } from '../messages.js';
 
 export interface FeeCapRow { id: string; platformId: string; version: number; amount: string; currency: string; setBy: string; createdAt: Date }
@@ -86,9 +87,12 @@ export class FeeRepository {
     return { delegation: (await this.delegation(q, platformId, id))!, changed: true };
   }
 
-  /** Whether the product is an ACTIVE personal subscription product of this Platform (the fee's one product, A1). */
+  /**
+   * Whether the product is an ACTIVE personal subscription product of this Platform (the fee's one product, A1) that the Owner created
+   * (S3g D-CAT-8: the reserved `billing-owner` provenance; the database refuses a proposal on any other product too).
+   */
   async isFeeableProduct(q: Queryable, platformId: string, productId: string): Promise<boolean> {
-    const { rows } = await q.query(`SELECT 1 FROM product WHERE id = $1 AND "platformId" = $2 AND "subscriptionTarget" = 'personal' AND status = 'active'`, [productId, platformId]);
+    const { rows } = await q.query(`SELECT 1 FROM product WHERE id = $1 AND "platformId" = $2 AND "subscriptionTarget" = 'personal' AND status = 'active' AND producer = $3`, [productId, platformId, OWNER_CATALOG_PRODUCER]);
     return rows.length === 1;
   }
 

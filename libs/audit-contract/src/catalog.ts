@@ -386,26 +386,30 @@ const SPEC = {
   },
   'product.created': {
     // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
+    // Core V2 S3g (D-CAT-9): additively, the verified Owner of the Platform's Company (the Owner catalog; Billing records organization null for it).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { user: ['owner'], service: true }, organization: 'optional',
     resource: ['product'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A sellable product enters the platform catalog.',
   },
   'product.archived': {
     // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
+    // Core V2 S3g (D-CAT-9): additively, the verified Owner of the Platform's Company (the Owner catalog; Billing records organization null for it).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { user: ['owner'], service: true }, organization: 'optional',
     resource: ['product'], subject: NO_SUBJECT, outcomes: OK, changes: NONE,
     purpose: 'A product stops being sellable.',
   },
   'price.created': {
     // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
+    // Core V2 S3g (D-CAT-9): additively, the verified Owner of the Platform's Company (the Owner catalog; Billing records organization null for it).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { user: ['owner'], service: true }, organization: 'optional',
     resource: ['price'], subject: NO_SUBJECT, outcomes: OK,
     changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A price (what an organization will be charged) is published.',
   },
   'price.retired': {
     // 18.7 G4: a product's seller may be an organization: that organization, else null (a user- or company-sold product).
-    producer: 'billing-service', category: 'administrative', since: 1, actors: { service: true }, organization: 'optional',
+    // Core V2 S3g (D-CAT-9): additively, the verified Owner of the Platform's Company (the Owner catalog; Billing records organization null for it).
+    producer: 'billing-service', category: 'administrative', since: 1, actors: { user: ['owner'], service: true }, organization: 'optional',
     resource: ['price'], subject: NO_SUBJECT, outcomes: OK,
     changes: { product_id: { type: 'uuid', shape: 'value', required: true } },
     purpose: 'A price stops being offered.',

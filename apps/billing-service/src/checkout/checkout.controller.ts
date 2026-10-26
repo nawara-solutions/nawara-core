@@ -12,7 +12,7 @@ import { CheckoutService } from './checkout.service.js';
 
 class CheckoutDto {
   @ApiProperty({ format: 'uuid', description: 'A configured Platform.' }) platformId!: string;
-  @ApiProperty({ format: 'uuid', description: 'An active personal subscription product of that Platform (no universal plan).' }) productId!: string;
+  @ApiProperty({ format: 'uuid', description: 'An active personal subscription product of that Platform, created by the Owner (S3g; no universal plan).' }) productId!: string;
   @ApiProperty({ format: 'uuid', description: 'An effective, unretired recurring price of that product, in the Platform currency.' }) priceId!: string;
 }
 

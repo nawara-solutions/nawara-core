@@ -38,6 +38,7 @@ const BILLING_MIGRATIONS = [
   '0024_fixed_organization_grace.sql', // Core V2 S3e: the fixed 24-hour Organization grace check and lifecycle guard, no table
   '0025_fee_caps_delegations_proposals.sql', // Core V2 S3f: fee_cap, fee_delegation(_revocation), fee_proposal, fee_command_idempotency
   '0026_direct_checkout.sql', // Core V2 S3f: the reserved checkout producer's commit-time guard and checkout_idempotency
+  '0027_owner_catalog_provenance.sql', // Core V2 S3g: the reserved Owner catalog provenance and its checkout / fee-proposal guards, no table
 ];
 /** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022) and S3d's billing_platform (0023) and S3f's fee tables (0025) and checkout_idempotency (0026). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [

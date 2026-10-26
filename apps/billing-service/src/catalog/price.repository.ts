@@ -86,6 +86,8 @@ export class PriceRepository {
   /** Sets `retiredAt` once (SDD endpoint 6). Existing invoices are untouched (BI-06): a retired price's past lines are unaffected. */
   async retire(id: string, caller: Caller): Promise<PriceWriteResult> {
     return this.db.tx(async (q) => {
+      // Core V2 S3g (D-CAT-6): the product first, then the price (the one lock order of every catalog command)
+      await q.query(`SELECT 1 FROM product WHERE id = (SELECT "productId" FROM price WHERE id = $1) FOR NO KEY UPDATE`, [id]);
       const { rows } = await q.query<PriceWithProducer>(
         `SELECT pr.*, p.producer, p."sellerType", p."sellerId" FROM price pr JOIN product p ON p.id = pr."productId" WHERE pr.id = $1 FOR UPDATE OF pr`,
         [id],
@@ -102,7 +104,9 @@ export class PriceRepository {
   }
 
   private async assertOwnsProduct(q: Queryable, productId: string, caller: Caller): Promise<OwnedProduct> {
-    const { rows } = await q.query<OwnedProduct>(`SELECT id, producer, status, "sellerType", "sellerId", "subscriptionTarget" FROM product WHERE id = $1`, [productId]);
+    // Core V2 S3g (D-CAT-6): the product row is locked, so every price write and retirement of one product applies one at a time; NO KEY
+    // UPDATE never blocks a sale's key-share reference to the product
+    const { rows } = await q.query<OwnedProduct>(`SELECT id, producer, status, "sellerType", "sellerId", "subscriptionTarget" FROM product WHERE id = $1 FOR NO KEY UPDATE`, [productId]);
     const product = rows[0];
     if (!product || catalogRelationTo(product, caller) === null) throw notFound();
     return product;

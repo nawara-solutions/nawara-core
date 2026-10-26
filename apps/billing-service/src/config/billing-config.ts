@@ -8,6 +8,9 @@ import { parseBillingServicePolicy, type BillingCallerPolicy } from '../admissio
 /** Core V2 S3f (D3): the reserved internal producer of direct-checkout invoices (never a service-token caller). */
 export const CHECKOUT_PRODUCER = 'billing-checkout';
 
+/** Core V2 S3g (D-CAT-8): the reserved provenance of a product the verified Owner created (never a service-token caller). */
+export const OWNER_CATALOG_PRODUCER = 'billing-owner';
+
 /**
  * billing-service configuration, layered on the kit's shared `BaseConfig` (SDD section 16 lists the settings a Core
  * service needs). Stage 1 carries ONLY what the foundation itself uses; every later stage adds its own values with the feature
@@ -99,6 +102,8 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   // Core V2 S3f (D3): `billing-checkout` is Billing's own reserved producer for direct checkout; no service may hold a token in its name.
   if (serviceTokens.some((t) => t.caller === CHECKOUT_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${CHECKOUT_PRODUCER} is reserved by Billing`);
+  // Core V2 S3g (D-CAT-8): so is `billing-owner`, the provenance of the Owner's products; a producer can never act as the Owner's catalog.
+  if (serviceTokens.some((t) => t.caller === OWNER_CATALOG_PRODUCER)) throw new ConfigError(`SERVICE_TOKENS: the caller name ${OWNER_CATALOG_PRODUCER} is reserved by Billing`);
   const servicePolicy = parseBillingServicePolicy(reader.get('BILLING_SERVICE_POLICY'), registeredCallers(serviceTokens));
   const config = {
     ...base,

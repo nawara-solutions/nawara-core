@@ -14,7 +14,7 @@ class FeeDelegationDto {
 }
 class FeeProposalDto {
   @ApiProperty({ format: 'uuid', description: 'An Organization Auth places on this Platform (live).' }) organizationId!: string;
-  @ApiProperty({ format: 'uuid', description: "An active personal subscription product of this Platform." }) productId!: string;
+  @ApiProperty({ format: 'uuid', description: "An active personal subscription product of this Platform, created by the Owner (S3g)." }) productId!: string;
   @ApiProperty({ description: "The Organization fee, in minor units of the Platform's currency; an integer from 0 to the Platform's current cap." }) amount!: number;
 }
 

@@ -53,6 +53,12 @@ describe('loadBillingConfig', () => {
     expect(refusal({ ...BASE, SERVICE_TOKENS: `billing-checkout:${digest}` })).toContain('billing-checkout is reserved');
   });
 
+  it('Core V2 S3g (D-CAT-8): no service may hold a token in the reserved Owner catalog provenance billing-owner, alone or among others', () => {
+    const digest = 'a'.repeat(64);
+    expect(refusal({ ...BASE, SERVICE_TOKENS: `billing-owner:${digest}` })).toContain('billing-owner is reserved');
+    expect(refusal({ ...BASE, SERVICE_TOKENS: `some-product:${'b'.repeat(64)},billing-owner:${digest}` })).toContain('billing-owner is reserved');
+  });
+
   it('Core V2 S3e: grace is not configurable — the retired SUBSCRIPTION_GRACE_DAYS is refused, whatever its value, never silently ignored', () => {
     for (const v of ['1', '7', '365', '0', 'seven']) expect(refusal({ ...BASE, SUBSCRIPTION_GRACE_DAYS: v })).toContain('SUBSCRIPTION_GRACE_DAYS was retired');
     expect(() => loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '' })).not.toThrow(); // empty means unset, like every other optional value
