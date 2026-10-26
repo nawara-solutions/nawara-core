@@ -35,6 +35,7 @@ const BILLING_MIGRATIONS = [
   '0021_subscription_settlement.sql', // Core V2 S3b: the append-only subscription_settlement and the DB-11 period guard (B3)
   '0022_personal_subscription.sql', // Core V2 S3c: personal_subscription, the subscription_purchase ledger and its reversals (B4, B5)
   '0023_billing_platform.sql', // Core V2 S3d: billing_platform, the Platform commercial configuration (BIL-01)
+  '0024_fixed_organization_grace.sql', // Core V2 S3e: the fixed 24-hour Organization grace check and lifecycle guard, no table
 ];
 /** The Stage 2/3 schema plus Stage 12.2's `subscription` (SDD 28 and 34.1; migrations 0010/0011/0015 add a column, 0012 an index, 0014 drops one and 0016 replaces one, not a table) and Core V2 S1b's provenance tables (0017), S1e-2's payment_event_origin (0018) and S3a's invoice_entitlement (0020) S3b's subscription_settlement (0021) and S3c's personal subscription ledger (0022) and S3d's billing_platform (0023). The exact-set assertions are the tripwire against a table for a DEFERRED concept. */
 const STAGE_2_TABLES = [
@@ -174,11 +175,14 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
 
     let mig: TestDatabase;
     let upTo0014: string;
+    let upTo0023: string;
     let c: pg.Client;
     beforeAll(async () => {
       mig = await createTestDatabase(env.TEST_DATABASE_ADMIN_URL, 'billingmig15');
       upTo0014 = mkdtempSync(join(tmpdir(), 'billing-upto-0014-'));
       for (const name of BILLING_MIGRATIONS.filter((n) => n < '0015')) copyFileSync(join(billingMigrationsDir, name), join(upTo0014, name));
+      upTo0023 = mkdtempSync(join(tmpdir(), 'billing-upto-0023-'));
+      for (const name of BILLING_MIGRATIONS.filter((n) => n < '0024')) copyFileSync(join(billingMigrationsDir, name), join(upTo0023, name));
       await runMigrations(mig.url, [kitMigrationsDir, upTo0014]);
       c = new pg.Client({ connectionString: mig.url });
       await c.connect();
@@ -189,6 +193,7 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
     afterAll(async () => {
       await c.end();
       rmSync(upTo0014, { recursive: true, force: true });
+      rmSync(upTo0023, { recursive: true, force: true });
       await mig.drop();
     });
 
@@ -218,7 +223,8 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
       const before = (await c.query(SNAPSHOT)).rows;
       expect(before.map((r) => `${r.status}/${r.unit}`)).toEqual(['active/month', 'grace/month', 'expired/year', 'pending/month', 'active/week', 'active/day']);
 
-      const result = await runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir]);
+      // through 0023: the V1 rows seeded here carry a configurable grace (7 days, or none), which S3e's 0024 refuses (the test below)
+      const result = await runMigrations(mig.url, [kitMigrationsDir, upTo0023]);
       expect(result.applied).toEqual(['0015_subscription_billing_anchor.sql', '0016_payment_event_receipt_applied_claim.sql', '0017_event_provenance.sql', '0018_payment_event_origin.sql', '0019_product_subscription_target.sql', '0020_invoice_entitlement_routing.sql', '0021_subscription_settlement.sql', '0022_personal_subscription.sql', '0023_billing_platform.sql']); // V2 A3M.3: 0016 (indexes only), S1b's 0017, S1e-2's 0018, S3a's 0019 / 0020, S3b's 0021, S3c's 0022 and S3d's 0023 follow
 
       expect((await c.query(SNAPSHOT)).rows).toEqual(before); // revision, updatedAt, graceUntil, period and history count: all unchanged
@@ -233,6 +239,15 @@ describeWithEnv('migration infrastructure (real PostgreSQL)', ['TEST_DATABASE_AD
       // ...and enforcing: a backfilled monthly row can no longer lose, or arbitrarily move, its anchor
       await expect(c.query(`UPDATE subscription SET "billingAnchorAt" = NULL WHERE "organizationId" = '00000000-0000-4000-8000-00000000a001'`)).rejects.toMatchObject({ code: '23514' });
       await expect(c.query(`UPDATE subscription SET "billingAnchorAt" = '2026-01-01T00:00:00Z' WHERE "organizationId" = '00000000-0000-4000-8000-00000000a001'`)).rejects.toMatchObject({ code: '23514' });
+    });
+
+    it('Core V2 S3e: 0024 refuses to apply over established V1 subscriptions whose grace is not exactly 24 hours, and rewrites nothing (no backfill, refuse on ambiguity)', async () => {
+      const before = (await c.query(SNAPSHOT)).rows;
+      const failure = await runMigrations(mig.url, [kitMigrationsDir, billingMigrationsDir]).catch((e: unknown) => e);
+      expect((failure as Error).message).toMatch(/^0024_fixed_organization_grace\.sql failed and was rolled back: error=\S+ code=23514$/);
+      expect((await c.query(`SELECT count(*)::int AS n FROM schema_migrations WHERE name = '0024_fixed_organization_grace.sql'`)).rows[0].n).toBe(0);
+      expect((await c.query(`SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'subscription_grace_fixed'`)).rows[0].n).toBe(0);
+      expect((await c.query(SNAPSHOT)).rows).toEqual(before); // the 7-day and no-grace rows are untouched
     });
   });
 });

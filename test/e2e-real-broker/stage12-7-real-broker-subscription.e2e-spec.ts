@@ -291,7 +291,7 @@ describeWithEnv(
       const closedAt = paymentRow.rows[0]!.closedAt;
       expect(closedAt).not.toBeNull();
 
-      const sub = await billingAdmin.query(`SELECT status, "currentPeriodStart", "currentPeriodEnd", revision FROM subscription WHERE "organizationId" = $1`, [organizationId]);
+      const sub = await billingAdmin.query(`SELECT status, "currentPeriodStart", "currentPeriodEnd", "graceUntil", revision FROM subscription WHERE "organizationId" = $1`, [organizationId]);
       expect(sub.rows.length).toBe(1);
       expect(sub.rows[0].status).toBe('active');
       expect(sub.rows[0].revision).toBe(1); // create(0) + activate(1)
@@ -299,8 +299,11 @@ describeWithEnv(
       expect(sub.rows[0].currentPeriodStart).toEqual(closedAt);
       const periodEnd: Date = sub.rows[0].currentPeriodEnd;
 
+      // Core V2 S3e: access runs to the fixed Organization grace, exactly 24 hours after the period end
+      const graceUntil = new Date(periodEnd.getTime() + 24 * 3_600_000);
+      expect(sub.rows[0].graceUntil).toEqual(graceUntil);
       const entitlement = await getEntitlement(organizationId);
-      expect(entitlement).toEqual({ valid: true, expiresAt: periodEnd.toISOString() });
+      expect(entitlement).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
 
       // ---- duplicate delivery over the REAL broker: the same eventId redelivered must have ZERO additional effect ----
       const dlqBefore = await deadLetterDepth();
@@ -310,7 +313,7 @@ describeWithEnv(
       const receiptAfter = await billingAdmin.query(`SELECT count(*)::int AS n FROM payment_event_receipt WHERE "eventId" = $1`, [capturedEventId]);
       expect(receiptAfter.rows[0].n).toBe(1); // still exactly one receipt row for this event id
       expect(await deadLetterDepth()).toBe(dlqBefore); // a well-formed redelivery is never dead-lettered
-      const subAfter = await billingAdmin.query(`SELECT status, "currentPeriodStart", "currentPeriodEnd", revision FROM subscription WHERE "organizationId" = $1`, [organizationId]);
+      const subAfter = await billingAdmin.query(`SELECT status, "currentPeriodStart", "currentPeriodEnd", "graceUntil", revision FROM subscription WHERE "organizationId" = $1`, [organizationId]);
       expect(subAfter.rows[0]).toEqual(sub.rows[0]); // byte-identical: no second period extension, no extra revision
       expect(await getEntitlement(organizationId)).toEqual(entitlement);
     }, 60_000);

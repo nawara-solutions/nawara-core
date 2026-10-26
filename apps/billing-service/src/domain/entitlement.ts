@@ -4,9 +4,9 @@ import type { SubscriptionStatus } from './state-machines.js';
  * Pure Entitlement derivation (Stage 12.3). Entitlement is a logical Billing capability, not a physical service and not
  * a persisted table: it answers ONE question — "does this Organization have effective commercial access at
  * authoritative time `now`?" — entirely from Subscription's own already-established fields. It never queries the
- * database, never calls another service, and never reads configuration (Stage 12.2's `SUBSCRIPTION_GRACE_DAYS` already
- * did its job by the time `graceUntil` was precomputed and persisted; re-reading it here would be the architecture
- * leaking). `now` is always supplied by the caller — never `new Date()`/`Date.now()` internally — so boundary behavior
+ * database, never calls another service, and never reads configuration (the fixed Core V2 grace, exactly 24 hours after
+ * `currentPeriodEnd` (S3e, ADR-0044 B13), is already on the row as `graceUntil`, which the database guarantees). `now` is
+ * always supplied by the caller — never `new Date()`/`Date.now()` internally — so boundary behavior
  * is deterministic and testable.
  *
  * The V1 result is frozen to exactly `{ valid, expiresAt }` (Stage 11): no reason code, no feature flags, no plan

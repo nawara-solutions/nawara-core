@@ -137,10 +137,13 @@ the anchor rule in `src/domain/subscription-period.ts` already accounts for ever
 effective-access route (Stage 12.5) are described in their own sections below; this section covers the domain/database
 foundation only.
 
-`graceUntil` has exactly one trusted authority: `SUBSCRIPTION_GRACE_DAYS` (optional; unset means this deployment offers no
-grace at all — no Nawara-wide default exists). `activate`/`renew` precompute it from that policy in the SAME statement as
-`currentPeriodEnd`, so it is a trustworthy timestamp from the moment a period exists, not only once some later sweeper calls
-`enterGrace` — `enterGrace` itself takes no timestamp at all; it only normalizes the status label once a grace window that
+`graceUntil` is fixed (Core V2 S3e, ADR-0044 B13; `db/migrations/0024`): exactly 24 hours after `currentPeriodEnd` (an absolute
+24 hours, UTC instants, no calendar or time-zone arithmetic), written by the settlement in the SAME statement as the period and frozen
+for it; the database refuses any other value or none on every established row (`subscription_grace_fixed`). The V1 setting
+`SUBSCRIPTION_GRACE_DAYS` is retired: Billing refuses to start if it is set. Grace is only an access boundary: it never records a
+settlement, a purchase or a renewal. Personal Subscriptions have no grace. So `graceUntil` is a trustworthy timestamp from the moment a
+period exists, not only once some later sweeper calls `enterGrace` — `enterGrace` itself takes no timestamp at all; it only normalizes
+the status label once a grace window that
 was already computed exists. `create` distinguishes an identical replay (same organization, same product AND price — state
 idempotent) from a genuinely conflicting request (same organization, a DIFFERENT product or price — `409 subscription_conflict`);
 it is never a disguised upgrade/downgrade. `productId`/`priceId` are immutable today (no method changes them), which does not
@@ -152,7 +155,7 @@ existing `billing_immutable_except` allow-list the day that operation is actuall
 `deriveEntitlement` (`src/domain/entitlement.ts`) answers, purely from an already-loaded Subscription and an explicitly
 supplied `now`, whether an Organization has effective commercial access right now: `{ valid: boolean, expiresAt: Date |
 null }` — the frozen V1 contract, nothing else (no reason code, no feature flags). No database query, no HTTP call, no
-RabbitMQ, no configuration read (grace policy already did its job when Stage 12.2 precomputed `graceUntil`), no `new
+RabbitMQ, no configuration read (the fixed grace is already on the row, S3e), no `new
 Date()` inside it — `now` is always the caller's. It never reads `cancelAtPeriodEnd` at all (structurally, not just
 behaviorally, irrelevant to already-purchased access) and treats `active`, `grace` and a possibly-premature `expired`
 identically: only `pending` (or no subscription) short-circuits to invalid, because Stage 12.2 already guarantees

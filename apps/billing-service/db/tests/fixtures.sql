@@ -211,6 +211,7 @@ DECLARE r int;
 BEGIN
   PERFORM t_settle(sub, p_start);
   UPDATE subscription s SET status = 'active', "currentPeriodStart" = p_start, "currentPeriodEnd" = p_end,
+         "graceUntil" = p_end + interval '24 hours', -- Core V2 S3e: the fixed Organization grace
          "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN p_start END
     FROM price p WHERE p.id = s."priceId" AND s.id = sub RETURNING s.revision INTO r;
   PERFORM t_hist('subscription', sub, 'pending', 'active', r);
@@ -240,9 +241,8 @@ END $$;
 -- the database half of a renewal (mirrors SubscriptionRepository.renew's anchor/period math): lock, anchor on the
 -- frozen rule, extend by the price's own recurring interval on the subscription's billing anchor (a genuinely late
 -- renewal resets that anchor to its own start), write history. Used both directly and under real concurrency. `at`
--- stands in for the settlement instant (default: now()). Unlike the repository, it does not recompute `graceUntil`
--- (R1: that needs a configured grace policy, a TypeScript-only concept these SQL fixtures have none of) — harmless here
--- since every fixture subscription is created with `graceUntil` NULL and stays that way throughout these races.
+-- stands in for the settlement instant (default: now()). Like the repository, it sets `graceUntil` to exactly 24 hours after the
+-- new period end in the same statement (Core V2 S3e).
 CREATE FUNCTION t_try_renew(sub uuid, at timestamptz DEFAULT now()) RETURNS void LANGUAGE plpgsql AS $$
 DECLARE row subscription%ROWTYPE; late boolean; anchor timestamptz; r int;
 BEGIN
@@ -254,7 +254,10 @@ BEGIN
          "billingAnchorAt" = CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN late THEN anchor ELSE row."billingAnchorAt" END END,
          "currentPeriodEnd" = billing_subscription_period_end(anchor,
            CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN late THEN anchor ELSE row."billingAnchorAt" END END,
-           p."intervalUnit", p."intervalCount")
+           p."intervalUnit", p."intervalCount"),
+         "graceUntil" = billing_subscription_period_end(anchor,
+           CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN late THEN anchor ELSE row."billingAnchorAt" END END,
+           p."intervalUnit", p."intervalCount") + interval '24 hours'
     FROM price p WHERE p.id = s."priceId" AND s.id = sub RETURNING s.revision INTO r;
   PERFORM t_hist('subscription', sub, row.status, 'active', r);
 END $$;
@@ -284,7 +287,7 @@ CREATE FUNCTION t_set_period_end(sub uuid, new_end timestamptz, flag boolean) RE
 DECLARE r int;
 BEGIN
   PERFORM t_settle(sub); -- Core V2 S3b (DB-11): an extension is only ever a settled one
-  UPDATE subscription SET "currentPeriodEnd" = new_end, "cancelAtPeriodEnd" = flag WHERE id = sub RETURNING revision INTO r;
+  UPDATE subscription SET "currentPeriodEnd" = new_end, "graceUntil" = new_end + interval '24 hours', "cancelAtPeriodEnd" = flag WHERE id = sub RETURNING revision INTO r;
   PERFORM t_hist('subscription', sub, 'active', 'active', r);
 END $$;
 

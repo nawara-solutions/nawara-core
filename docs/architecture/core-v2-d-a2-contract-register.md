@@ -391,6 +391,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | IMPLEMENTED `subscription_grace_unavailable` becomes unreachable for Organization Subscriptions (PROPOSED disposition at review). Guard DB-11 |
 | D. Existing | `apps/billing-service/src/subscriptions/`; optional `SUBSCRIPTION_GRACE_DAYS` (`apps/billing-service/src/config/billing-config.ts`) |
 | E. Open, gates | DOC-5 before S3e (roadmap §8). Stage S3b, S3e. Confidence H |
+| F. S3e (2026-10-26) | IMPLEMENTED (`0024_fixed_organization_grace.sql`): `graceUntil = currentPeriodEnd + interval '24 hours'` written by the settlement with the period; same-row check `subscription_grace_fixed` = `status = 'pending' OR (graceUntil IS NOT NULL AND graceUntil = currentPeriodEnd + interval '24 hours')` (the explicit `IS NOT NULL` closes SQL's NULL-passes-CHECK gap in the frozen wording); the lifecycle guard no longer clears `graceUntil` on an `active -> active` move (a cancellation toggle kept no grace in V1); `SUBSCRIPTION_GRACE_DAYS` retired and refused at startup; existing rows never rewritten (0024 refuses to apply over a different grace). `subscription_grace_unavailable`: unreachable, kept as a defensive refusal. Personal: no grace (unchanged). DOC-5 done |
 
 #### BIL-10 Direct checkout of personal Premium
 

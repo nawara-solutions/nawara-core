@@ -311,10 +311,10 @@ describeWithEnv('Payment -> Subscription integration (Stage 12.4), against a rea
     const firstSettledAt = new Date('2026-06-01T00:00:00Z');
     await succeed(first.open, first.request, first.paymentId, firstSettledAt);
     const activated = await subs.getByOrganization(organizationId);
-    expect(activated.graceUntil).not.toBeNull(); // precomputed at activation (Stage 12.2 R1), test app default grace = 7 days
+    expect(activated.graceUntil).toEqual(new Date(activated.currentPeriodEnd!.getTime() + day)); // the fixed 24-hour grace (S3e), set at activation
 
     const second = await requestedRecurring({ organizationId, priceId: price.priceId });
-    const lateSettledAt = new Date(activated.currentPeriodEnd!.getTime() + 3 * day); // inside grace, past period end
+    const lateSettledAt = new Date(activated.currentPeriodEnd!.getTime() + 23 * 3_600_000); // inside grace, past period end
     await succeed(second.open, second.request, second.paymentId, lateSettledAt);
 
     const row = await subs.getByOrganization(organizationId);

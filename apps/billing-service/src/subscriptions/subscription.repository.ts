@@ -1,9 +1,7 @@
 import { BillingAudit } from '../audit/billing-audit.js';
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { DbService, type Queryable } from '@nawara/service-kit';
 import type { TransitionContext } from '../domain/actors.js';
-import { BILLING_CONFIG } from '../config/billing-config.token.js';
-import type { BillingConfig } from '../config/billing-config.js';
 import { billingError, notFound } from '../domain/errors.js';
 import { isLateRenewal, renewalAnchor } from '../domain/subscription-period.js';
 import { recordTransition } from '../domain/transitions.js';
@@ -28,7 +26,6 @@ export interface SubscriptionWriteResult {
 export class SubscriptionRepository {
   constructor(
     private readonly db: DbService,
-    @Inject(BILLING_CONFIG) private readonly config: BillingConfig,
     private readonly audit: BillingAudit,
   ) {}
 
@@ -70,7 +67,8 @@ export class SubscriptionRepository {
 
   /**
    * Rolls a subscription's period forward to start at `anchor`, extending by its own price's recurring interval, and
-   * recomputing `graceUntil` from the configured policy (R1) — the one place that actually performs this UPDATE.
+   * setting `graceUntil` to exactly 24 hours after the new period end (Core V2 S3e, ADR-0044 B13.1: fixed, never configured) — the one
+   * place that actually performs this UPDATE.
    * `applySettlement` computes `anchor` via the frozen renewal-anchor rule, or, for the first activation, uses the authoritative
    * settlement instant directly (there is no prior period to anchor from).
    * Either way this is the SAME move the database allows from `pending`, `active`, `grace` or `expired` alike.
@@ -80,28 +78,26 @@ export class SubscriptionRepository {
    * that one period end (ADR-0044 B-025). `billing_subscription_period_end` (0015) does the calendar arithmetic.
    */
   private async rollPeriod(q: Queryable, row: SubscriptionRow, anchor: Date, resetBillingAnchor: boolean, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
-    const graceDays = this.config.subscriptionGraceDays ?? null;
     // Calendar arithmetic (month/year/days) on a `timestamptz` is otherwise done in the SESSION's TimeZone, which
     // could shift the result across a DST boundary (section 17: server/database UTC semantics, never a local
-    // clock). The `AT TIME ZONE 'UTC'` round trips force every addition to happen in UTC wall-clock time, with no
-    // DST. `graceUntil` is recomputed from the NEW `currentPeriodEnd` here too (R1): every roll forward carries the
-    // grace boundary forward with it, in the same statement, so it is never stale relative to the new period
-    // (`subscription_grace_after_period` would refuse the write outright if it ever were).
+    // clock); `billing_subscription_period_end` does it in UTC. `graceUntil` is the NEW `currentPeriodEnd` plus an absolute 24 hours
+    // (an `interval '24 hours'` on a `timestamptz` involves no calendar or time zone), in the same statement, frozen for this period:
+    // the database refuses anything else (`subscription_grace_fixed`, S3e).
     const { rows } = await q.query<SubscriptionRow>(
       `UPDATE subscription s SET status = 'active', "currentPeriodStart" = calc."newStart", "currentPeriodEnd" = calc."newEnd",
               "billingAnchorAt" = calc."billingAnchorAt",
-              "graceUntil" = CASE WHEN $3::int IS NULL THEN NULL ELSE (calc."newEnd" AT TIME ZONE 'UTC' + ($3::int || ' days')::interval) AT TIME ZONE 'UTC' END
+              "graceUntil" = calc."newEnd" + interval '24 hours'
          FROM (
            SELECT b."newStart", b."billingAnchorAt",
                   billing_subscription_period_end(b."newStart", b."billingAnchorAt", b."intervalUnit", b."intervalCount") AS "newEnd"
              FROM (
                SELECT $2::timestamptz AS "newStart", p."intervalUnit", p."intervalCount",
-                      CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN $4::boolean THEN $2::timestamptz ELSE cur."billingAnchorAt" END END AS "billingAnchorAt"
+                      CASE WHEN p."intervalUnit" IN ('month', 'year') THEN CASE WHEN $3::boolean THEN $2::timestamptz ELSE cur."billingAnchorAt" END END AS "billingAnchorAt"
                  FROM subscription cur JOIN price p ON p.id = cur."priceId" WHERE cur.id = $1
              ) b
          ) calc
          WHERE s.id = $1 RETURNING s.*`,
-      [row.id, anchor, graceDays, resetBillingAnchor],
+      [row.id, anchor, resetBillingAnchor],
     );
     const updated = rows[0]!;
     await this.record(q, row, updated, ctx);
@@ -157,10 +153,10 @@ export class SubscriptionRepository {
 
   /**
    * `active -> grace`: normalizes the STATUS LABEL once `currentPeriodEnd` has passed. It does not set `graceUntil` —
-   * that boundary was already precomputed by the settlement that established the period from the deployment's configured grace policy (R1), so
+   * that boundary (exactly 24 hours after the period end, S3e) was already written by the settlement that established the period, so
    * this is a pure reporting/consistency move a future sweeper would call, never the source of the grace timestamp
-   * itself. Refused when this subscription has no grace window at all (no `SUBSCRIPTION_GRACE_DAYS` configured when its
-   * current period was established): there is nothing to normalize into, and it should go straight to `expire`.
+   * itself, and it never extends anything. `subscription_grace_unavailable` is unreachable for an established subscription since S3e
+   * (the database guarantees its grace); kept as a defensive refusal.
    */
   async enterGrace(organizationId: string, ctx: TransitionContext): Promise<SubscriptionWriteResult> {
     return this.db.tx(async (q) => {

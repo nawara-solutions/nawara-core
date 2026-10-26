@@ -61,14 +61,6 @@ export interface BillingConfig extends BaseConfig {
    * (0 = dead-letter on the first failure) and how long each retry waits in `billing.payment-events.retry`. Technical tuning, no business meaning.
    */
   paymentEventRetry: { maxRetries: number; delayMs: number };
-  /**
-   * Stage 12.2 R1: the ONE trusted authority for a Subscription's grace-period length. `undefined` means this
-   * deployment offers no grace at all (subscriptions go straight from `active` to `expired`). A business value with NO
-   * Nawara-wide default — an operator must say, exactly like `supportedCurrencies` — so no caller of the Subscription
-   * domain can grant an arbitrary commercial extension by supplying its own `graceUntil`; only this configured
-   * duration, applied by `SubscriptionRepository` itself at activate/renew time, ever produces one.
-   */
-  subscriptionGraceDays?: number;
 }
 
 export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): BillingConfig {
@@ -95,13 +87,10 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     throw new ConfigError('BILLING_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
   }
 
-  // No default: an unset SUBSCRIPTION_GRACE_DAYS means this deployment offers no grace at all, never "pick a number for it".
-  const graceDaysRaw = reader.optional('SUBSCRIPTION_GRACE_DAYS');
-  let subscriptionGraceDays: number | undefined;
-  if (graceDaysRaw !== undefined) {
-    const n = Number(graceDaysRaw);
-    if (!Number.isInteger(n) || n < 1 || n > 365) throw new ConfigError('SUBSCRIPTION_GRACE_DAYS must be an integer between 1 and 365');
-    subscriptionGraceDays = n;
+  // Core V2 S3e (ADR-0044 B13): grace is fixed (Organization exactly 24 hours, Personal none) and no longer configurable. The retired V1
+  // setting is refused rather than ignored, so a deployment that still sets it learns it has no effect instead of believing it does.
+  if (reader.optional('SUBSCRIPTION_GRACE_DAYS') !== undefined) {
+    throw new ConfigError('SUBSCRIPTION_GRACE_DAYS was retired by Core V2 S3e: Organization grace is fixed at 24 hours and Personal has none; remove the setting');
   }
 
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
@@ -110,7 +99,6 @@ export function loadBillingConfig(env: NodeJS.ProcessEnv = process.env): Billing
     ...base,
     databaseUrl,
     supportedCurrencies: [...new Set(supportedCurrencies)],
-    subscriptionGraceDays,
     serviceTokens,
     servicePolicy,
     organizationReference: loadOrganizationReferenceConfig(reader, base.isProduction, servicePolicy.size > 0),

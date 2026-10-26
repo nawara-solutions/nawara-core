@@ -500,8 +500,8 @@ SELECT pg_temp.expect_error('SUB', 'the priceId must belong to the productId (co
 
 -- lifecycle: activation, period order, grace, termination
 SELECT t_mk_subscription() AS pend \gset
-SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd <= currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-01-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
-SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd < currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-02', "currentPeriodEnd" = '2026-01-01', "billingAnchorAt" = '2026-01-02' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
+SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd <= currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-01-01', "graceUntil" = '2026-01-01'::timestamptz + interval '24 hours', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
+SELECT pg_temp.expect_error('SUB', 'activation refuses currentPeriodEnd < currentPeriodStart', format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-02', "currentPeriodEnd" = '2026-01-01', "graceUntil" = '2026-01-01'::timestamptz + interval '24 hours', "billingAnchorAt" = '2026-01-02' WHERE id = %L$$, :'pend'), '23514', 'subscription_period_order');
 SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to grace', format($$UPDATE subscription SET status = 'grace', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-08', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514');
 SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending to expired', format($$UPDATE subscription SET status = 'expired', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L$$, :'pend'), '23514');
 -- Success-path UPDATEs pair the mutation with its history row in ONE multi-statement EXECUTE (mirrors line ~320's own
@@ -510,7 +510,7 @@ SELECT pg_temp.expect_error('SUB', 'a status cannot move straight from pending t
 -- statement's own commit, outside any handler here — never something `expect_ok`/`expect_error` could turn into a clean result.
 SELECT pg_temp.expect_ok('SUB', 'pending -> active with a valid period', format($$
   SELECT t_settle(%L, '2026-01-01');
-  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "billingAnchorAt" = '2026-01-01' WHERE id = %L;
+  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-01'::timestamptz + interval '24 hours', "billingAnchorAt" = '2026-01-01' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'pending', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend', :'pend'));
 SELECT pg_temp.assert_eq('SUB', 'activation advanced the revision to 1', (SELECT revision::text FROM subscription WHERE id = :'pend'), '1');
 SELECT pg_temp.expect_error('SUB', 'a self-loop is refused for any status OTHER than active (no in-place change while pending/grace/expired)',
@@ -518,15 +518,17 @@ SELECT pg_temp.expect_error('SUB', 'a self-loop is refused for any status OTHER 
 
 SELECT pg_temp.expect_error('SUB', 'graceUntil at or before currentPeriodEnd is refused', format($$UPDATE subscription SET status = 'grace', "graceUntil" = '2026-02-01' WHERE id = %L$$, :'pend'), '23514', 'subscription_grace_after_period');
 SELECT pg_temp.expect_error('SUB', 'graceUntil before currentPeriodEnd is refused', format($$UPDATE subscription SET status = 'grace', "graceUntil" = '2026-01-15' WHERE id = %L$$, :'pend'), '23514', 'subscription_grace_after_period');
-SELECT pg_temp.expect_ok('SUB', 'active -> grace with a graceUntil strictly after the period end', format($$
-  UPDATE subscription SET status = 'grace', "graceUntil" = '2026-02-08' WHERE id = %L;
+SELECT pg_temp.expect_error('SUB', 'active -> grace cannot widen the grace (S3e: exactly 24 hours)', format($$UPDATE subscription SET status = 'grace', "graceUntil" = '2026-02-08' WHERE id = %L$$, :'pend'), '23514', 'subscription_grace_fixed');
+SELECT pg_temp.expect_ok('SUB', 'active -> grace keeps the period''s fixed grace (only the label changes)', format($$
+  UPDATE subscription SET status = 'grace' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'active', 'grace', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
 SELECT pg_temp.expect_error('SUB', 'grace cannot re-extend itself: grace -> grace is not an allowed move (never keep extending a grace window)',
   format($$UPDATE subscription SET "graceUntil" = '2026-02-20' WHERE id = %L$$, :'pend'), '23514');
-SELECT pg_temp.expect_ok('SUB', 'grace -> active clears graceUntil unconditionally, even if the caller tried to keep it', format($$
-  UPDATE subscription SET status = 'active', "graceUntil" = '2026-02-08' WHERE id = %L;
+SELECT pg_temp.expect_error('SUB', 'grace -> active cannot drop the grace (S3e)', format($$UPDATE subscription SET status = 'active', "graceUntil" = NULL WHERE id = %L$$, :'pend'), '23514', 'subscription_grace_fixed');
+SELECT pg_temp.expect_ok('SUB', 'grace -> active with the period unchanged keeps the fixed grace (S3e: no longer cleared)', format($$
+  UPDATE subscription SET status = 'active' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'grace', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend'));
-SELECT pg_temp.assert_eq('SUB', 'graceUntil was force-cleared on the move into active', (SELECT "graceUntil"::text FROM subscription WHERE id = :'pend'), NULL);
+SELECT pg_temp.assert_eq('SUB', 'the grace is still exactly 24 hours after the period end', (SELECT ("graceUntil" = "currentPeriodEnd" + interval '24 hours')::text FROM subscription WHERE id = :'pend'), 'true');
 
 SELECT pg_temp.expect_ok('SUB', 'active -> expired (natural expiry, no effectiveTerminationAt)', format($$
   UPDATE subscription SET status = 'expired' WHERE id = %L;
@@ -534,13 +536,13 @@ SELECT pg_temp.expect_ok('SUB', 'active -> expired (natural expiry, no effective
 SELECT pg_temp.assert_eq('SUB', 'a naturally expired subscription has no effectiveTerminationAt', (SELECT "effectiveTerminationAt"::text FROM subscription WHERE id = :'pend'), NULL);
 SELECT pg_temp.expect_ok('SUB', 'expired -> active: a late renewal can always reactivate', format($$
   SELECT t_settle(%L, '2026-03-01');
-  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-03-01', "currentPeriodEnd" = '2026-04-01', "billingAnchorAt" = '2026-03-01' WHERE id = %L;
+  UPDATE subscription SET status = 'active', "currentPeriodStart" = '2026-03-01', "currentPeriodEnd" = '2026-04-01', "graceUntil" = '2026-04-01'::timestamptz + interval '24 hours', "billingAnchorAt" = '2026-03-01' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'expired', 'active', (SELECT revision FROM subscription WHERE id = %L))$$, :'pend', :'pend', :'pend', :'pend'));
 
 -- effective termination: may only SHORTEN access, and never survives past its own `expired` episode (a later
 -- reactivation clears it — see the migration comment on why no separate "set once" check is needed)
 SELECT t_mk_active_subscription('2026-06-01'::timestamptz) AS term_sub \gset
-SELECT pg_temp.expect_error('SUB', 'effectiveTerminationAt after currentPeriodEnd would EXTEND access: refused', format($$UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = '2026-06-02' WHERE id = %L$$, :'term_sub'), '23514', 'subscription_termination_shape');
+SELECT pg_temp.expect_error('SUB', 'effectiveTerminationAt after the access boundary (the period end plus its 24-hour grace) would EXTEND access: refused', format($$UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = "graceUntil" + interval '1 millisecond' WHERE id = %L$$, :'term_sub'), '23514', 'subscription_termination_shape');
 SELECT pg_temp.expect_ok('SUB', 'effectiveTerminationAt at or before currentPeriodEnd shortens access: accepted', format($$
   UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = '2026-05-15' WHERE id = %L;
   SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L))$$, :'term_sub', :'term_sub', :'term_sub'));
@@ -644,11 +646,11 @@ SELECT pg_temp.expect_error('ANCHOR', 'a month subscription cannot drop its anch
 -- ======================================================================================== Core V2 S3b: DB-9, DB-10, DB-11
 SELECT t_mk_active_subscription('2030-01-31T09:30:00Z') AS s3b \gset
 SELECT pg_temp.expect_error('DB-11', 'a period extension with no settlement in its transaction cannot commit',
-  format($$UPDATE subscription SET "currentPeriodStart" = "currentPeriodEnd", "currentPeriodEnd" = "currentPeriodEnd" + interval '1 month' WHERE id = %L;
+  format($$UPDATE subscription SET "currentPeriodStart" = "currentPeriodEnd", "currentPeriodEnd" = "currentPeriodEnd" + interval '1 month', "graceUntil" = "currentPeriodEnd" + interval '1 month 24 hours' WHERE id = %L;
           SELECT t_hist('subscription', %L, 'active', 'active', (SELECT revision FROM subscription WHERE id = %L)); SET CONSTRAINTS ALL IMMEDIATE$$, :'s3b', :'s3b', :'s3b'), '23514', 'subscription_period_settled');
 SELECT t_mk_subscription() AS s3b_pend \gset
 SELECT pg_temp.expect_error('DB-11', 'a NEW period start (an activation) with no settlement cannot commit',
-  format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2031-01-01', "currentPeriodEnd" = '2031-02-01', "billingAnchorAt" = '2031-01-01' WHERE id = %L;
+  format($$UPDATE subscription SET status = 'active', "currentPeriodStart" = '2031-01-01', "currentPeriodEnd" = '2031-02-01', "graceUntil" = '2031-02-01'::timestamptz + interval '24 hours', "billingAnchorAt" = '2031-01-01' WHERE id = %L;
           SELECT t_hist('subscription', %L, 'pending', 'active', 1); SET CONSTRAINTS ALL IMMEDIATE$$, :'s3b_pend', :'s3b_pend'), '23514', 'subscription_period_settled');
 SELECT pg_temp.expect_ok('DB-11', 'shortening (termination) or a status change needs no settlement', format($$
   UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = least(now(), "currentPeriodEnd") WHERE id = %L;
@@ -721,6 +723,47 @@ INSERT INTO billing_platform ("platformId", "companyId", currency, "createdBy") 
 SELECT pg_temp.expect_error('S3d', 'once its Platform is configured, a pre-S3d subscription product''s new prices use that currency', format($$INSERT INTO price ("productId", "clientReference", currency, "unitAmount", "interval", "intervalUnit", "intervalCount")
   VALUES (%L, 's3d-legacy-eur-2', 'EUR', 100, 'recurring', 'month', 1)$$, :'s3d_legacy_prod'), '23514', 'price_platform_currency');
 SELECT pg_temp.assert_eq('S3d', 'a configured Platform rewrites no existing price', (SELECT count(*)::text FROM price WHERE "productId" = :'s3d_legacy_prod' AND currency = 'EUR'), '1');
+
+-- ------------------------------------------------------------------------------------------------------------- S3e fixed grace (B13)
+-- Organization: exactly 24 hours after currentPeriodEnd, on the same row, whatever path writes it; Personal: none.
+SELECT t_mk_active_subscription('2026-09-01T00:00:00Z'::timestamptz) AS g_sub \gset
+SELECT pg_temp.assert_eq('S3e', 'an activation by settlement carries exactly 24 hours of grace',
+  (SELECT extract(epoch FROM "graceUntil" - "currentPeriodEnd")::text FROM subscription WHERE id = :'g_sub'), '86400.000000');
+SELECT pg_temp.expect_error('S3e', 'a wider grace (the V1 7 days) is refused', format($$UPDATE subscription SET "graceUntil" = "currentPeriodEnd" + interval '7 days' WHERE id = %L$$, :'g_sub'), '23514', 'subscription_grace_fixed');
+SELECT pg_temp.expect_error('S3e', 'one millisecond less than 24 hours is refused', format($$UPDATE subscription SET "graceUntil" = "currentPeriodEnd" + interval '24 hours' - interval '1 millisecond' WHERE id = %L$$, :'g_sub'), '23514', 'subscription_grace_fixed');
+SELECT pg_temp.expect_error('S3e', 'one millisecond more than 24 hours is refused', format($$UPDATE subscription SET "graceUntil" = "currentPeriodEnd" + interval '24 hours 1 millisecond' WHERE id = %L$$, :'g_sub'), '23514', 'subscription_grace_fixed');
+SELECT pg_temp.expect_error('S3e', 'an established subscription cannot drop its grace (NULL)', format($$UPDATE subscription SET "graceUntil" = NULL WHERE id = %L$$, :'g_sub'), '23514', 'subscription_grace_fixed');
+SELECT pg_temp.expect_error('S3e', 'a period moved by raw SQL with its grace is still refused without a settlement (DB-11 unchanged)', format($$
+  UPDATE subscription SET "currentPeriodEnd" = "currentPeriodEnd" + interval '1 month', "graceUntil" = "currentPeriodEnd" + interval '1 month 24 hours' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'active', (SELECT revision FROM subscription WHERE id = %L)); SET CONSTRAINTS ALL IMMEDIATE$$, :'g_sub', :'g_sub', :'g_sub'), '23514', 'subscription_period_settled');
+SELECT t_set_cancel(:'g_sub', true);
+SELECT pg_temp.assert_eq('S3e', 'a cancellation toggle (active -> active, period unchanged) keeps the grace (V1 cleared it)',
+  (SELECT ("graceUntil" = "currentPeriodEnd" + interval '24 hours')::text FROM subscription WHERE id = :'g_sub'), 'true');
+SELECT count(*) AS g_settlements FROM subscription_settlement WHERE "subscriptionId" = :'g_sub' \gset
+SELECT pg_temp.expect_ok('S3e', 'entering grace is a label change only', format($$
+  UPDATE subscription SET status = 'grace' WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'grace', (SELECT revision FROM subscription WHERE id = %L)); SET CONSTRAINTS ALL IMMEDIATE$$, :'g_sub', :'g_sub', :'g_sub'));
+SELECT pg_temp.assert_eq('S3e', 'grace records no settlement (no payment, no renewal)', (SELECT count(*)::text FROM subscription_settlement WHERE "subscriptionId" = :'g_sub'), :'g_settlements');
+SELECT pg_temp.assert_eq('S3e', 'grace leaves the paid period as it was', (SELECT ("currentPeriodEnd" = '2026-09-01T00:00:00Z'::timestamptz)::text FROM subscription WHERE id = :'g_sub'), 'true');
+SELECT pg_temp.expect_ok('S3e', 'a settled renewal during grace writes the next period with its own 24 hours', format($$SELECT t_try_renew(%L, '2026-09-01T12:00:00Z'); SET CONSTRAINTS ALL IMMEDIATE$$, :'g_sub'));
+SELECT pg_temp.assert_eq('S3e', 'the renewal during grace anchors on the original period end and moves the grace with the period',
+  (SELECT ("currentPeriodStart" = '2026-09-01T00:00:00Z'::timestamptz AND "graceUntil" = "currentPeriodEnd" + interval '24 hours')::text FROM subscription WHERE id = :'g_sub'), 'true');
+SELECT pg_temp.expect_ok('S3e', 'termination during grace keeps the row consistent (expired, the grace unchanged, access cut by effectiveTerminationAt)', format($$
+  UPDATE subscription SET status = 'expired', "effectiveTerminationAt" = "currentPeriodEnd" WHERE id = %L;
+  SELECT t_hist('subscription', %L, 'active', 'expired', (SELECT revision FROM subscription WHERE id = %L)); SET CONSTRAINTS ALL IMMEDIATE$$, :'g_sub', :'g_sub', :'g_sub'));
+-- Time zones: 24 hours is absolute. In New York, 2026-03-08 is a 23-hour day (DST starts): a "next day, same wall-clock time" grace is
+-- only 23 hours and is refused; the exact 24 hours (13:00 the next day, local) is accepted. UTC throughout for the rest of the suite.
+SET TimeZone = 'America/New_York';
+SELECT t_mk_active_subscription('2026-03-07 12:00:00'::timestamptz) AS tz_sub \gset
+SELECT pg_temp.assert_eq('S3e', 'across a DST change the stored grace is still exactly 24 hours of elapsed time',
+  (SELECT (extract(epoch FROM "graceUntil" - "currentPeriodEnd") = 86400 AND "graceUntil" = '2026-03-08 13:00:00'::timestamptz)::text FROM subscription WHERE id = :'tz_sub'), 'true');
+SELECT pg_temp.expect_error('S3e', 'a calendar "+1 day" across DST (23 hours) is refused', format($$UPDATE subscription SET "graceUntil" = '2026-03-08 12:00:00'::timestamptz WHERE id = %L$$, :'tz_sub'), '23514', 'subscription_grace_fixed');
+RESET TimeZone;
+SELECT pg_temp.assert_eq('S3e', 'every established subscription in this database satisfies the fixed grace',
+  (SELECT count(*)::text FROM subscription WHERE status <> 'pending' AND "graceUntil" IS DISTINCT FROM "currentPeriodEnd" + interval '24 hours'), '0');
+-- Personal: the ledger's spans carry no grace (no grace column exists on personal_subscription or subscription_purchase)
+SELECT pg_temp.assert_eq('S3e', 'no Personal table has a grace column',
+  (SELECT count(*)::text FROM information_schema.columns WHERE table_name IN ('personal_subscription', 'subscription_purchase', 'subscription_purchase_reversal') AND column_name ILIKE '%grace%'), '0');
 
 -- ------------------------------------------------------------------------------------------------------------- verdict
 \o

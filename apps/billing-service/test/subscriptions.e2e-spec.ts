@@ -7,12 +7,13 @@ import type { TransitionContext } from '../src/domain/actors.js';
 import { deriveEntitlement } from '../src/domain/entitlement.js';
 import { SubscriptionRepository } from '../src/subscriptions/subscription.repository.js';
 import { createTestApp, type TestApp } from './support/app.js';
-import { anchorOccurrence, monthlyPeriodEndingBy, periodEnds } from './support/billing-calendar.js';
+import { anchorOccurrence, periodEnds } from './support/billing-calendar.js';
 import { describeWithEnv } from './support/env.js';
 import { settle as settleThroughPayment, subscriptionPrice } from './support/settlement.js';
 
 const ctx: TransitionContext = { actor: { type: 'service', id: 'test-producer' }, cause: { type: 'request', id: 'r1' }, correlationId: 'c1' };
 const rejects = (p: Promise<unknown>, status: number, code: string) => expect(p).rejects.toMatchObject({ status, response: { code } });
+const hour = 3_600_000;
 const day = 86_400_000;
 
 describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', ['TEST_DATABASE_ADMIN_URL'], (env) => {
@@ -182,7 +183,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       const periodEnd = new Date('2026-11-01T00:00:00Z');
       const organizationId = await activeSubscription(periodEnd);
       await subs.expire(organizationId, ctx);
-      // past periodEnd (Nov 1) AND past the 7-day grace `activate` already precomputed (Nov 8) — genuinely, not just nominally, late.
+      // past periodEnd (Nov 1) AND past the fixed 24-hour grace `activate` already set (Nov 2) — genuinely, not just nominally, late.
       const lateAt = new Date(periodEnd.getTime() + 10 * day);
       const renewed = await paid.renew(organizationId, lateAt);
       // ...and, being genuinely late, restarts the billing anchor at the settlement (ADR-0044 B-025)
@@ -195,7 +196,7 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       // `expire` is called immediately, before any real time has passed — an artificially premature status change,
       // exactly the kind of staleness a delayed sweeper would also produce in production.
       await subs.expire(organizationId, ctx);
-      const stillInGrace = new Date(periodEnd.getTime() + 4 * day); // grace runs Nov 1 -> Nov 8; Nov 5 is inside it
+      const stillInGrace = new Date(periodEnd.getTime() + 12 * hour); // grace runs Nov 1 00:00 -> Nov 2 00:00 (24 hours); Nov 1 12:00 is inside it
       const renewed = await paid.renew(organizationId, stillInGrace);
       expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: periodEnd, currentPeriodEnd: anchorOccurrence(periodEnd, 1), billingAnchorAt: anchorOccurrence(periodEnd, -1) });
     });
@@ -203,13 +204,13 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     it('6. renewal during grace anchors on the ORIGINAL period end, not on now and not on graceUntil, and rolls the grace boundary forward with the new period', async () => {
       const periodEnd = new Date('2026-11-01T00:00:00Z');
       const organizationId = await activeSubscription(periodEnd);
-      // `activate` already precomputed graceUntil = periodEnd + the configured 7 days (R1); `enterGrace` only
-      // normalizes the status label, it does not (and cannot) choose a timestamp.
-      expect((await subs.getByOrganization(organizationId)).graceUntil).toEqual(new Date(periodEnd.getTime() + 7 * day));
+      // `activate` already set graceUntil = periodEnd + exactly 24 hours (S3e); `enterGrace` only normalizes the status label, it
+      // does not (and cannot) choose a timestamp.
+      expect((await subs.getByOrganization(organizationId)).graceUntil).toEqual(new Date(periodEnd.getTime() + day));
       await subs.enterGrace(organizationId, ctx);
-      const renewed = await paid.renew(organizationId, new Date(periodEnd.getTime() + 4 * day));
+      const renewed = await paid.renew(organizationId, new Date(periodEnd.getTime() + 12 * hour));
       const newEnd = anchorOccurrence(periodEnd, 1);
-      expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: periodEnd, currentPeriodEnd: newEnd, graceUntil: new Date(newEnd.getTime() + 7 * day) });
+      expect(renewed.subscription).toMatchObject({ status: 'active', currentPeriodStart: periodEnd, currentPeriodEnd: newEnd, graceUntil: new Date(newEnd.getTime() + day) });
     });
   });
 
@@ -219,9 +220,9 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     await subs.create(organizationId, productId, priceId, ctx);
     const periodEnd = new Date('2026-11-01T00:00:00Z');
     await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
-    // R1: graceUntil was already computed by `activate`, from the deployment's configured policy — `enterGrace` only
-    // flips the status label and touches nothing else.
-    const graceUntil = new Date(periodEnd.getTime() + 7 * day);
+    // graceUntil was already set by `activate`, exactly 24 hours after the period end (S3e) — `enterGrace` only flips the status
+    // label and touches nothing else.
+    const graceUntil = new Date(periodEnd.getTime() + day);
     const graced = await subs.enterGrace(organizationId, ctx);
     expect(graced.subscription).toMatchObject({ status: 'grace', graceUntil, currentPeriodEnd: periodEnd });
 
@@ -239,24 +240,20 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
     await rejects(subs.enterGrace(organizationId, ctx), 409, 'invalid_subscription_transition'); // already in grace
   });
 
-  it('R1: with no grace configured for this deployment, activation sets no graceUntil, and enterGrace has nothing to normalize into', async () => {
-    const noGrace = await createTestApp({ databaseUrl: db.url, env: { SUBSCRIPTION_GRACE_DAYS: '' } });
-    try {
-      const noGraceSubs = noGrace.app.get(SubscriptionRepository);
-      const noGracePaid = paidVia(() => noGrace);
-      const organizationId = org();
-      const { productId, priceId } = await recurringPrice();
-      await noGraceSubs.create(organizationId, productId, priceId, ctx);
-      const periodEnd = new Date('2026-11-01T00:00:00Z');
-      const activated = await noGracePaid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
-      expect(activated.subscription.graceUntil).toBeNull();
-      await rejects(noGraceSubs.enterGrace(organizationId, ctx), 409, 'subscription_grace_unavailable');
-      // the only path left when the period ends is straight to expired — never invented, never client-supplied
-      const expired = await noGraceSubs.expire(organizationId, ctx);
-      expect(expired.subscription).toMatchObject({ status: 'expired', graceUntil: null });
-    } finally {
-      await noGrace.app.close();
-    }
+  it('Core V2 S3e: grace is fixed — activation sets exactly 24 hours, a cancellation toggle keeps it, and no configuration can change it', async () => {
+    const organizationId = org();
+    const { productId, priceId } = await recurringPrice();
+    await subs.create(organizationId, productId, priceId, ctx);
+    const periodEnd = new Date('2026-11-01T00:00:00Z');
+    const activated = await paid.activate(organizationId, { start: anchorOccurrence(periodEnd, -1), end: periodEnd });
+    expect(activated.subscription.graceUntil).toEqual(new Date('2026-11-02T00:00:00Z'));
+    // V1 cleared graceUntil on an `active -> active` move that kept the period: a scheduled cancellation silently removed the grace
+    const cancelled = await subs.scheduleCancellation(organizationId, ctx);
+    expect(cancelled.subscription).toMatchObject({ cancelAtPeriodEnd: true, graceUntil: new Date('2026-11-02T00:00:00Z') });
+    const reversed = await subs.reverseCancellation(organizationId, ctx);
+    expect(reversed.subscription).toMatchObject({ cancelAtPeriodEnd: false, graceUntil: new Date('2026-11-02T00:00:00Z') });
+    // the retired V1 setting cannot widen, narrow or remove it: the application refuses to start
+    for (const v of ['7', '1', '365']) await expect(createTestApp({ databaseUrl: db.url, env: { SUBSCRIPTION_GRACE_DAYS: v } })).rejects.toThrow(/SUBSCRIPTION_GRACE_DAYS was retired/);
   });
 
   it('the database itself refuses graceUntil at or before the period end (section 19), independent of the repository', async () => {
@@ -493,14 +490,14 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       const edge = await settledSubscription(at('2027-01-31'));
       expect((await settle(edge, at('2027-02-28'))).subscription).toMatchObject({ currentPeriodStart: at('2027-02-28'), currentPeriodEnd: at('2027-03-31'), billingAnchorAt: at('2027-01-31') });
 
-      // inside the configured 7-day grace (Feb 28 -> Mar 7), even with the status already normalized to `grace`
+      // inside the fixed 24-hour grace (Feb 28 09:30 -> Mar 1 09:30), even with the status already normalized to `grace`
       const graced = await settledSubscription(at('2027-01-31'));
       await subs.enterGrace(graced.organizationId, ctx);
-      expect((await settle(graced, at('2027-03-03'))).subscription).toMatchObject({
-        status: 'active', currentPeriodStart: at('2027-02-28'), currentPeriodEnd: at('2027-03-31'), graceUntil: at('2027-04-07'), billingAnchorAt: at('2027-01-31'),
+      expect((await settle(graced, at('2027-02-28', '20:00:00'))).subscription).toMatchObject({
+        status: 'active', currentPeriodStart: at('2027-02-28'), currentPeriodEnd: at('2027-03-31'), graceUntil: at('2027-04-01'), billingAnchorAt: at('2027-01-31'),
       });
 
-      // genuinely late: paid through Feb 28, grace through Mar 7, settled Apr 12 15:00 — starts there, and 12 is the new anchor
+      // genuinely late: paid through Feb 28, grace through Mar 1, settled Apr 12 15:00 — starts there, and 12 is the new anchor
       const late = await settledSubscription(at('2027-01-31'));
       const lateAt = at('2027-04-12', '15:00:00');
       expect((await settle(late, lateAt)).subscription).toMatchObject({ status: 'active', currentPeriodStart: lateAt, currentPeriodEnd: at('2027-05-12', '15:00:00'), billingAnchorAt: lateAt });
@@ -509,9 +506,9 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
 
       // one millisecond past the grace window is already late; the grace window's last instant is not
       const justLate = await settledSubscription(at('2027-01-31'));
-      expect((await settle(justLate, new Date(at('2027-03-07').getTime() + 1))).subscription.billingAnchorAt).toEqual(new Date(at('2027-03-07').getTime() + 1));
+      expect((await settle(justLate, new Date(at('2027-03-01').getTime() + 1))).subscription.billingAnchorAt).toEqual(new Date(at('2027-03-01').getTime() + 1));
       const lastGraceInstant = await settledSubscription(at('2027-01-31'));
-      expect((await settle(lastGraceInstant, at('2027-03-07'))).subscription).toMatchObject({ currentPeriodEnd: at('2027-03-31'), billingAnchorAt: at('2027-01-31') });
+      expect((await settle(lastGraceInstant, at('2027-03-01'))).subscription).toMatchObject({ currentPeriodEnd: at('2027-03-31'), billingAnchorAt: at('2027-01-31') });
     });
 
     // Core V2 S3b: `activate({ start, end })` (a caller-supplied first period) is retired; a first period now always comes from a
@@ -530,13 +527,13 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
 
     it('cancellation and entitlement read the stored (clamped) boundary; the next period recovers the anchor', async () => {
       const sub = await settledSubscription(at('2027-01-31'));
-      // entitlement ends at the stored boundary: the clamped period end Feb 28 + the configured 7 days of grace
-      expect(deriveEntitlement(await subs.getByOrganization(sub.organizationId), at('2027-02-27'))).toEqual({ valid: true, expiresAt: at('2027-03-07') });
+      // entitlement ends at the stored boundary: the clamped period end Feb 28 + the fixed 24 hours of grace
+      expect(deriveEntitlement(await subs.getByOrganization(sub.organizationId), at('2027-02-27'))).toEqual({ valid: true, expiresAt: at('2027-03-01') });
       const scheduled = await subs.scheduleCancellation(sub.organizationId, ctx);
       expect(scheduled.subscription).toMatchObject({ cancelAtPeriodEnd: true, currentPeriodEnd: at('2027-02-28'), billingAnchorAt: at('2027-01-31') });
       const renewed = (await settle(sub, at('2027-02-10'))).subscription;
       expect(renewed).toMatchObject({ cancelAtPeriodEnd: false, currentPeriodEnd: at('2027-03-31'), billingAnchorAt: at('2027-01-31') });
-      expect(deriveEntitlement(renewed, at('2027-03-30'))).toEqual({ valid: true, expiresAt: at('2027-04-07') });
+      expect(deriveEntitlement(renewed, at('2027-03-30'))).toEqual({ valid: true, expiresAt: at('2027-04-01') });
     });
   });
 
@@ -549,9 +546,9 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       const end = new Date('2026-11-01T00:00:00Z');
       await paid.activate(organizationId, { start, end });
       const row = await subs.getByOrganization(organizationId); // round-tripped through `pg`: timestamptz -> JS Date
-      // `activate` also precomputed graceUntil (the test app's default SUBSCRIPTION_GRACE_DAYS=7), so the row's OWN
-      // effective boundary is graceUntil, not currentPeriodEnd — exactly what a real, grace-configured deployment sees.
-      expect(row.graceUntil).toEqual(new Date('2026-11-08T00:00:00Z'));
+      // `activate` also set graceUntil (exactly 24 hours after the period end, S3e), so the row's OWN effective boundary is
+      // graceUntil, not currentPeriodEnd.
+      expect(row.graceUntil).toEqual(new Date('2026-11-02T00:00:00Z'));
 
       expect(deriveEntitlement(row, new Date('2026-10-15T00:00:00Z'))).toEqual({ valid: true, expiresAt: row.graceUntil });
       expect(deriveEntitlement(row, end)).toEqual({ valid: true, expiresAt: row.graceUntil }); // still within grace at the paid-period end
@@ -562,8 +559,8 @@ describeWithEnv('subscription domain (Stage 12.2), against a real PostgreSQL', [
       const organizationId = org();
       const { productId, priceId } = await recurringPrice();
       await subs.create(organizationId, productId, priceId, ctx);
-      const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() - 3 * day)); // period already ended (3 to 6 days ago)
-      await paid.activate(organizationId, { start, end }); // graceUntil is precomputed here (7-day test default), status stays 'active'
+      const end = new Date(Date.now() - hour); // the period ended an hour ago: inside its 24-hour grace
+      await paid.activate(organizationId, { start: anchorOccurrence(end, -1), end }); // graceUntil is set here (end + 24 h), status stays 'active'
       const row = await subs.getByOrganization(organizationId);
       expect(row.status).toBe('active');
       expect(row.graceUntil).not.toBeNull();
