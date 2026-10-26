@@ -23,17 +23,15 @@ import { settle, subscriptionPrice } from './support/settlement.js';
  * Every scenario anchors its Subscription periods on the REAL wall clock (`Date.now()`), not a fixed calendar date,
  * because the controller itself supplies the one authoritative `now` from `new Date()` at the HTTP boundary (section
  * 9) — there is no injectable clock to fake here, matching this repo's existing convention for other real-time-bound
- * HTTP suites. Every price here is monthly, so each first period is a real anchor-cadence month
- * (`monthlyPeriodEndingBy`, ADR-0044 B-025): it ends at the wall-clock instant a scenario needs, or at most three days
- * earlier, and every scenario below keeps its meaning across that slack.
+ * HTTP suites. The commercial scenarios use a 30-day price (`activeUntil`), whose period ends at an exact wall-clock instant, since
+ * the Organization grace is exactly 24 hours (Core V2 S3e); the others use a monthly price on its anchor cadence
+ * (`monthlyPeriodEndingBy`, ADR-0044 B-025), where a few days' slack changes nothing.
  */
 describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), against a real PostgreSQL', ['TEST_DATABASE_ADMIN_URL'], (env) => {
   let db: TestDatabase;
-  let t: TestApp; // grace-enabled (test app default: SUBSCRIPTION_GRACE_DAYS=7) — grace-specific scenarios and auth
-  let noGrace: TestApp; // SUBSCRIPTION_GRACE_DAYS='' — scenarios that need a clean currentPeriodEnd/effectiveTerminationAt boundary
+  let t: TestApp;
   let admin: pg.Pool;
   let subs: SubscriptionRepository;
-  let noGraceSubs: SubscriptionRepository;
 
   const ctx: TransitionContext = { actor: { type: 'service', id: 'test-producer' }, cause: { type: 'request', id: 'r1' }, correlationId: 'c1' };
   const day = 86_400_000;
@@ -51,24 +49,30 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
     await runMigrations(db.url, [kitMigrationsDir, billingMigrationsDir]);
     admin = new pg.Pool({ connectionString: db.url, max: 10 });
     t = await createTestApp({ databaseUrl: db.url, tokens: [{ caller: 'test-producer', digest: producer.digest }], authClient });
-    noGrace = await createTestApp({ databaseUrl: db.url, tokens: [{ caller: 'test-producer', digest: producer.digest }], env: { SUBSCRIPTION_GRACE_DAYS: '' } });
     subs = t.app.get(SubscriptionRepository);
-    noGraceSubs = noGrace.app.get(SubscriptionRepository);
   });
   afterAll(async () => {
     await t.app.close();
-    await noGrace.app.close();
     await admin.end();
     await db.drop();
   });
 
   const getEntitlement = (organizationId: string) =>
     request(t.app.getHttpServer()).get(`/billing/organizations/${organizationId}/entitlement`).set('authorization', `Bearer ${producer.token}`);
-  const getEntitlementNoGrace = (organizationId: string) =>
-    request(noGrace.app.getHttpServer()).get(`/billing/organizations/${organizationId}/entitlement`).set('authorization', `Bearer ${producer.token}`);
 
-  /** Core V2 S3a / S3b: an Organization subscription product (the only kind a settlement can apply to) with a monthly price. */
-  const recurringPrice = () => subscriptionPrice(admin);
+  /**
+   * Core V2 S3e: these scenarios run against the real wall clock, and the Organization grace is exactly 24 hours, so a period must end at
+   * an EXACT instant (a monthly cadence can end up to three days early). A 30-day price has no calendar cadence: settled at `end - 30
+   * days`, its first period ends exactly at `end`, and its grace exactly 24 hours later.
+   */
+  async function activeUntil(end: Date): Promise<{ organizationId: string; end: Date; graceUntil: Date }> {
+    const organizationId = org();
+    const { productId, priceId } = await subscriptionPrice(admin, { intervalUnit: 'day', intervalCount: 30 });
+    await subs.create(organizationId, productId, priceId, ctx);
+    const settled = await settle(t.app, { organizationId, priceId, at: new Date(end.getTime() - 30 * day) });
+    expect(settled.subscription).toMatchObject({ status: 'active', currentPeriodEnd: end, graceUntil: new Date(end.getTime() + day) });
+    return { organizationId, end, graceUntil: new Date(end.getTime() + day) };
+  }
 
   // ---------------------------------------------------------------------------------------------------- commercial scenarios
   it('1. no Subscription at all for the Organization -> 200, valid:false, expiresAt:null (never 404 — no Subscription is a normal commercial state)', async () => {
@@ -78,107 +82,73 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
 
   it('2. a pending Subscription (created but never activated) -> false/null', async () => {
     const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const res = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: false, expiresAt: null });
-  });
-
-  it('3. an active paid period, no grace configured -> true, expiresAt = currentPeriodEnd', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
-    await settle(noGrace.app, { organizationId, priceId, at: start });
-    const res = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
-  });
-
-  it('4. exact paid expiry, no grace configured -> false/null (the end boundary is exclusive)', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    await settle(noGrace.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - hour)).start });
-    const res = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: false, expiresAt: null });
-  });
-
-  it('5. Sweeper independence: status still "active" though the paid period already ended, but the PRECOMPUTED grace window is still open -> true/graceUntil', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
+    const { productId, priceId } = await subscriptionPrice(admin);
     await subs.create(organizationId, productId, priceId, ctx);
-    const activated = await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - hour)).start }); // default app: 7-day grace precomputed at activation
-    expect(activated.subscription!.status).toBe('active'); // never normalized to 'grace' — no sweeper exists (section 45)
-    expect(activated.subscription!.graceUntil).not.toBeNull();
     const res = await getEntitlement(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: true, expiresAt: activated.subscription!.graceUntil!.toISOString() });
+    expect(res.body).toEqual({ valid: false, expiresAt: null });
+  });
+
+  it('3. an active paid period -> true; expiresAt is the access boundary: the period end plus the fixed 24-hour grace (S3e)', async () => {
+    const { organizationId, graceUntil } = await activeUntil(new Date(Date.now() + 20 * day));
+    const res = await getEntitlement(organizationId).expect(200);
+    expect(res.body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
+  });
+
+  it('4. the paid period ended an hour ago: still inside the 24-hour grace -> true/graceUntil', async () => {
+    const { organizationId, graceUntil } = await activeUntil(new Date(Date.now() - hour));
+    const res = await getEntitlement(organizationId).expect(200);
+    expect(res.body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
+  });
+
+  it('5. Sweeper independence: status still "active" though the paid period already ended, but the grace window is still open -> true/graceUntil', async () => {
+    const { organizationId, graceUntil } = await activeUntil(new Date(Date.now() - 23 * hour)); // one hour of grace left
+    expect((await subs.getByOrganization(organizationId)).status).toBe('active'); // never normalized to 'grace' — no sweeper exists (section 45)
+    const res = await getEntitlement(organizationId).expect(200);
+    expect(res.body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
   });
 
   it('6. explicit grace status -> true/graceUntil', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await subs.create(organizationId, productId, priceId, ctx);
-    await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - hour)).start });
+    const { organizationId, graceUntil } = await activeUntil(new Date(Date.now() - hour));
     const graced = await subs.enterGrace(organizationId, ctx);
-    expect(graced.subscription.status).toBe('grace');
+    expect(graced.subscription).toMatchObject({ status: 'grace', graceUntil });
     const res = await getEntitlement(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: true, expiresAt: graced.subscription.graceUntil!.toISOString() });
+    expect(res.body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
   });
 
-  it('7. the grace window itself has fully elapsed -> false/null', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await subs.create(organizationId, productId, priceId, ctx);
-    // end 10 (to 13) days ago; default 7-day grace => graceUntil 3 (to 6) days ago, already elapsed too
-    await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() - 10 * day)).start });
-    const res = await getEntitlement(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: false, expiresAt: null });
+  it('7. the 24-hour grace window has elapsed (the period ended 25 hours ago) -> false/null, whatever the status label says', async () => {
+    const { organizationId } = await activeUntil(new Date(Date.now() - 25 * hour));
+    expect((await getEntitlement(organizationId).expect(200)).body).toEqual({ valid: false, expiresAt: null });
+    await subs.enterGrace(organizationId, ctx); // a stale label never revives access
+    expect((await getEntitlement(organizationId).expect(200)).body).toEqual({ valid: false, expiresAt: null });
   });
 
   // 8. Early termination. No repository method accepts a caller-supplied `effectiveTerminationAt` — `terminate()`
-  // always anchors it to the database's own `now()` (section 31) — and the lifecycle trigger force-clears it back to
-  // NULL on every write that leaves (or returns to) `active` (0013_subscription.sql), so a non-null
-  // `effectiveTerminationAt` only ever exists on an already-`expired` row, at an instant that has, by construction,
-  // already passed by the time any subsequent read observes it. The reachable "before/at-or-after" pair is therefore
-  // exactly this: valid immediately beforehand, invalid immediately after the real `terminate()` call — precise
-  // boundary arithmetic on an arbitrary `effectiveTerminationAt` is already exhaustively proven at the unit level
-  // (`src/domain/entitlement.spec.ts`, which is not constrained by what the live schema can actually produce).
-  it('8. early termination: valid right up until `terminate()`, then false/null immediately after (the DB itself owns the instant, never a caller-supplied one)', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 20 * day));
-    await settle(noGrace.app, { organizationId, priceId, at: start });
-
-    const before = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(before.body).toEqual({ valid: true, expiresAt: end.toISOString() });
-
-    await noGraceSubs.terminate(organizationId, ctx);
-    const after = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(after.body).toEqual({ valid: false, expiresAt: null });
+  // always anchors it to the database's own `now()` (section 31) — so the reachable "before/after" pair is exactly this: valid
+  // immediately beforehand, invalid immediately after the real `terminate()` call. Termination is stronger than grace: it cuts the
+  // grace too (S3e). Precise boundary arithmetic is proven at the unit level (`src/domain/entitlement.spec.ts`).
+  it('8. early termination: valid right up until `terminate()`, then false/null immediately after — during the paid period and during grace alike', async () => {
+    for (const end of [new Date(Date.now() + 20 * day), new Date(Date.now() - hour)]) {
+      const { organizationId, graceUntil } = await activeUntil(end);
+      expect((await getEntitlement(organizationId).expect(200)).body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
+      await subs.terminate(organizationId, ctx);
+      expect((await getEntitlement(organizationId).expect(200)).body).toEqual({ valid: false, expiresAt: null });
+    }
   });
 
-  it('9. cancelAtPeriodEnd is scheduled but never revokes already-purchased access before the boundary (Stage 12.3 excludes it from the input entirely)', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
-    await settle(noGrace.app, { organizationId, priceId, at: start });
-    await noGraceSubs.scheduleCancellation(organizationId, ctx);
-    const res = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
+  it('9. cancelAtPeriodEnd is scheduled but never revokes already-purchased access, nor its grace (Stage 12.3 excludes it from the input entirely)', async () => {
+    const { organizationId, graceUntil } = await activeUntil(new Date(Date.now() + 20 * day));
+    const scheduled = await subs.scheduleCancellation(organizationId, ctx);
+    expect(scheduled.subscription.graceUntil).toEqual(graceUntil); // S3e: the toggle keeps the period's grace
+    const res = await getEntitlement(organizationId).expect(200);
+    expect(res.body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
   });
 
   it('10. status independence: forced to "expired" while the period itself has not actually ended -> the TIMESTAMP-derived answer wins, never the status label (section 29/30)', async () => {
-    const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const { start, end } = monthlyPeriodEndingBy(new Date(Date.now() + 28 * day));
-    await settle(noGrace.app, { organizationId, priceId, at: start });
-    const expired = await noGraceSubs.expire(organizationId, ctx); // a legal active->expired transition, independent of whether time has actually elapsed
+    const { organizationId, graceUntil } = await activeUntil(new Date(Date.now() + 20 * day));
+    const expired = await subs.expire(organizationId, ctx); // a legal active->expired transition, independent of whether time has actually elapsed
     expect(expired.subscription.status).toBe('expired');
-    const res = await getEntitlementNoGrace(organizationId).expect(200);
-    expect(res.body).toEqual({ valid: true, expiresAt: end.toISOString() });
+    const res = await getEntitlement(organizationId).expect(200);
+    expect(res.body).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
   });
 
   // ---------------------------------------------------------------------------------------------------------------- authentication
@@ -209,14 +179,14 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
   it('tenant isolation: two Organizations each see only their OWN entitlement, never a cross-tenant fallback', async () => {
     const orgA = org();
     const orgB = org();
-    const a = await recurringPrice();
-    const b = await recurringPrice();
-    await noGraceSubs.create(orgA, a.productId, a.priceId, ctx);
-    await settle(noGrace.app, { organizationId: orgA, priceId: a.priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
-    await noGraceSubs.create(orgB, b.productId, b.priceId, ctx); // orgB stays pending — a different commercial state entirely
+    const a = await subscriptionPrice(admin);
+    const b = await subscriptionPrice(admin);
+    await subs.create(orgA, a.productId, a.priceId, ctx);
+    await settle(t.app, { organizationId: orgA, priceId: a.priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
+    await subs.create(orgB, b.productId, b.priceId, ctx); // orgB stays pending — a different commercial state entirely
 
-    const resA = await getEntitlementNoGrace(orgA).expect(200);
-    const resB = await getEntitlementNoGrace(orgB).expect(200);
+    const resA = await getEntitlement(orgA).expect(200);
+    const resB = await getEntitlement(orgB).expect(200);
     expect(resA.body.valid).toBe(true);
     expect(resB.body).toEqual({ valid: false, expiresAt: null });
   });
@@ -228,25 +198,25 @@ describeWithEnv('Billing effective-access / entitlement contract (Stage 12.5), a
 
   it('the response shape is EXACTLY {valid, expiresAt}: no Subscription internals (id/status/priceId/productId/revision/...) ever leak', async () => {
     const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    await settle(noGrace.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
-    const res = await getEntitlementNoGrace(organizationId).expect(200);
+    const { productId, priceId } = await subscriptionPrice(admin);
+    await subs.create(organizationId, productId, priceId, ctx);
+    await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
+    const res = await getEntitlement(organizationId).expect(200);
     expect(Object.keys(res.body).sort()).toEqual(['expiresAt', 'valid']);
   });
 
   // ---------------------------------------------------------------------------------------------------------------- read-only
   it('read-only: a GET never mutates the Subscription row, its history, or bumps its revision — even when called repeatedly', async () => {
     const organizationId = org();
-    const { productId, priceId } = await recurringPrice();
-    await noGraceSubs.create(organizationId, productId, priceId, ctx);
-    const activated = await settle(noGrace.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
+    const { productId, priceId } = await subscriptionPrice(admin);
+    await subs.create(organizationId, productId, priceId, ctx);
+    const activated = await settle(t.app, { organizationId, priceId, at: monthlyPeriodEndingBy(new Date(Date.now() + 29 * day)).start });
 
     const before = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription!.id])).rows[0];
     const historyBefore = (await admin.query(`SELECT count(*)::int AS n FROM billing_transition WHERE "entityType"='subscription' AND "entityId"=$1`, [activated.subscription!.id])).rows[0].n;
 
-    await getEntitlementNoGrace(organizationId).expect(200);
-    await getEntitlementNoGrace(organizationId).expect(200);
+    await getEntitlement(organizationId).expect(200);
+    await getEntitlement(organizationId).expect(200);
 
     const after = (await admin.query(`SELECT revision, "updatedAt" FROM subscription WHERE id = $1`, [activated.subscription!.id])).rows[0];
     expect(after).toEqual(before);

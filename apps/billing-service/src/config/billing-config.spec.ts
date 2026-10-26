@@ -48,16 +48,10 @@ describe('loadBillingConfig', () => {
     for (const bad of ['TN', 'TNDD', 'T1D', ',', 'tnd;usd']) expect(refusal({ ...BASE, BILLING_SUPPORTED_CURRENCIES: bad })).toContain('BILLING_SUPPORTED_CURRENCIES');
   });
 
-  it('R1: SUBSCRIPTION_GRACE_DAYS has NO code default either — undefined means this deployment offers no grace at all', () => {
-    expect(loadBillingConfig(BASE).subscriptionGraceDays).toBeUndefined();
-    expect(loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '7' }).subscriptionGraceDays).toBe(7);
-    expect(loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '1' }).subscriptionGraceDays).toBe(1);
-    expect(loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '365' }).subscriptionGraceDays).toBe(365);
-    for (const bad of ['0', '366', '-1', '3.5', 'seven', '']) {
-      const cfg = { ...BASE, SUBSCRIPTION_GRACE_DAYS: bad };
-      if (bad === '') expect(loadBillingConfig(cfg).subscriptionGraceDays).toBeUndefined(); // empty means unset, like every other optional value
-      else expect(refusal(cfg)).toContain('SUBSCRIPTION_GRACE_DAYS');
-    }
+  it('Core V2 S3e: grace is not configurable — the retired SUBSCRIPTION_GRACE_DAYS is refused, whatever its value, never silently ignored', () => {
+    for (const v of ['1', '7', '365', '0', 'seven']) expect(refusal({ ...BASE, SUBSCRIPTION_GRACE_DAYS: v })).toContain('SUBSCRIPTION_GRACE_DAYS was retired');
+    expect(() => loadBillingConfig({ ...BASE, SUBSCRIPTION_GRACE_DAYS: '' })).not.toThrow(); // empty means unset, like every other optional value
+    expect(loadBillingConfig(BASE)).not.toHaveProperty('subscriptionGraceDays');
   });
 
   it('carries only what each stage needs (currencies since Stage 2, rate limits since Stage 3, the Payment client/dispatch/reconcile settings since Stage 4, caller admission since Stage 21.C.2)', () => {
@@ -65,7 +59,7 @@ describe('loadBillingConfig', () => {
       'authServiceUrl', 'authTimeoutMs', 'bodyLimitKb', 'corsOrigins', 'databaseUrl', 'db', 'dispatch', 'docs', 'httpDrainTimeoutMs', 'isProduction', 'logLevel',
       'metrics', // V2 A12.2: the kit's metrics listener settings (off by default), used by configureApp
       'nodeEnv', 'organizationReference', 'paymentEventRetry', 'paymentServiceToken', 'paymentServiceUrl', 'paymentTimeoutMs', 'port', 'rabbitmqConfirmTimeoutMs', 'rabbitmqHeartbeatS', 'rabbitmqUrl', 'rateLimits', 'reconcile',
-      'serviceName', 'servicePolicy', 'serviceTokens', 'subscriptionGraceDays', 'supportedCurrencies', 'trustProxy', 'trustProxyHops',
+      'serviceName', 'servicePolicy', 'serviceTokens', 'supportedCurrencies', 'trustProxy', 'trustProxyHops',
     ]);
   });
 

@@ -93,10 +93,11 @@ errs=$(cat "$outdir"/*.out | grep -ciE "error|deadlock" || true)
 rev=$(q "SELECT revision FROM subscription WHERE id = '$sub'")
 after=$(q "SELECT to_char(\"currentPeriodEnd\" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM subscription WHERE id = '$sub'")
 anchor=$(q "SELECT to_char(\"billingAnchorAt\" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') FROM subscription WHERE id = '$sub'")
+grace=$(q "SELECT (\"graceUntil\" = \"currentPeriodEnd\" + interval '24 hours')::text FROM subscription WHERE id = '$sub'") # Core V2 S3e
 expected="2090-09-30 10:00"
 rm -rf "$outdir"
-[ "$errs" -eq 0 ] && [ "$rev" -eq $((1 + racers)) ] && [ "$after" = "$expected" ] && [ "$anchor" = "2089-12-31 10:00" ] \
-  || fail "concurrent renewals: errors=$errs revision=$rev (want $((1 + racers))) end=$after (want $expected) anchor=$anchor (want 2089-12-31 10:00) — lost update, lost time or a moved anchor"
+[ "$errs" -eq 0 ] && [ "$rev" -eq $((1 + racers)) ] && [ "$after" = "$expected" ] && [ "$anchor" = "2089-12-31 10:00" ] && [ "$grace" = true ] \
+  || fail "concurrent renewals: errors=$errs revision=$rev (want $((1 + racers))) end=$after (want $expected) anchor=$anchor (want 2089-12-31 10:00) grace24h=$grace — lost update, lost time, a moved anchor or a stale grace"
 echo "PASS: race — $racers concurrent renewals advanced the period by exactly $racers anchored intervals (end $after), revision $rev, anchor kept, no deadlock"
 
 echo "== concurrency: a renewal racing a termination on the SAME subscription ends in one consistent, auditable state"
@@ -115,8 +116,9 @@ status=$(q "SELECT status FROM subscription WHERE id = '$sub'")
 # or is a safe no-op once already expired: total history rows is always the creation row (revision 0) plus one per
 # revision since, so history == revision + 1 whenever nothing is silently lost to the race.
 history=$(q "SELECT count(*) FROM billing_transition WHERE \"entityType\"='subscription' AND \"entityId\"='$sub'")
-[ "$errs" -eq 0 ] && [ "$history" -eq $((rev + 1)) ] && [ "$rev" -ge 2 ] && { [ "$status" = active ] || [ "$status" = expired ]; } \
-  || fail "renew/terminate race: errors=$errs revision=$rev history=$history status=$status (want history=revision+1, revision>=2, one consistent status)"
+grace=$(q "SELECT (\"graceUntil\" = \"currentPeriodEnd\" + interval '24 hours')::text FROM subscription WHERE id = '$sub'") # Core V2 S3e
+[ "$errs" -eq 0 ] && [ "$history" -eq $((rev + 1)) ] && [ "$rev" -ge 2 ] && { [ "$status" = active ] || [ "$status" = expired ]; } && [ "$grace" = true ] \
+  || fail "renew/terminate race: errors=$errs revision=$rev history=$history status=$status grace24h=$grace (want history=revision+1, revision>=2, one consistent status, the fixed grace)"
 echo "PASS: race — renew vs terminate ended in status=$status, revision=$rev, matching history rows, no deadlock"
 
 echo "== concurrency: $racers concurrent creations for the SAME organization give exactly one subscription"

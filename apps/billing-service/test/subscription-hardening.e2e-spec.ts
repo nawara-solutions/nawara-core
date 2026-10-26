@@ -338,7 +338,7 @@ describeWithEnv('Subscription lifecycle / concurrency / idempotency hardening (S
       await client.query('BEGIN');
       const { rows: locked } = await client.query<{ revision: number }>(`SELECT revision FROM subscription WHERE id = $1 FOR UPDATE`, [before!.id]);
       const newEnd = new Date(before!.currentPeriodEnd!.getTime() + 30 * day);
-      const newGrace = new Date(newEnd.getTime() + 7 * day); // must move WITH currentPeriodEnd, or subscription_grace_after_period refuses the write
+      const newGrace = new Date(newEnd.getTime() + day); // exactly 24 hours after the new end, or subscription_grace_fixed refuses the write (S3e)
       await client.query(`UPDATE subscription SET "currentPeriodStart" = "currentPeriodEnd", "currentPeriodEnd" = $2, "graceUntil" = $3 WHERE id = $1`, [before!.id, newEnd, newGrace]);
       await client.query(
         `INSERT INTO billing_transition ("entityType", "entityId", "fromStatus", "toStatus", revision, "actorType", "actorId", "causeType", "correlationId")

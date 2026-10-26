@@ -106,12 +106,9 @@ describeWithEnv('TypeScript and database state machines agree on every pair (rea
     }
   }
 
-  const subscriptionColumns: Record<SubscriptionStatus, string> = {
-    pending: '',
-    active: `, "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01'`,
-    grace: `, "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01', "graceUntil" = '2026-02-08'`,
-    expired: `, "currentPeriodStart" = '2026-01-01', "currentPeriodEnd" = '2026-02-01'`,
-  };
+  // Core V2 S3e: every established row carries the fixed grace (exactly 24 hours after its period end, `subscription_grace_fixed`)
+  const established = `, "currentPeriodStart" = '2026-01-01T00:00:00Z', "currentPeriodEnd" = '2026-02-01T00:00:00Z', "graceUntil" = '2026-02-02T00:00:00Z'`;
+  const subscriptionColumns: Record<SubscriptionStatus, string> = { pending: '', active: established, grace: established, expired: established };
 
   /** A product + its immutable, recurring price, and a subscription against it, placed directly in `status` with triggers off. */
   async function makeSubscription(status: SubscriptionStatus): Promise<string> {
