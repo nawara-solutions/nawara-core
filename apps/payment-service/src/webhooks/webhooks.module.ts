@@ -8,5 +8,6 @@ import { WebhooksController } from './webhooks.controller.js';
   imports: [AttemptsModule],
   controllers: [WebhooksController],
   providers: [WebhookService, WebhookRetriever, WebhookRetrierService],
+  exports: [WebhookService], // Core V2 S4f: the simulation harness delivers its notifications through the same pipeline
 })
 export class WebhooksModule {}

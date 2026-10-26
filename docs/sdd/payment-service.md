@@ -55,6 +55,17 @@ chargeback facts, allocation (FC-2) and the association of unmatched evidence ar
 money command, retained exactly 90 days from the database's own time, never rewritten and never deleted inside its window; the
 configurable `IDEMPOTENCY_TTL_HOURS` ceiling is retired and refused. The permanent business keys behind it are unchanged.
 
+**Core V2 S4f (simulation provider and harness; S0 §1.1, FC-10; Owner OD-06 F-S1 to F-S7; register PAY-14 F):** a dedicated
+`simulation` provider beside `test`, both refused in production and mutually exclusive (with simulation enabled it is the server's default
+provider and payer `providerOptions` are refused: no client-chosen outcomes). A dedicated harness caller holding `payment.simulation.resolve`
+alone (service token only; the grant is refused unless the provider is enabled) records commands under stable `commandId`s in the
+simulated provider's own append-only `simulation_provider_command` (migration 0015): how it answers a payment's next attempts, and what
+it says happened to one of its attempts. A command is never a settlement fact: Payment learns only through the provider port, a
+notification signed with `PAYMENT_SIMULATION_WEBHOOK_SECRET` verified by the webhook pipeline or the status read, with the money and
+transaction derived from its own rows. Provider session expiry joins the evidence classes (`FetchStatusResult` `expired`, webhook type
+`payment.expired`): a submitted attempt expires definitively (F-3), and it confirms an inferred failure. The harness module is mounted only
+where the provider is enabled outside production and its service refuses otherwise.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.
@@ -811,6 +822,7 @@ Payment emits `payment.succeeded` and `refund.succeeded` (and the other events);
 | ~~`IDEMPOTENCY_TTL_HOURS`~~ | **retired by Core V2 S4g and refused at startup**: header keys are class M, retained 90 days by the database (register PAY-15 F) |
 | `PAYMENT_RETURN_URL_ALLOWLIST` | allowed `returnUrl` origins |
 | `PAYMENT_TEST_PROVIDER` | test provider switch; refused in production |
+| `PAYMENT_SIMULATION_PROVIDER`, `PAYMENT_SIMULATION_WEBHOOK_SECRET` | Core V2 S4f simulation provider and harness (register PAY-14 F); refused in production and beside the test provider; the secret is at least 32 characters and never a repository value |
 | provider secrets (`PAYMENT_PROVIDER_<ID>_*` via `NAME_FILE`) | never stored in tables, logs or events |
 | `PORT`, `NODE_ENV`, `LOG_LEVEL`, `BODY_LIMIT_KB`, `CORS_ORIGINS` | kit base configuration (fail-closed, values never echoed) |
 

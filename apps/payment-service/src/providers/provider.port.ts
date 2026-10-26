@@ -12,6 +12,8 @@ export type FetchStatusResult =
   | { kind: 'succeeded'; amount: number; currency: string; providerTransactionId?: string; providerOccurredAt?: Date }
   | { kind: 'failed'; failureClass: Exclude<FailureClass, 'ambiguous'>; failureCode: string }
   | { kind: 'pending' }
+  /** Core V2 S4f (PAY-14, F-S4): the provider says the attempt's session expired unpaid. Provider-confirmed, so definitive (F-3). */
+  | { kind: 'expired' }
   | { kind: 'notFound' };
 
 export interface ParsedWebhookBody {

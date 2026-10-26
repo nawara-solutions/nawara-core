@@ -52,6 +52,26 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "expiresAt n'est pas un horodatage valide.",
     ar: 'قيمة expiresAt ليست طابعًا زمنيًا صالحًا.',
   },
+  providerOptionsNotAccepted: {
+    en: 'This provider does not accept providerOptions: a payer cannot choose a simulated outcome.',
+    fr: 'Ce fournisseur n’accepte pas providerOptions : un payeur ne peut pas choisir un résultat simulé.',
+    ar: 'لا يقبل هذا المزوّد providerOptions: لا يمكن للدافع اختيار نتيجة محاكاة.',
+  },
+  invalidSimulationCommand: {
+    en: 'failureCode and delivery apply only to the outcomes that carry them.',
+    fr: 'failureCode et delivery ne s’appliquent qu’aux résultats qui les comportent.',
+    ar: 'لا ينطبق failureCode وdelivery إلا على النتائج التي تتضمنهما.',
+  },
+  simulationCommandConflict: {
+    en: 'This commandId was already used for a different simulation command.',
+    fr: 'Ce commandId a déjà été utilisé pour une autre commande de simulation.',
+    ar: 'سبق استخدام commandId هذا لأمر محاكاة مختلف.',
+  },
+  simulationNothingToDeliver: {
+    en: 'This simulation command produced no provider notification.',
+    fr: 'Cette commande de simulation n’a produit aucune notification du fournisseur.',
+    ar: 'لم ينتج أمر المحاكاة هذا أي إشعار من المزوّد.',
+  },
   paymentUncertain: {
     en: 'An earlier attempt may still settle this payment; no new attempt is possible until it is resolved.',
     fr: 'Une tentative précédente peut encore régler ce paiement ; aucune nouvelle tentative n’est possible avant sa résolution.',

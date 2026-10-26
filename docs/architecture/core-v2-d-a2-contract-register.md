@@ -157,7 +157,7 @@ is preserved as evidence even when its commercial processing fails.
 | PAY-11 | Payment | `POST /payment/admin/disputes/:id/decision` (P) | S6e | M |
 | PAY-12 | Payment | `GET /payment/admin/reconciliation-items` (P) | S6h | M |
 | PAY-13 | Payment | `POST /payment/admin/provider-facts/:id/associations` (P) | S6h | M |
-| PAY-14 | Payment | Simulation adapter and harness; production refusal (OPEN route) | S4f | L |
+| PAY-14 | Payment | Simulation adapter and harness; production refusal (OD-06 resolved, S4f implemented) | S4f | H |
 | PAY-15 | Payment | Class-M idempotency of 90 days (cross-cutting) | S4g | H |
 | FIL-01 | File | Evidence grant creation (OPEN) | S2-File | L |
 | FIL-02 | File | Granted read (OPEN) | S2-File | L |
@@ -807,10 +807,11 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | Part | Contract |
 |---|---|
 | A. Frozen | Core V2 is certified on simulation only; production refuses to boot with the test or simulation provider or harness; production refuses non-live events; no client-chosen outcomes (S0 §1.1, FC-10) |
-| B. Route and DTO | **OPEN**: whether the adapter is new beside the `test` provider or replaces it; the harness caller and shape |
-| C. Errors, idempotency | OPEN |
-| D. Existing | the `test` provider only (`apps/payment-service/src/providers/test-provider.ts`) |
-| E. Open, gates | **OD-06** (simulation-adapter gate, roadmap §7). Stage S4f. Confidence L |
+| B. Route and DTO | **Resolved (Owner OD-06 F-S1 to F-S3, S4f, 2026-10-26).** A dedicated `simulation` provider beside `test` (neither permitted in production). Service token only, operation `payment.simulation.resolve` held alone by a dedicated harness caller: `POST /payment/simulation/payments/:paymentId/initiation` `{commandId, mode: accepted \| ambiguous \| rejected, failureCode?}`; `POST /payment/simulation/payments/:paymentId/attempts/:attemptId/outcomes` `{commandId, outcome: succeeded \| amount_mismatch \| failed \| expired \| no_record \| pending, failureCode?, delivery?: immediate \| held}`; `POST /payment/simulation/commands/:commandId/deliver`. No money, currency, payer, provider transaction or settlement field exists |
+| C. Errors, idempotency | **Resolved (F-S6).** `invalid_simulation_command` (400), `not_found` (404: unknown, cross-payment, cross-provider or live reference), `simulation_command_conflict` (409), `simulation_nothing_to_deliver` (409), `provider_options_not_accepted` (422, payer attempt). Each `commandId` is a stable command identity (permanent primary key): an identical replay answers 200 `Idempotent-Replayed` with no effect; other content under it is refused; distinct commands may observe one attempt in sequence. A notification's event id `sim_<commandId>` is deduplicated by the existing `webhook_event (provider, providerEventId)` key. No new global money-command idempotency class |
+| D. Existing | the `test` provider (`apps/payment-service/src/providers/test-provider.ts`), kept for its existing workflows only (F-S7) |
+| E. Open, gates | none for the simulation scope. Real providers, refunds, chargebacks (S6) remain out of scope. Stage S4f. Confidence H |
+| F. S4f (2026-10-26) | **IMPLEMENTED** (`apps/payment-service/src/providers/simulation-provider.ts`, `src/simulation/`, migration `0015_simulation_provider.sql`). The harness changes only the simulated provider's own append-only records (`simulation_provider_command`, bound by a composite key to an attempt OF the simulation provider and its payment); Payment learns every outcome through the existing authenticated paths (a notification signed with `PAYMENT_SIMULATION_WEBHOOK_SECRET` and verified by the webhook pipeline, or the provider status read), so a harness instruction is never itself a verified settlement fact (F-S4). Evidence classes: verified success, provider-confirmed failure, provider expiry (new `expired` provider result: a submitted attempt expires definitively; it confirms an inferred failure), no record (inferred failure), pending, delayed, duplicate and out-of-order delivery, late verified success, amount mismatch, contradictory observation (S4d conflict). Configuration (F-S5): `PAYMENT_SIMULATION_PROVIDER` and its secret (at least 32 characters, never a repository-published value) are refused in production; the harness module is not mounted there and its service refuses when not enabled; granting `payment.simulation.resolve` is refused unless the provider is enabled; `liveMode` stays false. F-S7: the simulation and test providers are mutually exclusive; with simulation enabled it is the server's default provider and payer `providerOptions` are refused |
 
 #### PAY-15 Money-command idempotency
 
@@ -987,7 +988,7 @@ Nothing in this section is decided. Documenting a proposal elsewhere in this reg
 | OD-03 | Fee cap, delegation and proposal model: scope (Platform or Organization), units, limits. **Resolved (Owner A1 to A5, S3f, 2026-10-26):** BIL-04 to BIL-07 F | BIL-04 to BIL-07 |
 | OD-04 | How an assistance request selects and freezes its approved school fee | BIL-13, BIL-19 |
 | OD-05 | Premium catalog products, plan durations and prices (the catalog gate, S0 §6). **Split (Owner D-CAT-1, S3g, 2026-10-26):** the catalog-management capability is implemented (BIL-02 F, BIL-03 F); the catalog VALUES (product codes, names, descriptions, durations, amounts, initial availability dates) stay **OPEN** and are approved before the first real catalog configuration | BIL-02, BIL-03 configuration |
-| OD-06 | Simulation adapter: new beside the `test` provider or replacing it; harness caller and shape (the simulation-adapter gate, roadmap §7) | PAY-14 |
+| OD-06 | Simulation adapter: new beside the `test` provider or replacing it; harness caller and shape (the simulation-adapter gate, roadmap §7). **Resolved (Owner F-S1 to F-S7, S4f, 2026-10-26):** a dedicated `simulation` provider beside `test`; a dedicated harness caller holding `payment.simulation.resolve` alone; commands with stable identities; outcomes only through the provider pipeline (PAY-14 F) | PAY-14 |
 | OD-07 | School actor set for assistance, settlement, cash return, dispute response, restrictions and recovery in an **active** Organization; V-5 covers inactive Organizations only | BIL-15 to BIL-17, BIL-21, BIL-26, BIL-28, BIL-29, BIL-31 |
 | OD-08 | The actor who starts an Organization-payer attempt | BIL-16, BIL-29, PAY-03 |
 | OD-09 | Who may decline an assistance request | BIL-14 |

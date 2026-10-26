@@ -45,6 +45,19 @@ no production traffic can reach any of this (the test provider refuses to start 
   `timeout_after_accept`, plus signature verification), the provider port, and three background jobs
   (`AttemptResolver`, `WebhookRetrier`, `ExpirySweeper`) with the same start/stop shape as the kit's
   `OutboxRelay`.
+- **The `simulation` provider (Core V2 S4f, register PAY-14; OD-06 F-S1 to F-S7):** beside `test`, never in production (startup is
+  refused; its routes are not mounted; its service refuses if reached). Payers cannot choose its outcomes: `providerOptions` is refused
+  (`422 provider_options_not_accepted`) and, when it is enabled, it is the server's default provider while the test provider must be off.
+  An authorized harness caller holding `payment.simulation.resolve` **alone** (granting it is refused unless the provider is enabled)
+  instructs it through `POST /payment/simulation/payments/:paymentId/initiation` (`accepted | ambiguous | rejected`),
+  `POST /payment/simulation/payments/:paymentId/attempts/:attemptId/outcomes` (`succeeded | amount_mismatch | failed | expired |
+  no_record | pending`, delivered `immediate` or `held`) and `POST /payment/simulation/commands/:commandId/deliver` (delayed, duplicate,
+  out-of-order delivery). A command only changes the simulated provider's own append-only records (`simulation_provider_command`, migration
+  0015): Payment learns through the ordinary path, a notification signed with `PAYMENT_SIMULATION_WEBHOOK_SECRET` and verified by the
+  webhook pipeline, or the status read, so a command is never itself a settlement fact. Money, currency and the provider transaction are
+  derived from Payment's rows. Each `commandId` is a stable identity: an identical replay answers `200` (`Idempotent-Replayed`) and changes
+  nothing; other content under it is `409 simulation_command_conflict`. A provider session expiry (`expired`) is now an evidence class of
+  the shared pipeline: a submitted attempt expires definitively.
 - Financial invariants FI-13 (provider amount/currency must match the snapshot) and the late-success
   rule (an inferred failure can still succeed later; a provider-confirmed one is a real conflict, never
   silently applied) — enforced by `AttemptService.applyStatus`, the single implementation `sync`, the
@@ -119,7 +132,9 @@ Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
 | `PAYMENT_MAX_ATTEMPTS` | no | 3 | no | attempts per payment (1 to 20). `IDEMPOTENCY_TTL_HOURS` was retired by Core V2 S4g and is refused: money-command idempotency is class M, retained 90 days by the database |
 | `PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE`, `PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE` | no | 300, 30 | no | per-caller limits |
 | `PAYMENT_RETURN_URL_ALLOWLIST` | no | empty | no | allowed return-URL prefixes |
-| `PAYMENT_TEST_PROVIDER` | no | `false` | no | the development test gateway; **refused in production** |
+| `PAYMENT_TEST_PROVIDER` | no | `false` | no | the development test gateway (payer-chosen `scenario`s); **refused in production** |
+| `PAYMENT_SIMULATION_PROVIDER` | no | `false` | no | Core V2 S4f: the `simulation` provider and its harness routes (certification only); **refused in production** and together with `PAYMENT_TEST_PROVIDER` |
+| `PAYMENT_SIMULATION_WEBHOOK_SECRET` | when the simulation provider is on | none | **yes** | the simulation provider's notification signing secret (at least 32 characters; a value published in this repository is refused); refused in production |
 | `SWAGGER_USERNAME`, `SWAGGER_PASSWORD` | no | `docs`, none | password: **yes** | API docs; mounted only with a password of at least 16 characters |
 
 No real gateway adapter exists yet, so there is no gateway credential to configure.

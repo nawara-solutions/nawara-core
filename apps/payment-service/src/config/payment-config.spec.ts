@@ -248,4 +248,39 @@ describe('loadPaymentConfig', () => {
     }
     expect(() => loadPaymentConfig({ ...BASE_ENV, IDEMPOTENCY_TTL_HOURS: '' })).not.toThrow(); // empty means unset, like every optional value
   });
+  describe('Core V2 S4f (PAY-14): the simulation provider (F-S1, F-S2, F-S5, F-S7)', () => {
+    const SECRET = 's'.repeat(24) + 'imulation-own-secret';
+    const SIM = { PAYMENT_SIMULATION_PROVIDER: 'true', PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET };
+    const harness = generateServiceToken();
+    const HARNESS_POLICY = (operations: string[]) => JSON.stringify({ callers: { 'simulation-harness': { operations, allowedPlatforms: [] } } });
+
+    it('is off by default and, when enabled outside production, carries its own signing secret', () => {
+      expect(loadPaymentConfig(BASE_ENV).simulation).toBeUndefined();
+      expect(loadPaymentConfig({ ...BASE_ENV, ...SIM }).simulation).toEqual({ webhookSecret: SECRET });
+    });
+
+    it('refuses to start in production with the simulation provider, or with its secret configured', () => {
+      const prod = { ...BASE_ENV, ...PROD_REFERENCE, NODE_ENV: 'production', RABBITMQ_URL: 'amqp://mq:5672' };
+      expect(() => loadPaymentConfig({ ...prod, ...SIM })).toThrow(/PAYMENT_SIMULATION_PROVIDER must not be enabled/);
+      expect(() => loadPaymentConfig({ ...prod, PAYMENT_SIMULATION_WEBHOOK_SECRET: SECRET })).toThrow(/PAYMENT_SIMULATION_WEBHOOK_SECRET must not be configured/);
+    });
+
+    it('requires signing material of at least 32 characters, never a development value published in this repository', () => {
+      expect(() => loadPaymentConfig({ ...BASE_ENV, PAYMENT_SIMULATION_PROVIDER: 'true' })).toThrow(/PAYMENT_SIMULATION_WEBHOOK_SECRET is required/);
+      expect(() => loadPaymentConfig({ ...BASE_ENV, ...SIM, PAYMENT_SIMULATION_WEBHOOK_SECRET: 'x'.repeat(31) })).toThrow(/at least 32 characters/);
+      expect(() => loadPaymentConfig({ ...BASE_ENV, ...SIM, PAYMENT_SIMULATION_WEBHOOK_SECRET: 'test-provider-webhook-secret' })).toThrow(/at least 32 characters/);
+    });
+
+    it('F-S7: never runs beside the test provider (whose scenarios a payer chooses)', () => {
+      expect(() => loadPaymentConfig({ ...BASE_ENV, ...SIM, PAYMENT_TEST_PROVIDER: 'true' })).toThrow(/mutually exclusive/);
+    });
+
+    it('F-S2: payment.simulation.resolve is held alone, and only where the simulation provider is enabled', () => {
+      const env = { ...BASE_ENV, SERVICE_TOKENS: `simulation-harness:${harness.digest}` };
+      expect(loadPaymentConfig({ ...env, ...SIM, PAYMENT_SERVICE_POLICY: HARNESS_POLICY(['payment.simulation.resolve']) }).servicePolicy.of('simulation-harness')?.operations)
+        .toEqual(new Set(['payment.simulation.resolve']));
+      expect(() => loadPaymentConfig({ ...env, ...SIM, PAYMENT_SERVICE_POLICY: HARNESS_POLICY(['payment.simulation.resolve', 'payment.read']) })).toThrow(/held alone/);
+      expect(() => loadPaymentConfig({ ...env, PAYMENT_SERVICE_POLICY: HARNESS_POLICY(['payment.simulation.resolve']) })).toThrow(/requires PAYMENT_SIMULATION_PROVIDER/);
+    });
+  });
 });

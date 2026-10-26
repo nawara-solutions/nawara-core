@@ -42,8 +42,13 @@ export class AttemptService {
   async start(paymentId: string, callerId: string, idempotencyKey: string, dto: StartAttemptDto, userKind?: EventContext['userKind']): Promise<StartAttemptResult> {
     // Only the payer (a verified user) starts an attempt; a fatal provider rejection fails the payment under this context (Stage 18.7 G1).
     const ctx: EventContext = { ...requestContext({ type: 'user', id: callerId }), ...(userKind ? { userKind } : {}) };
-    const providerId = dto.provider ?? 'test';
+    // Core V2 S4f (F-S7): the default is the server's own provider; a simulation environment never runs the test provider (config-refused)
+    const providerId = dto.provider ?? (this.config.simulation ? 'simulation' : 'test');
     const provider = this.providers.get(providerId); // throws 422 invalid_provider if not enabled
+    // Core V2 S4f (F-S7): a payer never selects a simulated outcome; only the authorized harness instructs the simulation provider
+    if (provider.id === 'simulation' && dto.providerOptions !== undefined) {
+      throw paymentError(422, 'provider_options_not_accepted', PAYMENT_MESSAGES.providerOptionsNotAccepted);
+    }
     const attemptId = randomUUID();
     const requestHash = IdempotencyService.requestHash('start_attempt', `/payment/payments/${paymentId}/attempts`, dto);
 
@@ -210,6 +215,25 @@ export class AttemptService {
         );
         await this.outbox.enqueue(q, paymentEvent('payment.succeeded', settled[0], ctx, { settledMethod: 'gateway', succeededAt: settled[0].closedAt?.toISOString() }));
         await this.audit.record(q, 'payment.succeeded', settled[0], ctx); // Stage 18.7.1 (G1)
+        return rows[0];
+      }
+
+      if (status.kind === 'expired') {
+        // Core V2 S4f (F-S4): the provider's own expiry of a submitted attempt is definitive like its failure (F-3). It confirms an INFERRED
+        // failure the same way; an attempt the provider never acknowledged (initiated/unknown) has no expiry edge and stays for the resolver.
+        if (current.status === 'succeeded') throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.cannotFailSucceeded);
+        if (current.status === 'failed' && current.failureInferred && current.failureConfirmedAt === null) {
+          const { rows } = await q.query<AttemptRow>(
+            `UPDATE payment_attempt SET "failureConfirmedAt" = now(), "confirmedFailureCode" = 'expired' WHERE id = $1 RETURNING *`, [attemptId]);
+          await this.settlePaymentAfterFailure(q, payment.id, current.attemptNumber, 'expired', provider, ctx);
+          return rows[0];
+        }
+        if (current.status !== 'submitted') return current;
+        const { rows } = await q.query<AttemptRow>(
+          `UPDATE payment_attempt SET status = 'expired', "failureCode" = 'expired', "failureClass" = 'terminal', "completedAt" = now() WHERE id = $1 RETURNING *`,
+          [attemptId],
+        );
+        await this.settlePaymentAfterFailure(q, payment.id, current.attemptNumber, 'expired', provider, ctx);
         return rows[0];
       }
 

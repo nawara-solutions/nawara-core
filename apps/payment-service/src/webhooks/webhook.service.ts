@@ -124,6 +124,7 @@ export class WebhookService {
       const data = (parsed.data ?? {}) as { failureCode?: string; failureClass?: string };
       return { kind: 'failed', failureClass: data.failureClass === 'retryable' ? 'retryable' : 'terminal', failureCode: data.failureCode ?? 'unknown' };
     }
+    if (parsed.type === 'payment.expired') return { kind: 'expired' }; // Core V2 S4f (F-S4): a provider-confirmed session expiry
     return null;
   }
 

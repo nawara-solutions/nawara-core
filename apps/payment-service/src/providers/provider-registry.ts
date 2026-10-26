@@ -3,9 +3,10 @@ import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { paymentError } from '../errors.js';
 import type { PaymentProvider } from './provider.port.js';
+import { SimulationPaymentProvider } from './simulation-provider.js';
 import { TestPaymentProvider } from './test-provider.js';
 
-/** Enabled providers, by id. Only the test provider exists in this phase — real gateways are deferred (SDD section 18). */
+/** Enabled providers, by id. Only the test and (Core V2 S4f) simulation providers exist, never in production — real gateways are deferred (SDD section 18). */
 @Injectable()
 export class ProviderRegistry {
   private readonly providers = new Map<string, PaymentProvider>();
@@ -13,8 +14,10 @@ export class ProviderRegistry {
   constructor(
     @Inject(PAYMENT_CONFIG) config: PaymentConfig,
     @Inject(TestPaymentProvider) testProvider: TestPaymentProvider,
+    @Inject(SimulationPaymentProvider) simulationProvider: SimulationPaymentProvider,
   ) {
     if (config.testProviderEnabled) this.providers.set(testProvider.id, testProvider);
+    if (config.simulation && !config.isProduction) this.providers.set(simulationProvider.id, simulationProvider); // F-S5 (also refused by config)
   }
 
   get(id: string): PaymentProvider {

@@ -12,6 +12,7 @@ import { loadPaymentConfig, type PaymentConfig } from '../../src/config/payment-
 import { PaymentConfigModule } from '../../src/config/payment-config.module.js';
 import { PaymentsModule } from '../../src/payments/payments.module.js';
 import { ProvidersModule } from '../../src/providers/providers.module.js';
+import { SimulationModule } from '../../src/simulation/simulation.module.js';
 import { WEBHOOK_PATH_PREFIX } from '../../src/webhooks/webhooks.controller.js';
 import { WebhooksModule } from '../../src/webhooks/webhooks.module.js';
 
@@ -98,6 +99,7 @@ export async function createTestApp(opts: {
       PaymentsModule,
       AttemptsModule,
       WebhooksModule,
+      ...(config.simulation && !config.isProduction ? [SimulationModule] : []), // Core V2 S4f: as AppModule
     ],
     controllers: [RawBodyProbeController],
   }).compile();
