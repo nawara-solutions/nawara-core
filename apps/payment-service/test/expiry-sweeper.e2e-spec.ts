@@ -94,7 +94,7 @@ describeWithEnv('expiry sweeper (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
     expect(after.body.status).toBe('created');
   });
 
-  it('refuses to expire a payment with money in flight (an open attempt) until the attempt is resolved', async () => {
+  it('Core V2 S4c (F-1): a due payment with money in flight (an open attempt) starts CLOSING (expiry), never expired, and emits nothing yet', async () => {
     // "Still valid when the attempt starts, expired by the time the sweeper runs", with no clock race (V2 A15.3): the payment is created
     // with a far expiry, so the attempt always starts on a valid payment, and only then is its expiry moved into the past. expiresAt is
     // immutable (FI-02), so this test-only step disables the immutability trigger for that one statement, inside one transaction (the
@@ -106,7 +106,10 @@ describeWithEnv('expiry sweeper (real PostgreSQL)', ['TEST_DATABASE_ADMIN_URL'],
     const sweeper = t.app.get(ExpirySweeper);
     await sweeper.sweepOnce();
     const stillOpen = await getPayment(payment.id).expect(200);
-    expect(stillOpen.body.status).toBe('pending'); // NOT expired: an attempt is still open
+    expect(stillOpen.body).toMatchObject({ status: 'closing', closingReason: 'expiry', finality: 'uncertain' }); // NOT expired: an attempt is still open
+    await sweeper.sweepOnce(); // a second pass changes nothing (closing is not swept again)
+    expect((await getPayment(payment.id).expect(200)).body.closingSince).toBe(stillOpen.body.closingSince);
+    expect((await t.app.get(DbService).query(`SELECT 1 FROM outbox WHERE name = 'payment.expired' AND payload->>'paymentId' = $1`, [payment.id])).rows).toHaveLength(0);
   });
 
   it('is idempotent: sweeping an already-expired payment again does not re-emit the event', async () => {

@@ -57,6 +57,7 @@ describeWithEnv('Payment re-emission preparation (real PostgreSQL)', ['TEST_DATA
       '0006_phase1_acceptance_hardening.sql', '0007_payment_expiry_open_index.sql', '0008_attempt_resolver_lease.sql', '0009_reemission_attempt.sql',
       '0010_payment_purpose_live_mode.sql', // Core V2 S4a: columns, CHECKs and triggers on payment / payment_attempt, no table
       '0011_no_company_cash_settlement.sql', // Core V2 S4b: DB-16, one CHECK on payment, no table
+      '0012_payment_closing_finality.sql', // Core V2 S4c: closing, uncertainty guards, payment_late_success
     ]);
     const cols = await db.query(`SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'payment_reemission%' ORDER BY table_name, ordinal_position`);
     expect(cols.rows.map((r) => `${r.table_name}.${r.column_name}`)).toStrictEqual([

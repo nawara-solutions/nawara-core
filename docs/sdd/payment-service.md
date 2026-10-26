@@ -35,6 +35,15 @@ in this document.
 
 Implemented in `apps/payment-service/db/migrations/0010_payment_purpose_live_mode.sql` and `src/payments/`.
 
+**Core V2 S4c (closing and finality; the Owner's F-1 to F-8; register PAY-02 F, PAY-04 F):** this amends section 5.1's lifecycle for Core
+V2, without changing the frozen S0 text. A payment is **uncertain** while an attempt is `initiated`, `submitted` or `unknown`, or failed only
+by inference with no provider confirmation since; only provider-confirmed failure or provider-reported expiry is definitive. A cancel or an
+expiry of an uncertain payment moves it to the new non-final status **`closing`** (`202` on cancel; no event); it ends `succeeded` on a
+verified success, or `cancelled` / `expired` as its reason says once nothing is uncertain (`0012_payment_closing_finality.sql`). No payment
+is `cancelled`, `expired` or `failed` while uncertain, no new attempt starts while it is (`409 payment_uncertain`), and a verified success
+after the workflow ended is recorded in `payment_late_success`, never applied. `finality` (`open`, `uncertain`, `final`) is derived on every
+read and means workflow finality only, never that a refund, dispute, chargeback or late evidence is impossible.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.

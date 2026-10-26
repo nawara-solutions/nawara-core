@@ -18,4 +18,7 @@ export interface AttemptRow {
   completedAt: Date | null;
   /** Core V2 S4a (P-6): its payment's mode, `false` (simulation only); NULL only on an attempt created before S4a. */
   liveMode: boolean | null;
+  /** Core V2 S4c (F-3): provider evidence later confirmed this INFERRED failure (database time) and its own code; NULL otherwise. */
+  failureConfirmedAt: Date | null;
+  confirmedFailureCode: string | null;
 }

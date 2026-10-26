@@ -60,6 +60,8 @@ const row: PaymentRow = {
   purpose: null, // a payment created before S4a: no purpose, beneficiary or mode travels
   beneficiaryUserId: null,
   liveMode: null,
+  closingReason: null,
+  closingSince: null,
 };
 /** Core V2 S4a: a payment created since S4a carries its purpose, beneficiary and mode (added optional fields). */
 const s4aRow: PaymentRow = { ...row, purpose: 'direct_purchase', beneficiaryUserId: 'user-1', liveMode: false };

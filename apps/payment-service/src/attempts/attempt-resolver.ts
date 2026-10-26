@@ -56,7 +56,10 @@ export class AttemptResolver {
         `SELECT * FROM payment_attempt
          WHERE (status = 'unknown'
             OR status = 'initiated'
-            OR (status = 'submitted' AND "submittedAt" < now() - make_interval(secs => $1)))
+            OR (status = 'submitted' AND "submittedAt" < now() - make_interval(secs => $1))
+            -- Core V2 S4c (F-3): an INFERRED failure of a payment still open is asked about again: only provider evidence ends it
+            OR (status = 'failed' AND "failureInferred" AND "failureConfirmedAt" IS NULL
+                AND EXISTS (SELECT 1 FROM payment p WHERE p.id = "paymentId" AND p.status IN ('created', 'pending', 'closing'))))
            AND ("resolveAfter" IS NULL OR "resolveAfter" <= now())
          ORDER BY "initiatedAt"
          LIMIT $2`,
@@ -85,14 +88,20 @@ export class AttemptResolver {
           // within the lease, or an attempt that left its open state since the scan, is skipped.
           const claimed = await this.db.query(
             `UPDATE payment_attempt SET "resolveAfter" = now() + make_interval(secs => $2)
-              WHERE id = $1 AND status IN ('initiated', 'submitted', 'unknown') AND ("resolveAfter" IS NULL OR "resolveAfter" <= now())`,
+              WHERE id = $1 AND (status IN ('initiated', 'submitted', 'unknown') OR (status = 'failed' AND "failureInferred" AND "failureConfirmedAt" IS NULL))
+                AND ("resolveAfter" IS NULL OR "resolveAfter" <= now())`,
             [attempt.id, RESOLVE_LEASE_MS / 1000],
           );
           if (claimed.rowCount === 0) continue;
           const ref = attempt.providerTransactionId ?? attempt.merchantReference;
           const status = await provider.fetchStatus(ref);
           await this.attempts.applyStatus(attempt.id, status, provider, ctx);
-          resolved++;
+          if (attempt.status === 'failed' && (status.kind === 'notFound' || status.kind === 'pending')) {
+            // Core V2 S4c (F-3): still only inferred: the payment stays uncertain and is never released by time; the operator's alert
+            this.logger.warn(`payment_uncertain_unresolved payment=${attempt.paymentId} attempt=${attempt.id} provider=${attempt.provider} — an inferred failure the provider has not confirmed; asked again next pass`);
+          } else {
+            resolved++;
+          }
         } catch (e) {
           const code = (e as { response?: { code?: string } })?.response?.code;
           // Stage 14.7: a stable event name and the attempt's identity; the attempt stays as it is and is asked about again next pass.

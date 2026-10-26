@@ -29,6 +29,8 @@ const row: PaymentRow = {
   purpose: null,
   beneficiaryUserId: null,
   liveMode: null,
+  closingReason: null,
+  closingSince: null,
 };
 
 describe('paymentEvent (SDD section 11)', () => {

@@ -1,12 +1,13 @@
 import { PaymentAudit } from '../audit/payment-audit.js';
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DbService, OutboxService, type Queryable } from '@nawara/service-kit';
 import type { PaymentConfig } from '../config/payment-config.js';
 import { PAYMENT_CONFIG } from '../config/payment-config.token.js';
 import { paymentEvent, requestContext, type EventContext } from '../events/payment-events.js';
 import { paymentError } from '../errors.js';
 import { IdempotencyService } from '../idempotency/idempotency.service.js';
+import { completeClosingIfResolved, isPaymentUncertain } from '../payments/payment-closing.js';
 import { CORE_V2_LIVE_MODE, type PaymentRow } from '../payments/payment.types.js';
 import { ProviderRegistry } from '../providers/provider-registry.js';
 import type { FetchStatusResult, PaymentProvider } from '../providers/provider.port.js';
@@ -22,6 +23,8 @@ export interface StartAttemptResult {
 /** Owns `payment_attempt` rows: start (T1/provider-call/T2, SDD section 12.2) and sync (section 9.1 endpoint 4). */
 @Injectable()
 export class AttemptService {
+  private readonly logger = new Logger('PaymentAttempts');
+
   constructor(
     @Inject(DbService) private readonly db: DbService,
     @Inject(OutboxService) private readonly outbox: OutboxService,
@@ -67,9 +70,12 @@ export class AttemptService {
       // "pending" only means an open collection path in this phase (no cash exists yet): report the specific reason,
       // not the generic "not payable" (SDD section 5.1's "one open collection at a time").
       if (payment.status === 'pending') throw paymentError(409, 'payment_has_open_attempt', PAYMENT_MESSAGES.attemptAlreadyOpen);
+      // Core V2 S4c (F-1, F-6): a closing payment is not payable, and no new attempt starts while an earlier one may still settle it
+      if (payment.status === 'closing') throw paymentError(409, 'payment_uncertain', PAYMENT_MESSAGES.paymentUncertain);
       if (payment.status !== 'created') throw paymentError(409, 'payment_not_payable', PAYMENT_MESSAGES.cannotStartAttemptInStatus, { status: payment.status });
       const { rows: open } = await q.query(`SELECT 1 FROM payment_attempt WHERE "paymentId" = $1 AND status IN ('initiated','submitted','unknown')`, [paymentId]);
       if (open.length > 0) throw paymentError(409, 'payment_has_open_attempt', PAYMENT_MESSAGES.attemptAlreadyOpen);
+      if (await isPaymentUncertain(q, paymentId)) throw paymentError(409, 'payment_uncertain', PAYMENT_MESSAGES.paymentUncertain); // an inferred failure
       const { rows: countRows } = await q.query<{ count: number }>('SELECT count(*)::int AS count FROM payment_attempt WHERE "paymentId" = $1', [paymentId]);
       const attemptNumber = countRows[0].count + 1;
 
@@ -114,12 +120,13 @@ export class AttemptService {
         const { rows } = await q.query<AttemptRow>(`UPDATE payment_attempt SET status = 'unknown' WHERE id = $1 AND status = 'initiated' RETURNING *`, [t1.attempt.id]);
         return rows[0];
       }
-      await this.settlePaymentAfterFailure(q, t1.payment.id, t1.attempt.attemptNumber, initiateResult.failureCode, provider, ctx);
+      // the provider's own rejection is definitive (F-3); the attempt is recorded first, so the payment decision sees it
       const { rows } = await q.query<AttemptRow>(
         `UPDATE payment_attempt SET status = 'failed', "failureCode" = $2, "failureClass" = $3, "completedAt" = now()
          WHERE id = $1 AND status IN ('initiated', 'unknown') RETURNING *`,
         [t1.attempt.id, initiateResult.failureCode, initiateResult.failureClass],
       );
+      await this.settlePaymentAfterFailure(q, t1.payment.id, t1.attempt.attemptNumber, initiateResult.failureCode, provider, ctx);
       return rows[0];
     });
 
@@ -144,7 +151,8 @@ export class AttemptService {
    * terminal in ANY way — including succeeded through a different attempt — is a `409 invalid_state_transition`
    * (a recorded conflict on the webhook path), never applied and never silently swallowed (SDD section 5.1 "late success"). */
   async applyStatus(attemptId: string, status: FetchStatusResult, provider: PaymentProvider, ctx: EventContext = { actor: { type: 'system', id: null }, cause: { type: 'attempt_resolver', id: null } }): Promise<AttemptRow> {
-    return this.db.tx(async (q) => {
+    let lateSuccess: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: 'final' | 'confirmed_failure' } | null = null;
+    const result = await this.db.tx(async (q) => {
       const { rows: unlocked } = await q.query<AttemptRow>('SELECT "paymentId" FROM payment_attempt WHERE id = $1', [attemptId]);
       if (!unlocked[0]) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
       const { rows: payRows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1 FOR UPDATE', [unlocked[0].paymentId]);
@@ -158,6 +166,7 @@ export class AttemptService {
         // "No record" may fail an attempt only when the adapter declares it authoritative (SDD section 5.2), and only for an
         // attempt whose outcome we do not know (`initiated` is first moved to `unknown`, as the resolver does). A `submitted`
         // attempt has a provider transaction id: "no record" contradicts that, so it stays put rather than being failed by guess.
+        // Core V2 S4c (F-3): the resulting failure is INFERRED and never definitive — the payment stays uncertain (F-2).
         if (current.status !== 'initiated' && current.status !== 'unknown') return current;
         if (!provider.capabilities.notFoundIsAuthoritative) return current; // stays unknown/initiated; an alert is the resolver's job
         if (current.status === 'initiated') await q.query(`UPDATE payment_attempt SET status = 'unknown' WHERE id = $1`, [attemptId]);
@@ -175,15 +184,23 @@ export class AttemptService {
           // FI-13: never applied silently. No new state is introduced for this — it is refused outright.
           throw paymentError(502, 'provider_error', PAYMENT_MESSAGES.amountCurrencyMismatch);
         }
+        // Core V2 S4c (F-4, S0 L-1 and §3.4): a verified success for a payment whose workflow already ended changes nothing about it and
+        // emits no payment.succeeded (no automatic purchase); it is recorded durably below, after this transaction, and surfaced.
         if (payment.status === 'failed' || payment.status === 'cancelled' || payment.status === 'expired' || payment.status === 'succeeded') {
-          throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.providerSuccessConflicts, { status: payment.status });
+          lateSuccess = { paymentId: payment.id, paymentStatus: payment.status, amount: status.amount, currency: status.currency, conflict: 'final' };
+          return current;
         }
         if (current.status === 'failed' || current.status === 'expired') {
-          // Late success: accepted only if THIS failure was inferred (a guess); a provider-confirmed failure is a real conflict.
-          if (!current.failureInferred) throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.lateSuccessConflicts);
+          // Late success: accepted only if THIS failure was inferred (a guess) and no provider evidence confirmed it since; a confirmed
+          // failure contradicted by a success is a real conflict, recorded the same way (never applied, never discarded).
+          if (!current.failureInferred || current.failureConfirmedAt !== null) {
+            lateSuccess = { paymentId: payment.id, paymentStatus: payment.status, amount: status.amount, currency: status.currency, conflict: 'confirmed_failure' };
+            return current;
+          }
         }
         // An attempt still `initiated` (crash before T2, or a webhook that beat T2) is first moved through `unknown`: the
         // provider's success proves it reached the provider, and the state machine has no direct `initiated -> succeeded`.
+        // Core V2 S4c (F-4): a `closing` payment succeeds here too — it was never definitively closed.
         if (current.status === 'initiated') await q.query(`UPDATE payment_attempt SET status = 'unknown' WHERE id = $1`, [attemptId]);
         const { rows } = await q.query<AttemptRow>(`UPDATE payment_attempt SET status = 'succeeded', "completedAt" = now() WHERE id = $1 RETURNING *`, [attemptId]);
         const { rows: settled } = await q.query<PaymentRow>(
@@ -195,8 +212,15 @@ export class AttemptService {
         return rows[0];
       }
 
-      // status.kind === 'failed'
+      // status.kind === 'failed': provider-confirmed (F-3)
       if (current.status === 'succeeded') throw paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.cannotFailSucceeded);
+      if (current.status === 'failed' && current.failureInferred && current.failureConfirmedAt === null) {
+        // Core V2 S4c (F-3): the provider now confirms an INFERRED failure: definitive from here on (the late-success edge closes)
+        const { rows } = await q.query<AttemptRow>(
+          `UPDATE payment_attempt SET "failureConfirmedAt" = now(), "confirmedFailureCode" = $2 WHERE id = $1 RETURNING *`, [attemptId, status.failureCode]);
+        await this.settlePaymentAfterFailure(q, payment.id, current.attemptNumber, status.failureCode, provider, ctx);
+        return rows[0];
+      }
       if (current.status === 'failed' || current.status === 'expired') return current;
       const { rows } = await q.query<AttemptRow>(
         `UPDATE payment_attempt SET status = 'failed', "failureCode" = $2, "failureClass" = $3, "completedAt" = now() WHERE id = $1 RETURNING *`,
@@ -205,16 +229,51 @@ export class AttemptService {
       await this.settlePaymentAfterFailure(q, payment.id, current.attemptNumber, status.failureCode, provider, ctx);
       return rows[0];
     });
+    if (lateSuccess) {
+      await this.recordLateSuccess(attemptId, lateSuccess, ctx);
+      const ls = lateSuccess as { paymentStatus: string; conflict: string };
+      throw ls.conflict === 'final'
+        ? paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.providerSuccessConflicts, { status: ls.paymentStatus })
+        : paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.lateSuccessConflicts);
+    }
+    return result;
   }
 
-  /** After an attempt fails: the payment fails if the attempt limit is reached or the provider says the payment
-   * itself is unrecoverable; otherwise it returns to `created` so the payer can retry (SDD section 5.1). */
+  /**
+   * Core V2 S4c (F-4; S0 L-1, §3.4): the durable record of a verified success that cannot settle the payment (its workflow already ended, or
+   * the attempt's failure was provider-confirmed). Written in its own transaction once the deciding one has ended, once per (attempt, source,
+   * webhook event): the payment is not reopened, no payment.succeeded is emitted, and the evidence stays for S4d facts and S6h
+   * reconciliation. Surfaced as a stable warning for the operator (the existing alert channel).
+   */
+  private async recordLateSuccess(attemptId: string, f: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string }, ctx: EventContext): Promise<void> {
+    const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
+    const { rowCount } = await this.db.query(
+      `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus") VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT ON CONSTRAINT payment_late_success_once DO NOTHING`,
+      [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus],
+    );
+    this.logger.warn(`payment_late_success_recorded payment=${f.paymentId} attempt=${attemptId} paymentStatus=${f.paymentStatus} reason=${f.conflict} ${rowCount ? 'new' : 'already_recorded'} — needs reconciliation; nothing was settled`);
+  }
+
+  /**
+   * After an attempt fails: the payment fails if the attempt limit is reached or the provider says the payment itself is unrecoverable;
+   * otherwise it returns to `created` so the payer can retry (SDD section 5.1). Core V2 S4c (F-1 to F-3): never `failed` while an attempt
+   * may still settle it (an inferred failure keeps it `created` and uncertain); a `closing` payment ends as its reason says once nothing is
+   * uncertain; a `created` payment whose inferred failure is now confirmed fails only then, if the limit was reached or the code is fatal.
+   */
   private async settlePaymentAfterFailure(q: Queryable, paymentId: string, attemptNumber: number, failureCode: string | null, provider: PaymentProvider, ctx: EventContext): Promise<void> {
     const { rows } = await q.query<PaymentRow>('SELECT status FROM payment WHERE id = $1 FOR UPDATE', [paymentId]);
-    if (rows[0]?.status !== 'pending') return; // already moved on by another path
+    const current = rows[0]?.status;
+    if (current === 'closing') {
+      await completeClosingIfResolved(q, { outbox: this.outbox, audit: this.audit }, paymentId, ctx);
+      return;
+    }
+    if (current !== 'pending' && current !== 'created') return; // already moved on by another path
+    const uncertain = await isPaymentUncertain(q, paymentId);
     const paymentFatal = failureCode !== null && provider.capabilities.paymentFatalCodes.includes(failureCode);
     const limitReached = attemptNumber >= this.config.maxAttempts;
-    const nextStatus = paymentFatal || limitReached ? 'failed' : 'created';
+    const nextStatus = !uncertain && (paymentFatal || limitReached) ? 'failed' : 'created';
+    if (nextStatus === current) return;
     const { rows: updated } = await q.query<PaymentRow>(
       `UPDATE payment SET status = $2, "closedAt" = CASE WHEN $2 = 'failed' THEN now() ELSE "closedAt" END WHERE id = $1 RETURNING *`,
       [paymentId, nextStatus],

@@ -31,6 +31,9 @@ export interface PaymentRow {
   beneficiaryUserId: string | null;
   /** Core V2 S4a (P-6): `false` on every new payment (simulation only); NULL only before S4a. Server-derived, never a request value. */
   liveMode: boolean | null;
+  /** Core V2 S4c (F-1): why the payment started closing (`cancel` | `expiry`) and the database time it did; NULL if it never closed that way. */
+  closingReason: 'cancel' | 'expiry' | null;
+  closingSince: Date | null;
 }
 
 /** ADR-0044 B2 purposes (Core V2 S4a, P-1): the database admits all five (DB-15); the API accepts {@link ACCEPTED_PURPOSES} (P-5). */

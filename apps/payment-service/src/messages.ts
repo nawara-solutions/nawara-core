@@ -52,6 +52,11 @@ export const PAYMENT_MESSAGES = defineMessages({
     fr: "expiresAt n'est pas un horodatage valide.",
     ar: 'قيمة expiresAt ليست طابعًا زمنيًا صالحًا.',
   },
+  paymentUncertain: {
+    en: 'An earlier attempt may still settle this payment; no new attempt is possible until it is resolved.',
+    fr: 'Une tentative précédente peut encore régler ce paiement ; aucune nouvelle tentative n’est possible avant sa résolution.',
+    ar: 'قد تؤدي محاولة سابقة إلى تسوية هذه الدفعة؛ لا يمكن إجراء محاولة جديدة قبل حسمها.',
+  },
   purposeRequired: {
     en: 'purpose is required for a new payment.',
     fr: 'purpose est obligatoire pour un nouveau paiement.',

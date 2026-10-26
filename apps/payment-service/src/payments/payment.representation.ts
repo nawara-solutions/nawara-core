@@ -1,4 +1,6 @@
 import type { Queryable } from '@nawara/service-kit';
+import { paymentFinality, type PaymentFinality } from './payment-state-machine.js';
+import { isPaymentUncertain } from './payment-closing.js';
 import type { PaymentRow } from './payment.types.js';
 
 interface AttemptRepresentation {
@@ -38,6 +40,15 @@ export interface PaymentRepresentation {
   purpose: string | null;
   beneficiaryUserId: string | null;
   liveMode: boolean | null;
+  /**
+   * Core V2 S4c (F-5), derived (never stored): `open`, `uncertain` (closing, or an attempt may still settle it) or `final` (the payment's
+   * WORKFLOW has closed: succeeded, failed, cancelled, expired). `final` is operational only: a refund, a dispute, a chargeback or late
+   * provider evidence may still follow.
+   */
+  finality: PaymentFinality;
+  /** Core V2 S4c (F-1): why and since when it was closing; null if it never was. */
+  closingReason: string | null;
+  closingSince: string | null;
 }
 
 export async function representPayment(q: Queryable, payment: PaymentRow): Promise<PaymentRepresentation> {
@@ -81,5 +92,8 @@ export async function representPayment(q: Queryable, payment: PaymentRow): Promi
     purpose: payment.purpose,
     beneficiaryUserId: payment.beneficiaryUserId,
     liveMode: payment.liveMode,
+    finality: paymentFinality(payment.status, await isPaymentUncertain(q, payment.id)),
+    closingReason: payment.closingReason,
+    closingSince: payment.closingSince ? payment.closingSince.toISOString() : null,
   };
 }
