@@ -291,7 +291,7 @@ describeWithEnv(
       const closedAt = paymentRow.rows[0]!.closedAt;
       expect(closedAt).not.toBeNull();
 
-      const sub = await billingAdmin.query(`SELECT status, "currentPeriodStart", "currentPeriodEnd", revision FROM subscription WHERE "organizationId" = $1`, [organizationId]);
+      const sub = await billingAdmin.query(`SELECT status, "currentPeriodStart", "currentPeriodEnd", "graceUntil", revision FROM subscription WHERE "organizationId" = $1`, [organizationId]);
       expect(sub.rows.length).toBe(1);
       expect(sub.rows[0].status).toBe('active');
       expect(sub.rows[0].revision).toBe(1); // create(0) + activate(1)
@@ -299,8 +299,11 @@ describeWithEnv(
       expect(sub.rows[0].currentPeriodStart).toEqual(closedAt);
       const periodEnd: Date = sub.rows[0].currentPeriodEnd;
 
+      // Core V2 S3e: access runs to the fixed Organization grace, exactly 24 hours after the period end
+      const graceUntil = new Date(periodEnd.getTime() + 24 * 3_600_000);
+      expect(sub.rows[0].graceUntil).toEqual(graceUntil);
       const entitlement = await getEntitlement(organizationId);
-      expect(entitlement).toEqual({ valid: true, expiresAt: periodEnd.toISOString() });
+      expect(entitlement).toEqual({ valid: true, expiresAt: graceUntil.toISOString() });
 
       // ---- duplicate delivery over the REAL broker: the same eventId redelivered must have ZERO additional effect ----
       const dlqBefore = await deadLetterDepth();
