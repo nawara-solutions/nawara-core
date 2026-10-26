@@ -83,13 +83,15 @@ export class WebhookRetriever {
         const provider = this.providers.tryGet(candidate.provider);
         if (!provider) continue; // a provider that was since disabled; nothing to retry against
         try {
-          // Claim the row for the whole reprocessing (FOR UPDATE SKIP LOCKED): a worker/instance processing it right now is skipped.
+          // Claim the row for the whole reprocessing (FOR NO KEY UPDATE SKIP LOCKED): a worker/instance processing it right now is skipped.
+          // Core V2 S4d: NO KEY, so the provider fact recorded meanwhile in its own transaction can still reference this stored event
+          // (a foreign key takes KEY SHARE, which FOR UPDATE would block until this claim ends: a self-deadlock).
           // The claim also requires the attempt count this pass SAW: every processing increments it, so a row another worker already
           // handled since this pass selected it is skipped too (never reprocessed twice in a row). Its state is written through this
           // same transaction.
           const done = await this.db.tx(async (q) => {
             const { rows: claimed } = await q.query<WebhookEventRow>(
-              `SELECT * FROM webhook_event WHERE id = $2 AND attempts = $4 AND ${RETRYABLE} AND attempts < $3 AND ${DUE} FOR UPDATE SKIP LOCKED`,
+              `SELECT * FROM webhook_event WHERE id = $2 AND attempts = $4 AND ${RETRYABLE} AND attempts < $3 AND ${DUE} FOR NO KEY UPDATE SKIP LOCKED`,
               [STUCK_THRESHOLD_MS / 1000, candidate.id, WEBHOOK_RETRY_MAX_ATTEMPTS, candidate.attempts],
             );
             if (!claimed[0]) return null;

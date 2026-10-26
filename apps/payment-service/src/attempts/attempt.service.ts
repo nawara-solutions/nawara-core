@@ -152,6 +152,8 @@ export class AttemptService {
    * (a recorded conflict on the webhook path), never applied and never silently swallowed (SDD section 5.1 "late success"). */
   async applyStatus(attemptId: string, status: FetchStatusResult, provider: PaymentProvider, ctx: EventContext = { actor: { type: 'system', id: null }, cause: { type: 'attempt_resolver', id: null } }): Promise<AttemptRow> {
     let lateSuccess: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: 'final' | 'confirmed_failure' } | null = null;
+    // Core V2 S4d (FC-1, V-2): a reported money movement is a fact FIRST, in its own transaction, whatever the processing below decides
+    const factId = status.kind === 'succeeded' ? await this.recordCaptureFact(attemptId, status, ctx) : null;
     const result = await this.db.tx(async (q) => {
       const { rows: unlocked } = await q.query<AttemptRow>('SELECT "paymentId" FROM payment_attempt WHERE id = $1', [attemptId]);
       if (!unlocked[0]) throw paymentError(404, 'not_found', PAYMENT_MESSAGES.notFound);
@@ -230,7 +232,7 @@ export class AttemptService {
       return rows[0];
     });
     if (lateSuccess) {
-      await this.recordLateSuccess(attemptId, lateSuccess, ctx);
+      await this.recordLateSuccess(attemptId, lateSuccess, ctx, factId);
       const ls = lateSuccess as { paymentStatus: string; conflict: string };
       throw ls.conflict === 'final'
         ? paymentError(409, 'invalid_state_transition', PAYMENT_MESSAGES.providerSuccessConflicts, { status: ls.paymentStatus })
@@ -245,14 +247,59 @@ export class AttemptService {
    * webhook event): the payment is not reopened, no payment.succeeded is emitted, and the evidence stays for S4d facts and S6h
    * reconciliation. Surfaced as a stable warning for the operator (the existing alert channel).
    */
-  private async recordLateSuccess(attemptId: string, f: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string }, ctx: EventContext): Promise<void> {
+  private async recordLateSuccess(attemptId: string, f: { paymentId: string; paymentStatus: string; amount: number; currency: string; conflict: string }, ctx: EventContext, factId: string | null): Promise<void> {
     const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
     const { rowCount } = await this.db.query(
-      `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus") VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO payment_late_success ("paymentId", "attemptId", source, "webhookEventId", amount, currency, "paymentStatus", "factId") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT ON CONSTRAINT payment_late_success_once DO NOTHING`,
-      [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus],
+      [f.paymentId, attemptId, webhookEventId ? 'webhook' : 'status_check', webhookEventId, f.amount, f.currency, f.paymentStatus, factId],
     );
     this.logger.warn(`payment_late_success_recorded payment=${f.paymentId} attempt=${attemptId} paymentStatus=${f.paymentStatus} reason=${f.conflict} ${rowCount ? 'new' : 'already_recorded'} — needs reconciliation; nothing was settled`);
+  }
+
+  /**
+   * Core V2 S4d (register PAY-05, I-6; S0 FC-1, V-2; ADR-0035 C2): records the provider's reported capture as an immutable
+   * `provider_transaction_fact`, committed on its own before any commercial processing, and returns its id. The evidence reached Payment
+   * only through an authenticated channel (a signature-verified webhook, or the provider's status read: `ctx` says which). Identity
+   * `(provider, providerTxnId, 'capture')`: an identical redelivery, or the same capture seen through the other channel, is the same fact; a
+   * contradicting observation (other amount, currency, payment or attempt) never overwrites it and is kept, once, as a conflict.
+   * A capture whose provider transaction reference is unknown (an adapter that does not supply it) cannot be keyed: refused loudly.
+   */
+  private async recordCaptureFact(attemptId: string, status: Extract<FetchStatusResult, { kind: 'succeeded' }>, ctx: EventContext): Promise<string | null> {
+    const attempt = await this.findById(attemptId);
+    if (!attempt) return null; // applyStatus answers 404 below
+    const txn = status.providerTransactionId ?? attempt.providerTransactionId;
+    if (!txn) {
+      this.logger.error(`provider_fact_unidentifiable attempt=${attemptId} provider=${attempt.provider} — the adapter supplied no provider transaction reference`);
+      return null;
+    }
+    if (!Number.isSafeInteger(status.amount) || status.amount < 1) return null; // malformed: never a verified fact (I-6); applyStatus refuses it (FI-13)
+    const webhookEventId = ctx.cause.type === 'webhook_event' ? ctx.cause.id : null;
+    const source = webhookEventId ? 'webhook' : 'status_check';
+    const liveMode = attempt.liveMode ?? CORE_V2_LIVE_MODE;
+    return this.db.tx(async (q) => {
+      const { rows } = await q.query<{ id: string }>(
+        `INSERT INTO provider_transaction_fact (provider, "providerTxnId", kind, "paymentId", "attemptId", amount, currency, "liveMode", source, "webhookEventId", "providerOccurredAt")
+         VALUES ($1, $2, 'capture', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT ON CONSTRAINT provider_transaction_fact_identity DO NOTHING RETURNING id`,
+        [attempt.provider, txn, attempt.paymentId, attemptId, status.amount, status.currency, liveMode, source, webhookEventId, status.providerOccurredAt ?? null],
+      );
+      if (rows[0]) return rows[0].id;
+      const { rows: existing } = await q.query<{ id: string; paymentId: string; attemptId: string; amount: string; currency: string }>(
+        `SELECT id, "paymentId", "attemptId", amount, currency FROM provider_transaction_fact WHERE provider = $1 AND "providerTxnId" = $2 AND kind = 'capture'`,
+        [attempt.provider, txn],
+      );
+      const fact = existing[0]!;
+      const same = fact.paymentId === attempt.paymentId && fact.attemptId === attemptId && Number(fact.amount) === status.amount && fact.currency === status.currency;
+      if (!same) {
+        await q.query(
+          `INSERT INTO provider_transaction_fact_conflict ("factId", "paymentId", "attemptId", provider, amount, currency, source, "webhookEventId")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT ON CONSTRAINT provider_transaction_fact_conflict_once DO NOTHING`,
+          [fact.id, attempt.paymentId, attemptId, attempt.provider, status.amount, status.currency, source, webhookEventId],
+        );
+        this.logger.warn(`provider_fact_conflict fact=${fact.id} attempt=${attemptId} provider=${attempt.provider} — a contradicting observation of the same provider transaction; kept for reconciliation, the fact is unchanged`);
+      }
+      return fact.id;
+    });
   }
 
   /**

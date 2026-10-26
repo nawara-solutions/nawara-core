@@ -8,7 +8,8 @@ export type InitiateResult =
   | { kind: 'ambiguous' };
 
 export type FetchStatusResult =
-  | { kind: 'succeeded'; amount: number; currency: string }
+  /** Core V2 S4d (FC-1): `providerTransactionId` is the provider's own reference for the captured money (the fact identity). */
+  | { kind: 'succeeded'; amount: number; currency: string; providerTransactionId?: string; providerOccurredAt?: Date }
   | { kind: 'failed'; failureClass: Exclude<FailureClass, 'ambiguous'>; failureCode: string }
   | { kind: 'pending' }
   | { kind: 'notFound' };
@@ -20,6 +21,9 @@ export interface ParsedWebhookBody {
   amount?: number;
   currency?: string;
   data: unknown;
+  /** Core V2 S4d (FC-1): the provider's own transaction reference and stated time, when the adapter can read them from the message. */
+  providerTransactionId?: string;
+  providerOccurredAt?: Date;
 }
 
 /** A verified provider notification, or how verification failed (SDD section 7's two distinct failure modes). */
