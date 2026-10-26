@@ -448,6 +448,25 @@ SELECT pg_temp.assert_eq('S4d', 'the runtime grants: no UPDATE or DELETE on fact
     WHERE g.table_name IN ('provider_transaction_fact', 'provider_transaction_fact_conflict') AND g.privilege_type IN ('UPDATE', 'DELETE', 'TRUNCATE') AND g.grantee <> t.tableowner), '0');
 \o
 
+-- ======================================================= Core V2 S4g: class-M idempotency retention (0014) ----
+\o /dev/null
+INSERT INTO idempotency_key (caller, operation, key, "requestHash", "responseStatus", "resourceType", "resourceId", "createdAt", "expiresAt")
+  VALUES ('user:u-s4g', 'start_attempt', 'k-s4g-00001', repeat('a', 64), 201, 'payment_attempt', gen_random_uuid(), '2000-01-01', '2000-01-02');
+SELECT pg_temp.assert_eq('S4g', 'PAY-15: a money-command record is retained exactly 90 days from the database''s own time, whatever was supplied',
+  (SELECT ("expiresAt" = "createdAt" + interval '90 days' AND "createdAt" > now() - interval '1 minute')::text FROM idempotency_key WHERE key = 'k-s4g-00001'), 'true');
+SELECT pg_temp.expect_error('S4g', 'a stored money-command outcome is never rewritten', $$UPDATE idempotency_key SET "responseStatus" = 200 WHERE key = 'k-s4g-00001'$$, '23514');
+SELECT pg_temp.expect_error('S4g', 'its window is never shortened', $$UPDATE idempotency_key SET "expiresAt" = now() WHERE key = 'k-s4g-00001'$$, '23514');
+SELECT pg_temp.expect_error('S4g', 'a record is never deleted inside its 90-day window', $$DELETE FROM idempotency_key WHERE key = 'k-s4g-00001'$$, '23514');
+SELECT pg_temp.expect_error('S4g', 'the key is permanent per (caller, operation)', $$INSERT INTO idempotency_key (caller, operation, key, "requestHash", "responseStatus", "resourceType", "resourceId")
+  VALUES ('user:u-s4g', 'start_attempt', 'k-s4g-00001', repeat('b', 64), 201, 'payment_attempt', gen_random_uuid())$$, '23505');
+-- a record past its window (simulated: written without the retention trigger) may be removed by a later, authorized purge
+SET session_replication_role = replica;
+INSERT INTO idempotency_key (caller, operation, key, "requestHash", "responseStatus", "resourceType", "resourceId", "createdAt", "expiresAt")
+  VALUES ('user:u-s4g', 'start_attempt', 'k-s4g-00002', repeat('a', 64), 201, 'payment_attempt', gen_random_uuid(), now() - interval '91 days', now() - interval '1 day');
+SET session_replication_role = origin;
+SELECT pg_temp.expect_ok('S4g', 'an expired record may be purged (nothing purges today; a later purge needs its own authorization)', $$DELETE FROM idempotency_key WHERE key = 'k-s4g-00002'$$);
+\o
+
 -- ---------------------------------------------------------------------------- verdict ----
 \o
 SELECT id, name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END AS result, detail

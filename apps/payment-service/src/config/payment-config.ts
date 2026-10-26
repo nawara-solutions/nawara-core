@@ -27,7 +27,6 @@ export interface PaymentConfig extends BaseConfig {
   /** ISO 4217 codes accepted for `payment.currency`. No code default: configuration only (O-10). */
   supportedCurrencies: string[];
   maxAttempts: number;
-  idempotencyTtlHours: number;
   /** Refused when true and `isProduction` is also true (SDD section 13.2). */
   testProviderEnabled: boolean;
   returnUrlAllowlist: string[];
@@ -60,6 +59,11 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
   if (supportedCurrencies.length === 0 || supportedCurrencies.some((c) => !/^[A-Z]{3}$/.test(c))) {
     throw new ConfigError('PAYMENT_SUPPORTED_CURRENCIES must list three-letter ISO 4217 codes, comma-separated');
   }
+  // Core V2 S4g (register PAY-15; S0 §3.7, [OD] D7): money-command idempotency is class M, retained for 90 days by the database itself and
+  // not configurable. The retired setting is refused rather than ignored, so a deployment that still sets it learns it has no effect.
+  if (reader.optional('IDEMPOTENCY_TTL_HOURS') !== undefined) {
+    throw new ConfigError('IDEMPOTENCY_TTL_HOURS was retired by Core V2 S4g: money-command idempotency is class M (90 days, set by the database); remove the setting');
+  }
   const serviceTokens = parseServiceTokens(reader.get('SERVICE_TOKENS'));
   // V2 A2.2 (OD-A2.2-1, the callee side): production refuses a registered digest of a token published in this repository.
   assertNoPublishedServiceTokens(serviceTokens, { isProduction: base.isProduction });
@@ -76,7 +80,6 @@ export function loadPaymentConfig(env: NodeJS.ProcessEnv = process.env): Payment
     rabbitmqHeartbeatS: reader.int('RABBITMQ_HEARTBEAT_S', { default: DEFAULT_RABBITMQ_HEARTBEAT_S, ...RABBITMQ_HEARTBEAT_BOUNDS }),
     supportedCurrencies: [...new Set(supportedCurrencies)],
     maxAttempts: reader.int('PAYMENT_MAX_ATTEMPTS', { default: 3, min: 1, max: 20 }),
-    idempotencyTtlHours: reader.int('IDEMPOTENCY_TTL_HOURS', { default: 24, min: 1, max: 24 * 30 }),
     testProviderEnabled,
     returnUrlAllowlist: (reader.optional('PAYMENT_RETURN_URL_ALLOWLIST', '') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     rateLimits: {

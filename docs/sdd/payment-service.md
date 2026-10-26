@@ -51,6 +51,10 @@ what it means (settle, FI-13 refusal, late success). A fact is never refused, ed
 contradicting observation is kept in `provider_transaction_fact_conflict`; `payment_late_success` references its fact. Refund and
 chargeback facts, allocation (FC-2) and the association of unmatched evidence are S6.
 
+**Core V2 S4g (class-M idempotency; S0 §3.7, [OD] D7; register PAY-15 F):** every `Idempotency-Key` record (attempt start, cancel) is a
+money command, retained exactly 90 days from the database's own time, never rewritten and never deleted inside its window; the
+configurable `IDEMPOTENCY_TTL_HOURS` ceiling is retired and refused. The permanent business keys behind it are unchanged.
+
 **Core V2 S4b (DB-16, S-7, FC-11; ADR-0068 decision 3; register PAY-06 F):** `settledMethod = 'cash'` is refused for a Company seller by a
 validated same-row CHECK (`0011_no_company_cash_settlement.sql`), whatever path writes the row. Only a verified gateway success settles a
 Company-sold payment; no route or error code exists for cash, and cash for other sellers stays deferred.
@@ -804,7 +808,7 @@ Payment emits `payment.succeeded` and `refund.succeeded` (and the other events);
 | `RABBITMQ_URL` | event bus (a broker outage never blocks business work) |
 | `PAYMENT_SUPPORTED_CURRENCIES` | configured list, no code default [O-10] |
 | `PAYMENT_MAX_ATTEMPTS` | attempt limit, no business meaning [T] |
-| `IDEMPOTENCY_TTL_HOURS` | retention of header keys |
+| ~~`IDEMPOTENCY_TTL_HOURS`~~ | **retired by Core V2 S4g and refused at startup**: header keys are class M, retained 90 days by the database (register PAY-15 F) |
 | `PAYMENT_RETURN_URL_ALLOWLIST` | allowed `returnUrl` origins |
 | `PAYMENT_TEST_PROVIDER` | test provider switch; refused in production |
 | provider secrets (`PAYMENT_PROVIDER_<ID>_*` via `NAME_FILE`) | never stored in tables, logs or events |

@@ -116,7 +116,7 @@ Rotation: [secret rotation runbook](../../docs/runbooks/secret-rotation.md).
 | `ORGANIZATION_SERVICE_URL`, `ORGANIZATION_REFERENCE_TOKEN`, `ORGANIZATION_REFERENCE_TIMEOUT_MS` | **in production** | none, none, 2000 | token: **yes** | Organization verification (no bypass in production; `ORGANIZATION_REFERENCE_FIXTURE` is refused there) |
 | `RABBITMQ_URL`, `RABBITMQ_CONFIRM_TIMEOUT_MS`, `RABBITMQ_HEARTBEAT_S` | URL **in production** | none, 5000, kit default | **yes** (URL password) | event bus; without it the in-memory bus (development and tests only) |
 | `PAYMENT_SUPPORTED_CURRENCIES` | no | `TND` | no | ISO 4217 codes, comma-separated |
-| `PAYMENT_MAX_ATTEMPTS`, `IDEMPOTENCY_TTL_HOURS` | no | 3, 24 | no | attempts per payment (1 to 20); idempotency retention |
+| `PAYMENT_MAX_ATTEMPTS` | no | 3 | no | attempts per payment (1 to 20). `IDEMPOTENCY_TTL_HOURS` was retired by Core V2 S4g and is refused: money-command idempotency is class M, retained 90 days by the database |
 | `PAYMENT_RATE_LIMIT_CREATE_PER_MINUTE`, `PAYMENT_RATE_LIMIT_ATTEMPT_PER_MINUTE` | no | 300, 30 | no | per-caller limits |
 | `PAYMENT_RETURN_URL_ALLOWLIST` | no | empty | no | allowed return-URL prefixes |
 | `PAYMENT_TEST_PROVIDER` | no | `false` | no | the development test gateway; **refused in production** |

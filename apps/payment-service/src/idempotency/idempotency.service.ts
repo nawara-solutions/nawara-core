@@ -6,7 +6,10 @@ import { PAYMENT_MESSAGES } from '../messages.js';
 
 export type ReserveResult = { replay: false } | { replay: true; responseStatus: number; resourceId: string };
 
-/** Header-based idempotency (SDD section 4.7, 6) for operations without a natural key. */
+/**
+ * Header-based idempotency (SDD section 4.7, 6) for operations without a natural key. Core V2 S4g (PAY-15): every one is a money command,
+ * class M — the database stamps a 90-day window on each record and never lets it be rewritten or deleted inside it (migration 0014).
+ */
 @Injectable()
 export class IdempotencyService {
   constructor(@Inject(DbService) private readonly db: DbService) {}
@@ -22,14 +25,14 @@ export class IdempotencyService {
    */
   async reserve(
     q: Queryable,
-    params: { caller: string; operation: string; key: string; requestHash: string; responseStatus: number; resourceType: string; resourceId: string; ttlHours: number },
+    params: { caller: string; operation: string; key: string; requestHash: string; responseStatus: number; resourceType: string; resourceId: string },
   ): Promise<ReserveResult> {
     await q.query('SAVEPOINT idempotency_reserve');
     try {
       await q.query(
-        `INSERT INTO idempotency_key(caller, operation, key, "requestHash", "responseStatus", "resourceType", "resourceId", "expiresAt")
-         VALUES ($1,$2,$3,$4,$5,$6,$7, now() + make_interval(hours => $8))`,
-        [params.caller, params.operation, params.key, params.requestHash, params.responseStatus, params.resourceType, params.resourceId, params.ttlHours],
+        `INSERT INTO idempotency_key(caller, operation, key, "requestHash", "responseStatus", "resourceType", "resourceId")
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`, // the window (createdAt, expiresAt) is the database's: class M, 90 days
+        [params.caller, params.operation, params.key, params.requestHash, params.responseStatus, params.resourceType, params.resourceId],
       );
       return { replay: false };
     } catch (e) {

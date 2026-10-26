@@ -821,6 +821,7 @@ Organization-side actor of an assistance request: its identity in an active Orga
 | C. Errors, idempotency | IMPLEMENTED `idempotency_key_required`, `idempotency_key_reused` |
 | D. Existing | `IDEMPOTENCY_TTL_HOURS` (default 24, maximum 720 hours), to be replaced |
 | E. Open, gates | none. Stage S4g. Confidence H |
+| F. S4g (2026-10-26) | **IMPLEMENTED** (`apps/payment-service/db/migrations/0014_class_m_idempotency_retention.sql`). Every Payment header-idempotency record is a money command (attempt start, PAY-03; payment cancel, which ends a collection) and therefore class M: the database stamps `createdAt` and `expiresAt = createdAt + 90 days` whatever an INSERT supplies, never lets a record be rewritten, and never lets one be deleted inside its window (nothing purges today; a later purge of expired records needs its own authorization). `IDEMPOTENCY_TTL_HOURS` is retired and refused at startup (S3e precedent). Permanent uniqueness behind the window: PAY-01 by `(producer, paymentRequestId)`; a collection by one open attempt, no attempt while uncertain (S4c) and one succeeded attempt per payment. Records written before S4g keep their stored window (no backfill). PAY-07 (refunds) inherits class M when built in S6. Unchanged and still PROPOSED / OPEN: the rest of the §2 taxonomy (Q10) and `idempotency_key_in_use` |
 
 ### 5.5 File
 

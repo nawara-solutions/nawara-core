@@ -142,7 +142,6 @@ export class PaymentService {
         responseStatus: 200,
         resourceType: 'payment',
         resourceId: id,
-        ttlHours: this.config.idempotencyTtlHours,
       });
       if (reserved.replay) {
         const { rows } = await q.query<PaymentRow>('SELECT * FROM payment WHERE id = $1', [reserved.resourceId]);
